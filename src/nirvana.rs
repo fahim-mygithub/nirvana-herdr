@@ -153,6 +153,122 @@ pub fn supervise(args: &[String]) -> std::io::Result<()> {
     }
 }
 
+// ---- Feature 2: Restart Claude from the tab menu ----
+//
+// The owner, 2026-10-15: "If i right click this tab and I have an option to restart the claude code
+// insstance with that exact directory opened and that session resumed." The tab menu sends herdr's
+// existing `command.invoke` with this id (no new API method, so herdr's protocol stays upstream's);
+// `app/nirvana_restart.rs` stops the pane's Claude and types the command below into its shell.
+
+/// The `command.invoke` id the tab menu's "Restart Claude" sends.
+pub const RESTART_CLAUDE_COMMAND: &str = "nirvana.restart_claude";
+/// How long the restart waits for the pane's shell to be free after Claude is stopped.
+pub const RESTART_SHELL_WAIT: Duration = Duration::from_secs(3);
+
+/// Claude Code's config folder: `CLAUDE_CONFIG_DIR`, else `~/.claude` (Claude Code's own rule).
+pub fn claude_config_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    std::env::var_os("USERPROFILE")
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var_os("HOME").filter(|v| !v.is_empty()))
+        .map(|home| PathBuf::from(home).join(".claude"))
+}
+
+/// Stops processes now. herdr's Windows `signal_processes` opens each process with query rights only,
+/// so its `TerminateProcess` is refused and the process lives on (live run 2026-10-15: Claude pid 53612
+/// survived a restart). Here the handle asks for `PROCESS_TERMINATE`.
+pub fn terminate_processes(pids: &[u32]) {
+    #[cfg(windows)]
+    for &pid in pids {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+        };
+        // SAFETY: OpenProcess returns null on failure, which is checked; the handle is closed once.
+        unsafe {
+            let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if !handle.is_null() {
+                TerminateProcess(handle, 1);
+                CloseHandle(handle);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    crate::platform::signal_processes(pids, crate::platform::Signal::Kill);
+}
+
+/// The bytes typed into the pane's shell: the command and a carriage return, nothing else. herdr's
+/// `encode_api_submission` follows the terminal's modes, and a stopped Claude leaves bracketed paste and
+/// its keyboard protocol on: the live run 2026-10-15 got `[f((Get-Command claude ...}[` at the prompt,
+/// never submitted. herdr's own restore path types a plain line into a fresh shell the same way.
+pub fn shell_submission(command: &str) -> Vec<u8> {
+    let mut bytes = command.as_bytes().to_vec();
+    bytes.push(b'\r');
+    bytes
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeSession {
+    pub session_id: String,
+    pub cwd: Option<PathBuf>,
+}
+
+/// The conversation a running Claude holds. Claude Code writes `<config>/sessions/<pid>.json` for each
+/// interactive Claude with its `sessionId` and `cwd` (read on this machine 2026-10-15, Claude Code
+/// 2.1.300). A file whose `pid` is another process is a stale one left by a reused pid and is ignored.
+pub fn read_claude_session(config_dir: &Path, pid: u32) -> Option<ClaudeSession> {
+    let text =
+        std::fs::read_to_string(config_dir.join("sessions").join(format!("{pid}.json"))).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    if value.get("pid").and_then(serde_json::Value::as_u64) != Some(u64::from(pid)) {
+        return None;
+    }
+    let session_id = value.get("sessionId")?.as_str()?.trim();
+    let id_ok = !session_id.is_empty()
+        && session_id.len() <= 128
+        && session_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if !id_ok {
+        return None;
+    }
+    Some(ClaudeSession {
+        session_id: session_id.to_string(),
+        cwd: value
+            .get("cwd")
+            .and_then(serde_json::Value::as_str)
+            .map(PathBuf::from),
+    })
+}
+
+/// The arguments for the restarted Claude: the old Claude's own arguments (the Nirvana theme's
+/// `--settings`, a model, an effort) without any earlier resume, then `--resume <id>`, or
+/// `--continue` (the newest conversation in the folder) when no id was found.
+pub fn restart_args(old_args: &[String], session_id: Option<&str>) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut rest = old_args.iter().peekable();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--continue" | "-c" | "--fork-session" => {}
+            "--resume" | "-r" | "--session-id" => {
+                // `-r` alone opens Claude's picker; a following value is the session it named.
+                if rest.peek().is_some_and(|next| !next.starts_with('-')) {
+                    rest.next();
+                }
+            }
+            other if other.starts_with("--resume=") || other.starts_with("--session-id=") => {}
+            _ => args.push(arg.clone()),
+        }
+    }
+    match session_id {
+        Some(id) => args.extend(["--resume".to_string(), id.to_string()]),
+        None => args.push("--continue".to_string()),
+    }
+    args
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,5 +324,110 @@ mod tests {
         assert!(disarm_reload());
         assert!(!press_reload());
         RELOAD_ARMED.store(false, Ordering::Relaxed);
+    }
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn the_session_file_names_the_running_claudes_conversation() {
+        let dir = scratch("claude-session");
+        std::fs::create_dir_all(dir.join("sessions")).unwrap();
+        std::fs::write(
+            dir.join("sessions").join("4242.json"),
+            r#"{"pid":4242,"sessionId":"287150ad-a664-40ae-bcff-1976a2fcd814","cwd":"C:/work/moto","kind":"interactive"}"#,
+        )
+        .unwrap();
+        let session = read_claude_session(&dir, 4242).unwrap();
+        assert_eq!(session.session_id, "287150ad-a664-40ae-bcff-1976a2fcd814");
+        assert_eq!(session.cwd, Some(PathBuf::from("C:/work/moto")));
+        // No file for that pid: no id, so the restart falls back to --continue.
+        assert_eq!(read_claude_session(&dir, 4243), None);
+    }
+
+    #[test]
+    fn a_session_file_left_by_another_process_is_not_used() {
+        let dir = scratch("claude-stale");
+        std::fs::create_dir_all(dir.join("sessions")).unwrap();
+        std::fs::write(
+            dir.join("sessions").join("77.json"),
+            r#"{"pid":78,"sessionId":"aaaa-bbbb"}"#,
+        )
+        .unwrap();
+        assert_eq!(read_claude_session(&dir, 77), None);
+        std::fs::write(
+            dir.join("sessions").join("77.json"),
+            r#"{"pid":77,"sessionId":"x; rm -rf /"}"#,
+        )
+        .unwrap();
+        assert_eq!(read_claude_session(&dir, 77), None);
+    }
+
+    #[test]
+    fn restart_keeps_the_flags_and_resumes_the_same_conversation() {
+        let old = strings(&[
+            "--settings",
+            r#"{"theme":"custom:nirvana-dark"}"#,
+            "--resume",
+            "old-id",
+            "--model",
+            "opus",
+            "-c",
+            "--fork-session",
+        ]);
+        assert_eq!(
+            restart_args(&old, Some("new-id")),
+            strings(&[
+                "--settings",
+                r#"{"theme":"custom:nirvana-dark"}"#,
+                "--model",
+                "opus",
+                "--resume",
+                "new-id",
+            ])
+        );
+        assert_eq!(
+            restart_args(&strings(&["-r", "--verbose", "--session-id=abc"]), None),
+            strings(&["--verbose", "--continue"])
+        );
+    }
+
+    #[test]
+    fn terminate_really_stops_a_running_process() {
+        // The live run's bug: a query-only handle left Claude running. A real child must be gone.
+        let mut child = if cfg!(windows) {
+            std::process::Command::new("ping")
+                .args(["-n", "30", "127.0.0.1"])
+                .stdout(std::process::Stdio::null())
+                .spawn()
+        } else {
+            std::process::Command::new("sleep").arg("30").spawn()
+        }
+        .unwrap();
+        terminate_processes(&[child.id()]);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut exited = false;
+        while std::time::Instant::now() < deadline {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Reap it either way; a survivor is killed through std so the test leaves nothing behind.
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(exited, "the process outlived terminate_processes");
+    }
+
+    #[test]
+    fn the_restart_command_is_typed_as_a_plain_line() {
+        let bytes = shell_submission("& claude '--resume' abc");
+        assert_eq!(bytes, b"& claude '--resume' abc\r");
+        assert!(
+            !bytes.contains(&0x1b),
+            "no escape sequence reaches the shell"
+        );
     }
 }

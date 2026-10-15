@@ -82,6 +82,10 @@ impl App {
         id: String,
         params: crate::api::schema::CommandInvokeParams,
     ) -> String {
+        // Nirvana fork: the tab menu's Restart Claude rides command.invoke, so the API stays upstream's.
+        if params.command_id == crate::nirvana::RESTART_CLAUDE_COMMAND {
+            return self.nirvana_restart_claude(id, &params);
+        }
         let Some(binding) = self.resolve_client_shell_command(&params.command_id) else {
             return crate::app::api::responses::encode_error(
                 id,

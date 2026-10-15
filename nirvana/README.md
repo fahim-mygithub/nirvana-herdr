@@ -4,7 +4,8 @@ A fork of [herdr](https://github.com/herdrdev/herdr) that grows, one feature at 
 Nirvana: a multi-shell harness with Claude Code as its engine. The owner, 2026-10-15: "Lets fork and modify Herder to
 function similarly to the design objective of Nirvana. We will go one feature at a time."
 
-Everything the fork adds lives in this folder, `src/nirvana.rs`, and `src/client/shell/nirvana_*.rs`. Upstream files
+Everything the fork adds lives in this folder, `src/nirvana.rs`, `src/app/nirvana_*.rs`, and
+`src/client/shell/nirvana_*.rs`. Upstream files
 carry only small hooks, each marked `Nirvana fork:`, so `git merge upstream/master` stays easy. That is how the fork
 gets herdr's own updates; the owner wants "a popular maintained harnes repo to get free updates from".
 
@@ -23,6 +24,7 @@ Explorer's "Open Nirvana - CC" (Nirvana-C) runs the installed fork in the sessio
 | # | Feature | Plan |
 |---|---|---|
 | 1 | Sidebar header "◆ Nirvana alpha X.Y.Z", window title "<workspace> · Nirvana", reload onto a newer installed build | plans/2026-10-15-01-header-and-reload.md |
+| 2 | Tab right-click "Restart Claude": the tab's Claude Code starts again in the same pane and folder, resuming the same conversation | plans/2026-10-15-02-restart-claude.md |
 
 ## Rules for this fork
 

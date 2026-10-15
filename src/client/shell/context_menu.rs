@@ -45,11 +45,18 @@ impl ClientContextMenuOverlay {
                     Action::ToggleGroup,
                 ),
             ],
-            ClientContextMenuTarget::Tab { .. } => vec![
-                item("New tab", Action::NewTab),
-                item("Rename", Action::Rename),
-                item("Close", Action::Close),
-            ],
+            ClientContextMenuTarget::Tab { has_claude, .. } => {
+                let mut items = vec![
+                    item("New tab", Action::NewTab),
+                    item("Rename", Action::Rename),
+                ];
+                // Nirvana fork: the owner, 2026-10-15, "an option to restart the claude code insstance".
+                if *has_claude {
+                    items.push(item("Restart Claude", Action::RestartClaude));
+                }
+                items.push(item("Close", Action::Close));
+                items
+            }
             ClientContextMenuTarget::Pane {
                 source_pane_id,
                 has_manual_label,
@@ -131,10 +138,17 @@ impl ClientShellState {
         else {
             return;
         };
+        let has_claude = self.snapshot.as_deref().is_some_and(|snapshot| {
+            snapshot
+                .agents
+                .iter()
+                .any(|agent| agent.tab_id == tab_id && agent.agent.as_deref() == Some("claude"))
+        });
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target: ClientContextMenuTarget::Tab {
                 tab_id,
                 workspace_id: tab.workspace_id.clone(),
+                has_claude,
             },
             x,
             y,
@@ -200,6 +214,7 @@ impl ClientShellState {
             ClientContextMenuTarget::Tab {
                 tab_id,
                 workspace_id,
+                ..
             } => self.activate_tab_context_action(tab_id, workspace_id, action, outcome),
             ClientContextMenuTarget::Pane {
                 pane_id,
@@ -350,6 +365,18 @@ impl ClientShellState {
             }
             ClientContextMenuAction::Close => {
                 self.request_tab_close(tab_id, outcome);
+            }
+            ClientContextMenuAction::RestartClaude => {
+                self.push_endpoint_method(
+                    Method::CommandInvoke(crate::api::schema::CommandInvokeParams {
+                        command_id: crate::nirvana::RESTART_CLAUDE_COMMAND.into(),
+                        workspace_id: Some(workspace_id),
+                        tab_id: Some(tab_id),
+                        pane_id: None,
+                        selection: None,
+                    }),
+                    outcome,
+                );
             }
             _ => {}
         }

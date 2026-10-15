@@ -527,6 +527,8 @@ pub(super) enum ClientContextMenuAction {
     Zoom,
     ToggleRightClickPassthrough,
     ClosePane,
+    /// Nirvana fork: restart the tab's Claude Code on the same conversation.
+    RestartClaude,
 }
 
 #[derive(Debug)]
@@ -542,6 +544,8 @@ pub(super) enum ClientContextMenuTarget {
     Tab {
         tab_id: String,
         workspace_id: String,
+        /// Nirvana fork: a pane in the tab runs Claude Code, so the menu offers Restart Claude.
+        has_claude: bool,
     },
     Pane {
         pane_id: String,

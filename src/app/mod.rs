@@ -29,6 +29,8 @@ mod terminal_titles;
 mod theme_sync;
 mod window_title;
 mod worktrees;
+// Nirvana fork: Restart Claude from the tab menu.
+mod nirvana_restart;
 
 use std::collections::HashMap;
 #[cfg(unix)]

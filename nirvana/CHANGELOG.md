@@ -3,6 +3,26 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.2.0 (2026-10-15): Restart Claude from the tab menu, same folder, same conversation
+
+- **Changed:** a tab whose pane runs Claude Code has "Restart Claude" in its right-click menu, between Rename and
+  Close. It stops that Claude and its children, waits up to 3 s for the pane's shell, and types
+  `claude <the old flags> --resume <session id>` into it, keeping the herdr agent name. The id comes from Claude Code's
+  own `<config>/sessions/<pid>.json`; with no file the restart uses `--continue` instead. The menu sends herdr's
+  existing `command.invoke`, so herdr's API and protocol are unchanged.
+  **Because:** the owner, 2026-10-15: "If i right click this tab and I have an option to restart the claude code
+  insstance with that exact directory opened and that session resumed." Their screenshot's Claude read "Update
+  installed · Restart to update".
+  **Measured:** `a_tab_running_claude_offers_restart_claude`, `restart_claude_asks_the_server_for_that_tab`,
+  `restart_claude_reaches_the_server_and_stops_nothing_without_claude`,
+  `the_session_file_names_the_running_claudes_conversation`, `a_session_file_left_by_another_process_is_not_used`,
+  `restart_keeps_the_flags_and_resumes_the_same_conversation`, `terminate_really_stops_a_running_process`,
+  `the_restart_command_is_typed_as_a_plain_line`; eleven controls, `restart_*`, `session_*`, `terminate_query_only`.
+  The live runs are in the plan: the first two found that herdr's Windows kill is refused (query-only handle) and that
+  a stopped Claude leaves bracketed paste on; both are fixed in the fork's own code.
+  **If you remove this:** restarting Claude means quitting it, finding the conversation id, and typing the resume
+  command with the Nirvana theme flags by hand.
+
 ## alpha 0.1.0 (2026-10-15): the Nirvana header, its version, and reload onto the newest build
 
 Base: herdr master b431a063 (Cargo version 0.9.5).
