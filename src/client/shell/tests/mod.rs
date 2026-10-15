@@ -262,5 +262,6 @@ mod mobile;
 mod mouse_selection;
 // Nirvana fork.
 mod nirvana_restart_menu;
+mod nirvana_space_agents;
 mod popup_focus_projection;
 mod startup_overlays;

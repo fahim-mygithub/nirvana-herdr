@@ -33,6 +33,7 @@ mod layout;
 mod logging;
 mod metadata_tokens;
 mod nirvana;
+mod nirvana_spaces;
 mod noninteractive_process;
 mod pane;
 use ghostty_vt::pane_graphics_files;

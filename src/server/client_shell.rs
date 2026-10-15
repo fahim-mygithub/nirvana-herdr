@@ -14,6 +14,30 @@ pub(super) fn snapshot(
     snapshot_with_completions(app, boot_id, revision, config_diagnostic, location).0
 }
 
+/// Nirvana fork: the cached model of the agent in this pane, read off the server's loop.
+fn nirvana_agent_model(
+    app: &app::App,
+    pane_id: &str,
+    cwd: Option<&str>,
+) -> Option<crate::nirvana_spaces::AgentModel> {
+    let (workspace_index, pane) = app.parse_pane_id(pane_id)?;
+    let terminal_id = &app
+        .state
+        .workspaces
+        .get(workspace_index)?
+        .pane_state(pane)?
+        .attached_terminal_id;
+    let shell_pid = app.terminal_runtimes.get(terminal_id)?.child_pid()?;
+    crate::nirvana_spaces::cached_model(
+        shell_pid,
+        cwd,
+        &crate::nirvana_spaces::Waker {
+            dirty: app.render_dirty.clone(),
+            notify: app.render_notify.clone(),
+        },
+    )
+}
+
 pub(super) fn snapshot_with_completions(
     app: &app::App,
     boot_id: &str,
@@ -157,6 +181,14 @@ pub(super) fn snapshot_with_completions(
             let mut state_labels = agent.state_labels.into_iter().collect::<Vec<_>>();
             state_labels.sort_by(|left, right| left.0.cmp(&right.0));
             let mut tokens = agent.tokens.into_iter().collect::<Vec<_>>();
+            // Nirvana fork: the agent's kind and model for the spaces list (src/nirvana_spaces.rs).
+            if let Some(model) = nirvana_agent_model(
+                app,
+                &pane_id,
+                agent.foreground_cwd.as_deref().or(agent.cwd.as_deref()),
+            ) {
+                tokens.extend(model.tokens());
+            }
             tokens.sort_by(|left, right| left.0.cmp(&right.0));
             protocol::ClientShellAgent {
                 pane_id,

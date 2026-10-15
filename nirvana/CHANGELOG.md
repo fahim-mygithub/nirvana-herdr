@@ -3,6 +3,35 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.3.0 (2026-10-15): each space lists its agents' task and model, with the agent's icon
+
+- **Changed:** under each space in the spaces list, two rows per agent running there: the task's summarized title
+  (Claude Code's terminal title, "No task yet" before the first prompt), then the agent's icon and its provider and
+  model, e.g. "✻ Claude Sonnet 5.5". The icon takes the place of the status circle and keeps its colour (idle green,
+  working yellow, blocked red, done teal). Icons: Claude ✻, Codex ❖, Antigravity ▲, Local ⌂; any other agent keeps
+  herdr's dot. A space shows three agents, then "+N more"; the agents panel below still lists them all.
+  **Because:** the owner, 2026-10-15: "See how in our old Nirvana we showcase the task a summerised title and its active
+  model ... for herder it would be the model provider and tyle ie Claude Sonnet. ... Basically I would to have spaces do
+  somethign similar and on the left Instead of a green circle its the agents Icon. We need one for claude antigravity
+  codex and local."
+  **Measured:** `nirvana_space_agents::*` (six rendering tests) and `nirvana_spaces::tests::*` (ten reader and label
+  tests); eighteen controls, `spaces_*`. The live run is in the plan's Record.
+  **If you remove this:** the spaces list shows only folder names; which agent and model works where is read pane by
+  pane.
+- **Changed:** the server reads each agent's model off its main loop: Claude from its transcript's last reply (found
+  through `<config>/sessions/<pid>.json`), Codex from `--model` or its newest rollout in the pane's folder, Antigravity
+  from `--model` or its log's last model switch. A Claude on a non-Anthropic model (Nirvana's local seat through
+  Ollama) is Local. The result rides in the agent's existing `tokens` as `nirvana_kind` and `nirvana_model`, so the wire
+  format is unchanged and an older server still talks to this client.
+  **Because:** a model read on the server's loop would stall every pane's output; a new snapshot field would break an
+  older server with a newer client, which the 0.1.0 server and 0.2.0 client did for a command on 2026-10-15.
+  **Measured:** reads are cached for 3 s and run on one worker thread that wakes a render only when a model changed.
+  **If you remove this:** the client has no model to draw.
+- **Changed:** upstream's `sidebar_scrollbars_use_proportional_shared_geometry_and_drag` composes at 26 rows, not 20.
+  **Because:** its ten agents now also draw under their space, so at 20 rows the spaces thumb is one cell.
+  **Measured:** at 26 both lists still overflow; the test asserts both tracks.
+  **If you remove this:** that upstream test fails on the fork.
+
 ## alpha 0.2.0 (2026-10-15): Restart Claude from the tab menu, same folder, same conversation
 
 - **Changed:** a tab whose pane runs Claude Code has "Restart Claude" in its right-click menu, between Rename and

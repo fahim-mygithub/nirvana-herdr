@@ -253,7 +253,13 @@ pub(crate) fn render_sidebar(
                 .workspaces
                 .get(entry.index)
                 .map(|workspace| {
-                    workspace_rows(
+                    // Nirvana fork: a space is as tall as its own rows plus its agents' rows.
+                    let agents = super::nirvana_spaces::space_agents(
+                        snapshot,
+                        &workspace.workspace_id,
+                        config.status_indicators,
+                    );
+                    (workspace_rows(
                         workspace,
                         displayed_workspace_status(snapshot, workspace, state.collapsed_groups),
                         entry.indented,
@@ -261,6 +267,7 @@ pub(crate) fn render_sidebar(
                     )
                     .len()
                     .max(1)
+                        + super::nirvana_spaces::agents_height(agents.len()))
                     .min(u16::MAX as usize) as u16
                 })
                 .unwrap_or(1)
@@ -315,7 +322,15 @@ pub(crate) fn render_sidebar(
         };
         let status = displayed_workspace_status(snapshot, workspace, state.collapsed_groups);
         let rows = workspace_rows(workspace, status, entry.indented, &config.spaces);
-        let row_height = (rows.len().max(1).min(u16::MAX as usize) as u16).min(body.height);
+        let space_rows = rows.len().max(1);
+        let agents = super::nirvana_spaces::space_agents(
+            snapshot,
+            &workspace.workspace_id,
+            config.status_indicators,
+        );
+        let row_height = ((space_rows + super::nirvana_spaces::agents_height(agents.len()))
+            .min(u16::MAX as usize) as u16)
+            .min(body.height);
         if y.saturating_add(row_height) > body.bottom() {
             break;
         }
@@ -342,6 +357,20 @@ pub(crate) fn render_sidebar(
             selected,
             state.selected_workspace_id.is_some(),
             dragged,
+            palette,
+        );
+        super::nirvana_spaces::render_space_agents(
+            buffer,
+            Rect::new(
+                rect.x,
+                rect.y.saturating_add(space_rows as u16),
+                rect.width,
+                rect.height.saturating_sub(space_rows as u16),
+            ),
+            &agents,
+            entry.indented,
+            entry.last_child,
+            workspace.focused || dragged,
             palette,
         );
         let group_toggle = render_parent_group_toggle(
