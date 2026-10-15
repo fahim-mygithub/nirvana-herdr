@@ -1940,6 +1940,18 @@ impl ClientShellState {
                 self.workspace_press = None;
                 self.tab_press = None;
                 self.chrome_drag = None;
+                // Nirvana fork: the version badge reloads onto a newer installed build on its
+                // second press; any other press puts an armed badge back.
+                if super::contains(self.hits.nirvana_reload, point) {
+                    if crate::nirvana::press_reload() {
+                        outcome.detach = true;
+                    }
+                    outcome.repaint = true;
+                    return;
+                }
+                if crate::nirvana::disarm_reload() {
+                    outcome.repaint = true;
+                }
                 // The toggle is painted over the agent scrollbar's last cell.
                 if super::contains(self.hits.sidebar_toggle, point) {
                     self.sidebar_collapsed = !self.sidebar_collapsed;

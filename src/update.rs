@@ -1908,6 +1908,9 @@ pub(crate) fn update_install_instruction(install_command: &str) -> String {
         NIX_UPDATE_COMMAND => {
             "detach, update through Nix, then run Herdr again to reconnect".to_string()
         }
+        crate::nirvana::RELOAD_COMMAND => {
+            "press the version badge at the top of the sidebar twice to reload onto it".to_string()
+        }
         command => format!("detach, run `{command}`, then run Herdr again to reconnect"),
     }
 }
@@ -2107,6 +2110,15 @@ fn homebrew_cellar_keg_root(path: &Path) -> Option<PathBuf> {
 
 /// Manual self-update command (`herdr update`).
 pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
+    // Nirvana fork: `herdr update` would install upstream herdr over the fork.
+    if !cfg!(test) {
+        let _ = &options;
+        return Err(
+            "self-update is disabled in Nirvana-Herdr; build and install with \
+                    `python nirvana/install.py`, then press the version badge to reload"
+                .into(),
+        );
+    }
     let channel = UpdateChannel::configured();
 
     if is_homebrew_managed_install() {
@@ -2346,6 +2358,12 @@ fn print_outdated_integration_notice_with_updated_binary(updated_exe: &Path) {
 /// Background update check: only surface availability and release notes.
 /// Runs in a background thread at startup.
 pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
+    // Nirvana fork: never fetch herdr's releases (they would replace the fork); read the
+    // locally installed build's stamp instead.
+    if env::var(FAKE_UPDATE_VERSION_ENV).is_err() {
+        crate::nirvana::check_installed(&events);
+        return;
+    }
     crate::logging::update_check_started();
     if let Ok(version) = env::var(FAKE_UPDATE_VERSION_ENV) {
         let version = version.trim();

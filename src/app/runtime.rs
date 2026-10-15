@@ -103,15 +103,9 @@ impl App {
             return;
         }
 
-        self.next_auto_update_check = self
-            .state
-            .update_available
-            .is_none()
-            .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL);
-
-        if self.state.update_available.is_some() {
-            return;
-        }
+        // Nirvana fork: the check reads a local stamp, so it keeps running after a find; a later
+        // build replaces the one announced (src/nirvana.rs announces each version once).
+        self.next_auto_update_check = Some(Instant::now() + crate::nirvana::CHECK_INTERVAL);
 
         let update_tx = self.event_tx.clone();
         if let Err(err) = crate::thread_spawn::spawn_named("herdr-update-check", move || {

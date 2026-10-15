@@ -32,6 +32,7 @@ mod kitty_graphics;
 mod layout;
 mod logging;
 mod metadata_tokens;
+mod nirvana;
 mod noninteractive_process;
 mod pane;
 use ghostty_vt::pane_graphics_files;
@@ -330,7 +331,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # The title renders on the Herdr server, so {hostname} names the host the panes
 # run on even when attaching from a remote client.
 # Set to "" to leave the outer terminal title alone.
-# window_title = "{hostname}: {workspace}"
+# window_title = "{workspace} · Nirvana"
 
 # Agent panel ordering: "spaces" (grouped by space) or "priority" (attention queue).
 # "workspaces" is accepted as an alias for "spaces".
@@ -553,6 +554,11 @@ fn main() -> io::Result<()> {
         eprintln!("error: --remote can only be used with the default launch command");
         eprintln!("run 'herdr --help' for usage");
         std::process::exit(2);
+    }
+
+    // Nirvana fork: the supervisor that starts the installed build again after a reload.
+    if args.get(1).map(String::as_str) == Some("nirvana-shell") {
+        return nirvana::supervise(&args[2..]);
     }
 
     finish_cli(cli::maybe_run(&args))?;
@@ -802,6 +808,9 @@ fn main() -> io::Result<()> {
     if let Err(err) = server::autodetect::auto_detect_launch(saved_federation) {
         eprintln!("herdr: {err}");
         std::process::exit(1);
+    }
+    if nirvana::reload_requested() {
+        nirvana::finish_reload();
     }
     Ok(())
 }

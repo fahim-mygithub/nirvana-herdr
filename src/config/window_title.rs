@@ -2,7 +2,8 @@
 pub(crate) const MAX_WINDOW_TITLE_CHARS: usize = 200;
 
 pub(crate) fn default_window_title() -> String {
-    "{hostname}: {workspace}".to_string()
+    // Nirvana fork: the project in view, then the product, as Nirvana's window reads.
+    "{workspace} · Nirvana".to_string()
 }
 
 pub(crate) fn sanitize_window_title_text(value: &str) -> Option<String> {
@@ -129,6 +130,12 @@ pub(crate) fn window_title_diagnostics(template: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nirvana_default_title_names_the_project_then_nirvana() {
+        // Nirvana fork: the owner's Image #11 reads "Downloads · Nirvana".
+        assert_eq!(default_window_title(), "{workspace} · Nirvana");
+    }
 
     #[test]
     fn parses_tokens_literals_and_escapes() {

@@ -215,10 +215,20 @@ pub(crate) fn render_sidebar(
         crate::ui::expanded_sidebar_sections(area, state.sidebar_section_split);
     hits.sidebar_section_divider =
         crate::ui::sidebar_section_divider_rect(area, state.sidebar_section_split);
+    // Nirvana fork: the brand row takes the first header row; "spaces" moves to the second,
+    // which upstream leaves blank, so the list below keeps its place.
+    super::nirvana_header::render_brand_row(
+        buffer,
+        Rect::new(workspace_area.x, workspace_area.y, workspace_area.width, 1),
+        snapshot.update_available.as_deref(),
+        crate::nirvana::reload_armed(),
+        palette,
+        hits,
+    );
     put_text(
         buffer,
         workspace_area.x,
-        workspace_area.y,
+        workspace_area.y.saturating_add(1),
         workspace_area.width,
         " spaces",
         Style::default()
@@ -439,20 +449,7 @@ pub(crate) fn render_sidebar(
         hits,
     );
 
-    hits.sidebar_toggle = Rect::new(
-        area.right().saturating_sub(2),
-        area.bottom().saturating_sub(1),
-        u16::from(area.width > 1),
-        u16::from(area.height > 0),
-    );
-    put_text(
-        buffer,
-        hits.sidebar_toggle.x,
-        hits.sidebar_toggle.y,
-        hits.sidebar_toggle.width,
-        "«",
-        Style::default().fg(palette.overlay0),
-    );
+    // Nirvana fork: the toggle is drawn at the right of the brand row (nirvana_header.rs).
 }
 
 pub(crate) fn workspace_entries(
