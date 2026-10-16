@@ -86,6 +86,14 @@ impl App {
         if params.command_id == crate::nirvana::RESTART_CLAUDE_COMMAND {
             return self.nirvana_restart_claude(id, &params);
         }
+        // Nirvana fork, feature 5: the Preload panel's "edit" names the file after its id.
+        if let Some(file) = params
+            .command_id
+            .strip_prefix(crate::nirvana::EDIT_FILE_COMMAND)
+        {
+            let file = file.to_owned();
+            return self.nirvana_edit_file(id, &params, &file);
+        }
         let Some(binding) = self.resolve_client_shell_command(&params.command_id) else {
             return crate::app::api::responses::encode_error(
                 id,
@@ -136,7 +144,7 @@ impl App {
         }
     }
 
-    fn focus_client_shell_command_target(
+    pub(super) fn focus_client_shell_command_target(
         &mut self,
         params: &crate::api::schema::CommandInvokeParams,
     ) -> Result<(), (&'static str, String)> {

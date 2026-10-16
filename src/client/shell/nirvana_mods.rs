@@ -1,0 +1,678 @@
+//! Nirvana fork, feature 5: the mod strip under the tab bar, and its one mod, Preload.
+//!
+//! The owner, 2026-10-16: "under the 1 tool bar we will have a mod toolbar that is attached to each agent.
+//! ... I wawnt just one mod square for the herder version for now. This mod square is called Preload"
+//! (nirvana/plans/2026-10-16-05-preload-mod.md). Old Nirvana's task view opens with a strip of squares,
+//! each a bold label and a muted value ("Running  Nothing running"); this strip draws its squares the same
+//! way, one row tall, for the Claude in the focused tab:
+//!
+//! ```text
+//!  ✻ Claude   Preload  23.6k · 2 off ▾
+//! ```
+//!
+//! A click on the square opens the Preload panel over the panes: every item a fresh Claude in the agent's
+//! folder preloads, grouped, with its tokens; space switches the selected item off or on for every new
+//! Claude there, `e` opens its file in the editor, `r` restarts this Claude so it takes the change.
+//! The list and the switches are `crate::nirvana_preload`.
+
+use std::path::PathBuf;
+
+use super::nirvana_spaces::{agent_kind, fit};
+use super::render::put_text;
+use super::*;
+use crate::nirvana_preload::{self as preload, Group, Item, View};
+use crate::nirvana_spaces::Kind;
+use crate::protocol::ClientShellAgent;
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use ratatui::style::{Color, Modifier};
+
+/// The strip is one row.
+pub(super) const STRIP_HEIGHT: u16 = 1;
+/// The panel is at most this wide.
+const PANEL_WIDTH: u16 = 92;
+/// Rows a page key moves.
+const PAGE: usize = 10;
+/// The token column: "129.9k".
+const TOKENS: usize = 6;
+/// The detail column: "plugin superpowers".
+const DETAIL: usize = 22;
+
+/// The agent the strip belongs to: the focused pane's Claude, else the first Claude in the focused tab.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct StripAgent {
+    pub(super) workspace_id: String,
+    pub(super) tab_id: String,
+    pub(super) cwd: PathBuf,
+}
+
+/// Claude Code, on an Anthropic model or a local one, is what Preload reads.
+fn is_claude(agent: &ClientShellAgent) -> bool {
+    matches!(agent_kind(agent), Some(Kind::Claude | Kind::Local))
+}
+
+pub(super) fn strip_agent(snapshot: &ClientShellSnapshot) -> Option<StripAgent> {
+    let tab_id = snapshot.focused_tab_id.as_deref()?;
+    let in_tab = |agent: &&ClientShellAgent| agent.tab_id == tab_id && is_claude(agent);
+    let agent = snapshot
+        .agents
+        .iter()
+        .filter(in_tab)
+        .find(|agent| Some(agent.pane_id.as_str()) == snapshot.focused_pane_id.as_deref())
+        .or_else(|| snapshot.agents.iter().find(in_tab))?;
+    let pane = snapshot
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == agent.pane_id)?;
+    let cwd = pane
+        .foreground_cwd
+        .clone()
+        .or_else(|| pane.cwd.clone())
+        .filter(|cwd| !cwd.is_empty())?;
+    Some(StripAgent {
+        workspace_id: agent.workspace_id.clone(),
+        tab_id: tab_id.to_owned(),
+        cwd: PathBuf::from(cwd),
+    })
+}
+
+fn claude_colour(palette: &Palette) -> Color {
+    crate::nirvana_usage::Provider::Claude
+        .colour()
+        .map_or(palette.accent, |(r, g, b)| Color::Rgb(r, g, b))
+}
+
+fn width(text: &str) -> u16 {
+    u16::try_from(unicode_width::UnicodeWidthStr::width(text)).unwrap_or(u16::MAX)
+}
+
+/// The strip's value for the Preload square: "23.6k · 2 off", "reading", "not read".
+pub(super) fn preload_value(view: &View) -> String {
+    let off = preload::off_count(&view.local);
+    let mut value = match &view.report {
+        Some(report) => preload::short(report.total),
+        None if view.failed => "not read".into(),
+        None => "reading".into(),
+    };
+    if off > 0 {
+        value = format!("{value} · {off} off");
+    }
+    value
+}
+
+/// Draws the strip; returns the Preload square's rect, the click target.
+pub(super) fn render_strip(
+    buffer: &mut Buffer,
+    area: Rect,
+    view: &View,
+    open: bool,
+    palette: &Palette,
+) -> Rect {
+    if area.height == 0 || area.width < 4 {
+        return Rect::default();
+    }
+    let base = Style::default().fg(palette.subtext0).bg(palette.panel_bg);
+    buffer.set_style(area, base);
+    for x in area.x..area.right() {
+        buffer[(x, area.y)].set_symbol(" ");
+    }
+    let mut x = area.x + 1;
+    let right = area.right();
+    put_text(
+        buffer,
+        x,
+        area.y,
+        right.saturating_sub(x),
+        Kind::Claude.icon(),
+        base.fg(claude_colour(palette)),
+    );
+    x += 2;
+    put_text(buffer, x, area.y, right.saturating_sub(x), "Claude", base);
+    x += 6 + 2;
+    // The square: a bold label and a muted value on a raised background, as old Nirvana draws its squares.
+    let label = " Preload ";
+    let value = format!(
+        "{} {} ",
+        preload_value(view),
+        if open { "\u{25B4}" } else { "\u{25BE}" }
+    );
+    let square = Rect::new(
+        x,
+        area.y,
+        (width(label) + width(&value)).min(right.saturating_sub(x)),
+        1,
+    );
+    if square.width == 0 {
+        return Rect::default();
+    }
+    let raised = Style::default().bg(if open {
+        palette.surface1
+    } else {
+        palette.surface0
+    });
+    buffer.set_style(square, raised);
+    put_text(
+        buffer,
+        x,
+        area.y,
+        square.width,
+        label,
+        raised.fg(palette.text).add_modifier(Modifier::BOLD),
+    );
+    let after = x + width(label);
+    put_text(
+        buffer,
+        after,
+        area.y,
+        square.right().saturating_sub(after),
+        &value,
+        raised.fg(if preload::off_count(&view.local) > 0 {
+            palette.yellow
+        } else {
+            palette.subtext0
+        }),
+    );
+    square
+}
+
+/// The open panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreloadPanel {
+    pub(super) cwd: PathBuf,
+    pub(super) workspace_id: String,
+    pub(super) tab_id: String,
+    /// An index into the panel's items.
+    pub(super) selected: usize,
+    /// The first body line shown.
+    pub(super) scroll: usize,
+    pub(super) message: Option<String>,
+}
+
+/// Where the panel drew its parts, for the mouse.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct PanelHits {
+    pub(super) area: Rect,
+    /// Each item row, by item index.
+    pub(super) rows: Vec<(Rect, usize)>,
+    /// Each item's switch box.
+    pub(super) boxes: Vec<(Rect, usize)>,
+    /// Each item's "edit".
+    pub(super) edits: Vec<(Rect, usize)>,
+    pub(super) restart: Rect,
+    pub(super) close: Rect,
+    pub(super) body_height: usize,
+}
+
+enum Line {
+    Header(Group),
+    Item(usize),
+}
+
+fn lines(items: &[Item]) -> Vec<Line> {
+    let mut lines = Vec::new();
+    let mut group = None;
+    for (index, item) in items.iter().enumerate() {
+        if group != Some(item.group) {
+            group = Some(item.group);
+            lines.push(Line::Header(item.group));
+        }
+        lines.push(Line::Item(index));
+    }
+    lines
+}
+
+/// The panel's items for a view.
+pub(super) fn panel_items(panel: &PreloadPanel, view: &View) -> Vec<Item> {
+    let config_dir = crate::nirvana::claude_config_dir();
+    preload::items(
+        view.report.as_ref(),
+        &view.local,
+        &panel.cwd,
+        config_dir.as_deref(),
+        &view.remembered,
+    )
+}
+
+fn folder_name(cwd: &std::path::Path) -> String {
+    cwd.file_name().map_or_else(
+        || cwd.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// Draws the panel over `area` (the strip's row down to the panes' bottom).
+pub(super) fn render_panel(
+    buffer: &mut Buffer,
+    area: Rect,
+    panel: &mut PreloadPanel,
+    view: &View,
+    palette: &Palette,
+) -> PanelHits {
+    let mut hits = PanelHits::default();
+    let panel_width = area.width.saturating_sub(2).min(PANEL_WIDTH);
+    if panel_width < 30 || area.height < 8 {
+        return hits;
+    }
+    let rect = Rect::new(area.x + 1, area.y + 1, panel_width, area.height - 1);
+    hits.area = rect;
+    let base = Style::default().fg(palette.text).bg(palette.panel_bg);
+    let muted = base.fg(palette.overlay1);
+    buffer.set_style(rect, base);
+    for y in rect.y..rect.bottom() {
+        for x in rect.x..rect.right() {
+            buffer[(x, y)].set_symbol(" ");
+        }
+    }
+    // The frame.
+    let border = base.fg(palette.overlay0);
+    let (left, right, top, bottom) = (rect.x, rect.right() - 1, rect.y, rect.bottom() - 1);
+    for x in left..=right {
+        buffer[(x, top)].set_symbol("\u{2500}").set_style(border);
+        buffer[(x, bottom)].set_symbol("\u{2500}").set_style(border);
+    }
+    for y in top..=bottom {
+        buffer[(left, y)].set_symbol("\u{2502}").set_style(border);
+        buffer[(right, y)].set_symbol("\u{2502}").set_style(border);
+    }
+    buffer[(left, top)].set_symbol("\u{256D}");
+    buffer[(right, top)].set_symbol("\u{256E}");
+    buffer[(left, bottom)].set_symbol("\u{2570}");
+    buffer[(right, bottom)].set_symbol("\u{256F}");
+    let inner_x = left + 2;
+    let inner_width = rect.width.saturating_sub(4);
+    let title = format!(" Preload \u{b7} {} ", folder_name(&panel.cwd));
+    put_text(
+        buffer,
+        left + 2,
+        top,
+        inner_width.saturating_sub(4),
+        &fit(&title, usize::from(inner_width.saturating_sub(4))),
+        base.add_modifier(Modifier::BOLD),
+    );
+    hits.close = Rect::new(right - 4, top, 3, 1);
+    put_text(
+        buffer,
+        right - 4,
+        top,
+        3,
+        " \u{2715} ",
+        base.fg(palette.subtext0),
+    );
+
+    // The summary and where the switches go.
+    let summary = match &view.report {
+        Some(report) => format!(
+            "{} of {} preloaded \u{b7} Claude Code itself {}{}",
+            preload::short(report.total),
+            preload::short(report.window),
+            preload::short(report.category("System prompt")),
+            if view.reading { " \u{b7} reading" } else { "" }
+        ),
+        None if view.failed => "Claude Code did not answer /context in this folder".into(),
+        None => "reading what Claude preloads here".into(),
+    };
+    put_text(
+        buffer,
+        inner_x,
+        top + 1,
+        inner_width,
+        &fit(&summary, usize::from(inner_width)),
+        base,
+    );
+    put_text(
+        buffer,
+        inner_x,
+        top + 2,
+        inner_width,
+        &fit(
+            "Off stays off for every new Claude in this folder: .claude/settings.local.json",
+            usize::from(inner_width),
+        ),
+        muted,
+    );
+
+    let items = panel_items(panel, view);
+    let lines = lines(&items);
+    let body_top = top + 4;
+    let body_height = usize::from(bottom.saturating_sub(1).saturating_sub(body_top));
+    hits.body_height = body_height;
+    panel.selected = panel.selected.min(items.len().saturating_sub(1));
+    // Keep the selected row in view.
+    if let Some(line) = lines
+        .iter()
+        .position(|line| matches!(line, Line::Item(index) if *index == panel.selected))
+    {
+        if line < panel.scroll {
+            panel.scroll = line.saturating_sub(usize::from(
+                line > 0 && matches!(lines[line - 1], Line::Header(_)),
+            ));
+        } else if body_height > 0 && line >= panel.scroll + body_height {
+            panel.scroll = line + 1 - body_height;
+        }
+    }
+    panel.scroll = panel.scroll.min(lines.len().saturating_sub(body_height));
+
+    let tokens_x = inner_x + inner_width - TOKENS as u16 - 5;
+    let detail_width = DETAIL.min(usize::from(inner_width) / 4) as u16;
+    let detail_x = tokens_x.saturating_sub(detail_width + 1);
+    let name_x = inner_x + 4;
+    let name_width = detail_x.saturating_sub(name_x + 1);
+    for (row, line) in lines
+        .iter()
+        .skip(panel.scroll)
+        .take(body_height)
+        .enumerate()
+    {
+        let y = body_top + row as u16;
+        match line {
+            Line::Header(group) => {
+                let style = base.fg(palette.accent).add_modifier(Modifier::BOLD);
+                put_text(buffer, inner_x, y, inner_width, group.title(), style);
+                if let Some(report) = &view.report {
+                    let tokens = group.tokens(report);
+                    if tokens > 0 {
+                        let text = format!("{:>TOKENS$}", preload::short(tokens));
+                        put_text(
+                            buffer,
+                            tokens_x,
+                            y,
+                            TOKENS as u16,
+                            &text,
+                            base.fg(palette.accent),
+                        );
+                    }
+                }
+            }
+            Line::Item(index) => {
+                let item = &items[*index];
+                let selected = *index == panel.selected;
+                let row_style = if selected {
+                    base.bg(palette.selection_bg)
+                } else {
+                    base
+                };
+                let row_rect = Rect::new(inner_x, y, inner_width, 1);
+                buffer.set_style(row_rect, row_style);
+                hits.rows.push((row_rect, *index));
+                let (mark, mark_style) = match (&item.switch, item.on) {
+                    (None, _) => (" \u{b7} ", row_style.fg(palette.overlay0)),
+                    (Some(_), true) => ("[x]", row_style.fg(palette.green)),
+                    (Some(_), false) => ("[ ]", row_style.fg(palette.overlay1)),
+                };
+                put_text(buffer, inner_x, y, 3, mark, mark_style);
+                if item.switch.is_some() {
+                    hits.boxes.push((Rect::new(inner_x, y, 3, 1), *index));
+                }
+                let name_style = if item.on {
+                    row_style.fg(palette.text)
+                } else {
+                    row_style
+                        .fg(palette.overlay1)
+                        .add_modifier(Modifier::CROSSED_OUT)
+                };
+                put_text(
+                    buffer,
+                    name_x,
+                    y,
+                    name_width,
+                    &fit(&item.name, usize::from(name_width)),
+                    name_style,
+                );
+                put_text(
+                    buffer,
+                    detail_x,
+                    y,
+                    detail_width,
+                    &fit(&item.detail, usize::from(detail_width)),
+                    row_style.fg(palette.overlay1),
+                );
+                if let Some(tokens) = item.tokens {
+                    let text = format!("{:>TOKENS$}", preload::short(tokens));
+                    put_text(
+                        buffer,
+                        tokens_x,
+                        y,
+                        TOKENS as u16,
+                        &text,
+                        row_style.fg(palette.subtext0),
+                    );
+                }
+                if item.file.is_some() {
+                    let edit_x = tokens_x + TOKENS as u16 + 1;
+                    put_text(buffer, edit_x, y, 4, "edit", row_style.fg(palette.blue));
+                    hits.edits.push((Rect::new(edit_x, y, 4, 1), *index));
+                }
+            }
+        }
+    }
+
+    // The keys, then what the last action did.
+    let keys = "space switch \u{b7} e edit \u{b7} r restart Claude \u{b7} esc close";
+    let foot_y = bottom.saturating_sub(1);
+    let message = panel.message.as_deref().unwrap_or(keys);
+    put_text(
+        buffer,
+        inner_x,
+        foot_y,
+        inner_width,
+        &fit(message, usize::from(inner_width)),
+        if panel.message.is_some() {
+            base.fg(palette.yellow)
+        } else {
+            muted
+        },
+    );
+    if panel.message.is_none() {
+        let start = "space switch \u{b7} e edit \u{b7} ";
+        let restart = Rect::new(inner_x + width(start), foot_y, width("r restart Claude"), 1);
+        if restart.right() <= inner_x + inner_width {
+            hits.restart = restart;
+        }
+    }
+    hits
+}
+
+impl ClientShellState {
+    /// Whether the focused tab shows the mod strip.
+    pub(super) fn nirvana_strip_shown(&self) -> bool {
+        self.snapshot.as_deref().and_then(strip_agent).is_some()
+    }
+
+    /// Opens the Preload panel for the strip's agent, or closes it.
+    pub(super) fn toggle_preload_panel(&mut self) {
+        if self.nirvana_preload.take().is_some() {
+            return;
+        }
+        let Some(agent) = self.snapshot.as_deref().and_then(strip_agent) else {
+            return;
+        };
+        preload::refresh(&agent.cwd);
+        self.nirvana_preload = Some(PreloadPanel {
+            cwd: agent.cwd,
+            workspace_id: agent.workspace_id,
+            tab_id: agent.tab_id,
+            selected: 0,
+            scroll: 0,
+            message: None,
+        });
+    }
+
+    fn preload_item(&self, index: usize) -> Option<Item> {
+        let panel = self.nirvana_preload.as_ref()?;
+        let view = preload::view(&panel.cwd);
+        panel_items(panel, &view).into_iter().nth(index)
+    }
+
+    fn preload_say(&mut self, message: impl Into<String>) {
+        if let Some(panel) = self.nirvana_preload.as_mut() {
+            panel.message = Some(message.into());
+        }
+    }
+
+    /// Switches the item off or on for every new Claude in the folder.
+    fn preload_switch(&mut self, index: usize) {
+        let Some(item) = self.preload_item(index) else {
+            return;
+        };
+        let Some(cwd) = self.nirvana_preload.as_ref().map(|panel| panel.cwd.clone()) else {
+            return;
+        };
+        let Some(switch) = item.switch.clone() else {
+            let reason = if item.group == Group::Skills {
+                format!(
+                    "{} comes with its plugin: switch the plugin under Plugins",
+                    item.name
+                )
+            } else {
+                format!(
+                    "Claude Code has no switch for the agent {}; e opens its file",
+                    item.name
+                )
+            };
+            self.preload_say(reason);
+            return;
+        };
+        let message = match preload::switch_item(&cwd, &switch, !item.on) {
+            Ok(_) if item.on => format!(
+                "{} off for new Claude sessions here; r restarts this one",
+                item.name
+            ),
+            Ok(_) => format!(
+                "{} back on for new Claude sessions here; r restarts this one",
+                item.name
+            ),
+            Err(err) => format!("not saved: {err}"),
+        };
+        self.preload_say(message);
+    }
+
+    /// Opens the item's file in the editor, in a pane the server starts.
+    fn preload_edit(&mut self, index: usize, outcome: &mut ClientShellInput) {
+        let Some(item) = self.preload_item(index) else {
+            return;
+        };
+        let Some(file) = item.file else {
+            self.preload_say(format!("{} has no file to open", item.name));
+            return;
+        };
+        let Some(panel) = self.nirvana_preload.as_ref() else {
+            return;
+        };
+        let params = crate::api::schema::CommandInvokeParams {
+            command_id: format!("{}{}", crate::nirvana::EDIT_FILE_COMMAND, file.display()),
+            workspace_id: Some(panel.workspace_id.clone()),
+            tab_id: Some(panel.tab_id.clone()),
+            pane_id: None,
+            selection: None,
+        };
+        self.push_endpoint_method(crate::api::schema::Method::CommandInvoke(params), outcome);
+        self.nirvana_preload = None;
+    }
+
+    /// Restarts this Claude, same folder, same conversation (feature 2), so it takes the switches.
+    fn preload_restart(&mut self, outcome: &mut ClientShellInput) {
+        let Some(panel) = self.nirvana_preload.take() else {
+            return;
+        };
+        self.push_endpoint_method(
+            crate::api::schema::Method::CommandInvoke(crate::api::schema::CommandInvokeParams {
+                command_id: crate::nirvana::RESTART_CLAUDE_COMMAND.into(),
+                workspace_id: Some(panel.workspace_id),
+                tab_id: Some(panel.tab_id),
+                pane_id: None,
+                selection: None,
+            }),
+            outcome,
+        );
+    }
+
+    fn preload_count(&self) -> usize {
+        self.nirvana_preload.as_ref().map_or(0, |panel| {
+            panel_items(panel, &preload::view(&panel.cwd)).len()
+        })
+    }
+
+    /// The panel's keys. Every key goes to the panel while it is open.
+    pub(super) fn route_preload_key(
+        &mut self,
+        key: &crate::input::TerminalKey,
+        outcome: &mut ClientShellInput,
+    ) {
+        let count = self.preload_count();
+        let Some(panel) = self.nirvana_preload.as_mut() else {
+            return;
+        };
+        let last = count.saturating_sub(1);
+        panel.message = None;
+        let selected = panel.selected;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.nirvana_preload = None,
+            KeyCode::Up | KeyCode::Char('k') => panel.selected = selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => panel.selected = (selected + 1).min(last),
+            KeyCode::PageUp => panel.selected = selected.saturating_sub(PAGE),
+            KeyCode::PageDown => panel.selected = (selected + PAGE).min(last),
+            KeyCode::Home => panel.selected = 0,
+            KeyCode::End => panel.selected = last,
+            KeyCode::Char(' ') | KeyCode::Enter => self.preload_switch(selected),
+            KeyCode::Char('e') => self.preload_edit(selected, outcome),
+            KeyCode::Char('r') => self.preload_restart(outcome),
+            _ => {}
+        }
+        outcome.repaint = true;
+    }
+
+    /// The panel's mouse. Returns whether the event was the panel's: while it is open every event is.
+    pub(super) fn handle_preload_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        if self.nirvana_preload.is_none() {
+            return false;
+        }
+        let point = (mouse.column, mouse.row);
+        let hits = self.hits.nirvana_panel.clone();
+        let find = |list: &[(Rect, usize)]| {
+            list.iter()
+                .find(|(rect, _)| super::contains(*rect, point))
+                .map(|(_, index)| *index)
+        };
+        match mouse.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                if let Some(panel) = self.nirvana_preload.as_mut() {
+                    let step = 3;
+                    panel.selected = if mouse.kind == MouseEventKind::ScrollUp {
+                        panel.selected.saturating_sub(step)
+                    } else {
+                        panel.selected + step
+                    };
+                }
+                outcome.repaint = true;
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(panel) = self.nirvana_preload.as_mut() {
+                    panel.message = None;
+                }
+                if !super::contains(hits.area, point) || super::contains(hits.close, point) {
+                    // A click on the square itself closes too: it is outside the panel.
+                    self.nirvana_preload = None;
+                } else if super::contains(hits.restart, point) {
+                    self.preload_restart(outcome);
+                } else if let Some(index) = find(&hits.edits) {
+                    self.preload_edit(index, outcome);
+                } else if let Some(index) = find(&hits.boxes) {
+                    if let Some(panel) = self.nirvana_preload.as_mut() {
+                        panel.selected = index;
+                    }
+                    self.preload_switch(index);
+                } else if let Some(index) = find(&hits.rows) {
+                    if let Some(panel) = self.nirvana_preload.as_mut() {
+                        panel.selected = index;
+                    }
+                }
+                outcome.repaint = true;
+            }
+            _ => {}
+        }
+        true
+    }
+}

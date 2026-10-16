@@ -235,6 +235,22 @@ impl ClientShellState {
                 workspace_drop_indicator_row,
             },
         );
+        // Nirvana fork, feature 5: the mod strip under the tab bar.
+        if layout.nirvana_mods.height > 0 {
+            if let Some(agent) = super::nirvana_mods::strip_agent(snapshot) {
+                let view = crate::nirvana_preload::view(&agent.cwd);
+                let square = super::nirvana_mods::render_strip(
+                    &mut buffer,
+                    layout.nirvana_mods,
+                    &view,
+                    self.nirvana_preload.is_some(),
+                    &self.config.palette,
+                );
+                if self.config.mouse_capture {
+                    self.hits.nirvana_preload = square;
+                }
+            }
+        }
         self.hits.panes = surface
             .panes
             .iter()
@@ -700,6 +716,34 @@ impl ClientShellState {
                 rendered.cursor
             };
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
+        }
+        // Nirvana fork, feature 5: the Preload panel, over the panes, under herdr's own overlays.
+        if self.overlay.is_none() {
+            if let Some(panel) = self.nirvana_preload.as_mut() {
+                let top = if layout.nirvana_mods.height > 0 {
+                    layout.nirvana_mods.y
+                } else {
+                    layout.pane_surface.y
+                };
+                let area = Rect::new(
+                    layout.pane_surface.x,
+                    top,
+                    layout.pane_surface.width,
+                    layout.pane_surface.bottom().saturating_sub(top),
+                );
+                let view = crate::nirvana_preload::view(&panel.cwd);
+                let mut composed = frame.to_ratatui_buffer()?;
+                let rendered = super::nirvana_mods::render_panel(
+                    &mut composed,
+                    area,
+                    panel,
+                    &view,
+                    &self.config.palette,
+                );
+                occlusion.cover(rendered.area);
+                self.hits.nirvana_panel = rendered;
+                frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
+            }
         }
         if let Some(ClientShellOverlay::Help(help)) = self.overlay.as_mut() {
             help.scroll = help.scroll.min(self.hits.help_max_scroll);

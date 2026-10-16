@@ -389,6 +389,7 @@ impl ClientShellConfig {
         sidebar_collapsed: bool,
         tab_count: usize,
         sidebar_width: u16,
+        nirvana_strip: bool,
     ) -> ClientShellLayout {
         if cols <= self.mobile_width_threshold {
             let header_height = rows.min(2);
@@ -397,6 +398,7 @@ impl ClientShellConfig {
                 tab_bar: Rect::default(),
                 mobile_header: Rect::new(0, 0, cols, header_height),
                 pane_surface: Rect::new(0, header_height, cols, rows.saturating_sub(header_height)),
+                nirvana_mods: Rect::default(),
             };
         }
 
@@ -438,11 +440,30 @@ impl ClientShellConfig {
             ),
         };
 
+        // Nirvana fork, feature 5: the mod strip takes the panes' top row, under a top tab bar, so the
+        // panes' terminals are sized one row shorter and nothing of theirs is covered.
+        let (nirvana_mods, pane_surface) =
+            if nirvana_strip && pane_surface.height > super::nirvana_mods::STRIP_HEIGHT + 2 {
+                let strip = super::nirvana_mods::STRIP_HEIGHT;
+                (
+                    Rect::new(pane_surface.x, pane_surface.y, pane_surface.width, strip),
+                    Rect::new(
+                        pane_surface.x,
+                        pane_surface.y + strip,
+                        pane_surface.width,
+                        pane_surface.height - strip,
+                    ),
+                )
+            } else {
+                (Rect::default(), pane_surface)
+            };
+
         ClientShellLayout {
             sidebar: Rect::new(0, 0, sidebar_width, rows),
             tab_bar,
             mobile_header: Rect::default(),
             pane_surface,
+            nirvana_mods,
         }
     }
 
@@ -460,7 +481,7 @@ impl ClientShellConfig {
             .unwrap_or(self.sidebar_width)
             .clamp(min_width, max_width);
         let surface = self
-            .layout(cols, rows, sidebar_collapsed, 0, sidebar_width)
+            .layout(cols, rows, sidebar_collapsed, 0, sidebar_width, false)
             .pane_surface;
         ClientSurfaceSize {
             cols: surface.width.max(1),

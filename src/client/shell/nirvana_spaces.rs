@@ -16,6 +16,7 @@
 use super::render::put_text;
 use super::*;
 use crate::nirvana_spaces::{task_title, Kind, KIND_TOKEN, MODEL_TOKEN};
+use crate::protocol::ClientShellAgent;
 
 /// The task row and the agent row.
 pub(super) const ROWS_PER_AGENT: usize = 2;
@@ -55,9 +56,7 @@ pub(super) fn space_agents(
                     .find(|(name, _)| name == key)
                     .map(|(_, value)| value.as_str())
             };
-            let kind = token(KIND_TOKEN)
-                .and_then(Kind::parse)
-                .or_else(|| agent.agent.as_deref().and_then(Kind::from_agent_label));
+            let kind = agent_kind(agent);
             let model = token(MODEL_TOKEN)
                 .map(str::to_owned)
                 .or_else(|| kind.map(|kind| kind.provider().to_owned()))
@@ -73,6 +72,16 @@ pub(super) fn space_agents(
             }
         })
         .collect()
+}
+
+/// The agent's kind: the server's token, else its herdr name.
+pub(super) fn agent_kind(agent: &ClientShellAgent) -> Option<Kind> {
+    agent
+        .tokens
+        .iter()
+        .find(|(name, _)| name == KIND_TOKEN)
+        .and_then(|(_, value)| Kind::parse(value))
+        .or_else(|| agent.agent.as_deref().and_then(Kind::from_agent_label))
 }
 
 /// `text` cut to `width` cells, ending in `…` when cut.

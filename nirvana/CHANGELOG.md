@@ -3,6 +3,48 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.5.0 (2026-10-16): a mod strip under the tab bar, with one mod, Preload
+
+- **Changed:** a tab running Claude Code has a one-row strip under the tab bar, the panes a row shorter. It holds one
+  square, " Preload ", with the total a fresh Claude in the agent's folder preloads and "N off" when items are switched
+  off there. A click opens the Preload panel: every CLAUDE.md, memory file, skill, MCP server and connector, plugin,
+  agent, built-in tool and the hooks' session-start text, each with its tokens; space switches an item off or on for
+  every new Claude in the folder, `e` opens its file in the editor, `r` restarts this Claude so it takes the change.
+  **Because:** the owner, 2026-10-16: "I want to add the ability to add componoent mods like in Nirvana for each agent.
+  ... I wawnt just one mod square for the herder version for now. This mod square is called Preload and it will list all
+  the tokens it will preload for this fresh and every Claude session. ... I want to be able to see them and toggle them
+  or modify them if I cant remove unselect them."
+  **Measured:** `nirvana_mods::*` (eight rendering, key and click tests), `nirvana_preload::tests::*` (six),
+  `only_an_existing_absolute_markdown_file_is_editable`; twenty-three controls, `preload_*`, `strip_*`, `panel_*` and
+  `edit_any_extension`. The live run is in the plan's Record.
+  **If you remove this:** what a Claude session starts with is read with `/context` inside each session, and switching
+  an item off means editing Claude's settings by hand.
+- **Changed:** the list is Claude Code's own `/context`, run in the folder as `claude -p /context
+  --no-session-persistence --verbose --output-format json`, read from its `context_usage` and `init` events.
+  **Because:** Claude Code answers it locally: 0 tokens, a cost of 0, in 2.6 s (2026-10-16). `--verbose` gives the
+  tokens as integers and the servers, plugins and tools by the names their settings take; without it the answer is a
+  markdown table.
+  **Measured:** `the_report_reads_into_its_total_and_items` on a report cut from a real run.
+  **If you remove this:** the panel guesses at what Claude loads, and its names stop matching the settings.
+- **Changed:** each switch is the setting proven to remove that item from a new session's `/context`, written to the
+  folder's `.claude/settings.local.json`: `claudeMdExcludes`, `autoMemoryEnabled`, `skillOverrides`, `enabledPlugins`,
+  `deniedMcpServers`, `permissions.deny`, `disableAllHooks`. Only the item's entry is written; switching back removes it.
+  **Because:** 96 free `/context` runs on 2026-10-16 ("Sonnet - measure Claude preload toggles"). `permissions.deny`
+  on an MCP server hid its tools but left it connected with its instructions loaded, so servers use
+  `deniedMcpServers`. A plugin's own skill and a custom agent have no switch of their own; the panel says so.
+  **Measured:** `each_kind_of_item_gets_its_proven_switch`,
+  `switching_writes_only_the_items_entry_and_back_leaves_the_file_as_it_was`,
+  `the_local_settings_file_round_trips_and_a_broken_one_is_left_alone`; controls `preload_mcp_by_permission`,
+  `preload_empty_left`, `preload_broken_file_replaced`.
+  **If you remove this:** a switch that looks off leaves the item loaded, or the owner's settings file is rewritten.
+- **Changed:** `command.invoke` with `nirvana.edit_file:<path>` opens an existing absolute `.md` file in herdr's
+  scrollback editor, in a zoomed pane.
+  **Because:** "or modify them". Every file Preload offers to edit is markdown; the check keeps the command from
+  opening anything else a client names.
+  **Measured:** `e_asks_the_server_to_open_the_items_file`, `only_an_existing_absolute_markdown_file_is_editable`;
+  control `edit_any_extension`.
+  **If you remove this:** "edit" has nothing to open the file with.
+
 ## alpha 0.4.0 (2026-10-15): running servers and usage at the foot of the sidebar
 
 - **Changed:** the foot of the expanded sidebar, under the agents panel, holds old Nirvana's two blocks. "servers": one

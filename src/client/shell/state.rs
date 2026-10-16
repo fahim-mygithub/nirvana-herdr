@@ -59,6 +59,8 @@ pub(super) struct ClientShellLayout {
     pub tab_bar: Rect,
     pub mobile_header: Rect,
     pub pane_surface: Rect,
+    /// Nirvana fork: the mod strip under the tab bar, when the focused tab runs a Claude.
+    pub nirvana_mods: Rect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +109,10 @@ pub(super) struct ShellHitMap {
     pub(super) nirvana_reload: Rect,
     /// Nirvana fork: the sidebar foot's server rows and their ports; a click opens the address.
     pub(super) nirvana_servers: Vec<(Rect, u16)>,
+    /// Nirvana fork: the mod strip's Preload square; a click opens the panel.
+    pub(super) nirvana_preload: Rect,
+    /// Nirvana fork: the open Preload panel's rows, switches and buttons.
+    pub(super) nirvana_panel: super::nirvana_mods::PanelHits,
     pub(super) new_workspace: Rect,
     pub(super) new_tab: Rect,
     pub(super) tab_scroll_left: Rect,
@@ -967,6 +973,8 @@ pub(crate) struct ClientShellState {
     pub(super) endpoint_error: Option<String>,
     pub(super) endpoint_error_deadline: Option<std::time::Instant>,
     pub(super) dismissed_product_announcement: Option<(String, String)>,
+    /// Nirvana fork: the Preload panel, while open.
+    pub(super) nirvana_preload: Option<super::nirvana_mods::PreloadPanel>,
 }
 
 pub(super) fn product_announcement_state(
@@ -1135,6 +1143,7 @@ impl ClientShellState {
             endpoint_error: None,
             endpoint_error_deadline: None,
             dismissed_product_announcement: None,
+            nirvana_preload: None,
         }
     }
 
@@ -1233,6 +1242,7 @@ impl ClientShellState {
             self.sidebar_collapsed,
             self.focused_tab_count(),
             self.sidebar_width,
+            self.nirvana_strip_shown(),
         )
     }
 

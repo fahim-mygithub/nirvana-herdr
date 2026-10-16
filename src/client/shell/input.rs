@@ -639,6 +639,13 @@ impl ClientShellState {
             self.route_overlay_key(key, outcome);
             return None;
         }
+        // Nirvana fork, feature 5: the Preload panel takes the keys while it is open.
+        if self.nirvana_preload.is_some() {
+            if key.kind == KeyEventKind::Press {
+                self.route_preload_key(key, outcome);
+            }
+            return None;
+        }
         if matches!(key.code, KeyCode::Modifier(_)) {
             return None;
         }

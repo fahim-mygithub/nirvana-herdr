@@ -693,6 +693,10 @@ impl ClientShellState {
             self.navigate_workspace_id = None;
             outcome.repaint = true;
         }
+        // Nirvana fork, feature 5: the Preload panel takes the mouse while it is open.
+        if self.overlay.is_none() && self.handle_preload_mouse(mouse, outcome) {
+            return;
+        }
         if matches!(self.overlay, Some(ClientShellOverlay::Onboarding)) {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                 && super::contains(self.hits.overlay_primary, point)
@@ -1951,6 +1955,12 @@ impl ClientShellState {
                 }
                 if crate::nirvana::disarm_reload() {
                     outcome.repaint = true;
+                }
+                // Nirvana fork, feature 5: the strip's Preload square opens its panel.
+                if super::contains(self.hits.nirvana_preload, point) {
+                    self.toggle_preload_panel();
+                    outcome.repaint = true;
+                    return;
                 }
                 // Nirvana fork: a server row in the sidebar's foot opens its address in the browser.
                 if let Some((_, port)) = self

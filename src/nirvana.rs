@@ -162,6 +162,20 @@ pub fn supervise(args: &[String]) -> std::io::Result<()> {
 
 /// The `command.invoke` id the tab menu's "Restart Claude" sends.
 pub const RESTART_CLAUDE_COMMAND: &str = "nirvana.restart_claude";
+/// The `command.invoke` id the Preload panel's "edit" sends, the file's path after it (feature 5).
+pub const EDIT_FILE_COMMAND: &str = "nirvana.edit_file:";
+
+/// The file the Preload panel may open in the editor: an absolute path to an existing markdown file.
+/// Everything Preload offers to edit is one (CLAUDE.md, MEMORY.md, SKILL.md, an agent's file); the check
+/// keeps the command from opening anything else a client names.
+pub fn editable_file(file: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(file);
+    let markdown = path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"));
+    (path.is_absolute() && markdown && path.is_file()).then_some(path)
+}
+
 /// How long the restart waits for the pane's shell to be free after Claude is stopped.
 pub const RESTART_SHELL_WAIT: Duration = Duration::from_secs(3);
 
@@ -272,6 +286,27 @@ pub fn restart_args(old_args: &[String], session_id: Option<&str>) -> Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_existing_absolute_markdown_file_is_editable() {
+        let dir = std::env::temp_dir().join(format!("nirvana-editable-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let markdown = dir.join("CLAUDE.md");
+        let text = dir.join("notes.txt");
+        std::fs::write(&markdown, "x").expect("md");
+        std::fs::write(&text, "x").expect("txt");
+        assert_eq!(
+            editable_file(&markdown.display().to_string()),
+            Some(markdown.clone())
+        );
+        assert_eq!(editable_file(&text.display().to_string()), None);
+        assert_eq!(editable_file("CLAUDE.md"), None);
+        assert_eq!(
+            editable_file(&dir.join("missing.md").display().to_string()),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("nirvana-{name}-{}", std::process::id()));

@@ -261,7 +261,7 @@ pub fn gpu_memory(text: &str) -> Option<Figure> {
 }
 
 /// Whether a program is on PATH, the way a shell would find it (`.exe`, `.cmd` on Windows).
-fn on_path(program: &str) -> bool {
+pub(crate) fn on_path(program: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
     };
@@ -280,7 +280,20 @@ fn on_path(program: &str) -> bool {
 /// Runs a program without a window and returns its stdout, or `None` when it is missing, fails or
 /// outlives `timeout` (then it is killed).
 fn run(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
+    run_in(program, args, None, timeout)
+}
+
+/// `run`, in a folder: the Preload mod asks Claude Code about the folder an agent works in.
+pub(crate) fn run_in(
+    program: &str,
+    args: &[&str],
+    dir: Option<&Path>,
+    timeout: Duration,
+) -> Option<String> {
     let mut command = Command::new(program);
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
     command
         .args(args)
         .stdin(Stdio::null())
