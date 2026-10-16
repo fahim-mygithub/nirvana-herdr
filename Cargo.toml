@@ -72,6 +72,8 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Graphics_Gdi",
+    # Nirvana fork: the listener table for the sidebar's running servers (src/nirvana_servers.rs).
+    "Win32_NetworkManagement_IpHelper",
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_DataExchange",

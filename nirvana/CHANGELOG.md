@@ -3,6 +3,47 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.4.0 (2026-10-15): running servers and usage at the foot of the sidebar
+
+- **Changed:** the foot of the expanded sidebar, under the agents panel, holds old Nirvana's two blocks. "servers": one
+  row per port a process in a space's panes listens on, the space's name and `localhost:<port>` (`:<port>` when the
+  name needs the cells); a click opens it in the browser; the block hides when no space runs a server; four rows,
+  then "+N more". "usage": Claude, Codex, Antigravity and Local, each with Nirvana's provider colour, the five-hour and
+  seven-day windows in two columns under "5h 7D", and from 34 columns a bar for the five-hour window.
+  **Because:** the owner, 2026-10-15: "Lets work on the next feature. This running server and usage from Nirvana lets
+  port it to the Nirvana herder".
+  **Measured:** `nirvana_footer::*` (eight rendering and click tests), `nirvana_servers::tests::*` (seven),
+  `nirvana_usage::tests::*` (six); twenty-three controls, `servers_*`, `usage_*` and `footer_*`. The live run is in the
+  plan's Record.
+  **If you remove this:** which space runs a server, and how much of each subscription is left, is read outside herdr.
+- **Changed:** a server is any TCP port listened on inside a space's panes (the shell and its whole tree), read by the
+  server on one worker thread every 3 s and sent as the space's `nirvana_servers` token, so the wire is unchanged.
+  Ports from 49152 up and ports owned by claude, codex, agy or Antigravity are not servers.
+  **Because:** herdr has no daemon that starts servers, which is where old Nirvana's list came from. The live check
+  found an idle Claude Code on 64839 and agy's app on 60015 and 60016, which a plain port scan would list.
+  **Measured:** `plumbing_ports_are_not_servers`; controls `servers_dynamic_port_kept`, `servers_agent_port_kept`.
+  **If you remove this:** each Claude, agy and helper adds a row that is not a server.
+- **Changed:** the worker keeps reading a space while any of its pane shells runs, not only while a window asks.
+  **Because:** the server rebuilds a window's snapshot when the sidebar's state changes, not on pane output. In the
+  first live run a server's row stayed after the server stopped: the space had gone unasked for over 60 s, so the
+  worker had dropped it, and the row never cleared.
+  **Measured:** second live run, server idle 75 s then stopped: its row was gone 8 s later (plan Record);
+  `a_space_is_read_while_a_shell_lives`, control `servers_dead_space_kept`.
+  **If you remove this:** a server that stops after a quiet minute keeps its row until something else changes.
+- **Changed:** the usage rows are read by the window, never the server: Claude by `claude -p /usage
+  --no-session-persistence` (every 120 s while a Claude in the window works, else 600 s), Codex from its rollouts'
+  `rate_limits` (30 s), Antigravity by `agy -p /usage` (300 s), Local from Ollama on 127.0.0.1:11434 and `nvidia-smi`
+  (30 s). A failed read keeps the last figure.
+  **Because:** Claude Code answers `/usage` locally: the live check returned model `<synthetic>`, 0 tokens, a cost of 0,
+  in 2.7 s. Old Nirvana paid a model turn for its Claude reading. `--bare` drops the subscription sign-in and answers
+  with the API cost view, so it is not used. agy's read took 20.8 s.
+  **Measured:** the parsers' tests on text captured from this machine on 2026-10-15; `a_failed_read_keeps_the_last_figure`.
+  **If you remove this:** the rows say "reading" forever.
+- **Changed:** upstream's `sidebar_scrollbars_use_proportional_shared_geometry_and_drag` composes at 32 rows, not 26.
+  **Because:** the foot takes six rows from the agents panel, which at 26 left its ten agents a one-cell thumb.
+  **Measured:** at 32 both lists still overflow; the test asserts both tracks.
+  **If you remove this:** that upstream test fails on the fork.
+
 ## alpha 0.3.0 (2026-10-15): each space lists its agents' task and model, with the agent's icon
 
 - **Changed:** under each space in the spaces list, two rows per agent running there: the task's summarized title

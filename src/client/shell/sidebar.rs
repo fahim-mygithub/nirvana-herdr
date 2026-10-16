@@ -469,14 +469,31 @@ pub(crate) fn render_sidebar(
         }
     }
 
+    // Nirvana fork: running servers and usage at the foot, under the agents panel (nirvana_footer.rs).
+    let servers = super::nirvana_footer::server_rows(snapshot);
+    let (agents_area, foot_area) = super::nirvana_footer::split(
+        detail_area,
+        super::nirvana_footer::footer_height(servers.len()),
+    );
     super::render_agent_panel(
         buffer,
-        detail_area,
+        agents_area,
         snapshot,
         config,
         state.agent_scroll,
         hits,
     );
+    if !foot_area.is_empty() {
+        crate::nirvana_usage::note_claude_working(super::nirvana_footer::claude_working(snapshot));
+        super::nirvana_footer::render_footer(
+            buffer,
+            foot_area,
+            &servers,
+            &crate::nirvana_usage::rows(),
+            palette,
+            &mut hits.nirvana_servers,
+        );
+    }
 
     // Nirvana fork: the toggle is drawn at the right of the brand row (nirvana_header.rs).
 }

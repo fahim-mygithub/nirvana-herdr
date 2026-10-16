@@ -1952,6 +1952,21 @@ impl ClientShellState {
                 if crate::nirvana::disarm_reload() {
                     outcome.repaint = true;
                 }
+                // Nirvana fork: a server row in the sidebar's foot opens its address in the browser.
+                if let Some((_, port)) = self
+                    .hits
+                    .nirvana_servers
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                {
+                    outcome
+                        .actions
+                        .push(ClientShellAction::OpenSafeWebUrl(format!(
+                            "http://localhost:{port}/"
+                        )));
+                    outcome.repaint = true;
+                    return;
+                }
                 // The toggle is painted over the agent scrollbar's last cell.
                 if super::contains(self.hits.sidebar_toggle, point) {
                     self.sidebar_collapsed = !self.sidebar_collapsed;

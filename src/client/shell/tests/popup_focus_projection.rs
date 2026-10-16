@@ -957,10 +957,11 @@ fn sidebar_scrollbars_use_proportional_shared_geometry_and_drag() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
-    // Nirvana fork: 26 rows, not 20. The ten agents now also draw under their space (three shown,
-    // then "+7 more"), so at 20 rows the spaces list is too long for a thumb over one cell; at 26
-    // both lists still overflow (track.width > 0 below).
-    state.compose(106, 26).expect("overflowing sidebars");
+    // Nirvana fork: 32 rows, not 20. The ten agents now also draw under their space (three shown,
+    // then "+7 more"), so at 20 rows the spaces list is too long for a thumb over one cell (feature
+    // 3 raised it to 26); the sidebar's foot (servers and usage, feature 4) then takes six rows from
+    // the agents panel, the same at 26. At 32 both lists still overflow (track.width > 0 below).
+    state.compose(106, 32).expect("overflowing sidebars");
 
     for agent in [false, true] {
         let (track, metrics) = if agent {

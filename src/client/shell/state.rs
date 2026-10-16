@@ -105,6 +105,8 @@ pub(super) struct ShellHitMap {
     pub(super) sidebar_toggle: Rect,
     /// Nirvana fork: the version badge while it offers a reload.
     pub(super) nirvana_reload: Rect,
+    /// Nirvana fork: the sidebar foot's server rows and their ports; a click opens the address.
+    pub(super) nirvana_servers: Vec<(Rect, u16)>,
     pub(super) new_workspace: Rect,
     pub(super) new_tab: Rect,
     pub(super) tab_scroll_left: Rect,

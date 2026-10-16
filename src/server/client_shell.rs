@@ -38,6 +38,31 @@ fn nirvana_agent_model(
     )
 }
 
+/// Nirvana fork: the ports servers listen on inside this space's panes, read off the server's loop.
+fn nirvana_space_ports(app: &app::App, workspace_index: usize, workspace_id: &str) -> Vec<u16> {
+    let shell_pids = app
+        .state
+        .workspaces
+        .get(workspace_index)
+        .into_iter()
+        .flat_map(|workspace| &workspace.tabs)
+        .flat_map(|tab| tab.panes.values())
+        .filter_map(|pane| {
+            app.terminal_runtimes
+                .get(&pane.attached_terminal_id)?
+                .child_pid()
+        })
+        .collect::<Vec<_>>();
+    crate::nirvana_servers::cached_ports(
+        workspace_id,
+        shell_pids,
+        &crate::nirvana_spaces::Waker {
+            dirty: app.render_dirty.clone(),
+            notify: app.render_notify.clone(),
+        },
+    )
+}
+
 pub(super) fn snapshot_with_completions(
     app: &app::App,
     boot_id: &str,
@@ -86,6 +111,14 @@ pub(super) fn snapshot_with_completions(
         .enumerate()
         .map(|(workspace_index, (workspace, state))| {
             let mut tokens = workspace.tokens.into_iter().collect::<Vec<_>>();
+            // Nirvana fork: the space's running servers for the sidebar (src/nirvana_servers.rs).
+            let ports = nirvana_space_ports(app, workspace_index, &workspace.workspace_id);
+            if !ports.is_empty() {
+                tokens.push((
+                    crate::nirvana_servers::SERVERS_TOKEN.to_owned(),
+                    crate::nirvana_servers::encode(&ports),
+                ));
+            }
             tokens.sort_by(|left, right| left.0.cmp(&right.0));
             let workspace_id = workspace.workspace_id;
             let active_tab_id = location

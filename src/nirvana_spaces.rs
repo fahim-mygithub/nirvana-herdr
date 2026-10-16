@@ -306,7 +306,7 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn codex_home() -> Option<PathBuf> {
+pub(crate) fn codex_home() -> Option<PathBuf> {
     std::env::var_os("CODEX_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
@@ -314,7 +314,7 @@ fn codex_home() -> Option<PathBuf> {
 }
 
 /// The newest rollouts first, from the newest day folders (`sessions/YYYY/MM/DD`).
-fn recent_codex_rollouts(sessions: &Path) -> Vec<PathBuf> {
+pub(crate) fn recent_codex_rollouts(sessions: &Path) -> Vec<PathBuf> {
     fn sorted_dirs(dir: &Path) -> Vec<PathBuf> {
         let mut dirs: Vec<PathBuf> = std::fs::read_dir(dir)
             .into_iter()

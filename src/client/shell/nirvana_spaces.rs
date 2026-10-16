@@ -76,7 +76,7 @@ pub(super) fn space_agents(
 }
 
 /// `text` cut to `width` cells, ending in `…` when cut.
-fn fit(text: &str, width: usize) -> String {
+pub(super) fn fit(text: &str, width: usize) -> String {
     if unicode_width::UnicodeWidthStr::width(text) <= width {
         return text.to_string();
     }

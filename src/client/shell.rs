@@ -24,6 +24,7 @@ mod input_source;
 mod link_hover;
 mod mobile;
 mod mouse;
+mod nirvana_footer;
 mod nirvana_header;
 mod nirvana_spaces;
 mod notification_policy;
