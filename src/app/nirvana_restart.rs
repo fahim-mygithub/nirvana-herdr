@@ -114,9 +114,16 @@ impl App {
             .and_then(|process| process.argv.clone())
             .map(|argv| argv.into_iter().skip(1).collect())
             .unwrap_or_default();
-        let session = crate::nirvana::claude_config_dir()
-            .and_then(|dir| crate::nirvana::read_claude_session(&dir, claude_pid));
+        let config_dir = crate::nirvana::claude_config_dir();
+        let session = config_dir
+            .as_deref()
+            .and_then(|dir| crate::nirvana::read_claude_session(dir, claude_pid));
         let session_id = session.map(|session| session.session_id);
+        // A Claude with no prompt yet has no saved conversation to resume.
+        let unsaved = match (&session_id, config_dir.as_deref()) {
+            (Some(id), Some(dir)) => !crate::nirvana::conversation_saved(dir, id),
+            _ => false,
+        };
 
         let mut pids = crate::platform::session_processes(claude_pid);
         if pids.is_empty() {
@@ -143,10 +150,11 @@ impl App {
                 crate::detect::interactive_agent_executable(crate::detect::Agent::Claude)
                     .to_string(),
             ];
-        argv.extend(crate::nirvana::restart_args(
-            &old_args,
-            session_id.as_deref(),
-        ));
+        argv.extend(if unsaved {
+            crate::nirvana::restart_args_unsaved(&old_args)
+        } else {
+            crate::nirvana::restart_args(&old_args, session_id.as_deref())
+        });
         let command = crate::platform::interactive_shell_command(&argv, &shell_name)
             .ok_or("the restart command could not be written for this shell")?;
         let runtime = self

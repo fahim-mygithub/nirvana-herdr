@@ -21,7 +21,7 @@ use super::nirvana_spaces::{agent_kind, fit};
 use super::render::put_text;
 use super::*;
 use crate::api::schema::AgentStatus;
-use crate::nirvana_preload::{self as preload, Group, Item, View};
+use crate::nirvana_preload::{self as preload, Group, Item, Switch, View};
 use crate::nirvana_running::{Activity, Prompt};
 use crate::nirvana_spaces::Kind;
 use crate::protocol::ClientShellAgent;
@@ -1067,7 +1067,10 @@ impl ClientShellState {
             return;
         };
         let Some(switch) = item.switch.clone() else {
-            let reason = if item.group == Group::Skills {
+            let reason = if item.group == Group::Jev {
+                "what Jev did today for every agent here; herdr jev stats lists each agent"
+                    .to_owned()
+            } else if item.group == Group::Skills {
                 format!(
                     "{} comes with its plugin: switch the plugin's own row at the top of {}",
                     item.name,
@@ -1083,6 +1086,18 @@ impl ClientShellState {
             return;
         };
         let message = match preload::switch_item(&cwd, &switch, !item.on) {
+            // Feature 9: herdr's own switches reach more than Claude, and compact advice is a Stop
+            // hook, which a running Claude picks up with no restart (measured for the board's hook).
+            Ok(_) if switch == Switch::JevGuide && !item.on => {
+                "Jev guide on: each new Claude, Codex and agy here is told to ask Jev before reading (AGENTS.md for Codex and agy); r restarts this Claude".to_owned()
+            }
+            Ok(_) if switch == Switch::JevGuide => {
+                "Jev guide off: herdr's hook and its AGENTS.md block are gone".to_owned()
+            }
+            Ok(_) if switch == Switch::JevCompact && !item.on => {
+                "Compact advice on: from its next answer, Claude here is told when /compact is worth it".to_owned()
+            }
+            Ok(_) if switch == Switch::JevCompact => "Compact advice off".to_owned(),
             Ok(_) if item.on => format!(
                 "{} off for new Claude sessions here; r restarts this one",
                 item.name

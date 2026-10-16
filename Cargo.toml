@@ -48,6 +48,8 @@ time = { version = "0.3.47", features = ["formatting"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "signal"] }
 toml = "0.8"
 tracing = "0.1.44"
+# Nirvana fork, feature 9: the one HTTPS POST to Jev (src/nirvana_jev.rs). rustls, so no system TLS library.
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 unicode-width = "0.2"
 unicode-segmentation = "1.13.1"

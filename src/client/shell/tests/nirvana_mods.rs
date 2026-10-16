@@ -165,6 +165,7 @@ fn the_panel_lists_each_group_and_item_with_its_tokens() {
     // Grouped by provider (feature 7), in this order: a header follows the panel's border, an item's
     // row starts with its box.
     let headers = [
+        "Jev token savers (herdr)",
         "This project",
         "You (~/.claude)",
         "Plugin github",
@@ -185,7 +186,7 @@ fn the_panel_lists_each_group_and_item_with_its_tokens() {
         "{at:?}: {text}"
     );
     // Built in's header counts the built-in tools, which /context does not split per tool.
-    assert!(rows[at[5]].contains("7.5k"), "{}", rows[at[5]]);
+    assert!(rows[at[6]].contains("7.5k"), "{}", rows[at[6]]);
     let row = |name: &str| {
         rows.iter()
             .find(|row| row.contains(name))
@@ -207,7 +208,11 @@ fn space_switches_the_selected_item_off_in_the_folders_local_settings() {
     let mut state = state_with(Some("claude"), &dir, view(serde_json::json!({})));
     open(&mut state);
     let _ = rows_of(&mut state, 120, 40);
-    // The first item is the first memory file, CLAUDE.local.md by name.
+    // The first items are herdr's three Jev rows (feature 9); the fourth is the first memory file,
+    // CLAUDE.local.md by name.
+    for _ in 0..3 {
+        key(&mut state, KeyCode::Down);
+    }
     let outcome = key(&mut state, KeyCode::Char(' '));
     assert!(outcome.requests.is_empty(), "the key stays out of the pane");
     let written = std::fs::read_to_string(dir.join(".claude").join("settings.local.json"))
@@ -235,7 +240,8 @@ fn a_click_on_a_box_switches_that_item() {
     let mut state = state_with(Some("claude"), &dir, view(serde_json::json!({})));
     open(&mut state);
     let _ = rows_of(&mut state, 120, 40);
-    let (rect, _) = state.hits.nirvana_panel.boxes[1];
+    // Boxes 0 and 1 are the Jev guide and compact advice (feature 9); 3 is the second memory file.
+    let (rect, _) = state.hits.nirvana_panel.boxes[3];
     click(&mut state, rect.x + 1, rect.y);
     let written = std::fs::read_to_string(dir.join(".claude").join("settings.local.json"))
         .expect("the click wrote the folder's local settings");
@@ -265,6 +271,10 @@ fn e_asks_the_server_to_open_the_items_file() {
     assert!(rows
         .iter()
         .any(|row| row.contains("CLAUDE.md") && row.contains("edit")));
+    // Past herdr's three Jev rows (feature 9) to the memory file.
+    for _ in 0..3 {
+        key(&mut state, KeyCode::Down);
+    }
     let outcome = key(&mut state, KeyCode::Char('e'));
     let invoked = invoked(&outcome);
     assert_eq!(invoked.len(), 1, "{:?}", outcome.actions);
@@ -678,5 +688,77 @@ fn an_open_panel_is_redrawn_when_its_agent_prints() {
         );
         assert_eq!(straight, panel == "none", "{panel}");
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Feature 9: the Jev group comes first, its switches are herdr's own hooks, and the guide also
+/// reaches Codex and agy through the project's AGENTS.md.
+#[test]
+fn the_jev_group_switches_the_guide_for_every_agent_and_compact_advice_for_claude() {
+    let dir = folder("jev");
+    let mut state = state_with(Some("claude"), &dir, view(serde_json::json!({})));
+    open(&mut state);
+    let (_, rows) = rows_of(&mut state, 120, 70);
+    let text = rows.join("\n");
+    let at = |needle: &str| {
+        rows.iter()
+            .position(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("{needle}: {text}"))
+    };
+    assert!(
+        at("Jev token savers (herdr)") < at("This project"),
+        "{text}"
+    );
+    assert!(
+        rows[at("Jev guide")].contains("[ ]"),
+        "off until switched: {text}"
+    );
+    assert!(rows[at("Compact advice")].contains("[ ]"), "{text}");
+    // Under test no key is read: the row says what is missing.
+    assert!(rows[at("today")].contains("no Jev key"), "{text}");
+
+    // Rows sort by name inside a group: Compact advice, Jev guide, today.
+    assert!(
+        at("Compact advice") < at("Jev guide") && at("Jev guide") < at("today"),
+        "{text}"
+    );
+    key(&mut state, KeyCode::Char(' '));
+    let message = state
+        .nirvana_preload
+        .as_ref()
+        .and_then(|panel| panel.message.clone())
+        .unwrap_or_default();
+    assert!(message.contains("Compact advice on"), "{message}");
+    key(&mut state, KeyCode::Down);
+    key(&mut state, KeyCode::Char(' '));
+    let local: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join(".claude").join("settings.local.json")).expect("written"),
+    )
+    .expect("json");
+    let command = |event: &str| {
+        local["hooks"][event][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert!(
+        command("SessionStart").ends_with("jev guide --hook"),
+        "{local}"
+    );
+    assert!(
+        command("Stop").ends_with("jev compact"),
+        "the second switch keeps the first: {local}"
+    );
+    let agents =
+        std::fs::read_to_string(dir.join("AGENTS.md")).expect("AGENTS.md for Codex and agy");
+    assert!(agents.contains("jev files"), "{agents}");
+    let message = state
+        .nirvana_preload
+        .as_ref()
+        .and_then(|panel| panel.message.clone())
+        .unwrap_or_default();
+    assert!(message.contains("Codex and agy"), "{message}");
+    // Switching off is `nirvana_jev_install::tests`: this panel's view is fixed under test, so a row
+    // reads off however often it is switched.
     let _ = std::fs::remove_dir_all(&dir);
 }

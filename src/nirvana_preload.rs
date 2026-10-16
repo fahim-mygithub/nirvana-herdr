@@ -183,6 +183,8 @@ pub fn tool_server_key(server: &str) -> String {
 /// above the parts it switches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Group {
+    /// Feature 9: herdr's own Jev switches and today's figures.
+    Jev,
     Plugins,
     Memory,
     Skills,
@@ -196,6 +198,9 @@ pub enum Group {
 /// "Organize the list by provider or built in." Read from Claude Code's own `source` fields in `/context`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Provider {
+    /// Feature 9: herdr's Jev token savers, first, because they are herdr's own and save tokens rather
+    /// than spend them.
+    Jev,
     /// The folder's own: `projectSettings`, `localSettings`, a Project or Local memory file.
     Project,
     /// The user's own config, `~/.claude`: `userSettings`, a User memory file, auto memory.
@@ -215,6 +220,7 @@ pub enum Provider {
 impl Provider {
     pub fn title(&self) -> String {
         match self {
+            Provider::Jev => "Jev token savers (herdr)".into(),
             Provider::Project => "This project".into(),
             Provider::User => "You (~/.claude)".into(),
             Provider::Plugin(name) => format!("Plugin {name}"),
@@ -276,6 +282,7 @@ impl Provider {
             Switch::McpServer(name) => Provider::of_server(name, "user"),
             Switch::Plugin(id) => Provider::Plugin(id.split('@').next().unwrap_or(id).to_owned()),
             Switch::Tool(_) | Switch::Hooks => Provider::BuiltIn,
+            Switch::JevGuide | Switch::JevCompact => Provider::Jev,
         }
     }
 }
@@ -314,6 +321,11 @@ pub enum Switch {
     Plugin(String),
     Tool(String),
     Hooks,
+    /// Feature 9: herdr's Jev guide, on when its hook is in the folder's settings. Off is the default,
+    /// so it is never one of the "N off".
+    JevGuide,
+    /// Feature 9: level 7's Stop hook.
+    JevCompact,
 }
 
 /// One row of the panel.
@@ -382,6 +394,16 @@ pub fn is_off(local: &Value, switch: &Switch) -> bool {
             .flatten()
             .any(|entry| entry.as_str() == Some(name)),
         Switch::Hooks => local.get("disableAllHooks") == Some(&Value::Bool(true)),
+        Switch::JevGuide => !crate::nirvana_jev_install::has_hook(
+            local,
+            crate::nirvana_jev_install::GUIDE_EVENT,
+            crate::nirvana_jev_install::GUIDE,
+        ),
+        Switch::JevCompact => !crate::nirvana_jev_install::has_hook(
+            local,
+            crate::nirvana_jev_install::COMPACT_EVENT,
+            crate::nirvana_jev_install::COMPACT,
+        ),
     }
 }
 
@@ -633,6 +655,7 @@ pub fn items(
             None,
         ));
     }
+    items.extend(jev_items(local));
     for switch in off_switches(local) {
         if items
             .iter()
@@ -674,6 +697,8 @@ pub fn items(
                 "all hooks".into(),
                 None,
             ),
+            // Listed by `jev_items` always; never one of `off_switches`.
+            Switch::JevGuide | Switch::JevCompact => continue,
         };
         items.push(Item {
             provider,
@@ -693,6 +718,37 @@ pub fn items(
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     items
+}
+
+/// Feature 9: the Jev group. The guide and compact advice switch herdr's own hooks; the last row is
+/// what Jev did today, from herdr's own log, or why it cannot run.
+fn jev_items(local: &Value) -> Vec<Item> {
+    let row = |name: &str, detail: String, tokens, switch: Option<Switch>| Item {
+        provider: Provider::Jev,
+        group: Group::Jev,
+        on: switch.as_ref().is_none_or(|s| !is_off(local, s)),
+        name: name.into(),
+        detail,
+        tokens,
+        switch,
+        file: None,
+    };
+    let (today, _) = crate::nirvana_jev::today_line();
+    vec![
+        row(
+            "Jev guide",
+            "Claude, Codex, agy: ask Jev, not read".into(),
+            Some(crate::nirvana_jev_install::guide_tokens()),
+            Some(Switch::JevGuide),
+        ),
+        row(
+            "Compact advice",
+            "Claude: says when to /compact".into(),
+            Some(0),
+            Some(Switch::JevCompact),
+        ),
+        row("today", today, None, None),
+    ]
 }
 
 fn array<'a>(object: &'a mut Map<String, Value>, key: &str) -> &'a mut Vec<Value> {
@@ -798,6 +854,20 @@ pub fn set(local: &mut Value, switch: &Switch, on: bool) {
                 root.insert("disableAllHooks".into(), Value::Bool(true));
             }
         }
+        Switch::JevGuide => crate::nirvana_jev_install::set_hook(
+            local,
+            crate::nirvana_jev_install::GUIDE_EVENT,
+            crate::nirvana_jev_install::GUIDE,
+            &crate::nirvana_board::exe(),
+            on,
+        ),
+        Switch::JevCompact => crate::nirvana_jev_install::set_hook(
+            local,
+            crate::nirvana_jev_install::COMPACT_EVENT,
+            crate::nirvana_jev_install::COMPACT,
+            &crate::nirvana_board::exe(),
+            on,
+        ),
     }
 }
 
@@ -839,6 +909,10 @@ pub fn switch_item(cwd: &Path, switch: &Switch, on: bool) -> Result<Value, Strin
     let mut local = read_local(cwd)?;
     set(&mut local, switch, on);
     write_local(cwd, &local)?;
+    // The guide reaches the agents that are not Claude Code through their own files.
+    if *switch == Switch::JevGuide {
+        crate::nirvana_jev_install::others(cwd, on)?;
+    }
     folders()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1103,7 +1177,12 @@ mod tests {
         assert_eq!(find("demo").switch, None);
         assert_eq!(find("Bash").switch, Some(Switch::Tool("Bash".into())));
         assert_eq!(find("session start text").tokens, Some(1_620));
-        assert!(items.iter().all(|item| item.on));
+        // Every item is on with no local settings, but herdr's own Jev switches, which are off until
+        // switched on (feature 9).
+        assert!(items
+            .iter()
+            .all(|item| item.on || item.provider == Provider::Jev));
+        assert!(!find("Jev guide").on && !find("Compact advice").on);
         // Grouped by provider, then by kind inside a provider.
         assert!(items.windows(2).all(|pair| {
             (&pair[0].provider, pair[0].group) <= (&pair[1].provider, pair[1].group)

@@ -3,6 +3,70 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.9.0 (2026-10-16): Jev token savers for Claude, Codex and agy, switched in Preload
+
+- **Changed:** Jev, TypeSafe's cheap judge model reached through OpenRouter, runs from this binary for any agent with a
+  shell: `herdr jev file <path> --ask`, `herdr jev files <glob>... --ask` (with the file to read first), and
+  `<command> | herdr jev text --ask`, each with `--choice` or `--score`. The file text or output goes to Jev and never
+  into the agent's context; the agent gets one line. What is never sent is Nirvana's list, checked in code before any
+  call; command output goes with secret shapes redacted; a failure is never a yes. This binary never runs a command
+  for an agent. Every call is logged without its text in `<home>/jev/calls.jsonl`, with the agent that made it.
+  **Because:** the owner, 2026-10-16: "I would like to actually implement these token saving jev efatures for real.
+  I know we only have them shadow tested and never ran Nirvana but lets actually put them to use in herder." Nirvana
+  built levels 8 and 9 (`nirvanad/jev/files.py`) and registered them nowhere: 0 real calls.
+  **Measured:** `nirvana_jev::tests::*`; controls `jev_*`. Live on the owner's key: one 300 KB file judged right in
+  998 ms for $0.0033 (Nirvana's 24 KB cap was set before; the cap here is 256 KB); 18 files in parallel in 1.0 s,
+  142k tokens of code judged for $0.0063. The A/B, `nirvana/evidence/2026-10-16-jev-ab/summary.txt` (recomputed by
+  `summarize.py`): 46 of 46 runs answered right; with the guide, Claude and agy ran Jev by themselves.
+  **If you remove this:** an agent learns about a file only by reading it into its context.
+- **Changed:** Preload's first group, "Jev token savers (herdr)": **Jev guide** (off until switched) tells every new
+  Claude, Codex and agy in the folder how to ask Jev: a `SessionStart` hook for Claude and a marked block in the
+  project's `AGENTS.md` for Codex and agy. An `AGENTS.md` herdr made is kept out of git through `.git/info/exclude`;
+  a project's own keeps its text and gets the block appended. **Compact advice** is the Stop hook below. **today**
+  shows the day's Jev calls, the tokens no agent had to read, and the cost.
+  **Because:** the owner: "Ad a section in the preload so we can toggle this I imagine every agent needs some sort of
+  preload file to know how to save token with Jev", "ensure its compatible in claude code, agy and codex".
+  **Measured:** live in a herdr window: the group drew first with its rows, a click on Jev guide wrote the hook and an
+  `AGENTS.md` git did not see, a second click took both away. Codex 0.42.0's session record held the block (its
+  sign-in is dead here, so no Codex model ran). agy ran `& "...herdr.exe" jev files` from PowerShell by itself.
+  **If you remove this:** the tools exist and no agent knows to use them.
+- **Changed:** Claude gets the guide once. The hook says nothing when Claude already reads herdr's block from
+  `AGENTS.md`, which it does only when no `CLAUDE.md` or `CLAUDE.local.md` stands beside it.
+  **Because:** measured 2026-10-16 with `/context` in a trusted folder: `AGENTS.md` alone loaded as a Project memory
+  file at 469 tokens; with `CLAUDE.md`, or `CLAUDE.local.md` alone, it did not. The research leaf had measured
+  "Claude never loads AGENTS.md" in a folder that had a `CLAUDE.md`. The A/B's Claude runs paid the guide twice.
+  **Measured:** `claude_gets_the_guide_once_when_it_reads_agents_md`.
+  **If you remove this:** a project with no CLAUDE.md pays about 470 tokens more in every Claude session.
+- **Changed:** the guide says: after `jev files`, open only the `read first` file, and another only if that one does
+  not answer. **Because:** with the first wording Claude ran Jev, then still read the files Jev was unsure of, and each
+  read is paid again on every later turn. **Measured:** the 568 KB project, Claude Sonnet, finding the bug: no guide
+  6 runs; first wording 3 runs, 2 used Jev, +5% tokens; this wording 6 runs, 6 used Jev, -16% tokens (summary.txt).
+  The spread is wide (no guide 135k to 208k, this wording 128k to 218k): a lead, not a proof.
+  **If you remove this:** Claude pays for Jev's answer and the reads it was meant to save.
+- **Changed:** level 7, "Should I Compact", is a Claude Code Stop hook (`herdr jev compact`): at 150k, 300k and 500k
+  tokens of context it asks Jev four questions and, at a clean break, shows the owner one line. Nirvana's port, with
+  two changes: the reply judged is the hook's own `last_assistant_message`, and a silent reading rests one turn, not
+  three. Every decision and Jev's raw answers go to `<home>/jev/compact.jsonl`.
+  **Because:** Nirvana's `integrations/claude-code/compact/` was built and installed by nothing. Live 2026-10-16
+  (lines lowered to 20k/25k/90k, Claude Haiku, three turns): the transcript lagged the reply, so a finished summary
+  read at_boundary 0.07; and the three-turn rest skipped turn 3, the clean break to new work it exists for.
+  **Measured:** after both changes, turn 3 said "Context is 44k tokens and you just finished a unit of work: /compact
+  now keeps the summary clean." (`compact-live.jsonl`), at $0.00003 a call. Its lines and floors stay hypotheses.
+  **If you remove this:** compaction is left to Claude Code's own threshold.
+- **Changed:** a glob's `{a,b}` alternatives are expanded. **Because:** live, Claude asked
+  `**/*.{ts,js,py,go,rs,java}` and got "no file to judge". **Measured:** control `jev_no_braces`.
+- **Changed:** Restart Claude (the tab menu, and Preload's `r`) starts a Claude that has had no prompt yet fresh, with
+  its flags, instead of `--resume <id>`. **Because:** live 2026-10-16, `r` after switching the guide on in a new Claude
+  typed `--resume 2a85aa58-...` and Claude answered "No conversation found with session ID" and left the shell:
+  Claude Code saves a conversation at its first prompt. `--continue` would open another conversation.
+  **Measured:** `a_claude_with_no_saved_conversation_restarts_fresh`, control `restart_resumes_unsaved`; live, the same
+  press started Claude again 21 s later with `--model sonnet --allowedTools ...` and no `--resume`.
+  **If you remove this:** restarting a fresh Claude to take a Preload switch leaves the pane at a shell prompt.
+- **Measured, the whole path in a herdr window** (scratch home, the 568 KB project, Claude Sonnet): Preload's clicks
+  switched the guide and compact advice on, `r` restarted Claude, and asked the bug question Claude ran `herdr jev
+  files` by itself (17 calls, 142k tokens judged, $0.0062, all logged as `claude`), read 40 lines of one file and
+  answered right, at 62.6k tokens of context.
+
 ## alpha 0.8.0 (2026-10-16): the Memory square and the shared board
 
 - **Changed:** each workspace has a shared board, `.nirvana/board.md` at the repository's root: a revision, one section

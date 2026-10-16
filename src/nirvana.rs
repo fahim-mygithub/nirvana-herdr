@@ -333,6 +333,27 @@ pub fn restart_args(old_args: &[String], session_id: Option<&str>) -> Vec<String
     args
 }
 
+/// The arguments for restarting a Claude whose conversation was never saved: one that has had no
+/// prompt yet. Claude Code writes the transcript at the first prompt, and `--resume <id>` then fails
+/// with "No conversation found with session ID" and leaves the shell (live 2026-10-16, Preload's `r`
+/// after switching the Jev guide on in a fresh Claude). `--continue` would open another conversation,
+/// so the restart starts fresh, with the same flags.
+pub fn restart_args_unsaved(old_args: &[String]) -> Vec<String> {
+    let mut args = restart_args(old_args, None);
+    args.pop(); // the `--continue` fallback
+    args
+}
+
+/// Whether Claude Code saved the conversation: `<config>/projects/<folder>/<id>.jsonl`, in any folder.
+pub fn conversation_saved(config_dir: &Path, session_id: &str) -> bool {
+    let file = format!("{session_id}.jsonl");
+    std::fs::read_dir(config_dir.join("projects"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| entry.path().join(&file).is_file())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,6 +534,25 @@ mod tests {
             restart_args(&strings(&["-r", "--verbose", "--session-id=abc"]), None),
             strings(&["--verbose", "--continue"])
         );
+    }
+
+    #[test]
+    fn a_claude_with_no_saved_conversation_restarts_fresh() {
+        let dir = std::env::temp_dir().join(format!("nirvana-unsaved-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("projects").join("C--work-proj")).expect("projects");
+        assert!(!conversation_saved(&dir, "abc"));
+        std::fs::write(
+            dir.join("projects").join("C--work-proj").join("abc.jsonl"),
+            "{}\n",
+        )
+        .expect("transcript");
+        assert!(conversation_saved(&dir, "abc"));
+        assert_eq!(
+            restart_args_unsaved(&strings(&["--model", "sonnet", "--resume", "abc"])),
+            strings(&["--model", "sonnet"])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

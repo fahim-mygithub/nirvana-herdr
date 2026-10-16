@@ -34,6 +34,9 @@ mod logging;
 mod metadata_tokens;
 mod nirvana;
 mod nirvana_board;
+mod nirvana_jev;
+mod nirvana_jev_compact;
+mod nirvana_jev_install;
 mod nirvana_preload;
 mod nirvana_running;
 mod nirvana_servers;
@@ -569,6 +572,10 @@ fn main() -> io::Result<()> {
     // Nirvana fork, feature 8: the shared board, for agents and for Claude Code's prompt hook.
     if args.get(1).map(String::as_str) == Some("board") {
         return nirvana_board::cli(&args[2..]);
+    }
+    // Nirvana fork, feature 9: Jev, the cheap judge, for every agent in a pane and for Claude Code's Stop hook.
+    if args.get(1).map(String::as_str) == Some("jev") {
+        return nirvana_jev::cli(&args[2..]);
     }
 
     finish_cli(cli::maybe_run(&args))?;
