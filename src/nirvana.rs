@@ -176,6 +176,56 @@ pub fn editable_file(file: &str) -> Option<PathBuf> {
     (path.is_absolute() && markdown && path.is_file()).then_some(path)
 }
 
+/// The terminal editors "edit" tries, first found, each with the arguments that give it the mouse.
+/// Microsoft Edit is part of Windows 11 (`edit`, 1.2.1 on this machine on 2026-10-16) and takes clicks,
+/// selection, the wheel and its menus by itself; elsewhere it installs as `msedit`, because Debian's
+/// `edit` is run-mailcap's. `$VISUAL` and `$EDITOR` are not tried: either may name a window editor, and the
+/// owner asked for a terminal one that takes the mouse ("not open through notepad").
+#[cfg(windows)]
+const TERMINAL_EDITORS: [(&str, &[&str]); 3] =
+    [("edit", &[]), ("micro", &[]), ("nano", &["--mouse"])];
+#[cfg(not(windows))]
+const TERMINAL_EDITORS: [(&str, &[&str]); 3] =
+    [("msedit", &[]), ("micro", &[]), ("nano", &["--mouse"])];
+
+/// The argv that opens `path` in a terminal editor: `NIRVANA_EDITOR` (one program, run with the file) when
+/// set, else the first of `TERMINAL_EDITORS` on the PATH. `None` when there is none.
+pub fn terminal_editor_argv(path: &Path) -> Option<Vec<String>> {
+    terminal_editor_argv_with(path, std::env::var("NIRVANA_EDITOR").ok(), find_program)
+}
+
+fn terminal_editor_argv_with(
+    path: &Path,
+    chosen: Option<String>,
+    find: impl Fn(&str) -> Option<PathBuf>,
+) -> Option<Vec<String>> {
+    let file = path.display().to_string();
+    if let Some(chosen) = chosen.filter(|chosen| !chosen.trim().is_empty()) {
+        return Some(vec![chosen.trim().to_owned(), file]);
+    }
+    TERMINAL_EDITORS.iter().find_map(|(program, args)| {
+        let found = find(program)?;
+        let mut argv = vec![found.display().to_string()];
+        argv.extend(args.iter().map(|arg| (*arg).to_owned()));
+        argv.push(file.clone());
+        Some(argv)
+    })
+}
+
+/// A program on the PATH. On Windows only `.exe` and `.com`: a pane runs its argv directly, and a batch
+/// file needs `cmd`.
+fn find_program(name: &str) -> Option<PathBuf> {
+    let names: Vec<String> = if cfg!(windows) {
+        vec![format!("{name}.exe"), format!("{name}.com")]
+    } else {
+        vec![name.to_owned()]
+    };
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths)
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+        .find(|candidate| candidate.is_file())
+}
+
 /// How long the restart waits for the pane's shell to be free after Claude is stopped.
 pub const RESTART_SHELL_WAIT: Duration = Duration::from_secs(3);
 
@@ -306,6 +356,43 @@ mod tests {
             None
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edit_opens_a_terminal_editor_that_takes_the_mouse_never_notepad() {
+        let file = Path::new("/work/proj/CLAUDE.md");
+        let shown = file.display().to_string();
+        let on_path = |names: &'static [&'static str]| {
+            move |name: &str| {
+                names
+                    .contains(&name)
+                    .then(|| PathBuf::from(format!("/bin/{name}")))
+            }
+        };
+        let first = TERMINAL_EDITORS[0].0;
+        // The first editor found wins; nano only with its mouse switch.
+        assert_eq!(
+            terminal_editor_argv_with(file, None, on_path(&["edit", "msedit", "micro", "nano"])),
+            Some(vec![format!("/bin/{first}"), shown.clone()])
+        );
+        assert_eq!(
+            terminal_editor_argv_with(file, None, on_path(&["nano"])),
+            Some(vec!["/bin/nano".into(), "--mouse".into(), shown.clone()])
+        );
+        // NIRVANA_EDITOR wins over every editor found.
+        assert_eq!(
+            terminal_editor_argv_with(file, Some(" hx ".into()), on_path(&["micro"])),
+            Some(vec!["hx".into(), shown.clone()])
+        );
+        // Nothing found: no editor, so the panel says so; Notepad is never the answer.
+        assert_eq!(
+            terminal_editor_argv_with(file, None, on_path(&["notepad"])),
+            None
+        );
+        assert_eq!(
+            terminal_editor_argv_with(file, Some("  ".into()), on_path(&[])),
+            None
+        );
     }
 
     fn scratch(name: &str) -> PathBuf {

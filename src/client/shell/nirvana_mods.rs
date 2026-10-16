@@ -281,17 +281,18 @@ pub(super) struct PanelHits {
 }
 
 enum Line {
-    Header(Group),
+    /// A provider's header (feature 7): the owner, 2026-10-16, "Organize the list by provider or built in."
+    Header(preload::Provider),
     Item(usize),
 }
 
 fn lines(items: &[Item]) -> Vec<Line> {
     let mut lines = Vec::new();
-    let mut group = None;
+    let mut provider = None;
     for (index, item) in items.iter().enumerate() {
-        if group != Some(item.group) {
-            group = Some(item.group);
-            lines.push(Line::Header(item.group));
+        if provider.as_ref() != Some(&item.provider) {
+            provider = Some(item.provider.clone());
+            lines.push(Line::Header(item.provider.clone()));
         }
         lines.push(Line::Item(index));
     }
@@ -735,11 +736,11 @@ pub(super) fn render_panel(
     {
         let y = body_top + row as u16;
         match line {
-            Line::Header(group) => {
+            Line::Header(provider) => {
                 let style = base.fg(palette.accent).add_modifier(Modifier::BOLD);
-                put_text(buffer, inner_x, y, inner_width, group.title(), style);
-                if let Some(report) = &view.report {
-                    let tokens = group.tokens(report);
+                put_text(buffer, inner_x, y, inner_width, &provider.title(), style);
+                if view.report.is_some() {
+                    let tokens = preload::provider_tokens(&items, provider, view.report.as_ref());
                     if tokens > 0 {
                         let text = format!("{:>TOKENS$}", preload::short(tokens));
                         put_text(
@@ -1040,8 +1041,9 @@ impl ClientShellState {
         let Some(switch) = item.switch.clone() else {
             let reason = if item.group == Group::Skills {
                 format!(
-                    "{} comes with its plugin: switch the plugin under Plugins",
-                    item.name
+                    "{} comes with its plugin: switch the plugin's own row at the top of {}",
+                    item.name,
+                    item.provider.title()
                 )
             } else {
                 format!(

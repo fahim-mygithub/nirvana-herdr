@@ -3,6 +3,46 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.7.0 (2026-10-16): Preload grouped by provider; edit opens a terminal editor in a new tab
+
+- **Changed:** the Preload panel groups its rows by where each comes from: This project, You (~/.claude), one group per
+  plugin (its own switch first, then its skills, agents and MCP servers), claude.ai, Built in (Claude Code), Managed.
+  Each header shows its group's tokens; each row's detail now names its kind ("memory file", "skill", "MCP, 2 tools",
+  "connector, 1 tool", "agent", "tool", "whole plugin").
+  **Because:** the owner, 2026-10-16: "Organize the list by provider or built in."
+  **Measured:** `each_item_is_grouped_under_the_provider_it_comes_from`,
+  `a_switched_off_item_nothing_remembers_is_grouped_by_its_switch`,
+  `the_panel_lists_each_group_and_item_with_its_tokens`; controls `provider_*`. A header sums its rows; a plugin's own
+  row is left out of its header, since it sums the same rows; Built in adds "System tools", which `/context` does not
+  split per tool. The "MCP server instructions" category is no longer shown: `/context` does not split it per server.
+  **If you remove this:** a plugin's skills, agents and server are spread over four groups, and what a plugin costs is
+  read by adding them up.
+- **Changed:** a row switched off keeps its group: the window remembers each row's provider with its tokens; with
+  nothing remembered (herdr restarted since), the switch names it (a `plugin:` server is its plugin, a `claude.ai `
+  server is claude.ai, a CLAUDE.md under `~/.claude` is You).
+  **Because:** a row switched off is gone from `/context`, which is where its provider is read.
+  **Measured:** controls `provider_off_item_forgotten`, `provider_off_switch_guess`.
+  **If you remove this:** switching a row off moves it to another group.
+- **Changed:** "edit" opens the file in a terminal editor that takes the mouse, in a new tab of the panel's space,
+  focused and named "edit <file>"; the agent's tab is left as it was. The editor is `NIRVANA_EDITOR` when set, else the
+  first found of Microsoft Edit (`edit` on Windows, `msedit` elsewhere), `micro`, `nano --mouse`. With none, the panel
+  says so; Notepad is never opened.
+  **Because:** the owner, 2026-10-16: "when you edit have a terminal editor that is mouse compatible and open that file
+  in a new tab not open through notepad." Microsoft Edit 1.2.1 is part of Windows 11 on this machine, so nothing is
+  installed. `$VISUAL`/`$EDITOR` are not read: either may name a window editor.
+  **Measured:** `edit_opens_a_terminal_editor_that_takes_the_mouse_never_notepad`,
+  `edit_opens_the_file_in_a_new_focused_tab_and_leaves_the_agents_tab_alone`; controls `editor_*`, `edit_tab_*`.
+  **If you remove this:** "edit" opens Notepad, over the agent's tab.
+- **Changed:** "edit" no longer goes through herdr's scrollback editor helper.
+  **Because:** that helper is written for herdr's scrollback temp file: on Linux and macOS it runs
+  `rm -f "$scrollback_file"` when the editor exits (`src/platform/linux.rs`), so 0.5.0's "edit" there would have
+  deleted the CLAUDE.md it opened. Found while building 0.7.0; never run on Linux or macOS, so never measured.
+  **If you remove this:** on Linux and macOS, editing a preloaded file deletes it.
+- **Changed:** control `spaces_kind_token_ignored` sabotages `.find(|(name, _)| name == KIND_TOKEN)`.
+  **Because:** its find text had been gone since 0.5.0 moved the token read, so it printed "find text occurs 0 times"
+  and proved nothing. Found by checking every control's find text before this run.
+  **If you remove this:** the agent-icon test has no control.
+
 ## alpha 0.6.0 (2026-10-16): the Running square, Running on top and Waiting on you under it
 
 - **Changed:** the mod strip's first square is "Running": "working · Bash", "waits on you" in yellow, "idle". Its

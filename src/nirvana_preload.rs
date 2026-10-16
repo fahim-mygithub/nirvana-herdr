@@ -179,43 +179,127 @@ pub fn tool_server_key(server: &str) -> String {
         .collect()
 }
 
-/// The panel's groups, in its order.
+/// What kind of thing an item is, its order inside its provider's group. A plugin's own row comes first,
+/// above the parts it switches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Group {
+    Plugins,
     Memory,
     Skills,
     Mcp,
-    Plugins,
     Agents,
     Tools,
     Hooks,
 }
 
-impl Group {
-    pub fn title(self) -> &'static str {
+/// Where an item comes from: the panel's groups, in its order (feature 7). The owner, 2026-10-16:
+/// "Organize the list by provider or built in." Read from Claude Code's own `source` fields in `/context`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Provider {
+    /// The folder's own: `projectSettings`, `localSettings`, a Project or Local memory file.
+    Project,
+    /// The user's own config, `~/.claude`: `userSettings`, a User memory file, auto memory.
+    User,
+    /// A plugin, by its name.
+    Plugin(String),
+    /// Synced from claude.ai: its connectors and skills.
+    ClaudeAi,
+    /// A source this reader does not know, as Claude Code wrote it.
+    Other(String),
+    /// Part of Claude Code itself: its tools, its skills, and the hooks' session-start text.
+    BuiltIn,
+    /// Managed policy.
+    Managed,
+}
+
+impl Provider {
+    pub fn title(&self) -> String {
         match self {
-            Group::Memory => "CLAUDE.md and memory",
-            Group::Skills => "Skills",
-            Group::Mcp => "MCP servers and connectors",
-            Group::Plugins => "Plugins",
-            Group::Agents => "Agents",
-            Group::Tools => "Built-in tools",
-            Group::Hooks => "Hooks",
+            Provider::Project => "This project".into(),
+            Provider::User => "You (~/.claude)".into(),
+            Provider::Plugin(name) => format!("Plugin {name}"),
+            Provider::ClaudeAi => "claude.ai".into(),
+            Provider::Other(source) => source.clone(),
+            Provider::BuiltIn => "Built in (Claude Code)".into(),
+            Provider::Managed => "Managed".into(),
         }
     }
 
-    /// The group's tokens as the report counts them.
-    pub fn tokens(self, report: &Report) -> u32 {
-        match self {
-            Group::Memory => report.category("Memory files"),
-            Group::Skills => report.category("Skills"),
-            Group::Mcp => report.category("MCP tools") + report.category("MCP server instructions"),
-            Group::Plugins => 0,
-            Group::Agents => report.category("Custom agents"),
-            Group::Tools => report.category("System tools"),
-            Group::Hooks => report.category("Messages"),
+    /// A memory file's type, a skill's, agent's or MCP server's source.
+    fn of_source(source: &str) -> Provider {
+        match source {
+            "Project" | "Local" | "projectSettings" | "localSettings" | "project" | "local" => {
+                Provider::Project
+            }
+            "User" | "AutoMem" | "userSettings" | "user" => Provider::User,
+            "syncedSkills" | "claudeai" => Provider::ClaudeAi,
+            "Managed" | "policySettings" | "managed" | "enterprise" => Provider::Managed,
+            "built-in" | "builtin" | "bundled" => Provider::BuiltIn,
+            other => Provider::Other(other.to_owned()),
         }
     }
+
+    /// The plugin an MCP server comes with, from the name `init` gives it: "plugin:github:github".
+    fn of_server(name: &str, source: &str) -> Provider {
+        match name
+            .strip_prefix("plugin:")
+            .and_then(|rest| rest.split(':').next())
+        {
+            Some(plugin) => Provider::Plugin(plugin.to_owned()),
+            None => Provider::of_source(source),
+        }
+    }
+
+    /// A switched-off item no read remembers (herdr restarted since): where its switch says it comes from.
+    fn of_switch(switch: &Switch, cwd: &Path, config_dir: Option<&Path>) -> Provider {
+        match switch {
+            Switch::ClaudeMd(path) => {
+                let in_config = config_dir
+                    .is_some_and(|dir| shown_path(path, cwd, Some(dir)).starts_with("~/.claude/"));
+                if in_config {
+                    Provider::User
+                } else {
+                    Provider::Project
+                }
+            }
+            Switch::AutoMemory => Provider::User,
+            Switch::Skill(name) => {
+                if cwd.join(".claude").join("skills").join(name).is_dir() {
+                    Provider::Project
+                } else if config_dir.is_some_and(|dir| dir.join("skills").join(name).is_dir()) {
+                    Provider::User
+                } else {
+                    Provider::BuiltIn
+                }
+            }
+            Switch::McpServer(name) if name.starts_with("claude.ai ") => Provider::ClaudeAi,
+            Switch::McpServer(name) => Provider::of_server(name, "user"),
+            Switch::Plugin(id) => Provider::Plugin(id.split('@').next().unwrap_or(id).to_owned()),
+            Switch::Tool(_) | Switch::Hooks => Provider::BuiltIn,
+        }
+    }
+}
+
+/// A group's tokens: the sum of its rows, a plugin's own row left out (it sums the rows under it). Built
+/// in adds "System tools", which `/context` does not split per tool.
+pub fn provider_tokens(items: &[Item], provider: &Provider, report: Option<&Report>) -> u32 {
+    let rows: u32 = items
+        .iter()
+        .filter(|item| &item.provider == provider && item.group != Group::Plugins)
+        .filter_map(|item| item.tokens)
+        .sum();
+    let tools = match (provider, report) {
+        (Provider::BuiltIn, Some(report)) => report.category("System tools"),
+        _ => 0,
+    };
+    rows + tools
+}
+
+/// What the window remembers of an item from the last read that listed it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Remembered {
+    pub tokens: Option<u32>,
+    pub provider: Provider,
 }
 
 /// The setting that keeps one item out of new sessions.
@@ -235,6 +319,7 @@ pub enum Switch {
 /// One row of the panel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Item {
+    pub provider: Provider,
     pub group: Group,
     pub name: String,
     pub detail: String,
@@ -359,54 +444,43 @@ pub fn off_count(local: &Value) -> usize {
     off_switches(local).len()
 }
 
-fn source_word(source: &str) -> String {
-    match source {
-        "userSettings" | "user" => "user".into(),
-        "projectSettings" | "project" => "project".into(),
-        "localSettings" | "local" => "local".into(),
-        "policySettings" | "managed" => "managed".into(),
-        "built-in" => "built-in".into(),
-        "syncedSkills" | "claudeai" => "claude.ai".into(),
-        "plugin" => "plugin".into(),
-        other => other.to_lowercase(),
-    }
-}
-
 /// The panel's rows: what the report lists, each on unless the folder's settings switch it off, then
-/// each item switched off there that the report no longer lists. `remembered` holds the tokens an item
-/// had when it was last listed. Each group is sorted by name, so a row keeps its place when switched.
+/// each item switched off there that the report no longer lists. `remembered` holds what an item was
+/// when it was last listed. Rows go by provider, then kind, then name, so a row keeps its place when
+/// switched; each row's detail names its kind, its provider being the header above it.
 pub fn items(
     report: Option<&Report>,
     local: &Value,
     cwd: &Path,
     config_dir: Option<&Path>,
-    remembered: &HashMap<Switch, u32>,
+    remembered: &HashMap<Switch, Remembered>,
 ) -> Vec<Item> {
     let mut items = Vec::new();
-    let item = |group, name: String, detail: String, tokens, switch: Option<Switch>, file| Item {
-        group,
-        on: switch.as_ref().is_none_or(|switch| !is_off(local, switch)),
-        name,
-        detail,
-        tokens,
-        switch,
-        file,
-    };
+    let item =
+        |provider, group, name: String, detail: String, tokens, switch: Option<Switch>, file| {
+            Item {
+                provider,
+                group,
+                on: switch.as_ref().is_none_or(|switch| !is_off(local, switch)),
+                name,
+                detail,
+                tokens,
+                switch,
+                file,
+            }
+        };
     if let Some(report) = report {
         for file in &report.memory {
             let auto = file.source == "AutoMem";
             items.push(item(
+                Provider::of_source(&file.source),
                 Group::Memory,
                 if auto {
                     "MEMORY.md".into()
                 } else {
                     shown_path(&file.name, cwd, config_dir)
                 },
-                if auto {
-                    "auto memory".into()
-                } else {
-                    source_word(&file.source)
-                },
+                if auto { "auto memory" } else { "memory file" }.into(),
                 Some(file.tokens),
                 Some(if auto {
                     Switch::AutoMemory
@@ -431,13 +505,14 @@ pub fn items(
                 _ => None,
             };
             items.push(item(
+                if plugin {
+                    Provider::Plugin(skill.extra.clone())
+                } else {
+                    Provider::of_source(&skill.source)
+                },
                 Group::Skills,
                 skill.name.clone(),
-                if plugin {
-                    format!("plugin {}", skill.extra)
-                } else {
-                    source_word(&skill.source)
-                },
+                "skill".into(),
                 Some(skill.tokens),
                 (!plugin).then(|| Switch::Skill(skill.name.clone())),
                 file,
@@ -450,8 +525,14 @@ pub fn items(
                 .iter()
                 .filter(|tool| tool.source == key)
                 .collect();
+            let provider = Provider::of_server(&server.name, &server.source);
             let mut detail = format!(
-                "{} tool{}",
+                "{}, {} tool{}",
+                if provider == Provider::ClaudeAi {
+                    "connector"
+                } else {
+                    "MCP"
+                },
                 tools.len(),
                 if tools.len() == 1 { "" } else { "s" }
             );
@@ -459,6 +540,7 @@ pub fn items(
                 detail = format!("{detail}, {}", server.extra);
             }
             items.push(item(
+                provider,
                 Group::Mcp,
                 server.name.clone(),
                 detail,
@@ -495,9 +577,10 @@ pub fn items(
                 )
                 .sum();
             items.push(item(
+                Provider::Plugin(plugin.name.clone()),
                 Group::Plugins,
                 plugin.name.clone(),
-                plugin.source.clone(),
+                "whole plugin".into(),
                 Some(tokens),
                 Some(Switch::Plugin(plugin.source.clone())),
                 None,
@@ -515,10 +598,15 @@ pub fn items(
                 ),
                 _ => None,
             };
+            let provider = match (agent.source.as_str(), agent.name.split_once(':')) {
+                ("plugin", Some((plugin, _))) => Provider::Plugin(plugin.to_owned()),
+                (source, _) => Provider::of_source(source),
+            };
             items.push(item(
+                provider,
                 Group::Agents,
                 agent.name.clone(),
-                source_word(&agent.source),
+                "agent".into(),
                 Some(agent.tokens),
                 None,
                 file,
@@ -526,15 +614,17 @@ pub fn items(
         }
         for tool in &report.tools {
             items.push(item(
+                Provider::BuiltIn,
                 Group::Tools,
                 tool.clone(),
-                String::new(),
+                "tool".into(),
                 None,
                 Some(Switch::Tool(tool.clone())),
                 None,
             ));
         }
         items.push(item(
+            Provider::BuiltIn,
             Group::Hooks,
             "session start text".into(),
             "all hooks".into(),
@@ -550,12 +640,17 @@ pub fn items(
         {
             continue;
         }
-        let tokens = remembered.get(&switch).copied();
+        let seen = remembered.get(&switch);
+        let tokens = seen.and_then(|seen| seen.tokens);
+        let provider = seen.map_or_else(
+            || Provider::of_switch(&switch, cwd, config_dir),
+            |seen| seen.provider.clone(),
+        );
         let (group, name, detail, file) = match &switch {
             Switch::ClaudeMd(path) => (
                 Group::Memory,
                 shown_path(path, cwd, config_dir),
-                "CLAUDE.md".into(),
+                "memory file".into(),
                 Some(PathBuf::from(path)),
             ),
             Switch::AutoMemory => (
@@ -564,15 +659,15 @@ pub fn items(
                 "auto memory".into(),
                 None,
             ),
-            Switch::Skill(name) => (Group::Skills, name.clone(), String::new(), None),
-            Switch::McpServer(name) => (Group::Mcp, name.clone(), String::new(), None),
+            Switch::Skill(name) => (Group::Skills, name.clone(), "skill".into(), None),
+            Switch::McpServer(name) => (Group::Mcp, name.clone(), "MCP".into(), None),
             Switch::Plugin(id) => (
                 Group::Plugins,
                 id.split('@').next().unwrap_or(id).to_owned(),
-                id.clone(),
+                "whole plugin".into(),
                 None,
             ),
-            Switch::Tool(name) => (Group::Tools, name.clone(), String::new(), None),
+            Switch::Tool(name) => (Group::Tools, name.clone(), "tool".into(), None),
             Switch::Hooks => (
                 Group::Hooks,
                 "session start text".into(),
@@ -581,6 +676,7 @@ pub fn items(
             ),
         };
         items.push(Item {
+            provider,
             group,
             name,
             detail,
@@ -591,8 +687,9 @@ pub fn items(
         });
     }
     items.sort_by(|a, b| {
-        a.group
-            .cmp(&b.group)
+        a.provider
+            .cmp(&b.provider)
+            .then_with(|| a.group.cmp(&b.group))
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     items
@@ -779,7 +876,7 @@ pub struct View {
     pub reading: bool,
     /// The last read gave no list (Claude Code missing, too old, or it failed).
     pub failed: bool,
-    pub remembered: HashMap<Switch, u32>,
+    pub remembered: HashMap<Switch, Remembered>,
     /// The folder's local settings, read with the list and after each switch.
     pub local: Value,
 }
@@ -816,8 +913,14 @@ fn store(cwd: &Path, report: Option<Report>) {
                 config_dir.as_deref(),
                 &HashMap::new(),
             ) {
-                if let (Some(switch), Some(tokens)) = (item.switch, item.tokens) {
-                    folder.view.remembered.insert(switch, tokens);
+                if let Some(switch) = item.switch {
+                    folder.view.remembered.insert(
+                        switch,
+                        Remembered {
+                            tokens: item.tokens,
+                            provider: item.provider,
+                        },
+                    );
                 }
             }
             folder.view.report = Some(report);
@@ -966,7 +1069,7 @@ mod tests {
             find("CLAUDE.md").switch,
             Some(Switch::ClaudeMd("C:/work/proj/CLAUDE.md".into()))
         );
-        assert_eq!(find("CLAUDE.local.md").detail, "local");
+        assert_eq!(find("CLAUDE.local.md").detail, "memory file");
         assert_eq!(find("MEMORY.md").switch, Some(Switch::AutoMemory));
         assert_eq!(
             find("benchmark").switch,
@@ -978,18 +1081,18 @@ mod tests {
         );
         // A plugin's skill is switched with its plugin.
         assert_eq!(find("superpowers:brainstorming").switch, None);
-        assert_eq!(
-            find("superpowers:brainstorming").detail,
-            "plugin superpowers"
-        );
+        assert_eq!(find("superpowers:brainstorming").detail, "skill");
         assert_eq!(
             find("bladebro").switch,
             Some(Switch::McpServer("bladebro".into()))
         );
         assert_eq!(find("bladebro").tokens, Some(3_224 + 864));
-        assert_eq!(find("bladebro").detail, "2 tools");
+        assert_eq!(find("bladebro").detail, "MCP, 2 tools");
         assert_eq!(find("claude.ai Gmail").tokens, Some(1_200));
-        assert_eq!(find("claude.ai Tavily").detail, "0 tools, needs-auth");
+        assert_eq!(
+            find("claude.ai Tavily").detail,
+            "connector, 0 tools, needs-auth"
+        );
         assert_eq!(
             find("github").switch,
             Some(Switch::Plugin("github@claude-plugins-official".into()))
@@ -1001,8 +1104,10 @@ mod tests {
         assert_eq!(find("Bash").switch, Some(Switch::Tool("Bash".into())));
         assert_eq!(find("session start text").tokens, Some(1_620));
         assert!(items.iter().all(|item| item.on));
-        // Grouped in the panel's order, by name inside a group.
-        assert!(items.windows(2).all(|pair| pair[0].group <= pair[1].group));
+        // Grouped by provider, then by kind inside a provider.
+        assert!(items.windows(2).all(|pair| {
+            (&pair[0].provider, pair[0].group) <= (&pair[1].provider, pair[1].group)
+        }));
     }
 
     #[test]
@@ -1018,7 +1123,13 @@ mod tests {
         );
         set(&mut local, &Switch::McpServer("bladebro".into()), false);
         let mut remembered = HashMap::new();
-        remembered.insert(Switch::McpServer("bladebro".into()), 4_088);
+        remembered.insert(
+            Switch::McpServer("bladebro".into()),
+            Remembered {
+                tokens: Some(4_088),
+                provider: Provider::User,
+            },
+        );
         // The next report no longer lists them.
         let mut next = report();
         next.skills.retain(|skill| skill.name != "benchmark");
@@ -1030,6 +1141,7 @@ mod tests {
             .expect("bladebro listed");
         assert!(!bladebro.on);
         assert_eq!(bladebro.tokens, Some(4_088));
+        assert_eq!(bladebro.provider, Provider::User);
         let benchmark = items
             .iter()
             .find(|item| item.name == "benchmark")
@@ -1045,6 +1157,88 @@ mod tests {
         assert_eq!(claude_md[0].tokens, Some(57));
         // A permission rule with a pattern is not a switched-off tool.
         assert!(items.iter().all(|item| item.name != "Bash(rm:*)"));
+    }
+
+    #[test]
+    fn each_item_is_grouped_under_the_provider_it_comes_from() {
+        let cwd = Path::new(r"C:\work\proj");
+        let items = items(
+            Some(&report()),
+            &json!({}),
+            cwd,
+            Some(Path::new(r"C:\home\.claude")),
+            &HashMap::new(),
+        );
+        let provider = |name: &str| {
+            items
+                .iter()
+                .find(|item| item.name == name)
+                .map(|item| item.provider.clone())
+                .unwrap_or_else(|| panic!("{name}"))
+        };
+        let plugin = |name: &str| Provider::Plugin(name.into());
+        assert_eq!(provider("CLAUDE.md"), Provider::Project);
+        assert_eq!(provider("CLAUDE.local.md"), Provider::Project);
+        assert_eq!(provider("demo"), Provider::Project);
+        assert_eq!(provider("MEMORY.md"), Provider::User);
+        assert_eq!(provider("benchmark"), Provider::User);
+        assert_eq!(provider("bladebro"), Provider::User);
+        assert_eq!(provider("superpowers"), plugin("superpowers"));
+        assert_eq!(provider("superpowers:brainstorming"), plugin("superpowers"));
+        assert_eq!(provider("superpowers:code-reviewer"), plugin("superpowers"));
+        assert_eq!(provider("github"), plugin("github"));
+        assert_eq!(provider("plugin:github:github"), plugin("github"));
+        assert_eq!(provider("claude.ai Gmail"), Provider::ClaudeAi);
+        assert_eq!(provider("docx"), Provider::ClaudeAi);
+        assert_eq!(provider("dataviz"), Provider::BuiltIn);
+        assert_eq!(provider("Bash"), Provider::BuiltIn);
+        assert_eq!(provider("session start text"), Provider::BuiltIn);
+        // A plugin's own row heads its group; its header leaves that row out, which sums the rest.
+        let superpowers: Vec<_> = items
+            .iter()
+            .filter(|item| item.provider == plugin("superpowers"))
+            .collect();
+        assert_eq!(superpowers[0].name, "superpowers");
+        assert_eq!(
+            provider_tokens(&items, &plugin("superpowers"), None),
+            76 + 350
+        );
+        // Built in adds the built-in tools' category to its rows.
+        assert_eq!(
+            provider_tokens(&items, &Provider::BuiltIn, Some(&report())),
+            480 + 1_620 + 5_381
+        );
+    }
+
+    #[test]
+    fn a_switched_off_item_nothing_remembers_is_grouped_by_its_switch() {
+        let cwd = Path::new(r"C:\work\proj");
+        let config = Path::new(r"C:\home\.claude");
+        let of = |switch: Switch| Provider::of_switch(&switch, cwd, Some(config));
+        assert_eq!(
+            of(Switch::ClaudeMd("C:/work/proj/CLAUDE.md".into())),
+            Provider::Project
+        );
+        assert_eq!(
+            of(Switch::ClaudeMd("C:/home/.claude/CLAUDE.md".into())),
+            Provider::User
+        );
+        assert_eq!(of(Switch::AutoMemory), Provider::User);
+        assert_eq!(
+            of(Switch::McpServer("claude.ai Gmail".into())),
+            Provider::ClaudeAi
+        );
+        assert_eq!(
+            of(Switch::McpServer("plugin:github:github".into())),
+            Provider::Plugin("github".into())
+        );
+        assert_eq!(of(Switch::McpServer("bladebro".into())), Provider::User);
+        assert_eq!(
+            of(Switch::Plugin("superpowers@superpowers-marketplace".into())),
+            Provider::Plugin("superpowers".into())
+        );
+        assert_eq!(of(Switch::Tool("WebFetch".into())), Provider::BuiltIn);
+        assert_eq!(of(Switch::Skill("no-such-skill".into())), Provider::BuiltIn);
     }
 
     #[test]

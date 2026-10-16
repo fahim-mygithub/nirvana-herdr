@@ -157,18 +157,35 @@ fn the_panel_lists_each_group_and_item_with_its_tokens() {
     let dir = folder("panel");
     let mut state = state_with(Some("claude"), &dir, view(serde_json::json!({})));
     open(&mut state);
-    let (_, rows) = rows_of(&mut state, 120, 40);
+    // Tall enough for every group.
+    let (_, rows) = rows_of(&mut state, 120, 70);
     let text = rows.join("\n");
     assert!(text.contains("Preload \u{b7} nirvana-mods-panel"), "{text}");
     assert!(text.contains("23.6k of 1m preloaded"), "{text}");
-    for group in [
-        "CLAUDE.md and memory",
-        "Skills",
-        "MCP servers and connectors",
-        "Plugins",
-    ] {
-        assert!(text.contains(group), "{group}: {text}");
-    }
+    // Grouped by provider (feature 7), in this order: a header follows the panel's border, an item's
+    // row starts with its box.
+    let headers = [
+        "This project",
+        "You (~/.claude)",
+        "Plugin github",
+        "Plugin superpowers",
+        "claude.ai",
+        "Built in (Claude Code)",
+    ];
+    let at: Vec<usize> = headers
+        .iter()
+        .map(|header| {
+            rows.iter()
+                .position(|row| row.contains(&format!("\u{2502} {header}")))
+                .unwrap_or_else(|| panic!("{header}: {text}"))
+        })
+        .collect();
+    assert!(
+        at.windows(2).all(|pair| pair[0] < pair[1]),
+        "{at:?}: {text}"
+    );
+    // Built in's header counts the built-in tools, which /context does not split per tool.
+    assert!(rows[at[5]].contains("7.5k"), "{}", rows[at[5]]);
     let row = |name: &str| {
         rows.iter()
             .find(|row| row.contains(name))
