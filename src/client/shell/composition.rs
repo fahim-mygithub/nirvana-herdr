@@ -243,12 +243,14 @@ impl ClientShellState {
                     .transcript
                     .as_deref()
                     .and_then(crate::nirvana_running::cached);
+                let memory = super::nirvana_memory::memory_value(&agent);
                 let strip = super::nirvana_mods::render_strip(
                     &mut buffer,
                     layout.nirvana_mods,
                     &agent,
                     activity.as_ref(),
                     &view,
+                    memory,
                     self.open_panel(),
                     &self.config.palette,
                 );
@@ -256,6 +258,7 @@ impl ClientShellState {
                 if self.config.mouse_capture {
                     self.hits.nirvana_preload = square;
                     self.hits.nirvana_running = strip.running;
+                    self.hits.nirvana_memory = strip.memory;
                 }
             }
         }
@@ -778,6 +781,39 @@ impl ClientShellState {
                 );
                 occlusion.cover(rendered.area);
                 self.hits.nirvana_running_panel = rendered;
+                frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
+            }
+        }
+        // Nirvana fork, feature 8: the Memory panel, drawn the same way.
+        if self.overlay.is_none() {
+            if let Some(panel) = self.nirvana_memory.clone() {
+                let top = if layout.nirvana_mods.height > 0 {
+                    layout.nirvana_mods.y
+                } else {
+                    layout.pane_surface.y
+                };
+                let area = Rect::new(
+                    layout.pane_surface.x,
+                    top,
+                    layout.pane_surface.width,
+                    layout.pane_surface.bottom().saturating_sub(top),
+                );
+                let view = crate::nirvana_board::view(&panel.cwd);
+                let seen = panel
+                    .session
+                    .as_deref()
+                    .and_then(crate::nirvana_board::seen);
+                let mut composed = frame.to_ratatui_buffer()?;
+                let rendered = super::nirvana_memory::render_memory_panel(
+                    &mut composed,
+                    area,
+                    &panel,
+                    view.as_ref(),
+                    seen.as_ref(),
+                    &self.config.palette,
+                );
+                occlusion.cover(rendered.area);
+                self.hits.nirvana_memory_panel = rendered;
                 frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
             }
         }

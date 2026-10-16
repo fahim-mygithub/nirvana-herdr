@@ -26,6 +26,7 @@ mod mobile;
 mod mouse;
 mod nirvana_footer;
 mod nirvana_header;
+mod nirvana_memory;
 mod nirvana_mods;
 mod nirvana_spaces;
 mod notification_policy;

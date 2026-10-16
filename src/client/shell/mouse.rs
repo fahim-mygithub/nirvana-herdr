@@ -701,6 +701,10 @@ impl ClientShellState {
         if self.overlay.is_none() && self.handle_running_mouse(mouse, outcome) {
             return;
         }
+        // Nirvana fork, feature 8: and the Memory panel.
+        if self.overlay.is_none() && self.handle_memory_mouse(mouse, outcome) {
+            return;
+        }
         if matches!(self.overlay, Some(ClientShellOverlay::Onboarding)) {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                 && super::contains(self.hits.overlay_primary, point)
@@ -1969,6 +1973,12 @@ impl ClientShellState {
                 // Nirvana fork, feature 6: the strip's Running square opens its panel.
                 if super::contains(self.hits.nirvana_running, point) {
                     self.toggle_running_panel();
+                    outcome.repaint = true;
+                    return;
+                }
+                // Nirvana fork, feature 8: the strip's Memory square opens its panel.
+                if super::contains(self.hits.nirvana_memory, point) {
+                    self.toggle_memory_panel();
                     outcome.repaint = true;
                     return;
                 }

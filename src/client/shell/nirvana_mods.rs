@@ -31,7 +31,7 @@ use ratatui::style::{Color, Modifier};
 /// The strip is one row.
 pub(super) const STRIP_HEIGHT: u16 = 1;
 /// The panel is at most this wide.
-const PANEL_WIDTH: u16 = 92;
+pub(super) const PANEL_WIDTH: u16 = 92;
 /// Rows a page key moves.
 const PAGE: usize = 10;
 /// The token column: "129.9k".
@@ -134,6 +134,8 @@ pub(super) fn running_value(agent: &StripAgent, activity: Option<&Activity>) -> 
 pub(super) struct StripHits {
     pub(super) running: Rect,
     pub(super) preload: Rect,
+    /// Feature 8: absent for a folder whose repository has no GitHub remote.
+    pub(super) memory: Rect,
 }
 
 /// One square: a bold label and a value on a raised background, as old Nirvana draws its squares.
@@ -185,13 +187,16 @@ fn draw_square(
     square
 }
 
-/// Draws the strip: the agent, then the Running square, then the Preload square.
+/// Draws the strip: the agent, then the Running square, the Preload square, and the Memory square when
+/// `memory` holds its value.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_strip(
     buffer: &mut Buffer,
     area: Rect,
     agent: &StripAgent,
     activity: Option<&Activity>,
     view: &View,
+    memory: Option<(String, bool)>,
     open: OpenPanel,
     palette: &Palette,
 ) -> StripHits {
@@ -249,6 +254,24 @@ pub(super) fn render_strip(
         open == OpenPanel::Preload,
         palette,
     );
+    if let Some((value, new)) = memory {
+        x = hits.preload.right() + 1;
+        hits.memory = draw_square(
+            buffer,
+            x,
+            area.y,
+            right,
+            "Memory",
+            &value,
+            if new {
+                palette.yellow
+            } else {
+                palette.subtext0
+            },
+            open == OpenPanel::Memory,
+            palette,
+        );
+    }
     hits
 }
 
@@ -311,7 +334,7 @@ pub(super) fn panel_items(panel: &PreloadPanel, view: &View) -> Vec<Item> {
     )
 }
 
-fn folder_name(cwd: &std::path::Path) -> String {
+pub(super) fn folder_name(cwd: &std::path::Path) -> String {
     cwd.file_name().map_or_else(
         || cwd.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
@@ -320,7 +343,7 @@ fn folder_name(cwd: &std::path::Path) -> String {
 
 /// A panel's frame over `rect`: cleared, a rounded border, the title on its top edge and a close box.
 /// Returns the close box.
-fn draw_frame(buffer: &mut Buffer, rect: Rect, title: &str, palette: &Palette) -> Rect {
+pub(super) fn draw_frame(buffer: &mut Buffer, rect: Rect, title: &str, palette: &Palette) -> Rect {
     let base = Style::default().fg(palette.text).bg(palette.panel_bg);
     buffer.set_style(rect, base);
     for y in rect.y..rect.bottom() {
@@ -368,6 +391,7 @@ pub(super) enum OpenPanel {
     None,
     Running,
     Preload,
+    Memory,
 }
 
 /// The open Running panel, for one agent's pane.
@@ -855,6 +879,8 @@ impl ClientShellState {
             OpenPanel::Running
         } else if self.nirvana_preload.is_some() {
             OpenPanel::Preload
+        } else if self.nirvana_memory.is_some() {
+            OpenPanel::Memory
         } else {
             OpenPanel::None
         }
@@ -869,6 +895,7 @@ impl ClientShellState {
             return;
         };
         self.nirvana_preload = None;
+        self.nirvana_memory = None;
         self.nirvana_running = Some(RunningPanel {
             pane_id: agent.pane_id,
             message: None,
@@ -1004,6 +1031,7 @@ impl ClientShellState {
             return;
         }
         self.nirvana_running = None;
+        self.nirvana_memory = None;
         let Some(agent) = self.snapshot.as_deref().and_then(strip_agent) else {
             return;
         };

@@ -117,6 +117,10 @@ pub(super) struct ShellHitMap {
     pub(super) nirvana_running: Rect,
     /// Nirvana fork, feature 6: the open Running panel's options and close box.
     pub(super) nirvana_running_panel: super::nirvana_mods::RunningHits,
+    /// Nirvana fork, feature 8: the strip's Memory square; a click opens its panel.
+    pub(super) nirvana_memory: Rect,
+    /// Nirvana fork, feature 8: the open Memory panel's switch, edit row and close box.
+    pub(super) nirvana_memory_panel: super::nirvana_memory::MemoryHits,
     pub(super) new_workspace: Rect,
     pub(super) new_tab: Rect,
     pub(super) tab_scroll_left: Rect,
@@ -981,6 +985,8 @@ pub(crate) struct ClientShellState {
     pub(super) nirvana_preload: Option<super::nirvana_mods::PreloadPanel>,
     /// Nirvana fork, feature 6: the Running panel, while open.
     pub(super) nirvana_running: Option<super::nirvana_mods::RunningPanel>,
+    /// Nirvana fork, feature 8: the Memory panel, while open.
+    pub(super) nirvana_memory: Option<super::nirvana_memory::MemoryPanel>,
 }
 
 pub(super) fn product_announcement_state(
@@ -1151,6 +1157,7 @@ impl ClientShellState {
             dismissed_product_announcement: None,
             nirvana_preload: None,
             nirvana_running: None,
+            nirvana_memory: None,
         }
     }
 

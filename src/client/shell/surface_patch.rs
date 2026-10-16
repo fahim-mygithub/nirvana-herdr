@@ -62,6 +62,14 @@ fn fast_path_blocker(
         Some("client_surface_patch.fallback.mode")
     } else if state.overlay.is_some() {
         Some("client_surface_patch.fallback.overlay")
+    } else if state.nirvana_preload.is_some()
+        || state.nirvana_running.is_some()
+        || state.nirvana_memory.is_some()
+    {
+        // Nirvana fork: a mod panel is drawn over the panes only when the frame is composed; a pane's
+        // output written straight to the screen would paint over it (seen live on 2026-10-16, the Memory
+        // panel gone while Claude answered).
+        Some("client_surface_patch.fallback.nirvana_panel")
     } else if state.endpoint_error.is_some() {
         Some("client_surface_patch.fallback.endpoint_error")
     } else if state.config_diagnostic.is_some() {

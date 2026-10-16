@@ -524,3 +524,159 @@ fn one_panel_at_a_time_and_esc_closes() {
     key(&mut state, KeyCode::Esc);
     assert!(state.nirvana_running.is_none());
 }
+
+// Feature 8: the Memory square and the shared board (nirvana/plans/2026-10-16-08-memory-square-and-board.md).
+
+/// A folder that is a repository, with a GitHub remote or another one.
+fn repo(name: &str, remote: &str) -> std::path::PathBuf {
+    let dir = folder(name);
+    std::fs::create_dir_all(dir.join(".git")).expect(".git");
+    std::fs::write(
+        dir.join(".git").join("config"),
+        format!("[remote \"origin\"]\n\turl = {remote}\n"),
+    )
+    .expect("config");
+    dir
+}
+
+fn strip_row(state: &mut ClientShellState) -> String {
+    let (_, rows) = rows_of(state, 160, 40);
+    let y = state.layout(160, 40).nirvana_mods.y as usize;
+    rows[y].clone()
+}
+
+#[test]
+fn the_memory_square_shows_only_in_a_repository_with_a_github_remote() {
+    let plain = folder("memory-plain");
+    let gitlab = repo("memory-gitlab", "https://gitlab.com/x/y.git");
+    let github = repo("memory-github", "git@github.com:x/y.git");
+    for dir in [&plain, &gitlab] {
+        let mut state = state_with(Some("claude"), dir, view(serde_json::json!({})));
+        let strip = strip_row(&mut state);
+        assert!(!strip.contains("Memory"), "{strip:?}");
+        assert!(state.hits.nirvana_memory.width == 0);
+    }
+    let mut state = state_with(Some("claude"), &github, view(serde_json::json!({})));
+    let strip = strip_row(&mut state);
+    assert!(
+        strip.contains(" Memory board empty \u{b7} not shared \u{25BE}"),
+        "{strip:?}"
+    );
+    assert!(state.hits.nirvana_memory.width > 0);
+    for dir in [plain, gitlab, github] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+fn the_memory_panel_lists_the_board_shares_it_and_edits_it() {
+    let dir = repo("memory-panel", "https://github.com/x/y.git");
+    crate::nirvana_board::write(&dir, "Server", "port 5173", 0, "codex").expect("written");
+    let mut state = state_with(Some("claude"), &dir, view(serde_json::json!({})));
+    let strip = strip_row(&mut state);
+    assert!(
+        strip.contains(" Memory board r1 \u{b7} not shared"),
+        "{strip:?}"
+    );
+    // One panel at a time: Memory closes Preload.
+    state.toggle_preload_panel();
+    state.toggle_memory_panel();
+    assert!(state.nirvana_preload.is_none() && state.nirvana_memory.is_some());
+    state.toggle_memory_panel();
+    // A click on the square opens it.
+    let square = state.hits.nirvana_memory;
+    click(&mut state, square.x + 1, square.y);
+    assert!(
+        state.nirvana_memory.is_some(),
+        "a click on the square opens the panel"
+    );
+    let (_, rows) = rows_of(&mut state, 160, 40);
+    let text = rows.join("\n");
+    assert!(
+        text.contains("Memory \u{b7} nirvana-mods-memory-panel"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Board \u{b7} .nirvana/board.md \u{b7} revision 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("[ ] Share the board with every Claude here"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Server") && text.contains("port 5173") && text.contains("codex"),
+        "{text}"
+    );
+    // Space shares: the prompt hook is written to the folder's local settings, and the square says so.
+    let outcome = key(&mut state, KeyCode::Char(' '));
+    assert!(outcome.requests.is_empty(), "the key stays out of the pane");
+    let local = crate::nirvana_preload::read_local(&dir).expect("settings");
+    assert!(crate::nirvana_board::is_shared(&local), "{local}");
+    let (_, rows) = rows_of(&mut state, 160, 40);
+    let text = rows.join("\n");
+    assert!(text.contains("[x] Share the board"), "{text}");
+    // This Claude has not seen the board: the section is new to it.
+    assert!(text.contains("1 new for this Claude"), "{text}");
+    // e opens board.md in the editor tab.
+    let outcome = key(&mut state, KeyCode::Char('e'));
+    let invoked = invoked(&outcome);
+    assert_eq!(invoked.len(), 1, "{:?}", outcome.actions);
+    assert_eq!(
+        invoked[0].command_id,
+        format!(
+            "{}{}",
+            crate::nirvana::EDIT_FILE_COMMAND,
+            crate::nirvana_board::board_path(&dir).display()
+        )
+    );
+    assert!(state.nirvana_memory.is_none(), "the panel closes");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A pane update for the first pane, as the server sends one while an agent prints.
+fn pane_patch(state: &ClientShellState) -> crate::protocol::PaneSurfacePatch {
+    let current = state.pane_surface.clone().expect("pane surface");
+    let mut cell = current.frame.cells[0].clone();
+    cell.symbol = "y".into();
+    crate::protocol::PaneSurfacePatch {
+        boot_id: current.boot_id,
+        projection_revision: current.projection_revision,
+        base_surface_revision: current.surface_revision,
+        surface_revision: current.surface_revision + 1,
+        panes: current.panes.clone(),
+        rows: vec![crate::protocol::PaneSurfacePatchRow {
+            x: 0,
+            y: 0,
+            cells: vec![cell],
+        }],
+        cursor: current.frame.cursor.clone(),
+    }
+}
+
+#[test]
+fn an_open_panel_is_redrawn_when_its_agent_prints() {
+    use super::super::surface_patch::ClientPaneSurfacePatchOutcome;
+    let dir = repo("memory-patch", "https://github.com/x/y.git");
+    for panel in ["none", "preload", "running", "memory"] {
+        let mut state = state_with(Some("claude"), &dir, view(serde_json::json!({})));
+        let _ = rows_of(&mut state, 160, 40);
+        match panel {
+            "preload" => state.toggle_preload_panel(),
+            "running" => state.toggle_running_panel(),
+            "memory" => state.toggle_memory_panel(),
+            _ => {}
+        }
+        let _ = rows_of(&mut state, 160, 40);
+        let outcome = state.apply_pane_surface_patch(pane_patch(&state));
+        // Written straight to the screen only with no panel open; with one open the frame is composed
+        // again, panel on top.
+        let straight = matches!(outcome, ClientPaneSurfacePatchOutcome::Applied(Some(_)));
+        assert!(
+            matches!(outcome, ClientPaneSurfacePatchOutcome::Applied(_)),
+            "{panel}: the patch is taken"
+        );
+        assert_eq!(straight, panel == "none", "{panel}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

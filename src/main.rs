@@ -33,6 +33,7 @@ mod layout;
 mod logging;
 mod metadata_tokens;
 mod nirvana;
+mod nirvana_board;
 mod nirvana_preload;
 mod nirvana_running;
 mod nirvana_servers;
@@ -564,6 +565,10 @@ fn main() -> io::Result<()> {
     // Nirvana fork: the supervisor that starts the installed build again after a reload.
     if args.get(1).map(String::as_str) == Some("nirvana-shell") {
         return nirvana::supervise(&args[2..]);
+    }
+    // Nirvana fork, feature 8: the shared board, for agents and for Claude Code's prompt hook.
+    if args.get(1).map(String::as_str) == Some("board") {
+        return nirvana_board::cli(&args[2..]);
     }
 
     finish_cli(cli::maybe_run(&args))?;

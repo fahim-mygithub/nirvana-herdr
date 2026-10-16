@@ -3,6 +3,54 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.8.0 (2026-10-16): the Memory square and the shared board
+
+- **Changed:** each workspace has a shared board, `.nirvana/board.md` at the repository's root: a revision, one section
+  per topic, each with its last writer. Any agent with a shell reads and writes it through this binary, `herdr board
+  read` and `herdr board write <section> --expect <revision> --by <name> -- <text>`. A write naming a stale revision is
+  refused (exit 3) and nothing is written; writers take a lock file, and a lock older than 15 s is a dead writer's.
+  **Because:** the owner, 2026-10-16: "They seem to have a shared file among all the agents that when you update with
+  one agent the other agents pick up on. Kind of like a shared state file", and "Keep a board per workspace." The
+  pattern is durable-pi's App State (disler/durable-pi 37165c6): one document, a revision, a refused stale write.
+  **Measured:** `nirvana_board::tests::*` (nine); controls `board_*`, `github_*`. Live: `board write Server --expect 0
+  --by codex` gave revision 1; the same write again with `--expect 0` exited 3 with "board is at revision 1, not 0".
+  **If you remove this:** agents working side by side learn of each other's changes only when you tell them.
+- **Changed:** a running Claude is told what changed on the board on its next prompt. `herdr board notice`, run by a
+  `UserPromptSubmit` hook, prints the sections changed or removed since that session last saw the board, and nothing
+  when none did; a session's first prompt gets the whole board and how to write it. What each session saw is kept under
+  the Nirvana-Herdr home, never in the project.
+  **Because:** measured 2026-10-16 on Claude Code 2.1.301: an edit to CLAUDE.md or to a file it imports never reaches
+  a running session, and a `FileChanged` hook's text never reaches Claude; a `UserPromptSubmit` hook's output does.
+  **Measured:** live, Claude Haiku in a scratch repository: the first prompt's notice carried the board, and Claude
+  answered "Port 5173" from it with no tool call; an unchanged board added nothing to the next turn (no hook output in
+  the transcript); a section another writer added reached the next turn alone; Claude wrote a section itself with the
+  command from the notice (`--expect 2`, revision 3). A change notice measured 666 characters, most of it the how-to;
+  later notices now carry one line instead (`a_session_is_told_only_what_changed_since_its_last_turn`).
+  **If you remove this:** a running Claude acts on a board it read minutes ago.
+- **Changed:** the mod strip's third square, Memory: "board r3 · 1 new", "board r3 · not shared", "board empty". Its
+  panel lists the sections, marks those this Claude has not seen, and names each one's last writer. Space adds or
+  removes the hook in the folder's `.claude/settings.local.json` ("Share the board with every Claude here"); `e` opens
+  `board.md` in the terminal editor tab of 0.7.0. The square shows only for a repository with a GitHub remote, read from
+  its git config.
+  **Because:** the owner: "The next potential feature is a memory manager", "flag this feature only if it opens a
+  project with a github"; and "Looks good" to the board and the square first, lessons second.
+  **Measured:** `the_memory_square_shows_only_in_a_repository_with_a_github_remote`,
+  `the_memory_panel_lists_the_board_shares_it_and_edits_it`; controls `memory_*`, `share_*`, `square_ignores_seen`.
+  Live: the square read "board empty", then "board r3 · 1 new"; space wrote the hook, and the Claude already running
+  in the folder ran it on its next prompt with no restart.
+  **If you remove this:** the board is read by opening the file.
+- **Changed:** while a mod panel is open (Preload, Running or Memory), a pane's new output is drawn by composing the
+  frame again, never written straight to the screen.
+  **Because:** herdr writes a pane's output straight to the screen when nothing blocks that fast path, and the panels
+  of 0.5.0 and 0.6.0 did not block it: live on 2026-10-16 the open Memory panel was painted over while Claude answered.
+  Every panel since 0.5.0 had the defect; it showed only now because the panel stayed open while an agent printed.
+  **Measured:** `an_open_panel_is_redrawn_when_its_agent_prints` (with no panel open the patch still takes the fast
+  path); control `panel_painted_over`.
+  **If you remove this:** an agent that prints while a panel is open paints over the panel.
+- **Changed:** control `panels_both_open` sabotages the Running toggle's line that closes Preload, beside the new
+  line that closes Memory.
+  **Because:** the new line sat inside its find text, which then occurred 0 times.
+
 ## alpha 0.7.0 (2026-10-16): Preload grouped by provider; edit opens a terminal editor in a new tab
 
 - **Changed:** the Preload panel groups its rows by where each comes from: This project, You (~/.claude), one group per
