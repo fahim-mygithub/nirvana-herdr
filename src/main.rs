@@ -34,6 +34,7 @@ mod logging;
 mod metadata_tokens;
 mod nirvana;
 mod nirvana_preload;
+mod nirvana_running;
 mod nirvana_servers;
 mod nirvana_spaces;
 mod nirvana_usage;

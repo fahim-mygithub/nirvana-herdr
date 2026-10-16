@@ -299,3 +299,211 @@ fn keys_move_the_selection_and_esc_or_a_click_outside_closes() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- Feature 6: the Running square (nirvana/plans/2026-10-16-06-running-and-waiting.md L1, L2) ----
+
+use crate::nirvana_running::{set_activity_for_test, Activity, Tool};
+
+/// The AskUserQuestion prompt as Claude Code 2.1.301 drew it on 2026-10-16.
+const QUESTION: [&str; 10] = [
+    "────────────────────────────────────",
+    " \u{2610} Button colour",
+    "Which colour should the button be?",
+    "\u{276F} 1. Red (Recommended)",
+    "     Red button colour.",
+    "  2. Blue",
+    "     Blue button colour.",
+    "  3. Type something.",
+    "  4. Chat about this",
+    "Enter to select \u{b7} Esc to cancel",
+];
+
+fn prompt_surface(lines: &[&str]) -> PaneSurfaceFrame {
+    let width = 40;
+    let padded: Vec<String> = lines.iter().map(|line| format!("{line:<width$}")).collect();
+    let buffer = Buffer::with_lines(padded.iter().map(String::as_str));
+    let mut surface = surface();
+    surface.frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[]);
+    let rect = SurfaceRect {
+        x: 0,
+        y: 0,
+        width: width as u16,
+        height: lines.len() as u16,
+    };
+    surface.panes[0].rect = rect;
+    surface.panes[0].inner_rect = rect;
+    surface
+}
+
+fn running_state(status: AgentStatus, activity: Option<Activity>) -> ClientShellState {
+    let dir = std::env::temp_dir();
+    let mut state = state_with(Some("claude"), &dir, view(serde_json::json!({})));
+    set_activity_for_test(activity);
+    let mut projected = state.snapshot.as_deref().cloned().expect("snapshot");
+    projected.agents[0].agent_status = status;
+    projected.agents[0].terminal_title_stripped = Some("\u{2733} Button colour question".into());
+    projected.agents[0].tokens = vec![(
+        crate::nirvana_spaces::TRANSCRIPT_TOKEN.into(),
+        r"C:\t\session.jsonl".into(),
+    )];
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(prompt_surface(&QUESTION));
+    state
+}
+
+fn working() -> Activity {
+    Activity {
+        asked: Some("Fix the flaky login test".into()),
+        asked_at: Some(1_000),
+        said: Some("I will run the tests to see which one fails.".into()),
+        now: Some(Tool {
+            name: "Bash".into(),
+            detail: "Run the login tests".into(),
+            since: Some(1_030),
+        }),
+    }
+}
+
+fn open_running(state: &mut ClientShellState) {
+    let _ = rows_of(state, 120, 40);
+    let square = state.hits.nirvana_running;
+    assert!(square.width > 0, "the strip draws a Running square");
+    click(state, square.x + 1, square.y);
+    assert!(
+        state.nirvana_running.is_some(),
+        "a click on the square opens the panel"
+    );
+}
+
+#[test]
+fn the_strip_puts_running_before_preload_and_says_when_claude_waits() {
+    let mut state = running_state(AgentStatus::Working, Some(working()));
+    let (_, rows) = rows_of(&mut state, 120, 40);
+    let y = state.layout(120, 40).nirvana_mods.y as usize;
+    let strip = rows[y].clone();
+    assert!(
+        strip.contains(" Running working \u{b7} Bash \u{25BE}"),
+        "{strip:?}"
+    );
+    assert!(strip.find("Running") < strip.find("Preload"), "{strip:?}");
+    let mut state = running_state(AgentStatus::Blocked, Some(working()));
+    let (frame, rows) = rows_of(&mut state, 120, 40);
+    assert!(
+        rows[y].contains(" Running waits on you \u{25BE}"),
+        "{:?}",
+        rows[y]
+    );
+    let square = state.hits.nirvana_running;
+    let cell = &frame.cells[y * frame.width as usize + square.x as usize + 10];
+    assert_eq!(
+        cell.fg,
+        crate::protocol::color_to_u32(state.config.palette.yellow),
+        "waiting reads in yellow"
+    );
+}
+
+#[test]
+fn the_panel_shows_running_on_top_and_nothing_waiting_under_it() {
+    let mut state = running_state(AgentStatus::Working, Some(working()));
+    open_running(&mut state);
+    let (_, rows) = rows_of(&mut state, 120, 40);
+    let text = rows.join("\n");
+    let line = |needle: &str| {
+        rows.iter()
+            .position(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("{needle}: {text}"))
+    };
+    assert!(text.contains("Task   Button colour question"), "{text}");
+    assert!(text.contains("Asked  Fix the flaky login test"), "{text}");
+    assert!(text.contains("Now    Bash  Run the login tests"), "{text}");
+    assert!(
+        text.contains("Said   I will run the tests to see which one fails."),
+        "{text}"
+    );
+    assert!(line("Running \u{b7} ") < line("Task"));
+    assert!(line("Said") < line("Waiting on you"));
+    assert!(line("Waiting on you") < line("Nothing needs you"));
+}
+
+#[test]
+fn a_waiting_prompt_is_read_from_the_pane_and_a_digit_answers_it() {
+    let mut state = running_state(AgentStatus::Blocked, Some(working()));
+    open_running(&mut state);
+    let (_, rows) = rows_of(&mut state, 120, 40);
+    let text = rows.join("\n");
+    assert!(
+        text.contains("Which colour should the button be?"),
+        "{text}"
+    );
+    assert!(text.contains(" 1  Red (Recommended)"), "{text}");
+    assert!(text.contains(" 4  Chat about this"), "{text}");
+    assert!(text.contains("1-4 answer in the pane"), "{text}");
+    let outcome = key(&mut state, KeyCode::Char('2'));
+    // Typed into the agent's pane as a key, the way the window types; no API method, since a window
+    // may not send `pane.send_keys` or `agent.send_keys`.
+    assert!(outcome.actions.is_empty(), "{:?}", outcome.actions);
+    assert_eq!(outcome.requests.len(), 1, "{:?}", outcome.requests);
+    let ClientMessage::ClientShellPaneInput { pane_id, events } = &outcome.requests[0] else {
+        panic!("a pane input: {:?}", outcome.requests);
+    };
+    assert_eq!(pane_id, "pane_1");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert!(
+        format!("{:?}", events[0]).contains("Char('2')"),
+        "{events:?}"
+    );
+    // A digit that is not an option sends nothing.
+    let outcome = key(&mut state, KeyCode::Char('7'));
+    assert!(outcome.requests.is_empty(), "{:?}", outcome.requests);
+}
+
+#[test]
+fn a_click_on_an_option_answers_it() {
+    let mut state = running_state(AgentStatus::Blocked, None);
+    open_running(&mut state);
+    let _ = rows_of(&mut state, 120, 40);
+    let (rect, digit) = state.hits.nirvana_running_panel.options[0];
+    assert_eq!(digit, 1);
+    let outcome = click(&mut state, rect.x + 1, rect.y);
+    let answered = outcome.requests.iter().any(|request| {
+        matches!(request, ClientMessage::ClientShellPaneInput { pane_id, events }
+            if pane_id == "pane_1" && format!("{events:?}").contains("Char('1')"))
+    });
+    assert!(answered, "{:?}", outcome.requests);
+}
+
+#[test]
+fn a_screen_with_no_waiting_agent_answers_nothing() {
+    // The prompt text is on screen but herdr says Claude is working: nothing is offered.
+    let mut state = running_state(AgentStatus::Working, None);
+    open_running(&mut state);
+    let (_, rows) = rows_of(&mut state, 120, 40);
+    assert!(rows.iter().any(|row| row.contains("Nothing needs you")));
+    let outcome = key(&mut state, KeyCode::Char('1'));
+    assert!(outcome.requests.is_empty(), "{:?}", outcome.requests);
+}
+
+#[test]
+fn one_panel_at_a_time_and_esc_closes() {
+    let mut state = running_state(AgentStatus::Idle, None);
+    open_running(&mut state);
+    let _ = rows_of(&mut state, 120, 40);
+    let preload = state.hits.nirvana_preload;
+    // A click outside the Running panel closes it.
+    click(&mut state, preload.x + 1, preload.y);
+    assert!(state.nirvana_running.is_none());
+    state.toggle_running_panel();
+    state.toggle_preload_panel();
+    assert!(
+        state.nirvana_running.is_none(),
+        "opening Preload closes Running"
+    );
+    assert!(state.nirvana_preload.is_some());
+    state.toggle_running_panel();
+    assert!(
+        state.nirvana_preload.is_none(),
+        "opening Running closes Preload"
+    );
+    key(&mut state, KeyCode::Esc);
+    assert!(state.nirvana_running.is_none());
+}

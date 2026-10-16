@@ -3,6 +3,49 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.6.0 (2026-10-16): the Running square, Running on top and Waiting on you under it
+
+- **Changed:** the mod strip's first square is "Running": "working · Bash", "waits on you" in yellow, "idle". Its
+  panel shows Running on top (the task, the last prompt, the tool in flight and for how long, Claude's last words) and
+  Waiting on you under it: the prompt Claude is waiting on, read from its pane, each numbered option, "(Recommended)" in
+  green. A digit or a click answers it in the pane.
+  **Because:** the owner, 2026-10-16: "Marge the running and waiting on you into one panel the top being running and
+  what is actively being run with a summary. Then underneath that running is the waiting on you." Asked how Waiting on
+  you should behave first, the owner picked "Show and answer"; building the recommended option ahead comes later.
+  **Measured:** `nirvana_mods::*` (six tests for this square), `nirvana_running::tests::*` (six),
+  `claudes_state_mark_is_not_part_of_the_task`, `a_claudes_transcript_rides_in_the_agent_tokens`; nineteen controls,
+  `running_*`, `prompt_*`, `strip_wait_not_yellow`, `strip_blocked_reads_idle`, `answer_*`, `panels_both_open`,
+  `title_mark_kept`, `transcript_token_dropped`. The live run is in the plan's Record.
+  **If you remove this:** what a Claude is doing and what it waits on is read by switching to its pane.
+- **Changed:** Waiting on you reads the prompt from the pane's screen, never from the transcript, and only while herdr
+  says the agent is blocked.
+  **Because:** measured 2026-10-16: an AskUserQuestion call reaches the transcript only after it is answered, and a
+  permission dialog's options change with the case ("Yes, and always allow access to <folder>", "switch to auto
+  mode"), so only the screen says what each digit means. One digit picks the option, no Enter.
+  **Measured:** `a_question_on_screen_reads_as_its_heading_and_options`,
+  `a_permission_dialog_reads_with_its_command`, `a_screen_with_no_waiting_agent_answers_nothing`; controls
+  `prompt_heading_past_rule`, `running_prompt_while_working`, `answer_with_enter`.
+  **If you remove this:** the panel offers answers to a question it cannot see, or sends a digit into Claude's prompt
+  box while it works.
+- **Changed:** the answer is typed into the agent's pane through the window's own key path (a pane input event for
+  that pane), not sent as an API method.
+  **Because:** the first live run of 2026-10-16 sent `pane.send_keys` and herdr answered "Action unavailable": a window
+  may send only the methods herdr lists for windows, and neither `pane.send_keys` nor `agent.send_keys` is one. The
+  tests had passed, because a test window knows no such list; the test now checks the request a real window sends.
+  **Measured:** second live run: the panel's "1" reached Claude, whose transcript recorded "Red (Recommended)", and herdr
+  read the agent `idle`; `a_waiting_prompt_is_read_from_the_pane_and_a_digit_answers_it`; control `answer_wrong_digit`.
+  **If you remove this:** the panel says it answered and Claude keeps waiting.
+- **Changed:** the server sends each Claude's transcript path as the agent token `nirvana_transcript`; the window reads
+  the transcript itself every 2 s while the strip shows that agent.
+  **Because:** herdr rebuilds a window's snapshot when an agent's state changes, not while it works, so a tool that
+  starts mid-turn would wait for the next state change. The path stays the same for the whole conversation.
+  **Measured:** `a_claudes_transcript_rides_in_the_agent_tokens`, `a_tool_call_without_a_result_is_what_runs_now`.
+  **If you remove this:** Running shows the turn as it was when the agent last changed state.
+- **Changed:** a task title no longer carries Claude's state mark ("✳ ", a spinner glyph).
+  **Because:** the spaces list read "✳ Button colour que…" in the live run of 2026-10-16.
+  **Measured:** `claudes_state_mark_is_not_part_of_the_task`; control `title_mark_kept`.
+  **If you remove this:** every Claude task row starts with a mark that is not the task.
+
 ## alpha 0.5.0 (2026-10-16): a mod strip under the tab bar, with one mod, Preload
 
 - **Changed:** a tab running Claude Code has a one-row strip under the tab bar, the panes a row shorter. It holds one

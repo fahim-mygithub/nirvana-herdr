@@ -646,6 +646,13 @@ impl ClientShellState {
             }
             return None;
         }
+        // Nirvana fork, feature 6: the Running panel takes the keys while it is open.
+        if self.nirvana_running.is_some() {
+            if key.kind == KeyEventKind::Press {
+                self.route_running_key(key, outcome);
+            }
+            return None;
+        }
         if matches!(key.code, KeyCode::Modifier(_)) {
             return None;
         }

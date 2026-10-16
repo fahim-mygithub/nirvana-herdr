@@ -20,7 +20,9 @@ use std::path::PathBuf;
 use super::nirvana_spaces::{agent_kind, fit};
 use super::render::put_text;
 use super::*;
+use crate::api::schema::AgentStatus;
 use crate::nirvana_preload::{self as preload, Group, Item, View};
+use crate::nirvana_running::{Activity, Prompt};
 use crate::nirvana_spaces::Kind;
 use crate::protocol::ClientShellAgent;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -42,7 +44,13 @@ const DETAIL: usize = 22;
 pub(super) struct StripAgent {
     pub(super) workspace_id: String,
     pub(super) tab_id: String,
+    pub(super) pane_id: String,
     pub(super) cwd: PathBuf,
+    /// Feature 6: the transcript the server named, for Running.
+    pub(super) transcript: Option<PathBuf>,
+    pub(super) status: AgentStatus,
+    /// Claude's own terminal title, a summary of the conversation.
+    pub(super) title: Option<String>,
 }
 
 /// Claude Code, on an Anthropic model or a local one, is what Preload reads.
@@ -68,10 +76,19 @@ pub(super) fn strip_agent(snapshot: &ClientShellSnapshot) -> Option<StripAgent> 
         .clone()
         .or_else(|| pane.cwd.clone())
         .filter(|cwd| !cwd.is_empty())?;
+    let transcript = agent
+        .tokens
+        .iter()
+        .find(|(name, _)| name == crate::nirvana_spaces::TRANSCRIPT_TOKEN)
+        .map(|(_, path)| PathBuf::from(path));
     Some(StripAgent {
         workspace_id: agent.workspace_id.clone(),
         tab_id: tab_id.to_owned(),
+        pane_id: agent.pane_id.clone(),
         cwd: PathBuf::from(cwd),
+        transcript,
+        status: agent.agent_status,
+        title: agent.terminal_title_stripped.clone(),
     })
 }
 
@@ -99,16 +116,88 @@ pub(super) fn preload_value(view: &View) -> String {
     value
 }
 
-/// Draws the strip; returns the Preload square's rect, the click target.
-pub(super) fn render_strip(
+/// The strip's value for the Running square, and whether it is the user's turn.
+pub(super) fn running_value(agent: &StripAgent, activity: Option<&Activity>) -> (String, bool) {
+    match agent.status {
+        AgentStatus::Blocked => ("waits on you".into(), true),
+        AgentStatus::Working => match activity.and_then(|activity| activity.now.as_ref()) {
+            Some(tool) if !tool.name.is_empty() => (format!("working \u{b7} {}", tool.name), false),
+            _ => ("working".into(), false),
+        },
+        AgentStatus::Idle | AgentStatus::Done => ("idle".into(), false),
+        AgentStatus::Unknown => ("starting".into(), false),
+    }
+}
+
+/// Where the strip drew its squares.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct StripHits {
+    pub(super) running: Rect,
+    pub(super) preload: Rect,
+}
+
+/// One square: a bold label and a value on a raised background, as old Nirvana draws its squares.
+fn draw_square(
     buffer: &mut Buffer,
-    area: Rect,
-    view: &View,
+    x: u16,
+    y: u16,
+    right: u16,
+    label: &str,
+    value: &str,
+    value_colour: Color,
     open: bool,
     palette: &Palette,
 ) -> Rect {
-    if area.height == 0 || area.width < 4 {
+    let label = format!(" {label} ");
+    let value = format!("{value} {} ", if open { "\u{25B4}" } else { "\u{25BE}" });
+    let square = Rect::new(
+        x,
+        y,
+        (width(&label) + width(&value)).min(right.saturating_sub(x)),
+        1,
+    );
+    if square.width == 0 {
         return Rect::default();
+    }
+    let raised = Style::default().bg(if open {
+        palette.surface1
+    } else {
+        palette.surface0
+    });
+    buffer.set_style(square, raised);
+    put_text(
+        buffer,
+        x,
+        y,
+        square.width,
+        &label,
+        raised.fg(palette.text).add_modifier(Modifier::BOLD),
+    );
+    let after = x + width(&label);
+    put_text(
+        buffer,
+        after,
+        y,
+        square.right().saturating_sub(after),
+        &value,
+        raised.fg(value_colour),
+    );
+    square
+}
+
+/// Draws the strip: the agent, then the Running square, then the Preload square.
+pub(super) fn render_strip(
+    buffer: &mut Buffer,
+    area: Rect,
+    agent: &StripAgent,
+    activity: Option<&Activity>,
+    view: &View,
+    open: OpenPanel,
+    palette: &Palette,
+) -> StripHits {
+    let mut hits = StripHits::default();
+    if area.height == 0 || area.width < 4 {
+        return hits;
     }
     let base = Style::default().fg(palette.subtext0).bg(palette.panel_bg);
     buffer.set_style(area, base);
@@ -128,50 +217,39 @@ pub(super) fn render_strip(
     x += 2;
     put_text(buffer, x, area.y, right.saturating_sub(x), "Claude", base);
     x += 6 + 2;
-    // The square: a bold label and a muted value on a raised background, as old Nirvana draws its squares.
-    let label = " Preload ";
-    let value = format!(
-        "{} {} ",
-        preload_value(view),
-        if open { "\u{25B4}" } else { "\u{25BE}" }
-    );
-    let square = Rect::new(
-        x,
-        area.y,
-        (width(label) + width(&value)).min(right.saturating_sub(x)),
-        1,
-    );
-    if square.width == 0 {
-        return Rect::default();
-    }
-    let raised = Style::default().bg(if open {
-        palette.surface1
-    } else {
-        palette.surface0
-    });
-    buffer.set_style(square, raised);
-    put_text(
+    let (running, yours) = running_value(agent, activity);
+    hits.running = draw_square(
         buffer,
         x,
         area.y,
-        square.width,
-        label,
-        raised.fg(palette.text).add_modifier(Modifier::BOLD),
-    );
-    let after = x + width(label);
-    put_text(
-        buffer,
-        after,
-        area.y,
-        square.right().saturating_sub(after),
-        &value,
-        raised.fg(if preload::off_count(&view.local) > 0 {
+        right,
+        "Running",
+        &running,
+        if yours {
             palette.yellow
         } else {
             palette.subtext0
-        }),
+        },
+        open == OpenPanel::Running,
+        palette,
     );
-    square
+    x = hits.running.right() + 1;
+    hits.preload = draw_square(
+        buffer,
+        x,
+        area.y,
+        right,
+        "Preload",
+        &preload_value(view),
+        if preload::off_count(&view.local) > 0 {
+            palette.yellow
+        } else {
+            palette.subtext0
+        },
+        open == OpenPanel::Preload,
+        palette,
+    );
+    hits
 }
 
 /// The open panel.
@@ -239,6 +317,331 @@ fn folder_name(cwd: &std::path::Path) -> String {
     )
 }
 
+/// A panel's frame over `rect`: cleared, a rounded border, the title on its top edge and a close box.
+/// Returns the close box.
+fn draw_frame(buffer: &mut Buffer, rect: Rect, title: &str, palette: &Palette) -> Rect {
+    let base = Style::default().fg(palette.text).bg(palette.panel_bg);
+    buffer.set_style(rect, base);
+    for y in rect.y..rect.bottom() {
+        for x in rect.x..rect.right() {
+            buffer[(x, y)].set_symbol(" ");
+        }
+    }
+    let border = base.fg(palette.overlay0);
+    let (left, right, top, bottom) = (rect.x, rect.right() - 1, rect.y, rect.bottom() - 1);
+    for x in left..=right {
+        buffer[(x, top)].set_symbol("\u{2500}").set_style(border);
+        buffer[(x, bottom)].set_symbol("\u{2500}").set_style(border);
+    }
+    for y in top..=bottom {
+        buffer[(left, y)].set_symbol("\u{2502}").set_style(border);
+        buffer[(right, y)].set_symbol("\u{2502}").set_style(border);
+    }
+    buffer[(left, top)].set_symbol("\u{256D}");
+    buffer[(right, top)].set_symbol("\u{256E}");
+    buffer[(left, bottom)].set_symbol("\u{2570}");
+    buffer[(right, bottom)].set_symbol("\u{256F}");
+    let inner_width = rect.width.saturating_sub(4);
+    put_text(
+        buffer,
+        left + 2,
+        top,
+        inner_width.saturating_sub(4),
+        &fit(title, usize::from(inner_width.saturating_sub(4))),
+        base.add_modifier(Modifier::BOLD),
+    );
+    put_text(
+        buffer,
+        right - 4,
+        top,
+        3,
+        " \u{2715} ",
+        base.fg(palette.subtext0),
+    );
+    Rect::new(right - 4, top, 3, 1)
+}
+
+/// Which panel the strip has open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OpenPanel {
+    None,
+    Running,
+    Preload,
+}
+
+/// The open Running panel, for one agent's pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunningPanel {
+    pub(super) pane_id: String,
+    pub(super) message: Option<String>,
+}
+
+/// Where the Running panel drew its parts, for the mouse.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct RunningHits {
+    pub(super) area: Rect,
+    pub(super) close: Rect,
+    /// Each option of the prompt, by the digit that answers it.
+    pub(super) options: Vec<(Rect, u8)>,
+}
+
+/// What the Running panel shows for one agent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct RunningView {
+    pub(super) folder: String,
+    pub(super) status: Option<AgentStatus>,
+    pub(super) title: Option<String>,
+    pub(super) activity: Option<Activity>,
+    /// The prompt on the pane's screen, while the agent waits.
+    pub(super) prompt: Option<Prompt>,
+    /// Unix seconds now.
+    pub(super) now: u64,
+}
+
+/// The rows of one pane as text, from the pane surface the server sent.
+pub(super) fn pane_rows(surface: &PaneSurfaceFrame, pane_id: &str) -> Vec<String> {
+    let Some(pane) = surface.panes.iter().find(|pane| pane.pane_id == pane_id) else {
+        return Vec::new();
+    };
+    let rect = pane.inner_rect;
+    let width = surface.frame.width as usize;
+    (rect.y..rect.y.saturating_add(rect.height))
+        .map(|y| {
+            (rect.x..rect.x.saturating_add(rect.width))
+                .filter_map(|x| surface.frame.cells.get(y as usize * width + x as usize))
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect()
+}
+
+/// Wraps `text` to lines of at most `width` cells, at most `max` lines, the last cut with `…`.
+fn wrap(text: &str, width: usize, max: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let candidate = if line.is_empty() {
+            word.to_owned()
+        } else {
+            format!("{line} {word}")
+        };
+        if unicode_width::UnicodeWidthStr::width(candidate.as_str()) <= width || line.is_empty() {
+            line = candidate;
+        } else {
+            lines.push(std::mem::take(&mut line));
+            line = word.to_owned();
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    if lines.len() > max {
+        lines.truncate(max);
+        if let Some(last) = lines.last_mut() {
+            *last = fit(&format!("{last} \u{2026}"), width);
+        }
+    }
+    lines.into_iter().map(|line| fit(&line, width)).collect()
+}
+
+/// Draws the Running panel: Running on top, Waiting on you under it.
+pub(super) fn render_running_panel(
+    buffer: &mut Buffer,
+    area: Rect,
+    panel: &RunningPanel,
+    view: &RunningView,
+    palette: &Palette,
+) -> RunningHits {
+    let mut hits = RunningHits::default();
+    let panel_width = area.width.saturating_sub(2).min(PANEL_WIDTH);
+    if panel_width < 30 || area.height < 8 {
+        return hits;
+    }
+    let inner = usize::from(panel_width.saturating_sub(4));
+    let label = 7;
+    let text_width = inner.saturating_sub(label);
+    let base = Style::default().fg(palette.text).bg(palette.panel_bg);
+    let muted = base.fg(palette.overlay1);
+    let heading = base.fg(palette.accent).add_modifier(Modifier::BOLD);
+
+    // Lay out the rows first, so the panel is as tall as its content.
+    enum Row {
+        Heading(&'static str, String, Style),
+        Field(&'static str, String),
+        Text(String, Style),
+        Option_(u8, String),
+        Blank,
+    }
+    let mut rows = Vec::new();
+    let activity = view.activity.clone().unwrap_or_default();
+    let (state, state_style) = match view.status {
+        Some(AgentStatus::Working) => (
+            match activity.asked_at {
+                Some(at) => format!(
+                    "working {}",
+                    crate::nirvana_running::elapsed(view.now.saturating_sub(at))
+                ),
+                None => "working".into(),
+            },
+            base.fg(palette.green),
+        ),
+        Some(AgentStatus::Blocked) => ("waiting on you".into(), base.fg(palette.yellow)),
+        Some(AgentStatus::Idle | AgentStatus::Done) => ("idle".into(), muted),
+        _ => ("starting".into(), muted),
+    };
+    rows.push(Row::Heading("Running", state, state_style));
+    rows.push(Row::Field(
+        "Task",
+        crate::nirvana_spaces::task_title(view.title.as_deref()),
+    ));
+    if let Some(asked) = &activity.asked {
+        rows.push(Row::Field("Asked", asked.clone()));
+    }
+    let running = matches!(
+        view.status,
+        Some(AgentStatus::Working | AgentStatus::Blocked)
+    );
+    match activity.now.as_ref().filter(|_| running) {
+        Some(tool) => {
+            let since = tool
+                .since
+                .map(|at| {
+                    format!(
+                        "  {}",
+                        crate::nirvana_running::elapsed(view.now.saturating_sub(at))
+                    )
+                })
+                .unwrap_or_default();
+            rows.push(Row::Field(
+                "Now",
+                format!("{}  {}{since}", tool.name, tool.detail),
+            ));
+        }
+        None if running => rows.push(Row::Field("Now", "thinking".into())),
+        None => rows.push(Row::Field("Now", "nothing running".into())),
+    }
+    if let Some(said) = &activity.said {
+        for (index, line) in wrap(said, text_width, 3).into_iter().enumerate() {
+            rows.push(Row::Field(if index == 0 { "Said" } else { "" }, line));
+        }
+    }
+    rows.push(Row::Blank);
+    let waiting = view.status == Some(AgentStatus::Blocked);
+    rows.push(Row::Heading("Waiting on you", String::new(), base));
+    match (&view.prompt, waiting) {
+        (Some(prompt), true) => {
+            for line in &prompt.lines {
+                rows.push(Row::Text(fit(line, inner), base));
+            }
+            for (digit, option) in &prompt.options {
+                rows.push(Row::Option_(*digit, option.clone()));
+            }
+        }
+        (None, true) => rows.push(Row::Text(
+            "Claude is waiting in its pane; its prompt has no numbered options".into(),
+            muted,
+        )),
+        _ => rows.push(Row::Text("Nothing needs you".into(), muted)),
+    }
+    rows.push(Row::Blank);
+    let options = view
+        .prompt
+        .as_ref()
+        .filter(|_| waiting)
+        .map_or(0, |prompt| prompt.options.len());
+    let keys = if options > 0 {
+        format!("1-{options} answer in the pane \u{b7} esc close")
+    } else {
+        "esc close".into()
+    };
+    rows.push(Row::Text(
+        panel.message.clone().unwrap_or(keys),
+        if panel.message.is_some() {
+            base.fg(palette.yellow)
+        } else {
+            muted
+        },
+    ));
+
+    let height = (rows.len() as u16 + 2).min(area.height.saturating_sub(1));
+    let rect = Rect::new(area.x + 1, area.y + 1, panel_width, height);
+    hits.area = rect;
+    hits.close = draw_frame(
+        buffer,
+        rect,
+        &format!(" Running \u{b7} {} ", view.folder),
+        palette,
+    );
+    let x = rect.x + 2;
+    let body = rect.height.saturating_sub(2);
+    for (index, row) in rows.iter().take(usize::from(body)).enumerate() {
+        let y = rect.y + 1 + index as u16;
+        let width = inner as u16;
+        match row {
+            Row::Heading(title, right, style) => {
+                put_text(buffer, x, y, width, title, heading);
+                let right_width = width_of(right);
+                if right_width > 0 && right_width < width {
+                    put_text(
+                        buffer,
+                        x + width - right_width,
+                        y,
+                        right_width,
+                        right,
+                        *style,
+                    );
+                }
+            }
+            Row::Field(name, value) => {
+                put_text(buffer, x, y, label as u16, name, muted);
+                put_text(
+                    buffer,
+                    x + label as u16,
+                    y,
+                    width - label as u16,
+                    &fit(value, text_width),
+                    base,
+                );
+            }
+            Row::Text(text, style) => {
+                put_text(buffer, x, y, width, &fit(text, inner), *style);
+            }
+            Row::Option_(digit, option) => {
+                let rect = Rect::new(x, y, width, 1);
+                let key = format!(" {digit} ");
+                put_text(
+                    buffer,
+                    x,
+                    y,
+                    3,
+                    &key,
+                    base.bg(palette.surface0).add_modifier(Modifier::BOLD),
+                );
+                let recommended = option.contains("(Recommended)");
+                put_text(
+                    buffer,
+                    x + 4,
+                    y,
+                    width.saturating_sub(4),
+                    &fit(option, inner.saturating_sub(4)),
+                    if recommended {
+                        base.fg(palette.green)
+                    } else {
+                        base
+                    },
+                );
+                hits.options.push((rect, *digit));
+            }
+            Row::Blank => {}
+        }
+    }
+    hits
+}
+
+fn width_of(text: &str) -> u16 {
+    width(text)
+}
+
 /// Draws the panel over `area` (the strip's row down to the panes' bottom).
 pub(super) fn render_panel(
     buffer: &mut Buffer,
@@ -256,47 +659,15 @@ pub(super) fn render_panel(
     hits.area = rect;
     let base = Style::default().fg(palette.text).bg(palette.panel_bg);
     let muted = base.fg(palette.overlay1);
-    buffer.set_style(rect, base);
-    for y in rect.y..rect.bottom() {
-        for x in rect.x..rect.right() {
-            buffer[(x, y)].set_symbol(" ");
-        }
-    }
-    // The frame.
-    let border = base.fg(palette.overlay0);
-    let (left, right, top, bottom) = (rect.x, rect.right() - 1, rect.y, rect.bottom() - 1);
-    for x in left..=right {
-        buffer[(x, top)].set_symbol("\u{2500}").set_style(border);
-        buffer[(x, bottom)].set_symbol("\u{2500}").set_style(border);
-    }
-    for y in top..=bottom {
-        buffer[(left, y)].set_symbol("\u{2502}").set_style(border);
-        buffer[(right, y)].set_symbol("\u{2502}").set_style(border);
-    }
-    buffer[(left, top)].set_symbol("\u{256D}");
-    buffer[(right, top)].set_symbol("\u{256E}");
-    buffer[(left, bottom)].set_symbol("\u{2570}");
-    buffer[(right, bottom)].set_symbol("\u{256F}");
+    hits.close = draw_frame(
+        buffer,
+        rect,
+        &format!(" Preload \u{b7} {} ", folder_name(&panel.cwd)),
+        palette,
+    );
+    let (left, top, bottom) = (rect.x, rect.y, rect.bottom() - 1);
     let inner_x = left + 2;
     let inner_width = rect.width.saturating_sub(4);
-    let title = format!(" Preload \u{b7} {} ", folder_name(&panel.cwd));
-    put_text(
-        buffer,
-        left + 2,
-        top,
-        inner_width.saturating_sub(4),
-        &fit(&title, usize::from(inner_width.saturating_sub(4))),
-        base.add_modifier(Modifier::BOLD),
-    );
-    hits.close = Rect::new(right - 4, top, 3, 1);
-    put_text(
-        buffer,
-        right - 4,
-        top,
-        3,
-        " \u{2715} ",
-        base.fg(palette.subtext0),
-    );
 
     // The summary and where the switches go.
     let summary = match &view.report {
@@ -477,11 +848,161 @@ impl ClientShellState {
         self.snapshot.as_deref().and_then(strip_agent).is_some()
     }
 
+    /// Which panel the strip has open.
+    pub(super) fn open_panel(&self) -> OpenPanel {
+        if self.nirvana_running.is_some() {
+            OpenPanel::Running
+        } else if self.nirvana_preload.is_some() {
+            OpenPanel::Preload
+        } else {
+            OpenPanel::None
+        }
+    }
+
+    /// Opens the Running panel for the strip's agent, or closes it. One panel is open at a time.
+    pub(super) fn toggle_running_panel(&mut self) {
+        if self.nirvana_running.take().is_some() {
+            return;
+        }
+        let Some(agent) = self.snapshot.as_deref().and_then(strip_agent) else {
+            return;
+        };
+        self.nirvana_preload = None;
+        self.nirvana_running = Some(RunningPanel {
+            pane_id: agent.pane_id,
+            message: None,
+        });
+    }
+
+    /// What the Running panel shows: the agent in the snapshot, its transcript, and the prompt on its
+    /// pane's screen.
+    pub(super) fn running_view(&self, pane_id: &str) -> RunningView {
+        let mut view = RunningView {
+            now: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_secs()),
+            ..RunningView::default()
+        };
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            return view;
+        };
+        if let Some(agent) = snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.pane_id == pane_id)
+        {
+            view.status = Some(agent.agent_status);
+            view.title = agent.terminal_title_stripped.clone();
+            view.activity = agent
+                .tokens
+                .iter()
+                .find(|(name, _)| name == crate::nirvana_spaces::TRANSCRIPT_TOKEN)
+                .and_then(|(_, path)| crate::nirvana_running::cached(std::path::Path::new(path)));
+        }
+        if let Some(pane) = snapshot.panes.iter().find(|pane| pane.pane_id == pane_id) {
+            view.folder = pane
+                .foreground_cwd
+                .as_deref()
+                .or(pane.cwd.as_deref())
+                .map(|cwd| folder_name(std::path::Path::new(cwd)))
+                .unwrap_or_default();
+        }
+        if view.status == Some(AgentStatus::Blocked) {
+            view.prompt = self
+                .pane_surface
+                .as_ref()
+                .and_then(|surface| crate::nirvana_running::prompt(&pane_rows(surface, pane_id)));
+        }
+        view
+    }
+
+    /// Answers the waiting prompt with one digit, sent to the agent's pane as a key press: Claude Code
+    /// takes a digit as the pick, with no Enter (measured 2026-10-16).
+    fn running_answer(&mut self, digit: u8, outcome: &mut ClientShellInput) {
+        let Some(pane_id) = self
+            .nirvana_running
+            .as_ref()
+            .map(|panel| panel.pane_id.clone())
+        else {
+            return;
+        };
+        // `running_view` reads a prompt only while herdr says the agent is blocked.
+        let answer = self.running_view(&pane_id).prompt.and_then(|prompt| {
+            prompt
+                .options
+                .into_iter()
+                .find(|(option, _)| *option == digit)
+        });
+        let Some((_, label)) = answer else {
+            if let Some(panel) = self.nirvana_running.as_mut() {
+                panel.message = Some(format!("{digit} is not an option of the waiting prompt"));
+            }
+            return;
+        };
+        // Typed into the agent's pane the way the window types any key into a pane. The API's
+        // `pane.send_keys` and `agent.send_keys` are not methods a window may send; the live run of
+        // 2026-10-16 got "Action unavailable" for the first.
+        let key = crate::input::TerminalKey::new(
+            KeyCode::Char(char::from(b'0' + digit)),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        if let Some(event) = crate::protocol::ClientPaneInputEvent::from_terminal_key(key) {
+            super::push_target_event(ClientInputTarget::Pane(pane_id), event, outcome);
+        }
+        if let Some(panel) = self.nirvana_running.as_mut() {
+            panel.message = Some(format!("answered {digit}: {label}"));
+        }
+    }
+
+    /// The Running panel's keys. Every key goes to the panel while it is open.
+    pub(super) fn route_running_key(
+        &mut self,
+        key: &crate::input::TerminalKey,
+        outcome: &mut ClientShellInput,
+    ) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.nirvana_running = None,
+            KeyCode::Char(c @ '1'..='9') => self.running_answer(c as u8 - b'0', outcome),
+            _ => {}
+        }
+        outcome.repaint = true;
+    }
+
+    /// The Running panel's mouse. While it is open every event is the panel's.
+    pub(super) fn handle_running_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        if self.nirvana_running.is_none() {
+            return false;
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            let point = (mouse.column, mouse.row);
+            let hits = self.hits.nirvana_running_panel.clone();
+            if let Some(panel) = self.nirvana_running.as_mut() {
+                panel.message = None;
+            }
+            if !super::contains(hits.area, point) || super::contains(hits.close, point) {
+                self.nirvana_running = None;
+            } else if let Some((_, digit)) = hits
+                .options
+                .iter()
+                .find(|(rect, _)| super::contains(*rect, point))
+            {
+                self.running_answer(*digit, outcome);
+            }
+            outcome.repaint = true;
+        }
+        true
+    }
+
     /// Opens the Preload panel for the strip's agent, or closes it.
     pub(super) fn toggle_preload_panel(&mut self) {
         if self.nirvana_preload.take().is_some() {
             return;
         }
+        self.nirvana_running = None;
         let Some(agent) = self.snapshot.as_deref().and_then(strip_agent) else {
             return;
         };

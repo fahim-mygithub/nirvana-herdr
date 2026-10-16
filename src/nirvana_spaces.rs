@@ -19,6 +19,10 @@ use std::time::{Duration, Instant};
 
 /// The agent token holding the provider and model, e.g. "Claude Sonnet 5.5".
 pub const MODEL_TOKEN: &str = "nirvana_model";
+/// The agent token holding a Claude's transcript path (feature 6: the Running panel reads it). The path
+/// stays the same for a whole conversation, so the window reads the file itself, as often as it likes,
+/// instead of waiting for the server to send a new snapshot.
+pub const TRANSCRIPT_TOKEN: &str = "nirvana_transcript";
 /// The agent token holding the kind: "claude", "codex", "antigravity" or "local".
 pub const KIND_TOKEN: &str = "nirvana_kind";
 /// How old a cached model may get before the worker reads it again. A `/model` switch shows within this.
@@ -97,14 +101,23 @@ impl Kind {
 pub struct AgentModel {
     pub kind: Kind,
     pub label: String,
+    /// Feature 6: a Claude's transcript, which the window's Running panel reads.
+    pub transcript: Option<PathBuf>,
 }
 
 impl AgentModel {
-    pub fn tokens(&self) -> [(String, String); 2] {
-        [
+    pub fn tokens(&self) -> Vec<(String, String)> {
+        let mut tokens = vec![
             (KIND_TOKEN.to_string(), self.kind.as_str().to_string()),
             (MODEL_TOKEN.to_string(), self.label.clone()),
-        ]
+        ];
+        if let Some(transcript) = &self.transcript {
+            tokens.push((
+                TRANSCRIPT_TOKEN.to_string(),
+                transcript.display().to_string(),
+            ));
+        }
+        tokens
     }
 }
 
@@ -160,19 +173,23 @@ pub fn claude_model(model: Option<&str>) -> AgentModel {
         None => AgentModel {
             kind: Kind::Claude,
             label: Kind::Claude.provider().into(),
+            transcript: None,
         },
         Some(model) if CLAUDE_GENERIC_ALIASES.contains(&model) => AgentModel {
             kind: Kind::Claude,
             label: Kind::Claude.provider().into(),
+            transcript: None,
         },
         Some(model) => match claude_label(model) {
             Some(label) => AgentModel {
                 kind: Kind::Claude,
                 label,
+                transcript: None,
             },
             None => AgentModel {
                 kind: Kind::Local,
                 label: format!("Local {model}"),
+                transcript: None,
             },
         },
     }
@@ -204,6 +221,7 @@ pub fn codex_model(model: Option<&str>) -> AgentModel {
     AgentModel {
         kind: Kind::Codex,
         label,
+        transcript: None,
     }
 }
 
@@ -216,6 +234,7 @@ pub fn antigravity_model(model: Option<&str>) -> AgentModel {
             .filter(|model| !model.is_empty())
             .unwrap_or(Kind::Antigravity.provider())
             .to_string(),
+        transcript: None,
     }
 }
 
@@ -388,16 +407,23 @@ fn probe(shell_pid: u32, pane_cwd: Option<&str>) -> Option<AgentModel> {
     let from_args = argv_model(&args);
     match agent {
         crate::detect::Agent::Claude => {
-            let transcript = crate::nirvana::claude_config_dir().and_then(|config| {
+            let path = crate::nirvana::claude_config_dir().and_then(|config| {
                 let session = crate::nirvana::read_claude_session(&config, pid)?;
                 let cwd = session.cwd.or_else(|| pane_cwd.map(PathBuf::from))?;
-                let path = config
-                    .join("projects")
-                    .join(claude_project_slug(&cwd))
-                    .join(format!("{}.jsonl", session.session_id));
-                read_tail(&path).and_then(|text| claude_transcript_model(&text))
+                Some(
+                    config
+                        .join("projects")
+                        .join(claude_project_slug(&cwd))
+                        .join(format!("{}.jsonl", session.session_id)),
+                )
             });
-            Some(claude_model(transcript.or(from_args).as_deref()))
+            let transcript = path
+                .as_deref()
+                .and_then(read_tail)
+                .and_then(|text| claude_transcript_model(&text));
+            let mut model = claude_model(transcript.or(from_args).as_deref());
+            model.transcript = path;
+            Some(model)
         }
         crate::detect::Agent::Codex => {
             let model = from_args
@@ -514,6 +540,19 @@ pub fn task_title(title: Option<&str>) -> String {
     let Some(title) = title.map(str::trim).filter(|title| !title.is_empty()) else {
         return NO_TASK.into();
     };
+    // Claude Code puts its state in front of its title: "✳ Button colour question" while idle or
+    // waiting, a spinner glyph while working (measured 2026-10-16). The mark is not the task.
+    let title = match title.split_once(' ') {
+        Some((mark, rest))
+            if mark.chars().count() == 1 && !mark.chars().all(char::is_alphanumeric) =>
+        {
+            rest.trim()
+        }
+        _ => title,
+    };
+    if title.is_empty() {
+        return NO_TASK.into();
+    }
     let lower = title.to_lowercase();
     let program_only = [
         "claude code",
@@ -538,6 +577,31 @@ pub fn task_title(title: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_claudes_transcript_rides_in_the_agent_tokens() {
+        let mut model = claude_model(Some("claude-opus-5-5"));
+        assert_eq!(model.tokens().len(), 2);
+        model.transcript = Some(PathBuf::from(r"C:\c\projects\p\s.jsonl"));
+        assert!(model.tokens().contains(&(
+            TRANSCRIPT_TOKEN.to_string(),
+            r"C:\c\projects\p\s.jsonl".to_string()
+        )));
+    }
+
+    #[test]
+    fn claudes_state_mark_is_not_part_of_the_task() {
+        assert_eq!(
+            task_title(Some("\u{2733} Button colour question")),
+            "Button colour question"
+        );
+        assert_eq!(
+            task_title(Some("\u{25D1} Fixing the tests")),
+            "Fixing the tests"
+        );
+        assert_eq!(task_title(Some("A short task")), "A short task");
+        assert_eq!(task_title(Some("\u{2733} Claude Code")), "No task yet");
+    }
 
     #[test]
     fn claude_models_read_as_provider_family_and_version() {
@@ -571,7 +635,8 @@ mod tests {
             claude_model(Some("qwen3.6:35b-a3b")),
             AgentModel {
                 kind: Kind::Local,
-                label: "Local qwen3.6:35b-a3b".into()
+                label: "Local qwen3.6:35b-a3b".into(),
+                transcript: None,
             }
         );
         assert_eq!(claude_model(Some("claude-haiku-5-5")).kind, Kind::Claude);

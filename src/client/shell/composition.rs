@@ -235,19 +235,27 @@ impl ClientShellState {
                 workspace_drop_indicator_row,
             },
         );
-        // Nirvana fork, feature 5: the mod strip under the tab bar.
+        // Nirvana fork, features 5 and 6: the mod strip under the tab bar.
         if layout.nirvana_mods.height > 0 {
             if let Some(agent) = super::nirvana_mods::strip_agent(snapshot) {
                 let view = crate::nirvana_preload::view(&agent.cwd);
-                let square = super::nirvana_mods::render_strip(
+                let activity = agent
+                    .transcript
+                    .as_deref()
+                    .and_then(crate::nirvana_running::cached);
+                let strip = super::nirvana_mods::render_strip(
                     &mut buffer,
                     layout.nirvana_mods,
+                    &agent,
+                    activity.as_ref(),
                     &view,
-                    self.nirvana_preload.is_some(),
+                    self.open_panel(),
                     &self.config.palette,
                 );
+                let square = strip.preload;
                 if self.config.mouse_capture {
                     self.hits.nirvana_preload = square;
+                    self.hits.nirvana_running = strip.running;
                 }
             }
         }
@@ -742,6 +750,34 @@ impl ClientShellState {
                 );
                 occlusion.cover(rendered.area);
                 self.hits.nirvana_panel = rendered;
+                frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
+            }
+        }
+        // Nirvana fork, feature 6: the Running panel, drawn the same way.
+        if self.overlay.is_none() {
+            if let Some(panel) = self.nirvana_running.clone() {
+                let top = if layout.nirvana_mods.height > 0 {
+                    layout.nirvana_mods.y
+                } else {
+                    layout.pane_surface.y
+                };
+                let area = Rect::new(
+                    layout.pane_surface.x,
+                    top,
+                    layout.pane_surface.width,
+                    layout.pane_surface.bottom().saturating_sub(top),
+                );
+                let view = self.running_view(&panel.pane_id);
+                let mut composed = frame.to_ratatui_buffer()?;
+                let rendered = super::nirvana_mods::render_running_panel(
+                    &mut composed,
+                    area,
+                    &panel,
+                    &view,
+                    &self.config.palette,
+                );
+                occlusion.cover(rendered.area);
+                self.hits.nirvana_running_panel = rendered;
                 frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
             }
         }
