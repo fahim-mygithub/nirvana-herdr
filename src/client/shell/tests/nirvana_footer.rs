@@ -102,8 +102,13 @@ fn the_foot_lists_a_spaces_server_and_the_four_usage_rows() {
             "usage row {offset}: {row:?}"
         );
     }
-    // The foot sits at the very bottom of the sidebar.
-    assert_eq!(usage_y + 4, rows.len() - 1);
+    // The foot sits at the very bottom of the sidebar, its last row the accounts button.
+    assert_eq!(usage_y + 5, rows.len() - 1);
+    assert!(
+        sidebar(&rows[usage_y + 5]).starts_with(" [ accounts ]"),
+        "{:?}",
+        rows[usage_y + 5]
+    );
 }
 
 #[test]
@@ -186,9 +191,9 @@ fn a_wide_sidebar_draws_a_bar_for_the_five_hour_window() {
 
 #[test]
 fn the_layout_rules() {
-    assert_eq!(footer_height(0), 6);
-    assert_eq!(footer_height(1), 8);
-    assert_eq!(footer_height(9), 12);
+    assert_eq!(footer_height(0), 7);
+    assert_eq!(footer_height(1), 9);
+    assert_eq!(footer_height(9), 13);
     let detail = Rect::new(0, 10, 25, 14);
     let (agents, foot) = split(detail, 8);
     assert_eq!((agents.height, foot.y, foot.height), (6, 16, 8));
@@ -204,4 +209,147 @@ fn the_layout_rules() {
         "  -- 100%"
     );
     assert_eq!(figures(&Figure::Reading), "reading");
+}
+
+// ---- Feature 11: the accounts button and its panel (nirvana/plans/2026-10-17-11-accounts.md) ----
+
+fn accounts() -> Vec<crate::nirvana_accounts::Account> {
+    use crate::nirvana_accounts::{Account, Cli, Signed};
+    vec![
+        Account {
+            cli: Cli::Claude,
+            signed: Signed::In("me@example.com \u{b7} max".into()),
+        },
+        Account {
+            cli: Cli::Codex,
+            signed: Signed::Out,
+        },
+        Account {
+            cli: Cli::Antigravity,
+            signed: Signed::In("old@example.com".into()),
+        },
+    ]
+}
+
+fn mouse_down(state: &mut ClientShellState, column: u16, row: u16) -> ClientShellInput {
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+        modifiers: KeyModifiers::empty(),
+    })])
+}
+
+fn texts(state: &mut ClientShellState) -> Vec<String> {
+    let frame = state.compose(106, 40).expect("composed frame").frame;
+    frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| row.iter().map(|cell| cell.symbol.as_str()).collect())
+        .collect()
+}
+
+fn login_ids(outcome: &ClientShellInput) -> Vec<String> {
+    outcome
+        .actions
+        .iter()
+        .filter_map(|action| match action {
+            ClientShellAction::Endpoint { request, .. } => match &request.method {
+                crate::api::schema::Method::CommandInvoke(params) => {
+                    Some(params.command_id.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_accounts_button_opens_a_panel_with_each_cli_and_who_is_signed_in() {
+    crate::nirvana_accounts::set_accounts_for_test(Some(accounts()));
+    let (mut state, _, rows) = compose_with("", 106, 40, None);
+    let button_y = rows.len() - 1;
+    assert!(state.nirvana_accounts.is_none());
+    mouse_down(&mut state, 4, button_y as u16);
+    assert!(
+        state.nirvana_accounts.is_some(),
+        "the button opens the panel"
+    );
+    set_rows_for_test(Some(usage()));
+    let rows = texts(&mut state);
+    let (claude_y, claude) = row_with(&rows, "Claude Code").expect("Claude row");
+    assert!(
+        claude.contains("me@example.com \u{b7} max") && claude.contains("[ switch ]"),
+        "{claude:?}"
+    );
+    let codex = &rows[claude_y + 1];
+    assert!(
+        codex.contains("Codex") && codex.contains("not signed in") && codex.contains("[ log in ]"),
+        "{codex:?}"
+    );
+    let agy = &rows[claude_y + 2];
+    assert!(
+        agy.contains("Antigravity")
+            && agy.contains("old@example.com")
+            && agy.contains("[ switch ]"),
+        "{agy:?}"
+    );
+    assert!(row_with(&rows, " Accounts ").is_some(), "the panel's title");
+    // It sits at the bottom left of the panes, beside the button: its frame's foot is the window's last row.
+    assert!(rows[button_y].contains('\u{2570}'), "{:?}", rows[button_y]);
+
+    // A second press of the button closes it.
+    mouse_down(&mut state, 4, button_y as u16);
+    assert!(
+        state.nirvana_accounts.is_none(),
+        "the button closes the panel"
+    );
+    set_rows_for_test(None);
+    crate::nirvana_accounts::set_accounts_for_test(None);
+}
+
+#[test]
+fn a_rows_button_sends_that_clis_sign_in_and_closes_the_panel() {
+    crate::nirvana_accounts::set_accounts_for_test(Some(accounts()));
+    let (mut state, _, rows) = compose_with("", 106, 40, None);
+    mouse_down(&mut state, 4, (rows.len() - 1) as u16);
+    set_rows_for_test(Some(usage()));
+    let rows = texts(&mut state);
+    let (agy_y, agy) = row_with(&rows, "old@example.com").expect("Antigravity row");
+    let column = agy.chars().collect::<Vec<_>>();
+    let button_x = (0..column.len())
+        .find(|&x| {
+            column[x..]
+                .iter()
+                .collect::<String>()
+                .starts_with("[ switch ]")
+        })
+        .expect("button");
+    let outcome = mouse_down(&mut state, button_x as u16 + 2, agy_y as u16);
+    assert_eq!(
+        login_ids(&outcome),
+        vec![format!(
+            "{}antigravity",
+            crate::nirvana::ACCOUNT_LOGIN_COMMAND
+        )]
+    );
+    assert!(state.nirvana_accounts.is_none(), "the tab takes over");
+
+    // The keys: down to Codex, Enter signs in to it.
+    mouse_down(&mut state, 4, (rows.len() - 1) as u16);
+    let press = |state: &mut ClientShellState, code| {
+        state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+            code,
+            KeyModifiers::NONE,
+        ))])
+    };
+    press(&mut state, KeyCode::Down);
+    let outcome = press(&mut state, KeyCode::Enter);
+    assert_eq!(
+        login_ids(&outcome),
+        vec![format!("{}codex", crate::nirvana::ACCOUNT_LOGIN_COMMAND)]
+    );
+    set_rows_for_test(None);
+    crate::nirvana_accounts::set_accounts_for_test(None);
 }

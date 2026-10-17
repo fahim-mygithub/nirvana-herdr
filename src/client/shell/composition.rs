@@ -817,6 +817,24 @@ impl ClientShellState {
                 frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
             }
         }
+        // Nirvana fork, feature 11: the Accounts panel, at the bottom left of the panes, beside the foot's
+        // button.
+        if self.overlay.is_none() {
+            if let Some(panel) = self.nirvana_accounts.clone() {
+                let accounts = crate::nirvana_accounts::accounts();
+                let mut composed = frame.to_ratatui_buffer()?;
+                let rendered = super::nirvana_accounts::render_accounts_panel(
+                    &mut composed,
+                    layout.pane_surface,
+                    &panel,
+                    &accounts,
+                    &self.config.palette,
+                );
+                occlusion.cover(rendered.area);
+                self.hits.nirvana_accounts_panel = rendered;
+                frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
+            }
+        }
         if let Some(ClientShellOverlay::Help(help)) = self.overlay.as_mut() {
             help.scroll = help.scroll.min(self.hits.help_max_scroll);
         }

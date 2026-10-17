@@ -492,6 +492,7 @@ pub(crate) fn render_sidebar(
             &crate::nirvana_usage::rows(),
             palette,
             &mut hits.nirvana_servers,
+            &mut hits.nirvana_accounts,
         );
     }
 

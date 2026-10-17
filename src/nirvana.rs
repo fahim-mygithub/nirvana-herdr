@@ -164,6 +164,8 @@ pub fn supervise(args: &[String]) -> std::io::Result<()> {
 pub const RESTART_CLAUDE_COMMAND: &str = "nirvana.restart_claude";
 /// The `command.invoke` id the Preload panel's "edit" sends, the file's path after it (feature 5).
 pub const EDIT_FILE_COMMAND: &str = "nirvana.edit_file:";
+/// The `command.invoke` id the Accounts panel's sign-in sends, the CLI's key after it (feature 11).
+pub const ACCOUNT_LOGIN_COMMAND: &str = "nirvana.account_login:";
 
 /// The file the Preload panel may open in the editor: an absolute path to an existing markdown file.
 /// Everything Preload offers to edit is one (CLAUDE.md, MEMORY.md, SKILL.md, an agent's file); the check

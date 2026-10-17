@@ -15,6 +15,9 @@
 //! The servers come from the server, as each space's `nirvana_servers` token (`crate::nirvana_servers`);
 //! the usage rows are read by this window (`crate::nirvana_usage`). The "servers" block hides when no
 //! space runs one, as old Nirvana's does.
+//!
+//! Feature 11: the last row is the "[ accounts ]" button, which opens the Accounts panel
+//! (`nirvana_accounts.rs`). The owner, 2026-10-17: "In the bottom left let me manage my login accounts."
 
 use super::nirvana_spaces::fit;
 use super::render::put_text;
@@ -59,14 +62,15 @@ pub(super) fn server_rows(snapshot: &ClientShellSnapshot) -> Vec<ServerRow> {
         .collect()
 }
 
-/// The foot's rows: a divider, the servers block when there is one, the usage head and its four rows.
+/// The foot's rows: a divider, the servers block when there is one, the usage head and its four rows, and
+/// the accounts button.
 pub(super) fn footer_height(servers: usize) -> u16 {
     let servers = if servers == 0 {
         0
     } else {
         1 + servers.min(SERVERS_SHOWN) + usize::from(servers > SERVERS_SHOWN)
     };
-    (1 + servers + 1 + Provider::ALL.len()) as u16
+    (1 + servers + 1 + Provider::ALL.len() + 1) as u16
 }
 
 /// The agents panel's area and the foot's, out of the sidebar's lower section.
@@ -164,8 +168,28 @@ pub(super) fn render_footer(
     usage: &[UsageRow],
     palette: &Palette,
     hits: &mut ServerHits,
+    accounts: &mut Rect,
 ) {
     if area.height == 0 || area.width == 0 {
+        return;
+    }
+    // The button keeps the bottom row, so the rows above stop one short of it.
+    let button_y = area.bottom() - 1;
+    let button = super::nirvana_accounts::BUTTON;
+    let button_width = (button.len() as u16).min(area.width.saturating_sub(1));
+    put_text(
+        buffer,
+        area.x + 1,
+        button_y,
+        button_width,
+        button,
+        Style::default()
+            .fg(palette.accent)
+            .add_modifier(Modifier::BOLD),
+    );
+    *accounts = Rect::new(area.x, button_y, button_width + 1, 1);
+    let area = Rect::new(area.x, area.y, area.width, area.height - 1);
+    if area.height == 0 {
         return;
     }
     let mut y = area.y;

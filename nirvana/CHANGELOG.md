@@ -3,6 +3,37 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.11.0 (2026-10-17): Accounts, a sign-in button at the foot of the sidebar
+
+- **Changed:** the sidebar foot ends with an "[ accounts ]" button. It opens the Accounts panel at the bottom left of
+  the panes: one row each for Claude Code, Codex and Antigravity, with who is signed in and a button ("switch" when
+  someone is, "log in" when not). The button sends herdr's `command.invoke` with `nirvana.account_login:<cli>`; the
+  server opens a focused tab, "log in <CLI>", running `herdr account login <cli>`, which runs the CLI's own sign-in
+  in that terminal: `claude auth login`, `codex login`, or for Antigravity `agy`, into which herdr types `/logout`
+  and Enter once agy's banner shows the old account, so agy's own sign-in follows. When agy exits, Enter starts it
+  again. The tab ends by printing who is signed in now. `herdr account status` prints the three rows.
+  **Because:** the owner, 2026-10-17: "In the bottom left let me manage my login accounts. Create a button so that
+  this herder instance let me login to claude code or antigravity or codex. I currently have a new antigravity
+  account I want to login to."
+  **Measured:** `claude auth status` answers JSON in 0.2 s; `codex login status` answers on stderr, not stdout
+  (the first reading showed Codex "not signed in" until stderr was read); agy 1.4.0 has no login command,
+  `/logout` is refused in print mode (`agy -p /help` lists what print mode answers), and `agy -i "/help"` sends
+  "/help" to the model instead of running it; typed into a running agy, "/help" and one Enter ran the command. agy's
+  log names the account on every signed-in start ("OAuth: authenticated successfully as ..."). Tests
+  `nirvana_accounts::tests::*`, `a_sign_in_opens_its_own_focused_tab_and_an_unknown_cli_opens_none`, the foot's
+  `the_accounts_button_*` and `a_rows_button_*`; controls `accounts_*`.
+  **If you remove this:** signing in to another account means finding each CLI's own command, and for Antigravity
+  knowing that the way in is `/logout` inside agy.
+- **Hypothesis, not measured:** that agy shows its sign-in screen after `/logout` rather than exiting. A real
+  `/logout` signs the owner out, so the live check typed `/help` through `NIRVANA_ACCOUNT_TYPE` instead; the tab
+  restarts agy on Enter for the case where it exits.
+- **Changed:** the brand row has no space after "Nirvana"; the badge's own leading space separates them.
+  **Because:** a two-digit minor version (" alpha 0.10.0 ", " alpha 0.11.0 ") needed 25 columns beside the toggle in
+  the default sidebar and lost its closing pad. It has been clipped since 0.10.0: the leaf reading this feature's live
+  screenshot reported the badge cut at the right, and `brand_row_names_nirvana_and_its_running_version` failed.
+  **Measured:** that test passes at 0.11.0; control `header_name_pad`.
+  **If you remove this:** the badge touches the toggle again from 0.10.0 on.
+
 ## alpha 0.10.0 (2026-10-17): the Jev memory, its own file, sized to the project
 
 - **Changed:** the Jev guide is now the Jev memory, one file, `<home>/jev/JEV.md`, written from herdr's text the first

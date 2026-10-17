@@ -705,6 +705,10 @@ impl ClientShellState {
         if self.overlay.is_none() && self.handle_memory_mouse(mouse, outcome) {
             return;
         }
+        // Nirvana fork, feature 11: and the Accounts panel.
+        if self.overlay.is_none() && self.handle_accounts_mouse(mouse, outcome) {
+            return;
+        }
         if matches!(self.overlay, Some(ClientShellOverlay::Onboarding)) {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                 && super::contains(self.hits.overlay_primary, point)
@@ -1979,6 +1983,12 @@ impl ClientShellState {
                 // Nirvana fork, feature 8: the strip's Memory square opens its panel.
                 if super::contains(self.hits.nirvana_memory, point) {
                     self.toggle_memory_panel();
+                    outcome.repaint = true;
+                    return;
+                }
+                // Nirvana fork, feature 11: the foot's "accounts" button opens the Accounts panel.
+                if super::contains(self.hits.nirvana_accounts, point) {
+                    self.toggle_accounts_panel();
                     outcome.repaint = true;
                     return;
                 }

@@ -42,6 +42,50 @@ impl App {
         path: &std::path::Path,
         argv: &[String],
     ) -> String {
+        let cwd = path
+            .parent()
+            .map_or_else(|| path.to_path_buf(), std::path::Path::to_path_buf);
+        let name = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        tracing::info!(file = %path.display(), editor = %argv[0], "nirvana: opening a preloaded file in a new tab");
+        self.nirvana_open_command_tab(id, params, cwd, argv, format!("edit {name}"))
+    }
+
+    /// Feature 11: the Accounts panel's sign-in. Runs `herdr account login <cli>` in a new focused tab, in the
+    /// home folder: a sign-in belongs to no project.
+    pub(crate) fn nirvana_account_login(
+        &mut self,
+        id: String,
+        params: &crate::api::schema::CommandInvokeParams,
+        key: &str,
+    ) -> String {
+        let Some(cli) = crate::nirvana_accounts::Cli::from_key(key) else {
+            return crate::app::api::responses::encode_error(
+                id,
+                "unknown_cli",
+                format!("no sign-in for {key}"),
+            );
+        };
+        let exe = std::env::current_exe().unwrap_or_else(|_| "herdr".into());
+        let argv = crate::nirvana_accounts::login_argv(&exe, cli);
+        let cwd = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map_or_else(std::env::temp_dir, std::path::PathBuf::from);
+        tracing::info!(cli = key, "nirvana: opening a sign-in tab");
+        self.nirvana_open_command_tab(id, params, cwd, &argv, format!("log in {}", cli.name()))
+    }
+
+    /// Runs `argv` in a new tab of the panel's space, focused and named; the tab closes when `argv` exits.
+    fn nirvana_open_command_tab(
+        &mut self,
+        id: String,
+        params: &crate::api::schema::CommandInvokeParams,
+        cwd: std::path::PathBuf,
+        argv: &[String],
+        name: String,
+    ) -> String {
         use crate::app::api::responses::{encode_error, encode_success};
 
         let ws_idx = match params.workspace_id.as_deref() {
@@ -54,9 +98,6 @@ impl App {
                 None => return encode_error(id, "no_active_workspace", "no active workspace"),
             },
         };
-        let cwd = path
-            .parent()
-            .map_or_else(|| path.to_path_buf(), std::path::Path::to_path_buf);
         let (env, _) = self.custom_command_env();
         let (rows, cols) = self.state.new_pane_size(crate::ui::NewPanePlacement::Alone);
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
@@ -79,11 +120,7 @@ impl App {
             Err(err) => return encode_error(id, "editor_failed", err.to_string()),
         };
         let pane_id = ws.tabs[tab_idx].root_pane;
-        let name = path.file_name().map_or_else(
-            || path.display().to_string(),
-            |name| name.to_string_lossy().into_owned(),
-        );
-        ws.tabs[tab_idx].set_custom_name(format!("edit {name}"));
+        ws.tabs[tab_idx].set_custom_name(name);
         self.terminal_runtimes.insert(terminal.id.clone(), runtime);
         self.state.terminals.insert(terminal.id.clone(), terminal);
         self.state.remove_alias_shadowed_by_new_pane(pane_id);
@@ -91,7 +128,6 @@ impl App {
         self.state.mode = crate::app::Mode::Terminal;
         self.schedule_session_save();
         self.emit_tab_created_events(ws_idx, tab_idx);
-        tracing::info!(file = %path.display(), editor = %argv[0], "nirvana: opened a preloaded file in a new tab");
         encode_success(id, crate::api::schema::ResponseResult::Ok {})
     }
 }
@@ -142,6 +178,53 @@ mod tests {
             ws.tabs[0].panes.len(),
             panes_before,
             "the agent's tab keeps its panes"
+        );
+        shutdown_test_runtimes(&mut app);
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_opens_its_own_focused_tab_and_an_unknown_cli_opens_none() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("accounts")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let params = |key: &str| crate::api::schema::CommandInvokeParams {
+            command_id: format!("{}{key}", crate::nirvana::ACCOUNT_LOGIN_COMMAND),
+            workspace_id: None,
+            tab_id: None,
+            pane_id: None,
+            selection: None,
+        };
+        let response = app.handle_command_invoke("bad".into(), params("gemini"));
+        assert!(response.contains("unknown_cli"), "{response}");
+        assert_eq!(
+            app.state.workspaces[0].tabs.len(),
+            1,
+            "no tab for an unknown CLI"
+        );
+
+        let response = app.nirvana_open_command_tab(
+            "req".into(),
+            &params("antigravity"),
+            std::env::temp_dir(),
+            &[exiting_test_command().to_owned()],
+            "log in Antigravity".into(),
+        );
+        assert!(response.contains("\"ok\""), "{response}");
+        let ws = &app.state.workspaces[0];
+        assert_eq!(ws.tabs.len(), 2, "a new tab");
+        assert_eq!(ws.active_tab, 1, "focused");
+        assert_eq!(
+            ws.tabs[1].custom_name.as_deref(),
+            Some("log in Antigravity")
         );
         shutdown_test_runtimes(&mut app);
     }

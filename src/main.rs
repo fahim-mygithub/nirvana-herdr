@@ -33,6 +33,7 @@ mod layout;
 mod logging;
 mod metadata_tokens;
 mod nirvana;
+mod nirvana_accounts;
 mod nirvana_board;
 mod nirvana_jev;
 mod nirvana_jev_compact;
@@ -569,6 +570,10 @@ fn main() -> io::Result<()> {
     // Nirvana fork: the supervisor that starts the installed build again after a reload.
     if args.get(1).map(String::as_str) == Some("nirvana-shell") {
         return nirvana::supervise(&args[2..]);
+    }
+    // Nirvana fork, feature 11: the sign-in tab the Accounts panel opens.
+    if args.get(1).map(String::as_str) == Some("account") {
+        return nirvana_accounts::cli(&args[2..]);
     }
     // Nirvana fork, feature 8: the shared board, for agents and for Claude Code's prompt hook.
     if args.get(1).map(String::as_str) == Some("board") {

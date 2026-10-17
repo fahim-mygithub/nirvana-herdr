@@ -2354,7 +2354,8 @@ async fn run_client_loop(
                             // last tick.
                             | crate::nirvana_usage::take_changed()
                             | crate::nirvana_preload::take_changed()
-                            | crate::nirvana_running::take_changed();
+                            | crate::nirvana_running::take_changed()
+                            | crate::nirvana_accounts::take_changed();
                         let frame = outcome
                             .repaint
                             .then(|| shell.compose(state.reported_size.0, state.reported_size.1))

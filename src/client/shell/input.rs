@@ -653,6 +653,13 @@ impl ClientShellState {
             }
             return None;
         }
+        // Nirvana fork, feature 11: the Accounts panel takes the keys while it is open.
+        if self.nirvana_accounts.is_some() {
+            if key.kind == KeyEventKind::Press {
+                self.route_accounts_key(key, outcome);
+            }
+            return None;
+        }
         // Nirvana fork, feature 8: the Memory panel takes the keys while it is open.
         if self.nirvana_memory.is_some() {
             if key.kind == KeyEventKind::Press {

@@ -41,12 +41,14 @@ pub(super) fn render_brand_row(
             .fg(NIRVANA_TEAL)
             .add_modifier(Modifier::BOLD),
     );
+    // No space after the name: the badge starts with its own. With one more, " alpha 0.10.0 " (two-digit minor)
+    // needed 25 columns beside the toggle and lost its closing pad (0.10.0, seen in the 0.11.0 live check).
     x = super::render::put_segment(
         buffer,
         x,
         row.y,
         right,
-        " Nirvana ",
+        " Nirvana",
         Style::default()
             .fg(palette.text)
             .add_modifier(Modifier::BOLD),
@@ -118,7 +120,7 @@ mod tests {
         let (buffer, hits) = draw(25, None, false);
         let text = row_text(&buffer, 0);
         let expected = format!(
-            " ◆ Nirvana  {} ",
+            " ◆ Nirvana {} ",
             crate::nirvana::label(crate::nirvana::VERSION)
         );
         assert!(text.starts_with(&expected), "{text:?}");

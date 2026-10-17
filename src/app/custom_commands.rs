@@ -94,6 +94,14 @@ impl App {
             let file = file.to_owned();
             return self.nirvana_edit_file(id, &params, &file);
         }
+        // Nirvana fork, feature 11: the Accounts panel's sign-in names the CLI after its id.
+        if let Some(key) = params
+            .command_id
+            .strip_prefix(crate::nirvana::ACCOUNT_LOGIN_COMMAND)
+        {
+            let key = key.to_owned();
+            return self.nirvana_account_login(id, &params, &key);
+        }
         let Some(binding) = self.resolve_client_shell_command(&params.command_id) else {
             return crate::app::api::responses::encode_error(
                 id,

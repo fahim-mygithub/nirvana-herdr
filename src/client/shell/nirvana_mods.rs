@@ -896,6 +896,7 @@ impl ClientShellState {
         };
         self.nirvana_preload = None;
         self.nirvana_memory = None;
+        self.nirvana_accounts = None;
         self.nirvana_running = Some(RunningPanel {
             pane_id: agent.pane_id,
             message: None,
@@ -1032,6 +1033,7 @@ impl ClientShellState {
         }
         self.nirvana_running = None;
         self.nirvana_memory = None;
+        self.nirvana_accounts = None;
         let Some(agent) = self.snapshot.as_deref().and_then(strip_agent) else {
             return;
         };

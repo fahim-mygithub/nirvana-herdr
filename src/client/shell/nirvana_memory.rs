@@ -193,6 +193,7 @@ impl ClientShellState {
         };
         self.nirvana_preload = None;
         self.nirvana_running = None;
+        self.nirvana_accounts = None;
         self.nirvana_memory = Some(MemoryPanel {
             session: strip_session(&agent),
             cwd: agent.cwd,
