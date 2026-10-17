@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+<defs><linearGradient id="b" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2B3436"/><stop offset="1" stop-color="#161C1D"/></linearGradient></defs>
+<rect x="1.0" y="1.0" width="30.0" height="30.0" rx="7.0" fill="url(#b)" stroke="#FFFFFF" stroke-width="2.0"/>
+<text x="16.0" y="24.4" text-anchor="middle" font-family="Segoe UI Variable Display, Segoe UI, Arial, sans-serif" font-weight="700" font-size="23.0" fill="#FFFFFF">{LETTER}</text>
+</svg>
