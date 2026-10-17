@@ -471,9 +471,10 @@ pub(crate) fn render_sidebar(
 
     // Nirvana fork: running servers and usage at the foot, under the agents panel (nirvana_footer.rs).
     let servers = super::nirvana_footer::server_rows(snapshot);
+    let usage = crate::nirvana_usage::rows();
     let (agents_area, foot_area) = super::nirvana_footer::split(
         detail_area,
-        super::nirvana_footer::footer_height(servers.len()),
+        super::nirvana_footer::footer_height(servers.len(), usage.len()),
     );
     super::render_agent_panel(
         buffer,
@@ -489,7 +490,7 @@ pub(crate) fn render_sidebar(
             buffer,
             foot_area,
             &servers,
-            &crate::nirvana_usage::rows(),
+            &usage,
             palette,
             &mut hits.nirvana_servers,
             &mut hits.nirvana_accounts,

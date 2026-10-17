@@ -960,8 +960,9 @@ fn sidebar_scrollbars_use_proportional_shared_geometry_and_drag() {
     // Nirvana fork: 32 rows, not 20. The ten agents now also draw under their space (three shown,
     // then "+7 more"), so at 20 rows the spaces list is too long for a thumb over one cell (feature
     // 3 raised it to 26); the sidebar's foot (servers and usage, feature 4) then takes six rows from
-    // the agents panel, the same at 26. At 32 both lists still overflow (track.width > 0 below).
-    state.compose(106, 32).expect("overflowing sidebars");
+    // the agents panel, the same at 26. At 32 both lists still overflow (track.width > 0 below). Plan 12 O1's
+    // foot has a usage row per pool, two more, which left a thumb of one cell at 32 and 34, so 36.
+    state.compose(106, 36).expect("overflowing sidebars");
 
     for agent in [false, true] {
         let (track, metrics) = if agent {

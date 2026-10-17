@@ -583,6 +583,10 @@ fn main() -> io::Result<()> {
     if args.get(1).map(String::as_str) == Some("jev") {
         return nirvana_jev::cli(&args[2..]);
     }
+    // Nirvana fork, plan 12 O1: every pool's usage windows, for the plugin, the statusline and the seat engine.
+    if args.get(1).map(String::as_str) == Some("usage") {
+        return nirvana_usage::cli(&args[2..]);
+    }
 
     finish_cli(cli::maybe_run(&args))?;
 

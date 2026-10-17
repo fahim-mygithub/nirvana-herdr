@@ -917,7 +917,9 @@ fn active_agent_view_controls_sidebar_order_and_focus_indices() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
-    state.compose(106, 30).expect("filtered agent sidebar");
+    // Nirvana fork: 32 rows, not 30. Plan 12 O1's foot holds a usage row per pool, six where it held four, and
+    // at 30 rows the agents panel kept one of the two agents.
+    state.compose(106, 32).expect("filtered agent sidebar");
     assert_eq!(
         state
             .hits

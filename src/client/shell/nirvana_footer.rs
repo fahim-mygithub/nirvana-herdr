@@ -5,11 +5,14 @@
 //! ──────────────────────────
 //!  servers
 //!  ● MotoProject      :8770
-//!  usage            5h   7D
-//!  ● Claude          2%  70%
-//!  ● Codex      not exposed
-//!  ● Antigravity     0%   0%
-//!  ● Local         3/32 GiB
+//!  usage
+//!  ● Claude        41% 5h▲
+//!  ● Gemini         2% 5h
+//!  ● Argon          2% 7d
+//!  ● G·Claude       4% 7d
+//!  ● Codex     not exposed
+//!  ● Local        3/32 GiB
+//!  accounts
 //! ```
 //!
 //! The servers come from the server, as each space's `nirvana_servers` token (`crate::nirvana_servers`);
@@ -18,11 +21,16 @@
 //!
 //! Feature 11: the last row is the "accounts" button, which opens the Accounts panel
 //! (`nirvana_accounts.rs`). The owner, 2026-10-17: "In the bottom left let me manage my login accounts."
+//!
+//! Plan 12 O1 (§8): one usage row per pool, with Argon and Google's Claude pool beside Gemini, which were one
+//! "Antigravity" row before. A row shows its pool's tightest window (`nirvana_usage::tightest`), so one figure
+//! and its window's name replace the "5h 7D" columns; a pace mark when it is spent faster than it passes; and
+//! from `BAR_FROM_WIDTH` the time to its reset. A stale reading is drawn muted.
 
 use super::nirvana_spaces::fit;
 use super::render::put_text;
 use super::*;
-use crate::nirvana_usage::{Figure, Provider, UsageRow};
+use crate::nirvana_usage::{short_duration, Figure, UsageRow};
 use ratatui::style::Color;
 
 /// At most this many server rows, then "+N more".
@@ -30,12 +38,19 @@ pub(super) const SERVERS_SHOWN: usize = 4;
 /// The agents panel keeps at least its head (three rows) and two agents; below that the foot is not
 /// drawn and the agents panel keeps the whole area.
 pub(super) const AGENTS_KEEP: u16 = 5;
-/// From this sidebar width a bar sits between the name and the figures. herdr's default is 26.
+/// From this sidebar width a bar sits between the name and the figures, and the reset follows the figure.
+/// herdr's default is 26.
 pub(super) const BAR_FROM_WIDTH: u16 = 34;
-/// One figure column: "100%".
+/// The percent: "100%".
 const COLUMN: usize = 4;
-/// The widest provider name, "Antigravity", so the bars line up.
-const NAME: usize = 11;
+/// The figure, " 41% 5h▲", and from `BAR_FROM_WIDTH` " 41% 5h▲ 2h58m": the reset takes five cells.
+const FIGURE: usize = COLUMN + 1 + 2 + 1;
+const WIDE_FIGURE: usize = FIGURE + 1 + 5;
+/// The pace mark's cell in the figure.
+const MARK_AT: usize = COLUMN + 1 + 2;
+pub(super) const AHEAD: &str = "\u{25B2}";
+/// The widest pool name, "G·Claude", so the bars line up.
+const NAME: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ServerRow {
@@ -62,15 +77,15 @@ pub(super) fn server_rows(snapshot: &ClientShellSnapshot) -> Vec<ServerRow> {
         .collect()
 }
 
-/// The foot's rows: a divider, the servers block when there is one, the usage head and its four rows, and
+/// The foot's rows: a divider, the servers block when there is one, the usage head and a row per pool, and
 /// the accounts button.
-pub(super) fn footer_height(servers: usize) -> u16 {
+pub(super) fn footer_height(servers: usize, pools: usize) -> u16 {
     let servers = if servers == 0 {
         0
     } else {
         1 + servers.min(SERVERS_SHOWN) + usize::from(servers > SERVERS_SHOWN)
     };
-    (1 + servers + 1 + Provider::ALL.len() + 1) as u16
+    (1 + servers + 1 + pools + 1) as u16
 }
 
 /// The agents panel's area and the foot's, out of the sidebar's lower section.
@@ -133,18 +148,32 @@ pub(super) fn address(port: u16, name_width: usize, room: usize) -> String {
     }
 }
 
-/// The figures cell: two columns under "5h 7D", or one word or memory figure in their place.
-pub(super) fn figures(figure: &Figure) -> String {
-    let cell = |used: Option<u8>| used.map_or_else(|| "--".to_owned(), |used| format!("{used}%"));
+/// "5h", "7d" for every week; another window by its first two letters.
+fn window_name(window: &str) -> &str {
+    match window.split('.').next() {
+        Some("5h") => "5h",
+        Some("week") => "7d",
+        _ => window.get(..2).unwrap_or(window),
+    }
+}
+
+/// The figure cell: the tightest window's percent ("--" when not exposed), its window and the pace mark's
+/// cell; when `wide`, the time to the reset. Or one word or memory figure in its place.
+pub(super) fn figures(figure: &Figure, wide: bool) -> String {
     match figure {
-        Figure::Windows {
-            five_hour,
-            seven_day,
-        } => format!(
-            "{:>COLUMN$} {:>COLUMN$}",
-            cell(*five_hour),
-            cell(*seven_day)
-        ),
+        Figure::Window(shown) => {
+            let used = shown.used.map_or_else(
+                || "--".to_owned(),
+                |used| format!("{}%", (used * 100.0).round() as u32),
+            );
+            let mark = if figure.ahead() { AHEAD } else { " " };
+            let mut text = format!("{used:>COLUMN$} {:<2}{mark}", window_name(&shown.window));
+            if wide {
+                let resets = shown.resets_in.map(short_duration).unwrap_or_default();
+                text.push_str(&format!(" {resets:>5}"));
+            }
+            text
+        }
         Figure::Memory {
             used_mib,
             total_mib,
@@ -153,7 +182,7 @@ pub(super) fn figures(figure: &Figure) -> String {
             (*used_mib as f64 / 1024.0).round(),
             (*total_mib as f64 / 1024.0).round()
         ),
-        Figure::Word(word) => (*word).to_owned(),
+        Figure::Word(word) => word.clone(),
         Figure::Reading => "reading".to_owned(),
     }
 }
@@ -253,13 +282,6 @@ pub(super) fn render_footer(
         return;
     }
     heading(buffer, area, y, " usage", palette);
-    right(
-        buffer,
-        area,
-        y,
-        &format!("{:>COLUMN$} {:>COLUMN$}", "5h", "7D"),
-        Style::default().fg(palette.overlay0),
-    );
     y += 1;
     let bar = area.width >= BAR_FROM_WIDTH;
     for row in usage {
@@ -278,9 +300,9 @@ pub(super) fn render_footer(
             "\u{25CF}",
             Style::default().fg(colour),
         );
-        let text = figures(&row.figure);
+        let text = figures(&row.figure, bar);
         let text_width = unicode_width::UnicodeWidthStr::width(text.as_str());
-        let name = fit(row.provider.name(), room.saturating_sub(text_width + 1));
+        let name = fit(row.label(), room.saturating_sub(text_width + 1));
         put_text(
             buffer,
             area.x + 3,
@@ -289,17 +311,31 @@ pub(super) fn render_footer(
             &name,
             Style::default().fg(palette.text),
         );
-        let style = match row.figure {
-            Figure::Windows { .. } | Figure::Memory { .. } => Style::default().fg(palette.text),
+        let style = match &row.figure {
+            Figure::Window(shown) if !shown.stale && shown.used.is_some() => {
+                Style::default().fg(palette.text)
+            }
+            Figure::Memory { .. } => Style::default().fg(palette.text),
             _ => Style::default().fg(palette.overlay0),
         };
         right(buffer, area, y, &text, style);
+        // The mark in the warning colour, over its cell in the figure.
+        if row.figure.ahead() && text_width <= area.width as usize {
+            put_text(
+                buffer,
+                area.right() - text_width as u16 + MARK_AT as u16,
+                y,
+                1,
+                AHEAD,
+                Style::default().fg(palette.peach),
+            );
+        }
         if bar {
             // Between the name column and the figures, one cell of space on each side.
             let start = area.x + 3 + NAME as u16 + 1;
             let end = area
                 .right()
-                .saturating_sub(text_width.max(2 * COLUMN + 1) as u16 + 1);
+                .saturating_sub(text_width.max(if bar { WIDE_FIGURE } else { FIGURE }) as u16 + 1);
             let width = end.saturating_sub(start) as usize;
             if width >= 3 {
                 let filled = row
