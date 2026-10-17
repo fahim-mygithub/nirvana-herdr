@@ -1,0 +1,43 @@
+diff --git a/nirvana/controls.py b/nirvana/controls.py
+index 9fabd1f6..db94b84b 100644
+--- a/nirvana/controls.py
++++ b/nirvana/controls.py
+@@ -565,6 +565,14 @@ CONTROLS: tuple[Control, ...] = (
+             "    args.pop(); // the `--continue` fallback\n",
+             "\n",
+             'a_claude_with_no_saved_conversation_restarts_fresh', "rust"),
++    Control('jev_guide_search_first', 'src/nirvana_jev.rs',
++            "When a word finds the place (a function name, an error message), search instead: it is cheaper. ",
++            "",
++            'the_guide_names_the_binary_and_every_tool', "rust"),
++    Control('jev_guide_short_output', 'src/nirvana_jev.rs',
++            " Read short output yourself.",
++            "",
++            'the_guide_names_the_binary_and_every_tool', "rust"),
+     Control('jev_guide_twice', 'src/nirvana_jev_install.rs',
+             '    has_ours && !claude_md.iter().any(|path| path.is_file())',
+             '    has_ours',
+diff --git a/src/nirvana_jev.rs b/src/nirvana_jev.rs
+index 87874f01..eac188c2 100644
+--- a/src/nirvana_jev.rs
++++ b/src/nirvana_jev.rs
+@@ -1867,8 +1867,8 @@ Jev is a cheap judge model. Ask it a question about a file or a command's output
+ - One file: `herdr jev file src/auth/session.ts --ask \"Does this file validate tokens?\"` gives `yes 0.93`.\n\
+ - Pick one or rate: add `--choice \"a,b,c\"` or `--score \"low,medium,high\"`.\n\
+ - Many files: `herdr jev files \"src/**/*.ts\" --ask \"Is this file where proration is rounded?\"` lists the matches and the one to read first.\n\
+-- Output: `npm test 2>&1 | herdr jev text --ask \"Why did it fail?\" --choice \"bug_in_code,wrong_test,environment\"`.\n\
+-Use it to learn something about a file or output, before you read it. After `jev files`, open only the `read first` file, and another only if that one does not answer: each extra read is paid again on every later turn. Read a file when you will edit or quote it. If the answer says failed, read it yourself.\n"
++- Long output (about 200 lines or more): `npm test 2>&1 | herdr jev text --ask \"Why did it fail?\" --choice \"bug_in_code,wrong_test,environment\"`. Read short output yourself.\n\
++When a word finds the place (a function name, an error message), search instead: it is cheaper. Use Jev for a question a search cannot answer, before you read a file. After `jev files`, open only the `read first` file, and another only if that one does not answer: each extra read is paid again on every later turn. Read a file when you will edit or quote it. If the answer says failed, read it yourself.\n"
+     )
+ }
+ 
+@@ -2174,6 +2174,8 @@ mod tests {
+             "jev text",
+             "--choice",
+             "read it yourself",
++            "search instead",
++            "Read short output yourself",
+         ] {
+             assert!(text.contains(needle), "{needle}");
+         }
