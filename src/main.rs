@@ -37,6 +37,7 @@ mod nirvana_board;
 mod nirvana_jev;
 mod nirvana_jev_compact;
 mod nirvana_jev_install;
+mod nirvana_jev_memory;
 mod nirvana_preload;
 mod nirvana_running;
 mod nirvana_servers;

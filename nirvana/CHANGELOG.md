@@ -3,6 +3,37 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.10.0 (2026-10-17): the Jev memory, its own file, sized to the project
+
+- **Changed:** the Jev guide is now the Jev memory, one file, `<home>/jev/JEV.md`, written from herdr's text the first
+  time and the owner's from then on. Preload's row is "Jev memory": space switches it per folder as before, and `e`
+  opens the file in the terminal editor in a new tab. Its front matter holds the sizes (`min_project_kb`,
+  `read_file_kb`, `ask_file_kb`, `files_kb`, `output_lines`) and its body names them, so a size lives in one place.
+  The body says when to ask Jev, by size, and the handoffs: `jev files` then only its read-first file, `jev text` on
+  bug_in_code to the file, read before an edit, read on `failed`.
+  **Because:** the owner, 2026-10-17: "maybe just have a tool flag in memory. I wawnt to also ensure I can toggle
+  this so maybe have it a seperate file. This Jev memory preload file will give it instructions on how to make Jev
+  tool chain handoffs and at what sizes it would make sence to invoke it."
+  **Measured:** `nirvana_jev_memory::tests::*`; controls `jev_memory_*`. Live: an edit to `JEV.md` (min 400 KB, ask
+  30 KB) changed what the next `jev guide` printed; in a herdr window the row read "JEV.md: a flag, 555 K..." at 179
+  tokens with `edit`, the switch wrote the hook and a git-ignored `AGENTS.md`, and `edit` opened a tab titled
+  "JEV.md - edit" holding the file.
+  **If you remove this:** the guide is fixed text in the binary, the same for every project, and changing it means a
+  build.
+- **Changed:** a project under `min_project_kb` (1024 KB) gets one line, the tool flag: Jev is there, search and read
+  as usual, ask it only about one big file or long output. At or over the line it gets the whole memory and a line
+  measuring the project: its size and file count, and the largest three files. The size is what git tracks, or
+  outside git a walk skipping Jev's excluded folders; binaries by extension never count.
+  **Because:** two single runs on the 568 KB project (`nirvana/evidence/2026-10-16-jev-ab/single-results.jsonl`)
+  saved nothing: with the guide Claude used Jev three times for +8% tokens; with a "search first" wording it used
+  Jev never, and tokens swung +17% on noise. A plain search was as cheap as Jev wherever a word found the place.
+  **Measured:** a real Claude Haiku session in a 555 KB copy quoted the flag; in a 1.6 MB copy it quoted the full
+  memory's project line, from `AGENTS.md` and, with a `CLAUDE.md` beside it, from the `SessionStart` hook. agy 1.4.0
+  quoted the same line. The full memory costs about 480 tokens more than the flag (41,922 against 42,405 input
+  tokens). On this repository an image was among the largest three until binaries were left out. **The 1024 KB line is
+  a hypothesis:** no A/B has run above 568 KB.
+  **If you remove this:** every project gets the whole text, including those where it measured no saving.
+
 ## alpha 0.9.0 (2026-10-16): Jev token savers for Claude, Codex and agy, switched in Preload
 
 - **Changed:** Jev, TypeSafe's cheap judge model reached through OpenRouter, runs from this binary for any agent with a

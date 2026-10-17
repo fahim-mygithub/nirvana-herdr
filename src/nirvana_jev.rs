@@ -797,6 +797,11 @@ pub fn resolve_inside(root: &Path, path: &str) -> Result<(PathBuf, String), Refu
 }
 
 /// The first folder in a path the walk would have skipped.
+/// Whether Jev never reads a folder of this (lowercase) name: build output, dependencies, caches.
+pub fn excluded_dir(low: &str) -> bool {
+    EXCLUDED_DIRS.contains(&low) || SECRET_DIRS.contains(&low)
+}
+
 fn dir_class(rel: &str) -> Option<(&'static str, String)> {
     let parts: Vec<&str> = rel.split('/').collect();
     for part in &parts[..parts.len().saturating_sub(1)] {
@@ -1536,7 +1541,7 @@ pub fn today_line() -> (String, bool) {
 
 // ---- the CLI -----------------------------------------------------------------------------------------
 
-const USAGE: &str = "usage: herdr jev file <path> --ask <question> [--choice a,b,c | --score low,mid,high]\n       herdr jev files <glob>... --ask <question> [--choice ...] [--no-pick]\n       <command> 2>&1 | herdr jev text --ask <question> [--choice ...]\n       herdr jev guide [claude|codex|agy]\n       herdr jev stats\n       herdr jev on|off guide|compact   (Preload's switches)\n       herdr jev compact   (a Claude Code Stop hook)\nOptions: --max-kb <n> (default 256), --cwd <folder>";
+const USAGE: &str = "usage: herdr jev file <path> --ask <question> [--choice a,b,c | --score low,mid,high]\n       herdr jev files <glob>... --ask <question> [--choice ...] [--no-pick]\n       <command> 2>&1 | herdr jev text --ask <question> [--choice ...]\n       herdr jev guide   (the Jev memory this folder gets, from <home>/jev/JEV.md)\n       herdr jev stats\n       herdr jev on|off memory|compact   (Preload's switches)\n       herdr jev compact   (a Claude Code Stop hook)\nOptions: --max-kb <n> (default 256), --cwd <folder>";
 
 fn fail(message: &str, code: i32) -> ! {
     eprintln!("{message}");
@@ -1610,8 +1615,16 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
                 if crate::nirvana_jev_install::claude_reads_agents_block(&folder) {
                     return Ok(());
                 }
+                print!(
+                    "{}",
+                    crate::nirvana_jev_memory::for_folder(&folder, &crate::nirvana_board::exe())
+                );
+                return Ok(());
             }
-            print!("{}", guide(&crate::nirvana_board::exe()));
+            print!(
+                "{}",
+                crate::nirvana_jev_memory::for_folder(&cwd, &crate::nirvana_board::exe())
+            );
             return Ok(());
         }
         "stats" => {
@@ -1635,9 +1648,9 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         // The Preload switches, for scripts and checks: the same code path as the panel.
         "on" | "off" => {
             let switch = match words.get(1).map(String::as_str) {
-                Some("guide") => crate::nirvana_preload::Switch::JevGuide,
+                Some("guide" | "memory") => crate::nirvana_preload::Switch::JevGuide,
                 Some("compact") => crate::nirvana_preload::Switch::JevCompact,
-                _ => fail("herdr jev on|off guide|compact [--cwd <folder>]", 2),
+                _ => fail("herdr jev on|off memory|compact [--cwd <folder>]", 2),
             };
             match crate::nirvana_preload::switch_item(&cwd, &switch, command == "on") {
                 Ok(_) => {
@@ -1853,23 +1866,6 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             Ok(())
         }
     }
-}
-
-// ---- the guide ---------------------------------------------------------------------------------------
-
-/// What every agent is told at the start of a session: the Preload row "Jev guide". Short on purpose: it
-/// is paid in every session's context.
-pub fn guide(exe: &Path) -> String {
-    let exe = exe.to_string_lossy().replace('\\', "/");
-    format!(
-        "## Save tokens with Jev (herdr)\n\
-Jev is a cheap judge model. Ask it a question about a file or a command's output, and get a typed answer in about a second, for a fraction of a cent. The text never enters your context. herdr is `\"{exe}\"`.\n\
-- One file: `herdr jev file src/auth/session.ts --ask \"Does this file validate tokens?\"` gives `yes 0.93`.\n\
-- Pick one or rate: add `--choice \"a,b,c\"` or `--score \"low,medium,high\"`.\n\
-- Many files: `herdr jev files \"src/**/*.ts\" --ask \"Is this file where proration is rounded?\"` lists the matches and the one to read first.\n\
-- Output: `npm test 2>&1 | herdr jev text --ask \"Why did it fail?\" --choice \"bug_in_code,wrong_test,environment\"`.\n\
-Use it to learn something about a file or output, before you read it. After `jev files`, open only the `read first` file, and another only if that one does not answer: each extra read is paid again on every later turn. Read a file when you will edit or quote it. If the answer says failed, read it yourself.\n"
-    )
 }
 
 #[cfg(test)]
@@ -2162,25 +2158,5 @@ mod tests {
         assert_eq!((stats.calls, stats.failed, stats.tokens), (2, 1, 10_000));
         assert!((stats.cost_usd - 0.0005).abs() < 1e-9);
         assert_eq!(stats.by_agent.get("codex"), Some(&1));
-    }
-
-    #[test]
-    fn the_guide_names_the_binary_and_every_tool() {
-        let text = guide(Path::new(r"C:\h\bin\herdr.exe"));
-        for needle in [
-            "\"C:/h/bin/herdr.exe\"",
-            "jev file",
-            "jev files",
-            "jev text",
-            "--choice",
-            "read it yourself",
-        ] {
-            assert!(text.contains(needle), "{needle}");
-        }
-        assert!(
-            text.len() < 1400,
-            "the guide is paid in every session: {}",
-            text.len()
-        );
     }
 }

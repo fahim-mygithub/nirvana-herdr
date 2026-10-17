@@ -655,7 +655,7 @@ pub fn items(
             None,
         ));
     }
-    items.extend(jev_items(local));
+    items.extend(jev_items(local, cwd));
     for switch in off_switches(local) {
         if items
             .iter()
@@ -720,9 +720,10 @@ pub fn items(
     items
 }
 
-/// Feature 9: the Jev group. The guide and compact advice switch herdr's own hooks; the last row is
-/// what Jev did today, from herdr's own log, or why it cannot run.
-fn jev_items(local: &Value) -> Vec<Item> {
+/// Feature 9: the Jev group. The Jev memory and compact advice switch herdr's own hooks; the last row
+/// is what Jev did today, from herdr's own log, or why it cannot run. Feature 10: the memory is its own
+/// file, `e` opens it, and the row says whether this folder gets it in full or as a flag.
+fn jev_items(local: &Value, cwd: &Path) -> Vec<Item> {
     let row = |name: &str, detail: String, tokens, switch: Option<Switch>| Item {
         provider: Provider::Jev,
         group: Group::Jev,
@@ -734,13 +735,15 @@ fn jev_items(local: &Value) -> Vec<Item> {
         file: None,
     };
     let (today, _) = crate::nirvana_jev::today_line();
+    let mut memory = row(
+        "Jev memory",
+        crate::nirvana_jev_memory::detail(cwd),
+        Some(crate::nirvana_jev_install::guide_tokens(cwd)),
+        Some(Switch::JevGuide),
+    );
+    memory.file = Some(crate::nirvana_jev_memory::file());
     vec![
-        row(
-            "Jev guide",
-            "Claude, Codex, agy: ask Jev, not read".into(),
-            Some(crate::nirvana_jev_install::guide_tokens()),
-            Some(Switch::JevGuide),
-        ),
+        memory,
         row(
             "Compact advice",
             "Claude: says when to /compact".into(),
@@ -1182,7 +1185,12 @@ mod tests {
         assert!(items
             .iter()
             .all(|item| item.on || item.provider == Provider::Jev));
-        assert!(!find("Jev guide").on && !find("Compact advice").on);
+        assert!(!find("Jev memory").on && !find("Compact advice").on);
+        // Feature 10: the Jev memory is a file `e` opens.
+        assert!(find("Jev memory")
+            .file
+            .as_ref()
+            .is_some_and(|file| file.ends_with("JEV.md")));
         // Grouped by provider, then by kind inside a provider.
         assert!(items.windows(2).all(|pair| {
             (&pair[0].provider, pair[0].group) <= (&pair[1].provider, pair[1].group)

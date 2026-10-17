@@ -1,6 +1,6 @@
 //! Nirvana fork, feature 9: putting Jev in front of each agent in a folder, from Preload's two switches.
 //!
-//! - **Jev guide** tells every agent started in the folder how to ask Jev (`nirvana_jev::guide`). Claude
+//! - **Jev memory** tells every agent started in the folder how to ask Jev (`nirvana_jev_memory`). Claude
 //!   Code gets it from a `SessionStart` hook in the folder's `.claude/settings.local.json`, whose output
 //!   Claude Code adds to the session's context; the other agents get it as described in `others`.
 //! - **Compact advice** is level 7 for Claude Code: a `Stop` hook running `herdr jev compact`.
@@ -114,9 +114,10 @@ pub fn others(cwd: &Path, on: bool) -> Result<(), String> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => return Err(format!("{}: {err}", path.display())),
     };
+    // Written at the switch: the project's size in it is the size then.
     let block = format!(
         "{BLOCK_START}\n{}{BLOCK_END}\n",
-        crate::nirvana_jev::guide(&crate::nirvana_board::exe())
+        crate::nirvana_jev_memory::for_folder(&root, &crate::nirvana_board::exe())
     );
     let (text, created) = agents_md(existing.as_deref(), &block, on);
     let write = |text: &str| {
@@ -237,8 +238,8 @@ pub fn claude_reads_agents_block(folder: &Path) -> bool {
 /// The guide's size in tokens, as Preload shows it. Claude Code counted herdr's AGENTS.md block, the
 /// guide and its two marker lines, at 469 tokens for 1,150 characters (2026-10-16): about 2.5 characters
 /// a token, paths and code being dear.
-pub fn guide_tokens() -> u32 {
-    let text = crate::nirvana_jev::guide(&crate::nirvana_board::exe());
+pub fn guide_tokens(folder: &Path) -> u32 {
+    let text = crate::nirvana_jev_memory::for_folder(folder, &crate::nirvana_board::exe());
     u32::try_from((text.chars().count() * 2).div_ceil(5)).unwrap_or(u32::MAX)
 }
 
@@ -291,7 +292,8 @@ mod tests {
         std::fs::write(dir.join(".git/info/exclude"), "# local excludes\n").unwrap();
         others(&dir, true).unwrap();
         let agents = std::fs::read_to_string(dir.join("AGENTS.md")).unwrap();
-        assert!(agents.contains("jev file") && agents.starts_with(BLOCK_START));
+        // An empty folder is small: the block is the one-line flag.
+        assert!(agents.contains("jev file|files|text") && agents.starts_with(BLOCK_START));
         let exclude = std::fs::read_to_string(dir.join(".git/info/exclude")).unwrap();
         assert_eq!(exclude, "# local excludes\n/AGENTS.md\n");
         others(&dir, false).unwrap();
@@ -340,7 +342,7 @@ mod tests {
         others(&dir, true).unwrap();
         assert!(std::fs::read_to_string(dir.join("AGENTS.md"))
             .unwrap()
-            .contains("jev files"));
+            .contains("jev file|files|text"));
         assert!(!std::fs::read_to_string(dir.join(".git/info/exclude"))
             .unwrap_or_default()
             .contains("/AGENTS.md"));

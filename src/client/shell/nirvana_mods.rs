@@ -1089,10 +1089,10 @@ impl ClientShellState {
             // Feature 9: herdr's own switches reach more than Claude, and compact advice is a Stop
             // hook, which a running Claude picks up with no restart (measured for the board's hook).
             Ok(_) if switch == Switch::JevGuide && !item.on => {
-                "Jev guide on: each new Claude, Codex and agy here is told to ask Jev before reading (AGENTS.md for Codex and agy); r restarts this Claude".to_owned()
+                "Jev memory on: each new Claude, Codex and agy here gets JEV.md, in full or as a flag by this project's size (AGENTS.md for Codex and agy); r restarts this Claude".to_owned()
             }
             Ok(_) if switch == Switch::JevGuide => {
-                "Jev guide off: herdr's hook and its AGENTS.md block are gone".to_owned()
+                "Jev memory off: herdr's hook and its AGENTS.md block are gone; JEV.md stays".to_owned()
             }
             Ok(_) if switch == Switch::JevCompact && !item.on => {
                 "Compact advice on: from its next answer, Claude here is told when /compact is worth it".to_owned()

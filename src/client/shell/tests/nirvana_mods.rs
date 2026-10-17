@@ -710,16 +710,16 @@ fn the_jev_group_switches_the_guide_for_every_agent_and_compact_advice_for_claud
         "{text}"
     );
     assert!(
-        rows[at("Jev guide")].contains("[ ]"),
+        rows[at("Jev memory")].contains("[ ]"),
         "off until switched: {text}"
     );
     assert!(rows[at("Compact advice")].contains("[ ]"), "{text}");
     // Under test no key is read: the row says what is missing.
     assert!(rows[at("today")].contains("no Jev key"), "{text}");
 
-    // Rows sort by name inside a group: Compact advice, Jev guide, today.
+    // Rows sort by name inside a group: Compact advice, Jev memory, today.
     assert!(
-        at("Compact advice") < at("Jev guide") && at("Jev guide") < at("today"),
+        at("Compact advice") < at("Jev memory") && at("Jev memory") < at("today"),
         "{text}"
     );
     key(&mut state, KeyCode::Char(' '));
@@ -751,7 +751,8 @@ fn the_jev_group_switches_the_guide_for_every_agent_and_compact_advice_for_claud
     );
     let agents =
         std::fs::read_to_string(dir.join("AGENTS.md")).expect("AGENTS.md for Codex and agy");
-    assert!(agents.contains("jev files"), "{agents}");
+    // An empty folder is small: Codex and agy get the one-line flag (feature 10).
+    assert!(agents.contains("jev file|files|text"), "{agents}");
     let message = state
         .nirvana_preload
         .as_ref()
