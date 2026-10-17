@@ -5,7 +5,8 @@ which the fork never edits.
 
 ## alpha 0.11.0 (2026-10-17): Accounts, a sign-in button at the foot of the sidebar
 
-- **Changed:** the sidebar foot ends with an "[ accounts ]" button. It opens the Accounts panel at the bottom left of
+- **Changed:** the sidebar foot ends with an "accounts" button, plain grey text like the spaces list's "new" and
+  "menu" (the owner, of the first "[ accounts ]": "have it looks like the text here"). It opens the Accounts panel at the bottom left of
   the panes: one row each for Claude Code, Codex and Antigravity, with who is signed in and a button ("switch" when
   someone is, "log in" when not). The button sends herdr's `command.invoke` with `nirvana.account_login:<cli>`; the
   server opens a focused tab, "log in <CLI>", running `herdr account login <cli>`, which runs the CLI's own sign-in

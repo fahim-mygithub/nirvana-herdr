@@ -16,7 +16,7 @@
 //! the usage rows are read by this window (`crate::nirvana_usage`). The "servers" block hides when no
 //! space runs one, as old Nirvana's does.
 //!
-//! Feature 11: the last row is the "[ accounts ]" button, which opens the Accounts panel
+//! Feature 11: the last row is the "accounts" button, which opens the Accounts panel
 //! (`nirvana_accounts.rs`). The owner, 2026-10-17: "In the bottom left let me manage my login accounts."
 
 use super::nirvana_spaces::fit;
@@ -183,9 +183,7 @@ pub(super) fn render_footer(
         button_y,
         button_width,
         button,
-        Style::default()
-            .fg(palette.accent)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(palette.overlay0),
     );
     *accounts = Rect::new(area.x, button_y, button_width + 1, 1);
     let area = Rect::new(area.x, area.y, area.width, area.height - 1);

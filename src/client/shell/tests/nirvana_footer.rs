@@ -105,7 +105,7 @@ fn the_foot_lists_a_spaces_server_and_the_four_usage_rows() {
     // The foot sits at the very bottom of the sidebar, its last row the accounts button.
     assert_eq!(usage_y + 5, rows.len() - 1);
     assert!(
-        sidebar(&rows[usage_y + 5]).starts_with(" [ accounts ]"),
+        sidebar(&rows[usage_y + 5]).trim_end() == " accounts",
         "{:?}",
         rows[usage_y + 5]
     );

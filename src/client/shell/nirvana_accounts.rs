@@ -36,8 +36,9 @@ pub(super) struct AccountsHits {
     pub(super) rows: Vec<(Rect, usize)>,
 }
 
-/// The button's text on the foot's last row.
-pub(super) const BUTTON: &str = "[ accounts ]";
+/// The button's text on the foot's last row, plain like the spaces list's "new" and "menu". The owner,
+/// 2026-10-17, of "[ accounts ]": "have it looks like the text here" (the "new ... menu" row).
+pub(super) const BUTTON: &str = "accounts";
 
 /// One row's text: the name, the account, and the button at the right of `inner` cells.
 pub(super) fn row_text(account: &Account, inner: usize) -> (String, String) {
