@@ -7,6 +7,9 @@ description: "Route video, audio, and >400k-token files to Gemini seats (argon o
 
 As the Nirvana Claude orchestrator, **never read a video, an audio file, or a huge (>400k token) file into your own context**. Claude cannot ingest video or audio at all, and reading huge inputs on Claude burns the `>150k` context tier that consumes 74% of the Max weekly pool. Always delegate media and huge reads to an Antigravity (`agy`) worker seated on `argon` or `flash`.
 
+`herdr` below is the fork's binary, `"${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe"`. A plain `herdr` on this machine's
+PATH is upstream herdr, which has no `media` or `seat` command (measured by O4b, 2026-10-18).
+
 ## 1. Probe and shrink before seating (`< 100 MB`)
 
 Antigravity's `view_file` tool supports `image`, `pdf`, `video`, and `audio` up to a **hard 100 MB limit** (probe P2: a 186 MB video was refused at the tool layer before reaching Gemini).

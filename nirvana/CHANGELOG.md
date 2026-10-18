@@ -3,7 +3,7 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
-## alpha NEXT (o5): the completion gate, `herdr gate run|author|merge|status`; the retro; lessons
+## alpha 0.18.0 (2026-10-18): the completion gate, `herdr gate run|author|merge|status`; the retro; lessons (plan 12 O5)
 
 Plan 12, package O5 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §7.3, §7.4.2, §7.4.3; the record is
 `plans/2026-10-17-12-records/o5.md`).
