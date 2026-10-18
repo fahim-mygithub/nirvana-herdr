@@ -1835,12 +1835,6 @@ pub fn load_leases(path: &Path) -> Result<Leases, String> {
     }
 }
 
-/// Lossy: a corrupt file reads as empty. Only `record_cli` still uses it, where an empty read releases nothing
-/// and so writes nothing; it moves to `load_leases` with package O3's change to `record_cli`.
-pub fn read_leases(path: &Path) -> Leases {
-    load_leases(path).unwrap_or_default()
-}
-
 /// A temp file, then a rename, as `usage.json` is written (O1): a reader never sees half a file.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -2150,8 +2144,19 @@ pub fn record_once(
         return Ok((false, line));
     }
     let leases_path = dir.join(LEASES_FILE);
-    let mut leases = read_leases(&leases_path);
-    if let Some(lease) = leases.live(&line.order, now).cloned() {
+    // A leases.json that does not parse is left as it is (the O2 fix round: it holds each run's override
+    // count), so its booking is neither read nor released; the order's outcome is still recorded.
+    let mut leases = match load_leases(&leases_path) {
+        Ok(leases) => Some(leases),
+        Err(why) => {
+            eprintln!("herdr seat record: {why}; the booking is not released");
+            None
+        }
+    };
+    if let Some(lease) = leases
+        .as_ref()
+        .and_then(|leases| leases.live(&line.order, now).cloned())
+    {
         fill_from_lease(&mut line, &lease);
     }
     line.v.get_or_insert(1);
@@ -2159,8 +2164,10 @@ pub fn record_once(
         .get_or_insert_with(|| crate::nirvana::VERSION.to_owned());
     append_record(&record, &line)?;
     // A finished order's booking ends with it: its real use now shows in the pool's readings.
-    if release && leases.release(&line.order, now) {
-        write_leases(&leases_path, &leases)?;
+    if let Some(leases) = leases.as_mut().filter(|_| release) {
+        if leases.release(&line.order, now) {
+            write_leases(&leases_path, leases)?;
+        }
     }
     Ok((true, line))
 }
@@ -3556,7 +3563,7 @@ mod tests {
         let dir = temp_dir("leases");
         let path = dir.join(LEASES_FILE);
         write_leases(&path, &leases).unwrap();
-        assert_eq!(read_leases(&path).leases, leases.leases);
+        assert_eq!(load_leases(&path).unwrap().leases, leases.leases);
         assert!(leases.release("o-1", NOW + 10));
         assert!(!leases.release("o-1", NOW + 10));
         assert!(leases.leases.is_empty());

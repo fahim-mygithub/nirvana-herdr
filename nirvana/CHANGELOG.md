@@ -101,6 +101,34 @@ Plan 12, package O3 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` ยง4, ย
   (`woken via prompt`); with no such pane the next one queued ("state is not known") and `run notice` printed it once.
   **Hypothesis:** the owner-key hook has not run with a real client attached.
   **If you remove this:** the orchestrator learns of a delivery only when the owner next types.
+- **Changed:** the wake guard. `herdr run wake` types only into a pane that runs Nirvana Claude, and queues the events,
+  as for a busy pane, for any other pane, an urgent stop included. The signal is two of herdr's own readings: `pane
+  get`'s `agent` is `claude`, and one of `pane process-info`'s foreground processes has Nirvana Claude's argv,
+  `--agent nirvana` with `--plugin-dir` this home's `nirvana/claude`. `type_prompt` reads both again just before it
+  types. `NIRVANA_ORCHESTRATOR=1` is not the signal: herdr exposes no process's environment, and in the verb's seeded
+  shell it reaches Claude's tools through settings.json, not `claude.exe` itself.
+  **Because:** the O3 build's live run, 2026-10-18 (record `o3.md`): the run's orchestrator pane "was an interactive
+  haiku Claude Code I had started in the isolated server to record its prompt screen, with its folder the owner's
+  Nirvana repository. It took the digest as a prompt and ran read-only commands there (`cat` of a fixture, `git
+  worktree list`, a `find` under the home folder) before I interrupted it with Esc". To herdr, plain Claude Code and
+  Nirvana Claude were the same idle `claude`.
+  **Measured:** `a_wake_types_only_into_a_pane_that_runs_nirvana_claude`, on `pane get` and `pane process-info`
+  recorded from four panes of an isolated herdr server (Nirvana Claude, plain Claude Code, pwsh, agy); controls
+  `run_wake_guard_*` and `run_type_unguarded`. Live: `run wake` for an idle pwsh pane queued its event, and `run notice`
+  printed it.
+  **If you remove this:** a wake types a digest into whatever program holds the recorded pane, a plain Claude Code or a
+  shell, which runs it as a prompt or a command.
+- **Changed:** on the merge onto 0.15.0, the runner's own bookings take the O2 fix round's paths: `seat run` books
+  through `book_pick` (an override's count carries its time, so the 8-day prune keeps it) and refuses an unknown
+  `--needs` or `--not-family` word, exit 2; every writer of `leases.json` loads it with `load_leases`, so a file that
+  does not parse is left as it is (`seat run` and a re-seat exit 2; `record_once` still records the order and says
+  the booking was not released). The lossy `read_leases` is removed.
+  **Because:** O3 was built on 0.13.0, before the fix round. Its booking set `overrides += 1` with no time, which the
+  fix round's prune reads as a run 8 days old and drops; its lossy read wrote a corrupt file back as empty, every run's
+  override count with it.
+  **Hypothesis, not measured:** no test drives `seat run`'s booking (it reads the live world); `book_pick` and
+  `load_leases` are the fix round's, tested there.
+  **If you remove this:** the runner's overrides escape the 3-a-run cap after the first prune.
 - **Changed:** `herdr run receipt <run> [--json]`, recomputed from the journal and `record.jsonl`, no cache and no
   clock (an order's duration runs from `seated` to its last event); `herdr run end` writes `receipt.md` and
   `receipt.json` beside the journal. Each missing figure says why. O2's `RecordLine` gains optional `v`, pool, reason,

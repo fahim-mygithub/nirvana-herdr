@@ -1163,6 +1163,118 @@ pub struct PaneView {
     pub prompt: Option<String>,
     /// Unix seconds of the owner's last key in the pane (written by the server, `note_owner_key`).
     pub last_key_at: Option<u64>,
+    /// What runs in the pane: a digest is typed only into Nirvana Claude (`pane_program`).
+    pub program: PaneProgram,
+}
+
+/// What runs in a pane, as herdr reads it.
+///
+/// On 2026-10-18 the O3 build's live run woke a pane that held a plain interactive Claude Code on the owner's
+/// Nirvana repository: it took the digest as a prompt and ran commands there. So a wake types only into a pane
+/// shown to run Nirvana Claude, and anything else, an unread pane included, is queued for the notice route.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PaneProgram {
+    /// herdr's answers were missing: never typed into.
+    #[default]
+    Unknown,
+    NirvanaClaude,
+    /// Anything else, with what herdr saw.
+    Other(String),
+}
+
+impl PaneProgram {
+    pub fn why(&self) -> String {
+        match self {
+            Self::Unknown => "herdr could not say what runs in it".into(),
+            Self::NirvanaClaude => "it runs Nirvana Claude".into(),
+            Self::Other(why) => why.clone(),
+        }
+    }
+}
+
+/// Whether a pane runs Nirvana Claude, from herdr's `pane get` and `pane process-info` answers.
+///
+/// Both must say so: `pane get`'s `agent` is `claude` (herdr's live detection, which drops the label when the
+/// agent's process exits, while `process-info` may answer from a cached process snapshot), and one of the
+/// foreground processes has Nirvana Claude's argv, `--agent nirvana` with `--plugin-dir` this home's
+/// `nirvana/claude` (`nirvana_launch::nirvana_claude_args`). The argv is what tells Nirvana Claude from plain
+/// Claude Code: both are `claude` to herdr's detection. `NIRVANA_ORCHESTRATOR=1` is not read: herdr exposes no
+/// process's environment, and when the verb's seeded shell starts Nirvana Claude the variable comes from the
+/// plugin's settings.json `env`, which reaches Claude's tools, not `claude.exe` (O4a). The herdr agent name
+/// `nirvana` is a label `herdr agent start` gives; a Nirvana Claude typed into a shell has none.
+pub fn pane_program(pane: &Value, process: &Value, plugin_dir: Option<&Path>) -> PaneProgram {
+    let agent = ["/result/pane/agent", "/pane/agent"]
+        .iter()
+        .find_map(|pointer| pane.pointer(pointer))
+        .and_then(Value::as_str);
+    if agent != Some("claude") {
+        return PaneProgram::Other(format!(
+            "herdr reads its agent as {}",
+            agent.unwrap_or("none")
+        ));
+    }
+    let Some(plugin_dir) = plugin_dir else {
+        return PaneProgram::Other("no Nirvana home to find Nirvana Claude's plugin in".into());
+    };
+    let Some(processes) = [
+        "/result/process_info/foreground_processes",
+        "/process_info/foreground_processes",
+    ]
+    .iter()
+    .find_map(|pointer| process.pointer(pointer))
+    .and_then(Value::as_array) else {
+        return PaneProgram::Unknown;
+    };
+    let wanted = crate::nirvana_launch::folder_key(plugin_dir);
+    let nirvana = processes.iter().any(|process| {
+        let argv: Vec<&str> = match process.get("argv").and_then(Value::as_array) {
+            Some(argv) => argv.iter().filter_map(Value::as_str).collect(),
+            None => process
+                .get("cmdline")
+                .and_then(Value::as_str)
+                .map(|line| line.split_whitespace().collect())
+                .unwrap_or_default(),
+        };
+        let agent = flag_value(&argv, "--agent");
+        let plugin = flag_value(&argv, "--plugin-dir");
+        matches!(agent, Some("nirvana" | "nirvana:nirvana"))
+            && plugin.is_some_and(|dir| crate::nirvana_launch::folder_key(Path::new(dir)) == wanted)
+    });
+    if nirvana {
+        PaneProgram::NirvanaClaude
+    } else {
+        PaneProgram::Other(format!(
+            "its claude has no --agent nirvana with --plugin-dir {}",
+            plugin_dir.display()
+        ))
+    }
+}
+
+/// A flag's value in an argv: `--flag value` or `--flag=value`.
+fn flag_value<'a>(argv: &[&'a str], flag: &str) -> Option<&'a str> {
+    argv.iter().enumerate().find_map(|(index, arg)| {
+        if *arg == flag {
+            argv.get(index + 1).copied()
+        } else {
+            arg.strip_prefix(flag)
+                .and_then(|rest| rest.strip_prefix('='))
+        }
+    })
+}
+
+/// Types into a pane only when it runs Nirvana Claude: the one place a wake's text leaves herdr. The caller
+/// reads the program again just before, since the pane may have changed since the wake decided.
+pub fn type_if_nirvana(
+    program: &PaneProgram,
+    send: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if *program != PaneProgram::NirvanaClaude {
+        return Err(format!(
+            "the pane does not run Nirvana Claude: {}",
+            program.why()
+        ));
+    }
+    send()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1195,6 +1307,13 @@ pub fn wake_decision(
     let Some(view) = view else {
         return Wake::Queue("the run has no orchestrator pane".into());
     };
+    // Before the busy rule, and for an urgent stop too: a pane that is not Nirvana Claude is never typed into.
+    if view.program != PaneProgram::NirvanaClaude {
+        return Wake::Queue(format!(
+            "the orchestrator's pane does not run Nirvana Claude: {}",
+            view.program.why()
+        ));
+    }
     match view.status.as_deref() {
         Some("blocked") => {
             return Wake::Queue("the orchestrator is blocked on a prompt: retried later".into())
@@ -2217,7 +2336,10 @@ pub fn wake(project: &Project, run: &str, urgent: bool) -> std::io::Result<(Stri
                     )?;
                     Ok((format!("woke {pane}: {digest}"), true))
                 }
-                Err(why) => Ok((format!("queued: herdr agent prompt refused: {why}"), false)),
+                Err(why) => Ok((
+                    format!("{} event(s) queued: {why}", state.queue.len()),
+                    false,
+                )),
             }
         }
     }

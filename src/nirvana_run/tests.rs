@@ -390,7 +390,137 @@ fn idle_view() -> PaneView {
         status: Some("idle".into()),
         prompt: Some(String::new()),
         last_key_at: None,
+        program: PaneProgram::NirvanaClaude,
     }
+}
+
+/// `herdr pane get` and `herdr pane process-info --pane` of four panes in an isolated herdr server, recorded
+/// 2026-10-18 on this PC: Nirvana Claude started with O4a's argv, plain `claude`, the pane's pwsh at its
+/// prompt, and `agy`. Each Claude and agy sat on its folder-trust screen in a scratch repository.
+const PANES: [(&str, &str, &str); 4] = [
+    (
+        "nirvana-claude",
+        include_str!("fixtures/panes/nirvana-claude.get.json"),
+        include_str!("fixtures/panes/nirvana-claude.process.json"),
+    ),
+    (
+        "claude-code",
+        include_str!("fixtures/panes/claude-code.get.json"),
+        include_str!("fixtures/panes/claude-code.process.json"),
+    ),
+    (
+        "shell",
+        include_str!("fixtures/panes/shell.get.json"),
+        include_str!("fixtures/panes/shell.process.json"),
+    ),
+    (
+        "agy",
+        include_str!("fixtures/panes/agy.get.json"),
+        include_str!("fixtures/panes/agy.process.json"),
+    ),
+];
+/// The `NIRVANA_HERDR_HOME` of that server: its Nirvana Claude's `--plugin-dir` is `<home>\nirvana\claude`.
+const RECORDED_HOME: &str =
+    "C:\\Users\\fahim\\Desktop\\Pojects\\Nirvana-Herdr-o3\\target\\o3-merge-live\\home";
+
+fn recorded_program(name: &str, home: &str) -> PaneProgram {
+    let (_, get, process) = PANES
+        .iter()
+        .find(|(pane, _, _)| *pane == name)
+        .expect("a recorded pane");
+    let plugin = crate::nirvana_launch::plugin_dir(Path::new(home));
+    pane_program(
+        &serde_json::from_str(get).expect("pane get"),
+        &serde_json::from_str(process).expect("process-info"),
+        Some(&plugin),
+    )
+}
+
+#[test]
+fn a_wake_types_only_into_a_pane_that_runs_nirvana_claude() {
+    assert_eq!(
+        recorded_program("nirvana-claude", RECORDED_HOME),
+        PaneProgram::NirvanaClaude
+    );
+    // The 2026-10-18 incident's pane: a plain Claude Code is `claude` to herdr too.
+    for other in ["claude-code", "shell", "agy"] {
+        let program = recorded_program(other, RECORDED_HOME);
+        assert!(
+            matches!(program, PaneProgram::Other(_)),
+            "{other}: {program:?}"
+        );
+    }
+    // Another home's plugin is not this herdr's Nirvana Claude, and the folder's case does not matter.
+    assert!(matches!(
+        recorded_program("nirvana-claude", "C:\\Users\\fahim\\elsewhere"),
+        PaneProgram::Other(_)
+    ));
+    assert_eq!(
+        recorded_program("nirvana-claude", &RECORDED_HOME.to_lowercase()),
+        PaneProgram::NirvanaClaude
+    );
+    // Nirvana Claude's argv in a pane whose agent herdr no longer reads (its process just exited, and
+    // process-info answered from a cached snapshot) is not typed into.
+    let plugin = crate::nirvana_launch::plugin_dir(Path::new(RECORDED_HOME));
+    let program = pane_program(
+        &serde_json::from_str(PANES[2].1).expect("shell pane get"),
+        &serde_json::from_str(PANES[0].2).expect("nirvana process-info"),
+        Some(&plugin),
+    );
+    assert_eq!(
+        program,
+        PaneProgram::Other("herdr reads its agent as none".into())
+    );
+    // No home, no plugin to match: refused.
+    assert!(matches!(
+        pane_program(
+            &serde_json::from_str(PANES[0].1).expect("pane get"),
+            &serde_json::from_str(PANES[0].2).expect("process-info"),
+            None,
+        ),
+        PaneProgram::Other(_)
+    ));
+
+    // The wake queues the event for every pane but Nirvana Claude's, an urgent stop included.
+    let state = replay(&delivered_run());
+    let now = T0 + 100;
+    for (name, _, _) in PANES {
+        let mut view = idle_view();
+        view.program = recorded_program(name, RECORDED_HOME);
+        for urgent in [false, true] {
+            let verdict = wake_decision("live1", &state, Some(&view), now, urgent);
+            if name == "nirvana-claude" {
+                assert!(matches!(verdict, Wake::Type(_)), "{name}: {verdict:?}");
+            } else {
+                assert!(matches!(verdict, Wake::Queue(_)), "{name}: {verdict:?}");
+            }
+        }
+    }
+    let mut unread = idle_view();
+    unread.program = PaneProgram::Unknown;
+    assert_eq!(
+        wake_decision("live1", &state, Some(&unread), now, true),
+        Wake::Queue(
+            "the orchestrator's pane does not run Nirvana Claude: herdr could not say what runs in it".into()
+        )
+    );
+
+    // And the typing itself reads the pane again: nothing is sent to a pane that is not Nirvana Claude.
+    let mut sent = 0;
+    let refused = type_if_nirvana(&recorded_program("claude-code", RECORDED_HOME), || {
+        sent += 1;
+        Ok(())
+    });
+    assert!(refused.is_err());
+    assert_eq!(sent, 0);
+    assert_eq!(
+        type_if_nirvana(&PaneProgram::NirvanaClaude, || {
+            sent += 1;
+            Ok(())
+        }),
+        Ok(())
+    );
+    assert_eq!(sent, 1);
 }
 
 #[test]
@@ -911,7 +1041,7 @@ fn an_order_is_recorded_once_with_its_booking_and_the_booking_ends() {
     assert_eq!(filled.seated_at, Some(T0), "the lease's booked_at");
     assert_eq!(filled.v, Some(1));
     // The booking is released with it.
-    let leases = nirvana_seat::read_leases(&dir.join(nirvana_seat::LEASES_FILE));
+    let leases = nirvana_seat::load_leases(&dir.join(nirvana_seat::LEASES_FILE)).unwrap();
     assert!(leases.live("sub", T0 + 60).is_none());
     // A retry is refused: one line, not two.
     let (again, _) = nirvana_seat::record_once(&dir, line, true, T0 + 61).expect("retry");

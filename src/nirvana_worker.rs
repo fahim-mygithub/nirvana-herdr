@@ -1060,9 +1060,11 @@ fn release_lease(order: &str) {
     let dir = nirvana_seat::dir();
     if let Ok(_lock) = nirvana_seat::Lock::take(&dir) {
         let path = dir.join(nirvana_seat::LEASES_FILE);
-        let mut leases = nirvana_seat::read_leases(&path);
-        if leases.release(order, now()) {
-            let _ = nirvana_seat::write_leases(&path, &leases);
+        // A leases.json that does not parse is left as it is (O2 fix round); the lease then expires.
+        if let Ok(mut leases) = nirvana_seat::load_leases(&path) {
+            if leases.release(order, now()) {
+                let _ = nirvana_seat::write_leases(&path, &leases);
+            }
         }
     }
 }
@@ -1675,7 +1677,7 @@ fn book_child(
     let dir = nirvana_seat::dir();
     let _lock = nirvana_seat::Lock::take(&dir)?;
     let path = dir.join(nirvana_seat::LEASES_FILE);
-    let mut leases = nirvana_seat::read_leases(&path);
+    let mut leases = nirvana_seat::load_leases(&path).map_err(std::io::Error::other)?;
     let lease = nirvana_seat::lease_for(table, pick, order, Some(run), now());
     let booked = leases.book(lease, now());
     nirvana_seat::write_leases(&path, &leases)?;
@@ -1785,9 +1787,15 @@ fn find_str<'a>(value: &'a Value, pointers: &[&str]) -> Option<&'a str> {
 
 /// The orchestrator's pane as a wake sees it.
 pub fn pane_view(pane: &str) -> nirvana_run::PaneView {
-    let status = herdr_json(&["pane", "get", pane]).ok().and_then(|value| {
-        find_str(&value, &["/result/pane/agent_status", "/pane/agent_status"]).map(str::to_owned)
+    let info = herdr_json(&["pane", "get", pane]).ok();
+    let status = info.as_ref().and_then(|value| {
+        find_str(value, &["/result/pane/agent_status", "/pane/agent_status"]).map(str::to_owned)
     });
+    let program = info
+        .as_ref()
+        .map_or(nirvana_run::PaneProgram::Unknown, |info| {
+            program_of(pane, info)
+        });
     let prompt = herdr_text(&[
         "pane", "read", pane, "--source", "visible", "--format", "ansi",
     ])
@@ -1796,12 +1804,32 @@ pub fn pane_view(pane: &str) -> nirvana_run::PaneView {
         status,
         prompt,
         last_key_at: nirvana_run::owner_key_at(pane),
+        program,
     }
 }
 
-/// `herdr agent prompt`, which refuses a blocked agent before it types anything.
+/// What runs in the pane (`nirvana_run::pane_program`), from `pane get`'s answer and `pane process-info`.
+fn program_of(pane: &str, info: &Value) -> nirvana_run::PaneProgram {
+    let Ok(process) = herdr_json(&["pane", "process-info", "--pane", pane]) else {
+        return nirvana_run::PaneProgram::Unknown;
+    };
+    let plugin = crate::nirvana::home().map(|home| crate::nirvana_launch::plugin_dir(&home));
+    nirvana_run::pane_program(info, &process, plugin.as_deref())
+}
+
+/// `herdr agent prompt`, which refuses a blocked agent before it types anything, here only into a pane that
+/// runs Nirvana Claude, read again just before (`nirvana_run::type_if_nirvana`). The runner's only other typing
+/// is `open_pane`'s `pane run`, into the shell of the pane that same call created.
 pub fn type_prompt(pane: &str, text: &str) -> Result<(), String> {
-    herdr_json(&["agent", "prompt", pane, text]).map(|_| ())
+    let program = herdr_json(&["pane", "get", pane])
+        .map_or(nirvana_run::PaneProgram::Unknown, |info| {
+            program_of(pane, &info)
+        });
+    nirvana_run::type_if_nirvana(&program, || {
+        herdr_json(&["agent", "prompt", pane, text])
+            .map(|_| ())
+            .map_err(|why| format!("herdr agent prompt refused: {why}"))
+    })
 }
 
 fn pane_env(project: &Project) -> Vec<String> {
@@ -2209,8 +2237,14 @@ fn book(request: &SeatRequest) -> Result<Booked, (i32, String)> {
     let dir = nirvana_seat::dir();
     let leases_path = dir.join(nirvana_seat::LEASES_FILE);
     let mut world = nirvana_seat::live_world(&table);
+    let words = nirvana_seat::unknown_words(&table, &request.needs, &request.not_family);
+    if !words.is_empty() {
+        return Err((2, words.join("; ")));
+    }
     let lock = nirvana_seat::Lock::take(&dir).map_err(|err| (2, err.to_string()))?;
-    let mut leases = nirvana_seat::read_leases(&leases_path);
+    // `load_leases`, never the lossy read: a corrupt file read as empty and written back would lose every
+    // run's override count (the O2 fix round's exit 2).
+    let mut leases = nirvana_seat::load_leases(&leases_path).map_err(|why| (2, why))?;
     world.now = now();
     let mut booked: Booked = if let Some(lease) = leases.live(&request.order, world.now) {
         serde_json::from_value(lease.pick.clone()).map_err(|err| (2, err.to_string()))?
@@ -2268,16 +2302,18 @@ fn book(request: &SeatRequest) -> Result<Booked, (i32, String)> {
                 ),
             )
         })?;
-        if pick.override_reason.is_some() {
-            leases
-                .runs
-                .entry(request.run.clone())
-                .or_default()
-                .overrides += 1;
-        }
-        let lease =
-            nirvana_seat::lease_for(&table, &pick, &request.order, Some(&request.run), world.now);
-        let lease = leases.book(lease, world.now);
+        // The fix round's `book_pick`: the override is counted with its time, so the 8-day prune keeps it.
+        let (lease, _) = nirvana_seat::book_pick(
+            &mut leases,
+            &table,
+            &pick,
+            Some(&request.order),
+            Some(&request.run),
+            world.now,
+        );
+        let Some(lease) = lease else {
+            return Err((2, format!("{} was not booked", request.order)));
+        };
         nirvana_seat::write_leases(&leases_path, &leases).map_err(|err| (2, err.to_string()))?;
         serde_json::from_value(lease.pick).map_err(|err| (2, err.to_string()))?
     };
