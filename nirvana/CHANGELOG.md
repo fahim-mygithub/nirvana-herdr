@@ -3,7 +3,7 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
-## alpha NEXT (o8b): Jev's roles 2 and 3 in shadow, `herdr jev roles|agree|watch` (plan 12 O8b)
+## alpha 0.20.0 (2026-10-18): Jev's roles 2 and 3 in shadow, `herdr jev roles|agree|watch` (plan 12 O8b)
 
 Plan 12, package O8b (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §9; the record is
 `plans/2026-10-17-12-records/o8b.md`).
