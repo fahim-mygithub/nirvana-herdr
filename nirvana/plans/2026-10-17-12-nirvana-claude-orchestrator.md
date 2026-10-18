@@ -859,6 +859,21 @@ herdr seat pick: --needs vidoe: no seat has it; the capabilities: audio, browser
 (exit 2)
 ```
 
+§16's own five picks again, in a fresh home at 03:56Z, after the controls:
+
+```text
+$ herdr seat pick --class build.bounded
+build.bounded → sonnet medium: max 5h 63% used, week 49% used, reserve 15%
+$ herdr seat pick --class media.video
+media.video → argon medium: argon week 7% used
+$ herdr seat pick --class plan --mode efficient
+plan → opus high: max 5h 63% used, week 49% used, reserve 15%; next argon (argon week 7% used)
+$ herdr seat pick --class plan --mode sota
+plan → opus xhigh: max 5h 63% used, week 49% used, reserve 15%; g-opus scores the same (google3p 5h 0% used, week 4% used)
+$ herdr seat pick --class build.bounded --needs video
+build.bounded → argon low: argon week 7% used; bar dropped to 82 (none left reached 85)
+```
+
 With argon switched off in that home's `seats.toml`, the fallback:
 
 ```text
@@ -870,6 +885,13 @@ A repeat `--book o-1` naming `--override sonnet` after an override to argon: `no
 already booked on argon low (an override); release it first (herdr seat release o-1)`, exit 3. A `leases.json` cut
 short: exit 2, the file left as it was. With another process holding `leases.lock`, `herdr seat release` exited 4 after
 10.0 s, and 0 once it let go.
+
+**Controls.** The fix round's are in `nirvana/controls.d/o2_fix.py`; `seat_reserve_not_headroom`,
+`seat_holders_need_known`, `seat_unknown_ranks_first`, `seat_stale_is_read`, `seat_ties_score`, both `seat_lock_*` are
+repointed in `controls.py`, and `seat_ties_table_order` became `seat_ties_class_order`. Every `seat_*`, `footer_*` and
+`usage_*` control was run alone at 98ed0293 with `--only <exact name>` (a list argv, carriage returns stripped), the
+expected line `PASS <name>: red line seen` and an unchanged tree written down before each: each reddened its test, and
+`git status --porcelain` was empty after each.
 
 **Not measured in the fix round.** Two herdr processes racing for the lock (the live check held it from Python's
 `msvcrt.locking`, which overlaps `LockFileEx` at byte 0); the lock on Linux or macOS; whether a class whose Balanced bar
