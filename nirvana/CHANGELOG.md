@@ -3,6 +3,68 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha NEXT (o8a): the Seats square of a Nirvana tab, and the mode (plan 12 O8a)
+
+Plan 12, package O8a (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §5.3 step 5, §8; the record is
+`plans/2026-10-17-12-records/o8a.md`).
+
+- **Changed:** a Nirvana tab (one whose herdr agent is named `nirvana` or `nirvana-<n>`, as O4a's launch names
+  Nirvana Claude) gets a Seats square in its mod strip, after Running: "Seats 2 open · Balanced", narrow "2 · Bal"
+  under a 100-column strip, "· 1 asks" in yellow when an order is asked or interrupted. A click opens its panel: each
+  open order (a run not ended, a phase not terminal, and a live lease of that run no `seated` names yet, "booked")
+  with its seat and effort, model, pool, state, time and use, and under it the reason line `seat pick` gave; one row
+  of columns when the panel is 106 cells inside, three lines an order when narrower. Each run's line counts its
+  classes and overrides (§5.3 step 4) and names the last mode change. A click on any line of an order, or Enter on
+  the selected one, focuses the worker's pane and closes the panel; a booked order or a detached one says why not.
+  **Because:** §8: "each open order with its seat, model and effort, pool, state, time and use; its reason line; a
+  click focuses the worker's pane"; L7: a plain Claude Code tab stays what it was.
+  **Measured:** `nirvana_seats_square::tests::*` and `client::shell::tests::nirvana_seats::*` on a run herdr recorded
+  on an isolated server (session `o8ain`: a real flash low worker, journal copied while it ran and after it
+  delivered, and `leases.json` after a `seat pick --book` no worker took); 68 controls in `controls.d/o8a.py`. Live,
+  the same server's window drawn inside a second isolated herdr pane and read with `herdr pane read`, clicks and keys
+  written to its console input: the square, both panel forms, and a click that moved the focus to the worker's pane
+  `w1:p2` in tab `run rec1`.
+  **If you remove this:** the seating is read from `herdr seat status` and `herdr run receipt` in a shell, as before
+  O8 (§11: "Until O8, the statusline, `herdr usage` and `herdr seat list` show the seating").
+- **Changed:** the square's data is files only, read on the window's timer tick, never while it draws: the project's
+  journals replayed with O3's `replay`, `leases.json` and `seats.toml`. A journal whose length and modified time did
+  not change is not replayed again; a project the window has not drawn for 30 s is dropped. Use is the order's own
+  streamed tokens at its seat's price on the day it was seated (the receipt's basis, `computed_use`), else its
+  booking's expectation, written "~… booked".
+  **Because:** the brief: "a cheap read the window can poll ... do not run usage readers from the draw path". A
+  usage reader runs `claude` or `agy` (O1).
+  **Measured:** `a_journal_whose_length_and_time_did_not_change_is_not_replayed_again`; controls
+  `o8a_replay_never_reused`, `o8a_replay_never_again`. That the draw path starts no read is a design claim, not an
+  assertion: a source scan would be the hollow gate the memory names.
+  **If you remove this:** every frame reads and replays every journal of the project (Running's 2 s rule kept).
+- **Changed:** the mode (Efficient, Balanced, SOTA) in the panel's title and its first row; `m`, or a click on that
+  row, moves it to the next stop. It is written to `seats.toml`'s own top-level `mode =` line, every other byte kept
+  (comments, CRLF), and only when the result parses to the new mode; a refused table is never touched. `seat pick`
+  already read that line when `--mode` is not given (now through `default_request`). Each change is a
+  `mode_changed` event (`from`, `to`, `by`) in every open run of the project, replayed into `RunState.modes`; orders
+  seated at another mode say "seated at Balanced" on their reason line. `herdr seat mode [<mode>]` prints or sets it
+  from a shell, the same way.
+  **Because:** §8 "one key to change it"; the brief: "stored where `herdr seat pick` reads its default ... logged as a
+  journal event when changed during a run". One place for the setting: a `mode` file beside `seats.toml` would let a
+  hand edit of `mode =` lose to it silently.
+  **Measured:** `with_mode_changes_the_top_level_mode_line_and_nothing_else`,
+  `seat_pick_takes_the_mode_seats_toml_holds_when_no_mode_is_given`,
+  `the_mode_key_writes_seats_toml_and_logs_mode_changed_in_each_open_run`,
+  `a_refused_seats_toml_is_never_overwritten_by_the_mode_key`,
+  `the_mode_key_moves_the_mode_in_seats_toml_logs_it_and_shows_it`. Live: three presses wrote balanced → sota →
+  efficient → balanced with three `mode_changed` lines in `rec1`, and `herdr seat pick --class plan` with no `--mode`
+  between them answered `mode sota`, opus xhigh.
+  **If you remove this:** the mode changes only by editing `seats.toml`, and a run's journal cannot say why two of its
+  orders sat at two modes.
+- **Changed:** the Seats panel blocks the pane fast path in a branch of its own, so the existing condition keeps the
+  bytes `panel_painted_over` finds; `toggle_*` close the Seats panel with their line before their own, for the same
+  reason (`panels_both_open`, `memory_panel_beside_preload`).
+  **Because:** the 2026-10-16 incident (a pane's output painted over an open panel), and controls.py's rule that a
+  package does not edit the tuple.
+  **Measured:** `an_open_seats_panel_is_composed_again_when_a_pane_prints`,
+  `one_panel_is_open_at_a_time_with_the_seats_panel_among_them`; `controls.py --dry-run`: every find once.
+  **If you remove this:** a worker printing paints over the open Seats panel.
+
 ## alpha 0.20.0 (2026-10-18): Jev's roles 2 and 3 in shadow, `herdr jev roles|agree|watch` (plan 12 O8b)
 
 Plan 12, package O8b (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §9; the record is
