@@ -3,7 +3,7 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
-## alpha NEXT (o8a): the Seats square of a Nirvana tab, and the mode (plan 12 O8a)
+## alpha 0.21.0 (2026-10-18): the Seats square of a Nirvana tab, and the mode (plan 12 O8a)
 
 Plan 12, package O8a (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §5.3 step 5, §8; the record is
 `plans/2026-10-17-12-records/o8a.md`).
