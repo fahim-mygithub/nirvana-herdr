@@ -3,7 +3,7 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
-## alpha NEXT (o3): the runner, `herdr seat run|exec|status|read|stop|cleanup`, the journal, waking, the run receipt
+## alpha 0.16.0 (2026-10-18): the runner, `herdr seat run|exec|status|read|stop|cleanup`, the journal, waking, the run receipt (plan 12 O3)
 
 Plan 12, package O3 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §4, §5.6, §7.1, §7.2, §7.4.1; the record is
 `plans/2026-10-17-12-records/o3.md`).
