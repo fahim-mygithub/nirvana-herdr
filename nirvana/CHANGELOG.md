@@ -114,8 +114,9 @@ Plan 12, package O3 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` ยง4, ย
   Nirvana Claude were the same idle `claude`.
   **Measured:** `a_wake_types_only_into_a_pane_that_runs_nirvana_claude`, on `pane get` and `pane process-info`
   recorded from four panes of an isolated herdr server (Nirvana Claude, plain Claude Code, pwsh, agy); controls
-  `run_wake_guard_*` and `run_type_unguarded`. Live: `run wake` for an idle pwsh pane queued its event, and `run notice`
-  printed it.
+  `run_wake_guard_*` and `run_type_unguarded`. Live, run m1 in an isolated server with a pwsh pane as its orchestrator:
+  no `woken` event after either delivery, `run wake m1` printed "2 event(s) queued: the orchestrator's pane does not run
+  Nirvana Claude: herdr reads its agent as none", the pane showed only its prompt, and `run notice m1` printed both.
   **If you remove this:** a wake types a digest into whatever program holds the recorded pane, a plain Claude Code or a
   shell, which runs it as a prompt or a command.
 - **Changed:** on the merge onto 0.15.0, the runner's own bookings take the O2 fix round's paths: `seat run` books
