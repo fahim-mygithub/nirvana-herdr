@@ -737,3 +737,27 @@ fn the_plugins_copy_of_a_hook_stays_quiet_when_the_folder_runs_it() {
     ));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// O3's wake types a digest only into a pane whose `claude` argv is Nirvana Claude's (`nirvana_run::pane_program`):
+/// the launch O4b changed must still be recognised, and plain Claude Code must still not be.
+#[test]
+fn the_wake_guard_knows_this_launch_and_not_plain_claude() {
+    let home = Path::new(r"C:\Users\o\AppData\Local\Programs\Nirvana-Herdr");
+    let pane = json!({"result": {"pane": {"agent": "claude"}}});
+    let process = |args: Vec<String>| {
+        let mut argv = vec![r"C:\Users\o\.local\bin\claude.exe".to_owned()];
+        argv.extend(args);
+        json!({"result": {"process_info": {"foreground_processes": [{"argv": argv}]}}})
+    };
+    let plugin = crate::nirvana_launch::plugin_dir(home);
+    let nirvana = process(crate::nirvana_launch::NewKind::Nirvana.args(home));
+    assert_eq!(
+        nirvana_run::pane_program(&pane, &nirvana, Some(&plugin)),
+        nirvana_run::PaneProgram::NirvanaClaude
+    );
+    let plain = process(crate::nirvana_launch::NewKind::ClaudeCode.args(home));
+    assert_ne!(
+        nirvana_run::pane_program(&pane, &plain, Some(&plugin)),
+        nirvana_run::PaneProgram::NirvanaClaude
+    );
+}

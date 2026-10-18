@@ -27,7 +27,7 @@ merge commit 94701741), because the hooks call O3's journal (`check`, `replay`, 
 | `--plugin` on `herdr board notice` and `herdr jev compact` | `src/nirvana_board.rs`, `src/nirvana_jev.rs`, `src/nirvana_jev_compact.rs` (`hook` became `hook_input`) |
 | The installed statusline | `nirvana/windows_shell.py` `statusline`, `install_plugin` |
 | The hooks file test, on the built binary | `tests/nirvana_plugin_hooks.rs` |
-| Controls | `nirvana/controls.d/o4b.py` (56) |
+| Controls | `nirvana/controls.d/o4b.py` (57) |
 
 ## Measured (2026-10-18, this PC, Claude Code 2.1.302)
 
@@ -36,7 +36,7 @@ All `/context` runs: `claude -p /context --output-format json` from Python with 
 
 - **System prompt**: plain Claude Code 2.5k; O4a's `--agent nirvana` 1.5k; with no `--agent` and the role appended
   3.9k; `--agent nirvana` with an empty-bodied agent file 2.5k, and with the role appended 4k (the shipped launch;
-  ROLE.md grew by two paragraphs between the runs). Custom agents 423 to 957 (`nirvana:nirvana` 79, the five workers
+  ROLE.md grew by two paragraphs between the runs). Custom agents 423 to 1k (`nirvana:nirvana` 88, the five workers
   105 to 110 each). Skills 9.9k to 10k (the four new ones and media, 80 to 100 each).
 - `--append-system-prompt-file` is not in `claude --help`'s list but is named under `--bare`; a missing file exits 1
   with "Append system prompt file not found". `--effort bogus` warns "Unknown --effort value 'bogus' — ignoring it";
@@ -127,5 +127,5 @@ All `/context` runs: `claude -p /context --output-format json` from Python with 
 
 ## Controls
 
-52 in `nirvana/controls.d/o4b.py`, each run alone with `controls.py --only <exact name>`; results in the package
+57 in `nirvana/controls.d/o4b.py`, each run alone with `controls.py --only <exact name>`; results in the package
 report.

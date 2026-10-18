@@ -17,7 +17,7 @@ Plan 12, package O4b (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §6, 
   the owner's bar is parity with Claude Code. `--agent nirvana` stays because O3's wake guard tells Nirvana Claude from
   plain Claude Code by it (`nirvana_run::pane_program`). R1: Opus 5.5 at medium.
   **Measured:** `/context`, 0 turns, $0, in a scratch repo: plain Claude Code 2.5k system prompt; O4a's launch 1.5k;
-  the empty agent alone 2.5k; this launch 4k (2.5k + ROLE.md), with `nirvana:nirvana | Plugin | 79` in Custom agents.
+  the empty agent alone 2.5k; this launch 4k (2.5k + ROLE.md), with `nirvana:nirvana | Plugin | 88` in Custom agents.
   `--append-system-prompt-file` with a missing file exits 1 ("Append system prompt file not found"); `--effort bogus`
   warns and `medium` does not. Tests `nirvana_claude_takes_the_plugin_agent_name_and_settings_from_home` (the agent
   file's body is empty), `plain_claude_code_and_agy_carry_no_nirvana_flag_and_no_nirvana_env` (L6); controls
