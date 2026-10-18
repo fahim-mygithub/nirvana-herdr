@@ -20,6 +20,7 @@ The owner, 2026-10-17, verbatim. A row is a requirement; the verifier is named b
 | L8 | "Be aware a new model called Gemini 4 Argon is out." / "Research the token usage and the capbilities version 3.8 flash. Descide how to seat both model and effort level for their capabilites." | the seat table (§4) with Argon and Flash at each effort, and the class chains (§5.4) | orchestrator | probes P1 to P4 (§11 O0) replace the prior's quota costs with measured ones |
 | L9 | "Argon also has capabilities that Claude does not have like ingesting video. Consider these unique apabilities as part of the orchistrator seating process." | capability filters: `video`, `audio`, `context_1m`; classes `media.video`, `media.audio`, `read.huge` (§5.2) | orchestrator | probe P2: agy reads a video in the workspace; `seat pick --needs video` never returns a Claude seat (test) |
 | L10 | "Cosnider Jev and its capbilities in this process as well." | Jev's four roles in §9: keeping reads out of context, watching workers, advising the seating, and advising compaction | orchestrator | each role ships `off` or `shadow` with its call log; turned on by the owner |
+| L11 | "One other thing to consider is a form of run receipt Nirvana had this for checking how the agents ran and how it can improve. This was sort of baked into that memmory feature we were talking about." (2026-10-17, during O2) | §7.4: `herdr run receipt`, recomputed from the journal and the record; the retro's gap ledger; lessons from orders the gate verified, under the Ledger-Lessons rulings of 2026-10-16 | orchestrator | a receipt test on a recorded journal that renders the same bytes twice and changes with one appended event; a retro test where a gap in 3 distinct runs graduates and a quote not in the journal is refused; a lesson written only after its order passed the gate |
 
 ## 2. What was measured before this design (2026-10-17, this PC)
 
@@ -375,6 +376,50 @@ pane listens on (decision 0041 R6). Then, for load-bearing orders, a reviewer of
 gets a held-out check written before the build by another family; the builder sees only the failing test ids
 (decision 0019). At most 3 send-backs per order; then the owner is asked.
 
+### 7.4 The run receipt, and what it teaches (L11)
+
+Old Nirvana had three pieces: the one-page run report (`nirvanad/report.py`), the retro and its gap ledger
+(`nirvanad/improve/retro.py`), and the skill a finished order leaves (decision 0023). The Ledger-Lessons research of
+2026-10-16 measured where they broke: 21 of 21 memory writes skipped since 2026-09-22, because the repositories had
+no `.harness/`; 6 retro proposals open for 24 days and none merged; 0 of 7 skills carried their class. Here the
+three come back, built on the journal and the gate.
+
+1. **The receipt.** `herdr run receipt <run> [--json]` prints one page, recomputed from
+   `.nirvana/runs/<run>/journal.jsonl` and `<home>/nirvana/record.jsonl`. It is never cached and never reads a clock:
+   an order's duration runs from `seated` to its last event, so two calls with no new event print the same bytes (old
+   `report.py`'s rule). For each order: class, seat, model, effort, the reason line and any override, pool, tokens
+   (fresh in, cache write, cache read, out), computed use per window, duration, and the outcome: the gate's verdict,
+   send-backs, re-seats, deferrals, rate-limit stops and stalls. Then the totals: the orchestrator's own turns
+   apart from the workers', and each pool's windows at the run's start and end, each figure with its basis. A figure
+   that is missing says why, never 0. At the run's end herdr writes `receipt.md` and `receipt.json` beside the
+   journal, and the orchestrator's last message names the file.
+2. **The retro.** At the run's end herdr scans the journal for gaps: a send-back and its reason, a rate-limit stop,
+   a stall, a re-seat, an override, a `NoSeat`, a gotcha a worker reported. No model is called. Gaps are keyed by
+   (gap, run), matched by Sørensen-Dice on character bigrams at 0.6 (old Nirvana measured 0.90 for one gap phrased
+   two ways and 0.18 for two different gaps). A gap seen in 3 distinct runs, or once with an outcome-tagged miss and a
+   clear cause, becomes a proposal in `.nirvana/proposals/`, in the CHANGELOG shape, quoting the journal lines that
+   motivated it. A quote not found in the journal is refused. A proposal never edits a gate, a decision, CLAUDE.md or
+   seats.toml's constants; it may propose a seats.toml change, such as a measured expected-use cell, for the owner to
+   apply. A refused proposal stays refused, whatever new evidence arrives. Because proposals sat unread for 24 days
+   before, the receipt and the orchestrator's `SessionStart` digest name the open ones.
+3. **Lessons.** These follow the owner's rulings of 2026-10-16: "Checked lessions should go live automatically, keep
+   it per github remote assuming that project has a github ... have the lesson stay in its own project. Keep a board
+   per workspace."
+   - A worker's Work Report may carry a `lesson`: a name, its class, the steps (at most 120 lines) and an evidence
+     quote from its own stream.
+   - The gate checks it: the order passed and the quote is in the worker's stream. Only then is it written to
+     `.nirvana/lessons/<slug>.md` in the project, and only when the project's repository has a GitHub remote.
+   - The next order of that class gets one line in its brief: the path and the description, never the body
+     (decision 0023: everything in the prompt is paid for on every call).
+   - Each lesson keeps counters: offered, opened, and passed after it was opened. A lesson offered often that does
+     not help decays out of the briefs.
+   - `NIRVANA.md` (§6) indexes them.
+4. **Where it shows.** The receipt's one-line summary and the lessons offered and written go to the Memory square
+   (0.8.0). The record (§4) stays the input to seat scores; the receipt is the human view of it.
+
+The receipt is built in O3, which owns the journal. The retro and the lessons are built in O5, because the gate
+verifies them.
+
 ## 8. What the owner sees
 
 - **The sidebar's foot**: one row per pool, now with Google's Claude pool; each row shows its tightest window, a pace
@@ -451,7 +496,9 @@ Jev is not a seat: it writes no code and reads no repository.
 | Completion gate, held-out check, a different family reviews (0017, 0019) | §7.3 |
 | Auto mode and its budgets (0024, 0025) | §12 R6 |
 | The conversation reaches the worker, a question channel (0022) | a worker's question wakes the orchestrator; the owner can type into the worker's pane |
-| A finished order leaves a skill (0023) | NIRVANA.md lessons, after the gate |
+| A finished order leaves a skill (0023) | lessons in `.nirvana/lessons/`, live once the gate has checked them (§7.4.3) |
+| The one-page run report (`report.py`) | `herdr run receipt` (§7.4.1) |
+| The retro and its gap ledger (L16, L21) | §7.4.2: proposals with quotes from the journal, applied only by the owner |
 | A directory carries its own tasks (0026) | the board and `.nirvana/runs/` in the repository; board writes gain path-level operations beside today's whole-board revision check, after durable-pi's App State |
 | The seat gets a shell; Jev screens its output (0036, 0037) | the orchestrator's Bash, with `herdr jev text` |
 | The Agent rolls at a task boundary (0038) | §9.4 |
@@ -473,9 +520,9 @@ One feature at a time, each a minor bump with its own plan, tests and sabotage c
 | O0 | Probes P1 to P5 below, before any code | orchestrator, Sonnet 5.5 low leaves | the probe's own numbers |
 | O1 | Usage readings: every pool and window with reset, freshness, pace; `herdr usage --json`; the foot's new rows | Opus 5.5 high | Sonnet 5.5 medium review; controls |
 | O2 | Seats: `seats.toml`, `herdr seat list|pick`, the rule, reason lines, the record | Opus 5.5 high | Opus 5.5 high review against §5 |
-| O3 | Runner: `herdr seat run|status|read|stop`, panes, the journal, rate-limit stops, checkpoints, waking | Opus 5.5 high | live run with one claude and one agy worker |
+| O3 | Runner: `herdr seat run|status|read|stop`, panes, the journal, rate-limit stops, checkpoints, waking; the run receipt (§7.4.1) | Opus 5.5 high | live run with one claude and one agy worker, and its receipt |
 | O4 | Nirvana Claude: the plugin, the launch, the "new" menu; the full port of the Explorer verb with the icon, badge and toast from P7; Nirvana-C's verb removed | Opus 5.5 high | live: the verb, the taskbar button, `/context`, a first seated run |
-| O5 | The gate: axes, send-backs, held-out check, reviewer seat | Opus 5.5 high | the Moto A/B checks |
+| O5 | The gate: axes, send-backs, held-out check, reviewer seat; the retro and lessons (§7.4.2-3) | Opus 5.5 high | the Moto A/B checks; a retro graduating on recorded journals |
 | O6 | Media seats through P2's path: the `media` skill, an ffmpeg step that keeps a recording under 100 MB | Sonnet 5.5 high | a recorded UI bug diagnosed by argon |
 | O7 | A/B: Nirvana Claude against plain Claude Code, the Moto meter, 3 runs per arm, plus one run longer than 5 h | orchestrator | the owner reads it |
 | O8 | After the A/B: the Seats square and the mode in the mod strip; Jev's roles 2 and 3 in shadow | Opus 5.5 high (visual); Sonnet 5.5 high | Opus 5.5 high, screenshot by a leaf; the call logs |
