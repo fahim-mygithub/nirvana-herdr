@@ -43,6 +43,11 @@ fn seated(order: &str) -> Seated {
         branch: None,
         parent: None,
         why: None,
+        rule_pick: None,
+        bar_dropped: None,
+        step_down: None,
+        use_basis: None,
+        expected: BTreeMap::new(),
     }
 }
 
@@ -759,7 +764,11 @@ fn the_record_line_carries_the_runs_outcome_and_old_lines_still_parse() {
         },
     ));
     let state = replay(&events);
-    let line = record_line("live1", state.order("sub").expect("sub"));
+    let line = record_line(
+        "live1",
+        state.order("sub").expect("sub"),
+        Some("j.jsonl#8".into()),
+    );
     assert_eq!(line.v, Some(1));
     assert_eq!(line.outcome, "pass");
     assert_eq!(line.pool.as_deref(), Some("max"));
@@ -771,7 +780,7 @@ fn the_record_line_carries_the_runs_outcome_and_old_lines_still_parse() {
             line.send_backs,
             line.reseats,
             line.deferrals,
-            line.rate_limited,
+            line.rate_limit_stops,
             line.stalls
         ),
         (Some(0), Some(0), Some(0), Some(0), Some(0))
@@ -781,6 +790,13 @@ fn the_record_line_carries_the_runs_outcome_and_old_lines_still_parse() {
     let parsed: RecordLine = serde_json::from_str(old).expect("old line");
     assert_eq!(parsed.v, None);
     assert_eq!(serde_json::to_string(&parsed).expect("json"), old);
+    // The journal reference, the pick's mode and size, and the build that wrote it.
+    assert_eq!(line.journal.as_deref(), Some("j.jsonl#8"));
+    assert_eq!(
+        (line.mode, line.size),
+        (Some(Mode::Balanced), Some(SizeName::Small))
+    );
+    assert_eq!(line.herdr.as_deref(), Some(crate::nirvana::VERSION));
     // A re-seated order's line says so; the child's carries its own.
     let mut moved = delivered_run()[..3].to_vec();
     moved.push(ev(
@@ -794,7 +810,7 @@ fn the_record_line_carries_the_runs_outcome_and_old_lines_still_parse() {
         },
     ));
     let state = replay(&moved);
-    let line = record_line("live1", state.order("sub").expect("sub"));
+    let line = record_line("live1", state.order("sub").expect("sub"), None);
     assert_eq!((line.outcome.as_str(), line.reseats), ("reseated", Some(1)));
 }
 
@@ -832,4 +848,106 @@ fn a_send_back_counts_on_its_parent_and_a_rate_limit_on_its_order() {
     assert_eq!((child.rate_limited, child.deferrals), (1, 1));
     assert_eq!(child.phase, Phase::Deferred);
     assert_eq!(child.deferred_until, Some(T0 + 960));
+}
+
+#[test]
+fn a_record_line_keeps_keys_it_does_not_know() {
+    let later = r#"{"order":"o1","seat":"sonnet","effort":"medium","class":"build.bounded","outcome":"pass","tokens":null,"use":null,"at":5,"gate_axes":{"tests":"pass"},"lesson_opened":true}"#;
+    let parsed: RecordLine = serde_json::from_str(later).expect("a later line");
+    assert_eq!(parsed.extra.get("lesson_opened"), Some(&Value::Bool(true)));
+    let back: Value =
+        serde_json::from_str(&serde_json::to_string(&parsed).expect("json")).expect("json");
+    assert_eq!(back["gate_axes"]["tests"], "pass");
+    assert_eq!(back["lesson_opened"], true);
+}
+
+fn booked_lease(order: &str) -> nirvana_seat::Lease {
+    nirvana_seat::Lease {
+        order: order.into(),
+        seat: "haiku".into(),
+        effort: Effort::Low,
+        pool: "max".into(),
+        class: "chore.script".into(),
+        run: Some("live1".into()),
+        expected: BTreeMap::from([
+            ("5h".to_owned(), 0.0004_f32),
+            ("week".to_owned(), 0.00005_f32),
+        ]),
+        booked_at: T0,
+        expires_at: T0 + 3600,
+        pick: serde_json::json!({
+            "seat": "haiku", "reason": "chore.script → haiku low", "override": null, "rule_pick": null,
+            "mode": "balanced", "size": "small", "bar_dropped": false, "step_down": false,
+            "use_basis": "derived: P4's tokens"
+        }),
+    }
+}
+
+#[test]
+fn an_order_is_recorded_once_with_its_booking_and_the_booking_ends() {
+    let dir = temp_dir("record");
+    let mut leases = nirvana_seat::Leases::default();
+    leases.book(booked_lease("sub"), T0);
+    nirvana_seat::write_leases(&dir.join(nirvana_seat::LEASES_FILE), &leases).expect("leases");
+    let line: RecordLine = serde_json::from_value(serde_json::json!({
+        "order": "sub", "run": "live1", "seat": "haiku", "effort": "low", "class": "chore.script", "outcome": "pass"
+    }))
+    .expect("line");
+    let (written, filled) =
+        nirvana_seat::record_once(&dir, line.clone(), true, T0 + 60).expect("record");
+    assert!(written);
+    assert_eq!(filled.pool.as_deref(), Some("max"));
+    assert_eq!(filled.reason.as_deref(), Some("chore.script → haiku low"));
+    assert_eq!(
+        (filled.mode, filled.size),
+        (Some(Mode::Balanced), Some(SizeName::Small))
+    );
+    assert_eq!(
+        (filled.bar_dropped, filled.step_down),
+        (Some(false), Some(false))
+    );
+    assert_eq!(filled.use_basis.as_deref(), Some("derived: P4's tokens"));
+    assert_eq!(filled.expected.as_ref().map(BTreeMap::len), Some(2));
+    assert_eq!(filled.seated_at, Some(T0), "the lease's booked_at");
+    assert_eq!(filled.v, Some(1));
+    // The booking is released with it.
+    let leases = nirvana_seat::read_leases(&dir.join(nirvana_seat::LEASES_FILE));
+    assert!(leases.live("sub", T0 + 60).is_none());
+    // A retry is refused: one line, not two.
+    let (again, _) = nirvana_seat::record_once(&dir, line, true, T0 + 61).expect("retry");
+    assert!(!again);
+    let lines = nirvana_seat::read_record(&dir.join(nirvana_seat::RECORD_FILE));
+    assert_eq!(lines.len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn racing_record_calls_write_one_line() {
+    let dir = temp_dir("record-race");
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                let line: RecordLine = serde_json::from_value(serde_json::json!({
+                    "order": "sub", "run": "live1", "seat": "haiku", "effort": "low",
+                    "class": "chore.script", "outcome": "pass"
+                }))
+                .expect("line");
+                nirvana_seat::record_once(&dir, line, true, T0)
+                    .expect("record")
+                    .0
+            })
+        })
+        .collect();
+    let written = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("thread"))
+        .filter(|written| *written)
+        .count();
+    assert_eq!(written, 1);
+    assert_eq!(
+        nirvana_seat::read_record(&dir.join(nirvana_seat::RECORD_FILE)).len(),
+        1
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }

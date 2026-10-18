@@ -9,7 +9,8 @@ Plan 12, package O3 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` ยง4, ย
 `plans/2026-10-17-12-records/o3.md`).
 
 - **Changed:** a run's journal, `<project>/.nirvana/runs/<run>/journal.jsonl`: append-only, one JSON event a line with
-  `v`, `seq` and `at`, every writer under `journal.lock` in the run's folder, so the orchestrator's `seat run`, each
+  `v`, `seq` and `at`, every writer under an OS file lock on `journal.lock` in the run's folder (released when its
+  holder ends, however it ends), so the orchestrator's `seat run`, each
   worker's supervisor and `run wake` never interleave a line. Events: opened, seated, started, usage, rate_limited,
   checkpoint, deferred, reseated, delivered, gated, merged, asked, woken, stalled, interrupted, ended. Replaying it
   rebuilds the run; a kind a later herdr writes is skipped, a line that does not parse is counted and kept. herdr writes
@@ -103,13 +104,21 @@ Plan 12, package O3 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` ยง4, ย
 - **Changed:** `herdr run receipt <run> [--json]`, recomputed from the journal and `record.jsonl`, no cache and no
   clock (an order's duration runs from `seated` to its last event); `herdr run end` writes `receipt.md` and
   `receipt.json` beside the journal. Each missing figure says why. O2's `RecordLine` gains optional `v`, pool, reason,
-  override, seated_at, ended_at, send_backs, reseats, deferrals, rate_limited and stalls; a line is written once per
-  order when it ends (gated, failed, re-seated) and at `run end`.
+  override, seated_at, ended_at, send_backs, reseats, deferrals, rate_limit_stops, stalls, and from the booked pick
+  rule_pick, mode, size, bar_dropped, step_down, use_basis and expected use per window, plus the herdr version and a
+  journal reference `<path>#<seq>`; keys it does not know are kept on a round trip. `herdr seat record` and the runner
+  both record through `record_once`: under `leases.lock`, refuse an order and run already recorded, fill the line from
+  the live booking, append, then release the booking. A line is written once per order when it ends (gated, failed,
+  re-seated) and at `run end`.
+  **Because (O2 review S5):** a round trip dropped unknown fields; releasing the lease lost the pick, and expected
+  against real use is what offline tuning needs; a retry appended twice because the line was written before the lock.
   **Because:** the owner, 2026-10-17: "a form of run receipt Nirvana had this for checking how the agents ran and how it
   can improve." (L11), and old `report.py`'s rule.
   **Measured:** `the_receipt_is_the_same_bytes_twice_and_changes_with_one_appended_event`,
   `a_missing_figure_says_why_and_is_never_zero`, `the_record_line_carries_the_runs_outcome_and_old_lines_still_parse`
-  (an O2 line parses and writes back byte for byte); controls `run_receipt_*`, `run_record_*`, `run_send_back_uncounted`.
+  (an O2 line parses and writes back byte for byte), `a_record_line_keeps_keys_it_does_not_know`,
+  `an_order_is_recorded_once_with_its_booking_and_the_booking_ends`, `racing_record_calls_write_one_line` (8 threads,
+  one line); controls `run_receipt_*`, `run_record_*`, `record_*`, `run_send_back_uncounted`.
   Live: two `run receipt` calls on run live1 were the same bytes (`cmp`).
   **If you remove this:** "how did it run" is answered from memory.
 

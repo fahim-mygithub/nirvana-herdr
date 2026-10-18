@@ -1266,7 +1266,11 @@ pub fn exec(
                         release_lease(order);
                         let state = replay(&journal.read().0);
                         if let Some(known) = state.order(order) {
-                            let _ = nirvana_run::write_record(run, known);
+                            let _ = nirvana_run::write_record(
+                                run,
+                                known,
+                                nirvana_run::journal_ref(&journal, &state),
+                            );
                         }
                         return Ok(1);
                     }
@@ -1303,7 +1307,7 @@ fn end_failed(
     release_lease(&seated.order);
     let state = replay(&journal.read().0);
     if let Some(known) = state.order(&seated.order) {
-        let _ = nirvana_run::write_record(run, known);
+        let _ = nirvana_run::write_record(run, known, nirvana_run::journal_ref(journal, &state));
     }
     let _ = nirvana_run::wake(project, run, false);
     Ok(())
@@ -1497,6 +1501,11 @@ fn rate_limited(
                 branch: seated.branch.clone(),
                 parent: Some(order.clone()),
                 why: Some("reseat".into()),
+                rule_pick: booked.rule_pick.clone(),
+                bar_dropped: booked.bar_dropped,
+                step_down: booked.step_down,
+                use_basis: booked.use_basis.clone(),
+                expected: booked.expected(),
             };
             let why = format!(
                 "{} {} ran out ({}); a new session with a continuation brief",
@@ -1521,7 +1530,11 @@ fn rate_limited(
             release_lease(order);
             let state = replay(&journal.read().0);
             if let Some(known) = state.order(order) {
-                let _ = nirvana_run::write_record(run, known);
+                let _ = nirvana_run::write_record(
+                    run,
+                    known,
+                    nirvana_run::journal_ref(journal, &state),
+                );
             }
             let how = launch_worker(project, run, &child_seated).unwrap_or_else(|err| err);
             writeln!(out, "rate limited; re-seated as {child} on {seat} ({how})")?;
@@ -1624,6 +1637,33 @@ pub struct Booked {
     pub reason: String,
     #[serde(default, rename = "override")]
     pub override_reason: Option<String>,
+    #[serde(default)]
+    pub rule_pick: Option<String>,
+    #[serde(default)]
+    pub bar_dropped: Option<bool>,
+    #[serde(default)]
+    pub step_down: Option<bool>,
+    #[serde(default)]
+    pub use_basis: Option<String>,
+    #[serde(default)]
+    pub windows: Vec<BookedWindow>,
+}
+
+/// One window of the pick: the order's expected share of it, for the record (expected against real use).
+#[derive(Debug, Clone, Deserialize)]
+pub struct BookedWindow {
+    pub window: String,
+    #[serde(default)]
+    pub expected: f32,
+}
+
+impl Booked {
+    pub fn expected(&self) -> BTreeMap<String, f32> {
+        self.windows
+            .iter()
+            .map(|window| (window.window.clone(), window.expected))
+            .collect()
+    }
 }
 
 fn book_child(
@@ -2351,6 +2391,11 @@ pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i3
         branch,
         parent: None,
         why: None,
+        rule_pick: booked.rule_pick.clone(),
+        bar_dropped: booked.bar_dropped,
+        step_down: booked.step_down,
+        use_basis: booked.use_basis.clone(),
+        expected: booked.expected(),
     };
     let (pools, pools_basis) = nirvana_run::cached_pools();
     let opened = Kind::Opened {

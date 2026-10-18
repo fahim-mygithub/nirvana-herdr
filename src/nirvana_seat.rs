@@ -1881,21 +1881,16 @@ impl Lock {
 
     /// Tries `attempts` times, 50 ms apart; `TimedOut` when another handle held it for all of them.
     pub fn try_take(dir: &Path, attempts: u32) -> std::io::Result<Self> {
-        Self::try_take_named(dir, LOCK_FILE, attempts)
-    }
-
-    /// The same lock on another file: O3's journal is appended under `journal.lock` in its run's folder.
-    pub fn try_take_named(dir: &Path, file: &str, attempts: u32) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir)?;
-        let path = dir.join(file);
-        let lock = std::fs::OpenOptions::new()
+        let path = dir.join(LOCK_FILE);
+        let file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .open(&path)?;
         for attempt in 0..attempts {
-            match lock.try_lock() {
-                Ok(()) => return Ok(Self { _file: lock }),
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { _file: file }),
                 Err(std::fs::TryLockError::WouldBlock) => {
                     if attempt + 1 < attempts {
                         std::thread::sleep(Duration::from_millis(50));
@@ -1971,9 +1966,36 @@ pub struct RecordLine {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferrals: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rate_limited: Option<u32>,
+    pub rate_limit_stops: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalls: Option<u32>,
+    // The pick as it was booked (O2 review S5): expected use against real use is what offline tuning reads, and
+    // the lease that held it is released when the order ends.
+    /// What the rule would have picked, when an override chose instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_pick: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<Mode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<SizeName>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bar_dropped: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_down: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_basis: Option<String>,
+    /// The order's expected share of each window, as booked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<BTreeMap<String, f32>>,
+    /// The herdr build that wrote the line (`nirvana/VERSION`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub herdr: Option<String>,
+    /// The run's journal and its last event when the line was written: `<path>#<seq>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal: Option<String>,
+    /// Keys this herdr does not know, kept on a round trip (O2 review S5: a later field must not be dropped).
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// The record's key: seat, effort and chain. By seat and effort, never by provider (decision 0029: "a bad
@@ -2059,6 +2081,88 @@ pub fn append_record(path: &Path, line: &RecordLine) -> std::io::Result<()> {
         .append(true)
         .open(path)?
         .write_all(text.as_bytes())
+}
+
+/// A line for the same order and run is already in the record.
+pub fn recorded(lines: &[RecordLine], order: &str, run: Option<&str>) -> bool {
+    lines
+        .iter()
+        .any(|line| line.order == order && line.run.as_deref() == run)
+}
+
+/// Fills what the line does not say from the order's booking: the pick's pool, reason, override, rule pick,
+/// mode, size, bar drop, step down, use basis and expected use, and `seated_at` from `booked_at`.
+pub fn fill_from_lease(line: &mut RecordLine, lease: &Lease) {
+    let pick = &lease.pick;
+    let text = |key: &str| {
+        pick.get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let flag = |key: &str| pick.get(key).and_then(serde_json::Value::as_bool);
+    line.pool.get_or_insert_with(|| lease.pool.clone());
+    if line.reason.is_none() {
+        line.reason = text("reason");
+    }
+    if line.override_reason.is_none() {
+        line.override_reason = text("override");
+    }
+    if line.rule_pick.is_none() {
+        line.rule_pick = text("rule_pick");
+    }
+    if line.mode.is_none() {
+        line.mode = pick
+            .get("mode")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+    }
+    if line.size.is_none() {
+        line.size = pick
+            .get("size")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+    }
+    if line.bar_dropped.is_none() {
+        line.bar_dropped = flag("bar_dropped");
+    }
+    if line.step_down.is_none() {
+        line.step_down = flag("step_down");
+    }
+    if line.use_basis.is_none() {
+        line.use_basis = text("use_basis");
+    }
+    if line.expected.is_none() && !lease.expected.is_empty() {
+        line.expected = Some(lease.expected.clone());
+    }
+    line.seated_at.get_or_insert(lease.booked_at);
+}
+
+/// Records an order once (O2 review S5: a retry appended twice). Under `leases.lock`: refuse an order and run
+/// already recorded, fill the line from its live booking, append it, then release the booking when `release`.
+/// `Ok(false)` is the refusal.
+pub fn record_once(
+    dir: &Path,
+    mut line: RecordLine,
+    release: bool,
+    now: u64,
+) -> std::io::Result<(bool, RecordLine)> {
+    let _lock = Lock::take(dir)?;
+    let record = dir.join(RECORD_FILE);
+    if recorded(&read_record(&record), &line.order, line.run.as_deref()) {
+        return Ok((false, line));
+    }
+    let leases_path = dir.join(LEASES_FILE);
+    let mut leases = read_leases(&leases_path);
+    if let Some(lease) = leases.live(&line.order, now).cloned() {
+        fill_from_lease(&mut line, &lease);
+    }
+    line.v.get_or_insert(1);
+    line.herdr
+        .get_or_insert_with(|| crate::nirvana::VERSION.to_owned());
+    append_record(&record, &line)?;
+    // A finished order's booking ends with it: its real use now shows in the pool's readings.
+    if release && leases.release(&line.order, now) {
+        write_leases(&leases_path, &leases)?;
+    }
+    Ok((true, line))
 }
 
 /// The record's lines; a line that does not parse is skipped.
@@ -2700,14 +2804,17 @@ fn record_cli(args: &[String]) -> std::io::Result<()> {
             std::process::exit(2);
         }
     };
-    let dir = dir();
-    append_record(&dir.join(RECORD_FILE), &line)?;
-    // A finished order's booking ends with it: its real use now shows in the pool's readings.
-    let _lock = Lock::take(&dir)?;
-    let path = dir.join(LEASES_FILE);
-    let mut leases = read_leases(&path);
-    if leases.release(&line.order, now()) {
-        write_leases(&path, &leases)?;
+    let (written, line) = record_once(&dir(), line, true, now())?;
+    if !written {
+        eprintln!(
+            "herdr seat record: {} is already recorded{}",
+            line.order,
+            line.run
+                .as_deref()
+                .map(|run| format!(" for run {run}"))
+                .unwrap_or_default()
+        );
+        std::process::exit(2);
     }
     println!("{}", serde_json::to_string(&line)?);
     Ok(())

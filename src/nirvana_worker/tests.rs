@@ -426,6 +426,11 @@ fn seated(order: &str) -> Seated {
         branch: None,
         parent: None,
         why: None,
+        rule_pick: None,
+        bar_dropped: None,
+        step_down: None,
+        use_basis: None,
+        expected: BTreeMap::new(),
     }
 }
 

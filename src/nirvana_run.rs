@@ -27,7 +27,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::nirvana_seat::{self, Effort, Lock, Mode, RecordLine, SizeName, Tokens};
+use crate::nirvana_seat::{self, Effort, Mode, RecordLine, SizeName, Tokens};
 use crate::nirvana_usage::{self, Reading};
 
 /// The journal's event schema version.
@@ -221,6 +221,19 @@ pub struct Seated {
     /// "reseat" or "send_back" when `parent` is set.
     #[serde(default)]
     pub why: Option<String>,
+    // The pick's details, so the record line written when the order ends still has them after the lease that
+    // held the pick is released (O2 review S5).
+    #[serde(default)]
+    pub rule_pick: Option<String>,
+    #[serde(default)]
+    pub bar_dropped: Option<bool>,
+    #[serde(default)]
+    pub step_down: Option<bool>,
+    #[serde(default)]
+    pub use_basis: Option<String>,
+    /// The order's expected share of each window, as booked.
+    #[serde(default)]
+    pub expected: BTreeMap<String, f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -424,7 +437,7 @@ impl Journal {
         decide: impl FnOnce(&[Event]) -> std::io::Result<(Vec<Kind>, R)>,
     ) -> std::io::Result<(Vec<Event>, R)> {
         let dir = self.dir();
-        let _lock = Lock::try_take_named(&dir, JOURNAL_LOCK, 400)?;
+        let _lock = lock_journal(&dir)?;
         let text = std::fs::read_to_string(&self.path).unwrap_or_default();
         let (events, _) = parse_lines(&text);
         let (kinds, out) = decide(&events)?;
@@ -453,6 +466,27 @@ impl Journal {
         }
         Ok((written, out))
     }
+}
+
+/// The journal's lock: an OS file lock on `journal.lock`, which the OS lets go when its holder ends however it
+/// ends, so no stale lock is ever taken over (the O2 review's fix round moves `leases.lock` the same way).
+struct JournalLock(std::fs::File);
+
+impl Drop for JournalLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+fn lock_journal(dir: &Path) -> std::io::Result<JournalLock> {
+    std::fs::create_dir_all(dir)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(dir.join(JOURNAL_LOCK))?;
+    file.lock()?;
+    Ok(JournalLock(file))
 }
 
 pub fn parse_lines(text: &str) -> (Vec<Event>, usize) {
@@ -1810,7 +1844,8 @@ pub fn outcome_word(order: &OrderState) -> String {
     }
 }
 
-pub fn record_line(run: &str, order: &OrderState) -> RecordLine {
+/// `journal` is the line's reference back to the run: `<journal path>#<last seq>`.
+pub fn record_line(run: &str, order: &OrderState, journal: Option<String>) -> RecordLine {
     let seated = &order.seated;
     RecordLine {
         order: seated.order.clone(),
@@ -1833,30 +1868,42 @@ pub fn record_line(run: &str, order: &OrderState) -> RecordLine {
         send_backs: Some(order.send_backs),
         reseats: Some(order.reseats),
         deferrals: Some(order.deferrals),
-        rate_limited: Some(order.rate_limited),
+        rate_limit_stops: Some(order.rate_limited),
         stalls: Some(order.stalls),
+        rule_pick: seated.rule_pick.clone(),
+        mode: Some(seated.mode),
+        size: Some(seated.size),
+        bar_dropped: seated.bar_dropped,
+        step_down: seated.step_down,
+        use_basis: seated.use_basis.clone(),
+        expected: (!seated.expected.is_empty()).then(|| seated.expected.clone()),
+        herdr: Some(crate::nirvana::VERSION.to_owned()),
+        journal,
+        extra: serde_json::Map::new(),
     }
 }
 
-/// Writes the order's record line once: a line for the same order and run is never written twice.
-pub fn write_record(run: &str, order: &OrderState) -> std::io::Result<bool> {
-    let path = nirvana_seat::dir().join(nirvana_seat::RECORD_FILE);
-    let known = nirvana_seat::read_record(&path);
-    if known
-        .iter()
-        .any(|line| line.order == order.id() && line.run.as_deref() == Some(run))
-    {
-        return Ok(false);
-    }
-    let line = record_line(run, order);
+/// Writes the order's record line once, through O2's `record_once`: under `leases.lock`, a line for the same
+/// order and run is never written twice, and a booking still live fills what the journal lacks.
+pub fn write_record(
+    run: &str,
+    order: &OrderState,
+    journal: Option<String>,
+) -> std::io::Result<bool> {
+    let line = record_line(run, order, journal);
     let line = match nirvana_seat::table() {
         Ok(table) => {
             nirvana_seat::complete(&table, line.clone(), line.at.unwrap_or(0)).unwrap_or(line)
         }
         Err(_) => line,
     };
-    nirvana_seat::append_record(&path, &line)?;
-    Ok(true)
+    let (written, _) = nirvana_seat::record_once(&nirvana_seat::dir(), line, true, now())?;
+    Ok(written)
+}
+
+/// The journal reference a record line carries.
+pub fn journal_ref(journal: &Journal, state: &RunState) -> Option<String> {
+    Some(format!("{}#{}", journal.path.display(), state.last_seq))
 }
 
 // ---- the CLI ----
@@ -2012,7 +2059,7 @@ fn end_cli(project: &Project, args: &[String]) -> std::io::Result<()> {
     let state = replay(&events);
     for order in &state.orders {
         if order.phase.terminal() || !order.phase.wants_worker() {
-            write_record(&run, order)?;
+            write_record(&run, order, journal_ref(&journal, &state))?;
         }
     }
     let record = nirvana_seat::read_record(&nirvana_seat::dir().join(nirvana_seat::RECORD_FILE));
@@ -2079,7 +2126,7 @@ fn log_cli(project: &Project, args: &[String]) -> std::io::Result<()> {
         let state = replay(&journal.read().0);
         if let Some(known) = state.order(order) {
             if known.phase.terminal() {
-                write_record(run, known)?;
+                write_record(run, known, journal_ref(&journal, &state))?;
             }
         }
     }
