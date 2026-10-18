@@ -3,7 +3,7 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
-## alpha NEXT (o6): media seats
+## alpha 0.14.0 (2026-10-18): media seats, `herdr media probe|shrink|prompt`, the media skill (plan 12 O6)
 
 Plan 12, package O6 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §2, §4, §5.2, §5.4, §6, §11;
 `plans/2026-10-17-12-records/o6.md`).

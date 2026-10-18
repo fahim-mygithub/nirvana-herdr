@@ -31,6 +31,7 @@ Explorer's "Open Nirvana - CC" (Nirvana-C) runs the installed fork in the sessio
 | 6 | The strip's Running square: what Claude is doing now with a summary, and under it what it waits on you for, answered with a digit or a click | plans/2026-10-16-06-running-and-waiting.md |
 | 12 (O1) | Usage readings: every pool and window with its reset, freshness and pace; `herdr usage [--json] [--refresh]` over `<home>/nirvana/usage.json` | plans/2026-10-17-12-nirvana-claude-orchestrator.md §15 |
 | 12 (O2) | Seats: `<home>/nirvana/seats.toml` (seats, classes, bars, priors, prices); `herdr seat pick` seats an order by filters, bar and pool pressure with a reason line, books it (`--book`), takes three overrides a run; `herdr seat list`, `release`, `record` (`record.jsonl`, blend off) | plans/2026-10-17-12-nirvana-claude-orchestrator.md §16 |
+| 12 (O6) | Media seats: `herdr media probe` (ffprobe, the 100 MB `view_file` limit), `herdr media shrink` (ffmpeg to at most 1280 px, 10 fps, mono audio, under the limit, never over the input), `herdr media prompt` (the full-path `view_file` line for argon or flash); the `media` skill in `nirvana/claude/skills/media/` | plans/2026-10-17-12-records/o6.md |
 
 ## Rules for this fork
 
