@@ -1881,16 +1881,21 @@ impl Lock {
 
     /// Tries `attempts` times, 50 ms apart; `TimedOut` when another handle held it for all of them.
     pub fn try_take(dir: &Path, attempts: u32) -> std::io::Result<Self> {
+        Self::try_take_named(dir, LOCK_FILE, attempts)
+    }
+
+    /// The same lock on another file: O3's journal is appended under `journal.lock` in its run's folder.
+    pub fn try_take_named(dir: &Path, file: &str, attempts: u32) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir)?;
-        let path = dir.join(LOCK_FILE);
-        let file = std::fs::OpenOptions::new()
+        let path = dir.join(file);
+        let lock = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .open(&path)?;
         for attempt in 0..attempts {
-            match file.try_lock() {
-                Ok(()) => return Ok(Self { _file: file }),
+            match lock.try_lock() {
+                Ok(()) => return Ok(Self { _file: lock }),
                 Err(std::fs::TryLockError::WouldBlock) => {
                     if attempt + 1 < attempts {
                         std::thread::sleep(Duration::from_millis(50));
@@ -1942,6 +1947,33 @@ pub struct RecordLine {
     pub spent: Option<BTreeMap<String, f32>>,
     #[serde(default)]
     pub at: Option<u64>,
+    // Plan 12 O3: what the run's journal knows of the order, so the record answers "how did it run" offline
+    // (§7.4.1). All optional, so every line written before O3 still parses, and absent fields are not written.
+    /// The line's schema version: 1 from O3 on; absent on O2's lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub v: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
+    /// The pick's reason line (§5.3 step 5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, rename = "override", skip_serializing_if = "Option::is_none")]
+    pub override_reason: Option<String>,
+    /// Unix seconds of the order's `seated` event, and of its last event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seated_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_backs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reseats: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferrals: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limited: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalls: Option<u32>,
 }
 
 /// The record's key: seat, effort and chain. By seat and effort, never by provider (decision 0029: "a bad
@@ -2046,6 +2078,7 @@ const USAGE: &str = "usage: herdr seat list [--json]
                        [--override <seat> --reason \"...\"] [--json]
        herdr seat release <order>
        herdr seat record --json '<line>'
+       herdr seat run|exec|status|read|stop|cleanup ...   (plan 12 O3; `herdr seat run` alone prints its usage)
 --size defaults to medium (seats.toml's [size.medium]); --mode to seats.toml's mode.
 pick exits 0 with a seat, 3 with none (a refused override included), 2 on a usage or table error, a --needs
 or --not-family word no seat has, or a leases.json that does not parse. pick and release exit 4 when another
@@ -2058,6 +2091,18 @@ fn usage_exit() -> ! {
 
 fn now() -> u64 {
     nirvana_usage::unix(SystemTime::now())
+}
+
+/// The owner's table, or why it is refused. O3's runner reads it so; the CLI exits on a refusal.
+pub fn table() -> Result<Table, String> {
+    let path = dir().join(SEATS_FILE);
+    parse(&read_or_create(&path)).map_err(|problems| {
+        format!(
+            "{} is refused (delete it to get herdr's default back):
+{problems}",
+            path.display()
+        )
+    })
 }
 
 fn load_table() -> Table {
@@ -2167,7 +2212,7 @@ fn leases_or_exit(path: &Path) -> Leases {
 
 /// The world as this machine has it: usage from `usage.json` (stale readers read first, as `herdr usage`
 /// does), the accounts, and the record when the table blends it.
-fn live_world(table: &Table) -> World {
+pub fn live_world(table: &Table) -> World {
     let sources = nirvana_usage::current_sources(false);
     let mut clis = BTreeMap::new();
     for seat in table.seats.iter().filter(|seat| seat.enabled) {
@@ -2201,6 +2246,10 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         Some("pick") => pick_cli(&args[1..]),
         Some("release") => release_cli(&args[1..]),
         Some("record") => record_cli(&args[1..]),
+        // Plan 12 O3: the runner's verbs live in `nirvana_worker`.
+        Some("run" | "exec" | "status" | "read" | "stop" | "cleanup") => {
+            crate::nirvana_worker::cli(args)
+        }
         _ => usage_exit(),
     }
 }

@@ -3,6 +3,116 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha NEXT (o3): the runner, `herdr seat run|exec|status|read|stop|cleanup`, the journal, waking, the run receipt
+
+Plan 12, package O3 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §4, §5.6, §7.1, §7.2, §7.4.1; the record is
+`plans/2026-10-17-12-records/o3.md`).
+
+- **Changed:** a run's journal, `<project>/.nirvana/runs/<run>/journal.jsonl`: append-only, one JSON event a line with
+  `v`, `seq` and `at`, every writer under `journal.lock` in the run's folder, so the orchestrator's `seat run`, each
+  worker's supervisor and `run wake` never interleave a line. Events: opened, seated, started, usage, rate_limited,
+  checkpoint, deferred, reseated, delivered, gated, merged, asked, woken, stalled, interrupted, ended. Replaying it
+  rebuilds the run; a kind a later herdr writes is skipped, a line that does not parse is counted and kept. herdr writes
+  `.nirvana/.gitignore` (runs, orders, worktrees; not lessons) when it is missing.
+  **Because:** plan 12 §7.2: "replaying the journal rebuilds the run", and the owner, 2026-10-17: "longer running
+  agentic workflows" (L1). Nothing about a run may live in a process that a crash or a reload of herdr's server ends.
+  **Measured:** `replaying_the_journal_rebuilds_the_run`, `a_line_that_does_not_parse_is_counted_kept_and_numbered`,
+  `appends_from_many_threads_lose_no_line` (8 threads, 40 lines, seq 1 to 40); controls `run_replay_*`, `run_seq_*`,
+  `run_journal_unlocked`, `run_gitignore_lessons`. Live: two runs on this PC, 21 and 8 events.
+  **If you remove this:** a run is whatever the orchestrator's context still holds, and a resumed orchestrator seats
+  orders twice.
+- **Changed:** `herdr seat run <seat> --order <file>` books the order (O2's lease; the rule must agree with the seat, or
+  `--reason` makes it one of the run's 3 overrides), copies the order with herdr's rules appended to
+  `.nirvana/orders/<id>.md` (and into the worktree with `--worktree`, where claude's print-mode file tools can read it),
+  writes `seated`, and opens a pane `<seat>·<order>` in the run's tab whose shell runs `herdr seat exec <order> --run
+  <run>` with this build first on `PATH`. A second `seat run` for an order the run knows returns the first. Outside a
+  herdr pane it starts `seat exec` detached, never a tab on the owner's default session.
+  **Because:** plan 12 §7.1 and §7.2: "`seat run` refuses a second live worker for an order that has one, and returns
+  the first."
+  **Measured:** `a_second_run_for_an_order_returns_the_first_and_writes_nothing` (6 racing threads seat it once);
+  controls `worker_seat_twice`, `worker_opened_every_order`, `worker_footer_twice`, `worker_worktree_unignored`. Live:
+  the second `seat run` of `mul` printed `mul existing`, exit 0.
+  **If you remove this:** the orchestrator starts every worker by hand, and a retried call starts two.
+- **Changed:** the launches. claude: `-p <line> --output-format stream-json --verbose --setting-sources project
+  --strict-mcp-config --model <m> --effort <e> --permission-mode auto --json-schema <Work Report>`, with
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`; agy: `--output-format stream-json --model <id-with-effort> --print-timeout
+  <lease> --dangerously-skip-permissions --json-schema <Work Report> --print=<line>`. Continuation `--resume` and
+  `--conversation`, never `--continue`. A list argv, never a shell. Each worker starts suspended, goes into a
+  kill-on-close job object, then runs, so a stop, a rate limit or a stall ends its whole process tree.
+  **Because:** plan 12 §4, each line an incident in old Nirvana's adapters (16x a turn without `--setting-sources
+  project`; a print-mode background task that died; `--print` taking the next flag; `--continue` picking the wrong
+  conversation; `WinError 206` on an inlined order).
+  **Measured:** `a_claude_worker_starts_with_the_launch_lessons`,
+  `an_agy_worker_takes_its_line_as_one_print_token_and_its_effort_in_the_model`, `a_worker_is_never_started_through_a_shell`,
+  `a_stop_ends_the_workers_whole_process_tree`; controls `worker_*` for each flag and `worker_tree_outside_the_job`
+  (with the worker outside the job the stop took 56 s, ping's 30 s, against 0.6 s). Live: `seat stop` of a haiku worker
+  running `time.sleep(240)` returned in 0.55 s and no such process was left.
+  **If you remove this:** each lesson is learned again at its old price.
+- **Changed:** the Work Report schema (status done, blocked or needs_answer; summary; files; tests; gotchas; optional
+  question and lesson) is checked in herdr; an empty or malformed answer ends the order `failed` even when agy says
+  `SUCCESS`, and agy's own `toolAction` and `toolSummary` keys are dropped first.
+  **Because:** P2: flash "ended with an empty answer and `status: SUCCESS`".
+  **Measured:** `an_empty_answer_is_a_failure_even_when_agy_says_success` on P2's recorded stream,
+  `the_report_check_and_the_schema_name_the_same_fields`, `a_malformed_report_fails`,
+  `agys_own_keys_are_dropped_from_an_answer_given_as_text`; controls `worker_report_any_key`,
+  `worker_empty_answer_unnamed`, `worker_agy_status_ignored`, `worker_agy_keys_kept`.
+  **If you remove this:** an empty run reads as a delivery.
+- **Changed:** rate limits, typed only: claude's `rate_limit_event` with status `rejected` or an `api_retry` with
+  `error: rate_limit`, agy's exit 3 with an `AGY_ERROR` line naming a quota. herdr stops the worker, writes a
+  checkpoint (the report so far, the worktree's diff, the last turn), then defers when the window resets within
+  `defer_min` (30 min), else re-seats through O2's `pick` with the spent pool read as spent (a child order `<id>-r<n>`
+  with a continuation brief, in the same worktree, never the same conversation), else in auto mode defers to the
+  earliest reset plus a minute, else asks.
+  **Because:** plan 12 §5.6.
+  **Measured:** `only_a_rejected_rate_limit_event_or_a_rate_limited_retry_stops_a_claude_worker` on P3's recorded
+  `rate_limit_event`, `agy_runs_out_only_with_exit_3_and_a_quota_error_line`, `a_spent_pool_reseats_on_another_pool`,
+  `a_window_that_resets_within_30_minutes_is_waited_for`,
+  `with_no_seat_left_auto_mode_waits_for_the_earliest_reset_and_otherwise_asks`, `a_rejected_limit_stops_the_worker_at_once`;
+  controls `worker_allowed_is_a_limit`, `worker_retry_*`, `worker_agy_any_*`, `worker_spent_pool_unmarked`,
+  `run_defer_*`, `run_auto_mode_ignored`, `worker_limit_lets_it_run`.
+  **Hypothesis, not measured:** no window was spent on purpose, so the rejected event is P3's recorded line with its
+  status changed, the `api_retry` line is built from the documented shape, and agy's quota status string is not
+  recorded (P5). The defer and re-seat paths have not run live.
+  **If you remove this:** a spent window kills an order, or the order waits for the owner on a night run.
+- **Changed:** a deferral's timer lives in the worker's own supervisor, which waits in its pane and then resumes the
+  worker's own conversation; `herdr run tick` starts any due deferral whose supervisor is gone. Stalls: a stream
+  silent for 10 minutes is killed and restarted at once, then after 30, 60 and 120 s, then refused as a crash loop and
+  asked. **Because:** plan 12 §7.2. The server was not chosen for the timer: a reload restarts it, and its loop would
+  need upstream hooks; the journal is what survives, and tick reads it.
+  **Measured:** `a_stream_silent_for_ten_minutes_is_stalled_and_restarts_back_off_to_a_refusal`,
+  `a_refused_restart_fails_the_order_and_asks`; controls `run_stall_line_late`, `run_restart_delays_flat`,
+  `run_crash_loop_not_failed`. **Hypothesis:** a stall and a tick restart have not run live.
+  **If you remove this:** a hung worker holds its lease until it expires, and a deferral dies with its pane.
+- **Changed:** waking. `herdr run wake <run>` types a one-line digest into the orchestrator's pane with `herdr agent
+  prompt` only when herdr says it is idle, the prompt line on its screen is empty (Claude Code 2.1.302's box: `❯`, a
+  no-break space, and a faint placeholder that is not the owner's text), and the owner's last key in that pane is 30 s
+  old or more; `--urgent` (the owner's stop) steers a working one. Otherwise the events wait for `herdr run notice`,
+  which prints them for the `UserPromptSubmit` hook. After 3 wakes in a row that move no order forward the run asks the
+  owner instead. herdr's server writes the owner's last key per pane to `<home>/nirvana/keys/` (one hook in
+  `server/headless.rs`, at most one write a second). `herdr run check` exits 1 for a run with no live worker and no
+  next step; `herdr run resume` reports each interrupted step and never reruns it.
+  **Because:** plan 12 §7.2 and R6; Argon's review F7: a wake typed into the pane splices into the owner's typing.
+  **Measured:** `a_wake_types_only_into_an_idle_orchestrator_with_an_empty_prompt`, `a_wake_never_types_while_the_owner_does`,
+  `the_prompt_line_is_read_from_claude_codes_own_screen` (recorded screens), `three_wakes_in_a_row_that_move_no_order_forward_stop_the_waking`,
+  `an_unfinished_run_with_no_live_worker_and_no_next_step_is_a_dead_end`,
+  `resume_reports_each_interrupted_step_and_never_a_finished_or_live_one`; controls `run_wake_*`, `run_prompt_*`,
+  `run_check_*`, `run_resume_cuts_live`. Live: a delivery woke an idle interactive Claude in the run's orchestrator pane
+  (`woken via prompt`); with no such pane the next one queued ("state is not known") and `run notice` printed it once.
+  **Hypothesis:** the owner-key hook has not run with a real client attached.
+  **If you remove this:** the orchestrator learns of a delivery only when the owner next types.
+- **Changed:** `herdr run receipt <run> [--json]`, recomputed from the journal and `record.jsonl`, no cache and no
+  clock (an order's duration runs from `seated` to its last event); `herdr run end` writes `receipt.md` and
+  `receipt.json` beside the journal. Each missing figure says why. O2's `RecordLine` gains optional `v`, pool, reason,
+  override, seated_at, ended_at, send_backs, reseats, deferrals, rate_limited and stalls; a line is written once per
+  order when it ends (gated, failed, re-seated) and at `run end`.
+  **Because:** the owner, 2026-10-17: "a form of run receipt Nirvana had this for checking how the agents ran and how it
+  can improve." (L11), and old `report.py`'s rule.
+  **Measured:** `the_receipt_is_the_same_bytes_twice_and_changes_with_one_appended_event`,
+  `a_missing_figure_says_why_and_is_never_zero`, `the_record_line_carries_the_runs_outcome_and_old_lines_still_parse`
+  (an O2 line parses and writes back byte for byte); controls `run_receipt_*`, `run_record_*`, `run_send_back_uncounted`.
+  Live: two `run receipt` calls on run live1 were the same bytes (`cmp`).
+  **If you remove this:** "how did it run" is answered from memory.
+
 ## alpha 0.15.0 (2026-10-18): Nirvana Claude's launch, the "new" menu, "Open Nirvana", its own icon, badge and toast (plan 12 O4a)
 
 Plan 12, package O4a (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` L5, L6, L7, §6, §8, R1, R8; record

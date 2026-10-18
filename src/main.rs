@@ -42,12 +42,14 @@ mod nirvana_jev_memory;
 mod nirvana_launch;
 mod nirvana_media;
 mod nirvana_preload;
+mod nirvana_run;
 mod nirvana_running;
 mod nirvana_seat;
 mod nirvana_servers;
 mod nirvana_spaces;
 mod nirvana_taskbar;
 mod nirvana_usage;
+mod nirvana_worker;
 mod noninteractive_process;
 mod pane;
 use ghostty_vt::pane_graphics_files;
@@ -602,6 +604,10 @@ fn main() -> io::Result<()> {
     // Nirvana fork, plan 12 O6: media probe, ffmpeg shrink under 100 MB, and the view_file worker prompt.
     if args.get(1).map(String::as_str) == Some("media") {
         return nirvana_media::cli(&args[2..]);
+    }
+    // Nirvana fork, plan 12 O3: a run's journal, waking, receipt; the workers are `herdr seat run|exec|...`.
+    if args.get(1).map(String::as_str) == Some("run") {
+        return nirvana_run::cli(&args[2..]);
     }
 
     finish_cli(cli::maybe_run(&args))?;

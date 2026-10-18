@@ -2449,6 +2449,12 @@ impl HeadlessServer {
                 let scroll_changed = runtime.scroll_metrics() != scroll_before;
                 if keyboard_forwarded {
                     self.note_interactive_input(runtime_pane_id, Instant::now());
+                    // Nirvana fork, plan 12 O3: the owner's last key per pane, so a wake never types into a
+                    // prompt the owner is writing (Argon's review F7).
+                    if let Some(public) = self.app.public_pane_id(workspace_index, runtime_pane_id)
+                    {
+                        crate::nirvana_run::note_owner_key(&public);
+                    }
                 }
                 if let Err(err) = input_result {
                     warn!(client_id, pane_id, err = %err, "targeted client shell input failed");
