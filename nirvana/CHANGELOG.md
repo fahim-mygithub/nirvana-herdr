@@ -3,7 +3,7 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
-## alpha NEXT (o4b): the Nirvana Claude plugin's hooks, worker agents, skills and statusline; the launch keeps Claude Code's own prompt
+## alpha 0.17.0 (2026-10-18): the Nirvana Claude plugin's hooks, worker agents, skills and statusline; the launch keeps Claude Code's own prompt (plan 12 O4b)
 
 Plan 12, package O4b (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §6, §7.2, §7.4, §9; the record is
 `plans/2026-10-17-12-records/o4b.md`).
