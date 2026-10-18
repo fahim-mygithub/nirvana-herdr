@@ -39,6 +39,7 @@ mod nirvana_jev;
 mod nirvana_jev_compact;
 mod nirvana_jev_install;
 mod nirvana_jev_memory;
+mod nirvana_media;
 mod nirvana_preload;
 mod nirvana_running;
 mod nirvana_seat;
@@ -591,6 +592,10 @@ fn main() -> io::Result<()> {
     // Nirvana fork, plan 12 O2: the seat engine, which seats each order the orchestrator names.
     if args.get(1).map(String::as_str) == Some("seat") {
         return nirvana_seat::cli(&args[2..]);
+    }
+    // Nirvana fork, plan 12 O6: media probe, ffmpeg shrink under 100 MB, and the view_file worker prompt.
+    if args.get(1).map(String::as_str) == Some("media") {
+        return nirvana_media::cli(&args[2..]);
     }
 
     finish_cli(cli::maybe_run(&args))?;

@@ -3,6 +3,71 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha NEXT (o6): media seats
+
+Plan 12, package O6 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §2, §4, §5.2, §5.4, §6, §11;
+`plans/2026-10-17-12-records/o6.md`).
+
+- **Changed:** `herdr media probe <file> [--json]` (`src/nirvana_media.rs`, dispatched from `src/main.rs`) runs
+  `ffprobe` with a list `argv` (never through a shell) and prints the file's duration, byte size, container format,
+  video codec and resolution, whether audio is present (with its codec), and whether the file exceeds Antigravity
+  `view_file`'s 100 MB limit (`100,000,000` bytes). When `ffprobe` is missing on `PATH`, it says so clearly and exits 2.
+  **Because:** the owner, 2026-10-17: "Argon also has capabilities that Claude does not have like ingesting video.
+  Consider these unique apabilities as part of the orchistrator seating process." (plan 12 L9). Probe P2 showed
+  `view_file` refuses files over 100 MB (a 186 MB recording failed at the tool layer before reaching Gemini), so the
+  orchestrator needs a zero-token check before seating a media worker.
+  **Measured:** `media_over_limit_checks_the_100mb_view_file_cap` and
+  `media_ffprobe_json_reads_duration_size_container_video_audio_and_limit` on an `ffprobe` 8.0.1 JSON fixture recorded
+  from a real 1920x1080 H.264 + mono AAC MP4; controls `media_limit_inclusive`, `media_view_limit_wrong_cap`,
+  `media_probe_ignores_duration`, `media_probe_ignores_size`, `media_probe_ignores_video_stream`,
+  `media_probe_ignores_audio_stream`, `media_probe_wrong_resolution`, `media_probe_over_limit_inverted`. Live on a
+  3-minute (180.00 s) 1920x1080 30 fps synthetic screen recording with 440 Hz/1 kHz sine audio (`120,009,381` bytes,
+  120.01 MB): `over 100 MB view_file limit: yes (limit 100000000 bytes)`.
+  **If you remove this:** the orchestrator sends raw recordings over 100 MB straight to `agy`, and `view_file` refuses
+  them mid-turn.
+- **Changed:** `herdr media shrink <file> [--out <path>] [--max-mb 95] [--json]` runs `ffmpeg` with a list `argv` to
+  re-encode a recording to `<name>.shrunk.mp4` beside the input (unless `--out` is given), refusing any path that
+  collides with the input. It downscales width to at most `1280` px (`scale='min(1280,iw)':-2`), caps frame rate at
+  `10` fps (`-r 10`), keeps spoken narration as mono 48 kbps AAC (`-ac 1 -b:a 48k`), budgets the video bitrate from
+  duration with a 15% safety margin (`SAFETY_MARGIN = 0.85`, clamped between `32` and `4,000` kbps) under VBV rate
+  control (`-b:v`, `-maxrate`, `-bufsize`), and retries once at 60% of the first pass's video bitrate (or the measured
+  overshoot ratio, whichever is lower) if pass 1 still exceeds `--max-mb`.
+  **Because:** plan 12 §11 O6 and Argon's review (§3): raw screen recordings exceed `view_file`'s 100 MB limit, while
+  1280 px at 10 fps preserves UI text, layout transitions, and mono voice-over narration within budget.
+  **Measured:** `media_bitrate_scales_with_duration_and_clamps_very_short_and_very_long_files` (180 s -> `3,540` kbps,
+  600 s -> `1,028` kbps, 0.2 s -> clamped to `4,000` kbps, 36,000 s -> clamped to `32` kbps, retry 1000 -> `600` kbps)
+  and `media_shrink_argv_pins_scale_fps_mono_audio_and_never_overwrites_input`; controls `media_bitrate_no_margin`,
+  `media_bitrate_no_audio_deduction`, `media_bitrate_no_short_cap`, `media_bitrate_no_long_floor`,
+  `media_bitrate_retry_not_lower`, `media_shrink_wrong_scale`, `media_shrink_wrong_fps`, `media_shrink_stereo_audio`,
+  `media_shrink_allows_overwrite`, `media_shrink_default_out_wrong_suffix`. Live on the 120.01 MB (`120,009,381`-byte)
+  3-minute 1920x1080 30 fps recording: shrunk in 1 pass at `3,540` kbps to `73,048,200` bytes (73.05 MB), 1280x720 at
+  10 fps with mono AAC audio (`over_limit: false`).
+  **If you remove this:** recordings over 100 MB cannot be ingested by `argon` or `flash`, or a naive re-encode drops
+  the voice-over track or overwrites the caller's source file.
+- **Hypothesis, not measured:** the `0.85` bitrate safety margin, the `0.60` retry factor, the `32`–`4,000` kbps video
+  clamps, and taking `1 MB = 1,000,000` decimal bytes (which errs on the safe side of `100 MiB = 104,857,600` bytes).
+- **Changed:** `herdr media prompt <file> --ask "<question>" [--seat argon|flash]` prints the single-line prompt for an
+  `agy` media worker, resolving `<file>` to its full absolute path, instructing the worker to call `view_file` with
+  `AbsolutePath` and without `StartLine` or `EndLine` (and to start no subagents or background commands), and asking for
+  (1) `MM:SS` timestamps, (2) what happens on screen and any spoken transcript, (3) visual details a text transcript
+  alone would lose, and (4) findings for `<question>`. `nirvana/claude/skills/media/SKILL.md` gives the Nirvana Claude
+  orchestrator the full workflow (`herdr media probe`, `herdr media shrink`, `herdr seat pick --class
+  media.video|media.audio|read.huge`, `herdr media prompt`, resuming `read.huge` by `--conversation <id>` for read-only
+  follow-ups, never reading media or huge files into the orchestrator's own context, and treating an empty answer as a
+  failure even when `status: SUCCESS`).
+  **Because:** probe P2 (`nirvana/evidence/2026-10-17-o0-probes/README.md`): with a bare filename, `flash` tried `dir`,
+  plan mode refused it, and the turn ended with an empty answer and `status: SUCCESS`; with the full path and
+  `view_file` named, both `argon` and `flash` read MP4 and WebM files accurately.
+  **Measured:** `media_prompt_line_names_full_path_view_file_and_expected_return_fields`; controls
+  `media_prompt_relative_path`, `media_prompt_omits_view_file`, `media_prompt_multiline_kept`,
+  `media_prompt_empty_ask_accepted`. Live turn on `agy` 1.4.2 (`gemini-3.8-flash-low`, `--output-format stream-json
+  --mode plan`) with the `herdr media prompt` line for the shrunk 3-minute 73.05 MB video: called `view_file` on the
+  absolute path (`0.13 s`), exited `SUCCESS` (`58,913` in, `63,884` out including `62,913` thinking tokens, `127.4 s`),
+  and returned the timestamped timeline (`00:00` to `03:00`), the `HH:MM:SS.mmm` upper-left counter, the 6 color bars
+  and 4-state morphing reticle, and the continuous sine wave tone.
+  **If you remove this:** a media worker handed a bare filename in plan mode can exit `0` with `status: SUCCESS` and an
+  empty answer, or return a text-only summary that loses the visual bug.
+
 ## alpha 0.13.0 (2026-10-17): seats, `herdr seat list|pick|release|record`, the rule, leases and the record
 
 Plan 12, package O2 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §3, §4, §5, §16).
