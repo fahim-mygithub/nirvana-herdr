@@ -136,6 +136,8 @@ pub(super) struct StripHits {
     pub(super) preload: Rect,
     /// Feature 8: absent for a folder whose repository has no GitHub remote.
     pub(super) memory: Rect,
+    /// Plan 12 O8a: present only in a Nirvana tab.
+    pub(super) seats: Rect,
 }
 
 /// One square: a bold label and a value on a raised background, as old Nirvana draws its squares.
@@ -187,8 +189,9 @@ fn draw_square(
     square
 }
 
-/// Draws the strip: the agent, then the Running square, the Preload square, and the Memory square when
-/// `memory` holds its value.
+/// Draws the strip: the agent, then the Running square, the Seats square in a Nirvana tab (plan 12 O8a: the
+/// tab's seating comes right after what its Claude is doing), the Preload square, and the Memory square when
+/// `memory` holds its value. `seats` is the Seats view, `Some(None)` before its first read.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_strip(
     buffer: &mut Buffer,
@@ -197,6 +200,7 @@ pub(super) fn render_strip(
     activity: Option<&Activity>,
     view: &View,
     memory: Option<(String, bool)>,
+    seats: Option<Option<&crate::nirvana_seats_square::View>>,
     open: OpenPanel,
     palette: &Palette,
 ) -> StripHits {
@@ -239,6 +243,26 @@ pub(super) fn render_strip(
         palette,
     );
     x = hits.running.right() + 1;
+    if let Some(seats) = seats {
+        let narrow = area.width < super::nirvana_seats::NARROW_STRIP;
+        let (value, asks) = super::nirvana_seats::seats_value(seats, narrow);
+        hits.seats = draw_square(
+            buffer,
+            x,
+            area.y,
+            right,
+            "Seats",
+            &value,
+            if asks {
+                palette.yellow
+            } else {
+                palette.subtext0
+            },
+            open == OpenPanel::Seats,
+            palette,
+        );
+        x = hits.seats.right() + 1;
+    }
     hits.preload = draw_square(
         buffer,
         x,
@@ -392,6 +416,8 @@ pub(super) enum OpenPanel {
     Running,
     Preload,
     Memory,
+    /// Plan 12 O8a.
+    Seats,
 }
 
 /// The open Running panel, for one agent's pane.
@@ -881,6 +907,8 @@ impl ClientShellState {
             OpenPanel::Preload
         } else if self.nirvana_memory.is_some() {
             OpenPanel::Memory
+        } else if self.nirvana_seats.is_some() {
+            OpenPanel::Seats
         } else {
             OpenPanel::None
         }
@@ -894,6 +922,7 @@ impl ClientShellState {
         let Some(agent) = self.snapshot.as_deref().and_then(strip_agent) else {
             return;
         };
+        self.nirvana_seats = None;
         self.nirvana_preload = None;
         self.nirvana_memory = None;
         self.nirvana_accounts = None;
@@ -1034,6 +1063,7 @@ impl ClientShellState {
         self.nirvana_running = None;
         self.nirvana_memory = None;
         self.nirvana_accounts = None;
+        self.nirvana_seats = None;
         let Some(agent) = self.snapshot.as_deref().and_then(strip_agent) else {
             return;
         };

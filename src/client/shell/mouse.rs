@@ -709,6 +709,10 @@ impl ClientShellState {
         if self.overlay.is_none() && self.handle_accounts_mouse(mouse, outcome) {
             return;
         }
+        // Plan 12 O8a: and the Seats panel.
+        if self.overlay.is_none() && self.handle_seats_mouse(mouse, outcome) {
+            return;
+        }
         if matches!(self.overlay, Some(ClientShellOverlay::Onboarding)) {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                 && super::contains(self.hits.overlay_primary, point)
@@ -1983,6 +1987,12 @@ impl ClientShellState {
                 // Nirvana fork, feature 8: the strip's Memory square opens its panel.
                 if super::contains(self.hits.nirvana_memory, point) {
                     self.toggle_memory_panel();
+                    outcome.repaint = true;
+                    return;
+                }
+                // Plan 12 O8a: the strip's Seats square opens its panel.
+                if super::contains(self.hits.nirvana_seats, point) {
+                    self.toggle_seats_panel();
                     outcome.repaint = true;
                     return;
                 }

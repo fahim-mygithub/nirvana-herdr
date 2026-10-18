@@ -348,6 +348,14 @@ pub enum Kind {
         through: u64,
         digest: String,
     },
+    /// Plan 12 O8a: the owner changed the mode while the run was open (the Seats square's key, or `herdr seat
+    /// mode`). Each order's own mode is on its `seated`; this says why two orders of one run sat at two modes.
+    ModeChanged {
+        from: Mode,
+        to: Mode,
+        /// "seats square" or "herdr seat mode".
+        by: String,
+    },
     Stalled {
         order: String,
         silent_s: u64,
@@ -410,7 +418,9 @@ impl Kind {
             Self::Usage { order, .. } | Self::Asked { order, .. } | Self::Ended { order, .. } => {
                 order.as_deref()
             }
-            Self::Opened { .. } | Self::Woken { .. } | Self::Unknown => None,
+            Self::Opened { .. } | Self::Woken { .. } | Self::ModeChanged { .. } | Self::Unknown => {
+                None
+            }
         }
     }
 
@@ -661,6 +671,8 @@ pub struct RunState {
     pub cap_asked: bool,
     pub orchestrator: Option<Tokens>,
     pub last_at: Option<u64>,
+    /// Plan 12 O8a: each mode change while the run was open: its time, from, to.
+    pub modes: Vec<(u64, Mode, Mode)>,
 }
 
 impl RunState {
@@ -966,6 +978,7 @@ pub fn replay(events: &[Event]) -> RunState {
                     wake_open = true;
                 }
             }
+            Kind::ModeChanged { from, to, .. } => state.modes.push((event.at, *from, *to)),
             Kind::Stalled {
                 order,
                 stalls,

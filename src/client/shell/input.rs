@@ -667,6 +667,13 @@ impl ClientShellState {
             }
             return None;
         }
+        // Plan 12 O8a: and the Seats panel.
+        if self.nirvana_seats.is_some() {
+            if key.kind == KeyEventKind::Press {
+                self.route_seats_key(key, outcome);
+            }
+            return None;
+        }
         if matches!(key.code, KeyCode::Modifier(_)) {
             return None;
         }

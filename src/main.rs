@@ -50,6 +50,7 @@ mod nirvana_retro;
 mod nirvana_run;
 mod nirvana_running;
 mod nirvana_seat;
+mod nirvana_seats_square;
 mod nirvana_servers;
 mod nirvana_spaces;
 mod nirvana_taskbar;

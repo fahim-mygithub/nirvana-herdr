@@ -118,6 +118,24 @@ impl Mode {
             _ => None,
         }
     }
+
+    /// Plan 12 O8a: the word the Seats square's header shows (§8: "Efficient, Balanced, SOTA").
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Efficient => "Efficient",
+            Self::Balanced => "Balanced",
+            Self::Sota => "SOTA",
+        }
+    }
+
+    /// Plan 12 O8a: the mode the Seats square's one key moves to, round the three stops.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Efficient => Self::Balanced,
+            Self::Balanced => Self::Sota,
+            Self::Sota => Self::Efficient,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -562,6 +580,66 @@ pub fn read_or_create(path: &Path) -> String {
     }
     let _ = std::fs::write(path, DEFAULT);
     DEFAULT.to_owned()
+}
+
+/// Plan 12 O8a: the table's text with its top-level `mode` set, every other byte as it was. The Seats square's
+/// key writes the mode here, where `pick` reads its default (§8), and not in a file of its own: two places for
+/// one setting would let a hand edit of `mode =` silently lose to the other. The owner's comments and order
+/// stay; the result must parse to the new mode, or nothing is written.
+pub fn with_mode(text: &str, mode: Mode) -> Result<String, String> {
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut done = false;
+    let mut in_table = false;
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\r', '\n']);
+        let trimmed = body.trim_start();
+        in_table |= trimmed.starts_with('[');
+        let is_mode = !in_table
+            && trimmed
+                .strip_prefix("mode")
+                .is_some_and(|rest| rest.trim_start().starts_with('='));
+        if is_mode && !done {
+            let indent = &body[..body.len() - trimmed.len()];
+            out.push_str(&format!("{indent}mode = \"{}\"", mode.word()));
+            out.push_str(&line[body.len()..]);
+            done = true;
+        } else {
+            out.push_str(line);
+        }
+    }
+    if !done {
+        return Err("seats.toml has no top-level `mode =` line".into());
+    }
+    match parse(&out) {
+        Ok(table) if table.mode == mode => Ok(out),
+        Ok(table) => Err(format!(
+            "seats.toml still reads mode {} after the edit",
+            table.mode.word()
+        )),
+        Err(problems) => Err(problems),
+    }
+}
+
+/// Plan 12 O8a: sets the mode of `seats.toml` in `dir` (herdr's is `dir()`); the mode it had. A table that is
+/// refused is not touched: the owner's own edit is never overwritten (O2's rule for this file).
+pub fn set_mode_in(dir: &Path, mode: Mode) -> Result<Mode, String> {
+    let path = dir.join(SEATS_FILE);
+    let text = read_or_create(&path);
+    let previous = parse(&text)
+        .map_err(|problems| format!("{} is refused, fix it first:\n{problems}", path.display()))?
+        .mode;
+    if previous != mode {
+        write_atomic(&path, with_mode(&text, mode)?.as_bytes())
+            .map_err(|err| format!("{}: {err}", path.display()))?;
+    }
+    Ok(previous)
+}
+
+/// `seat pick`'s request before its flags are read: the table's mode stands when `--mode` is not given (§5.1).
+pub fn default_request(table: &Table) -> Request {
+    let mut request = Request::new("");
+    request.mode = table.mode;
+    request
 }
 
 // ---- the world the rule reads ----
@@ -2243,6 +2321,7 @@ const USAGE: &str = "usage: herdr seat list [--json]
                        [--override <seat> --reason \"...\"] [--json]
        herdr seat release <order>
        herdr seat record --json '<line>'
+       herdr seat mode [efficient|balanced|sota]   (prints the mode, or sets seats.toml's; plan 12 O8a)
        herdr seat run|exec|status|read|stop|cleanup ...   (plan 12 O3; `herdr seat run` alone prints its usage)
 --size defaults to medium (seats.toml's [size.medium]); --mode to seats.toml's mode.
 pick exits 0 with a seat, 3 with none (a refused override included), 2 on a usage or table error, a --needs
@@ -2411,6 +2490,8 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         Some("pick") => pick_cli(&args[1..]),
         Some("release") => release_cli(&args[1..]),
         Some("record") => record_cli(&args[1..]),
+        // Plan 12 O8a: the mode the Seats square shows and changes.
+        Some("mode") => crate::nirvana_seats_square::mode_cli(&args[1..]),
         // Plan 12 O3: the runner's verbs live in `nirvana_worker`.
         Some("run" | "exec" | "status" | "read" | "stop" | "cleanup") => {
             crate::nirvana_worker::cli(args)
@@ -2634,8 +2715,7 @@ fn list_arg(value: &str) -> Vec<String> {
 
 fn pick_cli(args: &[String]) -> std::io::Result<()> {
     let table = load_table();
-    let mut request = Request::new("");
-    request.mode = table.mode;
+    let mut request = default_request(&table);
     let mut json = false;
     let mut book: Option<String> = None;
     let mut run: Option<String> = None;

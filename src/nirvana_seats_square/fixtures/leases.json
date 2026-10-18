@@ -1,0 +1,154 @@
+{
+  "version": 1,
+  "leases": [
+    {
+      "order": "mul",
+      "seat": "flash",
+      "effort": "low",
+      "pool": "gemini",
+      "class": "sweep.mechanical",
+      "run": "rec1",
+      "use": {
+        "5h": 0.00044,
+        "week": 0.00022
+      },
+      "booked_at": 1792311966,
+      "expires_at": 1792315566,
+      "pick": {
+        "bar": 79.0,
+        "bar_dropped": false,
+        "chain": "chore",
+        "class": "sweep.mechanical",
+        "cli": "agy",
+        "effort": "low",
+        "effort_note": null,
+        "family": "google",
+        "mode": "balanced",
+        "model": "gemini-3.8-flash-low",
+        "override": null,
+        "pool": "gemini",
+        "pressure": 0.000222,
+        "reason": "sweep.mechanical → flash low: gemini 5h 1.0% used, week 1% used",
+        "rule_pick": null,
+        "runners_up": [
+          {
+            "effort": null,
+            "seat": "haiku",
+            "why": "family anthropic excluded (another family reviews, decision 0017)"
+          }
+        ],
+        "same_family_fallback": false,
+        "score": 80.0,
+        "seat": "flash",
+        "size": "small",
+        "step_down": false,
+        "unknown": [],
+        "use_basis": "flash at low: derived: P4 flash low's tokens, $0.0083, times the gemini factor (its own delta was under the refill noise)",
+        "windows": [
+          {
+            "booked": 0.0,
+            "expected": 0.00044,
+            "headroom": 0.990254,
+            "left": 0.990254,
+            "pace": 0.5,
+            "reset_factor": 1.0,
+            "resets_at": 1792319371,
+            "used": 0.009746,
+            "window": "5h"
+          },
+          {
+            "booked": 0.0,
+            "expected": 0.00022,
+            "headroom": 0.989195,
+            "left": 0.989195,
+            "pace": 0.556782,
+            "reset_factor": 1.0,
+            "resets_at": 1792856882,
+            "used": 0.010805,
+            "window": "week"
+          }
+        ]
+      }
+    },
+    {
+      "order": "fix1",
+      "seat": "sonnet",
+      "effort": "medium",
+      "pool": "max",
+      "class": "build.bounded",
+      "run": "rec1",
+      "use": {
+        "5h": 0.00088,
+        "week": 0.00011
+      },
+      "booked_at": 1792311983,
+      "expires_at": 1792315583,
+      "pick": {
+        "bar": 85.0,
+        "bar_dropped": false,
+        "chain": "build.bounded",
+        "class": "build.bounded",
+        "cli": "claude",
+        "effort": "medium",
+        "effort_note": null,
+        "family": "anthropic",
+        "mode": "balanced",
+        "model": "claude-sonnet-5-5",
+        "override": null,
+        "pool": "max",
+        "pressure": 0.001449,
+        "reason": "build.bounded → sonnet medium: max 5h 38% used, week 59% used, reserve 15%",
+        "rule_pick": null,
+        "runners_up": [
+          {
+            "effort": "medium",
+            "seat": "g-sonnet",
+            "why": "scores 77.0, under the bar 85 at balanced"
+          },
+          {
+            "effort": "low",
+            "seat": "argon",
+            "why": "scores 82.0, under the bar 85 at balanced"
+          },
+          {
+            "effort": "low",
+            "seat": "flash",
+            "why": "scores 78.0, under the bar 85 at balanced"
+          }
+        ],
+        "same_family_fallback": false,
+        "score": 88.0,
+        "seat": "sonnet",
+        "size": "small",
+        "step_down": false,
+        "unknown": [],
+        "use_basis": "sonnet at medium: derived: P4 sonnet medium's 43,807 cache reads and 1,286 out, $0.022, times the max prior",
+        "windows": [
+          {
+            "booked": 0.0,
+            "expected": 0.00088,
+            "headroom": 0.47,
+            "left": 0.62,
+            "pace": 0.773986,
+            "reset_factor": 1.0,
+            "resets_at": 1792320600,
+            "used": 0.38,
+            "window": "5h"
+          },
+          {
+            "booked": 0.0,
+            "expected": 0.00011,
+            "headroom": 0.41,
+            "left": 0.41,
+            "pace": 2.0,
+            "reset_factor": 1.0,
+            "resets_at": 1792771200,
+            "used": 0.59,
+            "window": "week"
+          }
+        ]
+      }
+    }
+  ],
+  "runs": {}
+}

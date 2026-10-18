@@ -125,6 +125,10 @@ pub(super) struct ShellHitMap {
     pub(super) nirvana_accounts: Rect,
     /// Nirvana fork, feature 11: the open Accounts panel's rows, buttons and close box.
     pub(super) nirvana_accounts_panel: super::nirvana_accounts::AccountsHits,
+    /// Plan 12 O8a: the strip's Seats square of a Nirvana tab; a click opens its panel.
+    pub(super) nirvana_seats: Rect,
+    /// Plan 12 O8a: the open Seats panel's mode row, order lines and close box.
+    pub(super) nirvana_seats_panel: super::nirvana_seats::SeatsHits,
     pub(super) new_workspace: Rect,
     pub(super) new_tab: Rect,
     pub(super) tab_scroll_left: Rect,
@@ -1001,6 +1005,8 @@ pub(crate) struct ClientShellState {
     pub(super) nirvana_memory: Option<super::nirvana_memory::MemoryPanel>,
     /// Nirvana fork, feature 11: the Accounts panel, while open.
     pub(super) nirvana_accounts: Option<super::nirvana_accounts::AccountsPanel>,
+    /// Plan 12 O8a: the Seats panel, while open.
+    pub(super) nirvana_seats: Option<super::nirvana_seats::SeatsPanel>,
 }
 
 pub(super) fn product_announcement_state(
@@ -1172,6 +1178,7 @@ impl ClientShellState {
             nirvana_preload: None,
             nirvana_running: None,
             nirvana_memory: None,
+            nirvana_seats: None,
             nirvana_accounts: None,
         }
     }

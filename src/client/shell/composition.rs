@@ -244,6 +244,9 @@ impl ClientShellState {
                     .as_deref()
                     .and_then(crate::nirvana_running::cached);
                 let memory = super::nirvana_memory::memory_value(&agent);
+                // Plan 12 O8a: the Seats square, in a Nirvana tab only; the last read, never a read.
+                let seats = super::nirvana_seats::seats_tab(snapshot)
+                    .map(|tab| crate::nirvana_seats_square::cached(&tab.root));
                 let strip = super::nirvana_mods::render_strip(
                     &mut buffer,
                     layout.nirvana_mods,
@@ -251,6 +254,7 @@ impl ClientShellState {
                     activity.as_ref(),
                     &view,
                     memory,
+                    seats.as_ref().map(Option::as_ref),
                     self.open_panel(),
                     &self.config.palette,
                 );
@@ -259,6 +263,7 @@ impl ClientShellState {
                     self.hits.nirvana_preload = square;
                     self.hits.nirvana_running = strip.running;
                     self.hits.nirvana_memory = strip.memory;
+                    self.hits.nirvana_seats = strip.seats;
                 }
             }
         }
@@ -814,6 +819,36 @@ impl ClientShellState {
                 );
                 occlusion.cover(rendered.area);
                 self.hits.nirvana_memory_panel = rendered;
+                frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
+            }
+        }
+        // Plan 12 O8a: the Seats panel, drawn as the Memory panel is.
+        if self.overlay.is_none() {
+            if let Some(mut panel) = self.nirvana_seats.clone() {
+                let top = if layout.nirvana_mods.height > 0 {
+                    layout.nirvana_mods.y
+                } else {
+                    layout.pane_surface.y
+                };
+                let area = Rect::new(
+                    layout.pane_surface.x,
+                    top,
+                    layout.pane_surface.width,
+                    layout.pane_surface.bottom().saturating_sub(top),
+                );
+                let view = crate::nirvana_seats_square::cached(&panel.root);
+                let mut composed = frame.to_ratatui_buffer()?;
+                let rendered = super::nirvana_seats::render_seats_panel(
+                    &mut composed,
+                    area,
+                    &mut panel,
+                    view.as_ref(),
+                    crate::nirvana_seats_square::now(),
+                    &self.config.palette,
+                );
+                occlusion.cover(rendered.area);
+                self.hits.nirvana_seats_panel = rendered;
+                self.nirvana_seats = Some(panel);
                 frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
             }
         }

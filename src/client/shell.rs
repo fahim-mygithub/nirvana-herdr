@@ -30,6 +30,8 @@ mod nirvana_header;
 mod nirvana_memory;
 mod nirvana_mods;
 mod nirvana_new_menu;
+// Plan 12 O8a: the Seats square of a Nirvana tab.
+mod nirvana_seats;
 mod nirvana_spaces;
 mod notification_policy;
 mod notifications;

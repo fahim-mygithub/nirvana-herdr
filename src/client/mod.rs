@@ -2355,7 +2355,10 @@ async fn run_client_loop(
                             | crate::nirvana_usage::take_changed()
                             | crate::nirvana_preload::take_changed()
                             | crate::nirvana_running::take_changed()
-                            | crate::nirvana_accounts::take_changed();
+                            | crate::nirvana_accounts::take_changed()
+                            // Plan 12 O8a: the Seats square's journals; its reads start here, never
+                            // while the window draws.
+                            | crate::nirvana_seats_square::take_changed();
                         let frame = outcome
                             .repaint
                             .then(|| shell.compose(state.reported_size.0, state.reported_size.1))

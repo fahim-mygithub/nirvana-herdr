@@ -191,6 +191,7 @@ impl ClientShellState {
         else {
             return;
         };
+        self.nirvana_seats = None;
         self.nirvana_preload = None;
         self.nirvana_running = None;
         self.nirvana_accounts = None;
