@@ -54,6 +54,16 @@ Plan 12, package O4a (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` L5, L
   because `Directory\shell\Nirvana` holds old Nirvana's "Open Nirvana here" (read 2026-10-17). No real verb key was
   written during the build.
   **If you remove this:** the right-click opens Nirvana-C's Claude, or nothing.
+- **Changed:** install also retires old Nirvana's "Open Nirvana here" (`Directory\shell\Nirvana` and its Background
+  twin). First it writes each key's MUIVerb, Icon and command to `<home>\nirvana\backup\old-nirvana-verb.json`, and
+  only a key whose command names `open-here.pyw` is removed. The old daemon itself is not touched.
+  **Because:** R8, "have standard Nirvana use the herder varient". With both installed, the folder menu would show
+  "Open Nirvana here" (the old daemon's window) beside "Open Nirvana" (this fork). Read from the registry
+  2026-10-18; added by the orchestrator at the merge.
+  **Measured:** `test_install_writes_the_verb_and_toast_id_and_removes_nirvana_cs_verb` checks the removal and the
+  backup; `test_a_nirvana_key_of_another_program_is_left_alone` checks that another program's key stays. Controls are
+  in `controls.d/o4a_retire.py`.
+  **If you remove this:** two Nirvana entries in the folder menu, one of them opening the retired daemon's window.
 - **Changed:** `herdr.exe` carries `nirvana/assets/nirvana.ico` as icon group 1. build.rs writes the `.res` itself
   (one RT_ICON per image, one RT_GROUP_ICON) and passes it to MSVC's linker, so no build dependency and no `rc.exe`.
   **Because:** P7: "The icon must be a valid resource at the time the id is set ... An icon embedded in herdr.exe

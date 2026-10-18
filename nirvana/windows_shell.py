@@ -14,6 +14,8 @@ from the stdlib, never `reg.exe` (a console child that flashes) or a `.reg` file
 
 THE VERB KEY IS `NirvanaHerdr`. `Directory\\shell\\Nirvana` already holds old Nirvana's "Open Nirvana here" on the
 owner's machine (read 2026-10-17) and `NirvanaC` holds Nirvana-C's; a second writer at either would overwrite it.
+Both are retired after the new verb is written: Nirvana-C's outright, old Nirvana's after a JSON backup and only
+when its command names old Nirvana's launcher (`retire_old_nirvana_verb`).
 
 The verb runs Windows Terminal directly, so there is no launcher process and no console flash: `wt -w new -p
 Nirvana -d "%1" "<home>\\bin\\herdr.exe" --session nirvana nirvana window "%1"`. `-w new` keeps the folder's own
@@ -50,6 +52,9 @@ VERBS: tuple[tuple[str, str], ...] = (
 )
 # Nirvana-C's "Open Nirvana - CC" (its nirvana_c/verb.py VERBS), removed by every install (R8).
 OLD_VERBS: tuple[str, ...] = (r"Directory\shell\NirvanaC", r"Directory\Background\shell\NirvanaC")
+# Old Nirvana's "Open Nirvana here" (its `~/.nirvana/open-here.pyw`), retired with a backup (R8).
+OLD_NIRVANA_VERBS: tuple[str, ...] = (r"Directory\shell\Nirvana", r"Directory\Background\shell\Nirvana")
+OLD_NIRVANA_LAUNCHER = "open-here.pyw"
 # The fork's toast id; src/nirvana_launch.rs TOAST_APP_ID and the toast code write the same values.
 TOAST_APP_ID = "Nirvana.Herdr"
 TOAST_KEY = rf"AppUserModelId\{TOAST_APP_ID}"
@@ -297,8 +302,30 @@ def remove_verb(reg, base: str) -> dict:
 
 
 def remove_old_verb(reg, base: str) -> dict:
-    """Nirvana-C's "Open Nirvana - CC", both keys, whole trees. Old Nirvana's `Directory\\shell\\Nirvana` stays."""
+    """Nirvana-C's "Open Nirvana - CC", both keys, whole trees."""
     return {sub: reg.delete_tree(rf"{base}\{sub}") for sub in OLD_VERBS}
+
+
+def retire_old_nirvana_verb(reg, base: str, backup: Path) -> dict:
+    """Old Nirvana's "Open Nirvana here", which opens the old daemon's window, removed after a JSON backup of its keys.
+
+    The owner, R8: "have standard Nirvana use the herder varient". With both verbs installed, the folder menu showed
+    "Open Nirvana here" (old daemon) beside "Open Nirvana" (this fork), checked 2026-10-18. A key is removed only when
+    its command names old Nirvana's launcher, so another program's `Nirvana` key is never touched. The backup holds
+    each key's MUIVerb, Icon and command; nothing here stops or edits the old daemon.
+    """
+    found: dict = {}
+    for sub in OLD_NIRVANA_VERBS:
+        command = reg.get(rf"{base}\{sub}\command", None)
+        if command is not None and OLD_NIRVANA_LAUNCHER in command:
+            found[sub] = {"MUIVerb": reg.get(rf"{base}\{sub}", "MUIVerb"), "Icon": reg.get(rf"{base}\{sub}", "Icon"),
+                          "command": command}
+    if not found:
+        return {}
+    backup = Path(backup)
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    backup.write_text(json.dumps(found, indent=2) + "\n", encoding="utf-8")
+    return {sub: reg.delete_tree(rf"{base}\{sub}") for sub in found}
 
 
 def register_toast_id(reg, base: str, icon_uri: Path | str) -> dict:
@@ -409,4 +436,6 @@ def install_all(home: Path, *, reg=None, base: str = CLASSES, fragments: Path | 
     report["toast"] = register_toast_id(reg, base, toast_icon_path(home))
     report["verb"] = install_verb(reg, base, wt, herdr_exe(home), icon_path(home))
     report["old_verb_removed"] = remove_old_verb(reg, base)
+    report["old_nirvana_verb_retired"] = retire_old_nirvana_verb(reg, base,
+                                                                 home / "nirvana" / "backup" / "old-nirvana-verb.json")
     return report

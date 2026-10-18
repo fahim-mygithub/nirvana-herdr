@@ -39,12 +39,24 @@ class VerbTest(unittest.TestCase):
         for sub in ws.OLD_VERBS:      # Nirvana-C installed, as on the owner's machine
             reg.set(rf"{base}\{sub}", "MUIVerb", "Open Nirvana - CC")
             reg.set(rf"{base}\{sub}\command", None, "pythonw nirvana-herdr.pyw %1")
-        reg.set(rf"{base}\Directory\shell\Nirvana", "MUIVerb", "Open Nirvana here")   # old Nirvana's
+        for sub, token in zip(ws.OLD_NIRVANA_VERBS, ("%1", "%V")):   # old Nirvana's, as on the owner's machine
+            reg.set(rf"{base}\{sub}", "MUIVerb", "Open Nirvana here")
+            reg.set(rf"{base}\{sub}\command", None,
+                    rf'"C:\Python313\pythonw.exe" "C:\Users\o\.nirvana\open-here.pyw" "{token}"')
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             home = tmp / "home"
             report = ws.install_all(home, reg=reg, base=base, fragments=tmp / "frag", config_dir=tmp / "claude",
                                     wt=Path(r"C:\L\Microsoft\WindowsApps\wt.exe"), font=False)
+            backup_file = home / "nirvana" / "backup" / "old-nirvana-verb.json"
+            self.assertTrue(backup_file.is_file(), "old Nirvana's keys are backed up before they go")
+            backup = json.loads(backup_file.read_text(encoding="utf-8"))
+        # Old Nirvana's verb is retired (R8: "have standard Nirvana use the herder varient"), its keys kept in a backup.
+        self.assertEqual(report["old_nirvana_verb_retired"], {sub: True for sub in ws.OLD_NIRVANA_VERBS})
+        for sub in ws.OLD_NIRVANA_VERBS:
+            self.assertFalse(reg.exists(rf"{base}\{sub}"), sub)
+            self.assertEqual(backup[sub]["MUIVerb"], "Open Nirvana here")
+            self.assertIn("open-here.pyw", backup[sub]["command"])
         for sub, token in ws.VERBS:
             self.assertEqual(reg.get(rf"{base}\{sub}", "MUIVerb"), "Open Nirvana")
             self.assertEqual(reg.get(rf"{base}\{sub}", "Icon"), str(home / "nirvana" / "assets" / "nirvana.ico"))
@@ -55,8 +67,6 @@ class VerbTest(unittest.TestCase):
             self.assertFalse(reg.exists(rf"{base}\{sub}"), sub)
             self.assertFalse(reg.exists(rf"{base}\{sub}\command"), sub)
         self.assertEqual(report["old_verb_removed"], {sub: True for sub in ws.OLD_VERBS})
-        self.assertEqual(reg.get(rf"{base}\Directory\shell\Nirvana", "MUIVerb"), "Open Nirvana here",
-                         "old Nirvana's verb is left alone")
         self.assertEqual(reg.get(rf"{base}\AppUserModelId\Nirvana.Herdr", "DisplayName"), "Nirvana")
         self.assertEqual(reg.get(rf"{base}\AppUserModelId\Nirvana.Herdr", "IconUri"),
                          str(home / "nirvana" / "assets" / "nirvana-256.png"))
@@ -70,9 +80,20 @@ class VerbTest(unittest.TestCase):
                   {rf"{base}\{sub}\command".lower() for sub, _ in ws.VERBS} | \
                   {rf"{base}\{sub}".lower() for sub in ws.OLD_VERBS} | \
                   {rf"{base}\AppUserModelId\Nirvana.Herdr".lower()} | \
-                  {rf"{base}\Directory\shell\Nirvana".lower()} | \
+                  {rf"{base}\{sub}".lower() for sub in ws.OLD_NIRVANA_VERBS} | \
+                  {rf"{base}\{sub}\command".lower() for sub in ws.OLD_NIRVANA_VERBS} | \
                   {rf"{base}\{sub}\command".lower() for sub in ws.OLD_VERBS}
         self.assertLessEqual(touched, allowed, touched - allowed)
+
+    def test_a_nirvana_key_of_another_program_is_left_alone(self):
+        reg = ws.FakeRegistry()
+        reg.set(r"B\Directory\shell\Nirvana", "MUIVerb", "Some other Nirvana")
+        reg.set(r"B\Directory\shell\Nirvana\command", None, r'"C:\Other\nirvana.exe" "%1"')
+        with tempfile.TemporaryDirectory() as tmp:
+            backup = Path(tmp) / "backup.json"
+            self.assertEqual(ws.retire_old_nirvana_verb(reg, "B", backup), {})
+            self.assertFalse(backup.exists())
+        self.assertEqual(reg.get(r"B\Directory\shell\Nirvana", "MUIVerb"), "Some other Nirvana")
 
     def test_removing_the_old_verb_twice_is_harmless(self):
         reg = ws.FakeRegistry()
