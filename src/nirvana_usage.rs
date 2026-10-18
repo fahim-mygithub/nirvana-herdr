@@ -1030,6 +1030,10 @@ pub struct Shown {
     /// Seconds to the reset.
     pub resets_in: Option<u64>,
     pub stale: bool,
+    /// Any window every seat of the pool spends (no dot: `week.fable` binds only Fable) is fresh and ahead
+    /// of pace, not only the shown one. Plan 12 O2: live on 2026-10-17 Claude's week read pace 1.67 while
+    /// its 5 h window, the tightest at 0.98, was shown, and the row carried no mark.
+    pub ahead: bool,
 }
 
 /// What a usage row shows.
@@ -1060,9 +1064,9 @@ impl Figure {
         }
     }
 
-    /// Ahead of pace, and fresh enough to say so.
+    /// A window of the pool ahead of pace, and fresh enough to say so (`Shown::ahead`).
     pub fn ahead(&self) -> bool {
-        matches!(self, Self::Window(Shown { pace: Some(pace), stale: false, .. }) if *pace > AHEAD_OF_PACE)
+        matches!(self, Self::Window(Shown { ahead: true, .. }))
     }
 }
 
@@ -1090,6 +1094,16 @@ fn pool_names<'a>(sources: impl Iterator<Item = &'a Source>) -> Vec<String> {
         }
     }
     pools
+}
+
+/// Whether any window every seat of the pool spends is fresh and ahead of pace. A scoped week
+/// (`week.fable`) binds one model only, so it marks nothing, as it never decides the tightest window.
+fn any_ahead(readings: &[Reading], now: u64) -> bool {
+    readings.iter().any(|reading| {
+        !reading.window.contains('.')
+            && freshness(reading, now) == Freshness::Fresh
+            && pace(reading).is_some_and(|pace| pace > AHEAD_OF_PACE)
+    })
 }
 
 /// One row per pool from the readers' sources, at `now`.
@@ -1126,6 +1140,7 @@ pub fn pool_rows(sources: &[Source; 4], now: u64) -> Vec<UsageRow> {
                         .filter(|_| freshness != Freshness::ResetPassed)
                         .map(|at| at.saturating_sub(now)),
                     stale: freshness != Freshness::Fresh,
+                    ahead: any_ahead(&readings, now),
                 })
             } else {
                 Figure::Word("not exposed".to_owned())
@@ -1818,6 +1833,40 @@ mod tests {
         assert_eq!(tightest(&readings).unwrap().window, "5h");
     }
 
+    /// Plan 12 O2: live on 2026-10-17 Claude's 5 h window (shown, the tightest) read pace 0.98 and its
+    /// week 1.67, and the row had no mark. The mark is the pool's: any window every seat spends.
+    #[test]
+    fn the_pace_mark_shows_when_any_window_of_the_pool_is_ahead() {
+        let now = 1_000_000;
+        // 44% used with 2 h 44 m of 5 h left: pace 0.98, behind. 38% of the week with 5 d 17 h left: 1.67.
+        let five = reading("5h", Some(0.44), Some(now + 2 * 3600 + 44 * 60), now);
+        let week = reading("week", Some(0.38), Some(now + 5 * 86_400 + 17 * 3600), now);
+        assert!(pace(&five).unwrap() < AHEAD_OF_PACE, "{:?}", pace(&five));
+        assert!(pace(&week).unwrap() > AHEAD_OF_PACE, "{:?}", pace(&week));
+        let mut sources: [Source; 4] = Default::default();
+        sources[0].apply(
+            Some(Answer::Readings(vec![five.clone(), week.clone()])),
+            now,
+        );
+        let rows = pool_rows(&sources, now + 10);
+        let Figure::Window(shown) = &rows[0].figure else {
+            panic!("{:?}", rows[0]);
+        };
+        assert_eq!(shown.window, "5h", "the 5 h window is still the one shown");
+        assert!(rows[0].figure.ahead(), "the week is ahead: {shown:?}");
+        // A scoped week binds Fable only: ahead alone, it marks nothing.
+        let fable = reading("week.fable", Some(0.9), Some(now + 5 * 86_400), now);
+        let behind = reading("week", Some(0.1), Some(now + 5 * 86_400 + 17 * 3600), now);
+        sources[0].apply(
+            Some(Answer::Readings(vec![five.clone(), behind, fable])),
+            now,
+        );
+        assert!(!pool_rows(&sources, now + 10)[0].figure.ahead());
+        // A stale week says nothing of pace.
+        sources[0].apply(Some(Answer::Readings(vec![five, week])), now);
+        assert!(!pool_rows(&sources, now + STALE_AFTER + 1)[0].figure.ahead());
+    }
+
     fn sources_with(agy: Option<Vec<Reading>>, claude: Option<Vec<Reading>>) -> [Source; 4] {
         let mut sources: [Source; 4] = Default::default();
         if let Some(claude) = claude {
@@ -2000,6 +2049,7 @@ mod tests {
             pace: None,
             resets_in: None,
             stale: false,
+            ahead: false,
         });
         assert_eq!(figure.fill(), Some(0.4));
         assert_eq!(Figure::Word("off".into()).fill(), None);

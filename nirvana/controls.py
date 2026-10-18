@@ -305,9 +305,26 @@ CONTROLS: tuple[Control, ...] = (
     Control('usage_row_never_stale', 'src/nirvana_usage.rs',
             'stale: freshness != Freshness::Fresh,', 'stale: false,',
             'each_pool_row_shows_its_tightest_window_and_its_pace', "rust"),
+    # O2 moved the mark to any window of the pool, so the threshold lives in `any_ahead`. A week read 1.70 in
+    # the fixture, so only a line at the clamp (2.0) turns every window behind.
     Control('usage_ahead_threshold', 'src/nirvana_usage.rs',
-            'if *pace > AHEAD_OF_PACE)', 'if *pace > 1.5)',
+            'pace(reading).is_some_and(|pace| pace > AHEAD_OF_PACE)',
+            'pace(reading).is_some_and(|pace| pace > PACE_MAX)',
             'each_pool_row_shows_its_tightest_window_and_its_pace', "rust"),
+    # Plan 12 O2 fix (a): the pace mark is the pool's, any no-dot window fresh and ahead, not the shown one only.
+    Control('footer_mark_shown_window_only', 'src/nirvana_usage.rs',
+            '                    ahead: any_ahead(&readings, now),\n',
+            '                    ahead: freshness == Freshness::Fresh\n'
+            '                        && pace(reading).is_some_and(|pace| pace > AHEAD_OF_PACE),\n',
+            'the_pace_mark_shows_when_any_window_of_the_pool_is_ahead', "rust"),
+    Control('footer_mark_scoped_week', 'src/nirvana_usage.rs',
+            "        !reading.window.contains('.')\n            && freshness(reading, now) == Freshness::Fresh\n",
+            "        freshness(reading, now) == Freshness::Fresh\n",
+            'the_pace_mark_shows_when_any_window_of_the_pool_is_ahead', "rust"),
+    Control('footer_mark_stale_week', 'src/nirvana_usage.rs',
+            "            && freshness(reading, now) == Freshness::Fresh\n            && pace(reading)",
+            "            && pace(reading)",
+            'the_pace_mark_shows_when_any_window_of_the_pool_is_ahead', "rust"),
     Control('usage_label_g_claude', 'src/nirvana_usage.rs',
             'GOOGLE3P => "G\\u{b7}Claude",', 'GOOGLE3P => "Google",',
             'each_pool_row_shows_its_tightest_window_and_its_pace', "rust"),
@@ -497,9 +514,10 @@ CONTROLS: tuple[Control, ...] = (
     Control('answer_any_digit', 'src/client/shell/nirvana_mods.rs',
             '.find(|(option, _)| *option == digit)', '.next()',
             'a_waiting_prompt_is_read_from_the_pane_and_a_digit_answers_it', "rust"),
+    # Repointed in O2: 0.11.0's Accounts panel added `self.nirvana_accounts = None;` before the open.
     Control('panels_both_open', 'src/client/shell/nirvana_mods.rs',
-            '        self.nirvana_preload = None;\n        self.nirvana_memory = None;\n        self.nirvana_running = Some(RunningPanel {',
-            '        self.nirvana_memory = None;\n        self.nirvana_running = Some(RunningPanel {',
+            '        self.nirvana_preload = None;\n        self.nirvana_memory = None;\n        self.nirvana_accounts = None;\n        self.nirvana_running = Some(RunningPanel {',
+            '        self.nirvana_memory = None;\n        self.nirvana_accounts = None;\n        self.nirvana_running = Some(RunningPanel {',
             'one_panel_at_a_time_and_esc_closes', "rust"),
     Control('running_square_no_click', 'src/client/shell/composition.rs',
             'self.hits.nirvana_running = strip.running;', 'let _ = strip.running;',
@@ -557,8 +575,9 @@ CONTROLS: tuple[Control, ...] = (
     Control('edit_tab_not_focused', 'src/app/nirvana_edit.rs',
             '        self.state.switch_workspace_tab(ws_idx, tab_idx);\n', '',
             'edit_opens_the_file_in_a_new_focused_tab_and_leaves_the_agents_tab_alone', "rust"),
+    # Repointed in O2: 0.11.0 moved the tab into `nirvana_open_command_tab`, which takes the name whole.
     Control('edit_tab_unnamed', 'src/app/nirvana_edit.rs',
-            '        ws.tabs[tab_idx].set_custom_name(format!("edit {name}"));\n', '        let _ = name;\n',
+            '        ws.tabs[tab_idx].set_custom_name(name);\n', '        let _ = name;\n',
             'edit_opens_the_file_in_a_new_focused_tab_and_leaves_the_agents_tab_alone', "rust"),
     # Feature 8: the Memory square and the shared board (plans/2026-10-16-08-memory-square-and-board.md).
     # Red line for each: its test prints FAIL.
@@ -608,12 +627,14 @@ CONTROLS: tuple[Control, ...] = (
             'command_id: format!("{}{}", crate::nirvana::EDIT_FILE_COMMAND, file.display()),',
             'command_id: format!("{}{}", crate::nirvana::EDIT_FILE_COMMAND, root.display()),',
             'the_memory_panel_lists_the_board_shares_it_and_edits_it', "rust"),
+    # Repointed in O2: 0.11.0 added `self.nirvana_accounts = None;` before the open.
     Control('memory_panel_beside_preload', 'src/client/shell/nirvana_memory.rs',
-            '        self.nirvana_preload = None;\n        self.nirvana_running = None;\n        self.nirvana_memory = Some(',
-            '        self.nirvana_running = None;\n        self.nirvana_memory = Some(',
+            '        self.nirvana_preload = None;\n        self.nirvana_running = None;\n        self.nirvana_accounts = None;\n        self.nirvana_memory = Some(',
+            '        self.nirvana_running = None;\n        self.nirvana_accounts = None;\n        self.nirvana_memory = Some(',
             'the_memory_panel_lists_the_board_shares_it_and_edits_it', "rust"),
+    # Repointed in O2: 0.11.0 added `|| state.nirvana_accounts.is_some()` to the condition.
     Control('panel_painted_over', 'src/client/shell/surface_patch.rs',
-            '    } else if state.nirvana_preload.is_some()\n        || state.nirvana_running.is_some()\n        || state.nirvana_memory.is_some()\n    {\n',
+            '    } else if state.nirvana_preload.is_some()\n        || state.nirvana_running.is_some()\n        || state.nirvana_memory.is_some()\n        || state.nirvana_accounts.is_some()\n    {\n',
             '    } else if false {\n',
             'an_open_panel_is_redrawn_when_its_agent_prints', "rust"),
     Control('notice_first_without_howto', 'src/nirvana_board.rs',
@@ -693,8 +714,9 @@ CONTROLS: tuple[Control, ...] = (
             '        Switch::JevGuide => !crate::nirvana_jev_install::has_hook(',
             '        Switch::JevGuide => crate::nirvana_jev_install::has_hook(',
             'each_kind_of_item_gets_its_proven_switch', "rust"),
+    # Repointed in O2: 0.10.0 gave `jev_items` the folder, `jev_items(local, cwd)`.
     Control('jev_rows_missing', 'src/nirvana_preload.rs',
-            '    items.extend(jev_items(local));\n',
+            '    items.extend(jev_items(local, cwd));\n',
             '\n',
             'the_jev_group_switches_the_guide_for_every_agent_and_compact_advice_for_claude', "rust"),
     Control('jev_guide_not_for_others', 'src/nirvana_preload.rs',

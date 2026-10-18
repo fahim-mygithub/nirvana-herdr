@@ -14,6 +14,7 @@ fn shown(window: &str, used: f32, pace: f32, resets_in: u64) -> Figure {
         pace: Some(pace),
         resets_in: Some(resets_in),
         stale: false,
+        ahead: pace > crate::nirvana_usage::AHEAD_OF_PACE,
     })
 }
 
@@ -302,6 +303,7 @@ fn the_layout_rules() {
         pace: None,
         resets_in: None,
         stale: false,
+        ahead: false,
     });
     assert_eq!(figures(&unknown, false), "  -- 7d ");
     assert_eq!(figures(&unknown, true), "  -- 7d       ");
