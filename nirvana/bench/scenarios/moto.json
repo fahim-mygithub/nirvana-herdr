@@ -428,6 +428,141 @@
     ],
     "why": "MEASURED 2026-10-18 (haiku, print mode, the owner's settings): Bash ran, Write was denied with 'haven't granted it yet'; with --permission-mode auto both ran. Arm N's pane starts in auto mode ('auto mode on' on its screen), so arm C gets the same posture for the scenarios that write or serve. M1 keeps the brief's argv unchanged."
    }
+  },
+  {
+   "id": "M9",
+   "class": "medium",
+   "task_class": "build.bounded",
+   "status": "ready",
+   "seat": "Auto",
+   "runs_per_arm": 1,
+   "ends_on": "base",
+   "prompt": "Add a /api/health endpoint to the editor server that returns the loaded manifest name and how many hike clips are indexed, and a /api/clips endpoint that lists each indexed hike clip with its file name and duration. Write tests for both and commit the work.",
+   "source": {
+    "words": null,
+    "shaped": "orchestrator-shaped, 2026-10-18: M5's ask plus a second route, tests and a commit, so the order is over R2's one-file few-lines line and Nirvana Claude seats a worker; the first O7 round answered every ask itself. Truth is M5's (the health route on the committed tree); /api/clips and the tests are read by hand."
+   },
+   "repo": {
+    "project": "MotoProject",
+    "source": "D:/MotoProject",
+    "sha": "60476ebea26919b19138115543efcbd241cdb2a2",
+    "branch": "master",
+    "why_this_sha": "the folder's one commit (2026-10-08, 'Start keeping a history of changes (set up by Nirvana)'); read with git log on 2026-10-12",
+    "dirs": [
+     {
+      "from": "D:/MotoProject/editor",
+      "to": "editor",
+      "exclude": [
+       "cache",
+       "__pycache__"
+      ]
+     },
+     {
+      "from": "D:/MotoProject/index/hike",
+      "to": "index/hike",
+      "exclude": [
+       "cache",
+       "__pycache__"
+      ]
+     },
+     {
+      "from": "D:/MotoProject/angles_hike",
+      "to": "angles_hike",
+      "exclude": [
+       "cache",
+       "__pycache__"
+      ]
+     }
+    ],
+    "files": [
+     {
+      "from": "D:/MotoProject/scripts/sphere.py",
+      "to": "scripts/sphere.py",
+      "sha256": "9ccc0131f1de0c43e459cd442c7313b6b943836a37b82036b742ae6c2927a9b1",
+      "why": "editor/server/sources.py imports it; untracked at 60476eb, and without it main.py dies on import (measured: ModuleNotFoundError: No module named 'sphere')"
+     },
+     {
+      "from": "D:/MotoProject/scripts/post.py",
+      "to": "scripts/post.py",
+      "sha256": "001c87231fbcdbc738bd6e384b9f607c61a7c0186b7e023b7511e53ccb29755e",
+      "why": "editor/server/postview.py imports it (`import post as post_cli`); untracked; the next ModuleNotFoundError after sphere"
+     },
+     {
+      "from": "D:/MotoProject/scripts/grade_probe.py",
+      "to": "scripts/grade_probe.py",
+      "sha256": "1a08481982e89cc3d9b3fbdbc85cb53135140b4eeb0e2bd2ad884e44c290c07b",
+      "why": "imported by an editor module once sphere and post resolve; untracked; the third and last ModuleNotFoundError"
+     },
+     {
+      "from": "D:/MotoProject/profiles/hike.json",
+      "to": "profiles/hike.json",
+      "sha256": "c21e1962895c51052191fadcef23136ffd36bd527079fbfedee7c5cb5502447a",
+      "why": "the hike profile a post's /api/project reads (sources.load_profile); untracked"
+     },
+     {
+      "from": "D:/MotoProject/plan/post_alum_cave.json",
+      "to": "plan/post_alum_cave.json",
+      "sha256": "0992bdc599edacc5279f7aa33bce360ae4859192492558ea34ab512dc1a21593",
+      "why": "a hike carousel; untracked; the three are the only plan/post_*.json, so the hike workload exists in the clone only with them"
+     },
+     {
+      "from": "D:/MotoProject/plan/post_alum_cave_v2.json",
+      "to": "plan/post_alum_cave_v2.json",
+      "sha256": "f4f86599da3c169023220ba787017e9b91baa658ef6d0e5beba4618ccad179f4",
+      "why": "as above"
+     },
+     {
+      "from": "D:/MotoProject/plan/post_alum_cave_v3.json",
+      "to": "plan/post_alum_cave_v3.json",
+      "sha256": "363b887bca6098ae1553aa81ef523bdfc9d7acdafa00d0b0fad9070aedae01e2",
+      "why": "the post Claude Code's 49 s run loaded (`--manifest plan/post_alum_cave_v3.json`, decision 0041 §1)"
+     },
+     {
+      "from": "D:/MotoProject/notes/hike_finds_20260908.json",
+      "to": "notes/hike_finds_20260908.json",
+      "sha256": "5ad9e6eeff569c13f877940278542e59191ad321faeed6e97b01d28d0d7c36ae",
+      "why": "the brief's notes/hike_*.json; the Finds panel's data (editor/server/finds.py)"
+     },
+     {
+      "from": "D:/MotoProject/notes/hike_scan_20260908.json",
+      "to": "notes/hike_scan_20260908.json",
+      "sha256": "854d5c85bdc1d4fb9f408cdd970608fa7314564d614a3c776e8f84e311e99a47",
+      "why": "the brief's notes/hike_*.json"
+     }
+    ],
+    "extra_files": [
+     {
+      "to": ".gitignore",
+      "append": "editor/cache/\n"
+     }
+    ],
+    "why_attached": "D:/MotoProject's one commit (60476eb, made by Nirvana) left the very files a run needs untracked -- itself L6 of the serve-and-seat plan, \"the brief knows the tree\". 60476eb left the editor, the hike index and roster, the hike posts and three scripts the editor imports untracked; the bench commit (clone_base) carries them, a DELIBERATE departure from the owner's folder where they are untracked. NOT attached: media/masters (30 GB) and the two root .mp4 -- measured in bench/truth/moto_facts.json, the editor serves every page and API route checked without them. `__pycache__` is excluded as well as `cache`: the owner's bytecode is not source. The hike .insv files are read by absolute path (D:/Insta360 Studio/...) and EXIST on this machine, so a frame request for a hike clip can succeed: the bench does not hide them."
+   },
+   "truth": {
+    "check": "bench/truth/M5.py",
+    "answer": false,
+    "run_dir": true,
+    "rule": "on the COMMITTED tip of master (git archive): the editor starts with --no-prewarm --manifest plan/post_alum_cave_v3.json on a free port, GET /api/health is 200 JSON with a string naming post_alum_cave_v3 and an integer equal to the hike index's clip count; / and /api/project still answer; master is ahead of the base (committed_on_base)"
+   },
+   "target": {
+    "ratio": 3
+   },
+   "ceiling": {
+    "ratio": 4
+   },
+   "wall_target_s": 480,
+   "actions_target": 0,
+   "trust": "press",
+   "trust_why": "the ask needs no running server, so actions_target stays 0; but a build worker that starts the editor to try its route and keeps it listening raises a server_trust card at turn end (decision 0041 R4), which the written card policy never presses: the run would stall to its 3600 s wall. Pressing it ends the stall, and each press still counts as a person action over the target, so the meter shows what the worker's choice cost.",
+   "wall_limit_s": 3600,
+   "reply": "Yes.",
+   "claude_code": {
+    "extra_argv": [
+     "--permission-mode",
+     "auto"
+    ],
+    "why": "MEASURED 2026-10-18 (haiku, print mode, the owner's settings): Bash ran, Write was denied with 'haven't granted it yet'; with --permission-mode auto both ran. Arm N's pane starts in auto mode ('auto mode on' on its screen), so arm C gets the same posture for the scenarios that write or serve. M1 keeps the brief's argv unchanged."
+   }
   }
  ]
 }

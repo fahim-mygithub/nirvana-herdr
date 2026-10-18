@@ -1,7 +1,7 @@
 # Plan 12 O7: Nirvana Claude against plain Claude Code (generated)
 
 - out: `C:\Users\fahim\Desktop\Pojects\Nirvana-Herdr-o7\target\o7-bench\paid`
-- scenario file sha256: `7ff4dc22a7e7c2fc083985661ffc716444c5b53a5dc4e6433c272c934a76fb01`
+- scenario file sha256: `c58d60d603f5f5ff26138a6d705d0872bcda010b6e8682a13620e1bfa9ffca55`
 - both arms: claude-opus-5-5 at medium; gross tokens = input + cache write + cache read (output excluded)
 - Claude 5h and week: whole-percent readings of the whole account before and after the run, so another session's use in the span is inside them; the token columns are the meter
 
@@ -52,5 +52,22 @@ Tokens by kind (fresh input, cache write, cache read, output), orchestrator and 
 - Nirvana Claude (N): runs 1, median wall 49.023 s, median pass fraction 0.5, median gross 822,180
 - plain Claude Code (C): runs 1, median wall 35.605 s, median pass fraction 0.5, median gross 492,717
 - verdict: insufficient runs (n<3); N 1, C 1
+
+## M9 (medium)
+
+| run | arm | ended | wall s | truth | failed rules | orchestrator gross | workers gross | person | Claude 5h | Claude week | seats | incidents |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| M9/C-1 | C | finished | 118.556 | PASS (8 pass, 0 fail) | - | 994,214 | 0 | n.a. | +3.00 pts | +0.00 pts | claude-opus-5-5 x30 messages | - |
+| M9/N-1 | N | answered | 127.771 | PASS (8 pass, 0 fail) | - | 1,162,860 | 336,012 | 0 | +1.00 pts | +0.00 pts | subagent claude-sonnet-5-5 x8 messages | - |
+
+Tokens by kind (fresh input, cache write, cache read, output), orchestrator and workers apart:
+
+- M9/C-1: orchestrator in 24 / cache write 80,478 / cache read 913,712 / out 9,370; workers in 0 / cache write 0 / cache read 0 / out 0
+- M9/N-1: orchestrator in 26 / cache write 71,551 / cache read 1,091,283 / out 5,446; workers in 16 / cache write 48,871 / cache read 287,125 / out 3,541
+
+- Nirvana Claude (N): runs 1, median wall 127.771 s, median pass fraction 1, median gross 1,498,872
+- plain Claude Code (C): runs 1, median wall 118.556 s, median pass fraction 1, median gross 994,214
+- truth parity: N 1, C 1: at parity or better
+- usage ratio: N gross / C gross = 1.51 (target 3, ceiling 4): within target
 
 

@@ -3,6 +3,16 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.19.1 (2026-10-18): O7 scenario M9, the first live seated order
+
+- **Changed:** the A/B scenarios gain M9: M5's health route, a `/api/clips` route, tests for both, and a commit. Its
+  truth is M5's, on the committed tree.
+  **Because:** M1, M2 and M5 sit under R2's line, so Nirvana Claude answered them itself and the first round never
+  seated a worker.
+  **Measured:** M9 passes 8 of 8 on both arms (N 128 s, 1.50M gross; C 119 s, 0.99M). N seated a Sonnet medium worker
+  through `herdr seat pick` and the guard (`evidence/2026-10-18-o7-ab/README.md`).
+  **If you remove this:** the A/B never shows the orchestrator seating anything.
+
 ## alpha 0.19.0 (2026-10-18): the A/B driver, Nirvana Claude against plain Claude Code on the Moto project (plan 12 O7)
 
 Plan 12, package O7 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` L1, §6.1, §7.4.1, §11 O7; the record is

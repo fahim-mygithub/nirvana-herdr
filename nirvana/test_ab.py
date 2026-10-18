@@ -155,14 +155,14 @@ class PathLimitTest(unittest.TestCase):
 class ScenarioFileTest(unittest.TestCase):
     def test_the_scenarios_are_the_three_the_brief_names_with_the_owners_words(self):
         doc = ab.load_scenarios()
-        self.assertEqual([s["id"] for s in doc["scenarios"]], ["M1", "M2", "M5"])
+        self.assertEqual([s["id"] for s in doc["scenarios"]], ["M1", "M2", "M5", "M9"])
         self.assertEqual(ab.scenario(doc, "M1")["prompt"],
                          "Can you explain what this project does and how I start the reel editor?")
         self.assertEqual(ab.scenario(doc, "M2")["prompt"],
                          "Can you start the reel project server with the hike workload loaded?")
         self.assertEqual(set(doc["arms"]), {"N", "C"})
         with self.assertRaises(ab.Refused):
-            ab.scenario(doc, "M9")
+            ab.scenario(doc, "M99")
 
     def test_each_scenarios_truth_check_is_in_the_fork_and_its_source_is_named(self):
         for sc in ab.load_scenarios()["scenarios"]:
