@@ -3,7 +3,7 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
-## alpha NEXT (o4a): Nirvana Claude's launch, the "new" menu, "Open Nirvana", its own icon, badge and toast
+## alpha 0.15.0 (2026-10-18): Nirvana Claude's launch, the "new" menu, "Open Nirvana", its own icon, badge and toast (plan 12 O4a)
 
 Plan 12, package O4a (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` L5, L6, L7, §6, §8, R1, R8; record
 `plans/2026-10-17-12-records/o4a.md`).

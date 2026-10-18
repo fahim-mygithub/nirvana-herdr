@@ -16,8 +16,9 @@ python nirvana/install.py          # build release and install to %LOCALAPPDATA%
 python nirvana/version.py show     # alpha X.Y.Z
 ```
 
-Explorer's "Open Nirvana - CC" (Nirvana-C) runs the installed fork in the session `nirvana`, inside its
-`nirvana-shell` supervisor. By hand: `herdr.exe --session nirvana nirvana-shell`.
+Explorer's "Open Nirvana" (installed by `install.py` since 0.15.0) runs `herdr --session nirvana nirvana window
+<folder>` in a new Windows Terminal window: Nirvana Claude on the folder, with its own taskbar button, letter badge and
+toast. By hand: `herdr.exe --session nirvana nirvana-shell`.
 
 ## Features
 
@@ -32,6 +33,7 @@ Explorer's "Open Nirvana - CC" (Nirvana-C) runs the installed fork in the sessio
 | 12 (O1) | Usage readings: every pool and window with its reset, freshness and pace; `herdr usage [--json] [--refresh]` over `<home>/nirvana/usage.json` | plans/2026-10-17-12-nirvana-claude-orchestrator.md §15 |
 | 12 (O2) | Seats: `<home>/nirvana/seats.toml` (seats, classes, bars, priors, prices); `herdr seat pick` seats an order by filters, bar and pool pressure with a reason line, books it (`--book`), takes three overrides a run; `herdr seat list`, `release`, `record` (`record.jsonl`, blend off) | plans/2026-10-17-12-nirvana-claude-orchestrator.md §16 |
 | 12 (O6) | Media seats: `herdr media probe` (ffprobe, the 100 MB `view_file` limit), `herdr media shrink` (ffmpeg to at most 1280 px, 10 fps, mono audio, under the limit, never over the input), `herdr media prompt` (the full-path `view_file` line for argon or flash); the `media` skill in `nirvana/claude/skills/media/` | plans/2026-10-17-12-records/o6.md |
+| 12 (O4a) | Nirvana Claude: the plugin (`nirvana/claude`) and its launch; the "new" menu (Nirvana, Claude Code, Antigravity, Shell); Explorer's "Open Nirvana" (`herdr nirvana window`), replacing Nirvana-C's and old Nirvana's verbs; `herdr.exe` carries the Nirvana mark; a Nirvana window gets its own taskbar button, the folder's letter as badge, and the toast "Nirvana · <folder>" | plans/2026-10-17-12-records/o4a.md |
 
 ## Rules for this fork
 
