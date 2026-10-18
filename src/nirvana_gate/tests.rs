@@ -469,6 +469,7 @@ fn seated(order: &str, parent: Option<&str>) -> Seated {
         step_down: None,
         use_basis: None,
         expected: BTreeMap::new(),
+        jev_pick: None,
     }
 }
 

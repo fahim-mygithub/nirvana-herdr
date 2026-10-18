@@ -234,6 +234,10 @@ pub struct Seated {
     /// The order's expected share of each window, as booked.
     #[serde(default)]
     pub expected: BTreeMap<String, f32>,
+    /// Plan 12 O8b (§9 role 3): what Jev advised when more than one seat cleared the bar, beside the rule's
+    /// own pick in `seat`. In shadow it changed nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jev_pick: Option<crate::nirvana_jev_roles::JevPick>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -356,6 +360,19 @@ pub enum Kind {
         order: String,
         why: String,
     },
+    /// Plan 12 O8b (§9 role 2): Jev read a pane worker's screen. `answer` is yes, no, unsure or failed; only a
+    /// yes with `acted` set (the setting is `on`) wakes the orchestrator.
+    JevWatch {
+        order: String,
+        answer: String,
+        /// "stuck", "looping" or "waiting_for_answer", for a yes.
+        #[serde(default)]
+        kind: Option<String>,
+        #[serde(default)]
+        score: f64,
+        #[serde(default)]
+        acted: bool,
+    },
     /// An order's worker ended (`order` set), or the run ended (`herdr run end`).
     Ended {
         #[serde(default)]
@@ -388,6 +405,7 @@ impl Kind {
             | Self::Gated { order, .. }
             | Self::Merged { order, .. }
             | Self::Stalled { order, .. }
+            | Self::JevWatch { order, .. }
             | Self::Interrupted { order, .. } => Some(order),
             Self::Usage { order, .. } | Self::Asked { order, .. } | Self::Ended { order, .. } => {
                 order.as_deref()
@@ -704,6 +722,16 @@ fn queue_line(kind: &Kind) -> Option<String> {
             ..
         } => format!("{order} stalled ({silent_s} s silent): {next}"),
         Kind::Interrupted { order, why } => format!("{order} interrupted: {}", short(why, 90)),
+        Kind::JevWatch {
+            order,
+            answer,
+            kind,
+            score,
+            acted: true,
+        } if answer == "yes" => format!(
+            "{order}: Jev reads its screen as {} ({score:.2}); look at its pane",
+            kind.as_deref().unwrap_or("stuck")
+        ),
         Kind::Reseated {
             order,
             child,
@@ -990,7 +1018,8 @@ pub fn replay(events: &[Event]) -> RunState {
                     }
                 }
             },
-            Kind::Unknown => {}
+            // Shadow or on, it moves no order: the line below is all a yes does, and only when it acted.
+            Kind::JevWatch { .. } | Kind::Unknown => {}
         }
         if let Some(line) = queue_line(&event.kind) {
             state.queue.push(QueueItem {
@@ -2477,6 +2506,11 @@ fn tick_cli(project: &Project, args: &[String]) -> std::io::Result<()> {
                     Err(err) => println!("{run}: {} could not start: {err}", order.id()),
                 }
             }
+        }
+        // Plan 12 O8b (§9 role 2): Jev reads the long-running pane workers' screens before the wake, so an
+        // `on` yes is in the queue this wake carries and goes through its guard and the owner-typing rule.
+        for line in crate::nirvana_jev_roles::watch_run(project, &run)? {
+            println!("{run}: {line}");
         }
         let (verdict, _) = wake(project, &run, false)?;
         println!("{run}: {verdict}");

@@ -3,6 +3,59 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha NEXT (o8b): Jev's roles 2 and 3 in shadow, `herdr jev roles|agree|watch` (plan 12 O8b)
+
+Plan 12, package O8b (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §9; the record is
+`plans/2026-10-17-12-records/o8b.md`).
+
+- **Changed:** role 3, advising the seating. After `seat pick` has filtered and cleared the bar, when more than one seat
+  is left (`Pick.contenders`, a new optional field, the pick first), Jev answers a choice over those seats with a `none`
+  option and records `jev_pick` on the pick, in its reason line ("; Jev (shadow) would seat X 0.86; the rule seated Y")
+  and in the `seated` journal event (`jev_pick`, a new optional field). In shadow the rule's seat is seated. Under
+  `on`, a choice at or over 0.7 that is not the rule's is an override through `nirvana_seat::pick`, so it passes
+  step 1's filters, the reserve included, and counts against the run's 3 overrides; a refusal leaves the rule's pick
+  with the reason. `seat run <seat>` records and never acts: the caller named its seat.
+  **Because:** §9 role 3 and Argon's review: the first version should not need Jev, and the owner turns it on when it
+  agrees enough. Making Jev's choice an override instead of a second path to a seat means no filter is written twice
+  and Jev cannot spend more than the orchestrator's cap.
+  **Measured:** `nirvana_jev_roles::tests::*` with a fake client that answers from the question it was sent (both
+  floors at 0.69/0.7 and 0.3/0.31, none, a failure, off, a single contender, shadow writing without acting, `on`
+  acting and then refused at the cap); controls `jevr_*`. Live, one call: `seat pick --class plan` seated opus; Jev
+  answered `unsure (opus 0.51)` between opus and g-opus in 204 ms for $0.0000336. At Balanced only some classes leave
+  two seats: of the 19 classes in the default table with no usage readings (a probe test, since removed), 14 do;
+  `build.bounded`, `research.read`, `write.docs`, `media.video` and `sweep.mechanical` leave one, so role 3 has
+  nothing to ask there. **Hypothesis:** whether Jev's choices beat the rule's is unmeasured;
+  `herdr jev agree` is how it will be.
+  **If you remove this:** the owner has no number for whether Jev may pick seats, and turning it on would be a guess.
+- **Changed:** role 2, watching workers. `herdr run tick` (O3's tick) now reads, every 5 minutes, the last 60 lines of
+  each pane worker that has run over 10 minutes (a live supervisor, a pane, the time since its last `started`) and
+  asks Jev two questions in one call: is it stuck, looping or waiting for a human (a yes/no), and which. The answer is
+  a `jev_watch` journal event. A yes needs 0.7; 0.3 or less is a no; between is unsure; a kind Jev is sure is plain
+  work turns a yes into unsure; a failure is written `failed` and is never a yes. In shadow the event has
+  `acted: false` and queues nothing. Under `on` a yes queues one line for the orchestrator, and the wake that follows
+  is O3's `nirvana_run::wake`, with its guard and the owner-typing rule untouched.
+  **Because:** §7.2 reads a silent stream itself; a worker looping while it talks is what a silent stream misses, and
+  Jev reads it for no Claude token.
+  **Measured:** unit tests on the floors, the kind, redaction and the 60-line tail, `due` (10 minutes exactly is not
+  over, a restart moves the clock, 5 minutes between looks, no supervisor, headless, finished), the shadow and `on`
+  ticks and the wake decision on the `on` queue; controls `jevr_*`. Live, two calls through `herdr run tick` on an
+  isolated server, the worker pane a PowerShell printing 14 identical failing-test lines: shadow wrote
+  `jev_watch yes stuck 0.93 acted:false` (163 ms, $0.0000484) and "nothing waits"; `on` wrote `acted:true`, "1 event(s)
+  queued: the run has no orchestrator pane", and `run notice` printed the line. The kind was `stuck`, not `looping`:
+  the same-error lines were read as stuck. **Hypothesis:** whether Jev tells a loop from a stall, and its false-yes
+  rate on a busy healthy screen, are unmeasured; that is why `watch` ships in shadow.
+  **If you remove this:** a worker that loops while it talks stays invisible until the owner looks.
+- **Changed:** `<home>/nirvana/jev.toml` (`watch` and `seating`, each `off|shadow|on`, default `shadow`; a word herdr
+  does not know reads `off`), `herdr jev roles [watch|seating [off|shadow|on]]`, and the call log
+  `<home>/nirvana/jev-calls.jsonl` (time, role, a 16-hex hash of what was sent, answer, score, latency, cost, and the
+  rule's seat or the order); `herdr jev agree` prints how often Jev's seat matched the rule's.
+  **Because:** the brief asked for one file; it is its own file, not a key in `seats.toml`, which refuses an unknown key
+  and holds the seating mode O8a writes, so the two builders never edit one file. The log holds a hash and never the
+  prompt, as `jev/calls.jsonl` holds no file text.
+  **Measured:** the setting, log and agree tests and controls; live, `agree` read three lines: "seating: 1 answered, no
+  choice yet (... 1 declined) ... watch: 2 answered, 2 yes ... cost: $0.0001".
+  **If you remove this:** role 3 cannot be judged, and a typo in a setting could switch Jev on.
+
 ## alpha 0.19.2 (2026-10-18): the subagent record counts every token and reads the handback report
 
 Found by the orchestrator in the first live end-to-end run (O7 scenario M9, 2026-10-18); the evidence is one worker's

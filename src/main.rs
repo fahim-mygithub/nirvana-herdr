@@ -41,6 +41,7 @@ mod nirvana_jev;
 mod nirvana_jev_compact;
 mod nirvana_jev_install;
 mod nirvana_jev_memory;
+mod nirvana_jev_roles;
 mod nirvana_launch;
 mod nirvana_lessons;
 mod nirvana_media;

@@ -391,6 +391,17 @@ impl Client {
     }
 }
 
+/// The live client and the key's text (for redaction), or `None` with no key. Never under `cargo test`: the
+/// owner's key file is on this PC. Plan 12 O8b's roles 2 and 3 call Jev through it.
+pub fn live_client() -> Option<(Client, String)> {
+    if cfg!(test) {
+        return None;
+    }
+    let key = find_key()?;
+    let text = key.value.clone();
+    Some((Client::new(key), text))
+}
+
 fn unit(value: &Value) -> Option<f64> {
     value
         .as_f64()
@@ -1541,7 +1552,7 @@ pub fn today_line() -> (String, bool) {
 
 // ---- the CLI -----------------------------------------------------------------------------------------
 
-const USAGE: &str = "usage: herdr jev file <path> --ask <question> [--choice a,b,c | --score low,mid,high]\n       herdr jev files <glob>... --ask <question> [--choice ...] [--no-pick]\n       <command> 2>&1 | herdr jev text --ask <question> [--choice ...]\n       herdr jev guide   (the Jev memory this folder gets, from <home>/jev/JEV.md)\n       herdr jev stats\n       herdr jev on|off memory|compact   (Preload's switches)\n       herdr jev compact   (a Claude Code Stop hook)\nOptions: --max-kb <n> (default 256), --cwd <folder>";
+const USAGE: &str = "usage: herdr jev file <path> --ask <question> [--choice a,b,c | --score low,mid,high]\n       herdr jev files <glob>... --ask <question> [--choice ...] [--no-pick]\n       <command> 2>&1 | herdr jev text --ask <question> [--choice ...]\n       herdr jev guide   (the Jev memory this folder gets, from <home>/jev/JEV.md)\n       herdr jev stats\n       herdr jev on|off memory|compact   (Preload's switches)\n       herdr jev compact   (a Claude Code Stop hook)\n       herdr jev roles [watch|seating [off|shadow|on]]   (roles 2 and 3, default shadow)\n       herdr jev agree   (how often Jev's seat matched the rule's)\n       herdr jev watch --pane <id> | --screen-file <path>\nOptions: --max-kb <n> (default 256), --cwd <folder>";
 
 fn fail(message: &str, code: i32) -> ! {
     eprintln!("{message}");
@@ -1573,6 +1584,13 @@ fn print_failure(path: Option<&str>, failure: &Failure) {
 
 /// `herdr jev ...`. Exit 0 with an answer, 1 when Jev or a guard gave none, 2 on a usage error.
 pub fn cli(args: &[String]) -> std::io::Result<()> {
+    // Plan 12 O8b: roles 2 and 3 have their own options.
+    if matches!(
+        args.first().map(String::as_str),
+        Some("roles" | "agree" | "watch")
+    ) {
+        return crate::nirvana_jev_roles::cli(args);
+    }
     let mut cwd = std::env::current_dir()?;
     let mut ask = None;
     let mut choice = None;

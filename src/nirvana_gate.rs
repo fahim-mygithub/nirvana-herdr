@@ -1866,6 +1866,7 @@ fn send_back(
             .iter()
             .map(|w| (w.window.clone(), w.expected))
             .collect(),
+        jev_pick: None,
     };
     journal
         .transact(now(), |_| {

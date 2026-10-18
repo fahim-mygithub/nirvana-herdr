@@ -790,6 +790,27 @@ pub struct Pick {
     /// (decision 0017's fallback). The journal counts these.
     pub same_family_fallback: bool,
     pub runners_up: Vec<Loser>,
+    /// Plan 12 O8b: the seats that cleared the bar, the pick first, when more than one did: what Jev's seating
+    /// advice chooses among (§9 role 3). Empty when one seat was left, and on an override.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub contenders: Vec<Contender>,
+    /// Plan 12 O8b: what Jev advised for this order, set by `nirvana_jev_roles` after the rule picked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jev_pick: Option<crate::nirvana_jev_roles::JevPick>,
+}
+
+/// One seat that cleared the bar: the facts Jev weighs (O8b).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Contender {
+    pub seat: String,
+    pub effort: Effort,
+    pub model: String,
+    pub family: String,
+    pub pool: String,
+    #[serde(serialize_with = "six")]
+    pub score: f32,
+    #[serde(serialize_with = "six")]
+    pub pressure: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1666,6 +1687,28 @@ fn build_pick(
         rule_pick: None,
         same_family_fallback: false,
         runners_up,
+        contenders: if beaten.is_empty() {
+            Vec::new()
+        } else {
+            std::iter::once(winner)
+                .chain(beaten.iter().copied())
+                .map(|i| {
+                    let cand = &candidates[i];
+                    let seat = &table.seats[cand.index];
+                    let effort = cand.effort.unwrap_or(class.effort);
+                    Contender {
+                        seat: seat.id.clone(),
+                        effort,
+                        model: seat.model_for(effort),
+                        family: seat.family.clone(),
+                        pool: seat.pool.clone(),
+                        score: cand.score,
+                        pressure: cand.pressure(),
+                    }
+                })
+                .collect()
+        },
+        jev_pick: None,
     }
 }
 
@@ -2683,6 +2726,18 @@ fn pick_cli(args: &[String]) -> std::io::Result<()> {
     world.overrides_used = run.as_deref().map_or(0, |run| leases.overrides(run));
     match pick(&table, &world, &request) {
         Ok(chosen) => {
+            // Plan 12 O8b (§9 role 3): Jev's advice over the seats left, in shadow unless `jev.toml` says on.
+            let client = crate::nirvana_jev::live_client().map(|(client, _)| client);
+            let chosen = crate::nirvana_jev_roles::advise_seating(
+                client.as_ref(),
+                &dir,
+                crate::nirvana_jev_roles::settings_in(&dir).seating,
+                &table,
+                &world,
+                &request,
+                chosen,
+                true,
+            );
             let mut out = serde_json::to_value(&chosen)?;
             let (booked, changed) = book_pick(
                 &mut leases,

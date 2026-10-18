@@ -1508,6 +1508,7 @@ fn rate_limited(
                 step_down: booked.step_down,
                 use_basis: booked.use_basis.clone(),
                 expected: booked.expected(),
+                jev_pick: None,
             };
             let why = format!(
                 "{} {} ran out ({}); a new session with a continuation brief",
@@ -1649,6 +1650,9 @@ pub struct Booked {
     pub use_basis: Option<String>,
     #[serde(default)]
     pub windows: Vec<BookedWindow>,
+    /// Plan 12 O8b: Jev's advice stored with the pick.
+    #[serde(default)]
+    pub jev_pick: Option<crate::nirvana_jev_roles::JevPick>,
 }
 
 /// One window of the pick: the order's expected share of it, for the record (expected against real use).
@@ -1771,7 +1775,7 @@ fn herdr_ok(args: &[&str]) -> Result<(), String> {
     }
 }
 
-fn herdr_text(args: &[&str]) -> Option<String> {
+pub(crate) fn herdr_text(args: &[&str]) -> Option<String> {
     let out = herdr_command(args).output().ok()?;
     out.status
         .success()
@@ -2295,6 +2299,20 @@ fn book(request: &SeatRequest) -> Result<Booked, (i32, String)> {
             pick_request.override_seat = Some((request.seat.clone(), reason.clone()));
             pick = nirvana_seat::pick(&table, &world, &pick_request);
         }
+        // Plan 12 O8b (§9 role 3): the caller named its seat, so Jev's advice is recorded and never acts here.
+        let client = crate::nirvana_jev::live_client().map(|(client, _)| client);
+        let pick = pick.map(|chosen| {
+            crate::nirvana_jev_roles::advise_seating(
+                client.as_ref(),
+                &dir,
+                crate::nirvana_jev_roles::settings_in(&dir).seating,
+                &table,
+                &world,
+                &pick_request,
+                chosen,
+                false,
+            )
+        });
         let pick = pick.map_err(|no_seat| {
             (
                 nirvana_seat::NO_SEAT_EXIT,
@@ -2445,6 +2463,7 @@ pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i3
         step_down: booked.step_down,
         use_basis: booked.use_basis.clone(),
         expected: booked.expected(),
+        jev_pick: booked.jev_pick.clone(),
     };
     let (pools, pools_basis) = nirvana_run::cached_pools();
     let opened = Kind::Opened {
