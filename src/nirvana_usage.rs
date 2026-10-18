@@ -229,9 +229,16 @@ pub fn elapsed(reading: &Reading) -> Option<f32> {
 
 /// Plan 12 §5.3: above 1 the window is spent faster than it passes.
 pub fn pace(reading: &Reading) -> Option<f32> {
+    pace_with(reading, PACE_EASE, PACE_MIN, PACE_MAX)
+}
+
+/// `pace` with its three numbers given. The seat engine takes them from `seats.toml` (plan 12 §5.3: "with
+/// their numbers in seats.toml"), whose default holds these constants, so the foot and the seating share one
+/// formula.
+pub fn pace_with(reading: &Reading, ease: f32, min: f32, max: f32) -> Option<f32> {
     let used = reading.used?;
     let elapsed = elapsed(reading)?;
-    Some(((used + PACE_EASE) / (elapsed + PACE_EASE)).clamp(PACE_MIN, PACE_MAX))
+    Some(((used + ease) / (elapsed + ease)).clamp(min, max))
 }
 
 /// The window that binds the pool: of the windows every seat of the pool spends (no dot: `week.fable` binds
@@ -1431,6 +1438,26 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             }
         }
     }
+    let sources = current_sources(refresh);
+    let now = now();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&view(&sources, now))?);
+    } else {
+        print!("{}", table(&sources, now));
+    }
+    std::io::stdout().flush()?;
+    let any = sources
+        .iter()
+        .any(|source| source.readings.iter().any(|reading| reading.used.is_some()));
+    if !any {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Each reader's last answer from `usage.json`, after reading again every reader whose entry is missing or
+/// stale (every reader with `refresh`) and writing what they gave. `herdr usage` and `herdr seat` read so.
+pub fn current_sources(refresh: bool) -> [Source; 4] {
     let path = cache_path();
     let cache = path.as_deref().map(read_cache).unwrap_or_default();
     let mut sources: [Source; 4] = Default::default();
@@ -1463,20 +1490,7 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             }
         }
     }
-    let now = now();
-    if json {
-        println!("{}", serde_json::to_string_pretty(&view(&sources, now))?);
-    } else {
-        print!("{}", table(&sources, now));
-    }
-    std::io::stdout().flush()?;
-    let any = sources
-        .iter()
-        .any(|source| source.readings.iter().any(|reading| reading.used.is_some()));
-    if !any {
-        std::process::exit(1);
-    }
-    Ok(())
+    sources
 }
 
 #[cfg(test)]

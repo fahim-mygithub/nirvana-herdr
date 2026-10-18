@@ -41,6 +41,7 @@ mod nirvana_jev_install;
 mod nirvana_jev_memory;
 mod nirvana_preload;
 mod nirvana_running;
+mod nirvana_seat;
 mod nirvana_servers;
 mod nirvana_spaces;
 mod nirvana_usage;
@@ -586,6 +587,10 @@ fn main() -> io::Result<()> {
     // Nirvana fork, plan 12 O1: every pool's usage windows, for the plugin, the statusline and the seat engine.
     if args.get(1).map(String::as_str) == Some("usage") {
         return nirvana_usage::cli(&args[2..]);
+    }
+    // Nirvana fork, plan 12 O2: the seat engine, which seats each order the orchestrator names.
+    if args.get(1).map(String::as_str) == Some("seat") {
+        return nirvana_seat::cli(&args[2..]);
     }
 
     finish_cli(cli::maybe_run(&args))?;

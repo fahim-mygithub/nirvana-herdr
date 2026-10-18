@@ -3,6 +3,124 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.13.0 (2026-10-17): seats, `herdr seat list|pick|release|record`, the rule, leases and the record
+
+Plan 12, package O2 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §3, §4, §5, §16).
+
+- **Changed:** `<home>/nirvana/seats.toml` holds the seat table: the pools (their windows and a factor from list-price
+  dollars to a share of each window), ten seats (seven on: opus, sonnet, haiku, g-opus, g-sonnet, argon, flash; fable,
+  gpt-oss and local off), each with its CLI, model id, efforts, pool, capabilities, a dated price schedule and its
+  expected use per effort, the nineteen classes of §5.2 in the nine chains of §5.4 with their scores, efforts, needs
+  and bars, the order sizes, and §5.3's constants. herdr writes it from its default (`src/nirvana_seats.toml`) when it
+  is missing, and from then on it is the owner's, as JEV.md is. An edit with a problem (an unknown seat, bars that
+  fall, a bad date, an unknown key) is refused with its reason and never overwritten.
+  **Because:** the owner, 2026-10-17: "have a orchistrator agent that is aware of the 5h and 7s usage limits and can
+  seat and coordinate which agent and model can take the task to efficiently use usage credits." (plan 12 L2). Plan 12
+  §4: "herdr writes it from a built-in default when missing, and from then on it belongs to the owner, like JEV.md."
+  **Measured:** `the_default_table_is_written_once_parses_and_holds_the_plans_seats_and_classes`; controls
+  `seat_default_*`, `seat_problems_*`, `seat_toml_*`. Expected use is tagged per cell: measured from probe P4
+  (g-sonnet medium 3.31% of Google's Claude 5 h window, argon low and medium 1.01% of Argon's week, flash high 0.68% of
+  Gemini's 5 h window), derived from P4's token counts priced by the schedule, or a prior.
+  **If you remove this:** the seating's numbers live in code, and moving a bar or a prior is a build.
+- **Hypothesis, not measured:** every prior score, the bars that depart from decision 0018's 70/80/100 and 85/90/100,
+  the class weights, the order sizes (small is P4's order, medium 5x, large 20x), the effort factors (low 0.6, high
+  1.6, xhigh 2.5 of medium), and the `max` pool's factor ($25 of list price per 5 h window, $200 per week): P4 could not
+  separate one order on Max while other agents ran there.
+- **Changed:** `herdr seat pick --class C [--size] [--needs] [--not-family] [--mode] [--json]` seats an order by §5.3's
+  rule, a pure function of the table, the readings in `usage.json` (stale readers read first, as `herdr usage` does),
+  the leases, the accounts and the request. Filters in order, each skip with its reason: off; CLI not installed or not
+  signed in (Accounts); a need the seat lacks; the class does not take it; a family the caller excluded; a window at or
+  under the floor (5%); a window that cannot hold the order while another pool can; a `max` seat that would leave the
+  5 h window under the orchestrator's reserve (15%). Then the mode's bar, dropping to the best seat left but never
+  under the Efficient bar; then the least pressure, `max over windows (expected / headroom × pace × reset)`; a seat
+  with a window not read ranks below every known one; ties to the higher score, then table order. It prints the reason
+  line of §5.3 step 5 and every other seat with why it lost. Exit 0 with a seat, 3 with none, 2 on a usage or table
+  error.
+  **Because:** plan 12 §5.1: "herdr decides the seat, deterministically, and prints why."
+  **Measured:** 25 tests `nirvana_seat::tests::*` on the readings of 2026-10-17 21:51Z, one per filter, the bar and its
+  floor, pressure across windows, the reset discount, ties, unknown windows, effort, NoSeat; controls `seat_filter_*`,
+  `seat_bar_*`, `seat_pressure_*`, `seat_reset_*`, `seat_unknown_*`, `seat_stale_*`, `seat_ties_*`, `seat_reason_*`.
+  Live on this PC: `build.bounded` to sonnet medium, `media.video` to argon medium, `plan` to opus high (xhigh at SOTA).
+  **If you remove this:** the orchestrator seats by feel, and every order lands on the pool the orchestrator itself
+  runs on.
+- **Changed:** effort follows the class and its blast radius (§5.5): SOTA lifts plan and load-bearing builds to xhigh,
+  max is never chosen (a class or seat asking max gets xhigh), a seat without the effort gets the nearest it offers at
+  or below it, said in the reason. Under pressure the same model on another pool comes first (opus and g-opus, sonnet
+  and g-sonnet score the same), then the other family (the bar drop), and only when nothing is left one effort step
+  down.
+  **Because:** plan 12 §5.5 and Argon's review: "Stepping down first spends the congested pool and weakens the
+  reasoning."
+  **Measured:** `effort_follows_the_class_sota_lifts_plans_and_max_is_never_chosen`,
+  `under_pressure_with_nothing_left_one_effort_step_down`; controls `seat_effort_*`, `seat_step_down_*`.
+  **If you remove this:** every order thinks at the seat's one effort, the defect decision 0018 §1 measured.
+- **Changed:** `--needs video` never returns a Claude seat: only argon and flash carry `video` and `audio`.
+  **Because:** the owner, 2026-10-17: "Argon also has capabilities that Claude does not have like ingesting video.
+  Consider these unique apabilities as part of the orchistrator seating process." (L9, whose verifier this is).
+  **Measured:** `an_order_that_needs_video_never_gets_a_claude_seat` over every class, mode and size, with and without
+  Argon spent, and with an override to each Claude seat; control `seat_filter_need`.
+  **If you remove this:** a recording is sent to a model that cannot see it, and P2 showed an empty answer can still
+  say `SUCCESS`.
+- **Changed:** `--book <order>` writes a lease to `<home>/nirvana/leases.json` (its seat, pool, expected use per window,
+  booked and expiry times, and the pick as given) under a lock file and by a temp file and a rename; a second booking
+  for the same order returns the first. Headroom subtracts every live lease but the order's own; an expired lease
+  (60, 180 or 480 minutes by size) holds nothing. `herdr seat release <order>` drops one; `herdr seat record` drops the
+  finished order's.
+  **Because:** plan 12 §3: "Four parallel picks in five seconds cannot all see the same headroom and break the reserve
+  together" (Argon's review, F1). The rename alone keeps the file whole but lets two writers lose a lease, so the read,
+  the pick and the write hold `leases.lock`.
+  **Measured:** `live_leases_take_headroom_expired_ones_and_the_orders_own_do_not`,
+  `a_booking_is_idempotent_per_order_and_released_by_id`, `the_lease_lock_is_exclusive_and_a_stale_one_is_taken_over`;
+  controls `seat_booked_*`, `seat_lease_*`, `seat_book_*`, `seat_release_*`, `seat_lock_*`. Live: a second `--book o-1`
+  answered `"booked": "existing"` with the first pick.
+  **If you remove this:** parallel orders each see the whole headroom and break the reserve together.
+- **Hypothesis, not measured:** the lease lengths, and the 30 s after which a lock file is taken as left by a dead
+  process. A lease is not shortened when a reading taken after the booking already shows part of its use, so a long
+  order counts partly twice until it ends; that errs toward the reserve.
+- **Changed:** `--override <seat> --reason "..." --run <id>` takes the orchestrator's seat over the rule's, and still
+  passes every filter of step 1, the reserve and the class included; three per run are accepted, counted in
+  `leases.json`, and a fourth is refused (exit 3). The reason line names the override and the rule's own pick.
+  **Because:** plan 12 §5.3 step 4: "at most 3 per run are accepted without the owner".
+  **Measured:** `an_override_passes_every_filter_and_three_are_taken_per_run`; controls `seat_override_*`. Live: the
+  fourth override in run r-1 was refused, exit 3.
+  **If you remove this:** an override can dodge the price, or the orchestrator cannot overrule at all.
+- **Changed:** `herdr seat record --json '<line>'` appends a finished order to `<home>/nirvana/record.jsonl` (order, run,
+  seat, model, effort, class, chain, the gate's outcome, tokens, use, time), filling the chain and model from the table
+  and the use from the order's own tokens times its seat's price on its day times its pool's factor. A seat's score can
+  blend with its record by decision 0029's formula, `min(1, ((passes + 5 × 0.8) / (orders + 5)) / 0.8)`, keyed by seat,
+  effort and chain, behind `use_record = false`: off in this version, so the priors stay static and the record is
+  logged for offline tuning.
+  **Because:** plan 12 §4: "The first version keeps the priors static and logs every order's real use to
+  `record.jsonl` for offline tuning." Decision 0029 §2.53 for the formula.
+  **Measured:** `the_record_blend_is_decision_0029s_and_ships_off` reproduces 0029's own rows (9 of 12 is 0.956, 0 of 3
+  is 0.625); `a_finished_order_is_recorded_with_its_use_from_its_own_tokens` prices P4's g-sonnet order at 3.31% of the
+  5 h window; `argons_price_doubles_on_2026_11_30_and_its_expected_use_with_it`; controls `seat_record_*`,
+  `seat_price_*`, `seat_use_*`.
+  **If you remove this:** O3's runner has nowhere to put an order's outcome, and the table can never learn.
+- **Changed:** `herdr seat list [--json]` prints each seat, its pool's windows left (and after the reserve), and why it
+  cannot take an order; the JSON adds the pools, classes, chains, prices, use cells and the orders in flight.
+  **Because:** plan 12 §11: "Until O8, the statusline, `herdr usage` and `herdr seat list` show the seating."
+  **Measured:** `seat_list_shows_each_seat_its_headroom_and_why_not`; controls `seat_list_*`.
+  **If you remove this:** the seating has no view before the Seats square of O8.
+- **Changed:** the foot's pace mark ▲ shows when any window every seat of the pool spends is fresh and ahead of pace,
+  not only the window shown; `week.fable` does not count.
+  **Because:** plan 12 §15: live at 22:06Z Claude's week read pace 1.72 while its 5 h window, the one shown, read 0.98,
+  and the row carried no mark. The orchestrator chose this; the owner gave no ruling.
+  **Measured:** `the_pace_mark_shows_when_any_window_of_the_pool_is_ahead`; controls `footer_mark_shown_window_only`,
+  `footer_mark_scoped_week`, `footer_mark_stale_week`, and `usage_ahead_threshold` repointed into `any_ahead`.
+  **If you remove this:** a week running out early is invisible while its 5 h window is the fuller.
+- **Changed:** five controls that found nothing on master 14c3d4a0 are pointed at the current code and redden their
+  tests again: `panels_both_open`, `memory_panel_beside_preload` and `panel_painted_over` (0.11.0 added the Accounts
+  panel's line), `edit_tab_unnamed` (0.11.0 moved the tab into `nirvana_open_command_tab`), `jev_rows_missing` (0.10.0
+  gave `jev_items` the folder).
+  **Because:** plan 12 §15: "Five older controls find nothing on master". A control whose find is gone guards nothing.
+  **Measured:** each run alone with `--only`: red line seen, tree clean after.
+  **If you remove this:** those five tests can lose their assertion and stay green.
+- **Changed:** `nirvana_usage::pace_with` takes pace's three numbers, which `seats.toml` holds (the foot keeps its
+  constants), and `nirvana_usage::current_sources` is the read `herdr usage` and `herdr seat` share.
+  **Because:** plan 12 §5.3: "with their numbers in seats.toml"; one formula for the foot and the seating.
+  **Measured:** `usage_pace_no_ease` and `usage_pace_no_clamp` repointed at `pace_with`, both red when run.
+  **If you remove this:** the seat engine needs its own copy of pace and of the cache read.
+
 ## alpha 0.12.0 (2026-10-17): usage readings for every pool, `herdr usage`, a foot row per pool
 
 Plan 12, package O1 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §3, §5.3, §8, §15).

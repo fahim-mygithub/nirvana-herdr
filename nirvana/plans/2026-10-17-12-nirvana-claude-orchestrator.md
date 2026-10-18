@@ -721,3 +721,89 @@ the pace mark when any window of the pool is ahead: live, Claude's week read pac
 tightest, read 0.98, so the row carried no mark.
 
 The table above was read before the readings were sorted 5 h first; agy's pools now print 5 h, then the week.
+
+## 16. O2 record
+
+Built 2026-10-17 on master 14c3d4a0 (alpha 0.12.0), branch `o2-seats`, as alpha 0.13.0, by the leaf "Opus 5.5 high - O2
+seats build". Not merged.
+
+**Ledger for this package** (the rows of §1 it serves, quoted as the owner wrote them):
+
+| # | Verbatim quote | Surface | Verifier |
+|---|---|---|---|
+| L2 | "have a orchistrator agent that is aware of the 5h and 7s usage limits and can seat and coordinate which agent and model can take the task to efficiently use usage credits." | `herdr seat pick`: filters, bar, pressure over every window, reason line | `nirvana_seat::tests::*` on the readings of 2026-10-17 21:51Z; live picks below |
+| L8 | "Descide how to seat both model and effort level for their capabilites." | `seats.toml`: argon and flash at each effort, the class efforts, §5.5's ladder | `effort_follows_the_class_sota_lifts_plans_and_max_is_never_chosen`, `under_pressure_with_nothing_left_one_effort_step_down` |
+| L9 | "Argon also has capabilities that Claude does not have like ingesting video. Consider these unique apabilities as part of the orchistrator seating process." | capability filter; `media.video`, `media.audio`, `read.huge`; argon in visual classes only `only_with = ["video"]` | `an_order_that_needs_video_never_gets_a_claude_seat` |
+
+**Shape, as built.**
+- `src/nirvana_seats.toml` is the default table, `include_str!`'d and written to `<home>/nirvana/seats.toml` when
+  missing; `src/nirvana_seat.rs` is the engine and the CLI. `[[pool]]`, `[[seat]]` and `[[class]]` are arrays, so table
+  order is file order (the last tie-break), and every struct refuses an unknown key.
+- `pick(table, world, request)` is pure. `World` holds `now`, the readings, the leases, the CLIs that cannot take an
+  order, the record's tallies and the run's overrides so far; the CLI builds it from `usage.json` (through
+  `nirvana_usage::current_sources`, which also reads a stale reader first), `leases.json`, the Accounts readers and
+  `record.jsonl`.
+- Expected use of window `w` = the seat's use cell at the chosen effort (P4's order) × the price on `now` over the
+  price on the cell's date × the class's weight × the size's factor. Headroom = `1 - used - booked`, less the reserve on
+  `max`'s 5 h window. A reading not printed, older than 300 s, or read before a reset that has passed is not read.
+- Leases live in `<home>/nirvana/leases.json` with the per-run override counts; the read, the pick and the write hold
+  `<home>/nirvana/leases.lock` (create-new, 50 ms retries for 10 s, a lock older than 30 s is taken over). For O3:
+  `pick --book <order> --run <run>`, `release <order>`, `record --json`, and the Rust API `pick`, `lease_for`,
+  `Leases::book|release`, `Lock::take`, `complete`, `append_record`.
+- `herdr seat pick` exits 0 with a seat, 3 with none (a refused override included; the JSON carries `"no_seat": true`,
+  `reason`, `earliest_reset`, `defer` and every skipped seat), 2 on a usage or table error.
+
+**Files.** `src/nirvana_seat.rs`, `src/nirvana_seats.toml` (new); `src/main.rs` (the `seat` subcommand);
+`src/nirvana_usage.rs` (`pace_with`, `current_sources`, the pool-wide pace mark); `src/client/shell/tests/nirvana_footer.rs`;
+`nirvana/controls.py`, `nirvana/CHANGELOG.md`, `nirvana/VERSION`, `nirvana/README.md`, this section.
+
+**Controls.** 57 new `seat_*`; for the fixes `footer_mark_shown_window_only`, `footer_mark_scoped_week`,
+`footer_mark_stale_week`; repointed `usage_ahead_threshold`, `usage_pace_no_ease`, `usage_pace_no_clamp` and the five
+older ones. Each run alone with `--only <exact name>` (a list argv, names stripped of carriage returns), the expected
+red line written down first: 68 of 68 reddened their test, and `git status --porcelain` was the same after each. A
+script checked that every one of the 276 controls' find text occurs exactly once in its file.
+
+**Live run.** The debug build, `NIRVANA_HERDR_HOME` a folder under the worktree's `target`, about 01:00Z on 2026-10-18,
+just after Claude's 5 h window reset at 00:50Z (so 3% used); `herdr seat list` took 3.7 s, its usage read included:
+
+```text
+$ herdr seat pick --class build.bounded
+build.bounded → sonnet medium: max 5h 3% used, week 41% used, reserve 15%; g-sonnet scores the same (google3p 5h 3% used, week 4% used)
+$ herdr seat pick --class media.video
+media.video → argon medium: argon week 3% used
+$ herdr seat pick --class plan --mode efficient
+plan → opus high: max 5h 3% used, week 41% used, reserve 15%; next argon (argon week 3% used)
+$ herdr seat pick --class plan --mode sota
+plan → opus xhigh: max 5h 3% used, week 41% used, reserve 15%; g-opus scores the same (google3p 5h 3% used, week 4% used)
+$ herdr seat pick --class build.bounded --needs video
+build.bounded → argon low: argon week 3% used; bar dropped to 82 (none left reached 85)
+```
+
+**Choices where the plan was silent or spoke twice.**
+1. *§5.4 against §5.5 on g-sonnet.* §5.4 puts g-sonnet last for `build.bounded` (P4: its pool is small); §5.5 says
+   "first the same model on another pool". Built: sonnet and g-sonnet score the same, so the pool decides, and P4's
+   3.31% per order makes g-sonnet's pressure about 17 times sonnet's at today's readings. g-sonnet comes second only
+   when Max is filtered or far fuller.
+2. *Scores encode the chains.* The rule is "least pressure among the seats that clear the bar", and with today's
+   priors `max` reads cheap, so a bar that admitted the whole chain would seat flash ahead of sonnet. Each class's
+   Balanced bar admits the head of its §5.4 row (and its same-model twin); the bar drop walks the rest in score order;
+   Efficient lets the whole row compete on pressure.
+3. *Classes carry the data, chains are labels.* The nine chains merge classes whose rows differ (research.read starts
+   with sonnet, research.web with flash), so each class lists its own seats; `chain` keys the record.
+4. *`only_with`.* "argon for anything that moves" in the visual classes is a seat entry taken only when the order
+   needs `video`, so argon never takes still visual work, at any mode.
+5. *An override passes every step-1 filter, the class's included,* as §5.3 step 4 reads; overriding to a seat outside
+   the class needs a different class, which the journal counts (§4.7). An override needs `--run`.
+6. *SOTA's bar of 100 is the best seat left* (decision 0018 §2), not a drop to report.
+7. *The step down* is tried only when the first pass found no seat and some skip was decided by the order's expected
+   use (headroom or reserve); a floor or a missing need is not undone by thinking less.
+8. *The record* keys by seat, effort and chain; "pass" counts as a pass and any other outcome as a failure until O5
+   names the gate's words. `seat record` releases the order's lease.
+9. *Expected use as fraction cells*, per seat and effort, scaled by the price schedule, the class weight and the size,
+   rather than token profiles: the brief asked for fractions marked measured or prior.
+
+**Not measured.** Every prior score; `max`'s per-dollar factor (no order ran alone on Max); the class weights and
+sizes against real orders; agy's price for Claude models (taken as Anthropic's list price); Flash's cache-read price; the
+effort factors; four parallel `seat pick --book` processes against the lock (the lock is tested in one process); the
+CLI on Linux or macOS. The live picks read this machine's real accounts: claude and agy were signed in, so no live
+`not signed in` skip was seen.

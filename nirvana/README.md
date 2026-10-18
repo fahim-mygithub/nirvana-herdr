@@ -30,6 +30,7 @@ Explorer's "Open Nirvana - CC" (Nirvana-C) runs the installed fork in the sessio
 | 5 | A mod strip under the tab bar for a tab running Claude, with one mod, Preload: everything a new Claude in the folder preloads, with its tokens; switch an item off or on, open its file, restart Claude to take it | plans/2026-10-16-05-preload-mod.md |
 | 6 | The strip's Running square: what Claude is doing now with a summary, and under it what it waits on you for, answered with a digit or a click | plans/2026-10-16-06-running-and-waiting.md |
 | 12 (O1) | Usage readings: every pool and window with its reset, freshness and pace; `herdr usage [--json] [--refresh]` over `<home>/nirvana/usage.json` | plans/2026-10-17-12-nirvana-claude-orchestrator.md §15 |
+| 12 (O2) | Seats: `<home>/nirvana/seats.toml` (seats, classes, bars, priors, prices); `herdr seat pick` seats an order by filters, bar and pool pressure with a reason line, books it (`--book`), takes three overrides a run; `herdr seat list`, `release`, `record` (`record.jsonl`, blend off) | plans/2026-10-17-12-nirvana-claude-orchestrator.md §16 |
 
 ## Rules for this fork
 
