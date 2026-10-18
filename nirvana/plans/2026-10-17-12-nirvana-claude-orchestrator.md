@@ -747,21 +747,23 @@ seats build". Not merged.
   price on the cell's date × the class's weight × the size's factor. Headroom = `1 - used - booked`, less the reserve on
   `max`'s 5 h window. A reading not printed, older than 300 s, or read before a reset that has passed is not read.
 - Leases live in `<home>/nirvana/leases.json` with the per-run override counts; the read, the pick and the write hold
-  `<home>/nirvana/leases.lock` (create-new, 50 ms retries for 10 s, a lock older than 30 s is taken over). For O3:
+  the OS's lock on `<home>/nirvana/leases.lock` (`File::try_lock`, 50 ms retries for 10 s; the OS lets go when its
+  holder exits, and nothing deletes the file). For O3:
   `pick --book <order> --run <run>`, `release <order>`, `record --json`, and the Rust API `pick`, `lease_for`,
   `Leases::book|release`, `Lock::take`, `complete`, `append_record`.
 - `herdr seat pick` exits 0 with a seat, 3 with none (a refused override included; the JSON carries `"no_seat": true`,
-  `reason`, `earliest_reset`, `defer` and every skipped seat), 2 on a usage or table error.
+  `reason`, `earliest_reset`, `defer` and every skipped seat), 2 on a usage or table error, an unknown `--needs` or
+  `--not-family` word, or a `leases.json` that does not parse, 4 when another herdr held the lock for 10 s.
 
 **Files.** `src/nirvana_seat.rs`, `src/nirvana_seats.toml` (new); `src/main.rs` (the `seat` subcommand);
 `src/nirvana_usage.rs` (`pace_with`, `current_sources`, the pool-wide pace mark); `src/client/shell/tests/nirvana_footer.rs`;
 `nirvana/controls.py`, `nirvana/CHANGELOG.md`, `nirvana/VERSION`, `nirvana/README.md`, this section.
 
-**Controls.** 57 new `seat_*`; for the fixes `footer_mark_shown_window_only`, `footer_mark_scoped_week`,
+**Controls.** New `seat_*`; for the fixes `footer_mark_shown_window_only`, `footer_mark_scoped_week`,
 `footer_mark_stale_week`; repointed `usage_ahead_threshold`, `usage_pace_no_ease`, `usage_pace_no_clamp` and the five
 older ones. Each run alone with `--only <exact name>` (a list argv, names stripped of carriage returns), the expected
-red line written down first: 68 of 68 reddened their test, and `git status --porcelain` was the same after each. A
-script checked that every one of the 276 controls' find text occurs exactly once in its file.
+red line written down first: each reddened its test, and `git status --porcelain` was the same after each.
+`controls.py --dry-run` checks that every control's find text occurs exactly once in its file.
 
 **Live run.** The debug build, `NIRVANA_HERDR_HOME` a folder under the worktree's `target`, about 01:00Z on 2026-10-18,
 just after Claude's 5 h window reset at 00:50Z (so 3% used); `herdr seat list` took 3.7 s, its usage read included:
@@ -780,14 +782,24 @@ build.bounded → argon low: argon week 3% used; bar dropped to 82 (none left re
 ```
 
 **Choices where the plan was silent or spoke twice.**
-1. *§5.4 against §5.5 on g-sonnet.* §5.4 puts g-sonnet last for `build.bounded` (P4: its pool is small); §5.5 says
-   "first the same model on another pool". Built: sonnet and g-sonnet score the same, so the pool decides, and P4's
-   3.31% per order makes g-sonnet's pressure about 17 times sonnet's at today's readings. g-sonnet comes second only
-   when Max is filtered or far fuller.
-2. *Scores encode the chains.* The rule is "least pressure among the seats that clear the bar", and with today's
-   priors `max` reads cheap, so a bar that admitted the whole chain would seat flash ahead of sonnet. Each class's
-   Balanced bar admits the head of its §5.4 row (and its same-model twin); the bar drop walks the rest in score order;
-   Efficient lets the whole row compete on pressure.
+1. *§5.4 against §5.5 on g-sonnet.* The first build gave g-sonnet sonnet's 88 in `build.bounded`, so the pool
+   decided, and g-sonnet was seated ahead of argon whenever Max was filtered: §5.4's row is sonnet, argon, flash,
+   g-sonnet. That was the owner's call under CLAUDE.md rule 14, not a builder's choice (review S1). **Ruled by the
+   orchestrator on 2026-10-18** from §5.4 and the P4 evidence, which calls g-opus and g-sonnet "overflow seats, not a
+   second Max": §5.4 is the spec, and §5.5's "same model on another pool first" holds only where §5.4 puts the twin
+   next, which it does when the head's pool is filtered. `build.bounded` lists sonnet 88, argon 82, flash 78, g-sonnet
+   77; the twins of plan, the load-bearing build, the visual classes, fix.debug, ops.terminal and write.docs stay where
+   §5.4 puts them.
+2. *Scores and bars encode the chains.* The rule is "least pressure among the seats that clear the bar", and with
+   today's priors `max` reads cheap, so a bar that admitted the whole chain would seat flash ahead of sonnet. The first
+   build said each class's Balanced bar admits the head of its §5.4 row and its same-model twin; that was false for
+   `sweep.mechanical`, whose Balanced 70 admitted haiku, which max's cheap prior then seated ahead of flash (review S1).
+   **Ruled by the orchestrator on 2026-10-18:** Balanced 79 there. As built now: the Balanced bar admits §5.4's head and
+   its same-model twin, and in `research.web`, `read.huge`, `media.audio` and the chore classes also the row's next
+   seat, where pressure decides between them; `review.adversary` admits argon beside opus and g-opus, and a review
+   names its builder's family. At the readings of 21:51Z every head wins, which
+   `every_class_at_balanced_seats_its_5_4_head_then_walks_its_row` checks against §5.4's rows typed from this plan.
+   The bar drop walks the rest in score order; Efficient lets the whole row compete on pressure.
 3. *Classes carry the data, chains are labels.* The nine chains merge classes whose rows differ (research.read starts
    with sonnet, research.web with flash), so each class lists its own seats; `chain` keys the record.
 4. *`only_with`.* "argon for anything that moves" in the visual classes is a seat entry taken only when the order
@@ -807,3 +819,59 @@ sizes against real orders; agy's price for Claude models (taken as Anthropic's l
 effort factors; four parallel `seat pick --book` processes against the lock (the lock is tested in one process); the
 CLI on Linux or macOS. The live picks read this machine's real accounts: claude and agy were signed in, so no live
 `not signed in` skip was seen.
+
+### 16.1 Fix round
+
+2026-10-18, on `o2-seats` from 06e337c0, by the leaf "Opus 5.5 high - O2 fix round", on the review of O2 and the
+orchestrator's rulings. Still alpha 0.13.0; not merged. `RecordLine` and `record_cli` are untouched: the review's S5 is
+package O3's.
+
+| Finding | What changed |
+|---|---|
+| B1 | `pick` runs `seat_once`; when `--not-family` leaves no seat and no override was given, it runs again with the family allowed. The pick carries `same_family_fallback` and its line ends "same family (F), in a fresh session: no other family had a seat: <each other-family seat and why> (decision 0017)". A NoSeat after both is the second pass's, so its earliest reset counts both families. |
+| S1 | Choices 1 and 2 above, as ruled. `build.bounded` in §5.4's order with g-sonnet 77; `sweep.mechanical` Balanced 79; each class lists its seats in §5.4's order. |
+| S2 | Three tiers before pressure: known headroom, unread (a pool with no windows included), a known window too small. An unread max 5 h window ranks unread and the line says "reserve 15% not checked (5h not read)". |
+| S3 | `Lock` holds a `File` locked with `try_lock`; no stale rule, no `Drop`; `Lock::take(dir)` unchanged for O3. A timeout is exit 4 for `pick` and `release`. |
+| S4 | A floored seat's reset is the latest of its floored windows, unknown if one has none; the NoSeat takes the earliest across seats. |
+| S6 | The reset fixture has a factor under 1 and checks it in `pressure`; `book_pick` and `existing_booking` are extracted and tested; the worst-window test checks `Candidate::pressure` with the worst window first and last. |
+| S7 | The accounts read runs on a thread with a 15 s deadline. |
+| S8 | Ties go to the class's order; table order breaks none. |
+| Nits | Unknown `--needs` and `--not-family` words exit 2; the EDGE comment no longer cites 0018's; the reset discount reads the headroom; a corrupt `leases.json` exits 2 (`load_leases`); USAGE names the default size and every exit; the step-down mark only for a seat whose effort fell; a repeat `--book` naming another override exits 3 with why; an override's `bar` is the seat's score when under the mode's bar; `local` ranks unread (it is off anyway); runs pruned after 8 days; the counts in prose are gone from §16 and the 0.13.0 entry. |
+| Not verified | `claude -p /usage` now runs with `--strict-mcp-config`, after one live read with it at 02:40Z: the three windows printed, the init event listed `mcp_servers: []`, and the result had `num_turns` 0, every usage token field 0 and `total_cost_usd` 0. |
+
+**Live picks**, the debug build, `NIRVANA_HERDR_HOME` a folder under the worktree's `target`, 02:51Z on 2026-10-18:
+
+```text
+$ herdr seat pick --class build.bounded
+build.bounded → sonnet medium: max 5h 41% used, week 46% used, reserve 15%
+$ herdr seat pick --class sweep.mechanical
+sweep.mechanical → flash low: gemini 5h 0% used, week 0.8% used
+$ herdr seat pick --class research.web
+research.web → flash low: gemini 5h 0% used, week 0.8% used; argon scores the same (argon week 7% used)
+$ herdr seat pick --class media.video
+media.video → argon medium: argon week 7% used
+$ herdr seat pick --class plan --mode sota
+plan → opus xhigh: max 5h 41% used, week 46% used, reserve 15%; g-opus scores the same (google3p 5h 0% used, week 4% used)
+$ herdr seat pick --class review.adversary --not-family anthropic
+review.adversary → argon high: argon week 7% used
+$ herdr seat pick --class build.bounded --needs vidoe
+herdr seat pick: --needs vidoe: no seat has it; the capabilities: audio, browser, code, context_1m, image, image_gen, pdf, tools, video, web
+(exit 2)
+```
+
+With argon switched off in that home's `seats.toml`, the fallback:
+
+```text
+$ herdr seat pick --class review.adversary --not-family anthropic
+review.adversary → opus high: max 5h 41% used, week 46% used, reserve 15%; g-opus scores the same (google3p 5h 0% used, week 4% used); same family (anthropic), in a fresh session: no other family had a seat: argon (off in seats.toml) (decision 0017)
+```
+
+A repeat `--book o-1` naming `--override sonnet` after an override to argon: `no seat: override sonnet refused: o-1 is
+already booked on argon low (an override); release it first (herdr seat release o-1)`, exit 3. A `leases.json` cut
+short: exit 2, the file left as it was. With another process holding `leases.lock`, `herdr seat release` exited 4 after
+10.0 s, and 0 once it let go.
+
+**Not measured in the fix round.** Two herdr processes racing for the lock (the live check held it from Python's
+`msvcrt.locking`, which overlaps `LockFileEx` at byte 0); the lock on Linux or macOS; whether a class whose Balanced bar
+admits two rows' seats (research.web, read.huge, media.audio, the chores) keeps §5.4's head at other readings, which
+depends on the max prior; the fallback live on a real exhausted pool (argon was switched off instead).

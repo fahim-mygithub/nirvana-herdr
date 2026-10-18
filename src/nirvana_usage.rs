@@ -39,6 +39,19 @@ pub const AGY_EVERY: Duration = Duration::from_secs(240);
 pub const LOCAL_EVERY: Duration = Duration::from_secs(30);
 /// A read that has not finished by then is killed and the last figure kept.
 const CLAUDE_TIMEOUT: Duration = Duration::from_secs(60);
+/// `claude -p /usage`: answered locally, 0 tokens. `--strict-mcp-config` with no `--mcp-config` starts no MCP
+/// server. Without it the read, run in the caller's folder at every pick, may start the owner's user-scope
+/// servers (bladebro), and the timeout kills only `claude.exe` (O2 review). Measured 2026-10-18 02:40Z with the
+/// flag: the three windows printed, the init event listed `mcp_servers: []`, and the result had 0 turns, 0 in
+/// every usage token field and `total_cost_usd` 0 (plan 12 §16, the O2 fix round).
+const CLAUDE_USAGE_ARGS: &[&str] = &[
+    "-p",
+    "/usage",
+    "--no-session-persistence",
+    "--strict-mcp-config",
+    "--output-format",
+    "text",
+];
 const AGY_TIMEOUT: Duration = Duration::from_secs(90);
 const SMI_TIMEOUT: Duration = Duration::from_secs(10);
 /// Ollama's default address, as Nirvana's local seat uses it.
@@ -795,17 +808,7 @@ fn read_claude(now: u64) -> Option<Answer> {
     if !on_path("claude") {
         return Some(Answer::Word("not installed"));
     }
-    let text = run(
-        "claude",
-        &[
-            "-p",
-            "/usage",
-            "--no-session-persistence",
-            "--output-format",
-            "text",
-        ],
-        CLAUDE_TIMEOUT,
-    )?;
+    let text = run("claude", CLAUDE_USAGE_ARGS, CLAUDE_TIMEOUT)?;
     claude_readings(&text, now).map(Answer::Readings)
 }
 
@@ -1517,6 +1520,21 @@ mod tests {
 
     /// 2026-10-17T21:51:12Z, when `CLAUDE_TEXT_1017` and `AGY_STREAM_1017` were read.
     const READ_1017: u64 = 1_792_273_872;
+
+    /// The answer read with `CLAUDE_USAGE_ARGS`, `--strict-mcp-config` included, about 2026-10-18T02:40Z
+    /// (the contributions block shortened).
+    const CLAUDE_TEXT_STRICT: &str = "You are currently using your subscription to power your Claude Code usage\n\nCurrent session: 36% used \u{b7} resets Oct 18, 1:50am (America/New_York)\nCurrent week (all models): 45% used \u{b7} resets Oct 23, 12pm (America/New_York)\nCurrent week (Fable): 0% used \u{b7} resets Oct 23, 12pm (America/New_York)\n\nWhat's contributing to your limits usage?\nLast 24h \u{b7} 2389 requests \u{b7} 14 sessions\n";
+
+    #[test]
+    fn the_usage_read_starts_no_mcp_server_and_still_gets_three_windows() {
+        assert_eq!(&CLAUDE_USAGE_ARGS[..2], ["-p", "/usage"]);
+        assert!(CLAUDE_USAGE_ARGS.contains(&"--strict-mcp-config"));
+        assert!(!CLAUDE_USAGE_ARGS.contains(&"--mcp-config"));
+        let readings = claude_readings(CLAUDE_TEXT_STRICT, 1_792_291_200).expect("parses");
+        assert!(close(used(&readings, "max", "5h"), 0.36));
+        assert!(close(used(&readings, "max", "week"), 0.45));
+        assert!(close(used(&readings, "max", "week.fable"), 0.0));
+    }
 
     fn window<'a>(readings: &'a [Reading], pool: &str, window: &str) -> Option<&'a Reading> {
         readings

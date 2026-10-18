@@ -89,6 +89,8 @@ windows = ["week"]
 per_usd = { week = 0.48 }
 basis = "derived: P4 argon low spent 1.01% of the week for $0.017 and argon medium 1.01% for $0.026; the mean"
 
+# No windows to read: the rule ranks it with the unread pools, below known headroom, never as free. The local
+# seat is off in this version anyway.
 [[pool]]
 id = "local"
 windows = []
@@ -96,7 +98,7 @@ per_usd = {}
 basis = "free: the local GPU"
 
 # A seat is a CLI, a model and an effort, in one pool, with capabilities (plan 12 §4). `model` names the
-# effort as {effort} where the CLI takes it in the model id (agy). Table order breaks the last tie.
+# effort as {effort} where the CLI takes it in the model id (agy).
 # `prices` are USD per million tokens, each from its date. `use` is the expected share of each window for
 # P4's order at each effort, on the date `at`; a later price scales it.
 
@@ -283,7 +285,8 @@ use = [
 # mode (decision 0018; default 70/80/100 bounded, 85/90/100 load-bearing): the bar drops to the best seat
 # left, never under the Efficient bar. `effort` follows the class and its blast radius (§5.5); a seat's
 # own `effort` is its departure. `weight` scales the expected use against P4's order (a prior).
-# `only_with` takes the seat only when the order needs all of those.
+# `only_with` takes the seat only when the order needs all of those. A class lists its seats in §5.4's
+# order, and that order breaks the last tie.
 
 [[class]]
 id = "plan"
@@ -322,11 +325,14 @@ effort = "medium"
 weight = 1.0
 bars = { efficient = 70, balanced = 85, sota = 100 }
 why = "P4: every seat passed a small order; flash at medium and high spent 9x to 16x flash low's output for the same result"
+# Plan 12 §5.4's row: sonnet, argon, flash, g-sonnet. P4: Google's Claude pool took 3.3% of its 5 h window
+# for one order, an overflow seat and not a second Max, so g-sonnet comes last (the orchestrator's ruling,
+# 2026-10-18; at 88 it was seated ahead of argon whenever Max was filtered).
 seats = [
   { seat = "sonnet", score = 88 },
-  { seat = "g-sonnet", score = 88 },
   { seat = "argon", score = 82, effort = "low" },
   { seat = "flash", score = 78, effort = "low" },
+  { seat = "g-sonnet", score = 77 },
 ]
 
 [[class]]
@@ -497,7 +503,9 @@ chain = "chore"
 blast = "bounded"
 effort = "low"
 weight = 1.0
-bars = { efficient = 60, balanced = 70, sota = 100 }
+# Balanced 79 admits flash alone: at 70 it admitted haiku too, and max's cheap prior seated haiku ahead of
+# §5.4's head (the orchestrator's ruling, 2026-10-18). Efficient lets both compete on pressure.
+bars = { efficient = 60, balanced = 79, sota = 100 }
 seats = [
   { seat = "flash", score = 80 },
   { seat = "haiku", score = 78 },

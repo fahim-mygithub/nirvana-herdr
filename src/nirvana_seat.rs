@@ -11,15 +11,17 @@
 //!
 //! 1. **Filters**, in order, each skip with its reason: off in the table; the CLI not installed or not signed
 //!    in (Accounts, 0.11.0); a need the seat lacks; the class does not take the seat; the caller excluded its
-//!    family (decision 0017); a window at or under the floor; a window whose headroom is below the order's
-//!    expected use while another pool could hold the whole order (Argon's review, §4.4); a `max` seat that
-//!    would break the orchestrator's reserve.
+//!    family (decision 0017, a preference: when no other family has a seat and no override was given, the
+//!    class is seated again on its own family, in a fresh session, and the pick says so); a window at or
+//!    under the floor; a window whose headroom is below the order's expected use while another pool could
+//!    hold the whole order (Argon's review, §4.4); a `max` seat that would break the orchestrator's reserve.
 //! 2. **The bar** at the mode (decision 0018): if no seat clears it, the bar drops to the best seat left, never
 //!    under the class's Efficient bar (Argon's review, F4).
 //! 3. **Pressure**, the least wins: `max over windows (expected_use / headroom × pace × reset)`, a week's 20%
-//!    holding more than a 5 h window's 20% (§4.1). A seat with a window not read ranks below every seat
-//!    whose windows are known, and above an exhausted one, which the floor already skipped (§3). Ties go to
-//!    the higher score, then table order.
+//!    holding more than a 5 h window's 20% (§4.1). Before pressure, three tiers (§3): known headroom that
+//!    holds the order; then a seat with a window not read, or a pool with no windows at all; then a known
+//!    window too small for the order, which is nearer exhausted than free. Ties go to the higher score, then
+//!    to the class's own seat order, which is §5.4's row.
 //! 4. **Effort** (§5.5) follows the class and its blast radius; SOTA lifts plan and load-bearing builds to
 //!    xhigh; max is never chosen. Under pressure the same model on another pool comes first (equal scores),
 //!    then the other family at full effort (the bar drop), and only when nothing is left one effort step down.
@@ -44,10 +46,17 @@ pub const RECORD_FILE: &str = "record.jsonl";
 const LOCK_FILE: &str = "leases.lock";
 /// `herdr seat pick`'s exit code when no seat is given, a refused override included.
 pub const NO_SEAT_EXIT: i32 = 3;
-/// Scores and bars compare with this slack: a blended score is a product of floats (decision 0018's EDGE).
+/// `herdr seat pick` and `release` exit with this when another herdr held the lease lock for all of `Lock::take`.
+pub const LOCK_EXIT: i32 = 4;
+/// Scores, bars and shares compare with this slack: a blended score is a product of f32s. Decision 0018 §2.2
+/// keeps an EDGE of 1e-9 for its f64 composites; f32 needs a coarser one, so this is not that constant.
 const EDGE: f32 = 1e-4;
-/// A lock file older than this was left by a process that died holding it.
-const LOCK_STALE: Duration = Duration::from_secs(30);
+/// A run whose last override is older than this is dropped from `leases.json`: a run does not outlive a week's
+/// window, and the file would otherwise grow by one entry per run forever.
+pub const RUN_KEEP_S: u64 = 8 * 86_400;
+/// How long a pick waits for one CLI's sign-in to be read (`claude auth status`), so a hang there cannot hang
+/// `seat pick`.
+const ACCOUNTS_TIMEOUT: Duration = Duration::from_secs(15);
 
 // ---- the table ----
 
@@ -444,9 +453,16 @@ impl Table {
             if class.weight <= 0.0 {
                 problems.push(format!("class {}: weight must be above 0", class.id));
             }
-            for entry in &class.seats {
+            for (at, entry) in class.seats.iter().enumerate() {
                 if self.seat(&entry.seat).is_none() {
                     problems.push(format!("class {}: no seat {}", class.id, entry.seat));
+                }
+                // The class's order breaks the last tie, so a seat listed twice would have two places in it.
+                if class.seats[..at].iter().any(|seen| seen.seat == entry.seat) {
+                    problems.push(format!(
+                        "class {}: seat {} is listed twice",
+                        class.id, entry.seat
+                    ));
                 }
             }
         }
@@ -676,6 +692,8 @@ struct Candidate {
     use_basis: Option<String>,
     windows: Vec<WindowState>,
     skip: Option<Skip>,
+    /// The step-down pass gave this seat a lower effort than the class's; false for a seat already at its lowest.
+    stepped: bool,
 }
 
 impl Candidate {
@@ -686,12 +704,42 @@ impl Candidate {
             .fold(0.0, f32::max)
     }
 
+    /// A window not read, or a pool with no windows at all (`local`): either way its headroom is not known, and
+    /// a pool with nothing to read is not free (review nit: `local` would have won every chore at pressure 0).
+    fn unread(&self) -> bool {
+        self.windows.is_empty() || self.windows.iter().any(|window| !window.known())
+    }
+
     fn unknown(&self) -> Vec<String> {
+        if self.windows.is_empty() {
+            return vec!["no windows".to_owned()];
+        }
         self.windows
             .iter()
             .filter(|window| !window.known())
             .map(|window| window.window.clone())
             .collect()
+    }
+
+    /// The first known window too small for this order.
+    fn short(&self) -> Option<&WindowState> {
+        self.windows
+            .iter()
+            .find(|window| window.known() && !window.holds())
+    }
+
+    /// §3's order before pressure: 0 known headroom that holds the order, 1 a window not read, 2 a known window
+    /// that cannot hold it. A reader that fails ranks "below known headroom and above exhausted", and a window
+    /// too small for the order is nearer exhausted than free: seated there, a mid-order rate limit is near
+    /// certain (review S2). A seat with both an unread and a short window is short.
+    fn tier(&self) -> u8 {
+        if self.short().is_some() {
+            2
+        } else if self.unread() {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -723,7 +771,8 @@ pub struct Pick {
     pub bar_dropped: bool,
     #[serde(serialize_with = "six")]
     pub pressure: f32,
-    /// Windows not read: the seat ranked below every seat with known headroom.
+    /// Windows not read ("no windows" for a pool without any): the seat ranked below every seat with known
+    /// headroom.
     pub unknown: Vec<String>,
     pub windows: Vec<WindowState>,
     /// Whether the expected use is measured, derived or a prior, and from what.
@@ -737,6 +786,9 @@ pub struct Pick {
     pub override_reason: Option<String>,
     /// What the rule would have picked, when an override chose instead.
     pub rule_pick: Option<String>,
+    /// `--not-family` left no seat, so the class was seated on the excluded family, in a fresh session
+    /// (decision 0017's fallback). The journal counts these.
+    pub same_family_fallback: bool,
     pub runners_up: Vec<Loser>,
 }
 
@@ -880,6 +932,58 @@ pub fn pick(table: &Table, world: &World, request: &Request) -> Result<Pick, NoS
             skipped: Vec::new(),
         });
     };
+    match seat_once(table, world, request, class) {
+        // Decision 0017: another family is a preference, not a wall. With no other family left and no
+        // override, the class is seated again on its own family, in a fresh session (a new order, never the
+        // builder's conversation), and the pick says so. A wall turned a family's outage into a deferred
+        // review, up to a week under §5.6 step 4 (review B1).
+        Err(other) if !request.not_family.is_empty() && request.override_seat.is_none() => {
+            let mut own = request.clone();
+            own.not_family.clear();
+            match seat_once(table, world, &own, class) {
+                Ok(mut got) => {
+                    // Each other-family seat and what stopped it, as 0017's `same_family_reason` names them.
+                    let stopped: Vec<String> = other
+                        .skipped
+                        .iter()
+                        .filter(|loser| {
+                            table
+                                .seat(&loser.seat)
+                                .is_some_and(|seat| !request.not_family.contains(&seat.family))
+                        })
+                        .map(|loser| format!("{} ({})", loser.seat, loser.why))
+                        .collect();
+                    let why = if stopped.is_empty() {
+                        other.reason
+                    } else {
+                        stopped.join("; ")
+                    };
+                    got.same_family_fallback = true;
+                    got.reason.push_str(&format!(
+                        "; same family ({}), in a fresh session: no other family had a seat: {why} (decision 0017)",
+                        got.family
+                    ));
+                    Ok(got)
+                }
+                // Its own family's skips, with their resets: the earliest that frees any seat at all.
+                Err(mut none) => {
+                    none.reason
+                        .push_str("; its own family was tried too (decision 0017)");
+                    Err(none)
+                }
+            }
+        }
+        other => other,
+    }
+}
+
+/// One pass of the rule at the class's effort and, when a skip was priced, one effort step down (§5.5).
+fn seat_once(
+    table: &Table,
+    world: &World,
+    request: &Request,
+    class: &Class,
+) -> Result<Pick, NoSeat> {
     match evaluate(table, world, request, class, false) {
         Ok(pick) => Ok(pick),
         Err(first) if first.priced && request.override_seat.is_none() => {
@@ -1071,11 +1175,16 @@ fn evaluate(
                 winner.effort.map_or("", Effort::word)
             )
         });
-        let bar = table.bars(class).at(request.mode);
+        let mode_bar = table.bars(class).at(request.mode);
         let index = candidates
             .iter()
             .position(|cand| table.seats[cand.index].id == *seat_id)
             .expect("found above");
+        // The bar the seat stands at: an override can take a seat under the mode's bar, and the pick says
+        // so instead of reporting a bar it did not clear (review nit).
+        let score = candidates[index].score;
+        let under = score + EDGE < mode_bar;
+        let bar = if under { score } else { mode_bar };
         let mut out = build_pick(
             table,
             &candidates,
@@ -1089,11 +1198,28 @@ fn evaluate(
         );
         out.override_reason = Some(reason.clone());
         out.rule_pick = rule_pick.clone();
+        let under = if under {
+            format!(
+                "; {seat_id} scores {score:.0}, under the bar {mode_bar:.0} at {}",
+                request.mode.word()
+            )
+        } else {
+            String::new()
+        };
         out.reason = format!(
-            "{}; override: {reason}; the rule's pick: {}",
+            "{}{under}; override: {reason}; the rule's pick: {}",
             out.reason,
             rule_pick.as_deref().unwrap_or("none")
         );
+        // The seats the rule would have ranked lost to the override, not to a bar or a price.
+        for loser in &mut out.runners_up {
+            let ranked = candidates.iter().any(|cand| {
+                table.seats[cand.index].id == loser.seat && cand.in_class && cand.skip.is_none()
+            });
+            if ranked {
+                loser.why = format!("the override took {seat_id}");
+            }
+        }
         return Ok(out);
     }
 
@@ -1148,6 +1274,7 @@ fn candidate(
         use_basis: None,
         windows: Vec::new(),
         skip: None,
+        stepped: false,
     };
     let skip = |kind: SkipKind, why: String| {
         Some(Skip {
@@ -1196,6 +1323,8 @@ fn candidate(
     let (effort, note) = effort_for(class, entry, seat, request.mode, step_down);
     cand.effort = Some(effort);
     cand.effort_note = note;
+    // A seat already at its lowest effort (argon low, flash low in build.bounded) is not stepped down.
+    cand.stepped = step_down && effort < effort_for(class, entry, seat, request.mode, false).0;
     if table.use_record {
         let key = (seat.id.clone(), effort, class.chain.clone());
         if let Some(tally) = world.record.get(&key) {
@@ -1253,6 +1382,7 @@ fn candidate(
         } else {
             0.0
         };
+        let headroom = left.map(|left| left - reserve);
         let resets_at = reading.and_then(|reading| reading.resets_at);
         let pace = reading.and_then(|reading| {
             nirvana_usage::pace_with(
@@ -1262,13 +1392,12 @@ fn candidate(
                 constants.pace_max,
             )
         });
-        let reset_factor = match (used, resets_at) {
-            (Some(used), Some(at)) => reset_factor(
-                1.0 - used,
-                at.saturating_sub(world.now),
-                size.minutes,
-                constants,
-            ),
+        // "More than 30% left" is what this order could still use: after booked orders and the reserve. At
+        // max 5 h with 35% unused, 20% is usable, and that is not quota about to be lost (review nit).
+        let reset_factor = match (headroom, resets_at) {
+            (Some(room), Some(at)) => {
+                reset_factor(room, at.saturating_sub(world.now), size.minutes, constants)
+            }
             _ => 1.0,
         };
         cand.windows.push(WindowState {
@@ -1276,7 +1405,7 @@ fn candidate(
             used,
             booked,
             left,
-            headroom: left.map(|left| left - reserve),
+            headroom,
             resets_at,
             pace,
             reset_factor,
@@ -1284,11 +1413,24 @@ fn candidate(
         });
     }
     // Filter 5: a window at or under the floor.
-    if let Some(window) = cand.windows.iter().find(|window| {
-        window
-            .left
-            .is_some_and(|left| left <= constants.floor + EDGE)
-    }) {
+    let floored: Vec<&WindowState> = cand
+        .windows
+        .iter()
+        .filter(|window| {
+            window
+                .left
+                .is_some_and(|left| left <= constants.floor + EDGE)
+        })
+        .collect();
+    if let Some(window) = floored.first() {
+        // The seat is free only when every floored window has reset: the latest of them, and unknown when one
+        // has no reset time. The first one's reset sent a NoSeat to defer 20 minutes for a 5 h window while
+        // the week stayed floored for days (review S4).
+        let free_at = floored
+            .iter()
+            .map(|window| window.resets_at)
+            .collect::<Option<Vec<u64>>>()
+            .and_then(|ats| ats.into_iter().max());
         let booked = if window.booked > 0.0005 {
             format!(" and {} booked", pct(window.booked))
         } else {
@@ -1303,7 +1445,7 @@ fn candidate(
                 pct(window.used.unwrap_or(1.0)),
                 pct(constants.floor)
             ),
-            resets_at: window.resets_at,
+            resets_at: free_at,
         });
     }
     cand
@@ -1354,13 +1496,22 @@ fn rank(
         .into_iter()
         .filter(|&i| candidates[i].score + EDGE >= bar)
         .collect();
+    // Ties go to the higher score, then to the class's own order, §5.4's row: with the agy reader stale,
+    // flash and argon in research.web are both unread at 84, and table order gave argon (review S8). Every
+    // survivor is in the class and a class lists a seat once, so no tie is left after it.
+    let place = |cand: &Candidate| {
+        class
+            .seats
+            .iter()
+            .position(|entry| entry.seat == table.seats[cand.index].id)
+    };
     order.sort_by(|&a, &b| {
         let (a, b) = (&candidates[a], &candidates[b]);
-        (!a.unknown().is_empty())
-            .cmp(&!b.unknown().is_empty())
+        a.tier()
+            .cmp(&b.tier())
             .then(a.pressure().total_cmp(&b.pressure()))
             .then(b.score.total_cmp(&a.score))
-            .then(a.index.cmp(&b.index))
+            .then(place(a).cmp(&place(b)))
     });
     Ok((order, bar, dropped))
 }
@@ -1384,20 +1535,32 @@ fn build_pick(
     let mode_bar = table.bars(class).at(request.mode);
     let lost_to = |cand: &Candidate| -> String {
         let (a, b) = (cand.pressure(), won.pressure());
-        if !cand.unknown().is_empty() && won.unknown().is_empty() {
-            format!(
+        let pool = &table.seats[cand.index].pool;
+        match (cand.tier(), won.tier(), cand.short()) {
+            (2, below, Some(short)) if below < 2 => format!(
+                "{pool} {} has {} left for an order of {}: ranks below {}",
+                short.window,
+                pct(short.headroom.unwrap_or(0.0).max(0.0)),
+                pct(short.expected),
+                if below == 0 {
+                    "known headroom"
+                } else {
+                    "an unread pool"
+                }
+            ),
+            (1, 0, _) if cand.windows.is_empty() => {
+                format!("{pool} has no windows to read: ranks below known headroom")
+            }
+            (1, 0, _) => format!(
                 "{} not read: ranks below known headroom",
                 cand.unknown().join(", ")
-            )
-        } else if (a - b).abs() > 1e-6 {
-            format!("pressure {a:.4} against {b:.4}")
-        } else if (cand.score - won.score).abs() > EDGE {
-            format!(
+            ),
+            _ if (a - b).abs() > 1e-6 => format!("pressure {a:.4} against {b:.4}"),
+            _ if (cand.score - won.score).abs() > EDGE => format!(
                 "same pressure, scores {:.1} against {:.1}",
                 cand.score, won.score
-            )
-        } else {
-            "same pressure and score, later in the table".to_owned()
+            ),
+            _ => "same pressure and score, later in the class's order".to_owned(),
         }
     };
     let mut runners_up: Vec<Loser> = beaten
@@ -1437,14 +1600,29 @@ fn build_pick(
         windows_phrase(&seat.pool, &won.windows)
     );
     if seat.pool == constants.reserve_pool {
-        reason.push_str(&format!(", reserve {}", pct(constants.reserve)));
+        // An unread reserve window leaves the reserve unknown: the seat ranked with the unread, and the line
+        // says the reserve was not checked rather than that it held (review S2).
+        let unread = won
+            .windows
+            .iter()
+            .any(|window| window.window == constants.reserve_window && !window.known());
+        if unread {
+            reason.push_str(&format!(
+                ", reserve {} not checked ({} not read)",
+                pct(constants.reserve),
+                constants.reserve_window
+            ));
+        } else {
+            reason.push_str(&format!(", reserve {}", pct(constants.reserve)));
+        }
     }
     if dropped {
         reason.push_str(&format!(
             "; bar dropped to {bar:.0} (none left reached {mode_bar:.0})"
         ));
     }
-    if step_down {
+    let stepped = step_down && won.stepped;
+    if stepped {
         reason.push_str("; one effort step down (the class's effort found no seat)");
     }
     if let Some(note) = &won.effort_note {
@@ -1483,9 +1661,10 @@ fn build_pick(
         use_basis: won.use_basis.clone(),
         reason,
         effort_note: won.effort_note.clone(),
-        step_down,
+        step_down: stepped,
         override_reason: None,
         rule_pick: None,
+        same_family_fallback: false,
         runners_up,
     }
 }
@@ -1530,6 +1709,9 @@ pub struct Leases {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RunCount {
     pub overrides: u32,
+    /// When the run's last override was accepted; a run older than `RUN_KEEP_S` is pruned.
+    #[serde(default)]
+    pub at: u64,
 }
 
 impl Leases {
@@ -1583,11 +1765,80 @@ pub fn lease_for(table: &Table, pick: &Pick, order: &str, run: Option<&str>, now
     }
 }
 
+/// `pick --book` for an order that already has a live lease: that lease, whose stored pick is the answer, or a
+/// refusal when the repeat names an override the booking was not. The old pick came back with only
+/// `"booked": "existing"` to show that the new `--override` was ignored (review nit).
+pub fn existing_booking<'a>(
+    leases: &'a Leases,
+    order: &str,
+    override_seat: Option<&str>,
+    now: u64,
+) -> Option<Result<&'a Lease, String>> {
+    let known = leases.live(order, now)?;
+    let overrode = known
+        .pick
+        .get("override")
+        .is_some_and(|value| !value.is_null());
+    Some(match override_seat {
+        Some(seat) if !(overrode && known.seat == seat) => Err(format!(
+            "override {seat} refused: {order} is already booked on {} {} ({}); release it first (herdr seat release {order})",
+            known.seat,
+            known.effort.word(),
+            if overrode {
+                "an override"
+            } else {
+                "the rule's pick"
+            }
+        )),
+        _ => Ok(known),
+    })
+}
+
+/// What `pick` writes under the lock for a pick it gives: an override counted against its run, the order
+/// booked when `order` is given, and runs whose last override is over `RUN_KEEP_S` old dropped. The lease
+/// booked, and whether `leases` changed.
+pub fn book_pick(
+    leases: &mut Leases,
+    table: &Table,
+    pick: &Pick,
+    order: Option<&str>,
+    run: Option<&str>,
+    now: u64,
+) -> (Option<Lease>, bool) {
+    let runs = leases.runs.len();
+    leases
+        .runs
+        .retain(|_, count| now.saturating_sub(count.at) <= RUN_KEEP_S);
+    let mut changed = leases.runs.len() != runs;
+    if let (Some(_), Some(run)) = (&pick.override_reason, run) {
+        let count = leases.runs.entry(run.to_owned()).or_default();
+        count.overrides += 1;
+        count.at = now;
+        changed = true;
+    }
+    let lease = order.map(|order| leases.book(lease_for(table, pick, order, run, now), now));
+    (lease.clone(), changed || lease.is_some())
+}
+
+/// `leases.json`, or why it cannot be used. A missing file is empty; a file that does not parse is an error,
+/// never read as empty, because the next write would wipe every run's override count (review nit).
+pub fn load_leases(path: &Path) -> Result<Leases, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).map_err(|err| {
+            format!(
+                "{} does not parse ({err}); it holds each run's override count, so it is not read as empty: fix or delete it",
+                path.display()
+            )
+        }),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Leases::default()),
+        Err(err) => Err(format!("{} cannot be read: {err}", path.display())),
+    }
+}
+
+/// Lossy: a corrupt file reads as empty. Only `record_cli` still uses it, where an empty read releases nothing
+/// and so writes nothing; it moves to `load_leases` with package O3's change to `record_cli`.
 pub fn read_leases(path: &Path) -> Leases {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+    load_leases(path).unwrap_or_default()
 }
 
 /// A temp file, then a rename, as `usage.json` is written (O1): a reader never sees half a file.
@@ -1610,10 +1861,17 @@ pub fn write_leases(path: &Path, leases: &Leases) -> std::io::Result<()> {
     write_atomic(path, &serde_json::to_vec_pretty(&leases)?)
 }
 
-/// Holds `leases.lock` while it lives. A read, a pick and a write of `leases.json` happen under it, so four
-/// parallel picks in five seconds see each other's bookings (Argon's review F1); the rename alone keeps the
-/// file whole but would let two writers lose one lease.
-pub struct Lock(PathBuf);
+/// Holds the OS's lock on `leases.lock` while it lives. A read, a pick and a write of `leases.json` happen
+/// under it, so four parallel picks in five seconds see each other's bookings (Argon's review F1); the rename
+/// alone keeps the file whole but would let two writers lose one lease.
+///
+/// The lock is `File::try_lock`, which the OS lets go when the handle closes, its process dying included. So
+/// a crash leaves nothing to time out, no stale rule is needed, and the file itself stays: nothing deletes it.
+/// The first build created the file to lock and deleted it on drop; two takers of a stale file could both
+/// get in, and a holder's drop deleted whoever's lock was there (review S3).
+pub struct Lock {
+    _file: std::fs::File,
+}
 
 impl Lock {
     /// Waits up to 10 s for the lock.
@@ -1621,45 +1879,30 @@ impl Lock {
         Self::try_take(dir, 200)
     }
 
-    /// Tries `attempts` times, 50 ms apart; a lock left over `LOCK_STALE` ago is taken over.
+    /// Tries `attempts` times, 50 ms apart; `TimedOut` when another handle held it for all of them.
     pub fn try_take(dir: &Path, attempts: u32) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join(LOCK_FILE);
-        for _ in 0..attempts {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(mut file) => {
-                    let _ = write!(file, "{}", std::process::id());
-                    return Ok(Self(path));
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let stale = std::fs::metadata(&path)
-                        .and_then(|meta| meta.modified())
-                        .ok()
-                        .and_then(|at| SystemTime::now().duration_since(at).ok())
-                        .is_some_and(|age| age > LOCK_STALE);
-                    if stale {
-                        let _ = std::fs::remove_file(&path);
-                    } else {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)?;
+        for attempt in 0..attempts {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { _file: file }),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    if attempt + 1 < attempts {
                         std::thread::sleep(Duration::from_millis(50));
                     }
                 }
-                Err(err) => return Err(err),
+                Err(std::fs::TryLockError::Error(err)) => return Err(err),
             }
         }
         Err(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
             format!("{} is held by another herdr", path.display()),
         ))
-    }
-}
-
-impl Drop for Lock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
     }
 }
 
@@ -1803,7 +2046,10 @@ const USAGE: &str = "usage: herdr seat list [--json]
                        [--override <seat> --reason \"...\"] [--json]
        herdr seat release <order>
        herdr seat record --json '<line>'
-pick exits 0 with a seat, 3 with none (a refused override included), 2 on a usage or table error.";
+--size defaults to medium (seats.toml's [size.medium]); --mode to seats.toml's mode.
+pick exits 0 with a seat, 3 with none (a refused override included), 2 on a usage or table error, a --needs
+or --not-family word no seat has, or a leases.json that does not parse. pick and release exit 4 when another
+herdr held the seat lock for 10 s.";
 
 fn usage_exit() -> ! {
     eprintln!("{USAGE}");
@@ -1830,18 +2076,93 @@ fn load_table() -> Table {
 
 /// Why a CLI cannot take an order, from the Accounts readers; `None` when it is signed in.
 fn cli_state(cli: &str) -> Option<String> {
-    use crate::nirvana_accounts::{read, Cli, Signed};
+    use crate::nirvana_accounts::{read, Cli};
     let which = match cli {
         "claude" => Cli::Claude,
         "agy" => Cli::Antigravity,
         "codex" => Cli::Codex,
         other => return Some(format!("{other} is not a CLI herdr knows")),
     };
-    match read(which) {
-        Signed::In(_) => None,
-        Signed::NotInstalled => Some(format!("{cli} not installed")),
-        Signed::Out | Signed::Reading => Some(format!("{cli} not signed in")),
+    signed_within(cli, ACCOUNTS_TIMEOUT, move || read(which))
+}
+
+/// A sign-in read with a deadline. `claude auth status` runs with no deadline of its own at every pick
+/// (`nirvana_accounts::output`), and a hang there hung `seat pick` (review S7). A read past the deadline is
+/// left to finish on its own thread: herdr does not kill a process it cannot name from here.
+fn signed_within(
+    cli: &str,
+    timeout: Duration,
+    read: impl FnOnce() -> crate::nirvana_accounts::Signed + Send + 'static,
+) -> Option<String> {
+    use crate::nirvana_accounts::Signed;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(read());
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Signed::In(_)) => None,
+        Ok(Signed::NotInstalled) => Some(format!("{cli} not installed")),
+        Ok(Signed::Out | Signed::Reading) => Some(format!("{cli} not signed in")),
+        Err(_) => Some(format!("{cli} sign-in not read in {timeout:?}")),
     }
+}
+
+/// The `--needs` and `--not-family` words no seat in the table has, each in a sentence. A typo excluded
+/// nothing (`--not-family antropic`) or skipped every seat (`--needs vidoe`), silently (review nit).
+pub fn unknown_words(table: &Table, needs: &[String], families: &[String]) -> Vec<String> {
+    let mut capabilities: Vec<&str> = table
+        .seats
+        .iter()
+        .flat_map(|seat| seat.capabilities.iter().map(String::as_str))
+        .collect();
+    capabilities.sort_unstable();
+    capabilities.dedup();
+    let mut known: Vec<&str> = table
+        .seats
+        .iter()
+        .map(|seat| seat.family.as_str())
+        .collect();
+    known.sort_unstable();
+    known.dedup();
+    let mut words = Vec::new();
+    for need in needs
+        .iter()
+        .filter(|need| !capabilities.contains(&need.as_str()))
+    {
+        words.push(format!(
+            "--needs {need}: no seat has it; the capabilities: {}",
+            capabilities.join(", ")
+        ));
+    }
+    for family in families
+        .iter()
+        .filter(|family| !known.contains(&family.as_str()))
+    {
+        words.push(format!(
+            "--not-family {family}: no seat is of it; the families: {}",
+            known.join(", ")
+        ));
+    }
+    words
+}
+
+/// `Lock::take` for the CLI: another herdr holding the lock all the while is its own exit, `LOCK_EXIT`.
+fn take_lock(dir: &Path) -> std::io::Result<Lock> {
+    match Lock::take(dir) {
+        Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {
+            eprintln!("herdr seat: {err}; nothing was changed, try again");
+            std::process::exit(LOCK_EXIT);
+        }
+        other => other,
+    }
+}
+
+/// `load_leases` for the CLI: a file that does not parse is a table-class error, exit 2, never read as empty.
+fn leases_or_exit(path: &Path) -> Leases {
+    load_leases(path).unwrap_or_else(|err| {
+        eprintln!("herdr seat: {err}");
+        std::process::exit(2);
+    })
 }
 
 /// The world as this machine has it: usage from `usage.json` (stale readers read first, as `herdr usage`
@@ -1893,7 +2214,7 @@ fn list_cli(args: &[String]) -> std::io::Result<()> {
     let table = load_table();
     let mut world = live_world(&table);
     let dir = dir();
-    world.leases = read_leases(&dir.join(LEASES_FILE)).leases;
+    world.leases = leases_or_exit(&dir.join(LEASES_FILE)).leases;
     let view = list_view(&table, &world);
     if json {
         println!("{}", serde_json::to_string_pretty(&view)?);
@@ -2136,6 +2457,13 @@ fn pick_cli(args: &[String]) -> std::io::Result<()> {
         );
         std::process::exit(2);
     }
+    let words = unknown_words(&table, &request.needs, &request.not_family);
+    if !words.is_empty() {
+        for word in words {
+            eprintln!("herdr seat pick: {word}");
+        }
+        std::process::exit(2);
+    }
     if let Some(seat) = &over {
         let (Some(reason), Some(_)) = (&reason, &run) else {
             eprintln!(
@@ -2150,68 +2478,87 @@ fn pick_cli(args: &[String]) -> std::io::Result<()> {
     let mut world = live_world(&table);
     let dir = dir();
     let leases_path = dir.join(LEASES_FILE);
-    let lock = Lock::take(&dir)?;
-    let mut leases = read_leases(&leases_path);
+    let lock = take_lock(&dir)?;
+    let mut leases = leases_or_exit(&leases_path);
     world.now = now();
     if let Some(order) = &book {
-        if let Some(known) = leases.live(order, world.now) {
-            let mut out = known.pick.clone();
-            out["booked"] = "existing".into();
-            out["lease"] = lease_view(known)?;
-            drop(lock);
-            return print_pick(&out, json);
+        let over = request
+            .override_seat
+            .as_ref()
+            .map(|(seat, _)| seat.as_str());
+        match existing_booking(&leases, order, over, world.now) {
+            Some(Ok(known)) => {
+                let mut out = known.pick.clone();
+                out["booked"] = "existing".into();
+                out["lease"] = lease_view(known)?;
+                drop(lock);
+                return print_pick(&out, json);
+            }
+            Some(Err(reason)) => {
+                drop(lock);
+                let refused = NoSeat {
+                    class: request.class.clone(),
+                    reason,
+                    earliest_reset: None,
+                    defer: false,
+                    skipped: Vec::new(),
+                };
+                return no_seat_exit(&refused, world.now, json);
+            }
+            None => {}
         }
     }
     world.leases = leases.leases.clone();
     world.overrides_used = run.as_deref().map_or(0, |run| leases.overrides(run));
-    let result = pick(&table, &world, &request);
-    let out = match result {
+    match pick(&table, &world, &request) {
         Ok(chosen) => {
             let mut out = serde_json::to_value(&chosen)?;
-            let mut changed = false;
-            if chosen.override_reason.is_some() {
-                if let Some(run) = &run {
-                    leases.runs.entry(run.clone()).or_default().overrides += 1;
-                    changed = true;
-                }
-            }
-            if let Some(order) = &book {
-                let lease = lease_for(&table, &chosen, order, run.as_deref(), world.now);
-                let booked = leases.book(lease, world.now);
+            let (booked, changed) = book_pick(
+                &mut leases,
+                &table,
+                &chosen,
+                book.as_deref(),
+                run.as_deref(),
+                world.now,
+            );
+            if let Some(booked) = &booked {
                 out["booked"] = "new".into();
-                out["lease"] = lease_view(&booked)?;
-                changed = true;
+                out["lease"] = lease_view(booked)?;
             }
             if changed {
                 write_leases(&leases_path, &leases)?;
             }
-            out
+            drop(lock);
+            print_pick(&out, json)
         }
         Err(no_seat) => {
             drop(lock);
-            let mut out = serde_json::to_value(&no_seat)?;
-            out["no_seat"] = true.into();
-            if json {
-                println!("{}", serde_json::to_string_pretty(&out)?);
-            } else {
-                println!("no seat: {}", no_seat.reason);
-                if let Some(at) = no_seat.earliest_reset {
-                    println!(
-                        "earliest reset in {}{}",
-                        nirvana_usage::short_duration(at.saturating_sub(world.now)),
-                        if no_seat.defer { ": defer" } else { "" }
-                    );
-                }
-                for loser in &no_seat.skipped {
-                    println!("  {}: {}", loser.seat, loser.why);
-                }
-            }
-            std::io::stdout().flush()?;
-            std::process::exit(NO_SEAT_EXIT);
+            no_seat_exit(&no_seat, world.now, json)
         }
-    };
-    drop(lock);
-    print_pick(&out, json)
+    }
+}
+
+/// Prints a NoSeat and exits `NO_SEAT_EXIT`.
+fn no_seat_exit(no_seat: &NoSeat, now: u64, json: bool) -> std::io::Result<()> {
+    let mut out = serde_json::to_value(no_seat)?;
+    out["no_seat"] = true.into();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        println!("no seat: {}", no_seat.reason);
+        if let Some(at) = no_seat.earliest_reset {
+            println!(
+                "earliest reset in {}{}",
+                nirvana_usage::short_duration(at.saturating_sub(now)),
+                if no_seat.defer { ": defer" } else { "" }
+            );
+        }
+        for loser in &no_seat.skipped {
+            println!("  {}: {}", loser.seat, loser.why);
+        }
+    }
+    std::io::stdout().flush()?;
+    std::process::exit(NO_SEAT_EXIT);
 }
 
 /// A lease as the CLI prints it: its stored pick is the answer itself, so it is left out.
@@ -2273,8 +2620,8 @@ fn release_cli(args: &[String]) -> std::io::Result<()> {
     let [order] = args else { usage_exit() };
     let dir = dir();
     let path = dir.join(LEASES_FILE);
-    let _lock = Lock::take(&dir)?;
-    let mut leases = read_leases(&path);
+    let _lock = take_lock(&dir)?;
+    let mut leases = leases_or_exit(&path);
     if leases.release(order, now()) {
         write_leases(&path, &leases)?;
         println!("released {order}");
@@ -2510,6 +2857,12 @@ mod tests {
         ))
         .unwrap_err()
         .contains("class build.bounded: bars must rise"));
+        assert!(parse(&DEFAULT.replace(
+            "  { seat = \"sonnet\", score = 85 },\n  { seat = \"flash\", score = 78, effort = \"low\" },",
+            "  { seat = \"sonnet\", score = 85 },\n  { seat = \"sonnet\", score = 80 },\n  { seat = \"flash\", score = 78, effort = \"low\" },"
+        ))
+        .unwrap_err()
+        .contains("class research.read: seat sonnet is listed twice"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2529,13 +2882,22 @@ mod tests {
         // §5.3 step 5's form.
         assert_eq!(
             got.reason,
-            "build.bounded \u{2192} sonnet medium: max 5h 41% used, week 37% used, reserve 15%; \
-             g-sonnet scores the same (google3p 5h 3% used, week 4% used)"
+            "build.bounded \u{2192} sonnet medium: max 5h 41% used, week 37% used, reserve 15%"
         );
-        assert!(why(&got.runners_up, "g-sonnet").starts_with("pressure "));
+        // §5.4's row puts g-sonnet last: an overflow seat, not a second Max (S1).
+        assert_eq!(
+            why(&got.runners_up, "g-sonnet"),
+            "scores 77.0, under the bar 85 at balanced"
+        );
         assert_eq!(
             why(&got.runners_up, "argon"),
             "scores 82.0, under the bar 85 at balanced"
+        );
+        // A same-model twin on another pool is named when it scores the same.
+        assert_eq!(
+            chosen(&table, &world(), &request("plan")).reason,
+            "plan \u{2192} opus high: max 5h 41% used, week 37% used, reserve 15%; \
+             g-opus scores the same (google3p 5h 3% used, week 4% used)"
         );
         // Expected use: P4's order (0.088% of max 5 h) x weight 1 x medium size 5.
         let five = &got.windows[0];
@@ -2621,9 +2983,57 @@ mod tests {
             why(&got.runners_up, "opus"),
             "family anthropic excluded (another family reviews, decision 0017)"
         );
+        assert!(!got.same_family_fallback);
         review.not_family = vec!["google".into()];
         let got = chosen(&table, &world(), &review);
         assert_eq!((got.seat.as_str(), got.effort), ("opus", Effort::High));
+        assert!(!got.same_family_fallback);
+    }
+
+    /// Decision 0017: "A review prefers another family, falls back to its own in a fresh session".
+    #[test]
+    fn a_review_with_no_other_family_left_falls_back_to_its_own_in_a_fresh_session() {
+        let table = table();
+        let mut world = world();
+        set(&mut world, "argon", "week", 0.97);
+        let mut review = request("review.adversary");
+        review.not_family = vec!["anthropic".into()];
+        let got = chosen(&table, &world, &review);
+        assert_eq!((got.seat.as_str(), got.effort), ("opus", Effort::High));
+        assert!(got.same_family_fallback);
+        assert!(
+            got.reason.ends_with(
+                "; same family (anthropic), in a fresh session: no other family had a seat: \
+                 argon (argon week 97% used: at or under the floor 5%) (decision 0017)"
+            ),
+            "{}",
+            got.reason
+        );
+        // Decision 0019's acceptance author falls back the same way.
+        let mut author = request("acceptance.author");
+        author.not_family = vec!["anthropic".into()];
+        let got = chosen(&table, &world, &author);
+        assert_eq!(got.seat, "sonnet");
+        assert!(got.same_family_fallback);
+        // An override is the orchestrator's own choice: it is never relaxed.
+        let mut over = review.clone();
+        over.override_seat = Some(("opus".into(), "x".into()));
+        assert_eq!(
+            pick_err(&table, &world, &over),
+            "override opus refused: family anthropic excluded (another family reviews, decision 0017)"
+        );
+        // Neither family: the NoSeat is the second pass's, so its earliest reset is the soonest seat of
+        // either family, max's 5 h window, not argon's week.
+        set(&mut world, "max", "5h", 0.97);
+        set(&mut world, "google3p", "5h", 0.97);
+        let no = pick(&table, &world, &review).unwrap_err();
+        assert!(
+            no.reason
+                .ends_with("; its own family was tried too (decision 0017)"),
+            "{}",
+            no.reason
+        );
+        assert_eq!(no.earliest_reset, Some(at("2026-10-18T00:50:00Z")));
     }
 
     #[test]
@@ -2736,11 +3146,8 @@ mod tests {
             got.pressure,
             term(week)
         );
-        // The same order is twice the share of gemini's 5 h window that it is of the week, so at 20%
-        // headroom each the 5 h window is the dearer.
-        let flash = table.seat("flash").unwrap();
-        let cell = flash.use_cell(Effort::Low).unwrap();
-        let window = |name: &str| WindowState {
+        // A candidate's pressure is its worst window's, wherever that sits in the pool's order.
+        let window = |name: &str, expected: f32| WindowState {
             window: name.into(),
             used: Some(0.8),
             booked: 0.0,
@@ -2749,9 +3156,26 @@ mod tests {
             resets_at: None,
             pace: Some(1.0),
             reset_factor: 1.0,
-            expected: cell.windows[name],
+            expected,
         };
-        assert!(window("5h").pressure().unwrap() > window("week").pressure().unwrap());
+        for windows in [
+            vec![window("5h", 0.01), window("week", 0.04)],
+            vec![window("week", 0.04), window("5h", 0.01)],
+        ] {
+            let cand = Candidate {
+                index: 0,
+                in_class: true,
+                effort: None,
+                effort_note: None,
+                score: 0.0,
+                record_note: None,
+                use_basis: None,
+                windows,
+                skip: None,
+                stepped: false,
+            };
+            assert!(close(cand.pressure(), 0.2), "{}", cand.pressure());
+        }
     }
 
     #[test]
@@ -2778,10 +3202,31 @@ mod tests {
             close(five.reset_factor, 1.0 - 0.5 * (1200.0 / 2700.0)),
             "{five:?}"
         );
+        // The discount reaches the price: the 5 h window binds, and its term carries the factor.
+        assert!(five.reset_factor < 1.0);
+        let term = five.expected / five.headroom.unwrap() * five.pace.unwrap() * five.reset_factor;
+        assert!(close(got.pressure, term), "{} {term}", got.pressure);
+        // "More than 30% left" is what the order could use: max's 5 h window 65% used is 35% unused but 20%
+        // after the reserve, so its reset 20 minutes off is no discount.
+        let mut world = self::world();
+        set(&mut world, "max", "5h", 0.65);
+        world
+            .readings
+            .iter_mut()
+            .find(|r| r.pool == "max" && r.window == "5h")
+            .unwrap()
+            .resets_at = Some(NOW + 1200);
+        let got = chosen(&table(), &world, &request("build.bounded"));
+        assert_eq!(got.seat, "sonnet");
+        assert!(
+            close(got.windows[0].reset_factor, 1.0),
+            "{:?}",
+            got.windows[0]
+        );
     }
 
     #[test]
-    fn ties_go_to_the_higher_score_then_to_table_order() {
+    fn ties_go_to_the_higher_score_then_to_the_classs_own_order() {
         let mut table = table();
         for seat in table
             .seats
@@ -2792,13 +3237,15 @@ mod tests {
                 cell.windows.clear();
             }
         }
-        // Both 84, both no expected use: argon is earlier in the table.
+        // Both 84, both no expected use: flash heads research.web's row (§5.4), though argon is earlier in
+        // the table.
         let got = chosen(&table, &world(), &request("research.web"));
-        assert_eq!(got.seat, "argon");
+        assert_eq!(got.seat, "flash");
         assert_eq!(
-            why(&got.runners_up, "flash"),
-            "same pressure and score, later in the table"
+            why(&got.runners_up, "argon"),
+            "same pressure and score, later in the class's order"
         );
+        // The score comes before the class's order.
         let class = table
             .classes
             .iter_mut()
@@ -2807,23 +3254,24 @@ mod tests {
         class
             .seats
             .iter_mut()
-            .find(|e| e.seat == "argon")
+            .find(|e| e.seat == "flash")
             .unwrap()
             .score = 83.0;
         let got = chosen(&table, &world(), &request("research.web"));
-        assert_eq!(got.seat, "flash");
+        assert_eq!(got.seat, "argon");
         assert_eq!(
-            why(&got.runners_up, "argon"),
+            why(&got.runners_up, "flash"),
             "same pressure, scores 83.0 against 84.0"
         );
     }
 
     #[test]
-    fn a_window_not_read_ranks_below_known_headroom_and_above_an_exhausted_one() {
+    fn a_window_not_read_ranks_below_known_headroom_and_above_a_window_too_small() {
+        // ops.terminal: sonnet and its same-model twin g-sonnet both 88 (§5.4: sonnet, g-sonnet, flash).
         let table = table();
         let mut world = world();
         world.readings.retain(|r| r.pool != "max");
-        let got = chosen(&table, &world, &request("build.bounded"));
+        let got = chosen(&table, &world, &request("ops.terminal"));
         assert_eq!(got.seat, "g-sonnet");
         assert_eq!(
             why(&got.runners_up, "sonnet"),
@@ -2831,7 +3279,7 @@ mod tests {
         );
         // Google's Claude pool exhausted: the unread pool is better than none.
         set(&mut world, "google3p", "5h", 0.97);
-        let got = chosen(&table, &world, &request("build.bounded"));
+        let got = chosen(&table, &world, &request("ops.terminal"));
         assert_eq!(got.seat, "sonnet");
         assert_eq!(got.unknown, ["5h", "week"]);
         // A reading older than the staleness line is not read.
@@ -2840,10 +3288,12 @@ mod tests {
             r.read_at = NOW - nirvana_usage::STALE_AFTER - 100;
         }
         assert_eq!(
-            chosen(&table, &world, &request("build.bounded")).seat,
+            chosen(&table, &world, &request("ops.terminal")).seat,
             "g-sonnet"
         );
-        // An unread pool never counts as one that can hold the order.
+        // A known window that cannot hold the order is nearer exhausted than free: google3p's 5 h window has
+        // 10% left for an order expected at 17%, so the unread max ranks above it (review S2). An unread pool
+        // never counts as one that can hold the order, so g-sonnet is ranked, not skipped.
         let mut table = table;
         for seat in table
             .seats
@@ -2855,9 +3305,31 @@ mod tests {
         let mut world = self::world();
         world.readings.retain(|r| r.pool != "max");
         set(&mut world, "google3p", "5h", 0.90);
+        let got = chosen(&table, &world, &request("ops.terminal"));
+        assert_eq!(got.seat, "sonnet");
         assert_eq!(
-            chosen(&table, &world, &request("build.bounded")).seat,
-            "g-sonnet"
+            why(&got.runners_up, "g-sonnet"),
+            "google3p 5h has 10% left for an order of 17%: ranks below an unread pool"
+        );
+        // Max's 5 h window unread: the reserve could not be checked, and the line says so.
+        assert_eq!(
+            got.reason,
+            "ops.terminal \u{2192} sonnet medium: max 5h not read, week not read, reserve 15% not checked (5h not read); \
+             g-sonnet scores the same (google3p 5h 90% used, week 4% used)"
+        );
+        // A pool with no windows to read is unread, not free: local would have won every chore at pressure 0.
+        let mut table = self::table();
+        table
+            .seats
+            .iter_mut()
+            .find(|s| s.id == "local")
+            .unwrap()
+            .enabled = true;
+        let got = chosen(&table, &self::world(), &request("chore.script"));
+        assert_eq!(got.seat, "haiku");
+        assert_eq!(
+            why(&got.runners_up, "local"),
+            "local has no windows to read: ranks below known headroom"
         );
     }
 
@@ -2945,23 +3417,21 @@ mod tests {
     }
 
     #[test]
-    fn the_lease_lock_is_exclusive_and_a_stale_one_is_taken_over() {
+    fn the_lease_lock_is_exclusive_and_a_file_left_behind_does_not_hold_it() {
         let dir = temp_dir("lock");
         let held = Lock::try_take(&dir, 2).expect("free");
-        assert!(dir.join(LOCK_FILE).is_file());
-        assert!(Lock::try_take(&dir, 2).is_err(), "held by the first");
+        let err = Lock::try_take(&dir, 2).err().expect("held by the first");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
         drop(held);
-        assert!(!dir.join(LOCK_FILE).exists());
-        // A lock its process left behind a minute ago.
-        std::fs::write(dir.join(LOCK_FILE), "1").unwrap();
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(dir.join(LOCK_FILE))
-            .unwrap();
-        file.set_modified(SystemTime::now() - Duration::from_secs(60))
-            .unwrap();
-        drop(file);
-        assert!(Lock::try_take(&dir, 2).is_ok());
+        // A drop closes the handle and the OS lets go; nothing deletes the file, so no holder can delete
+        // another's lock.
+        assert!(dir.join(LOCK_FILE).is_file());
+        let again = Lock::try_take(&dir, 2).expect("free once the holder is gone");
+        drop(again);
+        // A file a dead process left, its pid in it as the first build wrote: no lock is on it, so it is
+        // taken at the first try, with no stale rule.
+        std::fs::write(dir.join(LOCK_FILE), "4242").unwrap();
+        assert!(Lock::try_take(&dir, 1).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2974,11 +3444,15 @@ mod tests {
         assert_eq!((got.seat.as_str(), got.effort), ("argon", Effort::Low));
         assert_eq!(got.rule_pick.as_deref(), Some("sonnet medium"));
         assert!(
-            got.reason
-                .ends_with("; override: wants a Gemini build; the rule's pick: sonnet medium"),
+            got.reason.ends_with(
+                "; argon scores 82, under the bar 85 at balanced; override: wants a Gemini build; \
+                 the rule's pick: sonnet medium"
+            ),
             "{}",
             got.reason
         );
+        assert!(close(got.bar, 82.0) && !got.bar_dropped, "{}", got.bar);
+        assert_eq!(why(&got.runners_up, "sonnet"), "the override took argon");
         let mut world = world();
         world.overrides_used = 3;
         assert_eq!(
@@ -3094,6 +3568,208 @@ mod tests {
     }
 
     #[test]
+    fn a_seat_already_at_its_lowest_effort_is_not_said_to_step_down() {
+        let table = table();
+        let class = table.class("media.audio").unwrap();
+        let got = match evaluate(&table, &world(), &request("media.audio"), class, true) {
+            Ok(got) => got,
+            Err(_) => panic!("no seat"),
+        };
+        assert_eq!((got.seat.as_str(), got.effort), ("flash", Effort::Low));
+        assert!(!got.step_down);
+        assert!(!got.reason.contains("step down"), "{}", got.reason);
+    }
+
+    #[test]
+    fn a_booking_counts_its_runs_overrides_and_a_repeat_returns_or_refuses() {
+        let table = table();
+        let mut over = request("build.bounded");
+        over.override_seat = Some(("argon".into(), "wants a Gemini build".into()));
+        let mut leases = Leases::default();
+        for n in 1..=3 {
+            let mut world = world();
+            world.overrides_used = leases.overrides("r-1");
+            let got = chosen(&table, &world, &over);
+            let order = format!("o-{n}");
+            let (lease, changed) =
+                book_pick(&mut leases, &table, &got, Some(&order), Some("r-1"), NOW);
+            assert!(changed && lease.is_some_and(|lease| lease.order == order));
+            assert_eq!(leases.overrides("r-1"), n);
+        }
+        // The fourth in the run is refused, by the count `book_pick` kept.
+        let mut world = world();
+        world.overrides_used = leases.overrides("r-1");
+        assert!(pick_err(&table, &world, &over).starts_with("override argon refused: 3 of 3"));
+        // A rule pick counts nothing against its run.
+        let rule = chosen(&table, &self::world(), &request("build.bounded"));
+        book_pick(&mut leases, &table, &rule, Some("o-9"), Some("r-2"), NOW);
+        assert_eq!(leases.overrides("r-2"), 0);
+        // A repeat --book gives the first pick back, or refuses when it names another override.
+        let known = existing_booking(&leases, "o-1", None, NOW + 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(known.seat, "argon");
+        assert_eq!(known.pick["override"], "wants a Gemini build");
+        assert!(existing_booking(&leases, "o-1", Some("argon"), NOW + 5)
+            .unwrap()
+            .is_ok());
+        assert_eq!(
+            existing_booking(&leases, "o-9", Some("argon"), NOW + 5)
+                .unwrap()
+                .unwrap_err(),
+            "override argon refused: o-9 is already booked on sonnet medium (the rule's pick); \
+             release it first (herdr seat release o-9)"
+        );
+        assert!(existing_booking(&leases, "o-404", Some("argon"), NOW).is_none());
+        // A run whose last override is over eight days old is dropped at the next write.
+        let (_, changed) = book_pick(&mut leases, &table, &rule, None, None, NOW + RUN_KEEP_S + 1);
+        assert!(changed);
+        assert!(leases.runs.is_empty(), "{:?}", leases.runs);
+    }
+
+    #[test]
+    fn a_leases_file_that_does_not_parse_is_an_error_never_empty() {
+        let dir = temp_dir("corrupt");
+        let path = dir.join(LEASES_FILE);
+        assert_eq!(
+            load_leases(&path),
+            Ok(Leases::default()),
+            "missing is empty"
+        );
+        std::fs::write(
+            &path,
+            "{\"version\": 1, \"runs\": {\"r-1\": {\"overrides\": 3",
+        )
+        .unwrap();
+        let err = load_leases(&path).unwrap_err();
+        assert!(err.contains("does not parse"), "{err}");
+        assert!(err.contains("fix or delete it"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sign_in_read_that_hangs_is_given_up_at_its_deadline() {
+        use crate::nirvana_accounts::Signed;
+        let started = std::time::Instant::now();
+        let why = signed_within("claude", Duration::from_millis(200), || {
+            std::thread::sleep(Duration::from_secs(3));
+            Signed::In("a@b".into())
+        });
+        assert_eq!(why.as_deref(), Some("claude sign-in not read in 200ms"));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            signed_within("agy", Duration::from_secs(5), || Signed::Out).as_deref(),
+            Some("agy not signed in")
+        );
+        assert_eq!(
+            signed_within("claude", Duration::from_secs(5), || Signed::In(
+                "a@b".into()
+            )),
+            None
+        );
+        assert_eq!(ACCOUNTS_TIMEOUT, Duration::from_secs(15));
+    }
+
+    #[test]
+    fn a_needs_or_family_word_no_seat_has_is_named() {
+        let table = table();
+        let words = unknown_words(&table, &["vidoe".into()], &["antropic".into()]);
+        assert_eq!(words.len(), 2, "{words:?}");
+        assert!(words[0].starts_with("--needs vidoe: no seat has it; the capabilities: "));
+        assert!(words[0].contains("video"));
+        assert!(words[1].starts_with("--not-family antropic: no seat is of it; the families: "));
+        assert!(words[1].contains("anthropic, google"));
+        assert!(unknown_words(&table, &["video".into()], &["anthropic".into()]).is_empty());
+    }
+
+    /// Plan 12 §5.4's rows as the plan writes them, the orchestrator's ruling of 2026-10-18: at Balanced on
+    /// the readings of 21:51Z the pick is the row's head, and with the pools of the seats before it spent it
+    /// is the next seat. The rows are the plan's data, not the table's, so the test can disagree with the
+    /// table. A review row walks into its own family through decision 0017's fallback.
+    #[test]
+    fn every_class_at_balanced_seats_its_5_4_head_then_walks_its_row() {
+        const ROWS: &[(&str, &[&str], &[&str])] = &[
+            ("plan", &[], &["opus", "g-opus", "argon"]),
+            ("build.load_bearing", &[], &["opus", "g-opus", "argon"]),
+            (
+                "build.bounded",
+                &[],
+                &["sonnet", "argon", "flash", "g-sonnet"],
+            ),
+            ("build.frontend", &[], &["opus", "g-opus"]),
+            ("judge.visual", &[], &["opus", "g-opus"]),
+            ("fix.debug", &[], &["opus", "g-opus", "argon"]),
+            ("ops.terminal", &[], &["sonnet", "g-sonnet", "flash"]),
+            (
+                "review.adversary",
+                &["anthropic"],
+                &["argon", "opus", "g-opus"],
+            ),
+            (
+                "review.adversary",
+                &["google"],
+                &["opus", "g-opus", "argon"],
+            ),
+            ("acceptance.author", &["anthropic"], &["argon", "sonnet"]),
+            ("acceptance.author", &["google"], &["sonnet", "argon"]),
+            ("research.read", &[], &["sonnet", "flash"]),
+            (
+                "research.web",
+                &[],
+                &["flash", "argon", "g-sonnet", "sonnet"],
+            ),
+            ("read.huge", &[], &["flash", "argon"]),
+            ("write.docs", &[], &["argon", "sonnet", "g-sonnet"]),
+            ("media.video", &[], &["argon", "flash"]),
+            ("media.audio", &[], &["flash", "argon"]),
+            ("sweep.mechanical", &[], &["flash", "haiku"]),
+            ("chore.memory", &[], &["haiku", "flash"]),
+            ("chore.script", &[], &["haiku", "flash"]),
+            ("chore.github", &[], &["haiku", "flash"]),
+        ];
+        let table = table();
+        let mut covered: Vec<&str> = ROWS.iter().map(|(class, _, _)| *class).collect();
+        covered.dedup();
+        let classes: Vec<&str> = table.classes.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(covered, classes, "every class has its row");
+        let ask = |class: &str, not_family: &[&str], size: SizeName| {
+            let mut r = request(class);
+            r.not_family = not_family.iter().map(|f| (*f).to_owned()).collect();
+            r.needs = table.class(class).unwrap().needs.clone();
+            r.size = size;
+            r
+        };
+        for (class, not_family, row) in ROWS {
+            for size in [SizeName::Small, SizeName::Medium, SizeName::Large] {
+                let got = chosen(&table, &world(), &ask(class, not_family, size));
+                assert_eq!(got.seat, row[0], "{class} {size:?}: {}", got.reason);
+            }
+            // Walk the row: spend every pool before the next seat. Small, so the window-holds filter
+            // (§4.4) does not decide instead of the order.
+            let mut world = world();
+            for (at, seat) in row.iter().enumerate() {
+                let r = ask(class, not_family, SizeName::Small);
+                let got = chosen(&table, &world, &r);
+                assert_eq!(got.seat, *seat, "{class} step {at}: {}", got.reason);
+                assert_eq!(
+                    got.same_family_fallback,
+                    not_family.contains(&got.family.as_str()),
+                    "{class} step {at}: {}",
+                    got.reason
+                );
+                let pool = table.seat(seat).unwrap().pool.clone();
+                for reading in world.readings.iter_mut().filter(|r| r.pool == pool) {
+                    reading.used = Some(0.97);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn no_seat_names_every_skip_and_the_earliest_reset() {
         let table = table();
         let mut world = world();
@@ -3123,6 +3799,34 @@ mod tests {
         let no = pick(&table, &world, &request("build.bounded")).unwrap_err();
         assert_eq!(no.earliest_reset, Some(NOW + 20 * 60));
         assert!(no.defer, "within 30 minutes");
+    }
+
+    #[test]
+    fn a_seat_floored_on_two_windows_is_free_only_when_both_have_reset() {
+        let table = table();
+        let mut world = world();
+        let floor = |world: &mut World, pool: &str, window: &str, resets: Option<u64>| {
+            let r = world
+                .readings
+                .iter_mut()
+                .find(|r| r.pool == pool && r.window == window)
+                .unwrap();
+            r.used = Some(0.97);
+            r.resets_at = resets;
+        };
+        // Haiku is floored on max's 5 h window for 20 minutes and on its week for five days; flash on
+        // gemini's 5 h window for three hours. The first window's reset said "defer 20 minutes".
+        floor(&mut world, "max", "5h", Some(NOW + 20 * 60));
+        floor(&mut world, "max", "week", Some(NOW + 5 * 86_400));
+        floor(&mut world, "gemini", "5h", Some(NOW + 3 * 3600));
+        let no = pick(&table, &world, &request("chore.script")).unwrap_err();
+        assert_eq!(no.earliest_reset, Some(NOW + 3 * 3600));
+        assert!(!no.defer);
+        // A floored window with no reset time leaves its seat's reset unknown, so it frees no seat.
+        floor(&mut world, "gemini", "5h", None);
+        floor(&mut world, "gemini", "week", Some(NOW + 3600));
+        let no = pick(&table, &world, &request("chore.script")).unwrap_err();
+        assert_eq!(no.earliest_reset, Some(NOW + 5 * 86_400));
     }
 
     /// Plan 12 L9's verifier: "`seat pick --needs video` never returns a Claude seat".
@@ -3189,10 +3893,10 @@ mod tests {
         );
         table.use_record = true;
         let got = chosen(&table, &world, &request("build.bounded"));
-        assert_eq!(got.seat, "g-sonnet");
+        assert_eq!(got.seat, "argon");
         assert_eq!(
             why(&got.runners_up, "sonnet"),
-            "scores 55.0, under the bar 85 at balanced"
+            "scores 55.0, under the bar 82 at balanced"
         );
     }
 
