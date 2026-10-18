@@ -598,6 +598,7 @@ fn main() -> io::Result<()> {
     // Nirvana fork, plan 12 O4a: the window Explorer's "Open Nirvana" opens, with Nirvana Claude on the folder.
     if args.get(1).map(String::as_str) == Some("nirvana") {
         return nirvana_launch::cli(&args[2..]);
+    }
     // Nirvana fork, plan 12 O6: media probe, ffmpeg shrink under 100 MB, and the view_file worker prompt.
     if args.get(1).map(String::as_str) == Some("media") {
         return nirvana_media::cli(&args[2..]);
