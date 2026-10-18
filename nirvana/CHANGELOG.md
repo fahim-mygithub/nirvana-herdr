@@ -3,6 +3,106 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha NEXT (o4b): the Nirvana Claude plugin's hooks, worker agents, skills and statusline; the launch keeps Claude Code's own prompt
+
+Plan 12, package O4b (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §6, §7.2, §7.4, §9; the record is
+`plans/2026-10-17-12-records/o4b.md`).
+
+- **Changed:** the launch becomes `claude --plugin-dir <home>/nirvana/claude --agent nirvana --model claude-opus-5-5
+  --effort medium --append-system-prompt-file <home>/nirvana/claude/ROLE.md --name Nirvana --settings
+  <home>/nirvana/claude/settings.json`. The orchestrator's role moves from the body of `agents/nirvana.md` to
+  `ROLE.md`; the agent file keeps only its front matter (name, model, effort), and `guard-spawn` refuses a spawn of it.
+  **Because:** an agent's prompt replaces Claude Code's own system prompt (Claude Code's sub-agents page: "replaces the
+  default Claude Code system prompt entirely"), while "an agent with an empty prompt and no memory" leaves it as it is;
+  the owner's bar is parity with Claude Code. `--agent nirvana` stays because O3's wake guard tells Nirvana Claude from
+  plain Claude Code by it (`nirvana_run::pane_program`). R1: Opus 5.5 at medium.
+  **Measured:** `/context`, 0 turns, $0, in a scratch repo: plain Claude Code 2.5k system prompt; O4a's launch 1.5k;
+  the empty agent alone 2.5k; this launch 4k (2.5k + ROLE.md), with `nirvana:nirvana | Plugin | 79` in Custom agents.
+  `--append-system-prompt-file` with a missing file exits 1 ("Append system prompt file not found"); `--effort bogus`
+  warns and `medium` does not. Tests `nirvana_claude_takes_the_plugin_agent_name_and_settings_from_home` (the agent
+  file's body is empty), `plain_claude_code_and_agy_carry_no_nirvana_flag_and_no_nirvana_env` (L6); controls
+  `o4b_launch_*`, `o4b_agent_has_a_prompt`, `o4b_role_effort_high`, `o4b_guard_spawns_orchestrator`.
+  **If you remove this:** Nirvana Claude runs without a thousand tokens of Claude Code's own instructions that plain
+  Claude Code has.
+- **Changed:** five worker subagents, `agents/worker-{opus-high,opus-medium,sonnet-medium,sonnet-low,haiku-low}.md`,
+  each naming its full model id and its effort, tools without `Agent`, ending with O3's Work Report.
+  **Because:** plan 12 §7.1: short orders on `max` that need no pane; CLAUDE.md rule 5: a spawn with no model or effort
+  inherits the orchestrator's seat.
+  **Measured:** `every_worker_agent_names_its_model_and_effort`; controls `o4b_worker_*`. Live: `/context` lists all
+  five as `nirvana:worker-*`.
+  **If you remove this:** every short order is a pane worker, or a subagent on Opus.
+- **Changed:** `hooks/hooks.json`, every hook in exec form on `${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe`:
+  `SessionStart` `herdr nirvana digest`; `UserPromptSubmit` `herdr board notice --plugin` and `herdr run notice`;
+  `PreToolUse` on `Agent` `herdr nirvana guard-spawn`; `SubagentStop` `herdr nirvana subagent-stop`; `Stop` `herdr jev
+  compact --plugin` and `herdr nirvana stop`. `--plugin` makes the plugin's copy quiet where the folder's own settings
+  run the same hook (Preload's switches), so a session hears it once.
+  **Because:** plan 12 §6's hooks row. The installed herdr is not on PATH: upstream herdr 0.9.5 is, on the owner's PC
+  (`command -v herdr` in a haiku probe printed `~/.herdr/packages/standalone/.../herdr`, and `herdr nirvana` answered
+  "unknown command"). A plugin's `bin/` shim did not come first on that PATH either, so it was removed.
+  **Measured:** `every_hook_names_a_herdr_subcommand_that_runs_quiet_and_fast` runs each hook's own args with its
+  event's JSON on the built binary (7 hooks, exit 0, under 10 s, silent where nothing is due);
+  `the_plugins_board_notice_stays_quiet_where_the_folder_runs_its_own`; controls `o4b_hook_*`, `o4b_dispatch_arm_gone`,
+  `o4b_guard_speaks_on_allow`, `o4b_board_notice_twice`. Live: a haiku probe's general-purpose spawn with no model or
+  effort was refused by the hook; its `nirvana:worker-haiku-low` spawn ran and its record line was written.
+  **If you remove this:** Nirvana Claude is Claude Code with a role and no harness.
+- **Changed:** `herdr nirvana digest`: herdr's own path, the pools the foot draws (each window, its reset, its age when
+  not fresh), one line for the hidden pools when they have headroom, the board's sections, the open runs with O3's
+  next step (dead ends first), the open retro proposals (`status: open` in `.nirvana/proposals/`, O5's form), and
+  `<home>/nirvana/NIRVANA.md` named in one line; caches only, never a reader. It writes the project's board line into
+  NIRVANA.md, replaced in place beside O5's lessons lines.
+  **Because:** plan 12 §6, §7.4.2 ("the orchestrator's SessionStart digest names the open ones"). Under 300 tokens.
+  **Measured:** `/context` counted a 753-character first draft at 380 tokens and a 567-character one at 310 (the digest
+  printed 10 times against 0, the Messages row over 10, +-10); the shipped 498-character digest at 290 with scratch
+  paths 40 characters longer than an install's. The ceiling is 540 characters, by priority (runs, proposals, board,
+  hidden pools; short forms first). 23 to 43 ms a run. Tests `the_digest_*`, `a_digest_*`,
+  `an_old_reading_says_its_age_and_a_passed_reset_is_not_a_figure`, `the_board_line_is_written_once_beside_the_lessons_lines`,
+  `only_open_proposals_are_named`; controls `o4b_digest_*`, `o4b_board_line_*`, `o4b_memory_no_head`,
+  `o4b_proposals_*`. A hypothesis: that `/context`'s count is the paid count.
+  **If you remove this:** each session starts blind to the pools, the runs and the proposals, which sat unread 24 days.
+- **Changed:** `herdr nirvana guard-spawn` refuses a fork, a spawn whose call and agent file name no model or no effort
+  (`inherit` is none), and a spawn on `max` that would leave the 5 h window under `seats.toml`'s reserve: the seat's
+  use cell at the effort, times the small size and the brief's class weight, against the fresher of the statusline's
+  live reading and `usage.json`'s, less live leases. An unknown window lets it through, as the seat engine's reserve
+  filter does.
+  **Because:** plan 12 §6 hooks row; CLAUDE.md rule 5.
+  **Measured:** `a_spawn_with_no_model_or_no_effort_is_refused`, `a_spawn_on_max_that_would_break_the_reserve_is_refused`,
+  `models_and_aliases_find_their_seat_and_cells_price_like_the_seat_engine`; controls `o4b_guard_*`. Live CLI: worker-opus-high
+  allowed at 23.5% used and refused at 84.9% ("would leave max 5h at 14.8%").
+  **If you remove this:** a subagent with no model runs on Opus at the orchestrator's effort, and parallel spawns spend
+  the orchestrator's own reserve.
+- **Changed:** `herdr nirvana subagent-stop` records a `nirvana:worker-*` subagent through `record_once`, as `herdr seat
+  record` does: seat and effort from its name, class, order and run from its brief's `Class:`, `Order:`, `Run:` lines,
+  tokens from its transcript (each response once), outcome `subagent-<status>` from its Work Report or
+  `subagent-no-report`, on chain `subagent`. It waits up to 3 s for a lagging transcript.
+  **Because:** plan 12 §6 ("records the outcome in the seat record"). The chain keeps an ungated outcome out of every
+  class chain, where O2's tally counts any word but `pass` as a failure.
+  **Measured:** `a_worker_subagents_outcome_is_recorded_under_its_seat_effort_and_class`; controls `o4b_sub_*`,
+  `o4b_report_*`, `o4b_brief_*`. Live: the first probe's line had `tokens: null` (the transcript lagged the hook); after
+  the wait, `tokens: {input 2, cache_write 1136, cache_read 5391, output 5}`.
+  **If you remove this:** subagents' use never reaches `record.jsonl`.
+- **Changed:** `herdr nirvana stop` raises an open run at a dead end (O3's `check`) once per run state: a `block` with
+  the next steps when the Stop hook is not already continuing, else a `systemMessage`, then nothing until the run moves.
+  **Because:** plan 12 §7.2 "No dead end"; the brief: "warns and never blocks forever".
+  **Measured:** `a_dead_end_blocks_once_then_tells_the_owner_and_then_says_nothing`; controls `o4b_stop_*`. Live CLI on a
+  dead-end copy of O3's live1: block, then silence on the same state, 16 to 29 ms.
+  **If you remove this:** a run can be left with no worker and no next step, and nothing says so.
+- **Changed:** `herdr nirvana statusline`: each drawn pool's tightest window (`FOOT_HIDDEN` honoured), its reset when
+  `COLUMNS` allows, and the open orders, names before a count; `max` from Claude Code's own `rate_limits` when given,
+  kept in `<home>/nirvana/statusline.json` for the guard. `install.py` writes the `statusLine` into the installed
+  `settings.json`, naming the installed binary, with `refreshInterval` 30.
+  **Because:** plan 12 §6 and §11 ("Until O8, the statusline ... show the seating"). A plugin's own settings take only
+  `agent` and `subagentStatusLine`, and a statusLine command gets no `${CLAUDE_PLUGIN_ROOT}`.
+  **Measured:** `the_statusline_*`, `test_the_plugin_is_copied_whole_and_a_removed_file_goes`; controls `o4b_status_*`,
+  `o4b_py_*`. Live CLI: "Claude week 41% 3d0h · Gemini week 0.8% 6d10h · orders: slow haiku interrupted" at 160
+  columns, "Claude week 41% · Gemini week 0.8% · 1 order" at 60. Not seen in an interactive Claude Code.
+  **If you remove this:** the seating shows nowhere until O8's Seats square.
+- **Changed:** skills `seat`, `usage`, `handoff`, `jev` (O5 writes `gate`), each naming herdr by
+  `${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe`.
+  **Because:** plan 12 §6's parts table.
+  **Measured:** `/context` lists `nirvana:handoff`, `nirvana:jev`, `nirvana:media`, `nirvana:seat`, `nirvana:usage`
+  (80 to 100 tokens each).
+  **If you remove this:** the orchestrator learns herdr's verbs by trial.
+
 ## alpha 0.16.0 (2026-10-18): the runner, `herdr seat run|exec|status|read|stop|cleanup`, the journal, waking, the run receipt (plan 12 O3)
 
 Plan 12, package O3 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §4, §5.6, §7.1, §7.2, §7.4.1; the record is

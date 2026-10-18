@@ -138,8 +138,23 @@ class FilesTest(unittest.TestCase):
             stale.write_bytes(b"old")
             dst = ws.install_plugin(home)
             self.assertFalse(stale.exists())
-            for rel in (".claude-plugin/plugin.json", "agents/nirvana.md", "settings.json"):
-                self.assertEqual((dst / rel).read_bytes(), (ws.ROOT / "nirvana" / "claude" / rel).read_bytes(), rel)
+            src = ws.ROOT / "nirvana" / "claude"
+            # O4b: every file of the tree arrives as it is, the role, the hooks, the worker agents and
+            # every skill included; only settings.json gains the statusline.
+            rels = sorted(p.relative_to(src).as_posix() for p in src.rglob("*") if p.is_file())
+            for rel in ("ROLE.md", "hooks/hooks.json", "skills/seat/SKILL.md", "skills/usage/SKILL.md",
+                        "skills/handoff/SKILL.md", "skills/jev/SKILL.md", "skills/media/SKILL.md",
+                        "agents/worker-opus-high.md", "agents/worker-haiku-low.md"):
+                self.assertIn(rel, rels)
+            for rel in rels:
+                if rel != "settings.json":
+                    self.assertEqual((dst / rel).read_bytes(), (src / rel).read_bytes(), rel)
+            installed = json.loads((dst / "settings.json").read_bytes())
+            mine = json.loads((src / "settings.json").read_bytes())
+            self.assertEqual({k: v for k, v in installed.items() if k != "statusLine"}, mine)
+            exe = (home / "bin" / "herdr.exe").as_posix()
+            self.assertEqual(installed["statusLine"]["command"], f'"{exe}" nirvana statusline')
+            self.assertNotIn(b"\r", (dst / "settings.json").read_bytes())
 
     def test_settings_carry_the_theme_and_the_orchestrator_env(self):
         settings = json.loads((ws.ROOT / "nirvana" / "claude" / "settings.json").read_bytes())
@@ -147,11 +162,17 @@ class FilesTest(unittest.TestCase):
         self.assertEqual(settings["env"], {"NIRVANA_ORCHESTRATOR": "1"})
 
     def test_the_agent_is_opus_at_medium_with_the_plans_rules(self):
-        text = (ws.ROOT / "nirvana" / "claude" / "agents" / "nirvana.md").read_text(encoding="utf-8")
-        head = text.split("---", 2)[1]
+        # O4b: the role is appended to Claude Code's own system prompt (ROLE.md); the agent file names the seat and
+        # has no prompt, which would replace Claude Code's.
+        claude = ws.ROOT / "nirvana" / "claude"
+        _, head, body = (claude / "agents" / "nirvana.md").read_text(encoding="utf-8").split("---", 2)
         self.assertIn("name: nirvana\n", head)
         self.assertIn("model: claude-opus-5-5\n", head)
         self.assertIn("effort: medium\n", head)
+        self.assertEqual(body.strip(), "")
+        text = (claude / "ROLE.md").read_text(encoding="utf-8")
+        self.assertFalse(text.startswith("---"), "ROLE.md is prompt text, with no front matter")
+        self.assertIn("Opus 5.5 at medium", text)
         for rule in ("Seat every order through `herdr seat pick`; say the seat, model and effort in one line.",
                      "A question is answered, never built.",
                      "Never resume a finished worker for a new question;",

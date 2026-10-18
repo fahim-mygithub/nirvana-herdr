@@ -288,7 +288,16 @@ mod tests {
         assert_eq!(argv[0], "claude");
         assert_eq!(argv[1..], NewKind::Nirvana.args(&home)[..]);
         let line = typed();
-        for flag in ["--plugin-dir", "--agent", "--name", "--settings"] {
+        // O4b: `--append-system-prompt-file` carries the role; the `--agent` file has no prompt of its own.
+        for flag in [
+            "--plugin-dir",
+            "--agent",
+            "--model",
+            "--effort",
+            "--append-system-prompt-file",
+            "--name",
+            "--settings",
+        ] {
             assert!(line.contains(flag), "{flag} not typed: {line:?}");
         }
 

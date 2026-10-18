@@ -117,12 +117,28 @@ def _replace_tree(src: Path, dst: Path) -> None:
     shutil.copytree(src, dst)
 
 
+def statusline(home: Path) -> dict:
+    """Plan 12 O4b: the statusline `herdr nirvana statusline` draws. A plugin's own settings take only `agent` and
+    `subagentStatusLine` (Claude Code's plugins reference), and a `statusLine` command gets no `${CLAUDE_PLUGIN_ROOT}`,
+    so the installed copy of the `--settings` file names the installed binary itself. Forward slashes and the quotes
+    keep it one word in Git Bash, where Claude Code runs it; a `herdr` on PATH may be upstream herdr."""
+    exe = (Path(home) / "bin" / "herdr.exe").as_posix()
+    # Event-driven runs go quiet while the orchestrator waits on its workers; 30 s keeps the orders current.
+    return {"type": "command", "command": f'"{exe}" nirvana statusline', "padding": 0, "refreshInterval": 30}
+
+
 def install_plugin(home: Path, src: Path | None = None) -> Path:
-    """`nirvana/claude/` to `<home>/nirvana/claude`, which the launch's `--plugin-dir` names."""
+    """`nirvana/claude/` to `<home>/nirvana/claude`, which the launch's `--plugin-dir` names, with the installed
+    `settings.json` naming the installed binary's statusline."""
     src = ROOT / "nirvana" / "claude" if src is None else Path(src)
     dst = Path(home) / "nirvana" / "claude"
     dst.parent.mkdir(parents=True, exist_ok=True)
     _replace_tree(src, dst)
+    settings_path = dst / "settings.json"
+    settings = json.loads(settings_path.read_bytes())
+    settings["statusLine"] = statusline(home)
+    # `.gitattributes` pins LF, and Claude Code reads either; bytes keep Windows from writing CRLF.
+    settings_path.write_bytes((json.dumps(settings, indent=2) + "\n").encode("utf-8"))
     return dst
 
 

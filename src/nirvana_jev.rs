@@ -1642,7 +1642,20 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             return Ok(());
         }
         "compact" => {
-            crate::nirvana_jev_compact::hook();
+            let mut input = String::new();
+            let _ = std::io::stdin().read_to_string(&mut input);
+            // Plan 12 O4b: the Nirvana Claude plugin runs this hook with `--plugin`; a folder whose own settings run
+            // it too (Preload's compact switch) asks Jev once, from its own hook.
+            if words.iter().any(|word| word == "--plugin")
+                && crate::nirvana_claude::folder_runs(
+                    &input,
+                    crate::nirvana_jev_install::COMPACT_EVENT,
+                    crate::nirvana_jev_install::COMPACT,
+                )
+            {
+                return Ok(());
+            }
+            crate::nirvana_jev_compact::hook_input(&input);
             return Ok(());
         }
         // The Preload switches, for scripts and checks: the same code path as the panel.

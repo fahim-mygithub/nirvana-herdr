@@ -671,6 +671,13 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         Some("notice") => {
             let mut input = String::new();
             let _ = std::io::stdin().read_to_string(&mut input);
+            // Plan 12 O4b: the Nirvana Claude plugin runs this hook with `--plugin`. A folder whose own settings run
+            // it as well gets the notice once, from its own hook; two copies raced to print the same notice.
+            if words.iter().any(|word| word == "--plugin")
+                && crate::nirvana_claude::folder_runs(&input, "UserPromptSubmit", NOTICE_COMMAND)
+            {
+                return Ok(());
+            }
             run_notice(&input);
             Ok(())
         }

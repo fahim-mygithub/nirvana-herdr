@@ -35,6 +35,7 @@ mod metadata_tokens;
 mod nirvana;
 mod nirvana_accounts;
 mod nirvana_board;
+mod nirvana_claude;
 mod nirvana_jev;
 mod nirvana_jev_compact;
 mod nirvana_jev_install;

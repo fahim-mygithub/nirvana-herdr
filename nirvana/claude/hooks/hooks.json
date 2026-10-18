@@ -1,0 +1,101 @@
+{
+  "description": "Nirvana Claude (Nirvana-Herdr plan 12 O4b): each hook runs the fork's herdr.exe from the install, <home>/bin, in exec form, so no shell quotes a path.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe",
+            "args": [
+              "nirvana",
+              "digest"
+            ],
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe",
+            "args": [
+              "board",
+              "notice",
+              "--plugin"
+            ],
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe",
+            "args": [
+              "run",
+              "notice"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe",
+            "args": [
+              "nirvana",
+              "guard-spawn"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe",
+            "args": [
+              "nirvana",
+              "subagent-stop"
+            ],
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe",
+            "args": [
+              "jev",
+              "compact",
+              "--plugin"
+            ],
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe",
+            "args": [
+              "nirvana",
+              "stop"
+            ],
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

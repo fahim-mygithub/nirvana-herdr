@@ -463,12 +463,11 @@ fn save(session: &str, memory: &Memory) {
 
 // ---- the hook ----------------------------------------------------------------------------------------
 
-/// The Stop hook: reads the hook's JSON on stdin, prints `{"systemMessage": ...}` or nothing. Never fails
-/// the turn: every problem prints nothing.
-pub fn hook() {
-    let mut input = String::new();
-    let _ = std::io::stdin().read_to_string(&mut input);
-    let hook: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
+/// The Stop hook, on the hook's JSON as `herdr jev compact` read it from stdin: prints `{"systemMessage": ...}` or
+/// nothing. Never fails the turn: every problem prints nothing. The CLI reads stdin first, since `--plugin` (plan 12
+/// O4b) looks at the input before this runs.
+pub fn hook_input(input: &str) {
+    let hook: Value = serde_json::from_str(input).unwrap_or(Value::Null);
     if hook.get("agent_id").is_some_and(|a| !a.is_null()) {
         return; // a subagent's context is not the one paid for turn after turn
     }
