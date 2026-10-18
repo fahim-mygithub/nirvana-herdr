@@ -138,6 +138,47 @@ fn a_clean_order_passes_every_axis_and_its_work_is_committed_on_its_branch() {
 }
 
 #[test]
+fn a_new_file_no_owns_pattern_names_stays_out_of_the_commit_and_is_said() {
+    let root = repo("bytecode");
+    let cwd = worktree(&root, "mul");
+    work(&cwd);
+    // The worker's own test run made bytecode in a project with no .gitignore (the live run of 2026-10-18).
+    std::fs::create_dir_all(cwd.join("__pycache__")).expect("cache");
+    std::fs::write(
+        cwd.join("__pycache__").join("calc.cpython-313.pyc"),
+        b"\x00",
+    )
+    .expect("pyc");
+    let det = run_det(
+        &root,
+        &cwd,
+        "mul",
+        &spec_with(&["calc.py", "test_mul.py"], "git ls-files", &["test_mul"]),
+        Some(&done()),
+    );
+    assert!(failing(&det.axes).is_empty(), "{det:#?}");
+    let commit = axis(&det, "commit");
+    assert_eq!(
+        (commit.mark, commit.lines.clone()),
+        (
+            Mark::Note,
+            vec!["__pycache__/calc.cpython-313.pyc".to_owned()]
+        )
+    );
+    let files = sh(&cwd, &["show", "--name-only", "--format=", "HEAD"]);
+    assert_eq!(
+        files.lines().collect::<Vec<_>>(),
+        vec!["calc.py", "test_mul.py"]
+    );
+    // With no `owns:` line every new file is the worker's; herdr's own folder never is.
+    let other = worktree(&root, "any");
+    std::fs::write(other.join("notes.md"), "n\n").expect("notes");
+    assert!(commit_work(&other, "any", &[]).expect("commit").is_empty());
+    let files = sh(&other, &["show", "--name-only", "--format=", "HEAD"]);
+    assert_eq!(files.lines().collect::<Vec<_>>(), vec!["notes.md"]);
+}
+
+#[test]
 fn the_branch_is_rebased_onto_the_integration_tip_before_the_tests() {
     let root = repo("rebase");
     let cwd = worktree(&root, "mul");
@@ -146,7 +187,7 @@ fn the_branch_is_rebased_onto_the_integration_tip_before_the_tests() {
     ensure_integration(&root, "r1").expect("integration");
     let other = worktree(&root, "doc");
     std::fs::write(other.join("README.md"), "calc, with docs\n").expect("doc");
-    commit_work(&other, "doc").expect("commit");
+    commit_work(&other, "doc", &[]).expect("commit");
     let doc = rev(&other, "HEAD").expect("doc head");
     sh(
         &root,
@@ -173,7 +214,7 @@ fn a_conflict_with_the_integration_tip_is_a_failing_rebase_with_the_files_and_th
         "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - b\n",
     )
     .expect("sub");
-    commit_work(&other, "sub").expect("commit");
+    commit_work(&other, "sub", &[]).expect("commit");
     sh(
         &root,
         &[
@@ -250,7 +291,9 @@ fn a_failing_test_command_fails_and_checks_without_a_command_fail_too() {
         timed_out: true,
         error: None,
     };
-    assert_eq!(tests_axis(Some("x"), Some(&timed), &[]).mark, Mark::Fail);
+    let stopped = tests_axis(Some("x"), Some(&timed), &[]);
+    assert_eq!(stopped.mark, Mark::Fail);
+    assert!(stopped.why.contains("ran past"), "{}", stopped.why);
 }
 
 #[test]

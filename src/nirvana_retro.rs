@@ -1152,6 +1152,28 @@ mod tests {
         let fourth = retro_with(&project, "r4", &[]).expect("fourth");
         assert!(fourth.proposed.is_empty(), "{fourth:?}");
         assert!(!path.exists());
+        // Each refusal holds alone: the ledger does not graduate the gap, so the retro does not even try ...
+        let key = ledger(&root)[0].key.clone();
+        assert!(!graduated(&ledger(&root), &rejected(&root), &key));
+        assert!(fourth.refused.is_empty(), "{fourth:?}");
+        // ... and a proposal for it by hand, with a real quote, is refused too.
+        let line =
+            raw_lines(&std::fs::read_to_string(project.journal("r4").path).expect("j"))[&2].clone();
+        let by_hand = Proposal {
+            gap: REASONS[3].into(),
+            target: "skills/seat/SKILL.md".into(),
+            changed: "c".into(),
+            because: "b".into(),
+            measured: "m".into(),
+            if_you_remove: "r".into(),
+            evidence: vec![Evidence {
+                run: "r4".into(),
+                seq: 2,
+                quote: cut(&line, 60),
+            }],
+        };
+        let why = propose(&project, &by_hand, None).expect_err("refused");
+        assert!(why.contains("the owner refused this gap"), "{why}");
     }
 
     #[test]

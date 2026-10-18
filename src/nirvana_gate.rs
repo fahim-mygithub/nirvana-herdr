@@ -799,12 +799,50 @@ fn uncommitted(cwd: &Path) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// Commits the worker's uncommitted work on its own branch, herdr's folder left out. `Ok(false)`: nothing to commit.
-pub fn commit_work(cwd: &Path, order: &str) -> Result<bool, String> {
-    if uncommitted(cwd)?.is_empty() {
-        return Ok(false);
+/// Commits the worker's work on its own branch, herdr's folder left out: every change to a tracked file, and each
+/// new file an `owns:` pattern names. A new file no pattern names stays out of the commit and is returned: the live
+/// run of 2026-10-18 committed the worker's `__pycache__/*.pyc`, which its own test run had made in a project with
+/// no `.gitignore`, and then failed the order on the owned axis for the gate's own commit. With no `owns:` line every
+/// new file is the worker's, as before.
+pub fn commit_work(cwd: &Path, order: &str, owns: &[String]) -> Result<Vec<String>, String> {
+    let status = git(
+        cwd,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            ".",
+            ":(exclude).nirvana",
+        ],
+    )?;
+    let (mut tracked, mut new, mut left_out) = (false, Vec::new(), Vec::new());
+    for line in status.lines().filter(|line| line.len() > 3) {
+        let path = line[3..]
+            .rsplit(" -> ")
+            .next()
+            .unwrap_or("")
+            .trim_matches('"')
+            .to_owned();
+        if !line.starts_with("??") {
+            tracked = true;
+        } else if owns.is_empty() || owns.iter().any(|pattern| glob_match(pattern, &path)) {
+            new.push(path);
+        } else {
+            left_out.push(path);
+        }
     }
-    git(cwd, &["add", "-A", "--", ".", ":(exclude).nirvana"])?;
+    if !tracked && new.is_empty() {
+        return Ok(left_out);
+    }
+    if tracked {
+        git(cwd, &["add", "-u", "--", ".", ":(exclude).nirvana"])?;
+    }
+    for chunk in new.chunks(64) {
+        let mut args = vec!["add", "--"];
+        args.extend(chunk.iter().map(String::as_str));
+        git(cwd, &args)?;
+    }
     let mut args = identity(cwd);
     args.extend(
         [
@@ -817,7 +855,7 @@ pub fn commit_work(cwd: &Path, order: &str) -> Result<bool, String> {
     );
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     git(cwd, &args)?;
-    Ok(true)
+    Ok(left_out)
 }
 
 /// Rebases the worktree's branch onto `onto`. A conflict aborts the rebase and names the files.
@@ -938,14 +976,28 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
                     return det;
                 }
             };
-            if let Err(why) = commit_work(subject.cwd, subject.order) {
-                axes.push(Axis::new(
-                    "rebase",
-                    Mark::Fail,
-                    format!("the worker's work could not be committed: {why}"),
-                ));
-                det.axes = axes;
-                return det;
+            match commit_work(subject.cwd, subject.order, &subject.spec.owns) {
+                Ok(left_out) if !left_out.is_empty() => axes.push(
+                    Axis::new(
+                        "commit",
+                        Mark::Note,
+                        format!(
+                            "{} new file(s) that no `owns:` pattern names were left out of the commit",
+                            left_out.len()
+                        ),
+                    )
+                    .with(left_out),
+                ),
+                Ok(_) => {}
+                Err(why) => {
+                    axes.push(Axis::new(
+                        "rebase",
+                        Mark::Fail,
+                        format!("the worker's work could not be committed: {why}"),
+                    ));
+                    det.axes = axes;
+                    return det;
+                }
             }
             match rebase(subject.cwd, &integration_branch(subject.run)) {
                 Ok(()) => axes.push(Axis::new(
@@ -1431,7 +1483,12 @@ pub fn gate(project: &Project, run: &str, order: &str) -> Result<Ruling, String>
     }
     match known.phase {
         Phase::Delivered => {}
-        Phase::Gated if known.verdict.as_deref() == Some("pass") => {
+        // A passed order whose branch or integration tip moved since (another order merged first) is gated again,
+        // onto the new tip: `gate merge` refuses the old trees.
+        Phase::Gated
+            if known.verdict.as_deref() == Some("pass")
+                && !trees_moved(project, run, &known, &sidecar) =>
+        {
             return Ok(Ruling {
                 order: order.to_owned(),
                 run: run.to_owned(),
@@ -1440,6 +1497,7 @@ pub fn gate(project: &Project, run: &str, order: &str) -> Result<Ruling, String>
                 next: vec![format!("herdr gate merge {order} --run {run}")],
             })
         }
+        Phase::Gated if known.verdict.as_deref() == Some("pass") => {}
         phase => {
             return Err(format!(
                 "{order} is {}{}: the gate rules on a delivered order",
@@ -1461,6 +1519,22 @@ pub fn gate(project: &Project, run: &str, order: &str) -> Result<Ruling, String>
         sidecar,
         table.as_ref(),
     )
+}
+
+/// Whether the trees a passed order's gate ran on are gone: its branch's head or the integration tip moved.
+fn trees_moved(project: &Project, run: &str, known: &OrderState, sidecar: &Sidecar) -> bool {
+    let Some(last) = &sidecar.last else {
+        return false;
+    };
+    if known.seated.branch.is_none() {
+        return false;
+    }
+    let head = rev(Path::new(&known.seated.cwd), "HEAD");
+    let tip = rev(
+        &project.root,
+        &format!("refs/heads/{}", integration_branch(run)),
+    );
+    last.head != head || last.base != tip
 }
 
 fn gate_subject(
