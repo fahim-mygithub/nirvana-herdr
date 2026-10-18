@@ -7,6 +7,22 @@ which the fork never edits.
 
 Plan 12, package O2 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §3, §4, §5, §16).
 
+- **Changed:** the foot no longer draws Argon or Google's Claude pool (G·Claude). Both are still read, priced by
+  `herdr seat` and listed by `herdr usage` and its JSON (`nirvana_usage::FOOT_HIDDEN`). The test fixture's Gemini row
+  now shows its week, so the foot keeps a "7d" row and a reset in days under test.
+  **Because:** the owner, 2026-10-18: "We dont need tracking for g claude or argon on the usage keep that internally."
+  **Measured:** `the_foot_lists_a_spaces_server_and_a_usage_row_per_pool` asserts neither row is drawn and the
+  accounts button sits at row 5 under the head; control `footer_hidden_pools_drawn`
+  (`nirvana/controls.d/foot_hidden.py`).
+  **If you remove this:** the foot grows back to six usage rows, two of them for pools the owner does not watch.
+- **Changed:** `nirvana/controls.py` loads each package's controls from `nirvana/controls.d/<package>.py`, and
+  `--dry-run` counts each control's find text, exiting 1 unless every one occurs exactly once.
+  **Because:** plan 12's packages now build in parallel; packages that each inserted into the one tuple lost a `    ),`
+  at merges. The old dry run only printed plans and missed five controls whose text had gone (the O1 builder,
+  2026-10-17).
+  **Measured:** a probe control with a missing find printed `FAIL ... finds 0x` and exit 1; without it, 276 of 276.
+  **If you remove this:** parallel merges collide in one tuple again, and a dead control passes a dry run.
+
 - **Changed:** `<home>/nirvana/seats.toml` holds the seat table: the pools (their windows and a factor from list-price
   dollars to a share of each window), ten seats (seven on: opus, sonnet, haiku, g-opus, g-sonnet, argon, flash; fable,
   gpt-oss and local off), each with its CLI, model id, efforts, pool, capabilities, a dated price schedule and its

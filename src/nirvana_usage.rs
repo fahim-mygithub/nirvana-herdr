@@ -1232,7 +1232,19 @@ fn start_worker() {
 
 /// The rows as last read, one per pool. The first call starts the readers; under test they never start
 /// (they would run this machine's `claude` and `agy`), and a test sets the rows it draws.
+/// Pools the readers read and the seat engine prices, but the foot does not show. The owner, 2026-10-18: "We dont
+/// need tracking for g claude or argon on the usage keep that internally." `herdr usage`, its JSON and `herdr seat`
+/// still carry them.
+pub const FOOT_HIDDEN: [&str; 2] = [ARGON, GOOGLE3P];
+
+/// The foot's rows: every pool but the hidden ones.
 pub fn rows() -> Vec<UsageRow> {
+    let mut rows = all_rows();
+    rows.retain(|row| !FOOT_HIDDEN.contains(&row.pool.as_str()));
+    rows
+}
+
+fn all_rows() -> Vec<UsageRow> {
     #[cfg(test)]
     if let Some(rows) = TEST_ROWS.with_borrow(Clone::clone) {
         return rows;

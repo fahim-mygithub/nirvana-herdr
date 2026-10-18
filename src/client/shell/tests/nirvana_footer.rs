@@ -27,13 +27,15 @@ fn row(pool: &str, provider: Provider, figure: Figure) -> UsageRow {
 }
 
 /// One row per pool (plan 12 O1), the readings of 2026-10-17: Claude's 5 h window ahead of pace.
+/// Gemini shows its week, so the foot keeps a "7d" row and a reset in days now that Argon and Google's Claude pool
+/// are hidden (2026-10-18).
 fn usage() -> Vec<UsageRow> {
     vec![
         row("max", Provider::Claude, shown("5h", 0.41, 1.01, 10_698)),
         row(
             "gemini",
             Provider::Antigravity,
-            shown("5h", 0.02, 0.79, 17_034),
+            shown("week", 0.02, 0.79, 583_910),
         ),
         row(
             "argon",
@@ -112,9 +114,7 @@ fn the_foot_lists_a_spaces_server_and_a_usage_row_per_pool() {
     assert!(usage_y > servers_y);
     let expected = [
         ("Claude", format!("41% 5h{AHEAD}")),
-        ("Gemini", "2% 5h".to_owned()),
-        ("Argon", "2% 7d".to_owned()),
-        ("G\u{b7}Claude", "4% 7d".to_owned()),
+        ("Gemini", "2% 7d".to_owned()),
         ("Codex", "not exposed".to_owned()),
         ("Local", "3/32 GiB".to_owned()),
     ];
@@ -125,12 +125,14 @@ fn the_foot_lists_a_spaces_server_and_a_usage_row_per_pool() {
             "usage row {offset}: {row:?}"
         );
     }
+    // Argon and Google's Claude pool are read but not shown (the owner, 2026-10-18: "keep that internally").
+    assert!(row_with(&rows, "Argon").is_none() && row_with(&rows, "G\u{b7}Claude").is_none());
     // The foot sits at the very bottom of the sidebar, its last row the accounts button.
-    assert_eq!(usage_y + 7, rows.len() - 1);
+    assert_eq!(usage_y + 5, rows.len() - 1);
     assert!(
-        sidebar(&rows[usage_y + 7]).trim_end() == " accounts",
+        sidebar(&rows[usage_y + 5]).trim_end() == " accounts",
         "{:?}",
-        rows[usage_y + 7]
+        rows[usage_y + 5]
     );
 }
 
@@ -200,14 +202,12 @@ fn each_provider_dot_has_its_colour() {
     let (usage_y, _) = row_with(&rows, " usage").unwrap();
     let dot = |y: usize| frame.cells[y * frame.width as usize + 1].fg;
     let rgb = |r, g, b| crate::protocol::color_to_u32(ratatui::style::Color::Rgb(r, g, b));
-    // Each pool's dot is its reader's colour: Gemini, Argon and Google's Claude pool are agy's.
+    // Each pool's dot is its reader's colour; Gemini is agy's.
     assert_eq!(dot(usage_y + 1), rgb(0xD8, 0x88, 0x6A));
-    for offset in 2..=4 {
-        assert_eq!(dot(usage_y + offset), rgb(0xAB, 0x93, 0xD6), "row {offset}");
-    }
-    assert_eq!(dot(usage_y + 5), rgb(0x7B, 0xAE, 0xDD));
+    assert_eq!(dot(usage_y + 2), rgb(0xAB, 0x93, 0xD6));
+    assert_eq!(dot(usage_y + 3), rgb(0x7B, 0xAE, 0xDD));
     assert_eq!(
-        dot(usage_y + 6),
+        dot(usage_y + 4),
         crate::protocol::color_to_u32(state.config.palette.overlay1)
     );
 }
@@ -269,10 +269,10 @@ fn a_wide_sidebar_draws_a_bar_and_the_reset_for_the_tightest_window() {
         claude.trim_end().ends_with(&format!("41% 5h{AHEAD} 2h58m")),
         "{claude:?}"
     );
-    let argon = rows[usage_y + 3].split('\u{2502}').next().unwrap();
-    assert!(argon.trim_end().ends_with("2% 7d  6d18h"), "{argon:?}");
+    let gemini = rows[usage_y + 2].split('\u{2502}').next().unwrap();
+    assert!(gemini.trim_end().ends_with("2% 7d  6d18h"), "{gemini:?}");
     // Codex has no figure: a dashed track.
-    let codex: String = rows[usage_y + 5].chars().take(40).collect();
+    let codex: String = rows[usage_y + 3].chars().take(40).collect();
     assert!(codex.contains('\u{254C}'), "{codex:?}");
     // At herdr's default width there is no reset.
     let (_, _, narrow) = compose_with("8770", 106, 40, None);

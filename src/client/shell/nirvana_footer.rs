@@ -8,8 +8,6 @@
 //!  usage
 //!  ● Claude        41% 5h▲
 //!  ● Gemini         2% 5h
-//!  ● Argon          2% 7d
-//!  ● G·Claude       4% 7d
 //!  ● Codex     not exposed
 //!  ● Local        3/32 GiB
 //!  accounts
@@ -26,6 +24,9 @@
 //! "Antigravity" row before. A row shows its pool's tightest window (`nirvana_usage::tightest`), so one figure
 //! and its window's name replace the "5h 7D" columns; a pace mark when it is spent faster than it passes; and
 //! from `BAR_FROM_WIDTH` the time to its reset. A stale reading is drawn muted.
+//!
+//! 2026-10-18, the owner: "We dont need tracking for g claude or argon on the usage keep that internally." Those
+//! two pools are read and priced but not drawn (`nirvana_usage::FOOT_HIDDEN`); `herdr usage` still lists them.
 
 use super::nirvana_spaces::fit;
 use super::render::put_text;
@@ -49,7 +50,8 @@ const WIDE_FIGURE: usize = FIGURE + 1 + 5;
 /// The pace mark's cell in the figure.
 const MARK_AT: usize = COLUMN + 1 + 2;
 pub(super) const AHEAD: &str = "\u{25B2}";
-/// The widest pool name, "G·Claude", so the bars line up.
+/// The widest pool name, "G·Claude", so the bars line up. That row is hidden now (`FOOT_HIDDEN`), but an agy pool
+/// no prefix maps gets a row with its own name, so the column keeps its room.
 const NAME: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
