@@ -3,6 +3,89 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.12.0 (2026-10-17): usage readings for every pool, `herdr usage`, a foot row per pool
+
+Plan 12, package O1 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §3, §5.3, §8, §15).
+
+- **Changed:** the usage readers give readings, not a percent per provider: one per pool and window, with the share
+  used, the reset, when it was read and by what. The pools are `max` (Claude: `5h`, `week`, and each other "Current
+  week (X)" line as `week.x`, today `week.fable`), `gemini`, `argon` and `google3p` (agy), and `codex` and `local` as
+  before. agy's groups and buckets are taken as they come: `gemini-argon-*` is Argon, checked before `gemini-*`, which
+  is Gemini; `3p-*` is Google's Claude and GPT pool; a bucket no prefix maps goes to a pool named from its group.
+  0.4.0's stand-in rule, another `gemini-` bucket for a missing named one, is gone with its control
+  `usage_agy_no_stand_in`: every bucket lands in its own pool.
+  **Because:** the owner, 2026-10-17: "have a orchistrator agent that is aware of the 5h and 7s usage limits and can
+  seat and coordinate which agent and model can take the task to efficiently use usage credits." (plan 12 L2, §3).
+  **Measured:** agy 1.4.1 at 21:51Z printed five buckets in three groups (`gemini-weekly`, `gemini-5h`, `3p-weekly`,
+  `3p-5h`, `gemini-argon-wtu-weekly`); 0.4.0's reader took two of them. Tests `nirvana_usage::tests::*` on that real
+  answer; controls `usage_agy_*`, `usage_claude_*`, `usage_codex_*`.
+  **If you remove this:** the foot and the seat engine see one Antigravity figure, Gemini's, and nothing of Argon or
+  Google's Claude pool.
+- **Changed:** a window the pool has that the reader did not print is unknown (`null`), never 0; a window the pool
+  does not have, like Argon's 5 h, is absent. A reading is stale when read more than 300 s ago, or before a reset that
+  has since passed; one read after its reset is fresh. A reader that fails keeps its last readings and marks the
+  failure's time. Each window has its pace, `clamp((used + 0.10) / (elapsed + 0.10), 0.5, 2.0)`.
+  **Because:** plan 12 §3's rules, each from an incident: old Nirvana read an unexposed window as 0 and deferred every
+  order; its "stuck at zero for claude" was a reading past its reset; a passed reset must not loop on re-reads on an
+  idle account (Argon's review, §4.6). §5.3 for pace.
+  **Measured:** controls `usage_stale_age_ignored`, `usage_reset_passed_ignored`, `usage_reset_after_loops`,
+  `usage_failed_read_wipes`, `usage_*_unknown_is_zero`, `usage_pace_no_ease`, `usage_pace_no_clamp`.
+  **If you remove this:** a seat engine reads a missing window as free quota and an old one as now.
+- **Hypothesis, not measured:** the pace constants (0.10, 0.5, 2.0), the mark's line (pace above 1.0) and the 300 s
+  staleness line. They are named constants in `nirvana_usage.rs`.
+- **Changed:** Claude's reset is a timestamp. Claude Code prints a wall clock in an IANA zone, "Oct 17, 8:50pm
+  (America/New_York)"; herdr resolves it through Windows' own ICU (`icuin.dll`), the year from the zone's current one
+  (next year when the date passed over a day ago), a time alone as today or tomorrow. The printed text is kept beside it.
+  **Because:** pace and the reset-passed rule need the reset as a time. The fork's one time crate, `time` 0.3 with
+  `formatting`, has no zone database, and ICU ships with Windows from 10 1703, older than the 1809 herdr's ConPTY
+  needs, so no crate is added.
+  **Measured:** `a_claude_reset_resolves_in_its_zone_and_year`: 8:50pm EDT on Oct 17 is 00:50Z, 9am EST on Dec 1 is
+  14:00Z, a December read of "Jan 2" is next year, an unknown zone is no timestamp (ICU opens one as GMT without an
+  error, so the name is checked first; control `usage_claude_reset_any_zone`).
+  **If you remove this:** Claude's windows have no reset, so no pace and no reset-passed staleness.
+- **Hypothesis, not measured:** on Linux and macOS a Claude reset keeps its text and no timestamp; the fork was not
+  built there.
+- **Changed:** `herdr usage [--json] [--refresh]` prints the readings: a table (pool, window, used, resets in, pace,
+  fresh or stale with its age), or with `--json` the shape documented on `nirvana_usage::view`, for the plugin, the
+  statusline and the seat engine. It reads `<home>/nirvana/usage.json`, which every window's readers write after
+  each read (a temp file, then a rename; an entry is replaced only by one tried as late or later, since several
+  windows share the file). A reader whose entry is missing or stale is run by the command itself, every reader with
+  `--refresh`. Exit 1 only when no window has a figure. A new window shows the file's readings at once, with their
+  age, instead of "reading".
+  **Because:** plan 12 §3: "A new `herdr usage --json` prints them for the plugin, the statusline and the seat
+  engine."
+  **Measured:** live, `NIRVANA_HERDR_HOME` a scratch folder, `herdr usage --refresh`: all four readers in 3.6 s, exit
+  0, every window fresh; the table is in plan 12 §15. Test `the_cache_round_trips_and_keeps_the_newer_entry`; controls
+  `usage_cache_*`, `usage_json_*`.
+  **If you remove this:** every consumer runs `claude -p /usage` and `agy -p /usage` itself, each through whatever
+  shell it has (Git Bash rewrote `/usage` into a path twice on 2026-10-17, each a paid turn).
+- **Changed:** Claude is read every 240 s while idle (600 s before) and agy every 240 s (300 s before).
+  **Because:** under the 300 s staleness line, an open window keeps the cache fresh, so `herdr usage` rarely reads.
+  **Measured:** `claude -p /usage` answered in 2.8 s for 0 tokens, `agy -p /usage` in 2.0 s (2026-10-17).
+  **If you remove this:** on an idle machine `herdr usage` finds Claude's reading stale half the time and reads it
+  itself.
+- **Changed:** the foot has one usage row per pool: Claude, Gemini, Argon, G·Claude, Codex, Local, then any pool agy
+  adds. Each shows its tightest window, the most used of those every seat of the pool spends (`week.fable` binds only
+  Fable), as "41% 5h"; a peach ▲ when that window is ahead of pace; from 34 columns its reset, "2h58m"; a stale
+  reading muted. The "5h 7D" head columns are gone. Google's Claude pool is "G·Claude": 8 cells, so the figure keeps
+  its column at herdr's default 26, and the G mirrors plan 12's `g-opus` and `g-sonnet` seats.
+  **Because:** plan 12 §8: "one row per pool, now with Google's Claude pool; each row shows its tightest window, a
+  pace mark when ahead of pace, and the reset time when wide enough."
+  **Measured:** `nirvana_footer` tests (`the_foot_lists_a_spaces_server_and_a_usage_row_per_pool`,
+  `a_window_ahead_of_pace_carries_its_mark_in_the_warning_colour`, `a_stale_reading_is_muted`,
+  `a_wide_sidebar_draws_a_bar_and_the_reset_for_the_tightest_window`); controls `footer_*`. Two upstream tests compose
+  taller for the two extra rows, as 0.4.0's did: `active_agent_view_controls_sidebar_order_and_focus_indices` 30 to 32
+  rows, `sidebar_scrollbars_use_proportional_shared_geometry_and_drag` 32 to 36 (34 still left a one-cell thumb).
+  **If you remove this:** the foot shows Gemini as "Antigravity" and nothing of Argon or Google's Claude pool.
+- **Hypothesis, not measured:** that the mark belongs to the shown window only. Live at 22:06Z, Claude's week read
+  38% at pace 1.72 while its 5 h window, 44% at 0.98, was the tightest, so the row carried no mark.
+- **Changed:** `a_short_sidebar_keeps_the_agents_panel` composes at 22 rows, not 20.
+  **Because:** with six pools and a server the foot is 11 rows, taller than the sidebar's lower section at 20, so
+  the foot was hidden whether or not the agents panel kept its five rows: control `footer_agents_starved` stayed
+  green on the first run of this package's controls.
+  **Measured:** at 22 and at 24 the test passes and the control reddens it.
+  **If you remove this:** the test passes with the agents' floor removed.
+
 ## alpha 0.11.0 (2026-10-17): Accounts, a sign-in button at the foot of the sidebar
 
 - **Changed:** the sidebar foot ends with an "accounts" button, plain grey text like the spaces list's "new" and

@@ -592,3 +592,85 @@ was weighed against this plan's evidence before it changed anything.
 | Cut the held-out check written before the build | **not taken.** Old Nirvana's M5 row passed 8 of 8 with it, against 4 of 8 for plain Claude Code, and the builder sees only failing test ids, so names do not leak | §7.3 |
 | Collapse the classes into nine chains | taken; the classes stay as labels | §5.4 |
 | Move the Seats square after the A/B | taken | O8 |
+
+## 15. O1 record
+
+Built 2026-10-17 on master 09ed59f0 (alpha 0.11.1), branch `o1-usage`, as alpha 0.12.0, by the leaf "Opus - O1 usage
+readings build". Not merged.
+
+**Measured before building (this PC, both read with a list argv, no shell).**
+- `claude -p /usage --no-session-persistence --output-format text`: 2.8 s, exit 0. "Current session: 41% used ·
+  resets Oct 17, 8:50pm (America/New_York)", "Current week (all models): 37% used · resets Oct 23, 12pm
+  (America/New_York)", "Current week (Fable): 0% used · resets Oct 23, 12pm (America/New_York)". The zone is the
+  machine's, an IANA name.
+- `agy -p /usage --output-format stream-json` (agy 1.4.1): 2.0 s, exit 0. Three groups, five buckets: "Gemini Models"
+  `gemini-weekly` and `gemini-5h`, "Claude and GPT models" `3p-weekly` and `3p-5h`, "Gemini 4 Argon"
+  `gemini-argon-wtu-weekly`, each with `window`, `remaining_fraction` and `reset_time`. Argon's group says "For paid
+  Pro plans, Argon quota is separate."
+- The fork's only time crate is `time` 0.3 with `formatting`, which has no zone database. Windows' ICU (`icuin.dll`,
+  `ucal_*` in windows-sys's `Win32_Globalization`, a feature the fork already turns on) resolves IANA zones.
+
+**Shape, as built.**
+- `Reading { pool, window, used: Option<f32>, resets_at, resets_text, read_at, source }`; `used` is `None` for a
+  window the pool has that the read did not print. Windows are `5h`, `week`, and `week.<model>` for a week scoped to
+  some models.
+- `<home>/nirvana/usage.json` holds each reader's last answer (`Source`: `read_at`, `failed_at`, a word, the GPU's
+  memory, the readings). The window writes it after each read; `herdr usage` reads it and runs the readers whose entry
+  is missing or stale. `herdr usage --json`'s shape is the doc comment on `nirvana_usage::view`.
+- The foot's row per pool shows the tightest window: the most used of the windows with no dot in their name.
+
+**Files.** `src/nirvana_usage.rs` (readings, parsers, ICU reset, freshness, pace, cache, `herdr usage`, tests);
+`src/main.rs` (the `usage` subcommand); `src/client/shell/nirvana_footer.rs` and `sidebar.rs` (a row per pool, the
+mark, the reset, the muted stale figure, the foot's height from the row count);
+`src/client/shell/tests/nirvana_footer.rs`; two upstream tests raised in height
+(`agents_worktrees_notifications.rs`, `popup_focus_projection.rs`, each with a `Nirvana fork:` comment);
+`nirvana/controls.py`, `nirvana/CHANGELOG.md`, `nirvana/VERSION`, `nirvana/README.md`, this section.
+
+**Controls.** 48 new or rewritten (`usage_*`, `footer_week_label`, `footer_label_is_pool`, `footer_four_rows`,
+`footer_no_pace_mark_text`, `footer_mark_colour`, `footer_stale_not_muted`, `footer_reset_narrow`,
+`footer_reset_never`), and the 11 foot controls of 0.4.0 and 0.11.0 run again, four pointed at renamed tests.
+First run, one at a time with `--only`: 57 of 59 reddened their test, and the tree was clean after. The two
+that stayed green, and what was wrong:
+- `usage_claude_reset_any_zone` removed the check after `ucal_getCanonicalTimeZoneID`, but that call's error
+  status still stopped `ucal_open`, since ICU skips every call after a failure. The control now resets the status
+  instead, and reddens: ICU does open an unknown zone as GMT without an error, so the check is what stops it.
+- `footer_agents_starved` (0.4.0's): at 20 rows the foot, now 11 rows, was taller than the whole lower section,
+  so the agents' floor never decided. The test composes at 22 rows; the control reddens it at 22 and at 24.
+Both rerun alone: PASS. The dry-run does not check that a find occurs once; a script did: every control of this
+package finds its text once. Five older controls find nothing on master 09ed59f0: `panels_both_open`,
+`edit_tab_unnamed`, `memory_panel_beside_preload`, `panel_painted_over`, `jev_rows_missing`. Not touched here.
+
+**Live run.** `NIRVANA_HERDR_HOME` a folder under the worktree's `target`, the debug build, `herdr usage --refresh`,
+3.6 s, exit 0:
+
+```text
+pool       window       used  resets in  pace  read
+Claude     5h            44%  2h44m      0.98  fresh 3s
+Claude     week          38%  5d17h      1.72  fresh 3s
+Claude     week.fable     0%  5d17h      0.50  fresh 3s
+Gemini     week           1%  6d17h      0.83  fresh 3s
+Gemini     5h             1%  4h29m      0.56  fresh 3s
+Argon      week           2%  6d17h      0.89  fresh 3s
+G·Claude   week           5%  1d12h      0.50  fresh 3s
+G·Claude   5h             3%  4h34m      0.73  fresh 3s
+Codex      not exposed
+Local      off
+```
+
+**Departures from the brief, found while building.**
+1. *Pace has no floor at a fresh window.* With nothing used just after a reset the formula gives 0.10 / 0.10 = 1.0,
+   on pace, which is what the ease is for; the clamp's 0.5 applies later in an idle window.
+2. *agy lists each week before its 5 h window.* The readings put 5 h first in every pool, so a tie in the tightest
+   window goes to 5 h for agy's pools as for Claude's.
+3. *Two buckets on one pool and window keep the tighter.* None does today; the rule keeps a pool's binding figure.
+4. *The idle Claude read moved from 600 s to 240 s and agy's from 300 s to 240 s,* under the 300 s staleness line, so
+   an open window keeps the cache fresh.
+
+**Not measured.** The reset on Linux or macOS (no timestamp there; not built). Two windows writing the cache at once:
+the newer-entry rule and the rename keep the file whole, but a read and write that interleave can drop the other
+window's newer entry until its next read. `herdr usage` with no `claude` or `agy` on PATH (exit 1 path) was not run
+live. The foot in a real window, read by a leaf from a screenshot: not done in this package. Whether the owner wants
+the pace mark when any window of the pool is ahead: live, Claude's week read pace 1.72 while the 5 h window, the
+tightest, read 0.98, so the row carried no mark.
+
+The table above was read before the readings were sorted 5 h first; agy's pools now print 5 h, then the week.

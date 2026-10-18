@@ -26,9 +26,10 @@ Explorer's "Open Nirvana - CC" (Nirvana-C) runs the installed fork in the sessio
 | 1 | Sidebar header "◆ Nirvana alpha X.Y.Z", window title "<workspace> · Nirvana", reload onto a newer installed build | plans/2026-10-15-01-header-and-reload.md |
 | 2 | Tab right-click "Restart Claude": the tab's Claude Code starts again in the same pane and folder, resuming the same conversation | plans/2026-10-15-02-restart-claude.md |
 | 3 | Each space lists its agents: the task's summarized title, then the agent's icon (Claude ✻, Codex ❖, Antigravity ▲, Local ⌂) and its provider and model | plans/2026-10-15-03-space-agents.md |
-| 4 | The sidebar's foot: the servers running in each space (a click opens one), and this machine's usage for Claude, Codex, Antigravity and Local | plans/2026-10-15-04-servers-and-usage.md |
+| 4 | The sidebar's foot: the servers running in each space (a click opens one), and this machine's usage, since 0.12.0 a row per pool: Claude, Gemini, Argon, G·Claude (Google's Claude and GPT pool), Codex, Local | plans/2026-10-15-04-servers-and-usage.md |
 | 5 | A mod strip under the tab bar for a tab running Claude, with one mod, Preload: everything a new Claude in the folder preloads, with its tokens; switch an item off or on, open its file, restart Claude to take it | plans/2026-10-16-05-preload-mod.md |
 | 6 | The strip's Running square: what Claude is doing now with a summary, and under it what it waits on you for, answered with a digit or a click | plans/2026-10-16-06-running-and-waiting.md |
+| 12 (O1) | Usage readings: every pool and window with its reset, freshness and pace; `herdr usage [--json] [--refresh]` over `<home>/nirvana/usage.json` | plans/2026-10-17-12-nirvana-claude-orchestrator.md §15 |
 
 ## Rules for this fork
 

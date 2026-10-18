@@ -245,7 +245,10 @@ fn four_servers_then_how_many_more() {
 
 #[test]
 fn a_short_sidebar_keeps_the_agents_panel() {
-    let (_, _, rows) = compose_with("8770", 106, 20, None);
+    // 22 rows, not 20: the foot is 11 rows with plan 12 O1's six pools and a server, so at 20 the sidebar's lower
+    // section was shorter than the foot itself and the agents' floor was never what hid it (control
+    // footer_agents_starved stayed green). At 22 the foot would fit, but not with five agent rows above it.
+    let (_, _, rows) = compose_with("8770", 106, 22, None);
     assert!(row_with(&rows, " usage").is_none());
     assert!(row_with(&rows, " agents").is_some());
 }

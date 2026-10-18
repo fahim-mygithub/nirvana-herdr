@@ -213,7 +213,9 @@ CONTROLS: tuple[Control, ...] = (
             'a_claude_reset_is_a_wall_clock_in_its_zone', "rust"),
     Control('usage_claude_reset_any_zone', 'src/nirvana_usage.rs',
             '    if status > U_ZERO_ERROR {\n        return None;\n    }\n    // SAFETY: as above',
-            '    // SAFETY: as above',
+            # Resetting the status, not only dropping the check: ICU skips every call after a failed one, so a
+            # bare removal stayed green (the canonical-id call's error still stopped `ucal_open`).
+            '    status = U_ZERO_ERROR;\n    // SAFETY: as above',
             'a_claude_reset_resolves_in_its_zone_and_year', "rust"),
     Control('usage_claude_reset_this_year', 'src/nirvana_usage.rs',
             'if this_year + DAY < now {', 'if false {',
