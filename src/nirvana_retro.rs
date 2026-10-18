@@ -105,6 +105,12 @@ pub struct Found {
     /// The gate axis a send-back named.
     #[serde(default)]
     pub axis: Option<String>,
+    /// What varies between two gaps of one kind: a send-back's reason, a gotcha's text, the pool and window that
+    /// ran out. Gaps are matched on it, never on the sentence around it: the live run of 2026-10-18 measured the
+    /// send-back sentences of three different gaps (rebase, owned, tests) at 0.63, 0.61 and 0.57 to each other, so
+    /// at 0.6 their shared template merged them.
+    #[serde(default)]
+    pub cause: String,
 }
 
 fn cut(text: &str, max: usize) -> String {
@@ -145,19 +151,21 @@ pub fn gaps(text: &str) -> Vec<Found> {
             .order()
             .and_then(|order| state.order(order))
             .map(|known| &known.seated);
-        let mut push = |kind: &str, gap: String, tagged: bool, axis: Option<String>| {
-            found.push(Found {
-                kind: kind.to_owned(),
-                gap: one_line(&gap),
-                seq: event.seq,
-                quote: quote.clone(),
-                outcome_tagged: tagged,
-                class: seated.map(|s| s.class.clone()),
-                seat: seated.map(|s| s.seat.clone()),
-                effort: seated.map(|s| s.effort.word().to_owned()),
-                axis,
-            });
-        };
+        let mut push =
+            |kind: &str, gap: String, tagged: bool, axis: Option<String>, cause: String| {
+                found.push(Found {
+                    kind: kind.to_owned(),
+                    gap: one_line(&gap),
+                    seq: event.seq,
+                    quote: quote.clone(),
+                    outcome_tagged: tagged,
+                    class: seated.map(|s| s.class.clone()),
+                    seat: seated.map(|s| s.seat.clone()),
+                    effort: seated.map(|s| s.effort.word().to_owned()),
+                    axis,
+                    cause: one_line(&cause),
+                });
+            };
         let class = seated.map_or("an", |s| s.class.as_str());
         match &event.kind {
             Kind::Gated {
@@ -171,6 +179,7 @@ pub fn gaps(text: &str) -> Vec<Found> {
                         format!("the gate spent its send-backs on a {class} order: {reason}"),
                         true,
                         axis,
+                        reason.clone(),
                     );
                 } else {
                     push(
@@ -178,6 +187,7 @@ pub fn gaps(text: &str) -> Vec<Found> {
                         format!("the gate sent a {class} order back on {reason}"),
                         false,
                         axis,
+                        reason.clone(),
                     );
                 }
             }
@@ -195,6 +205,11 @@ pub fn gaps(text: &str) -> Vec<Found> {
                 ),
                 false,
                 None,
+                format!(
+                    "{} {} {signal}",
+                    pool.as_deref().unwrap_or("?"),
+                    window.as_deref().unwrap_or("every window")
+                ),
             ),
             Kind::Stalled { next, .. } => {
                 let seat = seated.map_or("a", |s| s.seat.as_str());
@@ -204,6 +219,7 @@ pub fn gaps(text: &str) -> Vec<Found> {
                         format!("a {seat} worker on a {class} order stalled into a crash loop"),
                         true,
                         None,
+                        format!("{seat} {class}"),
                     );
                 } else {
                     push(
@@ -211,6 +227,7 @@ pub fn gaps(text: &str) -> Vec<Found> {
                         format!("a {seat} worker on a {class} order went silent for 10 minutes"),
                         false,
                         None,
+                        format!("{seat} {class}"),
                     );
                 }
             }
@@ -221,6 +238,7 @@ pub fn gaps(text: &str) -> Vec<Found> {
                     format!("a {class} order on {seat} was re-seated when its pool ran out"),
                     false,
                     None,
+                    format!("{class} {seat}"),
                 );
             }
             Kind::Seated(seat) => {
@@ -233,6 +251,7 @@ pub fn gaps(text: &str) -> Vec<Found> {
                         ),
                         false,
                         None,
+                        format!("{} {}: {why}", seat.class, seat.seat),
                     );
                 }
             }
@@ -244,6 +263,7 @@ pub fn gaps(text: &str) -> Vec<Found> {
                     format!("no seat had room for a {class} order"),
                     false,
                     None,
+                    class.to_owned(),
                 );
             }
             Kind::Ended {
@@ -258,6 +278,7 @@ pub fn gaps(text: &str) -> Vec<Found> {
                     format!("a {seat} worker failed: {}", cut(why, 160)),
                     true,
                     None,
+                    cut(why, 160),
                 );
             }
             Kind::Delivered { report, .. } => {
@@ -273,6 +294,7 @@ pub fn gaps(text: &str) -> Vec<Found> {
                             format!("a worker's gotcha: {}", cut(text, 200)),
                             false,
                             None,
+                            cut(text, 200),
                         );
                     }
                 }
@@ -349,6 +371,35 @@ pub fn rejected(root: &Path) -> Vec<Rejected> {
 }
 
 /// The key a gap belongs to: the best known gap at or above `DICE`, else its own.
+/// How alike two gaps are: 0 across kinds or gate axes, else Dice on their causes (the sentence when a row written
+/// before the cause was kept has none).
+pub fn similarity(a: &Found, b: &Found) -> f64 {
+    if a.kind != b.kind || a.axis != b.axis {
+        return 0.0;
+    }
+    let cause = |found: &Found| -> String {
+        if found.cause.is_empty() {
+            found.gap.clone()
+        } else {
+            found.cause.clone()
+        }
+    };
+    dice(&cause(a), &cause(b))
+}
+
+/// The key a found gap belongs to: the most alike known gap at or above `DICE`, else its own.
+pub fn merge_found(rows: &[Row], found: &Found) -> String {
+    let mut best: Option<(f64, &str)> = None;
+    for row in rows {
+        let score = similarity(found, &row.found);
+        if score >= DICE && best.is_none_or(|(known, _)| score > known) {
+            best = Some((score, row.key.as_str()));
+        }
+    }
+    best.map_or_else(|| gap_key(&found.gap), |(_, key)| key.to_owned())
+}
+
+/// A proposal's gap, which has no kind, against the ledger's sentences.
 pub fn merge_key(rows: &[Row], text: &str) -> String {
     let mut best: Option<(f64, &str)> = None;
     for row in rows {
@@ -366,15 +417,16 @@ pub fn is_rejected(rows: &[Row], refused: &[Rejected], key: &str) -> bool {
     if refused.iter().any(|r| r.key == key) {
         return true;
     }
-    let texts: Vec<&str> = rows
+    let mine: Vec<&Found> = rows
         .iter()
         .filter(|row| row.key == key)
-        .map(|row| row.found.gap.as_str())
+        .map(|row| &row.found)
         .collect();
     refused.iter().any(|r| {
-        rows.iter()
-            .filter(|row| row.key == r.key)
-            .any(|row| texts.iter().any(|text| dice(text, &row.found.gap) >= DICE))
+        rows.iter().filter(|row| row.key == r.key).any(|row| {
+            mine.iter()
+                .any(|found| similarity(found, &row.found) >= DICE)
+        })
     })
 }
 
@@ -577,6 +629,7 @@ pub fn propose(
             seat: None,
             effort: None,
             axis: None,
+            cause: String::new(),
         },
     });
     if is_rejected(&probe, &refused, &key) {
@@ -742,7 +795,7 @@ pub fn retro_with(project: &Project, run: &str, record: &[RecordLine]) -> Result
     for gap in &found {
         let mut known = rows.clone();
         known.extend(new_rows.iter().cloned());
-        let key = merge_key(&known, &gap.gap);
+        let key = merge_found(&known, gap);
         touched.insert(key.clone());
         if known.iter().any(|row| row.key == key && row.run == run) {
             continue;
@@ -1069,6 +1122,58 @@ mod tests {
         assert!(open_section(&project).contains(&id));
     }
 
+    /// The live run of 2026-10-18: three send-backs on three axes, whose sentences share a template.
+    #[test]
+    fn gaps_that_share_a_template_are_matched_on_their_cause_within_one_kind_and_axis() {
+        let root = temp("template");
+        let project = Project::at(&root);
+        let journal = project.journal("r1");
+        let reasons = [
+            "rebase: the branch does not rebase onto nirvana-integrate/o5live: 1 file(s) conflict",
+            "owned: 2 file(s) changed that the order does not own",
+            "tests: the named check(s) test_sub never ran: a suite total cannot see a check that never ran",
+        ];
+        for (index, reason) in reasons.iter().enumerate() {
+            let order = format!("o{index}");
+            journal
+                .append(100, Kind::Seated(Box::new(seated(&order))))
+                .expect("seated");
+            journal
+                .append(
+                    110,
+                    Kind::Gated {
+                        order,
+                        verdict: "sent_back".into(),
+                        reason: Some((*reason).into()),
+                        axes: Vec::new(),
+                    },
+                )
+                .expect("gated");
+        }
+        retro_with(&project, "r1", &[]).expect("retro");
+        let keys: BTreeSet<String> = ledger(&root).into_iter().map(|row| row.key).collect();
+        assert_eq!(keys.len(), 3, "{keys:?}");
+        // Two gaps of one kind and axis whose sentences agree and whose causes do not are two gaps.
+        let gap = |cause: &str| Found {
+            kind: "gotcha".into(),
+            gap: format!("a worker's gotcha that is long and shared by both of these: {cause}"),
+            seq: 1,
+            quote: String::new(),
+            outcome_tagged: false,
+            class: None,
+            seat: None,
+            effort: None,
+            axis: None,
+            cause: cause.into(),
+        };
+        let (a, b) = (gap("pip is slow"), gap("npm is gone"));
+        assert!(dice(&a.gap, &b.gap) >= DICE);
+        assert!(similarity(&a, &b) < DICE);
+        let mut other_axis = gap("pip is slow");
+        other_axis.axis = Some("tests".into());
+        assert_eq!(similarity(&a, &other_axis), 0.0);
+    }
+
     #[test]
     fn one_outcome_tagged_miss_with_a_clear_cause_graduates_alone() {
         let root = temp("tagged");
@@ -1222,6 +1327,7 @@ mod tests {
                 seat: Some("sonnet".into()),
                 effort: Some("medium".into()),
                 axis: None,
+                cause: "max 5h rate_limit_event".into(),
             },
         };
         let proposal = draft("g-x", &[&row], &record);
