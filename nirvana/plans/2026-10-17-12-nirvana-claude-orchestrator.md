@@ -1,6 +1,6 @@
 # Feature 12: Nirvana Claude, the orchestrator that seats work on Claude and Antigravity
 
-Status: **DESIGN, for the owner's approval.** Nothing is built. §12 lists the owner's rulings, which come before
+Status: **BUILT, alpha 0.12.0 to 0.21.0 (2026-10-18).** O1 to O8 are on master, each verified and installed; the records are §15, §16 and `plans/2026-10-17-12-records/`. O7's first round (one run per arm, `evidence/2026-10-18-o7-ab/`) is done; its three runs per arm, the run over 5 h, and a live pane or agy order through the gate wait for the owner's weekly Claude reset. §10 maps every old Nirvana feature to its home here.
 package O1. This plan replaces old Nirvana's daemon as the way forward. §10 maps every old Nirvana feature to its home
 here.
 
