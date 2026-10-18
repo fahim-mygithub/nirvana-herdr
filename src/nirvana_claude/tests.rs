@@ -707,6 +707,49 @@ fn the_board_line_is_written_once_beside_the_lessons_lines() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// The two writers of `NIRVANA.md`, this board line and O5's lessons line, each replace only their own line: written
+/// in turn, for two projects, every line stays once and the owner's own text stays.
+#[test]
+fn the_board_and_lessons_lines_survive_each_others_write() {
+    let home = scratch("md-both");
+    let a = scratch("md-a");
+    let b = scratch("md-b");
+    let path = crate::nirvana_lessons::write_index_line(&home, &a).expect("lessons first");
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .starts_with("# Nirvana memory"),
+        "a new file gets the head whichever writer is first"
+    );
+    write_board_line(&home, &a).expect("board a");
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    text.push_str("the owner's own line\n");
+    std::fs::write(&path, &text).unwrap();
+    write_board_line(&home, &b).expect("board b");
+    crate::nirvana_lessons::write_index_line(&home, &b).expect("lessons b");
+    crate::nirvana_lessons::write_index_line(&home, &a).expect("lessons a again");
+    write_board_line(&home, &a).expect("board a again");
+    let text = std::fs::read_to_string(&path).unwrap();
+    for (mark, root) in [
+        ("<!-- herdr-board ", &a),
+        ("<!-- herdr-board ", &b),
+        ("<!-- herdr-lessons ", &a),
+        ("<!-- herdr-lessons ", &b),
+    ] {
+        let tail = format!("{mark}{} -->", root.display());
+        assert_eq!(
+            text.lines().filter(|line| line.ends_with(&tail)).count(),
+            1,
+            "{tail} once in:\n{text}"
+        );
+    }
+    assert_eq!(text.matches("the owner's own line").count(), 1, "{text}");
+    assert_eq!(text.matches("# Nirvana memory").count(), 1, "{text}");
+    for dir in [&home, &a, &b] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 #[test]
 fn only_open_proposals_are_named() {
     let root = scratch("proposals");
@@ -723,10 +766,12 @@ fn only_open_proposals_are_named() {
     )
     .unwrap();
     std::fs::write(dir.join("notes.txt"), "status: open\n").unwrap();
-    assert_eq!(
-        open_proposals(&root),
-        vec![("p-1".to_owned(), "stall on flash".to_owned())]
-    );
+    // The digest's call since O5 merged: `nirvana_retro::open`, mapped to (id, gap).
+    let named: Vec<(String, String)> = crate::nirvana_retro::open(&nirvana_run::Project::at(&root))
+        .into_iter()
+        .map(|(id, gap, _)| (id, gap))
+        .collect();
+    assert_eq!(named, vec![("p-1".to_owned(), "stall on flash".to_owned())]);
     let _ = std::fs::remove_dir_all(&root);
 }
 

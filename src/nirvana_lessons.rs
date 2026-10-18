@@ -448,7 +448,9 @@ pub fn write_index_line(home: &Path, root: &Path) -> std::io::Result<PathBuf> {
         .filter(|entry| live(&entry.counters))
         .count();
     let path = home.join(crate::nirvana_seat::DIR).join("NIRVANA.md");
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    // A new file gets O4b's head, as its board line's writer gives it: either may write first.
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|_| crate::nirvana_claude::MEMORY_HEAD.to_owned());
     let mark = format!("{INDEX_MARK}{} -->", root.display());
     let line = index_line_text(root, count);
     let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();

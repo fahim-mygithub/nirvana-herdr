@@ -564,7 +564,8 @@ fn the_reviewer_is_of_another_family_and_only_falls_back_to_the_builders_own_mar
         "{}",
         pick.reason
     );
-    // agy signed out: no Google seat, so decision 0017's fallback, said at the start of the reason.
+    // agy signed out: no Google seat, so decision 0017's fallback (O2's `pick`), the gate's mark at the start of
+    // the reason and the Pick's own words after it.
     let world = world_with(&[("agy", "agy not signed in")]);
     let (pick, same) = pick_other_family(
         &table,
@@ -578,8 +579,12 @@ fn the_reviewer_is_of_another_family_and_only_falls_back_to_the_builders_own_mar
     .expect("fallback");
     assert_eq!((pick.family.as_str(), same), ("anthropic", true));
     assert!(
-        pick.reason
-            .starts_with("SAME-FAMILY REVIEW (anthropic), in a fresh session: "),
+        pick.same_family_fallback
+            && pick.reason.starts_with("SAME-FAMILY REVIEW: ")
+            && pick.reason.contains(
+                "; same family (anthropic), in a fresh session: no other family had a seat: "
+            )
+            && pick.reason.ends_with("(decision 0017)"),
         "{}",
         pick.reason
     );
@@ -727,17 +732,23 @@ fn the_outcome_words_and_what_the_tally_counts() {
         assert_eq!(Outcome::tally(word), Some(false), "{word}");
     }
     assert_eq!(Outcome::tally("reseated"), None);
-    let line = |outcome: &str| -> nirvana_seat::RecordLine {
+    let on = |chain: &str, outcome: &str| -> nirvana_seat::RecordLine {
         serde_json::from_value(serde_json::json!({"order":"o","seat":"sonnet","effort":"medium","class":"build.bounded",
-            "chain":"build.bounded","outcome":outcome}))
+            "chain":chain,"outcome":outcome}))
         .expect("line")
     };
+    let line = |outcome: &str| on("build.bounded", outcome);
+    // O4b's SubagentStop lines (chain `subagent`, outcome `subagent-<status>`) are the orchestrator's judgement:
+    // counted nowhere, neither on the class's chain nor as a row of their own.
     let tallies = nirvana_seat::tally(&[
         line("pass"),
         line("sent_back"),
         line("reseated"),
         line("asked"),
+        on("subagent", "subagent-done"),
+        on("subagent", "subagent-blocked"),
     ]);
+    assert_eq!(tallies.len(), 1, "{tallies:?}");
     let tally = tallies[&(
         "sonnet".to_owned(),
         Effort::Medium,

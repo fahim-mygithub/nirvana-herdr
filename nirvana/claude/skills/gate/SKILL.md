@@ -5,6 +5,9 @@ description: Use when a worker's order is delivered, sent back, waiting on a rev
 
 # The completion gate
 
+`herdr` below is the fork's binary, `"${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe"`; the session digest names it too.
+A `herdr` found on PATH may be upstream herdr, which has none of these commands.
+
 herdr's gate rules on a delivered order with no model call (plan 12 §7.3). You start it, read its ruling and do
 what it names next. You never pass an order by hand: `herdr run log` with a `gated` event skips every axis.
 

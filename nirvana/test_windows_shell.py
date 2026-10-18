@@ -143,7 +143,7 @@ class FilesTest(unittest.TestCase):
             # every skill included; only settings.json gains the statusline.
             rels = sorted(p.relative_to(src).as_posix() for p in src.rglob("*") if p.is_file())
             for rel in ("ROLE.md", "hooks/hooks.json", "skills/seat/SKILL.md", "skills/usage/SKILL.md",
-                        "skills/handoff/SKILL.md", "skills/jev/SKILL.md", "skills/media/SKILL.md",
+                        "skills/handoff/SKILL.md", "skills/jev/SKILL.md", "skills/media/SKILL.md", "skills/gate/SKILL.md",
                         "agents/worker-opus-high.md", "agents/worker-haiku-low.md"):
                 self.assertIn(rel, rels)
             for rel in rels:

@@ -2009,6 +2009,11 @@ pub fn tally(lines: &[RecordLine]) -> BTreeMap<RecordKey, Tally> {
         let Some(chain) = &line.chain else {
             continue;
         };
+        // O4b's worker subagents (chain `subagent`, outcome `subagent-<status>`): the orchestrator judged them, not
+        // the gate, so they count toward no seat's tally, and no "subagent" row of failures builds up either.
+        if chain == crate::nirvana_claude::SUBAGENT_CHAIN {
+            continue;
+        }
         // Plan 12 O5's outcome words (`nirvana_gate::Outcome::tally`): pass is a pass, a re-seat is not counted
         // (its pool ran out, not its work), every other word a failure.
         let Some(passed) = crate::nirvana_gate::Outcome::tally(&line.outcome) else {

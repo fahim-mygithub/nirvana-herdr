@@ -43,7 +43,8 @@ const GAP_CHARS: usize = 24;
 pub const MEMORY_FILE: &str = "NIRVANA.md";
 /// The marker of the project's board line, so a write replaces only that line, as O5's lessons line does.
 const BOARD_MARK: &str = "<!-- herdr-board ";
-const MEMORY_HEAD: &str = "# Nirvana memory\n\nOne line per project: its lessons, written by herdr once the gate checked them, and its \
+/// A new `NIRVANA.md`'s head, whichever of the two writers (this board line, O5's lessons line) comes first.
+pub(crate) const MEMORY_HEAD: &str = "# Nirvana memory\n\nOne line per project: its lessons, written by herdr once the gate checked them, and its \
 shared board. herdr rewrites only its own marked lines; anything else here is yours.\n\n";
 /// What the statusline last read from Claude Code: the `max` pool's live windows, fresher than `usage.json`, which
 /// `guard-spawn` prefers when it is younger.
@@ -479,36 +480,6 @@ fn run_steps(project: &Project, now: u64) -> Vec<(String, Result<String, String>
         .collect()
 }
 
-/// The open proposals: `.md` files in `.nirvana/proposals/` with the line `status: open`, the form O5's retro
-/// writes (`nirvana_retro::proposal_text`); the gap is the first line's text after ": ". O5's `nirvana_retro::open`
-/// reads the same; this copy keeps the digest building before O5 merges.
-pub fn open_proposals(root: &Path) -> Vec<(String, String)> {
-    let dir = root.join(nirvana_run::DIR).join("proposals");
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut paths: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
-    paths.sort();
-    paths
-        .into_iter()
-        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("md"))
-        .filter_map(|path| {
-            let text = std::fs::read_to_string(&path).ok()?;
-            if !text.lines().any(|line| line.trim_end() == "status: open") {
-                return None;
-            }
-            let id = path.file_stem()?.to_string_lossy().into_owned();
-            let gap = text
-                .lines()
-                .next()
-                .and_then(|line| line.split_once(": "))
-                .map(|(_, gap)| gap.trim().to_owned())
-                .unwrap_or_default();
-            Some((id, gap))
-        })
-        .collect()
-}
-
 /// The project's board line in `NIRVANA.md`.
 pub fn board_line_text(root: &Path) -> String {
     let board = crate::nirvana_board::board_path(root);
@@ -576,9 +547,15 @@ fn digest_cli() -> std::io::Result<()> {
                     .collect()
             })
             .unwrap_or_default(),
+        // O5's reader, the one the receipt names them by (O4b carried a copy until O5 merged).
         proposals: project
             .as_ref()
-            .map(|project| open_proposals(&project.root))
+            .map(|project| {
+                crate::nirvana_retro::open(project)
+                    .into_iter()
+                    .map(|(id, gap, _)| (id, gap))
+                    .collect()
+            })
             .unwrap_or_default(),
         memory: memory.display().to_string(),
     };

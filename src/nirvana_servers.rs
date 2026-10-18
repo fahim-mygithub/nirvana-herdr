@@ -115,8 +115,9 @@ pub fn decode(value: &str) -> Vec<u16> {
         .collect()
 }
 
+/// `pub(crate)` for O5's gate, whose served axis reads the same two tables for a worker's pane.
 #[cfg(windows)]
-mod read {
+pub(crate) mod read {
     use super::{Listener, Process};
     use std::mem::size_of;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
@@ -237,7 +238,7 @@ mod read {
 
 /// Not built for other systems yet: the owner runs Windows. Spaces there show no servers.
 #[cfg(not(windows))]
-mod read {
+pub(crate) mod read {
     use super::{Listener, Process};
 
     pub fn processes() -> Vec<Process> {

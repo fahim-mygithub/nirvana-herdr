@@ -1224,8 +1224,10 @@ pub fn feature_size(class: &str, size: SizeName) -> bool {
     (class.starts_with("build.") || class == "fix.debug") && size != SizeName::Small
 }
 
-/// Decision 0017: another family first; only when no other family has a seat, the builder's own in a fresh
-/// session, marked at the start of the reason. O2's `pick` has no fallback of its own; it is here.
+/// Decision 0017 through O2's `pick`, whose fix round (B1) holds the fallback: another family first; only when no
+/// other family has a seat, the builder's own in a fresh session, `same_family_fallback` set and the reason ending
+/// "(decision 0017)". The gate puts its mark on top, at the start of the reason, so the orchestrator reads which
+/// second opinion it is starting before it reads why.
 pub fn pick_other_family(
     table: &Table,
     world: &World,
@@ -1240,19 +1242,12 @@ pub fn pick_other_family(
     request.size = SizeName::Small;
     request.order = Some(order.to_owned());
     request.not_family = vec![family.to_owned()];
-    match nirvana_seat::pick(table, world, &request) {
-        Ok(pick) => Ok((pick, false)),
-        Err(first) => {
-            request.not_family.clear();
-            match nirvana_seat::pick(table, world, &request) {
-                Ok(mut pick) => {
-                    pick.reason = format!("{mark} ({family}), in a fresh session: {}", pick.reason);
-                    Ok((pick, true))
-                }
-                Err(_) => Err(first),
-            }
-        }
+    let mut pick = nirvana_seat::pick(table, world, &request)?;
+    let same = pick.same_family_fallback;
+    if same {
+        pick.reason = format!("{mark}: {}", pick.reason);
     }
+    Ok((pick, same))
 }
 
 fn family_of(table: Option<&Table>, seat: &str) -> String {
@@ -1459,7 +1454,9 @@ fn live_ports(pane: Option<&str>) -> Result<Vec<u16>, String> {
     .iter()
     .find_map(|pointer| value.pointer(pointer).and_then(Value::as_u64))
     .ok_or("pane process-info named no shell pid")? as u32;
-    let (processes, listeners) = tables::read();
+    // The Spaces square's own reader (`nirvana_servers::read`), so the gate and the square see one table.
+    let processes = crate::nirvana_servers::read::processes();
+    let listeners = crate::nirvana_servers::read::listeners();
     Ok(pane_ports(shell, &processes, &listeners))
 }
 
@@ -2596,113 +2593,6 @@ fn status_cli(project: &Project, args: Args) -> std::io::Result<()> {
         );
     }
     Ok(())
-}
-
-/// The process and listener tables, read once. `nirvana_servers` reads the same two in a private module; the O5
-/// record names the one-word hunk that would share it, and then this copy goes.
-mod tables {
-    use crate::nirvana_servers::{Listener, Process};
-
-    #[cfg(windows)]
-    pub fn read() -> (Vec<Process>, Vec<Listener>) {
-        use std::mem::size_of;
-        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-        use windows_sys::Win32::NetworkManagement::IpHelper::{
-            GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID,
-            TCP_TABLE_OWNER_PID_LISTENER,
-        };
-        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-            TH32CS_SNAPPROCESS,
-        };
-        let mut processes = Vec::new();
-        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-        if snapshot != INVALID_HANDLE_VALUE {
-            let mut entry = PROCESSENTRY32W {
-                dwSize: size_of::<PROCESSENTRY32W>() as u32,
-                ..Default::default()
-            };
-            let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
-            while ok {
-                let len = entry
-                    .szExeFile
-                    .iter()
-                    .position(|unit| *unit == 0)
-                    .unwrap_or(entry.szExeFile.len());
-                processes.push(Process {
-                    pid: entry.th32ProcessID,
-                    parent_pid: entry.th32ParentProcessID,
-                    name: String::from_utf16_lossy(&entry.szExeFile[..len]),
-                });
-                ok = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
-            }
-            unsafe { CloseHandle(snapshot) };
-        }
-        fn table(family: u32) -> Vec<u8> {
-            let mut size = 0u32;
-            for _ in 0..4 {
-                let mut buffer = vec![0u8; size as usize];
-                let pointer = if buffer.is_empty() {
-                    std::ptr::null_mut()
-                } else {
-                    buffer.as_mut_ptr().cast()
-                };
-                let result = unsafe {
-                    GetExtendedTcpTable(
-                        pointer,
-                        &mut size,
-                        0,
-                        family,
-                        TCP_TABLE_OWNER_PID_LISTENER,
-                        0,
-                    )
-                };
-                match result {
-                    0 if !buffer.is_empty() => return buffer,
-                    0 | 122 => continue,
-                    _ => return Vec::new(),
-                }
-            }
-            Vec::new()
-        }
-        fn rows<T: Copy>(buffer: &[u8]) -> Vec<T> {
-            if buffer.len() < 4 {
-                return Vec::new();
-            }
-            let count = u32::from_ne_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
-            let start = 4usize.next_multiple_of(std::mem::align_of::<T>());
-            (0..count)
-                .filter_map(|index| {
-                    let offset = start + index * size_of::<T>();
-                    (offset + size_of::<T>() <= buffer.len()).then(|| unsafe {
-                        std::ptr::read_unaligned(buffer.as_ptr().add(offset).cast::<T>())
-                    })
-                })
-                .collect()
-        }
-        let port = |raw: u32| u16::from_be((raw & 0xFFFF) as u16);
-        let mut listeners: Vec<Listener> = rows::<MIB_TCPROW_OWNER_PID>(&table(2))
-            .into_iter()
-            .map(|row| Listener {
-                pid: row.dwOwningPid,
-                port: port(row.dwLocalPort),
-            })
-            .collect();
-        listeners.extend(
-            rows::<MIB_TCP6ROW_OWNER_PID>(&table(23))
-                .into_iter()
-                .map(|row| Listener {
-                    pid: row.dwOwningPid,
-                    port: port(row.dwLocalPort),
-                }),
-        );
-        (processes, listeners)
-    }
-
-    #[cfg(not(windows))]
-    pub fn read() -> (Vec<Process>, Vec<Listener>) {
-        (Vec::new(), Vec::new())
-    }
 }
 
 #[cfg(test)]
