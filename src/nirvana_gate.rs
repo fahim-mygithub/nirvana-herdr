@@ -495,7 +495,14 @@ pub fn cases(output: &str) -> Vec<(String, bool)> {
         }
         match first {
             "PASSED" | "XFAIL" => push(parts.next().unwrap_or(""), true),
-            "FAILED" | "ERROR" | "XPASS" => push(parts.next().unwrap_or(""), false),
+            // unittest ends `FAILED (errors=2)`: a count, not a case (the scripted run of 2026-10-18 read it as a
+            // fourth case of a three-case check).
+            "FAILED" | "ERROR" | "XPASS" => {
+                let id = parts.next().unwrap_or("");
+                if !id.starts_with('(') {
+                    push(id, false);
+                }
+            }
             "test" => {
                 if let Some((id, result)) = line[4..].split_once(" ... ") {
                     match result.trim() {

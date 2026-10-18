@@ -639,7 +639,8 @@ fn held_out_cases_parse_from_pytest_cargo_and_unittest() {
     );
     assert_eq!(
         cases(
-            "test_mul (check.TestMul.test_mul) ... FAIL\ntest_add (check.TestMul.test_add) ... ok"
+            "test_mul (check.TestMul.test_mul) ... FAIL\ntest_add (check.TestMul.test_add) ... ok\n\
+             ERROR: test_mul (check.TestMul.test_mul)\n----\nRan 2 tests in 0.001s\n\nFAILED (errors=1)"
         ),
         vec![
             ("check.TestMul.test_mul".to_owned(), false),
