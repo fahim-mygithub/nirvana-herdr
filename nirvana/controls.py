@@ -1036,6 +1036,26 @@ CONTROLS: tuple[Control, ...] = (
 )
 
 
+
+def _package_controls() -> tuple[Control, ...]:
+    """Each package's controls in its own file, `nirvana/controls.d/<package>.py`, defining `CONTROLS`.
+
+    Plan 12 builds packages in parallel. Packages that each inserted their block into the one tuple above lost a
+    `    ),` at every merge (orchestrator memory, controls-blocks-collide-at-one-anchor), so a new package's controls
+    go in their own file and only the files are merged. `Control` is passed in; nothing else is imported.
+    """
+    found: list[Control] = []
+    for path in sorted((ROOT / "nirvana" / "controls.d").glob("*.py")):
+        scope: dict = {"Control": Control}
+        exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), scope)
+        found.extend(scope.get("CONTROLS", ()))
+    return tuple(found)
+
+
+CONTROLS = CONTROLS + _package_controls()
+_names = [c.name for c in CONTROLS]
+assert len(_names) == len(set(_names)), f"duplicate control names: {sorted({n for n in _names if _names.count(n) > 1})}"
+
 def command(c: Control) -> list[str]:
     if c.kind == "rust":
         return ["cargo", "nextest", "run", "--locked", "--no-fail-fast", c.test]
@@ -1077,7 +1097,12 @@ def main(argv: list[str] | None = None) -> int:
     failed = 0
     for c in chosen:
         if ns.dry_run:
-            print(f"PLAN  {c.name}: {c.file} {c.find!r} -> {c.replace!r}; expect {c.red_line!r} for {c.test}")
+            # The count, because a dry run that only printed the plan never noticed five controls whose find text
+            # had gone (found by the O1 builder, 2026-10-17).
+            count = (ROOT / c.file).read_bytes().count(c.find.encode("utf-8"))
+            failed += count != 1
+            print(f"{'PLAN' if count == 1 else 'FAIL'}  {c.name}: {c.file} finds {count}x {c.find!r} -> {c.replace!r}; "
+                  f"expect {c.red_line!r} for {c.test}")
             continue
         ok, why = run_one(c)
         restored = (ROOT / c.file).read_bytes().count(c.find.encode("utf-8")) == 1
@@ -1085,7 +1110,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{'PASS' if ok and restored else 'FAIL'}  {c.name}: {why}{'' if restored else '; NOT RESTORED'}",
               flush=True)
     if ns.dry_run:
-        return 0
+        print(f"controls: {len(chosen) - failed} of {len(chosen)} find their text exactly once")
+        return 1 if failed else 0
     print(f"controls: {len(chosen) - failed} of {len(chosen)} reddened their test")
     return 1 if failed else 0
 
