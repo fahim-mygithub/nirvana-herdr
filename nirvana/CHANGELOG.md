@@ -3,7 +3,7 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
-## alpha NEXT (o7): the A/B driver, Nirvana Claude against plain Claude Code on the Moto project (plan 12 O7)
+## alpha 0.19.0 (2026-10-18): the A/B driver, Nirvana Claude against plain Claude Code on the Moto project (plan 12 O7)
 
 Plan 12, package O7 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` L1, §6.1, §7.4.1, §11 O7; the record is
 `plans/2026-10-17-12-records/o7.md`). No Rust, no version bump: the driver is Python and the orchestrator runs the paid
