@@ -36,13 +36,14 @@ Plan 12, package O5 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §7.3,
   **If you remove this:** the orchestrator re-seats failing work by hand, with no cap and no reason in the journal.
 - **Changed:** load-bearing orders (the class's `blast`) get a reviewer of another family: `gate run` books
   `review.adversary` with the builder's family excluded and prints the `herdr seat run` line; only when no other
-  family has a seat, the builder's own, the reason opening `SAME-FAMILY REVIEW (<family>), in a fresh session` (decision
-  0017's fallback, which O2's `pick` did not have). The reviewer's Work Report is the verdict: `done` approves,
+  family has a seat, the builder's own: O2's `pick` (its fix round's B1) sets `same_family_fallback` and ends the
+  reason "(decision 0017)", and the gate puts `SAME-FAMILY REVIEW: ` (an author's `SAME-FAMILY AUTHOR: `) in front.
+  The reviewer's Work Report is the verdict: `done` approves,
   `blocked` sends back with its gotchas, `needs_answer` waits for the owner.
   **Because:** decision 0017; §7.3.
   **Measured:** `the_reviewer_is_of_another_family_and_only_falls_back_to_the_builders_own_marked`,
   `a_review_verdict_comes_back_as_a_work_report`; controls `gate_reviewer_*`, `gate_fallback_unmarked`,
-  `gate_no_fallback`, `gate_review_blocked_approves`. Scripted through the CLI with hand-written deliveries, no
+  `gate_no_fallback`, `gate_fallback_flag_ignored`, `gate_review_blocked_approves`. Scripted through the CLI with hand-written deliveries, no
   model: a `build.load_bearing` order waited (exit 4) with argon booked against the opus builder's family, and passed
   on the reviewer's `done`.
   **If you remove this:** a model reviews its own family's blind spots, or a family outage refuses every review.
@@ -105,6 +106,26 @@ Plan 12, package O5 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §7.3,
   evidence was its own prose, not a line of its stream, and the gate refused it. Scripted, no model: a lesson with a
   quote from the stream was written, listed by `herdr lessons for`, and indexed in the scratch home's NIRVANA.md.
   **If you remove this:** the next order of a class starts from nothing (old decision 0023).
+- **Changed (the merge onto 0.17.0):** O4b's SubagentStop lines (chain `subagent`, outcome `subagent-<status>`) count
+  toward no tally: `nirvana_seat::tally` skips the chain, so no row of them builds up as failures beside the classes'
+  chains.
+  **Because:** O4b's choice 13: the orchestrator judged a worker subagent, not the gate, and O5's word map would have
+  counted `subagent-done` as a failure (a word it does not know).
+  **Measured:** `the_outcome_words_and_what_the_tally_counts` with two subagent lines; control
+  `seat_tally_counts_subagents`. A hypothesis that a subagent's outcome is worth nothing to the blend: no record yet
+  holds one beside a gated order of the same seat.
+  **If you remove this:** each subagent adds a failure to a `subagent` row of its seat and effort.
+- **Changed (the merge onto 0.17.0):** O4b's digest reads open proposals through `nirvana_retro::open` (its copy is
+  gone); the served axis reads `nirvana_servers::read` (both `mod read` now `pub(crate)`; the gate's copy is gone);
+  the gate books through `load_leases` and `book_pick`; a new `NIRVANA.md` gets O4b's head whichever writer is first;
+  the gate skill names herdr by path, as O4b's skills do.
+  **Because:** each copy was there only because the other package had not merged; O4b measured that a plain `herdr`
+  in Nirvana Claude's shell is upstream herdr ("unknown command: nirvana").
+  **Measured:** `the_board_and_lessons_lines_survive_each_others_write`, `only_open_proposals_are_named`; controls
+  `o4b_md_*`, `o4b_proposals_*` (now on `nirvana_retro.rs`). Live at the merge: a haiku-low order passed and merged,
+  one was sent back for `test_sub` never printing, the lesson and board lines sat side by side in the scratch
+  NIRVANA.md, and the digest named the retro's open proposals.
+  **If you remove this:** two readers of one file drift apart, and the gate skill's commands run upstream herdr.
 
 ## alpha 0.17.0 (2026-10-18): the Nirvana Claude plugin's hooks, worker agents, skills and statusline; the launch keeps Claude Code's own prompt (plan 12 O4b)
 
