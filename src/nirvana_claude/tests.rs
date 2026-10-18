@@ -552,6 +552,95 @@ fn a_worker_subagents_outcome_is_recorded_under_its_seat_effort_and_class() {
     }
 }
 
+// A real worker's transcript, trimmed (live 2026-10-18, scenario M9): 8 responses, the fifth written as five lines
+// whose output counts read 3, 3, 3, 3, 2325, and a last response that is a `SubagentHandback` call with prose.
+const HANDBACK: &str = include_str!("fixtures/subagent_handback.jsonl");
+
+#[test]
+fn a_response_written_as_many_lines_counts_its_last_usage() {
+    // By hand, the last line of each message id: input 2 x 8 = 16; cache writes 31934 + 4701 + 2625 + 2637 + 1866
+    // + 2767 + 576 + 1765 = 48871; cache reads 0 + 31934 + 36635 + 39260 + 41897 + 43763 + 46530 + 47106 = 287125;
+    // output 374 + 475 + 320 + 5 + 2325 + 8 + 8 + 26 = 3541. Keeping the first line of each id gave output 98.
+    let (brief, tokens) = read_transcript(HANDBACK);
+    assert!(brief.starts_with("Class: build.bounded"));
+    assert_eq!(
+        tokens,
+        Tokens {
+            input: 16,
+            cache_write: 48871,
+            cache_read: 287125,
+            output: 3541
+        }
+    );
+}
+
+#[test]
+fn a_handback_report_is_read_from_the_call_and_prose_is_its_own_outcome() {
+    let table = table();
+    let hook = json!({"agent_type": "nirvana:worker-sonnet-medium", "agent_id": "a663", "last_assistant_message": ""});
+    let message = handback_message(HANDBACK).expect("the fixture ends in a handback");
+    assert!(message.starts_with("I added `/api/health`"));
+
+    // Prose in the handback: reported, but not as a Work Report.
+    let line = subagent_line(&table, &hook, HANDBACK).unwrap().unwrap();
+    assert_eq!(line.outcome, "subagent-prose-report");
+    let summary = line.extra["summary"].as_str().unwrap();
+    assert_eq!(summary.chars().count(), 200);
+    assert!(message.starts_with(summary));
+
+    // The same call carrying the fenced json block is a report.
+    let handed = |message: &str| {
+        [
+            json!({"type": "user", "message": {"role": "user", "content": "Class: review.adversary\nOrder: rev-1\nRun: live1"}}),
+            json!({"type": "assistant", "message": {"id": "msg_1", "content": [{"type": "tool_use", "name": "SubagentHandback", "input": {"message": message}}], "usage": {"output_tokens": 5}}}),
+        ]
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+    };
+    let line = subagent_line(&table, &hook, &handed(REPORT))
+        .unwrap()
+        .unwrap();
+    assert_eq!(line.outcome, "subagent-done");
+    assert!(line.extra.get("summary").is_none());
+
+    // A final text that is a report still wins, and no handback and no report is still no-report.
+    let hook_text = json!({"agent_type": "nirvana:worker-sonnet-medium", "agent_id": "a663", "last_assistant_message": REPORT});
+    assert_eq!(
+        subagent_line(&table, &hook_text, HANDBACK)
+            .unwrap()
+            .unwrap()
+            .outcome,
+        "subagent-done"
+    );
+    let line = subagent_line(&table, &hook, &transcript())
+        .unwrap()
+        .unwrap();
+    assert_eq!(line.outcome, "subagent-no-report");
+    let line = subagent_line(&table, &hook, &handed("  "))
+        .unwrap()
+        .unwrap();
+    assert_eq!(line.outcome, "subagent-no-report");
+}
+
+const WORK_REPORT_LINE: &str = "The Work Report is the fenced `json` block inside your final message itself, whether you end with a text reply or a SubagentHandback call; prose in the message alone is not a report.";
+
+#[test]
+fn every_worker_agent_says_the_work_report_is_in_the_final_message() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("nirvana/claude/agents");
+    for name in [
+        "haiku-low",
+        "opus-high",
+        "opus-medium",
+        "sonnet-low",
+        "sonnet-medium",
+    ] {
+        let text = std::fs::read_to_string(dir.join(format!("worker-{name}.md"))).unwrap();
+        assert!(text.contains(WORK_REPORT_LINE), "worker-{name}");
+    }
+}
+
 #[test]
 fn the_work_report_is_found_fenced_bare_or_last() {
     assert_eq!(report_in(REPORT).unwrap()["status"], "done");

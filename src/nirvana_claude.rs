@@ -955,11 +955,12 @@ fn message_text(message: &Value) -> String {
 }
 
 /// A subagent's transcript: its brief (the first user message) and its tokens, each API response once. Claude
-/// Code writes one line per content block with the response's usage on each, so lines are counted by message id.
+/// Code writes one line per content block with the response's usage so far on each, so lines are grouped by message
+/// id and the group's largest figure per field counts: the last line holds the final output count (live on
+/// 2026-10-18 a response's lines read 3, 3, 3, 2325, and keeping the first gave a record of 98 output for ~3,500).
 pub fn read_transcript(text: &str) -> (String, Tokens) {
     let mut brief = None;
-    let mut seen = std::collections::HashSet::new();
-    let mut tokens = Tokens::default();
+    let mut seen: std::collections::HashMap<String, [u64; 4]> = std::collections::HashMap::new();
     for line in text.lines() {
         let Ok(entry) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
@@ -981,19 +982,47 @@ pub fn read_transcript(text: &str) -> (String, Tokens) {
                 let Some(usage) = message.get("usage") else {
                     continue;
                 };
-                if !seen.insert(id) {
-                    continue;
-                }
                 let n = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
-                tokens.input += n("input_tokens");
-                tokens.cache_write += n("cache_creation_input_tokens");
-                tokens.cache_read += n("cache_read_input_tokens");
-                tokens.output += n("output_tokens");
+                let row = [
+                    n("input_tokens"),
+                    n("cache_creation_input_tokens"),
+                    n("cache_read_input_tokens"),
+                    n("output_tokens"),
+                ];
+                let slot = seen.entry(id).or_insert([0; 4]);
+                for (kept, now) in slot.iter_mut().zip(row) {
+                    *kept = (*kept).max(now);
+                }
             }
             _ => {}
         }
     }
+    let mut tokens = Tokens::default();
+    for [input, cache_write, cache_read, output] in seen.into_values() {
+        tokens.input += input;
+        tokens.cache_write += cache_write;
+        tokens.cache_read += cache_read;
+        tokens.output += output;
+    }
     (brief.unwrap_or_default(), tokens)
+}
+
+/// The `message` of the last `SubagentHandback` call in a subagent's transcript. A worker that ends through that tool
+/// writes its report there and has no final text block, so the hook's `last_assistant_message` is empty of it.
+pub fn handback_message(transcript: &str) -> Option<String> {
+    transcript
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+        .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("assistant"))
+        .flat_map(|entry| {
+            entry["message"]["content"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter(|block| block.get("name").and_then(Value::as_str) == Some("SubagentHandback"))
+        .filter_map(|block| block["input"]["message"].as_str().map(str::to_owned))
+        .next_back()
 }
 
 /// The Work Report in a worker's last message: the message itself when it is JSON, else its last fenced block
@@ -1054,11 +1083,19 @@ pub fn subagent_line(
             .get("agent_id")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
-        let outcome = match report_in(
-            hook.get("last_assistant_message")
-                .and_then(Value::as_str)
-                .unwrap_or(""),
-        ) {
+        let said = hook
+            .get("last_assistant_message")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        // The report is in the last text, else in the last handback call's message (a worker that ends through
+        // SubagentHandback has no final text block).
+        let handback = handback_message(transcript);
+        let report = report_in(said).or_else(|err| match &handback {
+            Some(message) => report_in(message),
+            None => Err(err),
+        });
+        let mut summary = None;
+        let outcome = match report {
             Ok(report) => format!(
                 "subagent-{}",
                 report
@@ -1066,10 +1103,18 @@ pub fn subagent_line(
                     .and_then(Value::as_str)
                     .unwrap_or("done")
             ),
-            Err(_) => "subagent-no-report".to_owned(),
+            // A handback that says what it did in prose has reported, in the wrong shape: not the same fact as a
+            // worker that said nothing, so it gets its own word and the start of what it said.
+            Err(_) => match handback.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+                Some(message) => {
+                    summary = Some(message.chars().take(200).collect::<String>());
+                    "subagent-prose-report".to_owned()
+                }
+                None => "subagent-no-report".to_owned(),
+            },
         };
         let tokens = (tokens != Tokens::default()).then_some(tokens);
-        let line = json!({
+        let mut line = json!({
             "order": fields.order.unwrap_or_else(|| format!("sub-{agent}")),
             "run": fields.run,
             "seat": seat,
@@ -1079,6 +1124,9 @@ pub fn subagent_line(
             "outcome": outcome,
             "tokens": tokens,
         });
+        if let Some(summary) = summary {
+            line["summary"] = Value::String(summary);
+        }
         serde_json::from_value(line).map_err(|err| err.to_string())
     })())
 }

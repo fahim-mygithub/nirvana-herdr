@@ -3,6 +3,29 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.19.2 (2026-10-18): the subagent record counts every token and reads the handback report
+
+Found by the orchestrator in the first live end-to-end run (O7 scenario M9, 2026-10-18); the evidence is one worker's
+transcript, trimmed into `src/nirvana_claude/fixtures/subagent_handback.jsonl`.
+
+- **Changed:** `read_transcript` (`src/nirvana_claude.rs`) groups assistant lines by message id and keeps the largest
+  figure per field, where it kept the first line of each id. `subagent_line` reads the Work Report from the last
+  `SubagentHandback` call's `message` when the hook's last text has none, and a handback that is prose records the new
+  outcome `subagent-prose-report` with its first 200 characters as `summary`; a worker that said nothing is still
+  `subagent-no-report`. The five `worker-*.md` say the report is the fenced `json` block in the final message itself,
+  text reply or handback. Two `o4b` controls re-pinned to the changed lines.
+- **Because:** Claude Code writes one line per content block and each carries the response's usage so far, so the last
+  line holds the final output count. The worker ended through `SubagentHandback`, which has no final text block.
+- **Measured:** in the fixture one message id reads output 3, 3, 3, 3, 2325. The record held output 98; counting the last line
+  of each id gives input 16, cache write 48871, cache read 287125, output 3541 (summed by hand in the test). The
+  record said `subagent-no-report` for a worker that had written a full report. Word choice: `prose-report` over
+  `no-report` because the worker did report, in the wrong shape; the tally treats any non-pass word as a failure
+  either way, so the word only separates the two causes. The handback report is read by the same `report_in`, so a
+  handback carrying the fenced block records `subagent-done`.
+- **If you remove this:** every subagent's output tokens are undercounted by its first-line figure (98 of 3,541 here),
+  which understates its use against the seat's windows, and a handback worker's report is lost as `no-report`.
+  Hypothesis: that other tools that end a worker (not seen live) put their report in a `message` field too.
+
 ## alpha 0.19.1 (2026-10-18): O7 scenario M9, the first live seated order
 
 - **Changed:** the A/B scenarios gain M9: M5's health route, a `/api/clips` route, tests for both, and a commit. Its

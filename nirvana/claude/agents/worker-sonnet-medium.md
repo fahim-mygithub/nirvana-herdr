@@ -21,6 +21,8 @@ Do the order in the brief, and only that order:
   `"${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe" jev file|text --ask "..."`. That path is the fork's herdr; a
   `herdr` on PATH may be upstream herdr, which has no `jev`.
 
+The Work Report is the fenced `json` block inside your final message itself, whether you end with a text reply or a SubagentHandback call; prose in the message alone is not a report.
+
 End with the Work Report, the shape every Nirvana worker ends with (O3's schema), as a fenced `json` block and
 nothing after it:
 

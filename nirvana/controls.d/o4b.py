@@ -111,13 +111,13 @@ CONTROLS = (
 
     # subagent-stop (SubagentStop): the record line.
     Control("o4b_sub_tokens_twice", CLAUDE,
-            "                if !seen.insert(id) {", "                if !seen.insert(id) && false {",
+            "*kept = (*kept).max(now);", "*kept += now;",
             "a_worker_subagents_outcome_is_recorded_under_its_seat_effort_and_class", "rust"),
     Control("o4b_sub_on_class_chain", CLAUDE,
             '            "chain": SUBAGENT_CHAIN,', '            "chain": null,',
             "a_worker_subagents_outcome_is_recorded_under_its_seat_effort_and_class", "rust"),
     Control("o4b_sub_no_report_passes", CLAUDE,
-            'Err(_) => "subagent-no-report".to_owned(),', 'Err(_) => "subagent-done".to_owned(),',
+            'None => "subagent-no-report".to_owned(),', 'None => "subagent-done".to_owned(),',
             "a_worker_subagents_outcome_is_recorded_under_its_seat_effort_and_class", "rust"),
     Control("o4b_sub_default_class", CLAUDE,
             "        let class = fields.class.ok_or_else(|| {",
