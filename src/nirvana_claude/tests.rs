@@ -195,13 +195,29 @@ fn the_digest_draws_the_foots_pools_and_says_the_hidden_ones_have_headroom() {
     );
 
     // A hidden pool at its floor has no headroom, and one that is not read is not said to have any.
+    // The runs and proposals are cleared, so the line has room and its absence is the rule's, not the budget's.
     let mut digest = full_digest();
+    digest.runs.clear();
+    digest.proposals.clear();
     digest.sources[2].readings = vec![
         reading("google3p", "5h", 0.96, 3600, 30),
         reading("google3p", "week", 0.2, 86_400, 30),
     ];
     let text = digest_text(&digest);
     assert!(!text.contains("Not in the foot"), "{text}");
+    // With Argon read again, the line comes back naming only Argon.
+    digest.sources[2]
+        .readings
+        .push(reading("argon", "week", 0.0101, 6 * 86_400, 30));
+    let text = digest_text(&digest);
+    let hidden = text
+        .lines()
+        .find(|l| l.starts_with("Not in the foot"))
+        .expect("the line");
+    assert!(
+        hidden.contains("Argon") && !hidden.contains("G\u{b7}Claude"),
+        "{hidden}"
+    );
 }
 
 #[test]

@@ -127,5 +127,10 @@ All `/context` runs: `claude -p /context --output-format json` from Python with 
 
 ## Controls
 
-57 in `nirvana/controls.d/o4b.py`, each run alone with `controls.py --only <exact name>`; results in the package
-report.
+57 in `nirvana/controls.d/o4b.py`, each run alone with `controls.py --only <exact name>` from a list argv, names
+stripped of carriage returns, the expected result (every one PASS, `git status --porcelain` unchanged) written
+before the run; `o4a_agent_effort_high`, whose file O4b emptied to front matter, was run again too. 57 of 57 and
+O4a's reddened their test, the tree unchanged after each batch. One did not on the first run, and was right not to:
+`o4b_digest_headroom_ignores_floor` stayed green because its test's second case had the full runs and proposals, so
+the budget dropped the hidden-pools line whatever the rule said. The case now clears them and adds a pool back to
+show the line returns; then PASS.
