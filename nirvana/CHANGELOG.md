@@ -3,6 +3,58 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha NEXT (o7): the A/B driver, Nirvana Claude against plain Claude Code on the Moto project (plan 12 O7)
+
+Plan 12, package O7 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` L1, §6.1, §7.4.1, §11 O7; the record is
+`plans/2026-10-17-12-records/o7.md`). No Rust, no version bump: the driver is Python and the orchestrator runs the paid
+sequence. The version is the orchestrator's to bump at the merge.
+
+- **Changed:** `nirvana/bench/ab.py`, with `run <out> <scenario> <N|C>`, `sequence <out>`, `table <out>` and `usage`.
+  Arm N opens Nirvana Claude (the O4b launch, read from `src/nirvana_launch.rs` and held to it by a test) in a pane of
+  an isolated herdr server on the worktree's debug build and plugin, in a fresh `git clone --local` of
+  `D:\MotoProject`, types the scenario's ask once the prompt line is idle, and waits for the end of the run (the
+  orchestrator idle, every `.nirvana/runs/*` answering `herdr run check` with no live worker and no pending step, no
+  wake queued, held for 20 s; a question that opens no run ends at the first idle after the answer). Arm C is
+  `claude -p <ask> --model claude-opus-5-5 --effort medium --output-format stream-json --verbose` in a fresh clone,
+  read line by line. Both write `run.json` with the wall, the truth verdict, tokens in four kinds for the orchestrator
+  and for workers, each pool's `herdr usage --json --refresh` before and after, the seats from the receipt, and the
+  incidents (dead ends, stalls, rate limits, blocked prompts, permission denials, the wall).
+  **Because:** L1 and §11 O7: the owner reads the A/B before the Nirvana Claude port is judged. It is ported from old
+  Nirvana's `bench/drive.py` (the 2026-10-12 Moto A/B) with that daemon's parts left out and its lessons kept: print
+  mode's `json` writes only at exit (stream-json and a line-wise reader), a clone of `D:\MotoProject` lacks untracked
+  files the editor needs (one bench commit, sha256-checked), a "server is up" probe must tell this run's server from the
+  owner's (the api's `project.root`), a verdict that does not arrive is a named gap and never a pass.
+  **Measured:** one smoke run per arm on M1 and one on M2 for arm N, twice (the second time on the final code), all
+  scored by the held-out truth: M1 C 9/9 in 32.6 s, 398,401 gross tokens, $0.529 by the result row; M1 N 9/9 in 22.1 s,
+  350,493 gross; M2 N 11/11 in 67.3 s, 540,235 gross, the editor on 8770 from the clone with the hike post loaded and
+  stopped by the driver. One run each is no claim. Tests `nirvana.test_ab`; controls `o7_*`, each run alone with
+  `--only` (the counts are `controls.py --dry-run`'s, not this prose's).
+  **If you remove this:** the A/B is typed by hand again, and "the run is over" is whoever last looked at the pane.
+- **Changed:** `nirvana/bench/scenarios/moto.json` (M1, M2, M5 of old Nirvana's `moto-20261012.json`, prompts, repo
+  blocks, truth rules, wall limits and the person policy unchanged) and `nirvana/bench/truth/M1.py`, `M2.py`, `M5.py`,
+  `moto_facts.json`, each Python file starting with a line that names its source. M2 and M5 give arm C
+  `--permission-mode auto`.
+  **Because:** a truth written before any run is the only thing that keeps the verdict from being the driver's. The
+  permission mode: arm N's pane starts in auto mode ("auto mode on" on its screen), and the brief's argv in print mode
+  cannot write.
+  **Measured:** a Haiku print-mode probe with the owner's settings: Bash ran, Write was denied ("haven't granted it
+  yet", `permission_denials` in the result row); with `--permission-mode auto` both ran. M1 C on the brief's argv hit one
+  Bash denial in one of two smoke runs and still passed 9/9; M1 keeps the brief's argv.
+  **If you remove this:** arm C cannot build M5, and the A/B compares a pane that may write with a print call that may not.
+- **Changed:** the driver presses the folder-trust prompt's Enter only when the highlighted line is "Yes, I trust this
+  folder", presses Down when it is "No, exit", and only for a clone inside the out directory.
+  **Because:** the prompt's default in Claude Code 2.1.302 is "No, exit". The first smoke pressed Enter on it, again and
+  again, and never got a prompt line.
+  **Measured:** `screen-trust-*` fixtures recorded from the pane; four bench clones trusted in the owner's
+  `~/.claude.json` (listed in the record). Controls `o7_trust_*`.
+  **If you remove this:** the driver trusts the wrong thing or nothing.
+- **Changed (a hypothesis, unmeasured beyond one pane):** `screen_kind` reads a working pane from the spinner line
+  (`✢ Accomplishing… (7s · ↓ 52 tokens)`) and the input box as the LAST prompt line.
+  **Because:** Claude Code 2.1.302 prints no "esc to interrupt", and the lines above the input box that echo earlier asks
+  also start with the prompt mark. **Measured:** a recorded working screen and the same pane after "done"
+  (`screen-working-2.1.302.txt`, `screen-idle-after-ask-2.1.302.txt`); herdr's `agent_status` read `working` for the
+  whole turn on both. **If you remove this:** a pane that has an old ask above its prompt reads as typed text.
+
 ## alpha 0.18.0 (2026-10-18): the completion gate, `herdr gate run|author|merge|status`; the retro; lessons (plan 12 O5)
 
 Plan 12, package O5 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §7.3, §7.4.2, §7.4.3; the record is

@@ -1,0 +1,385 @@
+{
+ "about": "Package P-A2 moto-scenarios, Step 1: what D:/MotoProject's editor serves in the bench's clone, with no media/masters and no root .mp4 attached. Rebuilt by facts_build.py (scratch, not tracked) from `git clone D:/MotoProject` at the sha below plus the attachments named here; every number below came out of that run, none typed. Truth checks M1-M5 rest on these rows.",
+ "measured_at": "2026-10-12T07:09:16+00:00",
+ "python": "3.13.2",
+ "source": "D:/MotoProject",
+ "sha": "60476ebea26919b19138115543efcbd241cdb2a2",
+ "branch": "master",
+ "attached_dirs": [
+  "editor",
+  "index/hike",
+  "angles_hike",
+  "notes/hike_*.json"
+ ],
+ "excluded_names": [
+  "cache",
+  "__pycache__"
+ ],
+ "attached_files": {
+  "scripts/sphere.py": "9ccc0131f1de0c43e459cd442c7313b6b943836a37b82036b742ae6c2927a9b1",
+  "scripts/post.py": "001c87231fbcdbc738bd6e384b9f607c61a7c0186b7e023b7511e53ccb29755e",
+  "scripts/grade_probe.py": "1a08481982e89cc3d9b3fbdbc85cb53135140b4eeb0e2bd2ad884e44c290c07b",
+  "profiles/hike.json": "c21e1962895c51052191fadcef23136ffd36bd527079fbfedee7c5cb5502447a",
+  "plan/post_alum_cave.json": "0992bdc599edacc5279f7aa33bce360ae4859192492558ea34ab512dc1a21593",
+  "plan/post_alum_cave_v2.json": "f4f86599da3c169023220ba787017e9b91baa658ef6d0e5beba4618ccad179f4",
+  "plan/post_alum_cave_v3.json": "363b887bca6098ae1553aa81ef523bdfc9d7acdafa00d0b0fad9070aedae01e2"
+ },
+ "hike_index": {
+  "file": "index/hike/hike_20260908.json",
+  "clip_ids": [
+   "VID_20260908_095715_00_005",
+   "VID_20260908_095715_00_006",
+   "VID_20260908_105510_00_008",
+   "VID_20260908_113923_00_009"
+  ],
+  "count": 4,
+  "insv_paths_exist_on_this_machine": true
+ },
+ "variants": {
+  "brief_dirs_only": {
+   "why": "the brief's attachment list exactly (no repo.files)",
+   "command": "python editor/server/main.py --port 8779 --no-prewarm",
+   "first_200_s": null,
+   "exited": 1,
+   "routes": {},
+   "log": [
+    "Traceback (most recent call last):",
+    "  File \"C:\\Users\\fahim\\AppData\\Local\\Temp\\bench-moto\\scenarios\\facts_brief\\editor\\server\\main.py\", line 41, in <module>",
+    "    from . import frames, segments, sources                        # noqa: E402",
+    "    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^",
+    "  File \"C:\\Users\\fahim\\AppData\\Local\\Temp\\bench-moto\\scenarios\\facts_brief\\editor\\server\\frames.py\", line 33, in <module>",
+    "    from . import sources",
+    "  File \"C:\\Users\\fahim\\AppData\\Local\\Temp\\bench-moto\\scenarios\\facts_brief\\editor\\server\\sources.py\", line 31, in <module>",
+    "    import sphere                         # noqa: E402",
+    "    ^^^^^^^^^^^^^",
+    "ModuleNotFoundError: No module named 'sphere'"
+   ],
+   "mounted_modules": 0,
+   "tracked_dirty_after": []
+  },
+  "full_default_noprewarm": {
+   "command": "python editor/server/main.py --port 8779 --no-prewarm",
+   "first_200_s": 1.08,
+   "exited": null,
+   "routes": {
+    "/openapi.json": {
+     "status": 200,
+     "bytes": 26526
+    },
+    "/api/project": {
+     "status": 200,
+     "bytes": 20873,
+     "body_2k": "{\"kind\":\"reel\",\"project\":{\"name\":\"facts_full\",\"root\":\"C:/Users/fahim/AppData/Local/Temp/bench-moto/scenarios/facts_full\",\"fps\":\"30000/1001\"},\"clips\":[{\"clip\":\"VID_20260726_183835_00_002_013947\",\"source\":\"media/masters/VID_20260726_183835_00_002_013947.mp4\",\"proxy\":\"proxy/VID_20260726_183835_00_002_013947_proxy.mp4\",\"width\":7680,\"height\":3840,\"fps\":\"30000/1001\",\"duration\":933.699433,\"nb_frames\":27983,\"forward_yaw\":-115},{\"clip\":\"VID_20260726_185655_00_003_211010\",\"source\":\"media/masters/VID_20260726_185655_00_003_211010.mp4\",\"proxy\":\"proxy/VID_20260726_185655_00_003_211010_proxy.mp4\",\"width\":7680,\"height\":3840,\"fps\":\"30000/1001\",\"duration\":783.516067,\"nb_frames\":23482,\"forward_yaw\":-115},{\"clip\":\"VID_20260908_095715_00_005\",\"kind\":\"insv\",\"source\":\"D:/Insta360 Studio/VID_20260908_095715_00_005_006-Original/VID_20260908_095715_00_005.insv\",\"proxy\":\"D:/Insta360 Studio/VID_20260908_095715_00_005_006-Original/LRV_20260908_095715_01_005.lrv\",\"width\":7680,\"height\":3840,\"fps\":\"30000/1001\",\"duration\":1799.808,\"nb_frames\":53940,\"forward_yaw\":null},{\"clip\":\"VID_20260908_095715_00_006\",\"kind\":\"insv\",\"source\":\"D:/Insta360 Studio/VID_20260908_095715_00_005_006-Original/VID_20260908_095715_00_006.insv\",\"proxy\":\"D:/Insta360 Studio/VID_20260908_095715_00_005_006-Original/LRV_20260908_095715_01_006.lrv\",\"width\":7680,\"height\":3840,\"fps\":\"30000/1001\",\"duration\":1287.8199,\"nb_frames\":38596,\"forward_yaw\":null},{\"clip\":\"VID_20260908_105510_00_008\",\"kind\":\"insv\",\"source\":\"D:/Insta360 Studio/VID_20260908_105510_00_008.insv\",\"proxy\":\"D:/Insta360 Studio/LRV_20260908_105510_01_008.lrv\",\"width\":7680,\"height\":3840,\"fps\":\"30000/1001\",\"duration\":1703.1014,\"nb_frames\":51042,\"forward_yaw\":null},{\"clip\":\"VID_20260908_113923_00_009\",\"kind\":\"insv\",\"source\":\"D:/Insta360 Studio/VID_20260908_113923_00_009.insv\",\"proxy\":\"E:/hike_work/proxy/VID_20260908_113923_00_009_proxy.mp4\",\"width\":7680,\"height\":3840,\"fps\":\"30000/1001\",\"duration\":3008.5055,\"nb_frames\":90165,\"forward_yaw\":null}],\"angles\":[{\"name\":\"forward\",\"offset\":0,\"pitch\":5,\"h_fov\":75,\"note\":\"Road a",
+     "kind": "reel",
+     "root": "C:/Users/fahim/AppData/Local/Temp/bench-moto/scenarios/facts_full",
+     "hike_ids_in_first_4096": [
+      "VID_20260908_095715_00_005",
+      "VID_20260908_095715_00_006",
+      "VID_20260908_105510_00_008",
+      "VID_20260908_113923_00_009"
+     ]
+    },
+    "/api/manifest": {
+     "status": 200,
+     "bytes": 10845,
+     "body_2k": "{\"version\":1,\"audio\":{\"file\":\"media/audio/jfarrari_the_unknowing.mp3\",\"t0\":32.13,\"t1\":74.8,\"beat_duration\":0.333338,\"bar_duration\":1.333353},\"reel\":{\"beats\":128,\"bars\":32.0,\"duration\":42.6673},\"output\":{\"width\":1080,\"height\":1920,\"fps\":\"30000/1001\"},\"policy\":{\"default_beats\":6,\"min_beats\":3,\"max_beats\":8,\"order\":\"chronological\"},\"segments\":[{\"seq\":0,\"clip\":\"VID_20260726_185655_00_003_211010\",\"source\":\"media/masters/VID_20260726_185655_00_003_211010.mp4\",\"mark_id\":\"m016\",\"score\":1.0,\"tags\":[\"water\",\"scenery\",\"golden-hour\",\"corner\"],\"in\":708.0,\"out\":710.0,\"duration\":2.0,\"beats\":6,\"reel_beat\":0,\"reel_bar\":0.0,\"track_time\":32.13,\"reel_frame_in\":0,\"reel_frame_out\":60,\"frames\":60,\"src_frame_in\":21219,\"src_frame_out\":21279,\"src_in_exact\":708.0073,\"src_out_exact\":710.0093,\"angle\":\"override\",\"yaw\":-160.0,\"pitch\":8,\"roll\":0,\"h_fov\":75,\"v_fov\":107.5124},{\"seq\":1,\"clip\":\"VID_20260726_183835_00_002_013947\",\"source\":\"media/masters/VID_20260726_183835_00_002_013947.mp4\",\"mark_id\":\"m002\",\"score\":1.0,\"tags\":[\"golden-hour\",\"canopy\"],\"in\":139.0,\"out\":141.3334,\"duration\":2.3334,\"beats\":7,\"reel_beat\":6,\"reel_bar\":1.5,\"track_time\":34.13,\"reel_frame_in\":60,\"reel_frame_out\":130,\"frames\":70,\"src_frame_in\":4166,\"src_frame_out\":4236,\"src_in_exact\":139.005533,\"src_out_exact\":141.3412,\"angle\":\"forward\",\"yaw\":-115.0,\"pitch\":5,\"roll\":0,\"h_fov\":75,\"v_fov\":107.5124},{\"seq\":2,\"clip\":\"VID_20260726_183835_00_002_013947\",\"source\":\"media/masters/VID_20260726_183835_00_002_013947.mp4\",\"mark_id\":\"m003\",\"score\":1.0,\"tags\":[\"canopy\",\"open-road\"],\"in\":188.8333,\"out\":191.1667,\"duration\":2.3334,\"beats\":7,\"reel_beat\":13,\"reel_bar\":3.25,\"track_time\":36.4634,\"reel_frame_in\":130,\"reel_frame_out\":200,\"frames\":70,\"src_frame_in\":5659,\"src_frame_out\":5729,\"src_in_exact\":188.821967,\"src_out_exact\":191.157633,\"angle\":\"rider\",\"yaw\":155.0,\"pitch\":0,\"roll\":0,\"h_fov\":70,\"v_fov\":102.4479},{\"seq\":3,\"clip\":\"VID_20260726_183835_00_002_013947\",\"source\":\"media/masters/VID_20260726_183835_00_002_013947.mp4\",\"mark_id\":\"m005\",\"score\":1.0,\"tags\":[\"canopy\"],\"in\":275.0,\"out\":277.0,\""
+    },
+    "/api/finds?limit=2": {
+     "status": 409,
+     "bytes": 87,
+     "body_2k": "{\"error\":\"finds are for a carousel post (plan/post_*.json); the loaded edit is a reel\"}"
+    }
+   },
+   "html_title": "reel editor",
+   "openapi_paths": [
+    "/api/audio/track",
+    "/api/beats",
+    "/api/clip",
+    "/api/cut",
+    "/api/cut/{seq}",
+    "/api/cut/{seq}/retrim",
+    "/api/cuts",
+    "/api/cuts/reorder",
+    "/api/finds",
+    "/api/finds/apply",
+    "/api/finds/thumb/{fid}",
+    "/api/frame",
+    "/api/grade",
+    "/api/grade/asset",
+    "/api/manifest",
+    "/api/manifest/version",
+    "/api/marks",
+    "/api/move/curve",
+    "/api/move/schema",
+    "/api/moves",
+    "/api/preset",
+    "/api/preset/{name}",
+    "/api/preset/{name}/apply",
+    "/api/project",
+    "/api/reel/render",
+    "/api/reel/source",
+    "/api/reel/source/status",
+    "/api/reel/status",
+    "/api/segment/{seq}",
+    "/api/segment/{seq}/render",
+    "/api/speed",
+    "/api/speed/sweep",
+    "/api/stab",
+    "/api/template",
+    "/api/template/{name}",
+    "/api/template/{name}/plan",
+    "/api/title",
+    "/api/title/sheet",
+    "/media/post/{folder}/{name}",
+    "/media/{name}",
+    "/media/{profile}/{name}"
+   ],
+   "log": [
+    "INFO:     Started server process [101224]",
+    "INFO:     Waiting for application startup.",
+    "INFO:     Application startup complete.",
+    "INFO:     Uvicorn running on http://127.0.0.1:8779 (Press CTRL+C to quit)",
+    "manifest: plan/manifest_v4.json",
+    "static:   editor/static",
+    "serving   http://127.0.0.1:8779/",
+    "cuts: optimistic-concurrency guard installed ahead of GET /api/manifest, PATCH /api/segment/{seq} (If-Match / version optional; omitted behaves as before)"
+   ],
+   "mounted_modules": 11,
+   "tracked_dirty_after": [
+    "M scripts/__pycache__/plan.cpython-313.pyc",
+    " M scripts/__pycache__/render.cpython-313.pyc",
+    " M scripts/__pycache__/review_marks.cpython-313.pyc"
+   ]
+  },
+  "full_default_prewarm": {
+   "command": "python editor/server/main.py --port 8779",
+   "first_200_s": 1.08,
+   "exited": null,
+   "routes": {
+    "/api/project": {
+     "status": 200,
+     "bytes": 20873,
+     "body_2k": "{\"kind\":\"reel\",\"project\":{\"name\":\"facts_full\",\"root\":\"C:/Users/fahim/AppData/Local/Temp/bench-moto/scenarios/facts_full\",\"fps\":\"30000/1001\"},\"clips\":[{\"clip\":\"VID_20260726_183835_00_002_013947\",\"source\":\"media/masters/VID_20260726_183835_00_002_013947.mp4\",\"proxy\":\"proxy/VID_20260726_183835_00_002_013947_proxy.mp4\",\"width\":7680,\"height\":3840,\"fps\":\"30000/1001\",\"duration\":933.699433,\"nb_frames\":27983,\"forward_yaw\":-115},{\"clip\":\"VID_20260726_185655_00_003_211010\",\"source\":\"media/masters/VID_20260726_185655_00_003_211010.mp4\",\"proxy\":\"proxy/VID_20260726_185655_00_003_211010_proxy.mp4\",\"width\":7680,\"height\":3840,\"fps\":\"30000/1001\",\"duration\":783.516067,\"nb_frames\":23482,\"forward_yaw\":-115},{\"clip\":\"VID_20260908_095715_00_005\",\"kind\":\"insv\",\"source\":\"D:/Insta360 Studio/VID_20260908_095715_00_005_006-Original/VID_20260908_095715_00_005.insv\",\"proxy\":\"D:/Insta360 Studio/VID_20260908_095715_00_005_006-Original/LRV_20260908_095715_01_005.lrv\",\"width\":7680,\"height\":3840,\"fps\":\"30000/1001\",\"duration\":1799.808,\"nb_frames\":53940,\"forward_yaw\":null},{\"clip\":\"VID_20260908_095715_00_006\",\"kind\":\"insv\",\"source\":\"D:/Insta360 Studio/VID_20260908_095715_00_005_006-Original/VID_20260908_095715_00_006.insv\",\"proxy\":\"D:/Insta360 Studio/VID_20260908_095715_00_005_006-Original/LRV_20260908_095715_01_006.lrv\",\"width\":7680,\"height\":3840,\"fps\":\"30000/1001\",\"duration\":1287.8199,\"nb_frames\":38596,\"forward_yaw\":null},{\"clip\":\"VID_20260908_105510_00_008\",\"kind\":\"insv\",\"source\":\"D:/Insta360 Studio/VID_20260908_105510_00_008.insv\",\"proxy\":\"D:/Insta360 Studio/LRV_20260908_105510_01_008.lrv\",\"width\":7680,\"height\":3840,\"fps\":\"30000/1001\",\"duration\":1703.1014,\"nb_frames\":51042,\"forward_yaw\":null},{\"clip\":\"VID_20260908_113923_00_009\",\"kind\":\"insv\",\"source\":\"D:/Insta360 Studio/VID_20260908_113923_00_009.insv\",\"proxy\":\"E:/hike_work/proxy/VID_20260908_113923_00_009_proxy.mp4\",\"width\":7680,\"height\":3840,\"fps\":\"30000/1001\",\"duration\":3008.5055,\"nb_frames\":90165,\"forward_yaw\":null}],\"angles\":[{\"name\":\"forward\",\"offset\":0,\"pitch\":5,\"h_fov\":75,\"note\":\"Road a",
+     "kind": "reel",
+     "root": "C:/Users/fahim/AppData/Local/Temp/bench-moto/scenarios/facts_full",
+     "hike_ids_in_first_4096": [
+      "VID_20260908_095715_00_005",
+      "VID_20260908_095715_00_006",
+      "VID_20260908_105510_00_008",
+      "VID_20260908_113923_00_009"
+     ]
+    }
+   },
+   "html_title": "reel editor",
+   "log": [
+    "INFO:     Started server process [344428]",
+    "INFO:     Waiting for application startup.",
+    "INFO:     Application startup complete.",
+    "INFO:     Uvicorn running on http://127.0.0.1:8779 (Press CTRL+C to quit)",
+    "manifest: plan/manifest_v4.json",
+    "static:   editor/static",
+    "serving   http://127.0.0.1:8779/",
+    "prewarming 21 frame(s) across 3 ffmpeg workers",
+    "cuts: optimistic-concurrency guard installed ahead of GET /api/manifest, PATCH /api/segment/{seq} (If-Match / version optional; omitted behaves as before)"
+   ],
+   "mounted_modules": 11,
+   "tracked_dirty_after": [
+    "M scripts/__pycache__/plan.cpython-313.pyc",
+    " M scripts/__pycache__/render.cpython-313.pyc",
+    " M scripts/__pycache__/review_marks.cpython-313.pyc"
+   ]
+  },
+  "full_post_v3_noprewarm": {
+   "command": "python editor/server/main.py --port 8779 --no-prewarm --manifest plan/post_alum_cave_v3.json",
+   "first_200_s": 1.08,
+   "exited": null,
+   "routes": {
+    "/openapi.json": {
+     "status": 200,
+     "bytes": 26526
+    },
+    "/api/project": {
+     "status": 200,
+     "bytes": 4031,
+     "body_2k": "{\"kind\":\"post\",\"project\":{\"name\":\"facts_full\",\"root\":\"C:/Users/fahim/AppData/Local/Temp/bench-moto/scenarios/facts_full\",\"fps\":\"30000/1001\"},\"clips\":[{\"clip\":\"VID_20260908_095715_00_005\",\"kind\":\"insv\",\"source\":\"D:/Insta360 Studio/VID_20260908_095715_00_005_006-Original/VID_20260908_095715_00_005.insv\",\"proxy\":\"D:/Insta360 Studio/VID_20260908_095715_00_005_006-Original/LRV_20260908_095715_01_005.lrv\",\"width\":7680,\"height\":3840,\"fps\":\"30000/1001\",\"duration\":1799.808,\"nb_frames\":53940,\"forward_yaw\":null},{\"clip\":\"VID_20260908_095715_00_006\",\"kind\":\"insv\",\"source\":\"D:/Insta360 Studio/VID_20260908_095715_00_005_006-Original/VID_20260908_095715_00_006.insv\",\"proxy\":\"D:/Insta360 Studio/VID_20260908_095715_00_005_006-Original/LRV_20260908_095715_01_006.lrv\",\"width\":7680,\"height\":3840,\"fps\":\"30000/1001\",\"duration\":1287.8199,\"nb_frames\":38596,\"forward_yaw\":null},{\"clip\":\"VID_20260908_105510_00_008\",\"kind\":\"insv\",\"source\":\"D:/Insta360 Studio/VID_20260908_105510_00_008.insv\",\"proxy\":\"D:/Insta360 Studio/LRV_20260908_105510_01_008.lrv\",\"width\":7680,\"height\":3840,\"fps\":\"30000/1001\",\"duration\":1703.1014,\"nb_frames\":51042,\"forward_yaw\":null},{\"clip\":\"VID_20260908_113923_00_009\",\"kind\":\"insv\",\"source\":\"D:/Insta360 Studio/VID_20260908_113923_00_009.insv\",\"proxy\":\"E:/hike_work/proxy/VID_20260908_113923_00_009_proxy.mp4\",\"width\":7680,\"height\":3840,\"fps\":\"30000/1001\",\"duration\":3008.5055,\"nb_frames\":90165,\"forward_yaw\":null}],\"angles\":[{\"name\":\"canopy_up\",\"offset\":0,\"pitch\":40,\"h_fov\":80,\"note\":\"Trunks converge. Overcast sky gaps clip on the raw plate (005 t=600 sky is white); grade protects highlights, it cannot restore them.\",\"roll\":0},{\"name\":\"look_back\",\"offset\":180,\"pitch\":0,\"h_fov\":75,\"note\":\"Puts the wearer in frame. On purpose only.\",\"roll\":0},{\"name\":\"overhang_in\",\"offset\":0,\"pitch\":10,\"h_fov\":85,\"note\":\"Rock roof and the window to the valley. Usually carries a drift from roof to window.\",\"roll\":0},{\"name\":\"ridge_view\",\"offset\":0,\"pitch\":8,\"h_fov\":80,\"note\":\"Layered ridges and cloud. Pitch +8 rather than +5: at 4:5 and 80 deg",
+     "kind": "post",
+     "root": "C:/Users/fahim/AppData/Local/Temp/bench-moto/scenarios/facts_full",
+     "hike_ids_in_first_4096": [
+      "VID_20260908_095715_00_005",
+      "VID_20260908_095715_00_006",
+      "VID_20260908_105510_00_008",
+      "VID_20260908_113923_00_009"
+     ]
+    },
+    "/api/manifest": {
+     "status": 200,
+     "bytes": 10642,
+     "body_2k": "{\"kind\":\"post\",\"version\":1,\"profile\":\"hike\",\"note\":\"Alum Cave Trail, 2026-09-08, v3 after the user's review of v2: every clip stabilised ON THE SPHERE (scripts/stabilise.py; water `lock`, walking `follow`), the walking shot faces FORWARD down the measured heading with the canopy overhead (v2's faced backwards), the overhang is a still and the post ENDS on the bluff, 12 slides. The descent creek moved before the bluff so the destination closes the post.\",\"post_path\":\"plan/post_alum_cave_v3.json\",\"output\":{\"w\":1080,\"h\":1350,\"fps\":\"30000/1001\",\"draft\":{\"w\":544,\"h\":680,\"crf\":22,\"preset\":\"veryfast\",\"interp\":\"cubic\",\"jpeg_q\":3},\"grid_crop\":\"3:4\"},\"reel\":{\"beats\":1140,\"bars\":38.0,\"duration\":38.038,\"frames\":1140},\"audio\":{\"file\":null,\"t0\":0.0,\"t1\":38.038,\"beat_duration\":0.03336666666666667,\"beats_per_bar\":30},\"policy\":{\"min_beats\":15,\"max_beats\":900,\"beats_are\":\"frames\"},\"post\":{\"hold_frames\":75,\"beats_per_bar\":30,\"grades\":[\"open_ridge\",\"overcast_green\",\"rock_overhang\"],\"roster\":\"angles_hike\"},\"segments\":[{\"seq\":0,\"kind\":\"still\",\"clip\":\"VID_20260908_105510_00_008\",\"source\":\"D:/Insta360 Studio/VID_20260908_105510_00_008.insv\",\"mark_id\":\"slide1\",\"angle\":\"ridge_view\",\"yaw\":20,\"pitch\":6,\"roll\":0,\"h_fov\":80,\"v_fov\":92.733,\"beats\":75,\"reel_beat\":0,\"reel_bar\":0.0,\"track_time\":0.0,\"duration\":2.5025,\"in\":800,\"out\":802.5025,\"src_frame_in\":23976,\"src_frame_out\":24051,\"src_in_exact\":799.9992,\"src_out_exact\":802.5017,\"frames\":75,\"reel_frame_in\":0,\"reel_frame_out\":75,\"hold\":true,\"grade\":\"open_ridge\",\"title\":{\"font\":\"bahnschrift\",\"lines\":[{\"text\":\"ALUM CAVE TRAIL\",\"size\":96,\"y\":120,\"color\":\"white\",\"shadow\":4},{\"text\":\"GREAT SMOKY MOUNTAINS\",\"size\":40,\"y\":232,\"color\":\"white\",\"alpha\":0.92,\"shadow\":3}],\"note\":\"Sky area, centred, inside the central 3:4 the profile grid shows. No date.\"},\"note\":\"Cover. Rock slab leading to the ridge under broken cloud. yaw 20 puts the peak right of centre and the slab as a lead-in.\",\"people_note\":\"Three hikers stand on the slab at yaw ~+125, outside this view.\"},{\"seq\":1,\"kind\":\"clip\",\"clip\":\"VID_20260908_0"
+    },
+    "/api/finds?limit=2": {
+     "status": 200,
+     "bytes": 1221,
+     "body_2k": "{\"date\":\"20260908\",\"people_guard\":true,\"counts\":{\"opening\":62,\"texture\":251,\"water\":16,\"frame\":97,\"walk\":3,\"low_angle\":219,\"vista\":58,\"symmetry\":15,\"leading_line\":248},\"total\":969,\"finds\":[{\"id\":\"008_657_opening_120_-25_55\",\"file\":\"VID_20260908_105510_00_008\",\"t\":657.0,\"role\":\"opening\",\"score\":0.986,\"pose\":{\"yaw\":120,\"pitch\":-25,\"h_fov\":55},\"stop\":[637,861],\"creek\":0.0,\"hike_t\":4132.0,\"people\":0.0,\"clip\":null,\"measures\":{\"sky\":0.308,\"water\":0.0,\"median\":0.322,\"clipped\":0.0,\"horizon_y\":0.323,\"subject\":[0.793,0.674],\"thirds\":0.138,\"lines\":[],\"lead\":0.0,\"frame\":0.0,\"symmetry\":0.738,\"texture\":0.0,\"whitewater\":0.0,\"open_band\":0.542},\"in_post\":false,\"thumb\":\"/api/finds/thumb/008_657_opening_120_-25_55\"},{\"id\":\"008_777_opening_0_-10_70\",\"file\":\"VID_20260908_105510_00_008\",\"t\":777.0,\"role\":\"opening\",\"score\":0.986,\"pose\":{\"yaw\":0,\"pitch\":-10,\"h_fov\":70},\"stop\":[637,861],\"creek\":0.0,\"hike_t\":4252.0,\"people\":0.0004,\"clip\":null,\"measures\":{\"sky\":0.273,\"water\":0.0,\"median\":0.273,\"clipped\":0.0,\"horizon_y\":0.318,\"subject\":[0.935,0.104],\"thirds\":0.0,\"lines\":[],\"lead\":0.0,\"frame\":0.0,\"symmetry\":0.469,\"texture\":0.0,\"whitewater\":0.0,\"open_band\":0.716},\"in_post\":false,\"thumb\":\"/api/finds/thumb/008_777_opening_0_-10_70\"}]}"
+    }
+   },
+   "html_title": "reel editor",
+   "openapi_paths": [
+    "/api/audio/track",
+    "/api/beats",
+    "/api/clip",
+    "/api/cut",
+    "/api/cut/{seq}",
+    "/api/cut/{seq}/retrim",
+    "/api/cuts",
+    "/api/cuts/reorder",
+    "/api/finds",
+    "/api/finds/apply",
+    "/api/finds/thumb/{fid}",
+    "/api/frame",
+    "/api/grade",
+    "/api/grade/asset",
+    "/api/manifest",
+    "/api/manifest/version",
+    "/api/marks",
+    "/api/move/curve",
+    "/api/move/schema",
+    "/api/moves",
+    "/api/preset",
+    "/api/preset/{name}",
+    "/api/preset/{name}/apply",
+    "/api/project",
+    "/api/reel/render",
+    "/api/reel/source",
+    "/api/reel/source/status",
+    "/api/reel/status",
+    "/api/segment/{seq}",
+    "/api/segment/{seq}/render",
+    "/api/speed",
+    "/api/speed/sweep",
+    "/api/stab",
+    "/api/template",
+    "/api/template/{name}",
+    "/api/template/{name}/plan",
+    "/api/title",
+    "/api/title/sheet",
+    "/media/post/{folder}/{name}",
+    "/media/{name}",
+    "/media/{profile}/{name}"
+   ],
+   "log": [
+    "INFO:     Started server process [369780]",
+    "INFO:     Waiting for application startup.",
+    "INFO:     Application startup complete.",
+    "INFO:     Uvicorn running on http://127.0.0.1:8779 (Press CTRL+C to quit)",
+    "manifest: plan/post_alum_cave_v3.json",
+    "static:   editor/static",
+    "serving   http://127.0.0.1:8779/",
+    "cuts: optimistic-concurrency guard installed ahead of GET /api/manifest, PATCH /api/segment/{seq} (If-Match / version optional; omitted behaves as before)"
+   ],
+   "mounted_modules": 11,
+   "tracked_dirty_after": [
+    "M scripts/__pycache__/plan.cpython-313.pyc",
+    " M scripts/__pycache__/render.cpython-313.pyc",
+    " M scripts/__pycache__/review_marks.cpython-313.pyc"
+   ]
+  },
+  "full_post_v3_prewarm": {
+   "command": "python editor/server/main.py --port 8779 --manifest plan/post_alum_cave_v3.json",
+   "first_200_s": 1.16,
+   "exited": null,
+   "routes": {
+    "/api/project": {
+     "status": 200,
+     "bytes": 4031,
+     "body_2k": "{\"kind\":\"post\",\"project\":{\"name\":\"facts_full\",\"root\":\"C:/Users/fahim/AppData/Local/Temp/bench-moto/scenarios/facts_full\",\"fps\":\"30000/1001\"},\"clips\":[{\"clip\":\"VID_20260908_095715_00_005\",\"kind\":\"insv\",\"source\":\"D:/Insta360 Studio/VID_20260908_095715_00_005_006-Original/VID_20260908_095715_00_005.insv\",\"proxy\":\"D:/Insta360 Studio/VID_20260908_095715_00_005_006-Original/LRV_20260908_095715_01_005.lrv\",\"width\":7680,\"height\":3840,\"fps\":\"30000/1001\",\"duration\":1799.808,\"nb_frames\":53940,\"forward_yaw\":null},{\"clip\":\"VID_20260908_095715_00_006\",\"kind\":\"insv\",\"source\":\"D:/Insta360 Studio/VID_20260908_095715_00_005_006-Original/VID_20260908_095715_00_006.insv\",\"proxy\":\"D:/Insta360 Studio/VID_20260908_095715_00_005_006-Original/LRV_20260908_095715_01_006.lrv\",\"width\":7680,\"height\":3840,\"fps\":\"30000/1001\",\"duration\":1287.8199,\"nb_frames\":38596,\"forward_yaw\":null},{\"clip\":\"VID_20260908_105510_00_008\",\"kind\":\"insv\",\"source\":\"D:/Insta360 Studio/VID_20260908_105510_00_008.insv\",\"proxy\":\"D:/Insta360 Studio/LRV_20260908_105510_01_008.lrv\",\"width\":7680,\"height\":3840,\"fps\":\"30000/1001\",\"duration\":1703.1014,\"nb_frames\":51042,\"forward_yaw\":null},{\"clip\":\"VID_20260908_113923_00_009\",\"kind\":\"insv\",\"source\":\"D:/Insta360 Studio/VID_20260908_113923_00_009.insv\",\"proxy\":\"E:/hike_work/proxy/VID_20260908_113923_00_009_proxy.mp4\",\"width\":7680,\"height\":3840,\"fps\":\"30000/1001\",\"duration\":3008.5055,\"nb_frames\":90165,\"forward_yaw\":null}],\"angles\":[{\"name\":\"canopy_up\",\"offset\":0,\"pitch\":40,\"h_fov\":80,\"note\":\"Trunks converge. Overcast sky gaps clip on the raw plate (005 t=600 sky is white); grade protects highlights, it cannot restore them.\",\"roll\":0},{\"name\":\"look_back\",\"offset\":180,\"pitch\":0,\"h_fov\":75,\"note\":\"Puts the wearer in frame. On purpose only.\",\"roll\":0},{\"name\":\"overhang_in\",\"offset\":0,\"pitch\":10,\"h_fov\":85,\"note\":\"Rock roof and the window to the valley. Usually carries a drift from roof to window.\",\"roll\":0},{\"name\":\"ridge_view\",\"offset\":0,\"pitch\":8,\"h_fov\":80,\"note\":\"Layered ridges and cloud. Pitch +8 rather than +5: at 4:5 and 80 deg",
+     "kind": "post",
+     "root": "C:/Users/fahim/AppData/Local/Temp/bench-moto/scenarios/facts_full",
+     "hike_ids_in_first_4096": [
+      "VID_20260908_095715_00_005",
+      "VID_20260908_095715_00_006",
+      "VID_20260908_105510_00_008",
+      "VID_20260908_113923_00_009"
+     ]
+    }
+   },
+   "html_title": "reel editor",
+   "log": [
+    "INFO:     Started server process [370464]",
+    "INFO:     Waiting for application startup.",
+    "INFO:     Application startup complete.",
+    "INFO:     Uvicorn running on http://127.0.0.1:8779 (Press CTRL+C to quit)",
+    "manifest: plan/post_alum_cave_v3.json",
+    "static:   editor/static",
+    "serving   http://127.0.0.1:8779/",
+    "prewarming 11 frame(s) across 3 ffmpeg workers",
+    "cuts: optimistic-concurrency guard installed ahead of GET /api/manifest, PATCH /api/segment/{seq} (If-Match / version optional; omitted behaves as before)"
+   ],
+   "mounted_modules": 11,
+   "tracked_dirty_after": [
+    "M scripts/__pycache__/plan.cpython-313.pyc",
+    " M scripts/__pycache__/render.cpython-313.pyc",
+    " M scripts/__pycache__/review_marks.cpython-313.pyc"
+   ]
+  }
+ },
+ "clone_base_of_full": "799928f7543d6766dd26f8b1c7fd814dbc713037",
+ "rendered": {
+  "how": "agent-browser 0.38.2 (merge-sas tools/browser, the pinned win32-x64 binary), AGENT_BROWSER_ALLOWED_DOMAINS=127.0.0.1,localhost, session p-a2-moto, headless; server from the full clone with `--no-prewarm --manifest plan/post_alum_cave_v3.json` on 8779; commands: open http://127.0.0.1:8779/, get title, eval document.title, console, errors, get text body, close. 2026-10-12.",
+  "open_printed": "reel editor",
+  "title_after_scripts": "reel editor",
+  "title_in_static_html": "reel editor",
+  "title_set_by_script": false,
+  "canvases": 17,
+  "console": [
+   "[log] inspector.js: mounted, WebGL2 ok, canvas 540x960 (9:16, draft profile), shader=projection.js",
+   "[log] player.js: mounted · canvas 540x960 (9:16, draft profile) · source /api/reel/source · visibility=visible",
+   "[log] sweep.js: mounted, ONE WebGL2 context, tiles 180x320 (9:16), shader=projection.js"
+  ],
+  "page_errors": [],
+  "body_text_head": [
+   "REEL EDITOR",
+   "plan/post_alum_cave_v3.json · post · 12 slides · 1080x1350 (4:5) · 0:38.04 swiped · 30000/1001 fps · v acfc1d4c281e8c8f",
+   "media /api/reel/source · key 2970287c00d2a021 · 1140f · readyState 4",
+   "ready · post · 12 slides · 1140 frames (stills held 75)",
+   "lanes",
+   "ribbon",
+   "post",
+   "render slide",
+   "render post",
+   "render full",
+   "SHOTS",
+   "12 · plan/post_alum_cave_v3.json"
+  ],
+  "body_text_lines_with_slide_count": [
+   "plan/post_alum_cave_v3.json · post · 12 slides · 1080x1350 (4:5) · 0:38.04 swiped · 30000/1001 fps · v acfc1d4c281e8c8f",
+   "ready · post · 12 slides · 1140 frames (stills held 75)",
+   "12 · plan/post_alum_cave_v3.json",
+   "1\t00_005\tslide2\tside_detail\t75.0\t+5\t55\t120\t797.00\t801.00",
+   "3\t00_006\tslide4\tside_detail\t-60.0\t-25\t55\t120\t747.00\t751.00",
+   "7\t00_008\tslide8\tridge_view\t120.0\t+5\t85\t75\t619.00\t621.50"
+  ],
+  "only_after_scripts": {
+   "facts": [
+    "the status line 'ready · post · 12 slides · 1140 frames (stills held 75)'",
+    "the header line 'plan/post_alum_cave_v3.json · post · 12 slides · 1080x1350 (4:5) · 0:38.04 swiped'",
+    "the player line 'slide 1/12 SLIDE IN · frame 0/1140'",
+    "the shots table's 12 rows (slide1..slide12)"
+   ],
+   "static_html_has": [
+    "<title>reel editor</title>",
+    "h2 headings: shots, yaw sweep, presets, finds, inspector, source timeline"
+   ],
+   "static_html_lacks": [
+    "12 slides",
+    "slide1",
+    "ridge_view"
+   ]
+  },
+  "m3_fact_chosen": "the post's slide count, 12, said as slides/shots of the post (what the status line, the header, the player and the shots legend all draw). KNOWN LIMIT: 12 is also derivable from the manifest file without a browser, so M3 proves browser use by `browser_used` on the run's transcript, not by this fact.",
+  "m3_rejected": {
+   "title": "'reel editor' is in the static HTML and no script changes it: a curl sees it",
+   "console_error_count": "zero errors: an answer saying 'no errors' is true for a worker that never opened a page, and Claude in Chrome only reads console messages logged after its first console read",
+   "panel_headings": "in the static HTML (h2), so a curl sees them"
+  }
+ }
+}

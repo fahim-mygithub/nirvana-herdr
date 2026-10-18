@@ -1,0 +1,433 @@
+{
+ "schema": "nirvana-ab-scenarios/1",
+ "about": "Ported 2026-10-18 from old Nirvana bench/scenarios/moto-20261012.json (scenarios M1, M2, M5 as measured on 2026-10-12; their repo blocks, prompts, truth rules, wall limits and the person policy `reply` are unchanged). Plan 12 O7: Nirvana Claude (arm N) against plain Claude Code (arm C), both on claude-opus-5-5 at medium effort, so only the harness differs.",
+ "arms": {
+  "N": {
+   "what": "Nirvana Claude: the O4b launch (--plugin-dir, --agent nirvana, --model claude-opus-5-5, --effort medium, the role file) interactive in an isolated herdr server, NIRVANA_ORCHESTRATOR=1"
+  },
+  "C": {
+   "what": "plain Claude Code, claude -p with the owner's normal settings, same model and effort as N",
+   "model": "claude-opus-5-5",
+   "effort": "medium"
+  }
+ },
+ "scenarios": [
+  {
+   "id": "M1",
+   "class": "question",
+   "task_class": "research.read",
+   "status": "ready",
+   "runs_per_arm": 3,
+   "ends_on": "answer",
+   "seat": "Auto",
+   "prompt": "Can you explain what this project does and how I start the reel editor?",
+   "source": {
+    "event": 40567,
+    "event_type": "ask_dispatch",
+    "ts": "2026-09-30T15:04:46.066Z",
+    "run": "run-20260930T150442",
+    "title": "Explain project and how to start",
+    "words": "What is this project and can you start it?",
+    "why_the_owners": "typed by the owner (actor owner); read-only from ~/.nirvana/events.sqlite on 2026-10-12",
+    "shaped": "the owner's 'can you start it' asks for an action; M1 keeps the explain half as a question ('how I start the reel editor') so it is answered, not built, and M2 carries the starting half. 'the reel editor' is the owner's own name for it (events 40972, 41805). No file path, sha or decision in the words."
+   },
+   "repo": {
+    "project": "MotoProject",
+    "source": "D:/MotoProject",
+    "sha": "60476ebea26919b19138115543efcbd241cdb2a2",
+    "branch": "master",
+    "why_this_sha": "the folder's one commit (2026-10-08, 'Start keeping a history of changes (set up by Nirvana)'); read with git log on 2026-10-12",
+    "dirs": [
+     {
+      "from": "D:/MotoProject/editor",
+      "to": "editor",
+      "exclude": [
+       "cache",
+       "__pycache__"
+      ]
+     },
+     {
+      "from": "D:/MotoProject/index/hike",
+      "to": "index/hike",
+      "exclude": [
+       "cache",
+       "__pycache__"
+      ]
+     },
+     {
+      "from": "D:/MotoProject/angles_hike",
+      "to": "angles_hike",
+      "exclude": [
+       "cache",
+       "__pycache__"
+      ]
+     }
+    ],
+    "files": [
+     {
+      "from": "D:/MotoProject/scripts/sphere.py",
+      "to": "scripts/sphere.py",
+      "sha256": "9ccc0131f1de0c43e459cd442c7313b6b943836a37b82036b742ae6c2927a9b1",
+      "why": "editor/server/sources.py imports it; untracked at 60476eb, and without it main.py dies on import (measured: ModuleNotFoundError: No module named 'sphere')"
+     },
+     {
+      "from": "D:/MotoProject/scripts/post.py",
+      "to": "scripts/post.py",
+      "sha256": "001c87231fbcdbc738bd6e384b9f607c61a7c0186b7e023b7511e53ccb29755e",
+      "why": "editor/server/postview.py imports it (`import post as post_cli`); untracked; the next ModuleNotFoundError after sphere"
+     },
+     {
+      "from": "D:/MotoProject/scripts/grade_probe.py",
+      "to": "scripts/grade_probe.py",
+      "sha256": "1a08481982e89cc3d9b3fbdbc85cb53135140b4eeb0e2bd2ad884e44c290c07b",
+      "why": "imported by an editor module once sphere and post resolve; untracked; the third and last ModuleNotFoundError"
+     },
+     {
+      "from": "D:/MotoProject/profiles/hike.json",
+      "to": "profiles/hike.json",
+      "sha256": "c21e1962895c51052191fadcef23136ffd36bd527079fbfedee7c5cb5502447a",
+      "why": "the hike profile a post's /api/project reads (sources.load_profile); untracked"
+     },
+     {
+      "from": "D:/MotoProject/plan/post_alum_cave.json",
+      "to": "plan/post_alum_cave.json",
+      "sha256": "0992bdc599edacc5279f7aa33bce360ae4859192492558ea34ab512dc1a21593",
+      "why": "a hike carousel; untracked; the three are the only plan/post_*.json, so the hike workload exists in the clone only with them"
+     },
+     {
+      "from": "D:/MotoProject/plan/post_alum_cave_v2.json",
+      "to": "plan/post_alum_cave_v2.json",
+      "sha256": "f4f86599da3c169023220ba787017e9b91baa658ef6d0e5beba4618ccad179f4",
+      "why": "as above"
+     },
+     {
+      "from": "D:/MotoProject/plan/post_alum_cave_v3.json",
+      "to": "plan/post_alum_cave_v3.json",
+      "sha256": "363b887bca6098ae1553aa81ef523bdfc9d7acdafa00d0b0fad9070aedae01e2",
+      "why": "the post Claude Code's 49 s run loaded (`--manifest plan/post_alum_cave_v3.json`, decision 0041 §1)"
+     },
+     {
+      "from": "D:/MotoProject/notes/hike_finds_20260908.json",
+      "to": "notes/hike_finds_20260908.json",
+      "sha256": "5ad9e6eeff569c13f877940278542e59191ad321faeed6e97b01d28d0d7c36ae",
+      "why": "the brief's notes/hike_*.json; the Finds panel's data (editor/server/finds.py)"
+     },
+     {
+      "from": "D:/MotoProject/notes/hike_scan_20260908.json",
+      "to": "notes/hike_scan_20260908.json",
+      "sha256": "854d5c85bdc1d4fb9f408cdd970608fa7314564d614a3c776e8f84e311e99a47",
+      "why": "the brief's notes/hike_*.json"
+     }
+    ],
+    "extra_files": [
+     {
+      "to": ".gitignore",
+      "append": "editor/cache/\n"
+     }
+    ],
+    "why_attached": "D:/MotoProject's one commit (60476eb, made by Nirvana) left the very files a run needs untracked -- itself L6 of the serve-and-seat plan, \"the brief knows the tree\". 60476eb left the editor, the hike index and roster, the hike posts and three scripts the editor imports untracked; the bench commit (clone_base) carries them, a DELIBERATE departure from the owner's folder where they are untracked. NOT attached: media/masters (30 GB) and the two root .mp4 -- measured in bench/truth/moto_facts.json, the editor serves every page and API route checked without them. `__pycache__` is excluded as well as `cache`: the owner's bytecode is not source. The hike .insv files are read by absolute path (D:/Insta360 Studio/...) and EXIST on this machine, so a frame request for a hike clip can succeed: the bench does not hide them."
+   },
+   "truth": {
+    "check": "bench/truth/M1.py",
+    "answer": true,
+    "run_dir": true,
+    "rule": "the answer names the 360/equirect-to-vertical-reel pipeline, how to start the editor (main.py or port 8770) and where presets or marks live (angles/ or marks/); HEAD is the base, one branch, one worktree, no tracked change (bytecode aside)"
+   },
+   "target": {
+    "ratio": 1.5
+   },
+   "ceiling": {
+    "ratio": 2
+   },
+   "wall_target_s": 60,
+   "actions_target": 0,
+   "wall_limit_s": 900,
+   "reply": null
+  },
+  {
+   "id": "M2",
+   "class": "ops",
+   "task_class": "ops.terminal",
+   "status": "ready",
+   "seat": "Auto",
+   "prompt": "Can you start the reel project server with the hike workload loaded?",
+   "source": {
+    "event": 43721,
+    "event_type": "ask_dispatch",
+    "ts": "2026-10-08T04:58:18.680Z",
+    "run": "run-20261008T045818-b469",
+    "title": "Start the reel project server",
+    "words": "Can you start the reel project server with the hike workload loaded?",
+    "why_the_owners": "typed by the owner (actor owner) on D:/MotoProject with the chip seat Gemini 3.8 Flash; read-only from ~/.nirvana/events.sqlite on 2026-10-12; kept word for word"
+   },
+   "repo": {
+    "project": "MotoProject",
+    "source": "D:/MotoProject",
+    "sha": "60476ebea26919b19138115543efcbd241cdb2a2",
+    "branch": "master",
+    "why_this_sha": "the folder's one commit (2026-10-08, 'Start keeping a history of changes (set up by Nirvana)'); read with git log on 2026-10-12",
+    "dirs": [
+     {
+      "from": "D:/MotoProject/editor",
+      "to": "editor",
+      "exclude": [
+       "cache",
+       "__pycache__"
+      ]
+     },
+     {
+      "from": "D:/MotoProject/index/hike",
+      "to": "index/hike",
+      "exclude": [
+       "cache",
+       "__pycache__"
+      ]
+     },
+     {
+      "from": "D:/MotoProject/angles_hike",
+      "to": "angles_hike",
+      "exclude": [
+       "cache",
+       "__pycache__"
+      ]
+     }
+    ],
+    "files": [
+     {
+      "from": "D:/MotoProject/scripts/sphere.py",
+      "to": "scripts/sphere.py",
+      "sha256": "9ccc0131f1de0c43e459cd442c7313b6b943836a37b82036b742ae6c2927a9b1",
+      "why": "editor/server/sources.py imports it; untracked at 60476eb, and without it main.py dies on import (measured: ModuleNotFoundError: No module named 'sphere')"
+     },
+     {
+      "from": "D:/MotoProject/scripts/post.py",
+      "to": "scripts/post.py",
+      "sha256": "001c87231fbcdbc738bd6e384b9f607c61a7c0186b7e023b7511e53ccb29755e",
+      "why": "editor/server/postview.py imports it (`import post as post_cli`); untracked; the next ModuleNotFoundError after sphere"
+     },
+     {
+      "from": "D:/MotoProject/scripts/grade_probe.py",
+      "to": "scripts/grade_probe.py",
+      "sha256": "1a08481982e89cc3d9b3fbdbc85cb53135140b4eeb0e2bd2ad884e44c290c07b",
+      "why": "imported by an editor module once sphere and post resolve; untracked; the third and last ModuleNotFoundError"
+     },
+     {
+      "from": "D:/MotoProject/profiles/hike.json",
+      "to": "profiles/hike.json",
+      "sha256": "c21e1962895c51052191fadcef23136ffd36bd527079fbfedee7c5cb5502447a",
+      "why": "the hike profile a post's /api/project reads (sources.load_profile); untracked"
+     },
+     {
+      "from": "D:/MotoProject/plan/post_alum_cave.json",
+      "to": "plan/post_alum_cave.json",
+      "sha256": "0992bdc599edacc5279f7aa33bce360ae4859192492558ea34ab512dc1a21593",
+      "why": "a hike carousel; untracked; the three are the only plan/post_*.json, so the hike workload exists in the clone only with them"
+     },
+     {
+      "from": "D:/MotoProject/plan/post_alum_cave_v2.json",
+      "to": "plan/post_alum_cave_v2.json",
+      "sha256": "f4f86599da3c169023220ba787017e9b91baa658ef6d0e5beba4618ccad179f4",
+      "why": "as above"
+     },
+     {
+      "from": "D:/MotoProject/plan/post_alum_cave_v3.json",
+      "to": "plan/post_alum_cave_v3.json",
+      "sha256": "363b887bca6098ae1553aa81ef523bdfc9d7acdafa00d0b0fad9070aedae01e2",
+      "why": "the post Claude Code's 49 s run loaded (`--manifest plan/post_alum_cave_v3.json`, decision 0041 §1)"
+     },
+     {
+      "from": "D:/MotoProject/notes/hike_finds_20260908.json",
+      "to": "notes/hike_finds_20260908.json",
+      "sha256": "5ad9e6eeff569c13f877940278542e59191ad321faeed6e97b01d28d0d7c36ae",
+      "why": "the brief's notes/hike_*.json; the Finds panel's data (editor/server/finds.py)"
+     },
+     {
+      "from": "D:/MotoProject/notes/hike_scan_20260908.json",
+      "to": "notes/hike_scan_20260908.json",
+      "sha256": "854d5c85bdc1d4fb9f408cdd970608fa7314564d614a3c776e8f84e311e99a47",
+      "why": "the brief's notes/hike_*.json"
+     }
+    ],
+    "extra_files": [
+     {
+      "to": ".gitignore",
+      "append": "editor/cache/\n"
+     }
+    ],
+    "why_attached": "D:/MotoProject's one commit (60476eb, made by Nirvana) left the very files a run needs untracked -- itself L6 of the serve-and-seat plan, \"the brief knows the tree\". 60476eb left the editor, the hike index and roster, the hike posts and three scripts the editor imports untracked; the bench commit (clone_base) carries them, a DELIBERATE departure from the owner's folder where they are untracked. NOT attached: media/masters (30 GB) and the two root .mp4 -- measured in bench/truth/moto_facts.json, the editor serves every page and API route checked without them. `__pycache__` is excluded as well as `cache`: the owner's bytecode is not source. The hike .insv files are read by absolute path (D:/Insta360 Studio/...) and EXIST on this machine, so a frame request for a hike clip can succeed: the bench does not hide them."
+   },
+   "truth": {
+    "check": "bench/truth/M2.py",
+    "answer": true,
+    "served": true,
+    "run_dir": true,
+    "rule": "served.json: GET / 200 with the editor's title; GET /api/project 200 says a hike post is loaded (kind post), names a hike clip id of the tree's index and is served from this run's tree; the answer names 127.0.0.1/localhost with the served port; HEAD is the base, no tracked change (bytecode aside)"
+   },
+   "runs_per_arm": 3,
+   "ends_on": "served",
+   "served": {
+    "ports": [
+     8770
+    ],
+    "path": "/",
+    "api": "/api/project",
+    "why_api": "measured (moto_facts.json): /api/project says the LOADED edit's kind ('post' for a hike carousel, 'reel' for the default manifest_v4), its project.root and the hike clip ids, all inside the first 4 KB the driver keeps; /api/finds answers 409 on a reel and 200 on a post but names no root"
+   },
+   "target": {
+    "ratio": 1.5
+   },
+   "ceiling": {
+    "ratio": 2
+   },
+   "trust": "press",
+   "actions_target": 2,
+   "actions_target_why": "2 presses on a fresh folder, read from the build under test (merge-sas 69cf260): the clone has no servers.json and nirvanad/servers/detect.py finds no app (it reads top-level *.py for a top-level `= FastAPI(`; the editor builds its app inside build_app() in editor/server/main.py), so the Agent's do_here takes the HERE path of nirvanad/agent/here.py: here_trust [Allow] (trust once per folder, 'also in auto mode'), then here_save [Run it], one press that writes the personal row and starts the server with the trust key it answers. A worker-kept server instead raises one server_trust [Run it] (nirvanad/agent/trust_card.py; decision 0041 R4): 1 press, inside this target. The owner's rule -- trust is asked once per folder and command, even in auto mode -- makes these the presses a real user makes on a new folder; the bench's scratch home trusts nothing, so every run is a new folder. Claude Code's arm has no equivalent press (it runs under --dangerously-skip-permissions), so its actions stay 0 and the difference is the trust rule's cost, measured, not a defect.",
+   "wall_limit_s": 1200,
+   "reply": null,
+   "wall_target_s": 60,
+   "wall_target_why": "Claude Code Sonnet 5.5 served it in 49 s on the owner's folder (decision 0041 §1)",
+   "claude_code": {
+    "extra_argv": [
+     "--permission-mode",
+     "auto"
+    ],
+    "why": "MEASURED 2026-10-18 (haiku, print mode, the owner's settings): Bash ran, Write was denied with 'haven't granted it yet'; with --permission-mode auto both ran. Arm N's pane starts in auto mode ('auto mode on' on its screen), so arm C gets the same posture for the scenarios that write or serve. M1 keeps the brief's argv unchanged."
+   }
+  },
+  {
+   "id": "M5",
+   "class": "small",
+   "task_class": "build.bounded",
+   "status": "ready",
+   "seat": "Auto",
+   "runs_per_arm": 3,
+   "ends_on": "base",
+   "prompt": "Add a /api/health endpoint to the editor server that returns the loaded manifest name and how many hike clips are indexed.",
+   "source": {
+    "words": null,
+    "shaped": "user-shaped, not the owner's words: the owner's only MotoProject build ask, 'Hike reel editor design' (run-20261001T063432-bdf5, 2026-10-01), was a plan, and a plan has no objective truth. One sentence a user of this editor would type; it names the route because a health route is named by its path, and no file, sha or decision."
+   },
+   "repo": {
+    "project": "MotoProject",
+    "source": "D:/MotoProject",
+    "sha": "60476ebea26919b19138115543efcbd241cdb2a2",
+    "branch": "master",
+    "why_this_sha": "the folder's one commit (2026-10-08, 'Start keeping a history of changes (set up by Nirvana)'); read with git log on 2026-10-12",
+    "dirs": [
+     {
+      "from": "D:/MotoProject/editor",
+      "to": "editor",
+      "exclude": [
+       "cache",
+       "__pycache__"
+      ]
+     },
+     {
+      "from": "D:/MotoProject/index/hike",
+      "to": "index/hike",
+      "exclude": [
+       "cache",
+       "__pycache__"
+      ]
+     },
+     {
+      "from": "D:/MotoProject/angles_hike",
+      "to": "angles_hike",
+      "exclude": [
+       "cache",
+       "__pycache__"
+      ]
+     }
+    ],
+    "files": [
+     {
+      "from": "D:/MotoProject/scripts/sphere.py",
+      "to": "scripts/sphere.py",
+      "sha256": "9ccc0131f1de0c43e459cd442c7313b6b943836a37b82036b742ae6c2927a9b1",
+      "why": "editor/server/sources.py imports it; untracked at 60476eb, and without it main.py dies on import (measured: ModuleNotFoundError: No module named 'sphere')"
+     },
+     {
+      "from": "D:/MotoProject/scripts/post.py",
+      "to": "scripts/post.py",
+      "sha256": "001c87231fbcdbc738bd6e384b9f607c61a7c0186b7e023b7511e53ccb29755e",
+      "why": "editor/server/postview.py imports it (`import post as post_cli`); untracked; the next ModuleNotFoundError after sphere"
+     },
+     {
+      "from": "D:/MotoProject/scripts/grade_probe.py",
+      "to": "scripts/grade_probe.py",
+      "sha256": "1a08481982e89cc3d9b3fbdbc85cb53135140b4eeb0e2bd2ad884e44c290c07b",
+      "why": "imported by an editor module once sphere and post resolve; untracked; the third and last ModuleNotFoundError"
+     },
+     {
+      "from": "D:/MotoProject/profiles/hike.json",
+      "to": "profiles/hike.json",
+      "sha256": "c21e1962895c51052191fadcef23136ffd36bd527079fbfedee7c5cb5502447a",
+      "why": "the hike profile a post's /api/project reads (sources.load_profile); untracked"
+     },
+     {
+      "from": "D:/MotoProject/plan/post_alum_cave.json",
+      "to": "plan/post_alum_cave.json",
+      "sha256": "0992bdc599edacc5279f7aa33bce360ae4859192492558ea34ab512dc1a21593",
+      "why": "a hike carousel; untracked; the three are the only plan/post_*.json, so the hike workload exists in the clone only with them"
+     },
+     {
+      "from": "D:/MotoProject/plan/post_alum_cave_v2.json",
+      "to": "plan/post_alum_cave_v2.json",
+      "sha256": "f4f86599da3c169023220ba787017e9b91baa658ef6d0e5beba4618ccad179f4",
+      "why": "as above"
+     },
+     {
+      "from": "D:/MotoProject/plan/post_alum_cave_v3.json",
+      "to": "plan/post_alum_cave_v3.json",
+      "sha256": "363b887bca6098ae1553aa81ef523bdfc9d7acdafa00d0b0fad9070aedae01e2",
+      "why": "the post Claude Code's 49 s run loaded (`--manifest plan/post_alum_cave_v3.json`, decision 0041 §1)"
+     },
+     {
+      "from": "D:/MotoProject/notes/hike_finds_20260908.json",
+      "to": "notes/hike_finds_20260908.json",
+      "sha256": "5ad9e6eeff569c13f877940278542e59191ad321faeed6e97b01d28d0d7c36ae",
+      "why": "the brief's notes/hike_*.json; the Finds panel's data (editor/server/finds.py)"
+     },
+     {
+      "from": "D:/MotoProject/notes/hike_scan_20260908.json",
+      "to": "notes/hike_scan_20260908.json",
+      "sha256": "854d5c85bdc1d4fb9f408cdd970608fa7314564d614a3c776e8f84e311e99a47",
+      "why": "the brief's notes/hike_*.json"
+     }
+    ],
+    "extra_files": [
+     {
+      "to": ".gitignore",
+      "append": "editor/cache/\n"
+     }
+    ],
+    "why_attached": "D:/MotoProject's one commit (60476eb, made by Nirvana) left the very files a run needs untracked -- itself L6 of the serve-and-seat plan, \"the brief knows the tree\". 60476eb left the editor, the hike index and roster, the hike posts and three scripts the editor imports untracked; the bench commit (clone_base) carries them, a DELIBERATE departure from the owner's folder where they are untracked. NOT attached: media/masters (30 GB) and the two root .mp4 -- measured in bench/truth/moto_facts.json, the editor serves every page and API route checked without them. `__pycache__` is excluded as well as `cache`: the owner's bytecode is not source. The hike .insv files are read by absolute path (D:/Insta360 Studio/...) and EXIST on this machine, so a frame request for a hike clip can succeed: the bench does not hide them."
+   },
+   "truth": {
+    "check": "bench/truth/M5.py",
+    "answer": false,
+    "run_dir": true,
+    "rule": "on the COMMITTED tip of master (git archive): the editor starts with --no-prewarm --manifest plan/post_alum_cave_v3.json on a free port, GET /api/health is 200 JSON with a string naming post_alum_cave_v3 and an integer equal to the hike index's clip count; / and /api/project still answer; master is ahead of the base (committed_on_base)"
+   },
+   "target": {
+    "ratio": 3
+   },
+   "ceiling": {
+    "ratio": 4
+   },
+   "wall_target_s": 480,
+   "actions_target": 0,
+   "trust": "press",
+   "trust_why": "the ask needs no running server, so actions_target stays 0; but a build worker that starts the editor to try its route and keeps it listening raises a server_trust card at turn end (decision 0041 R4), which the written card policy never presses: the run would stall to its 3600 s wall. Pressing it ends the stall, and each press still counts as a person action over the target, so the meter shows what the worker's choice cost.",
+   "wall_limit_s": 3600,
+   "reply": "Yes.",
+   "claude_code": {
+    "extra_argv": [
+     "--permission-mode",
+     "auto"
+    ],
+    "why": "MEASURED 2026-10-18 (haiku, print mode, the owner's settings): Bash ran, Write was denied with 'haven't granted it yet'; with --permission-mode auto both ran. Arm N's pane starts in auto mode ('auto mode on' on its screen), so arm C gets the same posture for the scenarios that write or serve. M1 keeps the brief's argv unchanged."
+   }
+  }
+ ]
+}

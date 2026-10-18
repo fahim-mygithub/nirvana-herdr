@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import install  # noqa: E402
 import version  # noqa: E402
 from test_windows_shell import *  # noqa: E402,F401,F403  plan 12 O4a: the Windows side of install
+from test_ab import *  # noqa: E402,F401,F403  plan 12 O7: the A/B driver (nirvana/bench/ab.py)
 
 
 class InstallTest(unittest.TestCase):

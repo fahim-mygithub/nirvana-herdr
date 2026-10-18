@@ -1,0 +1,366 @@
+{
+  "auto": true,
+  "bad_lines": 0,
+  "ended": true,
+  "events": 55,
+  "last_seq": 55,
+  "open_proposals": [],
+  "orchestrator": {
+    "missing": "no orchestrator usage event in the journal (Nirvana Claude's hooks log its turns, O4)"
+  },
+  "orchestrator_basis": "usage events with no order",
+  "orders": [
+    {
+      "attempts": 1,
+      "chain": "chore",
+      "class": "chore.script",
+      "cli": "claude",
+      "deferrals": 0,
+      "duration_s": 28,
+      "effort": "low",
+      "last_at": 1792299012,
+      "model": "claude-haiku-5-5",
+      "order": "mul",
+      "override": null,
+      "parent": null,
+      "phase": "gated",
+      "pool": "max",
+      "rate_limited": 0,
+      "reason": "chore.script → haiku low: max 5h 76% used, week 50% used, reserve 15%; next flash (gemini 5h 0% used, week 0.8% used)",
+      "report_status": "done",
+      "reseats": 0,
+      "seat": "haiku",
+      "seated_at": 1792298984,
+      "send_backs": 1,
+      "stalls": 0,
+      "tokens": {
+        "cache_read": 96868,
+        "cache_write": 25747,
+        "input": 12,
+        "output": 1584
+      },
+      "tokens_basis": "the stream's last usage in each of 1 attempt(s), summed",
+      "use": {
+        "5h": 0.000199,
+        "week": 0.000025
+      },
+      "use_basis": "record.jsonl: the order's tokens at its seat's price on its day, per window",
+      "verdict": "sent_back"
+    },
+    {
+      "attempts": 1,
+      "chain": "chore",
+      "class": "chore.script",
+      "cli": "claude",
+      "deferrals": 0,
+      "duration_s": 58,
+      "effort": "low",
+      "last_at": 1792299070,
+      "model": "claude-haiku-5-5",
+      "order": "mul-s1",
+      "override": null,
+      "parent": "mul",
+      "phase": "merged",
+      "pool": "max",
+      "rate_limited": 0,
+      "reason": "chore.script → haiku low: max 5h 76% used, week 50% used, reserve 15%; next flash (gemini 5h 0% used, week 0.8% used)",
+      "report_status": "done",
+      "reseats": 0,
+      "seat": "haiku",
+      "seated_at": 1792299012,
+      "send_backs": 0,
+      "stalls": 0,
+      "tokens": {
+        "cache_read": 142363,
+        "cache_write": 7582,
+        "input": 14,
+        "output": 2002
+      },
+      "tokens_basis": "the stream's last usage in each of 1 attempt(s), summed",
+      "use": {
+        "5h": 0.000135,
+        "week": 0.000017
+      },
+      "use_basis": "record.jsonl: the order's tokens at its seat's price on its day, per window",
+      "verdict": "pass"
+    },
+    {
+      "attempts": 1,
+      "chain": "chore",
+      "class": "chore.script",
+      "cli": "agy",
+      "deferrals": 0,
+      "duration_s": 267,
+      "effort": "low",
+      "last_at": 1792301637,
+      "model": "gemini-3.8-flash-low",
+      "order": "div",
+      "override": null,
+      "parent": null,
+      "phase": "gated",
+      "pool": "gemini",
+      "rate_limited": 0,
+      "reason": "chore.script → flash low: gemini 5h 0% used, week 0.8% used",
+      "report_status": "done",
+      "reseats": 0,
+      "seat": "flash",
+      "seated_at": 1792301370,
+      "send_backs": 1,
+      "stalls": 0,
+      "tokens": {
+        "cache_read": 90962,
+        "cache_write": 0,
+        "input": 95772,
+        "output": 1332
+      },
+      "tokens_basis": "the stream's last usage in each of 1 attempt(s), summed",
+      "use": {
+        "5h": 0.004433,
+        "week": 0.002258
+      },
+      "use_basis": "record.jsonl: the order's tokens at its seat's price on its day, per window",
+      "verdict": "sent_back"
+    },
+    {
+      "attempts": 1,
+      "chain": "chore",
+      "class": "chore.script",
+      "cli": "agy",
+      "deferrals": 0,
+      "duration_s": 99,
+      "effort": "low",
+      "last_at": 1792301736,
+      "model": "gemini-3.8-flash-low",
+      "order": "div-s1",
+      "override": null,
+      "parent": "div",
+      "phase": "merged",
+      "pool": "gemini",
+      "rate_limited": 0,
+      "reason": "chore.script → flash low: gemini 5h 0% used, week 0.8% used",
+      "report_status": "done",
+      "reseats": 0,
+      "seat": "flash",
+      "seated_at": 1792301637,
+      "send_backs": 0,
+      "stalls": 0,
+      "tokens": {
+        "cache_read": 212582,
+        "cache_write": 0,
+        "input": 94144,
+        "output": 1895
+      },
+      "tokens_basis": "the stream's last usage in each of 1 attempt(s), summed",
+      "use": {
+        "5h": 0.004964,
+        "week": 0.002529
+      },
+      "use_basis": "record.jsonl: the order's tokens at its seat's price on its day, per window",
+      "verdict": "pass"
+    },
+    {
+      "attempts": 1,
+      "chain": "chore",
+      "class": "chore.script",
+      "cli": "agy",
+      "deferrals": 0,
+      "duration_s": 35,
+      "effort": "low",
+      "last_at": 1792301790,
+      "model": "gemini-3.8-flash-low",
+      "order": "sub",
+      "override": null,
+      "parent": null,
+      "phase": "gated",
+      "pool": "gemini",
+      "rate_limited": 0,
+      "reason": "chore.script → flash low: gemini 5h 1% used, week 2% used",
+      "report_status": "done",
+      "reseats": 0,
+      "seat": "flash",
+      "seated_at": 1792301755,
+      "send_backs": 1,
+      "stalls": 0,
+      "tokens": {
+        "cache_read": 14275,
+        "cache_write": 0,
+        "input": 65474,
+        "output": 646
+      },
+      "tokens_basis": "the stream's last usage in each of 1 attempt(s), summed",
+      "use": {
+        "5h": 0.002788,
+        "week": 0.00142
+      },
+      "use_basis": "record.jsonl: the order's tokens at its seat's price on its day, per window",
+      "verdict": "sent_back"
+    },
+    {
+      "attempts": 1,
+      "chain": "chore",
+      "class": "chore.script",
+      "cli": "agy",
+      "deferrals": 0,
+      "duration_s": 1,
+      "effort": "low",
+      "last_at": 1792301791,
+      "model": "gemini-3.8-flash-low",
+      "order": "sub-s1",
+      "override": null,
+      "parent": "sub",
+      "phase": "interrupted",
+      "pool": "gemini",
+      "rate_limited": 0,
+      "reason": "chore.script → flash low: gemini 5h 1% used, week 2% used",
+      "report_status": null,
+      "reseats": 0,
+      "seat": "flash",
+      "seated_at": 1792301790,
+      "send_backs": 0,
+      "stalls": 0,
+      "tokens": {
+        "missing": "the worker streamed no usage"
+      },
+      "tokens_basis": "the stream's last usage in each of 1 attempt(s), summed",
+      "use": {
+        "missing": "the record line has no use: its seat has no price or factor"
+      },
+      "use_basis": "record.jsonl",
+      "verdict": {
+        "missing": "no gated event: the gate has not ruled"
+      }
+    }
+  ],
+  "pools_end": {
+    "basis": "usage.json, stale readers read again at the run's end",
+    "readings": [
+      {
+        "pool": "max",
+        "read_at": 1792301751,
+        "source": "claude /usage",
+        "used": 0.95,
+        "window": "5h"
+      },
+      {
+        "pool": "max",
+        "read_at": 1792301751,
+        "source": "claude /usage",
+        "used": 0.53,
+        "window": "week"
+      },
+      {
+        "pool": "max",
+        "read_at": 1792301751,
+        "source": "claude /usage",
+        "used": 0.0,
+        "window": "week.fable"
+      },
+      {
+        "pool": "gemini",
+        "read_at": 1792301751,
+        "source": "agy gemini-5h",
+        "used": 0.010067,
+        "window": "5h"
+      },
+      {
+        "pool": "google3p",
+        "read_at": 1792301751,
+        "source": "agy 3p-5h",
+        "used": 0.0,
+        "window": "5h"
+      },
+      {
+        "pool": "gemini",
+        "read_at": 1792301751,
+        "source": "agy gemini-weekly",
+        "used": 0.01727,
+        "window": "week"
+      },
+      {
+        "pool": "google3p",
+        "read_at": 1792301751,
+        "source": "agy 3p-weekly",
+        "used": 0.040228,
+        "window": "week"
+      },
+      {
+        "pool": "argon",
+        "read_at": 1792301751,
+        "source": "agy gemini-argon-wtu-weekly",
+        "used": 0.066353,
+        "window": "week"
+      }
+    ]
+  },
+  "pools_start": {
+    "basis": "usage.json as cached; each reading's read_at is its age",
+    "readings": [
+      {
+        "pool": "gemini",
+        "read_at": 1792298977,
+        "source": "agy gemini-5h",
+        "used": 0.0,
+        "window": "5h"
+      },
+      {
+        "pool": "google3p",
+        "read_at": 1792298977,
+        "source": "agy 3p-5h",
+        "used": 0.0,
+        "window": "5h"
+      },
+      {
+        "pool": "gemini",
+        "read_at": 1792298977,
+        "source": "agy gemini-weekly",
+        "used": 0.00802,
+        "window": "week"
+      },
+      {
+        "pool": "google3p",
+        "read_at": 1792298977,
+        "source": "agy 3p-weekly",
+        "used": 0.040228,
+        "window": "week"
+      },
+      {
+        "pool": "argon",
+        "read_at": 1792298977,
+        "source": "agy gemini-argon-wtu-weekly",
+        "used": 0.066353,
+        "window": "week"
+      },
+      {
+        "pool": "max",
+        "read_at": 1792298977,
+        "source": "claude /usage",
+        "used": 0.76,
+        "window": "5h"
+      },
+      {
+        "pool": "max",
+        "read_at": 1792298977,
+        "source": "claude /usage",
+        "used": 0.5,
+        "window": "week"
+      },
+      {
+        "pool": "max",
+        "read_at": 1792298977,
+        "source": "claude /usage",
+        "used": 0.0,
+        "window": "week.fable"
+      }
+    ]
+  },
+  "project": "C:\\Users\\fahim\\Desktop\\Pojects\\Nirvana-Herdr-o5\\target\\o5-live\\proj",
+  "run": "o5live",
+  "v": 1,
+  "workers": {
+    "cache_read": 557050,
+    "cache_write": 33329,
+    "input": 255416,
+    "output": 7459
+  },
+  "workers_basis": "the orders' tokens above, summed"
+}

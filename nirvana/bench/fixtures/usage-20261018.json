@@ -1,0 +1,181 @@
+{
+  "now": 1792306222,
+  "pools": [
+    {
+      "failed_at": null,
+      "label": "Claude",
+      "pool": "max",
+      "provider": "claude",
+      "read_at": 1792306082,
+      "state": "ok",
+      "tightest": "week",
+      "windows": [
+        {
+          "age_s": 140,
+          "elapsed": 0.196778,
+          "fresh": true,
+          "pace": 0.943467,
+          "read_at": 1792306082,
+          "resets_at": 1792320540,
+          "resets_in_s": 14318,
+          "resets_text": "Oct 18, 6:49am (America/New_York)",
+          "source": "claude /usage",
+          "stale": null,
+          "used": 0.18,
+          "window": "5h"
+        },
+        {
+          "age_s": 140,
+          "elapsed": 0.231055,
+          "fresh": true,
+          "pace": 1.993627,
+          "read_at": 1792306082,
+          "resets_at": 1792771140,
+          "resets_in_s": 464918,
+          "resets_text": "Oct 23, 11:59am (America/New_York)",
+          "source": "claude /usage",
+          "stale": null,
+          "used": 0.56,
+          "window": "week"
+        },
+        {
+          "age_s": 140,
+          "elapsed": 0.231055,
+          "fresh": true,
+          "pace": 0.5,
+          "read_at": 1792306082,
+          "resets_at": 1792771140,
+          "resets_in_s": 464918,
+          "resets_text": "Oct 23, 11:59am (America/New_York)",
+          "source": "claude /usage",
+          "stale": null,
+          "used": 0.0,
+          "window": "week.fable"
+        }
+      ]
+    },
+    {
+      "failed_at": null,
+      "label": "Gemini",
+      "pool": "gemini",
+      "provider": "antigravity",
+      "read_at": 1792306083,
+      "state": "ok",
+      "tightest": "week",
+      "windows": [
+        {
+          "age_s": 139,
+          "elapsed": 0.261778,
+          "fresh": true,
+          "pace": 0.5,
+          "read_at": 1792306083,
+          "resets_at": 1792319371,
+          "resets_in_s": 13149,
+          "resets_text": null,
+          "source": "agy gemini-5h",
+          "stale": null,
+          "used": 0.009746,
+          "window": "5h"
+        },
+        {
+          "age_s": 139,
+          "elapsed": 0.089287,
+          "fresh": true,
+          "pace": 0.585379,
+          "read_at": 1792306083,
+          "resets_at": 1792856882,
+          "resets_in_s": 550660,
+          "resets_text": null,
+          "source": "agy gemini-weekly",
+          "stale": null,
+          "used": 0.010805,
+          "window": "week"
+        }
+      ]
+    },
+    {
+      "failed_at": null,
+      "label": "Argon",
+      "pool": "argon",
+      "provider": "antigravity",
+      "read_at": 1792306083,
+      "state": "ok",
+      "tightest": "week",
+      "windows": [
+        {
+          "age_s": 139,
+          "elapsed": 0.08775,
+          "fresh": true,
+          "pace": 0.886037,
+          "read_at": 1792306083,
+          "resets_at": 1792857812,
+          "resets_in_s": 551590,
+          "resets_text": null,
+          "source": "agy gemini-argon-wtu-weekly",
+          "stale": null,
+          "used": 0.066353,
+          "window": "week"
+        }
+      ]
+    },
+    {
+      "failed_at": null,
+      "label": "G·Claude",
+      "pool": "google3p",
+      "provider": "antigravity",
+      "read_at": 1792306083,
+      "state": "ok",
+      "tightest": "week",
+      "windows": [
+        {
+          "age_s": 139,
+          "elapsed": 0.000056,
+          "fresh": true,
+          "pace": 0.999445,
+          "read_at": 1792306083,
+          "resets_at": 1792324082,
+          "resets_in_s": 17860,
+          "resets_text": null,
+          "source": "agy 3p-5h",
+          "stale": null,
+          "used": 0.0,
+          "window": "5h"
+        },
+        {
+          "age_s": 139,
+          "elapsed": 0.832703,
+          "fresh": true,
+          "pace": 0.5,
+          "read_at": 1792306083,
+          "resets_at": 1792407264,
+          "resets_in_s": 101042,
+          "resets_text": null,
+          "source": "agy 3p-weekly",
+          "stale": null,
+          "used": 0.040228,
+          "window": "week"
+        }
+      ]
+    },
+    {
+      "failed_at": null,
+      "label": "Codex",
+      "pool": "codex",
+      "provider": "codex",
+      "read_at": 1792306214,
+      "state": "not exposed",
+      "tightest": null,
+      "windows": []
+    },
+    {
+      "failed_at": null,
+      "label": "Local",
+      "pool": "local",
+      "provider": "local",
+      "read_at": 1792306214,
+      "state": "off",
+      "tightest": null,
+      "windows": []
+    }
+  ]
+}
