@@ -3,6 +3,109 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha NEXT (o5): the completion gate, `herdr gate run|author|merge|status`; the retro; lessons
+
+Plan 12, package O5 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §7.3, §7.4.2, §7.4.3; the record is
+`plans/2026-10-17-12-records/o5.md`).
+
+- **Changed:** `herdr gate run <order>` rules on a delivered order with no model call, in order: rebase its branch onto
+  the run's integration branch `nirvana-integrate/<run>` (made from the project's HEAD on first use; the worker's
+  uncommitted work committed first, a new file only when an `owns:` pattern names it); the order's `test:` command, its
+  output filtered, every `check:` name required in what the filter kept; the Work Report against O3's check, status
+  `done`; only `owns:` files changed (herdr's `.nirvana/` never counts; no `owns:` line is a note, never a block);
+  for `ops.terminal`, each `serves:` port listened on in the worker's own pane. Each ruling is a `gated` event with
+  the verdict and every axis (`axes`, a new optional field on O3's event). Exit 0 pass, 1 sent back or asked, 4 waiting.
+  **Because:** §7.3, and Nirvana CLAUDE.md rule 9: a suite total cannot see a check that never ran. Argon's review F6:
+  two orders that pass alone can break the build together, so the tests run on the rebased tree.
+  **Measured:** `nirvana_gate::tests::*` on scratch git repos built in each test (clean pass, rebase onto a moved tip,
+  a conflict named and aborted, the named check absent, a failing command, unowned files, bytecode left out of the
+  commit, the merge); controls `gate_*`. Live, three orders in a scratch project on haiku low and flash low: `mul` was
+  sent back on `owned` for `__pycache__` bytecode the gate itself had committed (fixed the same day: the commit takes
+  a new file only when an `owns:` pattern names it), then passed; `div` was sent back on `rebase`, since it conflicted
+  with `mul`'s merge, and its child rebased and passed; `sub` was sent back because its test command printed no check
+  name: `Ran 1 test ... OK` and "the named check(s) test_sub never ran".
+  **If you remove this:** a worker's `done` is the only evidence an order worked, and old Nirvana's measured 4 of 8
+  against 8 of 8 (M5, the held-out row) comes back.
+- **Changed:** a failing axis is a send-back: a child `<root>-s<n>` in the same worktree, seated by the rule on the
+  order's class and started, its brief the failing axes (a held-out failure as case ids only) and the root order; at
+  most 3 per order, then `gated asked` and an `asked` event for the owner.
+  **Because:** §7.3 "At most 3 send-backs per order; then the owner is asked"; decision 0010 (a continuation is a
+  child order); R6 (auto mode sends back without asking).
+  **Measured:** `send_backs_stop_at_three_per_order_then_the_owner_is_asked`; controls `gate_cap_four`,
+  `gate_chain_not_counted`. Live: `mul` → `mul-s1` → pass → merged.
+  **If you remove this:** the orchestrator re-seats failing work by hand, with no cap and no reason in the journal.
+- **Changed:** load-bearing orders (the class's `blast`) get a reviewer of another family: `gate run` books
+  `review.adversary` with the builder's family excluded and prints the `herdr seat run` line; only when no other
+  family has a seat, the builder's own, the reason opening `SAME-FAMILY REVIEW (<family>), in a fresh session` (decision
+  0017's fallback, which O2's `pick` did not have). The reviewer's Work Report is the verdict: `done` approves,
+  `blocked` sends back with its gotchas, `needs_answer` waits for the owner.
+  **Because:** decision 0017; §7.3.
+  **Measured:** `the_reviewer_is_of_another_family_and_only_falls_back_to_the_builders_own_marked`,
+  `a_review_verdict_comes_back_as_a_work_report`; controls `gate_reviewer_*`, `gate_fallback_unmarked`,
+  `gate_no_fallback`, `gate_review_blocked_approves`. Scripted through the CLI with hand-written deliveries, no
+  model: a `build.load_bearing` order waited (exit 4) with argon booked against the opus builder's family, and passed
+  on the reviewer's `done`.
+  **If you remove this:** a model reviews its own family's blind spots, or a family outage refuses every review.
+- **Changed:** feature-size orders (a build or debug fix, medium or large) get a held-out check written before the
+  build by another family: `herdr gate author <order> --order <file>` books `acceptance.author` against the booked
+  builder's family; `gate run <order>-acc1` takes the check out of the author's folder into the run's folder and runs
+  it at the base, valid when a case fails there; invalid once, a second author with the reason; invalid twice, the
+  build goes on without, said in every gate. At the builder's gate the failing case ids are all it sees.
+  **Because:** decision 0019; plan 12 §14 kept it against Argon's review (M5: 8 of 8 with it, 4 of 8 without).
+  **Measured:** `held_out_cases_parse_from_pytest_cargo_and_unittest`,
+  `a_held_out_check_is_valid_only_when_a_case_fails_at_the_base`, `the_builder_sees_only_the_failing_held_out_case_ids`;
+  controls `gate_heldout_*`, `gate_cases_*`. Scripted, no model: a hand-written three-case check was captured, left
+  the author's folder, read "3 case(s), 2 failing at the base: valid", and passed at the builder's head. The first
+  scripted run read four cases: unittest's `FAILED (errors=2)` was taken for a case; fixed and controlled.
+  **If you remove this:** the gate runs only the tests the builder wrote for the cases it understood.
+- **Changed:** `herdr gate merge <order>` merges a passed order into `nirvana-integrate/<run>` with `commit-tree` and a
+  compare-and-swap `update-ref`, no checkout; it refuses when the branch or the integration tip moved since the gate,
+  then runs O3's `seat cleanup` on the order and the send-backs before it. `main` is never touched.
+  **Because:** §6: "A merge to `main` asks the owner"; memory served-checkout-is-a-shared-writer (a landing step ran
+  `reset` in the served `main` on 2026-09-20).
+  **Measured:** `a_merge_moves_only_the_integration_branch_and_refuses_one_that_moved`; controls `gate_merge_*`. Live:
+  `mul-s1` merged as a two-parent commit; `main` stayed at the base.
+  **If you remove this:** each order's work stays on its own branch and the run has no integrated tree.
+- **Changed:** the outcome words the record and the tally use: pass, sent_back, failed, asked, reseated
+  (`nirvana_gate::Outcome`). O3's record line now says one of them (a cut, failed or never-gated order is `failed`);
+  O2's tally counts pass as a pass, a re-seat not at all, every other word as a failure.
+  **Because:** O3 left the words to O5 and counted `reseated` as a failure; a re-seat is a pool's window running out,
+  not the seat's work. A hypothesis that it is the better blend: no record has been tuned on it yet.
+  **Measured:** `the_outcome_words_and_what_the_tally_counts`, `the_record_line_says_one_of_the_five_words`; controls
+  `gate_tally_counts_reseat`, `seat_tally_ignores_the_words`, `run_record_word_unknown_kept`.
+  **If you remove this:** seat scores fall for every Max window that runs out under them.
+- **Changed:** `herdr run retro <run>`, run by `herdr run end` before the receipt: gaps from the journal (a send-back and
+  its reason, the send-back cap, a rate-limit stop, a stall, a crash loop, a re-seat, an override, no seat, a failed
+  worker, a Work Report's gotchas), each with its journal line verbatim, into `.nirvana/retro/gaps.jsonl` once per
+  (gap, run), matched within one kind and gate axis by Sørensen-Dice on the character bigrams of their cause at 0.6
+  (old Nirvana's measured line). A gap seen in 3 distinct runs, or once as an
+  outcome-tagged miss, opens `.nirvana/proposals/<id>.md` in the CHANGELOG shape; a quote not in its journal line is
+  refused; targets are the plugin's `skills/` and `agents/` or a `seats.toml:seat.<id>.use.<effort>` cell, never a
+  gate, a decision, CLAUDE.md or a seats.toml constant. `retro reject <id>` keeps a refusal that no later run undoes;
+  `retro propose --json` takes the orchestrator's own proposal under the same checks. The receipt lists open proposals.
+  **Because:** §7.4.2; the Ledger-Lessons research of 2026-10-16 found 6 old proposals open for 24 days, unread.
+  **Measured:** `a_gap_in_three_distinct_runs_graduates_and_in_two_does_not`, `a_quote_not_in_the_journal_is_refused`,
+  `a_rejected_gap_never_graduates_again`, `forbidden_targets_are_refused_and_an_expected_use_cell_is_not`; controls
+  `retro_*`. Live: the first ledger of the live run held one send-back gap for three, since the three send-back
+  sentences share a template and score 0.63, 0.61 and 0.57 to each other; gaps are now matched on their cause within
+  one kind and gate axis (`gaps_that_share_a_template_are_matched_on_their_cause_within_one_kind_and_axis`). Then the
+  live journal under three run ids: 8 gaps a run, all 8 graduated at the third; a refused one stayed shut through a
+  fourth; a quote not in its line and a `CLAUDE.md` target were refused through the CLI.
+  **If you remove this:** a gap is seen once per run, by whoever reads that run's receipt, and nothing accumulates.
+- **Changed:** lessons. A Work Report's `lesson` is written to `<project>/.nirvana/lessons/<slug>.md` only when its
+  order passed the gate, its evidence quote is in the worker's own stream outside the Work Report, and the repository
+  has a GitHub remote; `index.json` counts offered, opened (a tool call naming the file) and passed after opened.
+  O3's brief composer adds one line per live lesson of the order's class (path and description, never the body) and
+  copies the file into a worktree. A lesson stays in the briefs for its first 6 offers, then only while one offer in 3
+  led to an open and a pass (both numbers hypotheses). `<home>/nirvana/NIRVANA.md` gets one line per project.
+  `herdr lessons for --class C`, `herdr lessons list`.
+  **Because:** §7.4.3 and the owner's rulings of 2026-10-16: "Checked lessions should go live automatically, keep it
+  per github remote assuming that project has a github ... have the lesson stay in its own project."
+  **Measured:** `nirvana_lessons::tests::*`; controls `lessons_*`. Live: a flash worker offered a lesson whose
+  evidence was its own prose, not a line of its stream, and the gate refused it. Scripted, no model: a lesson with a
+  quote from the stream was written, listed by `herdr lessons for`, and indexed in the scratch home's NIRVANA.md.
+  **If you remove this:** the next order of a class starts from nothing (old decision 0023).
+
 ## alpha 0.17.0 (2026-10-18): the Nirvana Claude plugin's hooks, worker agents, skills and statusline; the launch keeps Claude Code's own prompt (plan 12 O4b)
 
 Plan 12, package O4b (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §6, §7.2, §7.4, §9; the record is
