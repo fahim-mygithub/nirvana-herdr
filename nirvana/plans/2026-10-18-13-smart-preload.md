@@ -225,7 +225,7 @@ seeded preset except `blank`.
 
 ## 7. The command
 
-`herdr preload show|why|apply|off|on|catalog|tag|memory trim|memory accept|memory restore [<folder>]`
+`herdr preload show|why|apply|off|on|catalog|tag [<folder>]` (P1) and `herdr memory status|trim|accept|discard|restore|record-session [<folder>]` (P3)
 - `why` prints the fingerprint, the rule or Jev answer, and each off item with its tag.
 - `apply` writes the generated file without launching.
 - `catalog` prints every item with its tags and where each came from (rule, Jev or owner).
@@ -236,7 +236,7 @@ seeded preset except `blank`.
 |---|---|---|---|
 | P1 engine | Opus 5.5 high | `src/nirvana_preset.rs` (new), `src/nirvana_preload.toml` (new), the `preload` dispatch in `src/main.rs`, `src/nirvana_launch.rs` (`--settings`), the worker args in `src/nirvana_worker.rs`, `nirvana/claude/ROLE.md`, `nirvana/controls.d/p13a.py` | §2, §3, §4 (not the panel), §6.3, §7 |
 | P2 panel | Sonnet 5.5 high | `src/nirvana_preload.rs` and its client draw code, `nirvana/controls.d/p13b.py` | §5; calls P1's `nirvana_preset::{view, set_preset, pin_on}` and P3's `nirvana_memory_trim::{status, propose, accept}` through stubs named here |
-| P3 memory | Sonnet 5.5 high | `src/nirvana_memory_trim.rs` (new), `src/nirvana_session_record.rs` (new), the digest and stop hooks under `nirvana/claude/hooks/`, the menu's Fresh choice, `nirvana/controls.d/p13c.py` | §6.1, §6.2 |
+| P3 memory | Sonnet 5.5 high | `src/nirvana_memory_trim.rs` (new), `src/nirvana_session_record.rs` (new), its `memory` dispatch arm in `src/main.rs`, new entries in `nirvana/claude/hooks/hooks.json`, `nirvana/controls.d/p13c.py` | §6.1's record, §6.2 |
 
 The interfaces P2 calls are fixed in this plan:
 - `nirvana_preset::view(cwd) -> PresetView { name, reason, off: Vec<(Switch, tag)>, saved_tokens }`
@@ -245,7 +245,17 @@ The interfaces P2 calls are fixed in this plan:
 - `nirvana_memory_trim::status(cwd) -> Option<TrimStatus>`
 - `nirvana_memory_trim::propose(cwd)`, `accept(cwd)` and `discard(cwd)`
 
-The merges run P1, then P3, then P2, each as a `version.py bump feature`.
+**File split, fixed 2026-10-18 at the build's start** so P1 and P3 never share a file:
+- P1 also owns `src/app/nirvana_new.rs` (where the open command builds Claude's args), `src/nirvana_taskbar.rs` (the
+  toast) and the launch's resume choice: it reads the session record by the format below and adds `--resume <id>`.
+- P3 owns the record's writer, `herdr memory record-session`, run from new entries in `nirvana/claude/hooks/hooks.json`
+  (SessionStart and Stop). The record is `<home>/nirvana/sessions/<folder_hash>.json`:
+  `{"session_id": "<id>", "at": "<RFC 3339 UTC>", "transcript": "<absolute path>"}`, with `folder_hash` from
+  `nirvana_launch::folder_hash`.
+- The menu's "Fresh Nirvana Claude" choice is P1's, since the menu is in `nirvana_launch.rs`.
+
+P1 and P3 build at once. P2 builds after both merge, on their real interfaces. The merges run P1, then P3, then P2,
+each as a `version.py bump feature`.
 
 ## 9. Verification, written down before the build
 
