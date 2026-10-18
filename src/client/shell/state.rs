@@ -549,6 +549,9 @@ pub(super) enum ClientContextMenuAction {
     ClosePane,
     /// Nirvana fork: restart the tab's Claude Code on the same conversation.
     RestartClaude,
+    /// Nirvana fork, plan 12 O4a: the "new" menu's entries, each a new space.
+    NewSpace(crate::nirvana_launch::NewKind),
+    NewShellSpace,
 }
 
 #[derive(Debug)]
@@ -573,6 +576,11 @@ pub(super) enum ClientContextMenuTarget {
         source_pane_id: Option<String>,
         has_manual_label: bool,
         right_click_passthrough: bool,
+    },
+    /// Nirvana fork, plan 12 O4a: the sidebar's "new", from the space it would copy the folder of.
+    NewSpace {
+        workspace_id: Option<String>,
+        cwd: Option<String>,
     },
 }
 

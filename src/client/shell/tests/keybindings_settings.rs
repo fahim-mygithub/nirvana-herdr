@@ -73,13 +73,24 @@ fn shell_new_controls_use_the_same_client_action_routes_as_keybinds() {
     state.compose(106, 20).expect("composed frame");
 
     let new_workspace = state.hits.new_workspace;
-    let create_workspace =
+    let open_menu =
         state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: new_workspace.x + 1,
             row: new_workspace.y,
             modifiers: KeyModifiers::empty(),
         })]);
+    // Nirvana fork, plan 12 O4a: "new" opens the menu of agents; its Shell entry is the upstream new space.
+    assert!(open_menu.actions.is_empty(), "{:?}", open_menu.actions);
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::NewSpace { .. },
+            ..
+        }))
+    ));
+    let mut create_workspace = ClientShellInput::default();
+    state.activate_context_menu_item(3, &mut create_workspace);
     let [ClientShellAction::Endpoint { request, .. }] = &create_workspace.actions[..] else {
         panic!("new workspace click should use the endpoint API");
     };

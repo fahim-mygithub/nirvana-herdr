@@ -39,12 +39,14 @@ mod nirvana_jev;
 mod nirvana_jev_compact;
 mod nirvana_jev_install;
 mod nirvana_jev_memory;
+mod nirvana_launch;
 mod nirvana_media;
 mod nirvana_preload;
 mod nirvana_running;
 mod nirvana_seat;
 mod nirvana_servers;
 mod nirvana_spaces;
+mod nirvana_taskbar;
 mod nirvana_usage;
 mod noninteractive_process;
 mod pane;
@@ -593,6 +595,9 @@ fn main() -> io::Result<()> {
     if args.get(1).map(String::as_str) == Some("seat") {
         return nirvana_seat::cli(&args[2..]);
     }
+    // Nirvana fork, plan 12 O4a: the window Explorer's "Open Nirvana" opens, with Nirvana Claude on the folder.
+    if args.get(1).map(String::as_str) == Some("nirvana") {
+        return nirvana_launch::cli(&args[2..]);
     // Nirvana fork, plan 12 O6: media probe, ffmpeg shrink under 100 MB, and the view_file worker prompt.
     if args.get(1).map(String::as_str) == Some("media") {
         return nirvana_media::cli(&args[2..]);
@@ -842,7 +847,11 @@ fn main() -> io::Result<()> {
 
     let saved_federation =
         client::endpoint::EndpointCatalog::load().is_ok_and(|catalog| catalog.has_enabled_ssh());
-    if let Err(err) = server::autodetect::auto_detect_launch(saved_federation) {
+    let launched = server::autodetect::auto_detect_launch(saved_federation);
+    // Nirvana fork, plan 12 O4a: a client that made its window Nirvana's clears the badge and properties as it
+    // leaves, because the Terminal window outlives it (P7).
+    nirvana_taskbar::release_window();
+    if let Err(err) = launched {
         eprintln!("herdr: {err}");
         std::process::exit(1);
     }

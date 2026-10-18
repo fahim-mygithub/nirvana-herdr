@@ -3,6 +3,96 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha NEXT (o4a): Nirvana Claude's launch, the "new" menu, "Open Nirvana", its own icon, badge and toast
+
+Plan 12, package O4a (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` L5, L6, L7, §6, §8, R1, R8; record
+`plans/2026-10-17-12-records/o4a.md`).
+
+- **Changed:** Nirvana Claude is Claude Code started as `claude --plugin-dir <home>/nirvana/claude --agent nirvana
+  --name Nirvana --settings <home>/nirvana/claude/settings.json` with `NIRVANA_ORCHESTRATOR=1`. The plugin's minimal
+  tree is `nirvana/claude/`: the manifest, `agents/nirvana.md` (the main-thread agent: its role, §6.1's loop, §6's
+  rules verbatim, R2's small asks; `model: claude-opus-5-5`, `effort: medium`) and `settings.json` (the theme
+  `custom:nirvana-dark` and `env.NIRVANA_ORCHESTRATOR=1`). `install.py` copies it to `<home>/nirvana/claude` before
+  the binary, so a reload never meets an older plugin. Plain Claude Code and agy are typed as `claude` and `agy`
+  alone.
+  **Because:** the owner, 2026-10-17 (L6): "this as a seperate version which tbh is proably just Claude Code with
+  these Orchistrator level skills and memories and hooks"; R1: "opus 5.5 medium".
+  **Measured:** each flag exists as written in `claude --help` of Claude Code 2.1.302. Live `/context` of
+  `claude --plugin-dir <worktree>/nirvana/claude --agent nirvana -p /context`: 0 turns, $0, `Model: claude-opus-5-5`,
+  `nirvana:nirvana | Plugin`, system prompt 1.5k; plain `claude -p /context`: 0 turns, no nirvana row, system prompt
+  2.5k. `settings.json`'s `env` reaches Claude's Bash tool (`printenv NIRVANA_ORCHESTRATOR` printed `1`, one haiku
+  low turn, $0.005). Tests `nirvana_launch::tests::*`, `app::nirvana_new::tests::*`; controls `o4a_argv_*`,
+  `o4a_plain_*`, `o4a_server_plain_gets_plugin`, `o4a_settings_env_off`, `o4a_agent_effort_high`.
+  **If you remove this:** the verb and the menu open a stock Claude Code, and nothing tells the two apart.
+- **Hypothesis, not measured:** a main-thread agent's prompt replaces Claude Code's default system prompt (the
+  sub-agents page; 2.5k against 1.5k above). Whether Nirvana Claude edits and uses its tools as well without that
+  prompt is for O7's A/B to measure. The agent file carries a short working-style section for it.
+- **Changed:** the sidebar's "new" opens a menu: Nirvana, Claude Code, Antigravity, and Shell (what "new" did
+  before). Each agent entry opens a space on the folder a plain "new" would use and starts its agent in the root pane
+  the way `herdr agent start` does (`command.invoke nirvana.new:<kind>`). Only Nirvana gets the plugin argv and the
+  pane env. Choosing Nirvana also makes the client's window a Nirvana window and shows the toast. The new-space key
+  still opens a shell space.
+  **Because:** L7: "Sometimes I want a Orchistrator style model that tries to utilize both Claude and ANtigravity and
+  sometimes I just want Claude Code or agy traditional to tackle the project."
+  **Measured:** `client::shell::tests::nirvana_new_menu::*`, the upstream click test updated to open the menu then
+  choose Shell; controls `o4a_menu_*`, `o4a_new_click_no_menu`, `o4a_new_not_routed`.
+  **If you remove this:** "new" opens a shell again and every agent is typed by hand.
+- **Changed:** Explorer's "Open Nirvana" (`HKCU\Software\Classes\Directory\shell\NirvanaHerdr` and
+  `Directory\Background\shell\NirvanaHerdr`) runs `wt -w new -p Nirvana -d "%1" <home>\bin\herdr.exe --session
+  nirvana nirvana window "%1"`. `herdr nirvana window <folder>` starts the session's server if it is not running,
+  focuses the Nirvana Claude already on the folder or starts one (a fresh server's seeded shell space takes it, so no
+  second space opens beside it), claims the window, shows the toast, runs the client under the reload supervisor, and
+  clears the window when the client leaves. `install.py` (through the new `windows_shell.py`) also writes the
+  "Nirvana" Windows Terminal profile and its two schemes as the fragment `Fragments\Nirvana-Herdr\nirvana.json`, the
+  two Claude Code themes to `<claude config>\themes`, JetBrains Mono when no face of it is registered, and removes
+  Nirvana-C's "Open Nirvana - CC" keys (`Directory\shell\NirvanaC`, `Directory\Background\shell\NirvanaC`) and its
+  fragment `Fragments\Nirvana-C\nirvana.json`.
+  **Because:** R8: "Lets do the full port were at a stage now I think the herder varient is the perfered method.
+  Remove Nirvana - CC have standard Nirvana use the herder varient."
+  **Measured:** `nirvana/test_windows_shell.py` (a fake registry, and the real one under
+  `HKCU\Software\NirvanaHerdrTest-<pid>`, created and deleted); controls `o4a_py_*`. The key is `NirvanaHerdr`
+  because `Directory\shell\Nirvana` holds old Nirvana's "Open Nirvana here" (read 2026-10-17). No real verb key was
+  written during the build.
+  **If you remove this:** the right-click opens Nirvana-C's Claude, or nothing.
+- **Changed:** `herdr.exe` carries `nirvana/assets/nirvana.ico` as icon group 1. build.rs writes the `.res` itself
+  (one RT_ICON per image, one RT_GROUP_ICON) and passes it to MSVC's linker, so no build dependency and no `rc.exe`.
+  **Because:** P7: "The icon must be a valid resource at the time the id is set ... An icon embedded in herdr.exe
+  (`<herdr.exe>,0`) is the stable choice."
+  **Measured:** the built exe has 1 icon group and six RT_ICON resources of 554, 1071, 1318, 2158, 3079 and 19691
+  bytes, the six images of the `.ico`; `tests/nirvana_icon.rs`; control `o4a_icon_group_two`. `Cargo.lock` unchanged.
+  **If you remove this:** the Nirvana window's button shows a blank page icon, which Windows does not re-read under
+  the same id (P7).
+- **Changed:** a Nirvana window gets its own taskbar button: on the Terminal window (`GetAncestor(GetConsoleWindow(),
+  GA_ROOTOWNER)`) herdr sets `RelaunchIconResource = <herdr.exe>,0`, `RelaunchCommand`, `RelaunchDisplayNameResource
+  = Nirvana`, then `AppUserModel_ID = Nirvana.Herdr.<16 hex of the folder's sha256>`, then the overlay badge: the
+  folder's first letter or digit (N when it has none), drawn at run time from the saffron template's numbers. On exit
+  the badge goes first, then the properties.
+  **Because:** R8, the owner: "have its own Icon and a toast with the directory first Letter as the icon".
+  **Measured:** `RelaunchCommand` takes at most 255 characters on this machine (`IPropertyStore::SetValue`: 255 set,
+  256 to 259 E_INVALIDARG, 260 and more ERROR_INSUFFICIENT_BUFFER); the first live run used the verb's 487-character
+  line and the button never split, so the relaunch line names `wt.exe` by its alias and falls back to `wt.exe -w new
+  -p "Nirvana"`. Live run 2 (one new Terminal window, debug build, session `o4a-live`, scratch home): the window read
+  `id=Nirvana.Herdr.066791b9d817e117`, `icon=<herdr.exe>,0`, `name=Nirvana`; the taskbar gained "Nirvana - 1 running
+  window" with 383 teal and 189 saffron pixels while Terminal's button had 0 of each; after the server stopped the
+  properties read empty, the Nirvana button was gone, and Terminal's button had 38 saffron pixels, all in rows 40-42
+  (the running-window underline in the accent colour), the same 38 as before the run. Tests
+  `nirvana_taskbar::tests::*`; controls `o4a_badge_*`, `o4a_id_first`, `o4a_clear_badge_last`, `o4a_set_keeps_going`,
+  `o4a_relaunch_over_limit`, `o4a_template_drift`, `o4a_tile_no_rim`, `o4a_gdi_black_ink`.
+  **If you remove this:** a Nirvana window is one of Terminal's windows in its group, with nothing to tell it apart.
+- **Changed:** herdr's toasts fire on the fork's install. `notifications.rs` returned NotFound without the bundled
+  ConPTY runtime, which the fork's install has never had; it now falls back to Windows' own
+  `System32\conhost.exe --headless --`. The toasts use the fork's id `Nirvana.Herdr` (DisplayName "Nirvana", IconUri
+  the installed `nirvana-256.png`), and a toast may carry an `appLogoOverride` picture: on open, "Nirvana · <folder>"
+  with the badge as a 96 px PNG.
+  **Because:** P7: "`notifications.rs:161-167` returns NotFound without it, so herdr's own Windows toasts most likely
+  never fire on the fork's install."
+  **Measured:** `conhost.exe --headless -- cmd /c ping -n 3 127.0.0.1` ran to exit 0 with 0 visible windows. Live:
+  the toast history of `Nirvana.Herdr` held "Nirvana · Pojects" with `appLogoOverride` `badge-0050-96.png` after each
+  open. Test `nirvana_toasts_carry_the_forks_id_the_letter_and_a_host_that_exists`; controls `o4a_toast_*`.
+  **If you remove this:** no herdr toast is ever seen on the fork.
+- **Hypothesis, not measured:** a click on a toast (activation through the system console host), a pinned Nirvana
+  button's relaunch, two Nirvana windows on two folders at once, never-combine taskbar mode, and Windows Terminal's
+  handling of a folder with `;` (it splits its command line there).
 ## alpha 0.14.0 (2026-10-18): media seats, `herdr media probe|shrink|prompt`, the media skill (plan 12 O6)
 
 Plan 12, package O6 (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §2, §4, §5.2, §5.4, §6, §11;

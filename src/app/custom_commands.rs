@@ -102,6 +102,21 @@ impl App {
             let key = key.to_owned();
             return self.nirvana_account_login(id, &params, &key);
         }
+        // Nirvana fork, plan 12 O4a: the "new" menu's agents, and the verb's open, name their kind or folder after the id.
+        if let Some(key) = params
+            .command_id
+            .strip_prefix(crate::nirvana_launch::NEW_COMMAND)
+        {
+            let key = key.to_owned();
+            return self.nirvana_new_space(id, &params, &key);
+        }
+        if let Some(rest) = params
+            .command_id
+            .strip_prefix(crate::nirvana_launch::OPEN_COMMAND)
+        {
+            let rest = rest.to_owned();
+            return self.nirvana_open_folder(id, &rest);
+        }
         let Some(binding) = self.resolve_client_shell_command(&params.command_id) else {
             return crate::app::api::responses::encode_error(
                 id,

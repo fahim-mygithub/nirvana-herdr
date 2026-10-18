@@ -21,6 +21,8 @@ pub(crate) use notifications::{
     foreground_desktop_notification_host, maybe_activate_desktop_notification,
     show_actionable_desktop_notification, show_desktop_notification,
 };
+// Nirvana fork, plan 12 O4a: the open toast with the folder's letter.
+pub(crate) use notifications::show_nirvana_toast;
 pub(crate) use power::monitor_host_power;
 
 static ALLOW_UNELEVATED_CLIENTS: OnceLock<bool> = OnceLock::new();

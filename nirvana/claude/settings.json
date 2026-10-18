@@ -1,0 +1,6 @@
+{
+  "theme": "custom:nirvana-dark",
+  "env": {
+    "NIRVANA_ORCHESTRATOR": "1"
+  }
+}

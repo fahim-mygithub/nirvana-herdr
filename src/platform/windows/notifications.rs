@@ -19,7 +19,9 @@ use windows_sys::Win32::{
     UI::WindowsAndMessaging::*,
 };
 
-const APP_ID: &str = "Herdr.Desktop";
+// Nirvana fork, plan 12 O4a: the fork's own app id, so its toasts carry "Nirvana" and the mark (upstream:
+// "Herdr.Desktop"). install.py registers the same id with the same values.
+const APP_ID: &str = crate::nirvana_launch::TOAST_APP_ID;
 const WINDOW_CLASS: &str = "HerdrNotificationActivation";
 const ACTIVATION_MESSAGE: &str = "Herdr.Notification.Activate";
 const SHOW_MESSAGE: u32 = WM_APP + 1;
@@ -47,6 +49,8 @@ struct Service {
 struct Request {
     title: String,
     body: Option<String>,
+    /// Nirvana fork: a picture for `appLogoOverride` (the open toast's folder letter).
+    logo: Option<String>,
     key: String,
     callback: Callback,
     ready: mpsc::SyncSender<io::Result<bool>>,
@@ -159,14 +163,26 @@ fn register(executable: &std::path::Path, scheme: &str) -> io::Result<()> {
         .parent()
         .ok_or_else(|| io::Error::other("missing executable directory"))?;
     let host = parent.join("conpty/x64/OpenConsole.exe");
-    if !host.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "Windows notification activation requires the bundled ConPTY runtime",
-        ));
-    }
+    // Nirvana fork, plan 12 O4a: the fork's install has no bundled ConPTY runtime, so this returned NotFound and no
+    // toast ever fired (P7, nirvana/evidence/2026-10-17-o0-probes/p7-icon.md). Windows' own console host takes
+    // the same `--headless --` form: measured 2026-10-17, `conhost.exe --headless -- cmd /c ping -n 3 127.0.0.1`
+    // ran to exit 0 with 0 visible windows.
+    let host = if host.is_file() {
+        host
+    } else {
+        nirvana_system_console_host().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "Windows notification activation requires the bundled ConPTY runtime",
+            )
+        })?
+    };
     let identity = RegistryKey::create(&format!(r"Software\Classes\AppUserModelId\{APP_ID}"))?;
-    identity.set("DisplayName", "Herdr")?;
+    // Nirvana fork: the toast header reads "Nirvana" with the installed mark (upstream: "Herdr", no icon).
+    identity.set("DisplayName", crate::nirvana_launch::DISPLAY_NAME)?;
+    if let Some(icon) = nirvana_icon_uri() {
+        identity.set("IconUri", &icon)?;
+    }
     // Unpackaged protocol toasts use a stub activator; no COM server is installed.
     identity.set("CustomActivator", ACTIVATOR)?;
     let protocol = RegistryKey::create(&format!(r"Software\Classes\{scheme}"))?;
@@ -181,6 +197,24 @@ fn register(executable: &std::path::Path, scheme: &str) -> io::Result<()> {
             executable.display()
         ),
     )
+}
+
+/// Nirvana fork: `%SystemRoot%\System32\conhost.exe`, the console host every Windows 10 1809+ carries.
+fn nirvana_system_console_host() -> Option<std::path::PathBuf> {
+    let root = std::env::var_os("SystemRoot")?;
+    let host = std::path::PathBuf::from(root)
+        .join("System32")
+        .join("conhost.exe");
+    host.is_file().then_some(host)
+}
+
+/// Nirvana fork: the installed mark, `<home>/nirvana/assets/nirvana-256.png`, when it is there.
+fn nirvana_icon_uri() -> Option<String> {
+    let icon = crate::nirvana::home()?
+        .join("nirvana")
+        .join("assets")
+        .join("nirvana-256.png");
+    icon.is_file().then(|| icon.display().to_string())
 }
 
 fn activation_message() -> u32 {
@@ -262,7 +296,12 @@ fn create_window() -> io::Result<HWND> {
     Ok(window)
 }
 
-fn notification_xml(title: &str, body: Option<&str>, uri: &str) -> io::Result<XmlDocument> {
+fn notification_xml(
+    title: &str,
+    body: Option<&str>,
+    uri: &str,
+    logo: Option<&str>,
+) -> io::Result<XmlDocument> {
     let xml = winrt(XmlDocument::new())?;
     winrt(xml.LoadXml(&HSTRING::from(r#"<toast activationType="protocol"><visual><binding template="ToastGeneric"/></visual><audio silent="true"/></toast>"#)))?;
     let root = winrt(xml.DocumentElement())?;
@@ -273,6 +312,16 @@ fn notification_xml(title: &str, body: Option<&str>, uri: &str) -> io::Result<Xm
         let node = winrt(xml.CreateTextNode(&HSTRING::from(text)))?;
         winrt(element.AppendChild(&node))?;
         winrt(binding.AppendChild(&element))?;
+    }
+    // Nirvana fork: the open toast's folder letter, as the toast's picture (plan 12 §8).
+    if let Some(logo) = logo {
+        let image = winrt(xml.CreateElement(&HSTRING::from("image")))?;
+        winrt(image.SetAttribute(
+            &HSTRING::from("placement"),
+            &HSTRING::from("appLogoOverride"),
+        ))?;
+        winrt(image.SetAttribute(&HSTRING::from("src"), &HSTRING::from(logo)))?;
+        winrt(binding.AppendChild(&image))?;
     }
     Ok(xml)
 }
@@ -292,7 +341,12 @@ fn show(
         )?
     };
     let uri = format!("{scheme}://{:x}/{token:032x}", window as usize);
-    let xml = notification_xml(&request.title, request.body.as_deref(), &uri)?;
+    let xml = notification_xml(
+        &request.title,
+        request.body.as_deref(),
+        &uri,
+        request.logo.as_deref(),
+    )?;
     let notification = winrt(ToastNotification::CreateToastNotification(&xml))?;
     winrt(notification.SetGroup(&HSTRING::from(group)))?;
     // Only pane notifications replace one another; custom messages stay distinct.
@@ -356,6 +410,30 @@ pub(crate) fn show_actionable_desktop_notification(
     key: String,
     callback: Callback,
 ) -> io::Result<bool> {
+    show_notification_request(title, body, key, callback, None)
+}
+
+/// Nirvana fork, plan 12 O4a: the open toast, "Nirvana · <folder>" with the folder's letter as its picture; a click
+/// brings the Terminal window forward, as herdr's general toasts do.
+pub(crate) fn show_nirvana_toast(title: &str, logo: Option<&std::path::Path>) -> io::Result<bool> {
+    let logo =
+        logo.map(|path| format!("file:///{}", path.display().to_string().replace('\\', "/")));
+    show_notification_request(
+        title,
+        None,
+        "general".into(),
+        Arc::new(foreground_desktop_notification_host),
+        logo,
+    )
+}
+
+fn show_notification_request(
+    title: &str,
+    body: Option<&str>,
+    key: String,
+    callback: Callback,
+    logo: Option<String>,
+) -> io::Result<bool> {
     let service = {
         let mut service = lock(&SERVICE);
         if service.is_none() {
@@ -380,6 +458,7 @@ pub(crate) fn show_actionable_desktop_notification(
         .send(Request {
             title: title.into(),
             body: body.map(str::to_owned),
+            logo,
             key,
             callback,
             ready,
@@ -514,10 +593,48 @@ mod tests {
     }
 
     #[test]
+    fn nirvana_toasts_carry_the_forks_id_the_letter_and_a_host_that_exists() {
+        // Nirvana fork, plan 12 O4a.
+        assert_eq!(APP_ID, "Nirvana.Herdr");
+        let host = nirvana_system_console_host().expect("Windows' own console host");
+        assert!(
+            host.ends_with(r"System32\conhost.exe") && host.is_file(),
+            "{}",
+            host.display()
+        );
+        let _apartment = ComApartment::new().expect("COM");
+        let logo = "file:///C:/t/badge-0050-96.png";
+        let xml = notification_xml("Nirvana · Pojects", None, "herdr-test://1/1", Some(logo))
+            .expect("XML");
+        let images = xml
+            .GetElementsByTagName(&HSTRING::from("image"))
+            .expect("images");
+        assert_eq!(images.Length().expect("count"), 1);
+        let image = images.Item(0).expect("image");
+        let attribute = |name: &str| {
+            image
+                .Attributes()
+                .expect("attributes")
+                .GetNamedItem(&HSTRING::from(name))
+                .expect(name)
+                .InnerText()
+                .expect("text")
+        };
+        assert_eq!(attribute("placement"), HSTRING::from("appLogoOverride"));
+        assert_eq!(attribute("src"), HSTRING::from(logo));
+        let plain = notification_xml("t", None, "herdr-test://1/1", None).expect("XML");
+        let none = plain
+            .GetElementsByTagName(&HSTRING::from("image"))
+            .expect("images");
+        assert_eq!(none.Length().expect("count"), 0);
+    }
+
+    #[test]
     fn notification_text_remains_literal_xml_and_unicode() {
         let _apartment = ComApartment::new().expect("COM");
         let title = "Agent <done> & 😀";
-        let xml = notification_xml(title, Some("body & <tag>"), "herdr-test://1/123").expect("XML");
+        let xml =
+            notification_xml(title, Some("body & <tag>"), "herdr-test://1/123", None).expect("XML");
         let texts = xml
             .GetElementsByTagName(&HSTRING::from("text"))
             .expect("texts");

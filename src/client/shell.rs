@@ -29,6 +29,7 @@ mod nirvana_footer;
 mod nirvana_header;
 mod nirvana_memory;
 mod nirvana_mods;
+mod nirvana_new_menu;
 mod nirvana_spaces;
 mod notification_policy;
 mod notifications;

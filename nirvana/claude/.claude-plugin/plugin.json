@@ -1,0 +1,10 @@
+{
+  "name": "nirvana",
+  "displayName": "Nirvana",
+  "description": "Nirvana Claude: the orchestrator that seats every order on Claude or Antigravity through herdr seat pick (Nirvana-Herdr plan 12).",
+  "author": {
+    "name": "Nirvana-Herdr"
+  },
+  "license": "Apache-2.0",
+  "keywords": ["orchestrator", "herdr", "seating"]
+}

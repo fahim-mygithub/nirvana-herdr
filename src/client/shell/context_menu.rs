@@ -86,6 +86,7 @@ impl ClientContextMenuOverlay {
                 ]);
                 items
             }
+            ClientContextMenuTarget::NewSpace { .. } => super::nirvana_new_menu::items(),
         }
     }
 }
@@ -230,6 +231,9 @@ impl ClientShellState {
                 action,
                 outcome,
             ),
+            ClientContextMenuTarget::NewSpace { workspace_id, cwd } => {
+                self.activate_new_space_action(workspace_id, cwd, action, outcome)
+            }
         }
         outcome.repaint = true;
     }

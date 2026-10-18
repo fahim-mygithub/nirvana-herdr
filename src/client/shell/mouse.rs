@@ -2114,12 +2114,10 @@ impl ClientShellState {
                     return;
                 }
                 if super::contains(self.hits.new_workspace, point) {
-                    self.record_binding(
-                        crate::input::KeybindMatch::Action(
-                            crate::input::KeybindAction::NewWorkspace,
-                        ),
-                        outcome,
-                    );
+                    // Nirvana fork, plan 12 O4a: "new" opens the menu of Nirvana, Claude Code, Antigravity and a
+                    // shell; the new-space key still opens a shell space as upstream.
+                    self.open_new_space_menu(point.0, point.1);
+                    outcome.repaint = true;
                     return;
                 }
                 if super::contains(self.hits.new_tab, point) {

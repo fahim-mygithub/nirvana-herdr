@@ -139,6 +139,12 @@ pub fn finish_reload() -> ! {
 /// `herdr nirvana-shell [args]`: run the installed build with `args` until it exits with anything
 /// but `RELOAD_EXIT_CODE`. Reads no input, so the client it runs owns the terminal alone.
 pub fn supervise(args: &[String]) -> std::io::Result<()> {
+    std::process::exit(supervise_code(args)?);
+}
+
+/// `supervise` without the exit, for a caller with something to undo first (plan 12 O4a: the verb's window
+/// clears its taskbar badge and properties after the client is gone).
+pub fn supervise_code(args: &[String]) -> std::io::Result<i32> {
     loop {
         let exe = home()
             .map(|home| installed_exe_in(&home))
@@ -147,8 +153,8 @@ pub fn supervise(args: &[String]) -> std::io::Result<()> {
         let status = std::process::Command::new(&exe).args(args).status()?;
         match status.code() {
             Some(RELOAD_EXIT_CODE) => continue,
-            Some(code) => std::process::exit(code),
-            None => std::process::exit(1),
+            Some(code) => return Ok(code),
+            None => return Ok(1),
         }
     }
 }
