@@ -184,6 +184,7 @@ fn replaying_the_journal_rebuilds_the_run() {
                 order: "sub".into(),
                 verdict: "pass".into(),
                 reason: None,
+                axes: Vec::new(),
             },
         )
         .expect("gate");
@@ -692,6 +693,7 @@ fn three_wakes_in_a_row_that_move_no_order_forward_stop_the_waking() {
             order: "sub".into(),
             verdict: "pass".into(),
             reason: None,
+            axes: Vec::new(),
         },
     ));
     events.push(ask(16, "e"));
@@ -739,6 +741,7 @@ fn an_unfinished_run_with_no_live_worker_and_no_next_step_is_a_dead_end() {
             order: "sub".into(),
             verdict: "pass".into(),
             reason: None,
+            axes: Vec::new(),
         },
     ));
     let all_done = check(&replay(&events), &never, T0).expect_err("dead end");
@@ -839,6 +842,7 @@ fn the_receipt_is_the_same_bytes_twice_and_changes_with_one_appended_event() {
             order: "sub".into(),
             verdict: "pass".into(),
             reason: None,
+            axes: Vec::new(),
         },
     ));
     let after = render(&more);
@@ -891,6 +895,7 @@ fn the_record_line_carries_the_runs_outcome_and_old_lines_still_parse() {
             order: "sub".into(),
             verdict: "pass".into(),
             reason: None,
+            axes: Vec::new(),
         },
     ));
     let state = replay(&events);

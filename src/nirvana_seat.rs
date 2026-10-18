@@ -1927,7 +1927,8 @@ pub struct RecordLine {
     pub class: String,
     #[serde(default)]
     pub chain: Option<String>,
-    /// The gate's verdict; "pass" counts as a pass in the blend, any other word as a failure.
+    /// One of O5's words, `nirvana_gate::Outcome`: pass, sent_back, failed, asked, reseated. "pass" counts as a
+    /// pass in the blend, "reseated" not at all, any other word as a failure.
     pub outcome: String,
     #[serde(default)]
     pub tokens: Option<Tokens>,
@@ -2008,11 +2009,16 @@ pub fn tally(lines: &[RecordLine]) -> BTreeMap<RecordKey, Tally> {
         let Some(chain) = &line.chain else {
             continue;
         };
+        // Plan 12 O5's outcome words (`nirvana_gate::Outcome::tally`): pass is a pass, a re-seat is not counted
+        // (its pool ran out, not its work), every other word a failure.
+        let Some(passed) = crate::nirvana_gate::Outcome::tally(&line.outcome) else {
+            continue;
+        };
         let entry = tallies
             .entry((line.seat.clone(), line.effort, chain.clone()))
             .or_default();
         entry.orders += 1;
-        if line.outcome == "pass" {
+        if passed {
             entry.passes += 1;
         }
     }

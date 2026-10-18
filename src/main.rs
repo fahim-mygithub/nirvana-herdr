@@ -36,13 +36,16 @@ mod nirvana;
 mod nirvana_accounts;
 mod nirvana_board;
 mod nirvana_claude;
+mod nirvana_gate;
 mod nirvana_jev;
 mod nirvana_jev_compact;
 mod nirvana_jev_install;
 mod nirvana_jev_memory;
 mod nirvana_launch;
+mod nirvana_lessons;
 mod nirvana_media;
 mod nirvana_preload;
+mod nirvana_retro;
 mod nirvana_run;
 mod nirvana_running;
 mod nirvana_seat;
@@ -609,6 +612,13 @@ fn main() -> io::Result<()> {
     // Nirvana fork, plan 12 O3: a run's journal, waking, receipt; the workers are `herdr seat run|exec|...`.
     if args.get(1).map(String::as_str) == Some("run") {
         return nirvana_run::cli(&args[2..]);
+    }
+    // Nirvana fork, plan 12 O5: the completion gate, and the lessons it checked (`herdr run retro` is under `run`).
+    if args.get(1).map(String::as_str) == Some("gate") {
+        return nirvana_gate::cli(&args[2..]);
+    }
+    if args.get(1).map(String::as_str) == Some("lessons") {
+        return nirvana_lessons::cli(&args[2..]);
     }
 
     finish_cli(cli::maybe_run(&args))?;

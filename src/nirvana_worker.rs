@@ -1685,8 +1685,14 @@ fn book_child(
 }
 
 /// Writes an order's file where its worker reads it (the worker's folder may be a worktree: claude's file tools
-/// stay inside the working folders in print mode), and a copy in the project's own `.nirvana/orders/`.
-fn write_order(project: &Project, cwd: &Path, order: &str, text: &str) -> std::io::Result<String> {
+/// stay inside the working folders in print mode), and a copy in the project's own `.nirvana/orders/`. Public for O5's
+/// send-backs, which write a child's order into its parent's worktree.
+pub fn write_order(
+    project: &Project,
+    cwd: &Path,
+    order: &str,
+    text: &str,
+) -> std::io::Result<String> {
     let mut text = text.to_owned();
     if !text.contains(FOOTER_MARK) {
         text.push_str(ORDER_FOOTER);
@@ -2404,6 +2410,13 @@ pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i3
         (path.clone(), Some(path.display().to_string()), Some(branch))
     } else {
         (project.root.clone(), None, None)
+    };
+    // Plan 12 O5 (§7.4.3): one line per live lesson of the class, the path and the description, never the body.
+    let lessons = crate::nirvana_lessons::offer(&project.root, &cwd, &booked.class);
+    let text = if lessons.is_empty() {
+        text
+    } else {
+        format!("{}{lessons}", text.trim_end())
     };
     let order_file = write_order(project, &cwd, &request.order, &text).map_err(io)?;
     let seated = Seated {

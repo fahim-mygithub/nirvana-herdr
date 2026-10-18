@@ -323,6 +323,10 @@ pub enum Kind {
         verdict: String,
         #[serde(default)]
         reason: Option<String>,
+        /// Plan 12 O5: every axis the gate ruled on, as `nirvana_gate::Axis` writes it (§7.3: "gated with the
+        /// verdict and every axis"). Empty on a hand-logged verdict and on lines written before O5.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        axes: Vec<Value>,
     },
     Merged {
         order: String,
@@ -896,6 +900,7 @@ pub fn replay(events: &[Event]) -> RunState {
                 order,
                 verdict,
                 reason,
+                ..
             } => {
                 if let Some(known) = state.order_mut(order) {
                     known.verdict = Some(verdict.clone());
@@ -1950,16 +1955,20 @@ pub fn receipt_text(receipt: &Receipt) -> String {
 
 // ---- the record line an order leaves (O2's `record.jsonl`, extended) ----
 
-/// The outcome word for the record: the gate's verdict when it ruled, else what happened to the order.
+/// The outcome word for the record, one of O5's five (`nirvana_gate::Outcome`): the gate's verdict when it ruled,
+/// else what happened to the order. An order that ends a run with no passing gate, cut, failed or never gated,
+/// did not deliver gated work: `failed`, its why kept on the journal.
 pub fn outcome_word(order: &OrderState) -> String {
-    if let Some(verdict) = &order.verdict {
-        return verdict.clone();
+    use crate::nirvana_gate::Outcome;
+    if let Some(verdict) = order.verdict.as_deref().and_then(Outcome::parse) {
+        return verdict.word().into();
     }
+    // O3's two arms are kept as they were written; its controls find them.
     match order.phase {
         Phase::Merged => "pass".into(),
         Phase::Reseated => "reseated".into(),
-        Phase::Failed => order.outcome.clone().unwrap_or_else(|| "failed".into()),
-        phase => phase.word().into(),
+        Phase::Asked => Outcome::Asked.word().into(),
+        _ => Outcome::Failed.word().into(),
     }
 }
 
@@ -2035,7 +2044,8 @@ const USAGE: &str = "usage: herdr run status [<run>] [--json]
        herdr run tick [<run>]                start what a deferral holds once it is due; wake when idle
        herdr run receipt <run> [--json]
        herdr run end <run>                   end the run; write receipt.md and receipt.json beside the journal
-       herdr run log <run> --json '<event>'  append gated, merged, asked or usage (the orchestrator's turns)";
+       herdr run log <run> --json '<event>'  append gated, merged, asked or usage (the orchestrator's turns)
+       herdr run retro <run> | retro reject <id> [--why text] | retro propose --json '<proposal>' | retro list";
 
 fn usage_exit() -> ! {
     eprintln!("{USAGE}");
@@ -2108,13 +2118,15 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
                 nirvana_seat::read_record(&nirvana_seat::dir().join(nirvana_seat::RECORD_FILE));
             let receipt = receipt(&run, &state, bad, &record);
             if json {
-                println!("{}", serde_json::to_string_pretty(&receipt)?);
+                println!("{}", receipt_json(&project, &receipt)?);
             } else {
-                print!("{}", receipt_text(&receipt));
+                print!("{}", receipt_page(&project, &receipt));
             }
             Ok(())
         }
         Some("end") => end_cli(&project, rest),
+        // Plan 12 O5: the retro (§7.4.2).
+        Some("retro") => crate::nirvana_retro::cli(&project, rest),
         Some("log") => log_cli(&project, rest),
         _ => usage_exit(),
     }
@@ -2181,16 +2193,38 @@ fn end_cli(project: &Project, args: &[String]) -> std::io::Result<()> {
             write_record(&run, order, journal_ref(&journal, &state))?;
         }
     }
+    // Plan 12 O5: the retro reads the ended journal, before the receipt that names its open proposals.
+    match crate::nirvana_retro::retro(project, &run) {
+        Ok(summary) => eprintln!("{summary}"),
+        Err(err) => eprintln!("herdr run retro {run}: {err}"),
+    }
     let record = nirvana_seat::read_record(&nirvana_seat::dir().join(nirvana_seat::RECORD_FILE));
     let receipt = receipt(&run, &state, bad, &record);
     let dir = journal.dir();
     nirvana_seat::write_atomic(
         &dir.join("receipt.json"),
-        serde_json::to_string_pretty(&receipt)?.as_bytes(),
+        receipt_json(project, &receipt)?.as_bytes(),
     )?;
-    nirvana_seat::write_atomic(&dir.join("receipt.md"), receipt_text(&receipt).as_bytes())?;
+    nirvana_seat::write_atomic(
+        &dir.join("receipt.md"),
+        receipt_page(project, &receipt).as_bytes(),
+    )?;
     println!("{}", dir.join("receipt.md").display());
     Ok(())
+}
+
+/// The receipt's page with the project's open retro proposals after it (plan 12 §7.4.2: "Because proposals sat
+/// unread for 24 days before, the receipt ... name[s] the open ones"). `receipt_text` stays the journal's alone.
+fn receipt_page(project: &Project, receipt: &Receipt) -> String {
+    let mut page = receipt_text(receipt);
+    page.push_str(&crate::nirvana_retro::open_section(project));
+    page
+}
+
+fn receipt_json(project: &Project, receipt: &Receipt) -> std::io::Result<String> {
+    let mut value = serde_json::to_value(receipt)?;
+    value["open_proposals"] = serde_json::to_value(crate::nirvana_retro::open_ids(project))?;
+    Ok(serde_json::to_string_pretty(&value)?)
 }
 
 fn log_cli(project: &Project, args: &[String]) -> std::io::Result<()> {
