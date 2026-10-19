@@ -237,6 +237,10 @@ class LaunchTest(unittest.TestCase):
         body = text[text.index("pub fn nirvana_claude_args"):]
         body = body[:body.index("\n}\n")]
         flags = re.findall(r'"(--[a-z-]+)"\.into\(\)', body)
+        # The owner's convenience flags are the Rust launch's and never the bench's; each must still be there.
+        for owner_only in ab.OWNER_ONLY_FLAGS:
+            self.assertIn(owner_only, flags)
+        flags = [f for f in flags if f not in ab.OWNER_ONLY_FLAGS]
         home = Path(r"C:\h")
         mine = ab.nirvana_claude_args(home)
         self.assertEqual([w for w in mine if w.startswith("--")], flags)

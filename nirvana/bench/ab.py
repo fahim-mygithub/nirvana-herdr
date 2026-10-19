@@ -232,8 +232,14 @@ def parse_lines(text: str) -> list[dict]:
 # ---- arm N: the launch, the screen, the end of a run ------------------------------------------------------------------
 
 
+# 0.25.2 gave Nirvana Claude the owner's --rc and --chrome. The bench leaves them out: --rc would register a
+# remote-control session for every run, and --chrome would drive the owner's browser.
+OWNER_ONLY_FLAGS = ("--rc", "--chrome")
+
+
 def nirvana_claude_args(home: Path) -> list[str]:
-    """src/nirvana_launch.rs `nirvana_claude_args`, in its order (a test reads the Rust source and holds this to it)."""
+    """src/nirvana_launch.rs `nirvana_claude_args`, in its order, less `OWNER_ONLY_FLAGS` (a test reads the Rust source
+    and holds this to it)."""
     plugin = Path(home) / "nirvana" / "claude"
     return ["--plugin-dir", str(plugin), "--agent", "nirvana", "--model", MODEL, "--effort", EFFORT,
             "--append-system-prompt-file", str(plugin / "ROLE.md"), "--name", "Nirvana",

@@ -3,6 +3,16 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.25.3: the A/B bench keeps the owner-only flags out
+
+- **Changed:** `nirvana/bench/ab.py` names `OWNER_ONLY_FLAGS` (`--rc`, `--chrome`); arm N launches without them and its
+  launch test holds every other Rust flag to the bench's, and checks the two are still the Rust launch's.
+- **Because:** 0.25.2 added them to Nirvana Claude and `test_arm_n_launches_what_the_rust_launch_says` failed; the
+  0.25.2 merge ran the Rust suite and not `nirvana.test_scripts`, so master carried the failure until P2's gate found
+  it. A bench run must not register a remote-control session or drive the owner's Chrome.
+- **Measured:** `python -m unittest nirvana.test_scripts` OK; control `rc_bench_takes_owner_flags` reddens it.
+- **If you remove this:** the bench either fails its launch test or opens a remote session per run.
+
 ## alpha 0.25.2: Nirvana Claude starts with --rc and --chrome
 
 - **Changed:** Nirvana Claude's launch adds `--rc` (remote control) and `--chrome` (Claude in Chrome), after `--settings`.
