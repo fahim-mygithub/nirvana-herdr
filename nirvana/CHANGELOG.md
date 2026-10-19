@@ -3,6 +3,16 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.22.1: a seats.toml from before 0.22.0 still parses
+
+- **Changed:** `constants.spare_weight` is optional in seats.toml, defaulting to 0.05.
+- **Because:** installing 0.22.0 refused the owner's unedited seats.toml (written by 0.13.0, identical to its default)
+  with "TOML parse error at line 17", so every `herdr seat pick` failed until the file was deleted. A table the owner
+  had edited would have lost its edits the same way.
+- **Measured:** the default with the line removed parses to 0.05 (`the_default_table_is_written_once_...`); control
+  `p14_spare_weight_required` reddens it.
+- **If you remove this:** every owner table from before plan 14 is refused at the first pick after the upgrade.
+
 ## alpha 0.22.0: spend-down seating (plan 14)
 
 Plan 14, package p14 (`plans/2026-10-18-14-seat-spend-down.md`; the record is

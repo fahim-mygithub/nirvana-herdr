@@ -180,6 +180,11 @@ pub struct Table {
     pub classes: Vec<Class>,
 }
 
+/// Plan 14 §2.2's `spare_weight` when a table written before it leaves the line out.
+fn default_spare_weight() -> f32 {
+    0.05
+}
+
 /// The rule's numbers (plan 12 §5.3). Each is commented with its source in the default file.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -191,6 +196,9 @@ pub struct Constants {
     pub pace_ease: f32,
     pub pace_min: f32,
     pub pace_max: f32,
+    /// Plan 14. Optional, so a seats.toml written before 0.22.0 still parses: the upgrade to 0.22.0 refused the
+    /// owner's unedited table ("TOML parse error at line 17") and every `seat pick` failed until it was deleted.
+    #[serde(default = "default_spare_weight")]
     pub spare_weight: f32,
     pub reset_left: f32,
     pub reset_within_min: u64,
@@ -3254,6 +3262,9 @@ mod tests {
         assert!(parse(&DEFAULT.replace("version = 1", "version = 2"))
             .unwrap_err()
             .contains("version 2 is not 1"));
+        // A table from before plan 14 has no spare_weight line: it parses, with the default.
+        let before_14 = parse(&DEFAULT.replace("spare_weight = 0.05\n", "")).unwrap();
+        assert!(close(before_14.constants.spare_weight, 0.05));
         assert!(
             parse(&DEFAULT.replace("spare_weight = 0.05", "spare_weight = 1.5"))
                 .unwrap_err()

@@ -44,4 +44,9 @@ CONTROLS = (
             '  { seat = "flash", score = 78, effort = "low" },\n  { seat = "g-sonnet", score = 88 },',
             '  { seat = "flash", score = 78, effort = "low" },\n  { seat = "g-sonnet", score = 77 },',
             SPEND_DOWN, "rust"),
+    # 0.22.1: a table written before plan 14 (no spare_weight line) still parses, with the default.
+    Control('p14_spare_weight_required', 'src/nirvana_seat.rs',
+            '    #[serde(default = "default_spare_weight")]\n',
+            '',
+            TABLE, "rust"),
 )
