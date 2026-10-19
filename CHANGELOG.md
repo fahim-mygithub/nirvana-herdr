@@ -1,5 +1,15 @@
 # Changelog
 
+## alpha NEXT (p17): subagents in the agents panel
+
+### Added
+- Claude subagent reader parses folder-encoded Claude Code sessions, metadata, and tail transcripts to display subagents and workflow children directly under their agent row.
+- Subagent rows show provider mark (`✻` Claude, `◆` Gemini, `●` Local) in their doctrine colors, agent type or order name, normalized model spelling, elapsed time, status (`✓` done, `✗` failed), and current context tokens matching Claude Code.
+- Wide views display agent descriptions on a second indented dimmed line, while narrow views adaptively drop description, model version numbers, and elapsed time.
+- Overflow beyond 6 subagents displays `+N more`, and finished subagents remain visible for 10 minutes dimmed.
+- Seat orders from `herdr seat run` and agy jobs or Bash-spawned agy processes are discovered and nested under their respective parent panes.
+- Clicking any subagent row focuses the subagent's target pane.
+
 ## Unreleased
 
 ## [0.9.5] - 2026-10-14

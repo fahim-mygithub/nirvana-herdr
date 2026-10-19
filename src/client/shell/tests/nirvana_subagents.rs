@@ -36,7 +36,11 @@ fn snapshot_with_agent(pane_id: &str, name: &str) -> ClientShellSnapshot {
     snap
 }
 
-fn compose_shell(agents: Vec<ClientShellAgent>, width: u16, height: u16) -> (ClientShellState, FrameData, Vec<String>) {
+fn compose_shell(
+    agents: Vec<ClientShellAgent>,
+    width: u16,
+    height: u16,
+) -> (ClientShellState, FrameData, Vec<String>) {
     let mut projected = snapshot();
     projected.agents = agents;
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
@@ -100,7 +104,10 @@ fn subagent_rows_render_under_agent_in_flat_and_grouped_views() {
         let (mut state, _, rows) = compose_shell(agents.clone(), 106, 40);
         state.config.agent_panel_sort = crate::config::AgentPanelSortConfig::Spaces;
         let text = rows.join("\n");
-        assert!(text.contains("\u{273B} general-purpose Sonnet"), "text: {text}");
+        assert!(
+            text.contains("\u{273B} general-purpose Sonnet"),
+            "text: {text}"
+        );
         assert!(text.contains("\u{25C6} build Gemini Flash"), "text: {text}");
     }
 
@@ -109,7 +116,10 @@ fn subagent_rows_render_under_agent_in_flat_and_grouped_views() {
         let (mut state, _, rows) = compose_shell(agents, 106, 40);
         state.config.agent_panel_sort = crate::config::AgentPanelSortConfig::Priority;
         let text = rows.join("\n");
-        assert!(text.contains("\u{273B} general-purpose Sonnet"), "text: {text}");
+        assert!(
+            text.contains("\u{273B} general-purpose Sonnet"),
+            "text: {text}"
+        );
         assert!(text.contains("\u{25C6} build Gemini Flash"), "text: {text}");
     }
 
@@ -121,7 +131,8 @@ fn subagent_rows_render_under_agent_in_flat_and_grouped_views() {
             "pane_1",
             &config,
             None,
-        ).expect("agent row");
+        )
+        .expect("agent row");
 
         let mut wide_buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 60, 6));
         crate::client::shell::agent_sidebar::render_agent_row(
@@ -141,7 +152,10 @@ fn subagent_rows_render_under_agent_in_flat_and_grouped_views() {
         }
         let text = lines.join("\n");
         assert!(text.contains("Sonnet 5.5"), "wide text: {text}");
-        assert!(text.contains("Amazon-only parts research"), "wide text: {text}");
+        assert!(
+            text.contains("Amazon-only parts research"),
+            "wide text: {text}"
+        );
         assert!(text.contains("Gemini 3.8 Flash"), "wide text: {text}");
         assert!(text.contains("Fast compile"), "wide text: {text}");
     }
@@ -209,8 +223,14 @@ fn marks_and_colours_by_provider() {
     let (state, frame, rows) = compose_shell(agents, 106, 40);
 
     // Find row with Claude subagent: mark ✻ (\u{273B})
-    let claude_row = rows.iter().position(|r| r.contains("claude-sub")).expect("claude-sub row");
-    let claude_mark_idx = rows[claude_row].chars().position(|c| c == '\u{273B}').unwrap();
+    let claude_row = rows
+        .iter()
+        .position(|r| r.contains("claude-sub"))
+        .expect("claude-sub row");
+    let claude_mark_idx = rows[claude_row]
+        .chars()
+        .position(|c| c == '\u{273B}')
+        .unwrap();
     let claude_fg = frame.cells[claude_row * frame.width as usize + claude_mark_idx].fg;
     assert_eq!(
         claude_fg,
@@ -218,8 +238,14 @@ fn marks_and_colours_by_provider() {
     );
 
     // Find row with Gemini subagent: mark ◆ (\u{25C6})
-    let gemini_row = rows.iter().position(|r| r.contains("gemini-sub")).expect("gemini-sub row");
-    let gemini_mark_idx = rows[gemini_row].chars().position(|c| c == '\u{25C6}').unwrap();
+    let gemini_row = rows
+        .iter()
+        .position(|r| r.contains("gemini-sub"))
+        .expect("gemini-sub row");
+    let gemini_mark_idx = rows[gemini_row]
+        .chars()
+        .position(|c| c == '\u{25C6}')
+        .unwrap();
     let gemini_fg = frame.cells[gemini_row * frame.width as usize + gemini_mark_idx].fg;
     assert_eq!(
         gemini_fg,
@@ -227,8 +253,14 @@ fn marks_and_colours_by_provider() {
     );
 
     // Find row with Local subagent: mark ● (\u{25CF})
-    let local_row = rows.iter().position(|r| r.contains("local-sub")).expect("local-sub row");
-    let local_mark_idx = rows[local_row].chars().position(|c| c == '\u{25CF}').unwrap();
+    let local_row = rows
+        .iter()
+        .position(|r| r.contains("local-sub"))
+        .expect("local-sub row");
+    let local_mark_idx = rows[local_row]
+        .chars()
+        .position(|c| c == '\u{25CF}')
+        .unwrap();
     let local_fg = frame.cells[local_row * frame.width as usize + local_mark_idx].fg;
     assert_eq!(
         local_fg,
@@ -281,7 +313,8 @@ fn narrow_and_wide_adaptive_formatting() {
         "pane_1",
         &config,
         None,
-    ).expect("agent row");
+    )
+    .expect("agent row");
 
     // Wide rendering: description is drawn on line 2, version number on line 1
     crate::client::shell::agent_sidebar::render_agent_row(
@@ -321,7 +354,10 @@ fn narrow_and_wide_adaptive_formatting() {
         narrow_lines.push(line);
     }
     let narrow_out = narrow_lines.join("\n");
-    assert!(!narrow_out.contains("researching parts"), "narrow: {narrow_out}");
+    assert!(
+        !narrow_out.contains("researching parts"),
+        "narrow: {narrow_out}"
+    );
     assert!(narrow_out.contains("Sonnet"), "narrow: {narrow_out}");
 
     set_view_for_test(None);
@@ -359,7 +395,8 @@ fn overflow_shows_plus_n_more() {
         "pane_1",
         &config,
         None,
-    ).expect("agent row");
+    )
+    .expect("agent row");
 
     let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 50, 6));
     crate::client::shell::agent_sidebar::render_agent_row(
@@ -433,7 +470,8 @@ fn finished_subagents_dimmed_and_ten_minute_filter() {
         "pane_1",
         &config,
         None,
-    ).expect("agent row");
+    )
+    .expect("agent row");
 
     let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 60, 6));
     crate::client::shell::agent_sidebar::render_agent_row(
@@ -458,7 +496,10 @@ fn finished_subagents_dimmed_and_ten_minute_filter() {
 
     // Check DIM modifier on the done row
     let done_line_idx = lines.iter().position(|l| l.contains("done-agent")).unwrap();
-    let check_x = lines[done_line_idx].chars().position(|c| c == '\u{2713}').unwrap();
+    let check_x = lines[done_line_idx]
+        .chars()
+        .position(|c| c == '\u{2713}')
+        .unwrap();
     let cell = buf.cell((check_x as u16, done_line_idx as u16)).unwrap();
     assert!(cell.modifier.contains(ratatui::style::Modifier::DIM));
 
@@ -497,7 +538,8 @@ fn click_subagent_row_focuses_target_pane() {
         "pane_1",
         &config,
         None,
-    ).expect("agent row");
+    )
+    .expect("agent row");
 
     let mut hits = ShellHitMap::default();
     let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 50, 6));
@@ -511,8 +553,15 @@ fn click_subagent_row_focuses_target_pane() {
     );
 
     // hits.agents should have recorded the subagent's target_pane_id "worker_pane_42"
-    let subagent_hit = hits.agents.iter().find(|(_, pane_id)| pane_id == "worker_pane_42");
-    assert!(subagent_hit.is_some(), "worker pane hit recorded: {:?}", hits.agents);
+    let subagent_hit = hits
+        .agents
+        .iter()
+        .find(|(_, pane_id)| pane_id == "worker_pane_42");
+    assert!(
+        subagent_hit.is_some(),
+        "worker pane hit recorded: {:?}",
+        hits.agents
+    );
 
     set_view_for_test(None);
 }
@@ -525,7 +574,8 @@ fn row_lines_calculation() {
         "pane_1",
         &config,
         None,
-    ).expect("agent row");
+    )
+    .expect("agent row");
 
     // 0 subagents: returns base row count
     assert_eq!(
@@ -608,4 +658,114 @@ fn seat_worker_panes_filtered_from_top_level() {
     assert_eq!(rows[0].pane_id, "orch_pane");
 
     set_worker_panes_for_test(None);
+}
+
+#[test]
+fn live_scratch_home_subagents_show_in_client_snapshot() {
+    let temp = crate::nirvana::with_test_home("live-subagents-snapshot");
+    let proj_dir = temp.path.join("repo").join("3D-Printer-Flow-xtool");
+    std::fs::create_dir_all(&proj_dir).unwrap();
+
+    let enc = crate::nirvana_subagents::encode_project_folder(&proj_dir);
+    let claude_proj = temp.path.join(".claude").join("projects").join(&enc);
+    let subagents_dir = claude_proj.join("sess-live").join("subagents");
+    std::fs::create_dir_all(&subagents_dir).unwrap();
+
+    let session_file = claude_proj.join("sess-live.jsonl");
+    std::fs::write(&session_file, "{\"type\":\"session_start\"}\n").unwrap();
+
+    let meta = serde_json::json!({
+        "agentType": "general-purpose",
+        "description": "Amazon-only parts research",
+        "toolUseId": "toolu_01",
+        "spawnDepth": 1,
+        "requestShape": "background",
+        "requestNonInteractive": true,
+        "model": "sonnet"
+    });
+    std::fs::write(
+        subagents_dir.join("agent-a9fa.meta.json"),
+        serde_json::to_string(&meta).unwrap(),
+    )
+    .unwrap();
+
+    let transcript = serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "id": "msg_01",
+            "model": "claude-sonnet-5-5",
+            "usage": {
+                "input_tokens": 2,
+                "cache_creation_input_tokens": 3390,
+                "cache_read_input_tokens": 129589,
+                "output_tokens": 10
+            }
+        },
+        "timestamp": "2026-10-19T21:23:48.371Z",
+        "sessionId": "sess-live",
+        "cwd": proj_dir.to_str().unwrap()
+    });
+    std::fs::write(
+        subagents_dir.join("agent-a9fa.jsonl"),
+        format!("{}\n", serde_json::to_string(&transcript).unwrap()),
+    )
+    .unwrap();
+
+    // Read directly via subagents reader with temp home
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let subagents =
+        crate::nirvana_subagents::read_claude_subagents(&session_file, "pane_1", now_secs);
+    assert_eq!(subagents.len(), 1);
+    assert_eq!(subagents[0].name, "general-purpose");
+    assert_eq!(subagents[0].model, "Sonnet 5.5");
+    assert_eq!(subagents[0].tokens, Some(132_991));
+
+    // In a client snapshot, populate view and render
+    let mut sub_map = HashMap::new();
+    sub_map.insert(
+        "pane_1".to_string(),
+        SubagentsView {
+            subagents: subagents.clone(),
+            total_count: 1,
+            overflow: 0,
+        },
+    );
+    set_view_for_test(Some(sub_map));
+
+    let config = ClientShellConfig::from_config(&Config::default());
+    let row = crate::client::shell::agent_sidebar::agent_row(
+        &snapshot_with_agent("pane_1", "3D-Printer-Flow-xtool"),
+        "pane_1",
+        &config,
+        None,
+    )
+    .expect("agent row");
+
+    let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 60, 6));
+    crate::client::shell::agent_sidebar::render_agent_row(
+        &mut buf,
+        Rect::new(0, 0, 60, 6),
+        &row,
+        &config,
+        None,
+    );
+
+    let mut lines = Vec::new();
+    for y in 0..6 {
+        let mut line = String::new();
+        for x in 0..60 {
+            line.push_str(buf.cell((x, y)).unwrap().symbol());
+        }
+        lines.push(line);
+    }
+    let out = lines.join("\n");
+    println!("Rendered subagent rows in client snapshot:\n{out}");
+    assert!(out.contains("Sonnet 5.5"), "out: {out}");
+    assert!(out.contains("Amazon-only parts research"), "out: {out}");
+    assert!(out.contains("133.0k"), "out: {out}");
+
+    set_view_for_test(None);
 }

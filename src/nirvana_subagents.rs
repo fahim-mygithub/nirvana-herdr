@@ -210,7 +210,10 @@ pub fn format_elapsed(secs: u64) -> String {
 /// Sums Claude Code usage fields: input + cache_creation + cache_read + output tokens.
 /// Measured on Claude Code 2.1.303: matches the turn's total context.
 pub fn parse_claude_usage(usage: &Value) -> u64 {
-    let input = usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let input = usage
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let cache_create = usage
         .get("cache_creation_input_tokens")
         .and_then(Value::as_u64)
@@ -219,7 +222,10 @@ pub fn parse_claude_usage(usage: &Value) -> u64 {
         .get("cache_read_input_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let output = usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let output = usage
+        .get("output_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     input + cache_create + cache_read + output
 }
 
@@ -253,10 +259,7 @@ pub fn parse_meta_json(content: &str) -> Option<SubagentMeta> {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let model = obj
-        .get("model")
-        .and_then(Value::as_str)
-        .map(String::from);
+    let model = obj.get("model").and_then(Value::as_str).map(String::from);
     let finished = obj.get("finished").and_then(Value::as_bool);
     let parent_agent_id = obj
         .get("parentAgentId")
@@ -380,17 +383,19 @@ pub fn resolve_claude_session(
     let enc_folder = encode_project_folder(pane_folder);
 
     // Check shared-folder conflict with any other Claude pane sharing the same encoded folder
-    let has_conflict = other_claude_panes.iter().any(|(_, other_folder, other_sess)| {
-        if encode_project_folder(other_folder) == enc_folder {
-            // If neither has an explicit session, or both have the same session, they cannot be told apart
-            match (agent_session, other_sess) {
-                (Some(s1), Some(s2)) => s1 == *s2,
-                _ => true,
+    let has_conflict = other_claude_panes
+        .iter()
+        .any(|(_, other_folder, other_sess)| {
+            if encode_project_folder(other_folder) == enc_folder {
+                // If neither has an explicit session, or both have the same session, they cannot be told apart
+                match (agent_session, other_sess) {
+                    (Some(s1), Some(s2)) => s1 == *s2,
+                    _ => true,
+                }
+            } else {
+                false
             }
-        } else {
-            false
-        }
-    });
+        });
 
     if has_conflict {
         // Refusal: two Claude panes share one folder and nothing tells them apart
@@ -446,7 +451,9 @@ pub fn resolve_claude_session(
             .unwrap_or(0);
         if agent_start_secs.is_none_or(|start| mtime >= start)
             && mtime <= now_secs + 300
-            && newest.as_ref().is_none_or(|(_, best_mtime)| mtime > *best_mtime)
+            && newest
+                .as_ref()
+                .is_none_or(|(_, best_mtime)| mtime > *best_mtime)
         {
             newest = Some((path, mtime));
         }
@@ -645,10 +652,22 @@ pub fn parse_agy_stream_tokens(path: &Path) -> Option<u64> {
         let Ok(val) = serde_json::from_str::<Value>(trimmed) else {
             continue;
         };
-        if let Some(usage) = val.pointer("/step_update/usage").or_else(|| val.pointer("/result/usage")) {
-            let input = usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
-            let cache_read = usage.get("cache_read_tokens").and_then(Value::as_u64).unwrap_or(0);
-            let output = usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+        if let Some(usage) = val
+            .pointer("/step_update/usage")
+            .or_else(|| val.pointer("/result/usage"))
+        {
+            let input = usage
+                .get("input_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let cache_read = usage
+                .get("cache_read_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let output = usage
+                .get("output_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             return Some(input + cache_read + output);
         }
     }
@@ -754,7 +773,8 @@ pub fn read_agy_jobs(home: &Path, pane_id: &str, now_secs: u64) -> Vec<Subagent>
         }
 
         let is_done = job.exit == Some(0);
-        let is_failed = job.exit.is_some_and(|c| c != 0) || (job.ended.is_some() && job.exit.is_none());
+        let is_failed =
+            job.exit.is_some_and(|c| c != 0) || (job.ended.is_some() && job.exit.is_none());
         let is_running = !is_done && !is_failed;
 
         let ended_at = job.ended;
@@ -792,7 +812,11 @@ pub fn read_agy_jobs(home: &Path, pane_id: &str, now_secs: u64) -> Vec<Subagent>
 }
 
 /// Reads seat orders (`herdr seat run`) nesting under `orchestrator_pane_id`.
-pub fn read_seat_orders(project_folder: &Path, orchestrator_pane_id: &str, now_secs: u64) -> Vec<Subagent> {
+pub fn read_seat_orders(
+    project_folder: &Path,
+    orchestrator_pane_id: &str,
+    now_secs: u64,
+) -> Vec<Subagent> {
     let runs_dir = project_folder.join(".nirvana").join("runs");
     let Ok(entries) = std::fs::read_dir(&runs_dir) else {
         return Vec::new();
@@ -825,7 +849,10 @@ pub fn read_seat_orders(project_folder: &Path, orchestrator_pane_id: &str, now_s
         }
 
         for order in run_state.orders {
-            let is_done = matches!(order.phase, crate::nirvana_run::Phase::Merged | crate::nirvana_run::Phase::Gated);
+            let is_done = matches!(
+                order.phase,
+                crate::nirvana_run::Phase::Merged | crate::nirvana_run::Phase::Gated
+            );
             let is_failed = order.phase == crate::nirvana_run::Phase::Failed;
             let is_running = !order.phase.terminal();
 
@@ -854,7 +881,10 @@ pub fn read_seat_orders(project_folder: &Path, orchestrator_pane_id: &str, now_s
 
             let model = format_model(Some(&order.seated.model), provider);
 
-            let stream_path = entry.path().join("streams").join(format!("{}.jsonl", order.seated.order));
+            let stream_path = entry
+                .path()
+                .join("streams")
+                .join(format!("{}.jsonl", order.seated.order));
             let tokens = if stream_path.is_file() {
                 parse_agy_stream_tokens(&stream_path)
             } else {
@@ -1050,10 +1080,11 @@ pub fn poll() {
             let Some(folder) = entry.folder.clone() else {
                 continue;
             };
-            let any_running = entry
-                .view
-                .as_ref()
-                .is_some_and(|v| v.subagents.iter().any(|s| s.state == SubagentState::Running));
+            let any_running = entry.view.as_ref().is_some_and(|v| {
+                v.subagents
+                    .iter()
+                    .any(|s| s.state == SubagentState::Running)
+            });
             let reread_interval = if any_running {
                 Duration::from_secs(2)
             } else {
@@ -1101,7 +1132,11 @@ pub fn poll() {
                 );
 
                 if let Some(session_path) = session_path {
-                    all_subagents.extend(read_claude_subagents(&session_path, &task.pane_id, now_secs));
+                    all_subagents.extend(read_claude_subagents(
+                        &session_path,
+                        &task.pane_id,
+                        now_secs,
+                    ));
                 }
             }
 
@@ -1183,10 +1218,7 @@ mod tests {
             format_model(Some("claude-3-5-sonnet-20241022"), SubagentProvider::Claude),
             "Sonnet 3.5"
         );
-        assert_eq!(
-            format_model(None, SubagentProvider::Claude),
-            "inherit"
-        );
+        assert_eq!(format_model(None, SubagentProvider::Claude), "inherit");
         assert_eq!(
             format_model(Some("gemini-3.8-flash"), SubagentProvider::Gemini),
             "Gemini 3.8 Flash"
@@ -1331,15 +1363,8 @@ mod tests {
         let pane1 = "pane-1";
         let pane2 = "pane-2";
         let other_panes = vec![(pane2, proj.as_path(), None)];
-        let res = resolve_claude_session(
-            pane1,
-            &proj,
-            None,
-            Some(100),
-            &other_panes,
-            &temp.path,
-            200,
-        );
+        let res =
+            resolve_claude_session(pane1, &proj, None, Some(100), &other_panes, &temp.path, 200);
         assert!(res.is_none(), "Shared folder conflict must be refused");
 
         // 2. Case 1: distinct agent_session reported

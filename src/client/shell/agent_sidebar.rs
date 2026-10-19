@@ -482,13 +482,17 @@ pub(super) fn render_agent_row(
         };
 
         let text_style = if is_finished {
-            Style::default().fg(palette.overlay0).add_modifier(Modifier::DIM)
+            Style::default()
+                .fg(palette.overlay0)
+                .add_modifier(Modifier::DIM)
         } else {
             Style::default().fg(palette.subtext0)
         };
 
         let model_style = if is_finished {
-            Style::default().fg(palette.overlay0).add_modifier(Modifier::DIM)
+            Style::default()
+                .fg(palette.overlay0)
+                .add_modifier(Modifier::DIM)
         } else {
             Style::default().fg(palette.overlay1)
         };
@@ -496,11 +500,20 @@ pub(super) fn render_agent_row(
         let elapsed_str = crate::nirvana_subagents::format_elapsed(sub.elapsed_secs);
         let tokens_str = crate::nirvana_subagents::format_tokens(sub.tokens);
 
-        let left_len = base_indent + 2 + sub.name.chars().count() + 1 + model_display.chars().count();
+        let left_len =
+            base_indent + 2 + sub.name.chars().count() + 1 + model_display.chars().count();
         let right_len = if is_done || is_failed {
-            2 + if !drop_elapsed { elapsed_str.chars().count() } else { 0 }
+            2 + if !drop_elapsed {
+                elapsed_str.chars().count()
+            } else {
+                0
+            }
         } else {
-            (if !drop_elapsed { elapsed_str.chars().count() + 1 } else { 0 }) + tokens_str.chars().count()
+            (if !drop_elapsed {
+                elapsed_str.chars().count() + 1
+            } else {
+                0
+            }) + tokens_str.chars().count()
         };
 
         let total_needed = left_len + right_len;
@@ -512,8 +525,14 @@ pub(super) fn render_agent_row(
 
         let mut spans = Vec::new();
         spans.push(ratatui::text::Span::raw(" ".repeat(base_indent)));
-        spans.push(ratatui::text::Span::styled(format!("{mark_str} "), mark_style));
-        spans.push(ratatui::text::Span::styled(format!("{} ", sub.name), text_style));
+        spans.push(ratatui::text::Span::styled(
+            format!("{mark_str} "),
+            mark_style,
+        ));
+        spans.push(ratatui::text::Span::styled(
+            format!("{} ", sub.name),
+            text_style,
+        ));
         spans.push(ratatui::text::Span::styled(model_display, model_style));
 
         spans.push(ratatui::text::Span::raw(" ".repeat(gap)));
@@ -538,7 +557,10 @@ pub(super) fn render_agent_row(
             }
         } else {
             if !drop_elapsed {
-                spans.push(ratatui::text::Span::styled(format!("{elapsed_str} "), model_style));
+                spans.push(ratatui::text::Span::styled(
+                    format!("{elapsed_str} "),
+                    model_style,
+                ));
             }
             let mut token_style = Style::default().fg(palette.subtext0);
             if is_finished {
@@ -547,25 +569,24 @@ pub(super) fn render_agent_row(
             spans.push(ratatui::text::Span::styled(tokens_str, token_style));
         }
 
-        Paragraph::new(Line::from(spans)).render(
-            Rect::new(rect.x, current_y, rect.width, 1),
-            buffer,
-        );
+        Paragraph::new(Line::from(spans))
+            .render(Rect::new(rect.x, current_y, rect.width, 1), buffer);
         current_y += 1;
 
         if has_desc && current_y < rect.bottom() {
             let desc_indent = if sub.depth == 1 { 5 } else { 3 };
             let max_desc_width = (rect.width as usize).saturating_sub(desc_indent);
-            let desc_fitted = crate::client::shell::nirvana_spaces::fit(sub.description.trim(), max_desc_width);
-            let desc_style = Style::default().fg(palette.overlay0).add_modifier(Modifier::DIM);
+            let desc_fitted =
+                crate::client::shell::nirvana_spaces::fit(sub.description.trim(), max_desc_width);
+            let desc_style = Style::default()
+                .fg(palette.overlay0)
+                .add_modifier(Modifier::DIM);
             let desc_spans = vec![
                 ratatui::text::Span::raw(" ".repeat(desc_indent)),
                 ratatui::text::Span::styled(desc_fitted, desc_style),
             ];
-            Paragraph::new(Line::from(desc_spans)).render(
-                Rect::new(rect.x, current_y, rect.width, 1),
-                buffer,
-            );
+            Paragraph::new(Line::from(desc_spans))
+                .render(Rect::new(rect.x, current_y, rect.width, 1), buffer);
             current_y += 1;
         }
     }
@@ -577,15 +598,15 @@ pub(super) fn render_agent_row(
                 row.pane_id.clone(),
             ));
         }
-        let more_style = Style::default().fg(palette.overlay0).add_modifier(Modifier::DIM);
+        let more_style = Style::default()
+            .fg(palette.overlay0)
+            .add_modifier(Modifier::DIM);
         let more_spans = vec![
             ratatui::text::Span::raw("   "),
             ratatui::text::Span::styled(format!("+{} more", row.subagents_overflow), more_style),
         ];
-        Paragraph::new(Line::from(more_spans)).render(
-            Rect::new(rect.x, current_y, rect.width, 1),
-            buffer,
-        );
+        Paragraph::new(Line::from(more_spans))
+            .render(Rect::new(rect.x, current_y, rect.width, 1), buffer);
     }
 }
 
