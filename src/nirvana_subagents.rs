@@ -32,12 +32,14 @@ impl SubagentProvider {
     }
 
     /// Provider colour: Anthropic orange/coral for Claude, purple for Gemini, None for Local.
+    /// Calls `nirvana_usage::Provider::colour()` so a palette change reaches both.
     pub fn colour(&self) -> Option<(u8, u8, u8)> {
-        match self {
-            Self::Claude => Some((0xD8, 0x88, 0x6A)),
-            Self::Gemini => Some((0xAB, 0x93, 0xD6)),
-            Self::Local => None,
-        }
+        let usage_provider = match self {
+            Self::Claude => crate::nirvana_usage::Provider::Claude,
+            Self::Gemini => crate::nirvana_usage::Provider::Antigravity,
+            Self::Local => crate::nirvana_usage::Provider::Local,
+        };
+        usage_provider.colour()
     }
 }
 

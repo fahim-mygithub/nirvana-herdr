@@ -3,6 +3,19 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha NEXT (p17): subagents in the agents panel
+
+Package `p17` (`P17-ORDER.md`, record `nirvana/plans/2026-10-19-17-records/p17.md`).
+
+- **Changed:** In the agents panel (both flat and grouped views), subagents are discovered and displayed directly under each parent agent row. Claude subagents and workflow children are read from `~/.claude/projects/` metadata and transcripts; seat orders are discovered from run journals; agy jobs and Bash-spawned agy processes are read off the draw path with ToolHelp walks. Each subagent displays its provider mark (`✻` Claude, `◆` Gemini, `●` Local) in doctrine colors, model spelling, elapsed time, status (`✓` done, `✗` failed), and turn context tokens. Rows adapt between narrow and wide views, show `+N more` beyond 6 subagents, dim finished subagents for 10 minutes, and focus target panes on click.
+  **Because:** Plan 17 L1 & L2: Subagents spawned by Claude Code (task tools, workflows), seat orders, and agy processes were previously hidden in the UI. Rendering them under their parent agent gives visibility into background tasks, token consumption, and running status.
+  **Measured:** Nextest suite and client snapshot tests in `src/client/shell/tests/nirvana_subagents.rs` covering folder encoding, session resolution, meta and tail parsing, model formatting, token sums, workflow nesting, adaptive width, click hitboxes, and seat orders; controls in `nirvana/controls.d/p17.py`; dry-run controls total verified.
+  **If you remove this:** users cannot see background subagents, their tokens, models, or running states under parent agents in the agents panel.
+- **Changed (review fix round):** Claude config folder reads `CLAUDE_CONFIG_DIR` (or `USERPROFILE`/`HOME` joined with `.claude`) separately from Nirvana home; session ID reads from `AgentInfo.agent_session` (`claude` and `Id` kind); agent filter checks canonical agent equals Claude; shared-folder refusal checks other Claude panes from cache entries; Bash-spawned agy discovers shell pid via `pane.process-info` with timeout and matches executable name `agy.exe`/`agy` with elapsed age from process creation; transcript tail expands from 64 KB up to 8 MB to find assistant turns; provider colours delegate directly to `nirvana_usage::Provider::colour`; changelog moved from root to `nirvana/CHANGELOG.md`.
+  **Because:** Plan 17 review findings: installed builds use Nirvana install dir rather than user Claude config; `agent_session` was read from tokens rather than `AgentInfo.agent_session`; non-agy agents like Codex erroneously listed Claude subagents; shared-folder conflict check was bypassed with empty slice; shell pid was missing for Bash agy and matching checked whole command line with 0 elapsed; 64 KB tail missed assistant turns when large user tool results occurred; colours were duplicated from `nirvana_usage`.
+  **Measured:** Individual unit and client tests for each finding in `src/client/shell/tests/nirvana_subagents.rs` and `src/nirvana_subagents.rs`; new controls in `nirvana/controls.d/p17.py` covering all fixes; dry-run controls total increased and matched.
+  **If you remove this:** Claude subagents fail to appear in installed builds, Codex panes display foreign Claude subagents, large tool results show `-` tokens, and command-line arguments containing "agy" match as agy processes.
+
 ## alpha 0.29.0: the Antigravity account guard (plan 18)
 
 Package `p18` (`P18-ORDER.md`, record `nirvana/plans/2026-10-19-18-records/p18.md`).

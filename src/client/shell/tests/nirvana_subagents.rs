@@ -266,6 +266,18 @@ fn marks_and_colours_by_provider() {
         local_fg,
         crate::protocol::color_to_u32(state.config.palette.overlay1)
     );
+    assert_eq!(
+        SubagentProvider::Claude.colour(),
+        crate::nirvana_usage::Provider::Claude.colour()
+    );
+    assert_eq!(
+        SubagentProvider::Gemini.colour(),
+        crate::nirvana_usage::Provider::Antigravity.colour()
+    );
+    assert_eq!(
+        SubagentProvider::Local.colour(),
+        crate::nirvana_usage::Provider::Local.colour()
+    );
 
     set_view_for_test(None);
 }

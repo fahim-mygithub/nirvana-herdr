@@ -154,4 +154,14 @@ CONTROLS = (
         'subagent_rows_render_under_agent_in_flat_and_grouped_views',
         'rust',
     ),
+    # Review fix: SubagentProvider::colour delegates to nirvana_usage::Provider::colour
+    Control(
+        'p17_provider_colour_delegates_to_usage',
+        'src/nirvana_subagents.rs',
+        "        let usage_provider = match self {\n            Self::Claude => crate::nirvana_usage::Provider::Claude,\n            Self::Gemini => crate::nirvana_usage::Provider::Antigravity,\n            Self::Local => crate::nirvana_usage::Provider::Local,\n        };\n        usage_provider.colour()",
+        "        let usage_provider = match self {\n            Self::Claude => crate::nirvana_usage::Provider::Local,\n            Self::Gemini => crate::nirvana_usage::Provider::Antigravity,\n            Self::Local => crate::nirvana_usage::Provider::Local,\n        };\n        usage_provider.colour()",
+        'marks_and_colours_by_provider',
+        'rust',
+    ),
 )
+
