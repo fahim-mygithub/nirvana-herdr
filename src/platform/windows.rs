@@ -2555,6 +2555,12 @@ fn environment_variable_from_utf16(environment: &[u16], name: &str) -> Option<St
     None
 }
 
+/// Reads a process command line by PID with limited query rights.
+pub fn process_command_line(pid: u32) -> Option<String> {
+    let process = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION)?;
+    read_process_command_line(process.0)
+}
+
 /// Read a process command line with only `PROCESS_QUERY_LIMITED_INFORMATION`.
 ///
 /// `ProcessCommandLineInformation` has been available since Windows 8.1.

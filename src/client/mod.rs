@@ -2362,7 +2362,9 @@ async fn run_client_loop(
                             // Plan 15: the Jobs square; polls 2s running / 15s idle off the draw path
                             | crate::nirvana_job::take_changed()
                             // Plan 16: the Git square; polls 5s open / 15s idle off the draw path
-                            | crate::nirvana_git::take_changed();
+                            | crate::nirvana_git::take_changed()
+                            // Plan 17: subagents under each agent in the agents panel; polls 2s running / 10s idle
+                            | crate::nirvana_subagents::take_changed();
                         let frame = outcome
                             .repaint
                             .then(|| shell.compose(state.reported_size.0, state.reported_size.1))

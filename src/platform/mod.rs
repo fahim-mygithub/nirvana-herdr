@@ -145,6 +145,16 @@ pub struct ForegroundProcess {
     pub cmdline: Option<String>,
 }
 
+#[cfg(windows)]
+pub fn process_command_line(pid: u32) -> Option<String> {
+    windows::process_command_line(pid)
+}
+
+#[cfg(not(windows))]
+pub fn process_command_line(_pid: u32) -> Option<String> {
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForegroundJob {
     pub process_group_id: u32,
