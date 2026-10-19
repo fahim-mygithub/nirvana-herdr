@@ -3,7 +3,7 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
-## alpha NEXT (p14): spend-down seating
+## alpha 0.22.0: spend-down seating (plan 14)
 
 Plan 14, package p14 (`plans/2026-10-18-14-seat-spend-down.md`; the record is
 `plans/2026-10-18-14-records/p14.md`).
@@ -46,6 +46,12 @@ Plan 14, package p14 (`plans/2026-10-18-14-seat-spend-down.md`; the record is
   `p14_toml_build_bounded_g_sonnet_score`, `seat_toml_g_sonnet_last`.
   **If you remove this:** `g-sonnet` is filtered out by `build.bounded`'s Balanced bar `85` before cost comparison, and
   recorded token spend on `max` `week` is overstated 6.4x.
+
+Review (Claude Sonnet 5.5, another family), open nits: the reason line names the window furthest through its cycle,
+not the one with the least slack; no test pins a reading older than `now` (conservative: elapsed reads low); among
+seats wholly inside their spare the smaller order wins, whatever each pool holds. Measured the same evening: one
+30-minute G·Claude Sonnet high build took its 5 h window to 100% and its week 4% to 58%, and this build with two
+Argon reviews took Argon's week 7% to 64%, so the agy `use` cells understate big orders (a hypothesis to retune).
 
 ## alpha 0.21.0 (2026-10-18): the Seats square of a Nirvana tab, and the mode (plan 12 O8a)
 
