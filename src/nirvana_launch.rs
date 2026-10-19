@@ -29,6 +29,14 @@
 //!
 //! Plain Claude Code and agy carry none of this: the "new" menu's other two entries type `claude` and `agy` alone,
 //! which is what a herdr agent start of those kinds types today.
+//!
+//! Plan 13 P1 (the smart Preload, nirvana/plans/2026-10-18-13-smart-preload.md §2, §6.1): `--settings` names the
+//! folder's generated file, `<home>/nirvana/preload/<folder_hash>.settings.json` (the plugin's settings plus the
+//! folder's preset), when `nirvana_preset` wrote one, else the plugin's own. Nothing else reads that value: O3's wake
+//! guard (`nirvana_run::pane_program`) reads `--agent` and `--plugin-dir` only, and Restart Claude keeps every flag
+//! as it was, so a restart reads the regenerated file. And Nirvana Claude resumes its last session in the folder
+//! (`--resume <id>`) when the session record P3's hooks write is under `resume_within_hours` old and its transcript
+//! is still there; the menu's "Fresh Nirvana Claude" never resumes.
 
 use std::path::{Path, PathBuf};
 
@@ -56,20 +64,31 @@ pub const WINDOW_APP_ID_PREFIX: &str = "Nirvana.Herdr.";
 /// What the taskbar button and the toast call the app.
 pub const DISPLAY_NAME: &str = "Nirvana";
 
-/// The three agents the sidebar's "new" menu offers (L7).
+/// The agents the sidebar's "new" menu offers (L7), and plan 13 §6.1's "Fresh Nirvana Claude": Nirvana Claude
+/// that never resumes the folder's last session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NewKind {
     Nirvana,
+    NirvanaFresh,
     ClaudeCode,
     Antigravity,
 }
 
 impl NewKind {
-    pub const MENU: [NewKind; 3] = [NewKind::Nirvana, NewKind::ClaudeCode, NewKind::Antigravity];
+    /// O4a's three, in O4a's order (its controls sabotage this line).
+    const AGENTS: [NewKind; 3] = [NewKind::Nirvana, NewKind::ClaudeCode, NewKind::Antigravity];
+    /// The menu: O4a's three with the fresh Nirvana Claude after Nirvana's own entry.
+    pub const MENU: [NewKind; 4] = [
+        Self::AGENTS[0],
+        NewKind::NirvanaFresh,
+        Self::AGENTS[1],
+        Self::AGENTS[2],
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Nirvana => "Nirvana",
+            Self::NirvanaFresh => "Fresh Nirvana Claude",
             Self::ClaudeCode => "Claude Code",
             Self::Antigravity => "Antigravity",
         }
@@ -78,9 +97,15 @@ impl NewKind {
     pub fn key(self) -> &'static str {
         match self {
             Self::Nirvana => "nirvana",
+            Self::NirvanaFresh => "nirvana-fresh",
             Self::ClaudeCode => "claude",
             Self::Antigravity => "agy",
         }
+    }
+
+    /// Nirvana Claude, resumed or fresh.
+    pub fn is_nirvana(self) -> bool {
+        matches!(self, Self::Nirvana | Self::NirvanaFresh)
     }
 
     pub fn from_key(key: &str) -> Option<Self> {
@@ -90,14 +115,18 @@ impl NewKind {
     /// The herdr agent kind label `agent start` takes; the program it types is herdr's own for that kind.
     pub fn agent_label(self) -> &'static str {
         match self {
-            Self::Nirvana | Self::ClaudeCode => "claude",
+            Self::Nirvana | Self::NirvanaFresh | Self::ClaudeCode => "claude",
             Self::Antigravity => "agy",
         }
     }
 
-    /// The herdr agent name's stem; `nirvana` also marks the pane as Nirvana Claude's for the verb's second click.
+    /// The herdr agent name's stem; `nirvana` also marks the pane as Nirvana Claude's for the verb's second click,
+    /// fresh or not.
     pub fn name_stem(self) -> &'static str {
-        self.key()
+        match self {
+            Self::NirvanaFresh => Self::Nirvana.key(),
+            _ => self.key(),
+        }
     }
 
     /// What is typed after the program: Nirvana's flags, nothing for the other two.
@@ -105,6 +134,7 @@ impl NewKind {
         match self {
             Self::Nirvana => nirvana_claude_args(home),
             Self::ClaudeCode | Self::Antigravity => Vec::new(),
+            Self::NirvanaFresh => Self::Nirvana.args(home),
         }
     }
 
@@ -113,6 +143,7 @@ impl NewKind {
         match self {
             Self::Nirvana => vec![(ORCHESTRATOR_ENV.to_owned(), "1".to_owned())],
             Self::ClaudeCode | Self::Antigravity => Vec::new(),
+            Self::NirvanaFresh => Self::Nirvana.env(),
         }
     }
 
@@ -151,6 +182,71 @@ pub fn nirvana_claude_args(home: &Path) -> Vec<String> {
         "--settings".into(),
         plugin.join("settings.json").display().to_string(),
     ]
+}
+
+/// Plan 13: `nirvana_claude_args` with the folder's generated settings file in place of the plugin's, when one was
+/// written, and `--resume <id>` last when `resume` names a session.
+pub fn launch_args(home: &Path, folder: &Path, resume: Option<&str>) -> Vec<String> {
+    let mut args = nirvana_claude_args(home);
+    let generated =
+        crate::nirvana_preset::settings_path(&home.join(crate::nirvana_seat::DIR), folder);
+    if generated.is_file() {
+        if let Some(at) = args.iter().position(|arg| arg == "--settings") {
+            args[at + 1] = generated.display().to_string();
+        }
+    }
+    if let Some(id) = resume {
+        args.extend(["--resume".to_owned(), id.to_owned()]);
+    }
+    args
+}
+
+/// The record P3's SessionStart and Stop hooks write (plan 13 §8): `<home>/nirvana/sessions/<folder_hash>.json`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct SessionRecord {
+    pub session_id: String,
+    /// RFC 3339 UTC: the session's start, or its last `Stop`.
+    pub at: String,
+    /// The transcript's absolute path.
+    pub transcript: String,
+}
+
+pub fn session_record_path(home: &Path, folder: &Path) -> PathBuf {
+    home.join(crate::nirvana_seat::DIR)
+        .join("sessions")
+        .join(format!("{}.json", folder_hash(folder)))
+}
+
+/// A session id as Claude Code writes one: it is typed into a shell, so only `[A-Za-z0-9-]`, at most 64.
+fn plain_session_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// §6.1: the session to resume, when the folder's record is under `within_hours` old at `now` (Unix seconds) and
+/// its transcript is still there; `None` otherwise, and the launch starts fresh.
+pub fn resume_session_at(
+    home: &Path,
+    folder: &Path,
+    now: u64,
+    within_hours: f64,
+) -> Option<String> {
+    let text = std::fs::read_to_string(session_record_path(home, folder)).ok()?;
+    let record: SessionRecord = serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?;
+    let at = crate::nirvana_usage::rfc3339(&record.at)?;
+    let age = now.saturating_sub(at);
+    if !plain_session_id(&record.session_id)
+        || (age as f64) >= within_hours * 3600.0
+        || !Path::new(&record.transcript).is_file()
+    {
+        return None;
+    }
+    Some(record.session_id)
+}
+
+/// `resume_session_at` now, with this machine's `resume_within_hours`.
+pub fn resume_session(home: &Path, folder: &Path) -> Option<String> {
+    let hours = crate::nirvana_preset::resume_within_hours(&home.join(crate::nirvana_seat::DIR));
+    resume_session_at(home, folder, crate::nirvana_run::now(), hours)
 }
 
 /// Whether an agent name is one `NewKind::Nirvana` gives: `nirvana` or `nirvana-<n>`.
@@ -259,7 +355,8 @@ const USAGE: &str = "usage: herdr --session nirvana nirvana window <folder>
   Nirvana button and the folder's letter, and runs the herdr client until it exits. Explorer's \"Open Nirvana\"
   runs it.
        herdr nirvana digest|guard-spawn|subagent-stop|stop|statusline
-  The Nirvana Claude plugin's hooks and statusline (plan 12 O4b); each reads Claude Code's JSON on stdin.";
+  The Nirvana Claude plugin's hooks and statusline (plan 12 O4b); each reads Claude Code's JSON on stdin.
+  Before Claude starts, the window applies the folder's preset (plan 13; `herdr preload why <folder>`).";
 
 /// `herdr nirvana <subcommand>`.
 pub fn cli(args: &[String]) -> std::io::Result<()> {
@@ -297,6 +394,9 @@ fn window(folder: &Path) -> std::io::Result<i32> {
             std::time::Duration::from_secs(15),
         )?;
     }
+    // Plan 13 §4: the folder's preset, in this process and before Claude starts; the server's launch then names the
+    // generated file. Jev waits at most 3 s, and a failure leaves the plugin's own settings.
+    let preset = crate::nirvana_preset::at_open(&folder);
     if let Err(err) = invoke_open(&folder, fresh) {
         // The window still opens: the space and its shell are there to see why.
         eprintln!("nirvana: Nirvana Claude did not start: {err}");
@@ -306,7 +406,7 @@ fn window(folder: &Path) -> std::io::Result<i32> {
         // This command runs before herdr's logging starts, so the window itself says it.
         eprintln!("nirvana: the taskbar button was not set: {err}");
     }
-    crate::nirvana_taskbar::toast_open(&folder);
+    crate::nirvana_taskbar::toast_open_with(&folder, preset.as_deref());
     std::env::set_var(WINDOW_FOLDER_ENV, &folder);
     let code = crate::nirvana::supervise_code(&[]);
     // Badge first, then the properties (P7): the Terminal window outlives this process.
@@ -429,12 +529,121 @@ mod tests {
     #[test]
     fn the_menu_offers_nirvana_claude_code_and_antigravity_in_that_order() {
         let labels: Vec<_> = NewKind::MENU.iter().map(|kind| kind.label()).collect();
-        assert_eq!(labels, ["Nirvana", "Claude Code", "Antigravity"]);
+        assert_eq!(
+            labels,
+            [
+                "Nirvana",
+                "Fresh Nirvana Claude",
+                "Claude Code",
+                "Antigravity"
+            ]
+        );
         for kind in NewKind::MENU {
             assert_eq!(NewKind::from_key(kind.key()), Some(kind));
             assert_eq!(kind.command_id(), format!("nirvana.new:{}", kind.key()));
         }
         assert_eq!(NewKind::from_key("codex"), None);
+        // Plan 13 §6.1: the fresh one is Nirvana Claude in every way but the resume, so the verb's second click
+        // finds it by its name.
+        let home = Path::new("/home/o/.nirvana-herdr");
+        assert_eq!(
+            NewKind::NirvanaFresh.args(home),
+            NewKind::Nirvana.args(home)
+        );
+        assert_eq!(NewKind::NirvanaFresh.env(), NewKind::Nirvana.env());
+        assert_eq!(NewKind::NirvanaFresh.name_stem(), "nirvana");
+        assert!(NewKind::NirvanaFresh.is_nirvana() && NewKind::Nirvana.is_nirvana());
+        assert!(!NewKind::ClaudeCode.is_nirvana() && !NewKind::Antigravity.is_nirvana());
+    }
+
+    fn scratch_home(name: &str) -> PathBuf {
+        let home =
+            std::env::temp_dir().join(format!("nirvana-p13a-launch-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("nirvana")).expect("home");
+        home
+    }
+
+    #[test]
+    fn the_launch_names_the_folders_generated_settings_when_one_was_written() {
+        let home = scratch_home("settings");
+        let folder = Path::new(r"C:\work\print");
+        // None written: the plugin's own file, exactly O4b's argv.
+        assert_eq!(launch_args(&home, folder, None), nirvana_claude_args(&home));
+        let generated = crate::nirvana_preset::settings_path(&home.join("nirvana"), folder);
+        std::fs::create_dir_all(generated.parent().unwrap()).unwrap();
+        std::fs::write(&generated, "{}").unwrap();
+        let args = launch_args(&home, folder, None);
+        let at = args.iter().position(|a| a == "--settings").unwrap();
+        assert_eq!(args[at + 1], generated.display().to_string());
+        assert_eq!(args.iter().filter(|a| *a == "--settings").count(), 1);
+        // Everything else is O4b's, so the wake guard still knows it (`--agent`, `--plugin-dir`).
+        let mut base = nirvana_claude_args(&home);
+        base[at + 1] = generated.display().to_string();
+        assert_eq!(args, base);
+        // Another folder has its own file, or none.
+        assert_eq!(
+            launch_args(&home, Path::new(r"C:\work\other"), None),
+            nirvana_claude_args(&home)
+        );
+        let resumed = launch_args(&home, folder, Some("abc-123"));
+        assert_eq!(resumed[resumed.len() - 2..], ["--resume", "abc-123"]);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    fn record(home: &Path, folder: &Path, id: &str, at: &str, transcript: &Path) {
+        let path = session_record_path(home, folder);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({"session_id": id, "at": at, "transcript": transcript}).to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_recent_session_with_its_transcript_resumes_and_anything_else_starts_fresh() {
+        let home = scratch_home("resume");
+        let folder = Path::new(r"C:\work\print");
+        let transcript = home.join("t.jsonl");
+        std::fs::write(&transcript, "{}\n").unwrap();
+        let at = "2026-10-18T10:00:00Z";
+        let then = crate::nirvana_usage::rfc3339(at).unwrap();
+        assert_eq!(
+            resume_session_at(&home, folder, then, 24.0),
+            None,
+            "no record"
+        );
+        record(
+            &home,
+            folder,
+            "6f1c2a3b-0000-4000-8000-000000000001",
+            at,
+            &transcript,
+        );
+        assert_eq!(
+            resume_session_at(&home, folder, then + 3600, 24.0).as_deref(),
+            Some("6f1c2a3b-0000-4000-8000-000000000001")
+        );
+        // The record's folder is the folder's hash: the same folder in another case still resumes.
+        assert!(resume_session_at(&home, Path::new("c:/WORK/print/"), then + 60, 24.0).is_some());
+        // Too old.
+        assert_eq!(
+            resume_session_at(&home, folder, then + 24 * 3600, 24.0),
+            None
+        );
+        assert_eq!(resume_session_at(&home, folder, then + 3 * 3600, 2.0), None);
+        // §6.1 "If the transcript file is gone, the launch drops --resume and starts fresh."
+        std::fs::remove_file(&transcript).unwrap();
+        assert_eq!(resume_session_at(&home, folder, then + 60, 24.0), None);
+        std::fs::write(&transcript, "{}\n").unwrap();
+        // An id that is not one Claude Code writes is never typed into a shell.
+        record(&home, folder, "x; rm -rf /", at, &transcript);
+        assert_eq!(resume_session_at(&home, folder, then + 60, 24.0), None);
+        // A broken record is no record.
+        std::fs::write(session_record_path(&home, folder), "{not json").unwrap();
+        assert_eq!(resume_session_at(&home, folder, then + 60, 24.0), None);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

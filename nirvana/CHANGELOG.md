@@ -3,6 +3,59 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha NEXT (p13a): the smart Preload's engine, a preset per folder at Open Nirvana (plan 13 P1)
+
+Plan 13, package P1 (`plans/2026-10-18-13-smart-preload.md` §2, §3, §4 without the panel, §6.1's launch side, §6.3,
+§7's `herdr preload`; the record is `plans/2026-10-18-13-records/p13a.md`).
+
+- **Changed:** "Open Nirvana" (`nirvana window`) reads the folder before Claude starts: a bounded walk (5,000 files or
+  1 s; `.git`, `.claude`, build and dependency folders skipped) gives extension counts, top-level marker files and
+  emptiness, and its hash caches the choice. The first preset in `<home>/nirvana/preload.toml` whose rule matches wins
+  (blank, then a marker, then an extension share); no match, or two shares within 10 points, asks Jev with the counts,
+  the markers and the README's first 2 KB, behind a 3 s wall (floors 0.7 and 0.3; `none`, unsure, a failure or the
+  wall is `general`, which switches nothing off, and is asked again at the next open).
+  **Because:** L4, "It can look at the directory and deside oh this is a 3d print project"; R1, "Rules, then Jev".
+  **Measured:** `nirvana_preset::tests::*` on §9's fixtures with Jev answering from recordings; live on a scratch home,
+  the rules chose 3d-print, blank and rust, and the one live `preload-folder` call answered `none` 0.92 for `mixed`
+  (general). Controls `p13a_*` in `controls.d/p13a.py`.
+  **If you remove this:** every folder's Nirvana Claude starts with everything, as before.
+- **Changed:** the catalog `<home>/nirvana/preload-catalog.toml` tags each skill, MCP server and plugin `/context` lists
+  (read in an empty folder of herdr's own, free): `preload.toml`'s name rules first (bambu, blender-stl and cosplay are
+  3d-print, the colour-correction and batch-photo skills photo, scholar research, the lsp plugins their language, six
+  claude.ai connectors personal), then Jev once per item, 16 items a call, a tag only at the 0.7 floor. herdr only
+  appends to it, so an owner's line is never retagged. An item goes off only when it has tags, none of them is kept by
+  the preset, and it is not core (nirvana, bladebro, superpowers, context7).
+  **Because:** L3, "I have alot of stuff like bambu skills that are not really needed for every project."
+  **Measured:** live, the owner's catalog read 81 items; the rules tagged 25, two live `preload-tag` calls tagged 15 of
+  32 and left 17 on (none or unsure), $0.00064 together.
+  **If you remove this:** no item has tags, so no preset switches anything off.
+- **Changed:** the preset's switches go into a generated `--settings` file, `<home>/nirvana/preload/<folder_hash>
+  .settings.json` (the plugin's `settings.json` plus Preload's own switches), which Nirvana Claude starts with in place
+  of the plugin's; nothing in the owner's folder is written. An item the owner switches on over the preset is
+  `pinned_on` in the folder's record and left out of the file. A preset with `auto_memory = false` (blank) turns auto
+  memory off. A pane worker of the project gets `<folder_hash>.worker.settings.json`, the switches without the plugin's
+  `env` (`NIRVANA_ORCHESTRATOR=1` is the orchestrator's mark). `herdr preload off|on` is the undo: the file is
+  regenerated without the preset, so Restart Claude, which keeps `--settings`, reads it. The toast reads "Nirvana ·
+  <folder> · 3d-print preset · 31 off · −5.9k a turn · Preload p to undo".
+  **Because:** §2; R2, "Apply, show undo ... Manual toggles always win"; R3, "Memory per preset".
+  **Measured:** live, the §2 check: the generated file's `off` won over a local `"on"`, a local `"off"` won when the
+  file left the skill out, and the skill was present with neither. `/context` totals barely move (3d 23,473 to
+  23,250, blank 23,502 to 22,689, rust 23,502 to 23,250, mixed unchanged, undo back to 23,502) because `/context`
+  moves a switched-off skill's tokens into System tools one for one (plan 05's surprise). The paid count settles it:
+  one Haiku turn each sent 42,115 tokens with the plugin's settings and 37,013 (3d), 38,224 (blank) and 36,229 (rust)
+  with the generated file, 3.9k to 5.9k a turn less, close to herdr's estimates of 5.9k, 4k and 6.6k. A worker
+  (`--setting-sources project --strict-mcp-config`) loads none of the owner's skills or plugins already, so its file
+  changed nothing in the 3d fixture (18,019 both).
+  **If you remove this:** Nirvana Claude starts with the plugin's settings and every tool in every folder.
+- **Changed:** Nirvana Claude resumes the folder's last session (`--resume <id>`) when the session record P3's hooks
+  write is under `resume_within_hours` (24) old and its transcript is there, unless another Nirvana Claude already runs
+  on the folder; the "new" menu gains "Fresh Nirvana Claude", which never resumes. `ROLE.md` says a tool may be off by
+  the folder's preset.
+  **Because:** §6.1; R3, "Resume last session".
+  **Measured:** `a_recent_session_with_its_transcript_resumes_and_anything_else_starts_fresh`,
+  `nirvana_resumes_the_folders_last_session_with_its_preset_file_and_fresh_never_resumes`; not run against a real
+  session record, which P3 writes. Hypothesis: P3's record format is §8's.
+  **If you remove this:** every open starts a fresh session.
 ## alpha 0.22.1: a seats.toml from before 0.22.0 still parses
 
 - **Changed:** `constants.spare_weight` is optional in seats.toml, defaulting to 0.05.

@@ -269,10 +269,28 @@ pub fn letter_coverage(_letter: char, _size: u32) -> Option<Vec<u8>> {
 }
 
 /// The toast "Nirvana · <folder>" with the folder's letter as its picture.
+// The menu's toast runs only outside tests (client/shell/nirvana_new_menu.rs), and the verb's window now names its
+// preset through `toast_open_with`, so a test build never uses this one.
+#[cfg_attr(test, allow(dead_code))]
 pub fn toast_open(folder: &Path) {
+    toast_open_with(folder, None);
+}
+
+/// Plan 13 §4: the open toast with the folder's preset, "Nirvana · <folder> · 3d-print preset · 31 off · −5.9k a
+/// turn · Preload p to undo". One line in the title: `show_nirvana_toast` takes no body (the platform file is not
+/// this package's), and Windows wraps a long title onto its second line.
+pub fn toast_text(folder: &Path, preset: Option<&str>) -> String {
+    let title = crate::nirvana_launch::toast_title(folder);
+    match preset {
+        Some(line) => format!("{title} \u{b7} {line}"),
+        None => title,
+    }
+}
+
+pub fn toast_open_with(folder: &Path, preset: Option<&str>) {
     #[cfg(windows)]
     {
-        let title = crate::nirvana_launch::toast_title(folder);
+        let title = toast_text(folder, preset);
         let logo = toast_logo_path(crate::nirvana_launch::folder_letter(folder));
         let logo = write_badge_png(&logo, 96, crate::nirvana_launch::folder_letter(folder))
             .map(|()| logo)
@@ -283,7 +301,7 @@ pub fn toast_open(folder: &Path) {
         }
     }
     #[cfg(not(windows))]
-    let _ = folder;
+    let _ = (folder, preset);
 }
 
 /// The installed `herdr.exe` when there is one (its icon resource is the one the id points at), else this one.
@@ -843,5 +861,21 @@ mod tests {
             .display()
             .to_string()
             .ends_with("badge-0050-96.png"));
+    }
+
+    #[test]
+    fn the_open_toast_carries_the_presets_line_after_the_folder() {
+        let folder = Path::new(r"C:\work\3D-Printer-Flow-xtool");
+        assert_eq!(
+            toast_text(folder, None),
+            "Nirvana \u{b7} 3D-Printer-Flow-xtool"
+        );
+        assert_eq!(
+            toast_text(
+                folder,
+                Some("3d-print preset \u{b7} 31 off \u{b7} \u{2212}5.9k a turn \u{b7} Preload p to undo")
+            ),
+            "Nirvana \u{b7} 3D-Printer-Flow-xtool \u{b7} 3d-print preset \u{b7} 31 off \u{b7} \u{2212}5.9k a turn \u{b7} Preload p to undo"
+        );
     }
 }

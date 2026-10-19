@@ -228,6 +228,20 @@ pub fn argv(spec: &LaunchSpec) -> Result<Vec<String>, String> {
     Ok(argv)
 }
 
+/// Plan 13 §2 ("Workers. A Claude worker that `herdr seat run` opens in a pane for this folder gets the same
+/// file"): a claude worker's argv with `--settings <file>` added when the project folder has a generated preset
+/// file. The worker's file holds the preset's switches alone: the plugin's own settings set
+/// `NIRVANA_ORCHESTRATOR=1`, which is the orchestrator's mark, not a worker's. An agy worker is untouched (§10: "No
+/// preset for agy or Codex panes").
+pub fn with_preset_settings(mut argv: Vec<String>, settings: Option<&Path>) -> Vec<String> {
+    if let Some(file) = settings {
+        if argv.first().map(String::as_str) == Some("claude") {
+            argv.extend(["--settings".to_owned(), file.display().to_string()]);
+        }
+    }
+    argv
+}
+
 /// The one line a worker is started with (§4).
 pub fn first_line(order_file: &str) -> String {
     format!(
@@ -1142,7 +1156,10 @@ pub fn exec(
             print_timeout_s: print_timeout_s(&seated),
         };
         let argv = match argv(&spec) {
-            Ok(argv) => argv,
+            Ok(argv) => with_preset_settings(
+                argv,
+                crate::nirvana_preset::worker_settings_for(&project.root).as_deref(),
+            ),
             Err(why) => {
                 end_failed(project, &journal, run, &seated, &why, None)?;
                 writeln!(out, "{why}")?;
@@ -2774,3 +2791,28 @@ fn cleanup_cli(args: &[String]) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+
+    #[test]
+    fn a_claude_worker_gets_the_folders_preset_file_and_agy_does_not() {
+        let file = Path::new(r"C:\home\nirvana\preload\0123456789abcdef.worker.settings.json");
+        let claude = vec!["claude".to_owned(), "-p".to_owned(), "go".to_owned()];
+        assert_eq!(
+            with_preset_settings(claude.clone(), Some(file)),
+            vec![
+                "claude".to_owned(),
+                "-p".to_owned(),
+                "go".to_owned(),
+                "--settings".to_owned(),
+                file.display().to_string(),
+            ]
+        );
+        // No generated file: the argv O3 measured, unchanged.
+        assert_eq!(with_preset_settings(claude.clone(), None), claude);
+        let agy = vec!["agy".to_owned(), "--print=go".to_owned()];
+        assert_eq!(with_preset_settings(agy.clone(), Some(file)), agy);
+    }
+}

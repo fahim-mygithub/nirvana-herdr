@@ -1,0 +1,145 @@
+# The smart Preload (Nirvana-Herdr plan 13): the skills, MCP servers and plugins Nirvana Claude starts with in a
+# folder. herdr wrote this file from its default the first time it read it; it is yours to edit from now on, like
+# seats.toml and JEV.md, and herdr never writes it again.
+#
+# "Open Nirvana" reads the folder (file types, marker files, emptiness), picks a preset by the rules below, asks Jev
+# only when the rules cannot tell, and starts Nirvana Claude with the preset's switches in a generated --settings
+# file. Nothing in the folder is written. `herdr preload why <folder>` says what was chosen and why.
+#
+# An item goes off only when it has tags, none of them is in the preset's `keep`, and it is not `core`. An untagged
+# item stays on: a preset only removes what it knows. Each item's tags are in preload-catalog.toml.
+
+version = 1
+# Items tagged "core" are never switched off. Untagged items stay on: a preset only removes what it knows.
+core = ["nirvana", "bladebro", "superpowers", "context7"]
+# "Open Nirvana" resumes Nirvana Claude's last session in the folder when it was active less than this long ago.
+resume_within_hours = 24
+# A folder's MEMORY.md index over this many tokens is offered for trimming in Preload.
+trim_over_tokens = 4000
+
+# The tags an item can carry, and what each means. Jev tags an item with one of these, or none.
+[tags]
+3d-print = "3D printing: printers, slicing, meshes, STL, 3MF and G-code files"
+cad = "CAD modelling: STEP, OpenSCAD, Fusion 360 and parametric parts"
+code = "writing, reviewing, testing or debugging software in any language"
+rust = "the Rust language and its tools"
+web = "web front ends and Node or TypeScript projects"
+db = "databases: SQL, Postgres, Supabase"
+python = "the Python language and its tools"
+photo = "editing photographs: colour correction, raw files, batches of photos"
+research = "researching a question across web sources and writing up what was found"
+writing = "writing documents, prose, slides or spreadsheets"
+personal = "personal life: email, calendar, shopping, food delivery, travel, maps"
+
+# The first preset in this order whose `when` matches wins; a marker match beats an extension share. Two shares
+# within 10% of each other, or no match at all, go to Jev.
+[preset.3d-print]
+when = { ext = ["3mf", "stl", "gcode", "step", "scad", "f3d"], share = 0.2 }
+keep = ["3d-print", "cad", "code"]
+
+[preset.photo]
+when = { ext = ["cr3", "arw", "nef", "dng", "xmp", "raf"], share = 0.2 }
+keep = ["photo"]
+
+[preset.rust]
+when = { marker = ["Cargo.toml"] }
+keep = ["code", "rust"]
+
+[preset.web]
+when = { marker = ["package.json"] }
+keep = ["code", "web", "db"]
+
+[preset.python]
+when = { marker = ["pyproject.toml", "requirements.txt", "setup.py"] }
+keep = ["code", "python"]
+
+[preset.research]
+when = { ext = ["md", "tex", "bib", "pdf"], share = 0.6 }
+keep = ["research", "writing"]
+
+[preset.blank]
+when = { blank = true }
+keep = ["code", "research", "writing"]
+auto_memory = false
+
+[preset.general]
+# Chosen when nothing matches and Jev answers none: nothing goes off.
+keep = ["*"]
+
+# Name rules tag catalog items for free, before Jev is asked. The first rule an item matches wins; `*` matches any
+# text. An item is `skill:<name>`, `mcp:<server>` (as Claude Code names it) or `plugin:<id>`.
+[[rule]]
+match = "skill:bambu*"
+tags = ["3d-print"]
+
+[[rule]]
+match = "skill:blender-stl*"
+tags = ["3d-print"]
+
+[[rule]]
+match = "skill:cosplay*"
+tags = ["3d-print"]
+
+[[rule]]
+match = "skill:*-color-correction"
+tags = ["photo"]
+
+[[rule]]
+match = "skill:batch-photo-*"
+tags = ["photo"]
+
+[[rule]]
+match = "skill:scholar-*"
+tags = ["research"]
+
+[[rule]]
+match = "plugin:rust-analyzer-lsp@*"
+tags = ["rust"]
+
+[[rule]]
+match = "plugin:pyright-lsp@*"
+tags = ["python"]
+
+[[rule]]
+match = "plugin:typescript-lsp@*"
+tags = ["web"]
+
+[[rule]]
+match = "plugin:clangd-lsp@*"
+tags = ["c"]
+
+[[rule]]
+match = "plugin:kotlin-lsp@*"
+tags = ["kotlin"]
+
+[[rule]]
+match = "plugin:gopls-lsp@*"
+tags = ["go"]
+
+[[rule]]
+match = "plugin:*-lsp@*"
+tags = ["lsp"]
+
+[[rule]]
+match = "mcp:claude.ai Gmail"
+tags = ["personal"]
+
+[[rule]]
+match = "mcp:claude.ai Google Calendar"
+tags = ["personal"]
+
+[[rule]]
+match = "mcp:claude.ai Instacart"
+tags = ["personal"]
+
+[[rule]]
+match = "mcp:claude.ai Uber Eats"
+tags = ["personal"]
+
+[[rule]]
+match = "mcp:claude.ai Booking.com"
+tags = ["personal"]
+
+[[rule]]
+match = "mcp:claude.ai Felt Maps"
+tags = ["personal"]

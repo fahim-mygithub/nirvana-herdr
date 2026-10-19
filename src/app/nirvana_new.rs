@@ -12,6 +12,12 @@
 //! `NIRVANA_ORCHESTRATOR=1` from the plugin's settings.json `env`, since that shell was started without it.
 //!
 //! Both ride herdr's existing `command.invoke`, so the API stays upstream's.
+//!
+//! Plan 13 P1: Nirvana Claude starts with the folder's generated `--settings` file when the window (or `herdr
+//! preload apply`) wrote one, and resumes the folder's last session when its record is recent and its transcript is
+//! there, unless another Nirvana Claude already runs on the folder: two Claudes on one transcript would both write
+//! it. The menu's "Fresh Nirvana Claude" never resumes. The server never computes a preset itself: the walk and Jev
+//! would hold this event loop, so the menu takes the file the last open wrote.
 
 use std::path::{Path, PathBuf};
 
@@ -63,7 +69,7 @@ impl App {
             if let Some((ws_idx, pane_id)) = self.nirvana_seeded_space(&folder) {
                 self.state.switch_workspace(ws_idx);
                 self.state.mode = crate::app::Mode::Terminal;
-                return self.nirvana_start_response(id, ws_idx, pane_id, NewKind::Nirvana);
+                return self.nirvana_start_response(id, ws_idx, pane_id, NewKind::Nirvana, &folder);
             }
         }
         self.nirvana_open_space(id, NewKind::Nirvana, folder)
@@ -72,13 +78,13 @@ impl App {
     fn nirvana_open_space(&mut self, id: String, kind: NewKind, cwd: PathBuf) -> String {
         use crate::app::api::responses::encode_error;
 
-        let ws_idx = match self.create_workspace_with_launch_env(cwd, true, kind.env()) {
+        let ws_idx = match self.create_workspace_with_launch_env(cwd.clone(), true, kind.env()) {
             Ok(ws_idx) => ws_idx,
             Err(err) => return encode_error(id, "workspace_create_failed", err.to_string()),
         };
         self.emit_workspace_open_events(ws_idx);
         let pane_id = self.state.workspaces[ws_idx].tabs[0].root_pane;
-        self.nirvana_start_response(id, ws_idx, pane_id, kind)
+        self.nirvana_start_response(id, ws_idx, pane_id, kind, &cwd)
     }
 
     /// Types the kind's agent into the pane's shell, as `herdr agent start` does, under a free name.
@@ -88,6 +94,7 @@ impl App {
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
         kind: NewKind,
+        folder: &Path,
     ) -> String {
         use crate::app::api::responses::{encode_error, encode_success};
 
@@ -95,7 +102,7 @@ impl App {
             return encode_error(id, "agent_pane_not_found", "the new space has no pane");
         };
         let home = match kind {
-            NewKind::Nirvana => match crate::nirvana::home() {
+            kind if kind.is_nirvana() => match crate::nirvana::home() {
                 Some(home) => home,
                 None => {
                     return encode_error(
@@ -105,7 +112,7 @@ impl App {
                     )
                 }
             },
-            NewKind::ClaudeCode | NewKind::Antigravity => PathBuf::new(),
+            _ => PathBuf::new(),
         };
         let name = crate::nirvana_launch::free_agent_name(kind.name_stem(), |name| {
             self.state
@@ -120,6 +127,23 @@ impl App {
             args: kind.args(&home),
             timeout_ms: None,
         };
+        // Plan 13: Nirvana Claude's argv with the folder's generated settings, and the resume when there is one.
+        let args = match kind {
+            NewKind::Nirvana => {
+                let resume = self.nirvana_resume(&home, folder);
+                Some(crate::nirvana_launch::launch_args(
+                    &home,
+                    folder,
+                    resume.as_deref(),
+                ))
+            }
+            NewKind::NirvanaFresh => Some(crate::nirvana_launch::launch_args(&home, folder, None)),
+            NewKind::ClaudeCode | NewKind::Antigravity => None,
+        };
+        let params = match args {
+            Some(args) => crate::api::schema::AgentStartParams { args, ..params },
+            None => params,
+        };
         match self.start_agent(params) {
             Ok((agent, argv)) => {
                 tracing::info!(kind = kind.key(), agent = ?agent.name, "nirvana: started from the new menu or the verb");
@@ -133,6 +157,15 @@ impl App {
                 encode_error(id, &body.code, body.message)
             }
         }
+    }
+
+    /// The folder's last session to resume, unless a Nirvana Claude already runs on the folder: two Claudes on one
+    /// transcript would both write it. The pane being started has no agent yet, so one found is another.
+    fn nirvana_resume(&self, home: &Path, folder: &Path) -> Option<String> {
+        if self.nirvana_space_on(folder).is_some() {
+            return None;
+        }
+        crate::nirvana_launch::resume_session(home, folder)
     }
 
     /// The space whose pane runs Nirvana Claude on `folder` (live or still starting).
@@ -281,7 +314,7 @@ mod tests {
         let mut app = app_with_a_space(&folder);
         let pane = app.state.workspaces[0].tabs[0].root_pane;
         std::env::set_var(crate::nirvana::HOME_ENV, &home);
-        let response = app.nirvana_start_response("n".into(), 0, pane, NewKind::Nirvana);
+        let response = app.nirvana_start_response("n".into(), 0, pane, NewKind::Nirvana, &folder);
         std::env::remove_var(crate::nirvana::HOME_ENV);
         let (name, argv) = started(&response);
         assert_eq!(name.as_deref(), Some("nirvana"));
@@ -304,7 +337,7 @@ mod tests {
         for kind in [NewKind::ClaudeCode, NewKind::Antigravity] {
             let mut app = app_with_a_space(&folder);
             let pane = app.state.workspaces[0].tabs[0].root_pane;
-            let response = app.nirvana_start_response("p".into(), 0, pane, kind);
+            let response = app.nirvana_start_response("p".into(), 0, pane, kind, &folder);
             let (name, argv) = started(&response);
             assert_eq!(name.as_deref(), Some(kind.name_stem()));
             // Exactly the program, nothing after it: what today's fork types for that kind.
@@ -323,6 +356,64 @@ mod tests {
         }
     }
 
+    /// Plan 13: the folder's generated settings and its last session, from a scratch home.
+    #[tokio::test]
+    async fn nirvana_resumes_the_folders_last_session_with_its_preset_file_and_fresh_never_resumes()
+    {
+        let folder = std::env::temp_dir();
+        let home = std::env::temp_dir().join(format!("nirvana-p13a-new-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let generated = crate::nirvana_preset::settings_path(&home.join("nirvana"), &folder);
+        std::fs::create_dir_all(generated.parent().unwrap()).unwrap();
+        std::fs::write(&generated, "{}").unwrap();
+        let transcript = home.join("session.jsonl");
+        std::fs::write(&transcript, "{}\n").unwrap();
+        let record = crate::nirvana_launch::session_record_path(&home, &folder);
+        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+        let now = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        std::fs::write(
+            &record,
+            serde_json::json!({"session_id": "0c0ffee0-1111-4222-8333-444455556666", "at": now, "transcript": transcript})
+                .to_string(),
+        )
+        .unwrap();
+        std::env::set_var(crate::nirvana::HOME_ENV, &home);
+        let start = |kind: NewKind| {
+            let mut app = app_with_a_space(&folder);
+            let pane = app.state.workspaces[0].tabs[0].root_pane;
+            let response = app.nirvana_start_response("n".into(), 0, pane, kind, &folder);
+            (app, started(&response).1)
+        };
+        let (app, resumed) = start(NewKind::Nirvana);
+        let (_, fresh) = start(NewKind::NirvanaFresh);
+        // A second Nirvana Claude on a folder that already has one: two Claudes on one transcript would both
+        // write it, so it starts fresh. This app's shell cannot start a second space, so the rule is read where
+        // the start reads it.
+        assert_eq!(app.nirvana_space_on(&folder), Some(0));
+        let second = app.nirvana_resume(&home, &folder);
+        let first = app_with_a_space(&folder).nirvana_resume(&home, &folder);
+        std::env::remove_var(crate::nirvana::HOME_ENV);
+        assert_eq!(
+            first.as_deref(),
+            Some("0c0ffee0-1111-4222-8333-444455556666")
+        );
+        let settings_of = |argv: &[String]| {
+            let at = argv.iter().position(|a| a == "--settings").unwrap();
+            argv[at + 1].clone()
+        };
+        assert_eq!(settings_of(&resumed), generated.display().to_string());
+        assert_eq!(
+            resumed[resumed.len() - 2..],
+            ["--resume", "0c0ffee0-1111-4222-8333-444455556666"]
+        );
+        assert_eq!(settings_of(&fresh), generated.display().to_string());
+        assert!(!fresh.iter().any(|a| a == "--resume"), "{fresh:?}");
+        assert_eq!(second, None);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     #[tokio::test]
     async fn the_verbs_second_click_focuses_the_nirvana_already_on_the_folder() {
         let folder = std::env::temp_dir();
@@ -330,7 +421,7 @@ mod tests {
         // The fresh server's seeded shell takes Nirvana Claude instead of a second space.
         assert!(app.nirvana_seeded_space(&folder).is_some());
         let pane = app.state.workspaces[0].tabs[0].root_pane;
-        let _ = app.nirvana_start_response("n".into(), 0, pane, NewKind::Nirvana);
+        let _ = app.nirvana_start_response("n".into(), 0, pane, NewKind::Nirvana, &folder);
         assert_eq!(app.nirvana_space_on(&folder), Some(0));
         assert_eq!(
             app.nirvana_seeded_space(&folder),
@@ -358,7 +449,7 @@ mod tests {
         // A plain Claude on the folder is not Nirvana's.
         let mut plain = app_with_a_space(&folder);
         let pane = plain.state.workspaces[0].tabs[0].root_pane;
-        let _ = plain.nirvana_start_response("c".into(), 0, pane, NewKind::ClaudeCode);
+        let _ = plain.nirvana_start_response("c".into(), 0, pane, NewKind::ClaudeCode, &folder);
         assert_eq!(plain.nirvana_space_on(&folder), None);
     }
 
