@@ -636,6 +636,11 @@ fn main() -> io::Result<()> {
         return nirvana_memory_trim::cli(&args[2..]);
     }
 
+    // Nirvana fork, plan 15: Jobs, long commands in view
+    if args.get(1).map(String::as_str) == Some("job") {
+        return nirvana_job::cli(&args[2..]);
+    }
+
     finish_cli(cli::maybe_run(&args))?;
 
     if args.get(1).map(String::as_str) == Some("remote-api-bridge") {

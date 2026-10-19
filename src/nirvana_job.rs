@@ -3,9 +3,10 @@
 //! (nirvana/plans/2026-10-19-15-jobs.md §2)
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 /// 7 days in seconds for `herdr job clean`.
 pub const CLEAN_MAX_AGE_SECS: u64 = 7 * 24 * 3600;
@@ -646,9 +647,390 @@ fn exec_cli(args: &[String]) -> std::io::Result<()> {
     std::process::exit(code);
 }
 
-fn run_cli(_args: &[String]) -> std::io::Result<()> {
-    // Implemented in Step 3
-    todo!("run implemented in step 3")
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct RunArgs {
+    pub name: String,
+    pub cwd: Option<String>,
+    pub wait: bool,
+    pub argv: Vec<String>,
+}
+
+/// Parses arguments for `herdr job run`.
+pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
+    let mut name = None;
+    let mut cwd = None;
+    let mut wait = false;
+    let mut argv = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--" {
+            argv.extend(args[i + 1..].iter().cloned());
+            break;
+        } else if arg == "--name" {
+            i += 1;
+            if i >= args.len() {
+                return Err("missing value for --name".into());
+            }
+            name = Some(args[i].clone());
+        } else if let Some(n) = arg.strip_prefix("--name=") {
+            name = Some(n.to_string());
+        } else if arg == "--cwd" {
+            i += 1;
+            if i >= args.len() {
+                return Err("missing value for --cwd".into());
+            }
+            cwd = Some(args[i].clone());
+        } else if let Some(c) = arg.strip_prefix("--cwd=") {
+            cwd = Some(c.to_string());
+        } else if arg == "--wait" {
+            wait = true;
+        } else if !arg.starts_with('-') {
+            argv.extend(args[i..].iter().cloned());
+            break;
+        } else {
+            return Err(format!("unknown option: {arg}"));
+        }
+        i += 1;
+    }
+    let Some(name) = name else {
+        return Err("missing required argument --name".into());
+    };
+    if argv.is_empty() {
+        return Err("missing command to run".into());
+    }
+    Ok(RunArgs {
+        name,
+        cwd,
+        wait,
+        argv,
+    })
+}
+
+fn herdr_command(args: &[&str]) -> std::process::Command {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("herdr"));
+    let mut command = std::process::Command::new(exe);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    crate::platform::configure_background_command(&mut command);
+    command
+}
+
+fn herdr_json(args: &[&str]) -> Result<Value, String> {
+    let out = herdr_command(args)
+        .output()
+        .map_err(|err| format!("herdr {}: {err}", args.join(" ")))?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let value: Option<Value> = serde_json::from_str(text.trim()).ok();
+    if !out.status.success() {
+        let errors: Option<Value> =
+            serde_json::from_str(String::from_utf8_lossy(&out.stderr).trim()).ok();
+        let why = value
+            .as_ref()
+            .or(errors.as_ref())
+            .and_then(|value| value.pointer("/error/message"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                format!(
+                    "{} {}",
+                    text.trim(),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )
+            });
+        return Err(why);
+    }
+    value.ok_or_else(|| format!("herdr {}: not JSON: {}", args.join(" "), text.trim()))
+}
+
+fn herdr_ok(args: &[&str]) -> Result<(), String> {
+    let out = herdr_command(args)
+        .output()
+        .map_err(|err| format!("herdr {}: {err}", args.join(" ")))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "herdr {}: {} {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stdout).trim(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
+pub(crate) fn herdr_text(args: &[&str]) -> Option<String> {
+    let out = herdr_command(args).output().ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn find_str<'a>(value: &'a Value, pointers: &[&str]) -> Option<&'a str> {
+    pointers
+        .iter()
+        .find_map(|pointer| value.pointer(pointer).and_then(Value::as_str))
+}
+
+pub fn in_herdr() -> bool {
+    std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR).is_some()
+        || std::env::var_os("HERDR_PANE_ID").is_some()
+}
+
+fn pane_env() -> Vec<String> {
+    let mut env = Vec::new();
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    {
+        let path = std::env::var("PATH").unwrap_or_default();
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        env.push(format!("PATH={}{sep}{path}", dir.display()));
+    }
+    if let Ok(home) = std::env::var(crate::nirvana::HOME_ENV) {
+        env.push(format!("{}={home}", crate::nirvana::HOME_ENV));
+    }
+    if let Ok(sock) = std::env::var(crate::api::SOCKET_PATH_ENV_VAR) {
+        env.push(format!("{}={sock}", crate::api::SOCKET_PATH_ENV_VAR));
+    }
+    env
+}
+
+fn open_job_pane(cwd: &str, name: &str, id: &str) -> Result<(Option<String>, String), String> {
+    let space_id = std::env::var("HERDR_WORKSPACE_ID").ok().or_else(|| {
+        let ws_list = herdr_json(&["workspace", "list"]).ok()?;
+        let workspaces = ws_list.pointer("/result/workspaces")?.as_array()?;
+        workspaces
+            .iter()
+            .find(|ws| ws.get("focused") == Some(&Value::Bool(true)))
+            .or_else(|| workspaces.first())
+            .and_then(|ws| ws.get("workspace_id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
+
+    let env = pane_env();
+    let mut env_args: Vec<&str> = Vec::new();
+    for pair in &env {
+        env_args.extend(["--env", pair.as_str()]);
+    }
+
+    // Check if Jobs tab exists
+    let mut tab_list_args = vec!["tab", "list"];
+    if let Some(space) = &space_id {
+        tab_list_args.extend(["--workspace", space.as_str()]);
+    }
+    let tabs_val = herdr_json(&tab_list_args)?;
+    let existing_jobs_tab = tabs_val
+        .pointer("/result/tabs")
+        .and_then(Value::as_array)
+        .and_then(|tabs| {
+            tabs.iter()
+                .find(|tab| tab.get("label").and_then(Value::as_str) == Some("Jobs"))
+        });
+
+    let pane_id = if let Some(jobs_tab) = existing_jobs_tab {
+        let tab_id = jobs_tab
+            .get("tab_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "missing tab_id in tab list".to_string())?;
+
+        // Find existing panes in this Jobs tab
+        let mut pane_list_args = vec!["pane", "list"];
+        if let Some(space) = &space_id {
+            pane_list_args.extend(["--workspace", space.as_str()]);
+        }
+        let panes_val = herdr_json(&pane_list_args)?;
+        let target_pane_id = panes_val
+            .pointer("/result/panes")
+            .and_then(Value::as_array)
+            .and_then(|panes| {
+                panes
+                    .iter()
+                    .rev()
+                    .find(|p| p.get("tab_id").and_then(Value::as_str) == Some(tab_id))
+                    .and_then(|p| p.get("pane_id").and_then(Value::as_str))
+            });
+
+        if let Some(target) = target_pane_id {
+            let mut args = vec![
+                "pane",
+                "split",
+                target,
+                "--direction",
+                "right",
+                "--cwd",
+                cwd,
+                "--no-focus",
+            ];
+            args.extend(env_args.iter().copied());
+            let value = herdr_json(&args)?;
+            find_str(&value, &["/result/pane/pane_id", "/pane/pane_id"])
+                .ok_or_else(|| "pane split gave no pane id".to_string())?
+                .to_owned()
+        } else {
+            let mut args = vec![
+                "tab",
+                "create",
+                "--label",
+                "Jobs",
+                "--cwd",
+                cwd,
+                "--no-focus",
+            ];
+            if let Some(space) = &space_id {
+                args.extend(["--workspace", space.as_str()]);
+            }
+            args.extend(env_args.iter().copied());
+            let value = herdr_json(&args)?;
+            find_str(&value, &["/result/root_pane/pane_id", "/root_pane/pane_id"])
+                .ok_or_else(|| "tab create gave no pane id".to_string())?
+                .to_owned()
+        }
+    } else {
+        let mut args = vec![
+            "tab",
+            "create",
+            "--label",
+            "Jobs",
+            "--cwd",
+            cwd,
+            "--no-focus",
+        ];
+        if let Some(space) = &space_id {
+            args.extend(["--workspace", space.as_str()]);
+        }
+        args.extend(env_args.iter().copied());
+        let value = herdr_json(&args)?;
+        find_str(&value, &["/result/root_pane/pane_id", "/root_pane/pane_id"])
+            .ok_or_else(|| "tab create gave no pane id".to_string())?
+            .to_owned()
+    };
+
+    let _ = herdr_ok(&["pane", "rename", &pane_id, &format!("job·{name}")]);
+
+    // Wait for the shell prompt to be drawn
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(10) {
+        if herdr_text(&["pane", "read", &pane_id, "--source", "visible"])
+            .is_some_and(|screen| !screen.trim().is_empty())
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+
+    herdr_ok(&["pane", "run", &pane_id, &format!("herdr job exec {id}")])?;
+
+    Ok((space_id, pane_id))
+}
+
+pub fn wait_job(home: &Path, id: &str) -> std::io::Result<i32> {
+    loop {
+        std::thread::sleep(Duration::from_millis(250));
+        if let Ok(rec) = read_job(home, id) {
+            let is_alive = rec.pid.is_some_and(is_process_alive);
+            let state = rec.state(is_alive);
+            if rec.ended.is_some() || rec.exit.is_some() || state == JobState::Lost {
+                let lines = tail_job(home, id, 20).unwrap_or_default();
+                for line in lines {
+                    println!("{line}");
+                }
+                let code = rec
+                    .exit
+                    .unwrap_or(if state == JobState::Passed { 0 } else { 1 });
+                return Ok(code);
+            }
+        }
+    }
+}
+
+pub fn run_job(
+    home: &Path,
+    parsed: &RunArgs,
+    in_herdr_mode: bool,
+) -> std::io::Result<(String, Option<i32>)> {
+    let id = generate_id();
+    let cwd = parsed.cwd.clone().unwrap_or_else(|| {
+        std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| ".".into())
+    });
+
+    if !in_herdr_mode {
+        // Outside herdr, with no server, run in place with the same log and record
+        create_job(
+            home,
+            &id,
+            &parsed.name,
+            parsed.argv.clone(),
+            &cwd,
+            None,
+            None,
+            None,
+        )?;
+        println!("{id}");
+        let code = run_exec(home, &id)?;
+        return Ok((id, Some(code)));
+    }
+
+    create_job(
+        home,
+        &id,
+        &parsed.name,
+        parsed.argv.clone(),
+        &cwd,
+        None,
+        None,
+        None,
+    )?;
+
+    match open_job_pane(&cwd, &parsed.name, &id) {
+        Ok((space_id, pane_id)) => {
+            if let Ok(mut rec) = read_job(home, &id) {
+                rec.space = space_id;
+                rec.pane = Some(pane_id);
+                let _ = write_job(home, &rec);
+            }
+            println!("{id}");
+        }
+        Err(why) => {
+            eprintln!("herdr job: opening pane failed ({why}), running in place");
+            println!("{id}");
+            let code = run_exec(home, &id)?;
+            return Ok((id, Some(code)));
+        }
+    }
+
+    if parsed.wait {
+        let code = wait_job(home, &id)?;
+        return Ok((id, Some(code)));
+    }
+
+    Ok((id, None))
+}
+
+fn run_cli(args: &[String]) -> std::io::Result<()> {
+    let parsed = match parse_run_args(args) {
+        Ok(p) => p,
+        Err(why) => {
+            eprintln!("herdr job run: {why}");
+            eprintln!("usage: herdr job run --name <name> [--cwd <dir>] [--wait] -- <command...>");
+            std::process::exit(2);
+        }
+    };
+    let home =
+        crate::nirvana::home().ok_or_else(|| std::io::Error::other("no home folder found"))?;
+    let in_herdr_mode = in_herdr() && herdr_json(&["tab", "list"]).is_ok();
+    let (_id, exit_code) = run_job(&home, &parsed, in_herdr_mode)?;
+    if let Some(code) = exit_code {
+        std::process::exit(code);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -998,5 +1380,107 @@ mod tests {
         assert_eq!(lines[0], "failing output");
         assert!(lines[1].starts_with("[job demo_fail: exit 3 after "));
         assert!(lines[1].ends_with("s]"));
+    }
+
+    #[test]
+    fn run_args_parser_handles_valid_flags_and_errors() {
+        // Standard syntax: --name <name> -- <command...>
+        let args = vec![
+            "--name".into(),
+            "my_job".into(),
+            "--".into(),
+            "python".into(),
+            "-c".into(),
+            "print(1)".into(),
+        ];
+        let parsed = parse_run_args(&args).unwrap();
+        assert_eq!(parsed.name, "my_job");
+        assert_eq!(parsed.cwd, None);
+        assert!(!parsed.wait);
+        assert_eq!(parsed.argv, vec!["python", "-c", "print(1)"]);
+
+        // With --cwd and --wait
+        let args2 = vec![
+            "--name=demo_wait".into(),
+            "--cwd=C:/temp".into(),
+            "--wait".into(),
+            "--".into(),
+            "echo".into(),
+            "hello".into(),
+        ];
+        let parsed2 = parse_run_args(&args2).unwrap();
+        assert_eq!(parsed2.name, "demo_wait");
+        assert_eq!(parsed2.cwd, Some("C:/temp".into()));
+        assert!(parsed2.wait);
+        assert_eq!(parsed2.argv, vec!["echo", "hello"]);
+
+        // Missing --name
+        let err1 = parse_run_args(&["--".into(), "echo".into()]);
+        assert!(err1.is_err());
+
+        // Missing command
+        let err2 = parse_run_args(&["--name".into(), "job1".into()]);
+        assert!(err2.is_err());
+    }
+
+    #[test]
+    fn run_job_with_no_server_runs_in_place_and_records_job() {
+        let guard = crate::nirvana::with_test_home("job_run_inplace");
+        let parsed = RunArgs {
+            name: "test_in_place".into(),
+            cwd: None,
+            wait: true,
+            argv: vec![
+                "python".into(),
+                "-c".into(),
+                "print('running in place'); print('done')".into(),
+            ],
+        };
+
+        let (id, code) = run_job(&guard.path, &parsed, false).unwrap();
+        assert_eq!(code, Some(0));
+
+        let rec = read_job(&guard.path, &id).unwrap();
+        assert!(rec.ended.is_some());
+        assert_eq!(rec.exit, Some(0));
+        assert_eq!(rec.state(false), JobState::Passed);
+
+        let lines = tail_job(&guard.path, &id, 10).unwrap();
+        assert!(lines.iter().any(|l| l.contains("running in place")));
+        assert!(lines.iter().any(|l| l.contains("done")));
+        assert!(lines
+            .last()
+            .unwrap()
+            .starts_with("[job test_in_place: exit 0 after "));
+    }
+
+    #[test]
+    fn run_job_with_no_server_records_nonzero_exit() {
+        let guard = crate::nirvana::with_test_home("job_run_inplace_fail");
+        let parsed = RunArgs {
+            name: "test_in_place_fail".into(),
+            cwd: None,
+            wait: true,
+            argv: vec![
+                "python".into(),
+                "-c".into(),
+                "import sys; print('fail step'); sys.exit(42)".into(),
+            ],
+        };
+
+        let (id, code) = run_job(&guard.path, &parsed, false).unwrap();
+        assert_eq!(code, Some(42));
+
+        let rec = read_job(&guard.path, &id).unwrap();
+        assert!(rec.ended.is_some());
+        assert_eq!(rec.exit, Some(42));
+        assert_eq!(rec.state(false), JobState::Failed);
+
+        let lines = tail_job(&guard.path, &id, 10).unwrap();
+        assert!(lines.iter().any(|l| l.contains("fail step")));
+        assert!(lines
+            .last()
+            .unwrap()
+            .starts_with("[job test_in_place_fail: exit 42 after "));
     }
 }
