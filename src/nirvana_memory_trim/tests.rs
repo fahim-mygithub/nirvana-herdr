@@ -1,6 +1,6 @@
 //! Plan 13 P3: the memory trim. The live Jev is never reached: a fake client answers from the question it is sent. Every
-//! test works in a scratch home and a scratch projects folder; nothing here reads or writes `~/.claude` except the one
-//! read-only directory listing in the encoding test.
+//! test works in a scratch home and a scratch projects folder; nothing here reads or writes `~/.claude`, the encoding
+//! test's folder names are pairs captured from it once and written down below.
 
 use std::sync::{Arc, Mutex};
 
@@ -91,32 +91,6 @@ fn the_folder_encoding_matches_the_names_claude_code_wrote() {
         "C--Users-fahim-Desktop-Pojects-Nirvana",
         "a trailing separator is not part of the name"
     );
-    // The real directory, when this machine has one: read only, a listing.
-    let real = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(|home| PathBuf::from(home).join(".claude").join("projects"));
-    if let Some(real) = real.filter(|p| p.is_dir()) {
-        let names: Vec<String> = std::fs::read_dir(&real)
-            .unwrap()
-            .flatten()
-            .filter_map(|e| e.file_name().into_string().ok())
-            .collect();
-        // Every real name is a string the rule could have made: nothing but letters, digits and dashes.
-        assert!(
-            names
-                .iter()
-                .all(|n| n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')),
-            "a real name has another character"
-        );
-        if names
-            .iter()
-            .any(|n| n == "C--Users-fahim-Desktop-Pojects-Nirvana")
-        {
-            assert!(names.contains(&encode(Path::new(
-                r"C:\Users\fahim\Desktop\Pojects\Nirvana"
-            ))));
-        }
-    }
 }
 
 #[test]
@@ -601,4 +575,182 @@ fn when_the_ladder_is_not_enough_needed_hooks_are_dropped_one_at_a_time_oldest_f
         out.contains("- [Entry 1](entry-1.md) — five words of hook here"),
         "a needed hook stays while helpful ones can go"
     );
+}
+
+// ---- the fix round -----------------------------------------------------------------------------------
+
+#[test]
+fn no_test_of_this_package_reads_the_owners_claude_folder() {
+    // A scan of the test sources, kept only because the live read it guards against came back once (the encoding test read
+    // the owner's real projects folder). The needles are built in two pieces so this file does not contain them itself.
+    let needles = [
+        concat!("join(\".cla", "ude\")"),
+        concat!("var_os(\"USERPRO", "FILE\")"),
+        concat!("var_os(\"HO", "ME\")"),
+    ];
+    for (file, source) in [
+        ("nirvana_memory_trim/tests.rs", include_str!("tests.rs")),
+        (
+            "nirvana_session_record/tests.rs",
+            include_str!("../nirvana_session_record/tests.rs"),
+        ),
+    ] {
+        for needle in needles {
+            assert!(
+                !source.contains(needle),
+                "{file} reads the owner's home: {needle}"
+            );
+        }
+    }
+}
+
+fn only(key: &str, count: usize) -> Pointers {
+    Pointers::from([(key.to_owned(), count)])
+}
+
+#[test]
+fn a_link_target_with_parentheses_parses_whole_and_survives_a_cut() {
+    let original = "- [Spec](docs/spec_(v2).md) — the v2 hook words\n";
+    let blocks = parse(original);
+    match &blocks[0] {
+        Block::Entry(entry) => {
+            assert_eq!(entry.head, "- [Spec](docs/spec_(v2).md)");
+            assert_eq!(entry.hook, " — the v2 hook words");
+            assert_eq!(entry.title(), "Spec");
+        }
+        other => panic!("not an entry: {other:?}"),
+    }
+    assert_eq!(pointers(original), only("](docs/spec_(v2).md)", 1));
+    assert_eq!(
+        assemble(original, &[Need::Redundant], 1),
+        "- [Spec](docs/spec_(v2).md)\n",
+        "the hook goes and the whole target stays"
+    );
+    // Parentheses in the hook are not the link's.
+    let plain = parse("- [A](a.md) — (see above)\n");
+    match &plain[0] {
+        Block::Entry(entry) => assert_eq!(entry.head, "- [A](a.md)"),
+        other => panic!("not an entry: {other:?}"),
+    }
+    // A link that never closes still counts, to the end of its line.
+    assert_eq!(pointers("- [A](a.md"), only("](a.md", 1));
+}
+
+#[test]
+fn pointers_are_counted_so_dropping_one_of_two_links_to_a_file_is_refused() {
+    let original = "- [A](x.md) — first hook words words words words\n- [B](x.md) — second hook words words words words\n";
+    assert_eq!(pointers(original), only("](x.md)", 2));
+    let err = check(original, "- [A](x.md)\n").unwrap_err();
+    assert!(err.contains("x.md") && err.contains("drops"), "{err}");
+    assert!(
+        check(original, "- [A](x.md)\n- [B](x.md)\n").is_ok(),
+        "both kept is fine"
+    );
+}
+
+#[test]
+fn a_hook_naming_a_file_in_another_form_is_never_cut_and_its_pointer_is_counted() {
+    for (form, needle) in [
+        ("see `notes/b.md` first", "notes/b.md"),
+        ("see `b.md` first", "b.md"),
+        ("see b.md first", "b.md"),
+        ("see (b.md), then more", "b.md"),
+        ("see <docs/b.md> first", "docs/b.md"),
+        ("see [the doc][r] first", "[r]"),
+        ("see [r][] first", "[r]"),
+    ] {
+        let original = format!("- [A](a.md) — {form}\n- [Z](z.md) — filler words filler words\n");
+        let out = assemble(&original, &[Need::Redundant, Need::Redundant], 1);
+        assert!(out.contains(form), "{form}: cut to {out:?}");
+        assert!(
+            out.contains("- [Z](z.md)\n"),
+            "{form}: the plain neighbour is cut"
+        );
+        let err = check(&original, "- [A](a.md)\n- [Z](z.md)\n").unwrap_err();
+        assert!(
+            err.contains(needle) && err.contains("drops"),
+            "{form}: {err}"
+        );
+    }
+    // A reference definition on the line after a plain hook belongs to the entry and keeps it whole.
+    let original = "- [A](a.md) — plain words\n[r]: docs/b.md\n- [Z](z.md) — filler words\n";
+    let out = assemble(original, &[Need::Redundant, Need::Redundant], 1);
+    assert!(out.contains("[r]: docs/b.md"), "{out:?}");
+    assert!(check(original, "- [A](a.md)\n- [Z](z.md)\n")
+        .unwrap_err()
+        .contains("[r]: docs/b.md"));
+    // Counts, here too.
+    assert_eq!(pointers("see b.md and b.md"), only("b.md", 2));
+    assert!(check(
+        "- [A](a.md) — see b.md and b.md and more words here\n",
+        "- [A](a.md) — see b.md\n"
+    )
+    .is_err());
+}
+
+#[test]
+fn plain_hooks_stay_cuttable_and_a_title_or_code_or_a_tag_is_not_a_pointer() {
+    let line = "- [A](a.md) — uses `cargo`, <b>bold</b> and e.g. more, x < y > z";
+    assert_eq!(pointers(line), only("](a.md)", 1));
+    let original = format!("{line}\n- [Z](z.md) — filler\n");
+    assert_eq!(
+        assemble(&original, &[Need::Redundant, Need::Redundant], 1),
+        "- [A](a.md)\n- [Z](z.md)\n"
+    );
+    // A file name in a link's title is read once, as the link.
+    assert_eq!(pointers("- [notes.md](notes.md)"), only("](notes.md)", 1));
+}
+
+#[test]
+fn a_relative_folder_is_made_absolute_before_it_is_encoded() {
+    let cwd = std::env::current_dir().unwrap();
+    let got = folder_arg(Some("rel-dir")).unwrap();
+    assert_eq!(got, cwd.join("rel-dir"));
+    assert_eq!(encode(&got), encode(&cwd.join("rel-dir")));
+    assert_ne!(
+        encode(&got),
+        encode(Path::new("rel-dir")),
+        "the relative spelling is a name Claude Code never wrote"
+    );
+    assert_eq!(
+        crate::nirvana_launch::folder_hash(&got),
+        crate::nirvana_launch::folder_hash(&cwd.join("rel-dir"))
+    );
+    assert_eq!(folder_arg(None).unwrap(), cwd, "no argument is the cwd");
+    // The index is looked for under the absolute folder's name.
+    let c = ctx("relative", 400);
+    let path = index_path(&c, &got).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, index_text(40)).unwrap();
+    assert!(status_in(&c, &got).is_some());
+    assert!(status_in(&c, Path::new("rel-dir")).is_none());
+}
+
+#[cfg(windows)]
+#[test]
+fn a_verbatim_prefix_is_dropped_from_the_folder_argument() {
+    let plain = folder_arg(Some(r"C:\work\proj")).unwrap();
+    let verbatim = folder_arg(Some(r"\\?\C:\work\proj")).unwrap();
+    assert_eq!(verbatim, plain);
+    assert_eq!(encode(&verbatim), "C--work-proj");
+    assert_eq!(
+        crate::nirvana_launch::folder_hash(&verbatim),
+        crate::nirvana_launch::folder_hash(&plain)
+    );
+}
+
+#[test]
+fn write_atomic_leaves_a_neighbour_the_old_temp_name_would_have_taken() {
+    let dir = scratch("atomic");
+    // `with_extension("tmp.<pid>")` made `MEMORY.tmp.<pid>` out of `MEMORY.md`: this file was in its way, and the rename
+    // took it.
+    let neighbour = dir.join(format!("MEMORY.tmp.{}", std::process::id()));
+    std::fs::write(&neighbour, "keep").unwrap();
+    let target = dir.join("MEMORY.md");
+    write_atomic(&target, b"new").unwrap();
+    write_atomic(&target, b"newer").unwrap();
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "newer");
+    assert_eq!(std::fs::read_to_string(&neighbour).unwrap(), "keep");
+    let left = std::fs::read_dir(&dir).unwrap().flatten().count();
+    assert_eq!(left, 2, "the target and the neighbour, no temporary file");
 }

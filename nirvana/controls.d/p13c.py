@@ -23,6 +23,17 @@ JEV = "jev_judges_each_entry_and_the_result_is_assembled_by_code"
 JEV_FAIL = "a_failed_jev_call_makes_no_proposal_and_is_logged_as_failed"
 REDACT = "a_secret_in_a_hook_is_redacted_before_it_is_sent"
 
+NO_CLAUDE_READ = "no_test_of_this_package_reads_the_owners_claude_folder"
+PAREN_TARGET = "a_link_target_with_parentheses_parses_whole_and_survives_a_cut"
+COUNTED = "pointers_are_counted_so_dropping_one_of_two_links_to_a_file_is_refused"
+OTHER_FORMS = "a_hook_naming_a_file_in_another_form_is_never_cut_and_its_pointer_is_counted"
+REL_CLI = "a_relative_folder_is_made_absolute_before_it_is_encoded"
+REL_RECORD = "a_relative_folder_is_filed_under_its_absolute_hash"
+VERBATIM = "a_verbatim_folder_and_its_plain_spelling_are_one_record"
+TEMP_NAMES = "temp_names_are_unique_and_append_to_the_whole_file_name"
+ATOMIC_NEIGHBOUR = "write_atomic_leaves_a_neighbour_the_old_temp_name_would_have_taken"
+RECORD_NEIGHBOUR = "a_record_write_leaves_a_neighbour_the_old_temp_name_would_have_taken"
+
 CONTROLS = (
     # The record: where, what, when it is not written.
     Control("p13c_record_wrong_key", REC,
@@ -58,8 +69,8 @@ CONTROLS = (
             "    let trimmed = text.as_str();", ENCODING, "rust"),
     # The pointer check and its neighbours.
     Control("p13c_dropped_pointer_passes", TRIM,
-            "    if let Some(missing) = pointers(original).into_iter().find(|p| !kept.contains(p)) {",
-            "    if let Some(missing) = pointers(original).into_iter().find(|_| false) {", REFUSE, "rust"),
+            "        if have < had {",
+            "        if false {", REFUSE, "rust"),
     Control("p13c_larger_proposal_passes", TRIM,
             "    if tokens_of(proposed) >= tokens_of(original) {",
             "    if false {", REFUSE, "rust"),
@@ -94,8 +105,8 @@ CONTROLS = (
             "            cuts[i] = Cut::Drop;",
             "            cuts.fill(Cut::Drop);", LADDER, "rust"),
     Control("p13c_pointer_hook_cut", TRIM,
-            '        !tail.contains("](") && !tail.contains("[[")',
-            "        true", POINTER_HOOK, "rust"),
+            "            .all(|line| pointers(line).is_empty())",
+            "            .all(|_| true)", POINTER_HOOK, "rust"),
     # Jev.
     Control("p13c_unsure_answer_cuts", TRIM,
             '                            answer["confidence"].as_f64().unwrap_or(0.0) >= CHOICE_FLOOR;',
@@ -106,4 +117,57 @@ CONTROLS = (
     Control("p13c_hook_sent_unredacted", TRIM,
             '                    "hook": redact(&hook, self.key.as_deref()).0,',
             '                    "hook": hook,', REDACT, "rust"),
+    # Fix round. 1: no test reads the owner's ~/.claude. The sabotage puts a read of it back into the encoding test.
+    Control("p13c_live_claude_read_returns", "src/nirvana_memory_trim/tests.rs",
+            '        "a trailing separator is not part of the name"\n    );\n',
+            '        "a trailing separator is not part of the name"\n    );\n    let _ = PathBuf::from(".").join(".claude");\n',
+            NO_CLAUDE_READ, "rust"),
+    # 2: the pointer check. Balanced parentheses, counts, and the other forms of a file pointer.
+    Control("p13c_target_ends_at_the_first_paren", TRIM,
+            "            '(' => depth += 1,",
+            "            '(' => {}", PAREN_TARGET, "rust"),
+    Control("p13c_pointers_compared_as_a_set", TRIM,
+            "        if have < had {",
+            "        if have == 0 && had > 0 {", COUNTED, "rust"),
+    Control("p13c_other_pointer_forms_are_cuttable", TRIM,
+            "            .all(|line| pointers(line).is_empty())",
+            '            .all(|line| !line.contains("](") && !line.contains("[["))', OTHER_FORMS, "rust"),
+    Control("p13c_bare_md_token_not_counted", TRIM,
+            "            add(out, token.to_owned());",
+            "            let _ = token;", OTHER_FORMS, "rust"),
+    Control("p13c_backticked_path_not_counted", TRIM,
+            '            add(out, format!("`{body}`"));',
+            "            let _ = &body;", OTHER_FORMS, "rust"),
+    Control("p13c_autolink_not_counted", TRIM,
+            '            add(out, format!("<{body}>"));',
+            "            let _ = body;", OTHER_FORMS, "rust"),
+    Control("p13c_reference_link_not_counted", TRIM,
+            '        add(out, format!("[{}]", reference.trim().to_lowercase()));',
+            "        let _ = reference;", OTHER_FORMS, "rust"),
+    Control("p13c_reference_definition_not_counted", TRIM,
+            '    add(out, format!("[{}]: {dest}", label.trim().to_lowercase()));',
+            "    let _ = (label, dest);", OTHER_FORMS, "rust"),
+    # 3: relative folders and the verbatim prefix.
+    Control("p13c_cli_folder_left_relative", TRIM,
+            "    Ok(crate::nirvana_session_record::absolute_folder(&folder))",
+            "    Ok(folder)", REL_CLI, "rust"),
+    Control("p13c_record_folder_left_relative", REC,
+            "        .map(|dir| absolute_folder(Path::new(dir)))",
+            "        .map(PathBuf::from)", REL_RECORD, "rust"),
+    Control("p13c_verbatim_prefix_kept", REC,
+            "    match absolute.to_str().and_then(strip_verbatim) {",
+            "    match None::<String> {", VERBATIM, "rust"),
+    # 4: temporary names.
+    Control("p13c_temp_name_without_the_counter", REC,
+            "        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)",
+            "        0u64", TEMP_NAMES, "rust"),
+    Control("p13c_temp_name_by_with_extension", REC,
+            "    path.with_file_name(name)",
+            '    path.with_extension(format!("tmp.{}", std::process::id()))', TEMP_NAMES, "rust"),
+    Control("p13c_atomic_write_uses_with_extension", TRIM,
+            "    let tmp = crate::nirvana_session_record::temp_sibling(path);",
+            '    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));', ATOMIC_NEIGHBOUR, "rust"),
+    Control("p13c_record_write_uses_with_extension", REC,
+            "    let tmp = temp_sibling(&path);",
+            '    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));', RECORD_NEIGHBOUR, "rust"),
 )

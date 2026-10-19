@@ -143,7 +143,7 @@ fn every_hook_names_a_herdr_subcommand_that_runs_quiet_and_fast() {
             }
         }
     }
-    assert_eq!(ran, 7, "seven hooks");
+    assert_eq!(ran, 9, "nine hooks");
 }
 
 /// A folder whose own settings run `herdr board notice` (Preload's shared board) hears the notice once: the plugin's

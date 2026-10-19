@@ -230,3 +230,109 @@ fn the_plugin_runs_record_session_from_session_start_and_stop_in_the_same_exec_f
             .is_some_and(|s| (1..=15).contains(&s)));
     }
 }
+
+// ---- the fix round -----------------------------------------------------------------------------------
+
+#[test]
+fn a_relative_folder_is_filed_under_its_absolute_hash() {
+    let home = scratch("relative");
+    let cwd = std::env::current_dir().unwrap();
+    handle(
+        &home,
+        &hook(json!({})),
+        Some("rel-proj"),
+        "2026-10-18T10:00:00Z",
+    )
+    .expect("written");
+    assert!(read(&home, &cwd.join("rel-proj")).is_some());
+    assert!(read(&home, Path::new("rel-proj")).is_none());
+    assert_eq!(
+        folder_of(&json!({"cwd": "rel-cwd"}), None),
+        Some(cwd.join("rel-cwd")),
+        "the hook's own cwd is resolved too"
+    );
+}
+
+#[test]
+fn a_verbatim_prefix_is_dropped_and_other_verbatim_forms_are_left_alone() {
+    assert_eq!(
+        strip_verbatim(r"\\?\C:\work\proj").as_deref(),
+        Some(r"C:\work\proj")
+    );
+    assert_eq!(
+        strip_verbatim(r"\\?\UNC\srv\share\x").as_deref(),
+        Some(r"\\srv\share\x")
+    );
+    assert_eq!(strip_verbatim(r"\\?\Volume{1234}\x"), None);
+    assert_eq!(strip_verbatim(r"C:\work\proj"), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_verbatim_folder_and_its_plain_spelling_are_one_record() {
+    let home = scratch("verbatim");
+    handle(
+        &home,
+        &hook(json!({})),
+        Some(r"\\?\C:\work\proj"),
+        "2026-10-18T10:00:00Z",
+    )
+    .expect("written");
+    assert!(read(&home, Path::new(r"C:\work\proj")).is_some());
+    assert_eq!(
+        absolute_folder(Path::new(r"\\?\C:\work\proj")),
+        PathBuf::from(r"C:\work\proj")
+    );
+}
+
+#[test]
+fn temp_names_are_unique_and_append_to_the_whole_file_name() {
+    // A dotted stem: `with_extension` would have replaced `.json` and kept `notes.v1`, or cut the stem short.
+    let path = Path::new("dir").join("notes.v1.json");
+    let names: Vec<PathBuf> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..8)
+            .map(|_| scope.spawn(|| (0..200).map(|_| temp_sibling(&path)).collect::<Vec<_>>()))
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap())
+            .collect()
+    });
+    let unique: std::collections::BTreeSet<&PathBuf> = names.iter().collect();
+    assert_eq!(unique.len(), 8 * 200, "no name is handed out twice");
+    let pid = std::process::id().to_string();
+    for name in &names {
+        assert_eq!(name.parent(), path.parent());
+        let file = name.file_name().and_then(|n| n.to_str()).unwrap();
+        assert!(file.starts_with("notes.v1.json.tmp."), "{file}");
+        assert!(
+            file["notes.v1.json.tmp.".len()..].starts_with(&pid),
+            "{file}"
+        );
+    }
+}
+
+#[test]
+fn a_record_write_leaves_a_neighbour_the_old_temp_name_would_have_taken() {
+    let home = scratch("neighbour");
+    let folder = std::env::current_dir().unwrap().join("work-proj");
+    let path = path_in(&home, &folder);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    // The name the old code used: `<hash>.json` with `json.<pid>.tmp` in the place of its extension.
+    let neighbour = path.with_file_name(format!(
+        "{}.json.{}.tmp",
+        crate::nirvana_launch::folder_hash(&folder),
+        std::process::id()
+    ));
+    std::fs::write(&neighbour, "keep").unwrap();
+    let record = record_of(&hook(json!({})), "2026-10-18T10:00:00Z").unwrap();
+    write(&home, &folder, &record).unwrap();
+    write(&home, &folder, &record).unwrap();
+    assert!(read(&home, &folder).is_some());
+    assert_eq!(std::fs::read_to_string(&neighbour).unwrap(), "keep");
+    let left = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .count();
+    assert_eq!(left, 2, "the record and the neighbour, no temporary file");
+}

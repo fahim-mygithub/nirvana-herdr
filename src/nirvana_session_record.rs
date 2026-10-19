@@ -15,8 +15,10 @@
 //! `CLAUDE_PROJECT_DIR` (measured in the same run: forward slashes, `proj` at both events, which is also the folder the
 //! transcript is filed under) is read first, and `cwd` is only the fallback.
 
+use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -44,7 +46,31 @@ pub fn path_in(home: &Path, folder: &Path) -> PathBuf {
     ))
 }
 
-/// The folder a hook belongs to: the session's start directory when Claude Code names it, else the hook's `cwd`.
+/// `text` without a Windows verbatim prefix: `\\?\C:\x` is `C:\x` and `\\?\UNC\srv\share` is `\\srv\share`. Any other
+/// verbatim form (`\\?\Volume{...}`) has no plain spelling and is left alone (`None`).
+fn strip_verbatim(text: &str) -> Option<String> {
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return Some(format!(r"\\{rest}"));
+    }
+    let rest = text.strip_prefix(r"\\?\")?;
+    let bytes = rest.as_bytes();
+    (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+        .then(|| rest.to_owned())
+}
+
+/// The folder as an absolute path with no `\\?\` prefix. `folder_hash` and the memory folder's encoding are both
+/// spellings of the path: a relative `proj` hashed as it stands would be a different folder from the `C:\work\proj` the
+/// window opened (the launch makes its folder absolute before it hashes), and `\\?\C:\work\proj` a third.
+pub fn absolute_folder(folder: &Path) -> PathBuf {
+    let absolute = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
+    match absolute.to_str().and_then(strip_verbatim) {
+        Some(plain) => PathBuf::from(plain),
+        None => absolute,
+    }
+}
+
+/// The folder a hook belongs to: the session's start directory when Claude Code names it, else the hook's `cwd`. Made
+/// absolute, so the record is filed under the hash the launch looks it up by.
 pub fn folder_of(hook: &Value, project_dir: Option<&str>) -> Option<PathBuf> {
     project_dir
         .map(str::trim)
@@ -55,7 +81,24 @@ pub fn folder_of(hook: &Value, project_dir: Option<&str>) -> Option<PathBuf> {
                 .map(str::trim)
                 .filter(|cwd| !cwd.is_empty())
         })
-        .map(PathBuf::from)
+        .map(|dir| absolute_folder(Path::new(dir)))
+}
+
+/// Counts the temporary files this process has named, so two writes to one target never share a name.
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A temporary name beside `path` for a write-then-rename: the full file name, then `.tmp.<pid>.<n>`. The pid keeps two
+/// processes apart (a `SessionStart` and a `Stop` hook can overlap) and the counter keeps two writes in one process apart.
+/// The suffix is appended and never set through `with_extension`, which replaces the last extension: `MEMORY.md` would
+/// become `MEMORY.tmp.<pid>` and a stem with a dot in it would lose its tail.
+pub fn temp_sibling(path: &Path) -> PathBuf {
+    let mut name: OsString = path.file_name().map(OsString::from).unwrap_or_default();
+    name.push(format!(
+        ".tmp.{}.{}",
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    path.with_file_name(name)
 }
 
 /// The record a hook describes, or why it describes none. A subagent's hook is never a record: its session is not the
@@ -95,7 +138,7 @@ pub fn write(home: &Path, folder: &Path, record: &Record) -> std::io::Result<()>
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    let tmp = temp_sibling(&path);
     let mut text = serde_json::to_string_pretty(record)?;
     text.push('\n');
     std::fs::write(&tmp, text)?;

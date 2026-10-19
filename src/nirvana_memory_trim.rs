@@ -9,9 +9,11 @@
 //!   byte-identical, and only then replaces the index with the proposal.
 //! - **`discard`** deletes the proposal. **`restore`** puts the newest backup back.
 //!
-//! **The pointer check** is the safeguard: a proposal is refused, and not written, when any link target (`](file.md)`) or
-//! `[[link]]` of the original is missing from it, or when it is not smaller. It runs again at `accept`, because the
-//! original may have gained an entry since.
+//! **The pointer check** is the safeguard: a proposal is refused, and not written, when it holds any pointer of the
+//! original fewer times than the original does, or when it is not smaller. A pointer is a link target (`](file.md)`,
+//! parentheses balanced), a `[[link]]`, or a file named another way (a backticked path, a bare `.md` token, a `<...>`
+//! autolink, a reference link or definition); counts, so dropping one of two links to one file is refused. It runs again
+//! at `accept`, because the original may have gained an entry since.
 //!
 //! **Jev cannot write text.** Its wire has three answer types (a probability, a choice, a score) and no free text, so
 //! "Jev rewrites the index" (plan §6.2) is built as "Jev judges each entry, code assembles the result": one choice
@@ -28,7 +30,7 @@
 //! environment overrides are `NIRVANA_CLAUDE_PROJECTS_DIR` and `NIRVANA_TRIM_OVER_TOKENS`, and every function that does the
 //! work takes a `Ctx`.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -229,42 +231,285 @@ pub fn status(cwd: &Path) -> Option<TrimStatus> {
 
 // ---- the pointer check -------------------------------------------------------------------------------
 
-/// Every pointer an index holds: the target of each markdown link and each `[[name]]`.
-pub fn pointers(text: &str) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    let mut rest = text;
-    while let Some(at) = rest.find("](") {
-        let after = &rest[at + 2..];
-        match after.find(')') {
-            Some(end) => {
-                out.insert(format!("]({})", &after[..end]));
-                rest = &after[end..];
+/// What an index points at, and how many times: the key is the pointer as written (`](docs/spec_(v2).md)`, `[[name]]`,
+/// `` `notes/b.md` ``, `b.md`, `<docs/b.md>`, `[ref]`, `[ref]: docs/b.md`) and the value is its count.
+pub type Pointers = BTreeMap<String, usize>;
+
+fn add(out: &mut Pointers, key: String) {
+    *out.entry(key).or_insert(0) += 1;
+}
+
+/// The index of the `)` that closes a link target, in `after`, the text just past `](`. Parentheses inside the target
+/// balance (`docs/spec_(v2).md`); a backslash escapes the next character, and inside a `<...>` destination nothing counts.
+/// `None` when the line ends first.
+fn target_end(after: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut in_angle = after.starts_with('<');
+    let mut escaped = false;
+    for (i, c) in after.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '>' if in_angle => in_angle = false,
+            _ if in_angle => {}
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
             }
-            None => break,
+            _ => {}
         }
     }
-    let mut rest = text;
-    while let Some(at) = rest.find("[[") {
-        let after = &rest[at + 2..];
-        match after.find("]]") {
-            Some(end) => {
-                out.insert(format!("[[{}]]", &after[..end]));
-                rest = &after[end..];
-            }
-            None => break,
+    None
+}
+
+/// The index where the `[` that opens the title ending at `before`'s end begins, if there is one on the line.
+fn title_start(before: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, c) in before.char_indices().rev() {
+        match c {
+            ']' => depth += 1,
+            '[' if depth == 0 => return Some(i),
+            '[' => depth -= 1,
+            _ => {}
         }
+    }
+    None
+}
+
+/// `[title](target)`: counts `](target)` and blanks the whole link, so nothing inside it is read twice.
+fn take_links(line: &mut String, out: &mut Pointers) {
+    while let Some(at) = line.find("](") {
+        let open = at + 2;
+        let rest = &line[open..];
+        let (key, end) = match target_end(rest) {
+            Some(e) => (format!("]({})", &rest[..e]), open + e + 1),
+            // Never closed: the rest of the line is the target, so it is still counted (and not as a closed link).
+            None => (format!("]({}", rest.trim_end()), line.len()),
+        };
+        add(out, key);
+        let start = title_start(&line[..at]).unwrap_or(at);
+        line.replace_range(start..end, " ");
+    }
+}
+
+/// `[[name]]`.
+fn take_wiki_links(line: &mut String, out: &mut Pointers) {
+    while let Some(at) = line.find("[[") {
+        let rest = &line[at + 2..];
+        let Some(end) = rest.find("]]") else { break };
+        add(out, format!("[[{}]]", &rest[..end]));
+        line.replace_range(at..at + 2 + end + 2, " ");
+    }
+}
+
+/// Whether a token is a file path: it has a separator or an extension; with a space in it, only a name ending `.md`.
+fn looks_like_path(token: &str) -> bool {
+    let token = token.trim();
+    if token.is_empty() {
+        return false;
+    }
+    if token.chars().any(char::is_whitespace) {
+        return token.to_ascii_lowercase().ends_with(".md");
+    }
+    token.contains(['/', '\\']) || has_extension(token)
+}
+
+fn has_extension(token: &str) -> bool {
+    match token.rfind('.') {
+        Some(i) if i > 0 => {
+            let ext = &token[i + 1..];
+            (1..=8).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric())
+        }
+        _ => false,
+    }
+}
+
+/// The next run of exactly `run` backticks in `text`.
+fn find_backtick_run(text: &str, run: usize) -> Option<usize> {
+    let mut from = 0;
+    while let Some(rel) = text[from..].find('`') {
+        let start = from + rel;
+        let n = text[start..].chars().take_while(|c| *c == '`').count();
+        if n == run {
+            return Some(start);
+        }
+        from = start + n;
+    }
+    None
+}
+
+/// A backticked path: `` `notes/b.md` ``. Code that is not a path stays in the line and is not counted.
+fn take_code_paths(line: &mut String, out: &mut Pointers) {
+    let mut from = 0;
+    while let Some(rel) = line[from..].find('`') {
+        let start = from + rel;
+        let run = line[start..].chars().take_while(|c| *c == '`').count();
+        let body_start = start + run;
+        let Some(rel_end) = find_backtick_run(&line[body_start..], run) else {
+            break;
+        };
+        let body_end = body_start + rel_end;
+        let body = line[body_start..body_end].trim().to_owned();
+        if looks_like_path(&body) {
+            add(out, format!("`{body}`"));
+            line.replace_range(start..body_end + run, " ");
+            from = start + 1;
+        } else {
+            from = body_end + run;
+        }
+    }
+}
+
+/// Whether the inside of `<...>` is an address, not an HTML tag: no space, not `</b>` or `<!-- -->`, and a separator, a
+/// scheme colon or an extension in it.
+fn autolink_like(body: &str) -> bool {
+    !body.is_empty()
+        && !body.chars().any(|c| c.is_whitespace() || c == '<')
+        && !body.starts_with(['/', '!'])
+        && (body.contains(['/', '\\', ':']) || has_extension(body))
+}
+
+/// `<docs/b.md>`.
+fn take_autolinks(line: &mut String, out: &mut Pointers) {
+    let mut from = 0;
+    while let Some(rel) = line[from..].find('<') {
+        let start = from + rel;
+        let rest = &line[start + 1..];
+        let Some(end) = rest.find('>') else { break };
+        let body = &rest[..end];
+        if autolink_like(body) {
+            add(out, format!("<{body}>"));
+            line.replace_range(start..start + 1 + end + 1, " ");
+        }
+        from = start + 1;
+    }
+}
+
+/// `[text][ref]` and `[text][]`: the pointer is the label of the definition it uses.
+fn take_reference_links(line: &mut String, out: &mut Pointers) {
+    let mut from = 0;
+    while let Some(rel) = line[from..].find('[') {
+        let start = from + rel;
+        let rest = &line[start + 1..];
+        let Some(close) = rest.find(']') else { break };
+        let label = &rest[..close];
+        from = start + 1;
+        if label.contains('[') {
+            continue;
+        }
+        let Some(second) = rest[close + 1..].strip_prefix('[') else {
+            continue;
+        };
+        let Some(end) = second.find(']') else {
+            continue;
+        };
+        let reference = if second[..end].trim().is_empty() {
+            label
+        } else {
+            &second[..end]
+        };
+        if reference.trim().is_empty() {
+            continue;
+        }
+        add(out, format!("[{}]", reference.trim().to_lowercase()));
+        // `[` + label + `]` + `[` + reference + `]`
+        let stop = start + 1 + close + 1 + 1 + end + 1;
+        line.replace_range(start..stop, " ");
+    }
+}
+
+/// `[ref]: docs/b.md`, a reference definition: only one at a line's start. The whole line is spent.
+fn take_reference_definition(line: &mut String, out: &mut Pointers) {
+    let Some(rest) = line.trim_start().strip_prefix('[') else {
+        return;
+    };
+    let Some((label, dest)) = rest.split_once("]:") else {
+        return;
+    };
+    if label.is_empty() || label.starts_with('^') || label.contains(['[', ']']) {
+        return;
+    }
+    let dest = dest.trim();
+    if dest.is_empty() {
+        return;
+    }
+    add(out, format!("[{}]: {dest}", label.trim().to_lowercase()));
+    line.clear();
+}
+
+/// A bare token ending `.md`: `see MEMORY.md.`
+fn take_bare_files(line: &str, out: &mut Pointers) {
+    for token in line.split_whitespace() {
+        let token = token.trim_matches(|c: char| {
+            matches!(
+                c,
+                '.' | ','
+                    | ';'
+                    | ':'
+                    | '!'
+                    | '?'
+                    | '"'
+                    | '\''
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '<'
+                    | '>'
+                    | '*'
+                    | '`'
+            )
+        });
+        if token.len() > 3
+            && token.is_char_boundary(token.len() - 3)
+            && token[token.len() - 3..].eq_ignore_ascii_case(".md")
+        {
+            add(out, token.to_owned());
+        }
+    }
+}
+
+/// Every pointer an index holds, counted: the target of each markdown link (balanced parentheses, so
+/// `](docs/spec_(v2).md)` is one pointer), each `[[name]]`, and each other way a hook can name a file: a backticked path,
+/// a bare token ending `.md`, a `<...>` autolink, and a reference link (`[text][ref]`) or definition (`[ref]: path`). Each
+/// line is read alone, and a span read as one form is blanked before the next form is looked for.
+pub fn pointers(text: &str) -> Pointers {
+    let mut out = Pointers::new();
+    for raw in text.lines() {
+        let mut line = raw.to_owned();
+        take_reference_definition(&mut line, &mut out);
+        take_links(&mut line, &mut out);
+        take_wiki_links(&mut line, &mut out);
+        take_code_paths(&mut line, &mut out);
+        take_autolinks(&mut line, &mut out);
+        take_reference_links(&mut line, &mut out);
+        take_bare_files(&line, &mut out);
     }
     out
 }
 
-/// Whether `proposed` may stand in for `original`: not empty, every pointer kept, and smaller.
+/// Whether `proposed` may stand in for `original`: not empty, every pointer kept as often as the original has it, and
+/// smaller. Counts, not a set: dropping one of two links to one target loses a pointer.
 pub fn check(original: &str, proposed: &str) -> Result<(), String> {
     if proposed.trim().is_empty() {
         return Err("the proposal is empty".into());
     }
     let kept = pointers(proposed);
-    if let Some(missing) = pointers(original).into_iter().find(|p| !kept.contains(p)) {
-        return Err(format!("the proposal drops the pointer {missing}"));
+    for (pointer, had) in pointers(original) {
+        let have = kept.get(&pointer).copied().unwrap_or(0);
+        if have < had {
+            return Err(if had > 1 {
+                format!("the proposal drops the pointer {pointer} (the index has {had} of it, the proposal {have})")
+            } else {
+                format!("the proposal drops the pointer {pointer}")
+            });
+        }
     }
     if tokens_of(proposed) >= tokens_of(original) {
         return Err("the proposal is not smaller than the index".into());
@@ -309,10 +554,12 @@ impl Entry {
             .join(" ")
     }
 
-    /// A hook that holds a pointer of its own is never cut: cutting it could lose the pointer.
+    /// A hook that holds a pointer of its own, in any of the forms `pointers` reads, is never cut: cutting it could lose
+    /// the pointer. Each line is read alone, because a reference definition (`[ref]: path`) is only one at a line's start.
     fn cuttable(&self) -> bool {
-        let tail = self.hook_text();
-        !tail.contains("](") && !tail.contains("[[")
+        std::iter::once(self.hook.as_str())
+            .chain(self.cont.iter().map(String::as_str))
+            .all(|line| pointers(line).is_empty())
     }
 }
 
@@ -326,7 +573,8 @@ pub fn parse(text: &str) -> Vec<Block> {
     for line in text.lines() {
         if is_entry_start(line) {
             let at = line.find("](").unwrap_or(0);
-            let end = line[at..].find(')').map_or(line.len(), |e| at + e + 1);
+            // The link's closing parenthesis is the balanced one: `(v2)` inside `docs/spec_(v2).md` does not end it.
+            let end = target_end(&line[at + 2..]).map_or(line.len(), |e| at + 2 + e + 1);
             blocks.push(Block::Entry(Entry {
                 head: line[..end].to_owned(),
                 hook: line[end..].to_owned(),
@@ -630,7 +878,7 @@ fn compact_now() -> String {
 
 /// Writes through a temporary file in the same folder and a rename.
 fn write_atomic(path: &Path, text: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    let tmp = crate::nirvana_session_record::temp_sibling(path);
     std::fs::write(&tmp, text)?;
     std::fs::rename(&tmp, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
@@ -761,6 +1009,17 @@ fn k(tokens: u64) -> String {
     }
 }
 
+/// The folder the command works on: its `[<folder>]` argument, else the current directory, made absolute and without a
+/// `\\?\` prefix. A relative `proj` would encode to a name Claude Code never wrote and hash apart from the folder the window
+/// opened, so `status proj` would report "no auto memory index" for a folder that has one.
+fn folder_arg(arg: Option<&str>) -> std::io::Result<PathBuf> {
+    let folder = match arg {
+        Some(folder) => PathBuf::from(folder),
+        None => std::env::current_dir()?,
+    };
+    Ok(crate::nirvana_session_record::absolute_folder(&folder))
+}
+
 /// `herdr memory ...`
 pub fn cli(args: &[String]) -> std::io::Result<()> {
     let Some(verb) = args.first().map(String::as_str) else {
@@ -769,10 +1028,7 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
     if verb == "record-session" {
         return crate::nirvana_session_record::cli();
     }
-    let folder = match args.get(1) {
-        Some(folder) => PathBuf::from(folder),
-        None => std::env::current_dir()?,
-    };
+    let folder = folder_arg(args.get(1).map(String::as_str))?;
     match verb {
         "status" => match status(&folder) {
             None => println!("no auto memory index for this folder"),
