@@ -907,6 +907,15 @@ impl ClientShellState {
                     layout.pane_surface.width,
                     layout.pane_surface.bottom().saturating_sub(top),
                 );
+                // A finished Pull, Push or Fetch hands its words back here: a map read, no I/O.
+                if panel.busy.is_some() {
+                    if let Some(result) = crate::nirvana_git::take_action_result(&panel.folder) {
+                        panel.busy = None;
+                        panel.message = Some(match result {
+                            Ok(text) | Err(text) => text,
+                        });
+                    }
+                }
                 let view = crate::nirvana_git::cached(&panel.folder);
                 let now_secs = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

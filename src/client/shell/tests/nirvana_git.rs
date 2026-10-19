@@ -3,7 +3,7 @@
 //! row rendering, disabled reasons, confirm step, and Esc / Cancel.
 
 use super::*;
-use crate::client::shell::nirvana_git::GitConfirm;
+use crate::client::shell::nirvana_git::{GitButton, GitConfirm};
 use crate::client::shell::nirvana_mods::OpenPanel;
 use crate::nirvana_git::{set_view_for_test, CiRun, CiState, GitStatus, GitView};
 
@@ -423,6 +423,59 @@ fn live_client_snapshot_renders_git_square_on_scratch_repo() {
     assert!(
         row_narrow.contains("Git main \u{b7} 1 \u{25BE}"),
         "live strip narrow: {row_narrow}"
+    );
+
+    done(root);
+}
+
+// Review of plan 16: the confirmed press starts git on a worker, the button reads busy, and git's words come back
+// at a later draw. The folder is not a repo, so the worker's re-read refuses fast and nothing reaches a remote.
+#[test]
+fn confirmed_pull_runs_off_the_input_path_and_reports_back() {
+    let (mut state, root) = state_for("pull-off-input");
+    set_view_for_test(Some(GitView {
+        status: GitStatus {
+            repo: root.clone(),
+            branch: "main".into(),
+            upstream: "origin/main".into(),
+            ahead: 0,
+            behind: 2,
+            dirty: 0,
+            files: vec![],
+        },
+        ci: None,
+    }));
+
+    let _ = rows_of(&mut state, 160, 40);
+    let square = state.hits.nirvana_git;
+    click(&mut state, square.x + 1, square.y);
+    let _ = rows_of(&mut state, 160, 40);
+    let pull_btn = state.hits.nirvana_git_panel.pull_btn;
+    click(&mut state, pull_btn.x + 1, pull_btn.y);
+    let _ = rows_of(&mut state, 160, 40);
+    let confirm = state.hits.nirvana_git_panel.pull_btn;
+    click(&mut state, confirm.x + 1, confirm.y);
+    assert_eq!(
+        state.nirvana_git.as_ref().unwrap().busy,
+        Some(GitButton::Pull),
+        "the confirmed press marks the panel busy and returns"
+    );
+
+    let started = std::time::Instant::now();
+    let mut message = None;
+    while started.elapsed() < std::time::Duration::from_secs(10) {
+        let _ = rows_of(&mut state, 160, 40);
+        let panel = state.nirvana_git.as_ref().unwrap();
+        if panel.busy.is_none() {
+            message = panel.message.clone();
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let message = message.expect("the pull's result reached the panel");
+    assert!(
+        message.starts_with("git pull: refused."),
+        "git's words: {message}"
     );
 
     done(root);

@@ -50,7 +50,7 @@ pub(crate) struct GitPanel {
     pub(super) tab_id: String,
     pub(super) selected_button: usize,
     pub(super) confirming: Option<GitConfirm>,
-    pub(super) busy: Option<GitConfirm>,
+    pub(super) busy: Option<GitButton>,
     pub(super) message: Option<String>,
 }
 
@@ -228,7 +228,7 @@ pub(super) fn render_git_panel(
     let mut cur_x = x;
     if panel.confirming.is_none() {
         // [Pull ↓M]
-        let pull_label = if panel.busy == Some(GitConfirm::Pull) {
+        let pull_label = if panel.busy == Some(GitButton::Pull) {
             "[Pulling\u{2026}]".to_string()
         } else if status.behind > 0 {
             format!("[Pull \u{2193}{}]", status.behind)
@@ -257,7 +257,7 @@ pub(super) fn render_git_panel(
         cur_x += pull_width + 2;
 
         // [Push ↑N]
-        let push_label = if panel.busy == Some(GitConfirm::Push) {
+        let push_label = if panel.busy == Some(GitButton::Push) {
             "[Pushing\u{2026}]".to_string()
         } else if status.ahead > 0 {
             format!("[Push \u{2191}{}]", status.ahead)
@@ -286,7 +286,11 @@ pub(super) fn render_git_panel(
         cur_x += push_width + 2;
 
         // [Fetch]
-        let fetch_label = "[Fetch]".to_string();
+        let fetch_label = if panel.busy == Some(GitButton::Fetch) {
+            "[Fetching\u{2026}]".to_string()
+        } else {
+            "[Fetch]".to_string()
+        };
         let fetch_width = fetch_label.len() as u16;
         let fetch_rect = Rect::new(cur_x, btn_y, fetch_width, 1);
         hits.fetch_btn = fetch_rect;
@@ -423,6 +427,18 @@ impl ClientShellState {
             ..Default::default()
         };
         let status = view.as_ref().map(|v| &v.status).unwrap_or(&default_status);
+        // One action at a time per panel: a second press while git still runs says so and starts nothing.
+        if let Some(running) = panel.busy {
+            panel.message = Some(format!(
+                "git: a {} is still running.",
+                match running {
+                    GitButton::Pull => "pull",
+                    GitButton::Push => "push",
+                    GitButton::Fetch => "fetch",
+                }
+            ));
+            return;
+        }
 
         match button {
             GitButton::Pull => {
@@ -440,10 +456,9 @@ impl ClientShellState {
                 panel.selected_button = 0;
                 let folder = panel.folder.clone();
                 let branch = status.branch.clone();
-                match crate::nirvana_git::pull_action(&folder, &branch) {
-                    Ok(msg) => panel.message = Some(msg),
-                    Err(err) => panel.message = Some(err),
-                }
+                panel.busy = Some(GitButton::Pull);
+                panel.message = None;
+                crate::nirvana_git::start_action(folder, branch, crate::nirvana_git::pull_action);
             }
             GitButton::Push => {
                 if status.upstream.is_empty() {
@@ -464,10 +479,9 @@ impl ClientShellState {
                 panel.selected_button = 0;
                 let folder = panel.folder.clone();
                 let branch = status.branch.clone();
-                match crate::nirvana_git::push_action(&folder, &branch) {
-                    Ok(msg) => panel.message = Some(msg),
-                    Err(err) => panel.message = Some(err),
-                }
+                panel.busy = Some(GitButton::Push);
+                panel.message = None;
+                crate::nirvana_git::start_action(folder, branch, crate::nirvana_git::push_action);
             }
             GitButton::Fetch => {
                 if status.upstream.is_empty() {
@@ -476,10 +490,9 @@ impl ClientShellState {
                 }
                 let folder = panel.folder.clone();
                 let branch = status.branch.clone();
-                match crate::nirvana_git::fetch_action(&folder, &branch) {
-                    Ok(msg) => panel.message = Some(msg),
-                    Err(err) => panel.message = Some(err),
-                }
+                panel.busy = Some(GitButton::Fetch);
+                panel.message = None;
+                crate::nirvana_git::start_action(folder, branch, crate::nirvana_git::fetch_action);
             }
         }
     }

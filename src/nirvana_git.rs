@@ -227,7 +227,6 @@ pub fn run_cmd(
         }
     };
 
-    let (tx, rx) = std::sync::mpsc::channel();
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
 
@@ -249,17 +248,23 @@ pub fn run_cmd(
         buf
     });
 
-    let t_wait = std::thread::spawn(move || {
-        let res = child.wait();
-        let _ = tx.send(res);
-        child
-    });
+    // The child stays on this thread and is polled, so the timeout can kill it. Review of plan 16 (2026-10-19): the
+    // build moved the child into a thread blocked in `wait()` and joined that thread at the timeout, which waited for
+    // the hung child instead of killing it, so a push stuck on a credential helper never came back.
+    let started = Instant::now();
+    let waited = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if started.elapsed() >= timeout => break Err(None),
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(e) => break Err(Some(e)),
+        }
+    };
 
-    match rx.recv_timeout(timeout) {
-        Ok(Ok(status)) => {
+    match waited {
+        Ok(status) => {
             let out_bytes = t_stdout.join().unwrap_or_default();
             let err_bytes = t_stderr.join().unwrap_or_default();
-            let _ = t_wait.join();
             let out_str = String::from_utf8_lossy(&out_bytes);
             let err_str = String::from_utf8_lossy(&err_bytes);
             let code = status.code().unwrap_or(1);
@@ -270,18 +275,15 @@ pub fn run_cmd(
                 .join("\n");
             CmdResult { code, text }
         }
-        Ok(Err(e)) => {
-            let _ = t_wait.join();
-            CmdResult {
-                code: 1,
-                text: format!("wait failed: {e}"),
-            }
-        }
-        Err(_) => {
-            if let Ok(mut child) = t_wait.join() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+        Err(Some(e)) => CmdResult {
+            code: 1,
+            text: format!("wait failed: {e}"),
+        },
+        Err(None) => {
+            // The reader threads are left to end when the pipes close; joining them could wait on a grandchild
+            // (git-remote-https, a credential helper) that still holds a pipe.
+            let _ = child.kill();
+            let _ = child.wait();
             CmdResult {
                 code: 124,
                 text: format!(
@@ -480,6 +482,34 @@ pub fn refresh_folder(folder: &Path) {
     entry.view = status.map(|s| GitView { status: s, ci });
     entry.read_at = Some(Instant::now());
     CHANGED.store(true, Ordering::Release);
+}
+
+/// What an action's worker thread hands back, per folder, until the panel takes it.
+static ACTION_DONE: Mutex<Option<HashMap<PathBuf, Result<String, String>>>> = Mutex::new(None);
+
+/// Runs a Pull, Push or Fetch on its own thread and returns at once. Plan 16 §3: the action runs off the draw path
+/// and the button reads `Pulling…` meanwhile. Review of plan 16 (2026-10-19): the build called the action inline
+/// from the key and mouse handlers, so the whole window froze for as long as git talked to the remote.
+pub fn start_action(
+    folder: PathBuf,
+    expect_branch: String,
+    action: fn(&Path, &str) -> Result<String, String>,
+) {
+    std::thread::spawn(move || {
+        let result = action(&folder, &expect_branch);
+        let mut guard = ACTION_DONE.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .get_or_insert_with(HashMap::new)
+            .insert(folder, result);
+        CHANGED.store(true, Ordering::Release);
+    });
+}
+
+/// The finished action's result for this folder, once; `None` while it still runs. A map read, no I/O, so the
+/// panel may call it while it draws.
+pub fn take_action_result(folder: &Path) -> Option<Result<String, String>> {
+    let mut guard = ACTION_DONE.lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_mut().and_then(|map| map.remove(folder))
 }
 
 // -----------------------------------------------------------------------------
@@ -1272,5 +1302,60 @@ mod tests {
         // 1000 + 12 * 60 = 1720
         let row = ci_row_text(&ci, 1_720);
         assert_eq!(row, "CI  CI  passed  12m ago");
+    }
+
+    // Review of plan 16: a child past its timeout is killed and `run_cmd` comes back, rather than waiting it out.
+    #[test]
+    fn run_cmd_kills_a_child_past_its_timeout() {
+        let dir = std::env::temp_dir();
+        let started = Instant::now();
+        let res = if cfg!(windows) {
+            run_cmd(
+                &dir,
+                "ping",
+                &["-n", "30", "127.0.0.1"],
+                Duration::from_millis(500),
+                &[],
+            )
+        } else {
+            run_cmd(&dir, "sleep", &["30"], Duration::from_millis(500), &[])
+        };
+        assert_eq!(res.code, 124, "timed out: {}", res.text);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "run_cmd waited {:?} for a child it should have killed at 500 ms",
+            started.elapsed()
+        );
+    }
+
+    fn slow_action(_folder: &Path, branch: &str) -> Result<String, String> {
+        std::thread::sleep(Duration::from_millis(400));
+        Ok(format!("done on {branch}"))
+    }
+
+    // Review of plan 16: an action returns at once and hands its result back later, once.
+    #[test]
+    fn start_action_returns_before_the_action_ends() {
+        let folder =
+            std::env::temp_dir().join(format!("nirvana-git-action-{}", std::process::id()));
+        let started = Instant::now();
+        start_action(folder.clone(), "main".into(), slow_action);
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "start_action blocked for {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            take_action_result(&folder),
+            None,
+            "no result before the action ends"
+        );
+        let mut got = None;
+        while started.elapsed() < Duration::from_secs(5) && got.is_none() {
+            got = take_action_result(&folder);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(got, Some(Ok("done on main".to_string())));
+        assert_eq!(take_action_result(&folder), None, "a result is taken once");
     }
 }

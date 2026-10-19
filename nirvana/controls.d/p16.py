@@ -136,4 +136,40 @@ CONTROLS = (
         'ci_row_text_formatting',
         'rust',
     ),
+    # Review of plan 16: a child past its timeout is killed.
+    Control(
+        'p16_run_cmd_kills_at_timeout',
+        'src/nirvana_git.rs',
+        '            Ok(None) if started.elapsed() >= timeout => break Err(None),\n',
+        '            Ok(None) if false && started.elapsed() >= timeout => break Err(None),\n',
+        'run_cmd_kills_a_child_past_its_timeout',
+        'rust',
+    ),
+    # Review of plan 16: an action runs on its own thread.
+    Control(
+        'p16_start_action_on_a_thread',
+        'src/nirvana_git.rs',
+        '    std::thread::spawn(move || {\n        let result = action(&folder, &expect_branch);\n',
+        '    (move || {\n        let result = action(&folder, &expect_branch);\n',
+        'start_action_returns_before_the_action_ends',
+        'rust',
+    ),
+    # Review of plan 16: the confirmed press marks the panel busy.
+    Control(
+        'p16_confirmed_pull_marks_busy',
+        'src/client/shell/nirvana_git.rs',
+        '                panel.busy = Some(GitButton::Pull);\n',
+        '                panel.busy = None;\n',
+        'confirmed_pull_runs_off_the_input_path_and_reports_back',
+        'rust',
+    ),
+    # Review of plan 16: a finished action's words reach the panel at the next draw.
+    Control(
+        'p16_action_result_reaches_panel',
+        'src/client/shell/composition.rs',
+        '                if panel.busy.is_some() {\n                    if let Some(result) = crate::nirvana_git::take_action_result(&panel.folder) {\n',
+        '                if false && panel.busy.is_some() {\n                    if let Some(result) = crate::nirvana_git::take_action_result(&panel.folder) {\n',
+        'confirmed_pull_runs_off_the_input_path_and_reports_back',
+        'rust',
+    ),
 )
