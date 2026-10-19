@@ -180,6 +180,11 @@ pub fn nirvana_claude_args(home: &Path) -> Vec<String> {
         DISPLAY_NAME.into(),
         "--settings".into(),
         plugin.join("settings.json").display().to_string(),
+        // The owner's own Claude runs as `claude --rc --dangerously-skip-permissions --chrome`. The owner,
+        // 2026-10-19, choosing Nirvana Claude over a usage line for plain Claude: "Use Nirvana Claude instead"
+        // ("Add --rc and --chrome to Nirvana Claude's launch so it can replace your plain Claude").
+        "--rc".into(),
+        "--chrome".into(),
     ]
 }
 
@@ -515,6 +520,8 @@ mod tests {
                 "Nirvana".into(),
                 "--settings".into(),
                 plugin.join("settings.json").display().to_string(),
+                "--rc".into(),
+                "--chrome".into(),
             ]
         );
         assert_eq!(

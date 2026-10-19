@@ -329,6 +329,8 @@ mod tests {
             "--append-system-prompt-file",
             "--name",
             "--settings",
+            "--rc",
+            "--chrome",
         ] {
             assert!(line.contains(flag), "{flag} not typed: {line:?}");
         }
