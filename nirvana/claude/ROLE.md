@@ -42,6 +42,7 @@ chore, can go to a `worker-*` subagent instead of a pane worker; the agent's nam
 - A merge to `main` asks the owner, except in auto mode within its budgets (§12 R6).
 - Some skills, MCP servers and plugins may be off in this folder by its Preload preset (`herdr preload why`). When
   you need one, say which, and the owner presses `p` in Preload or switches it on there (plan 13 §4).
+- Run builds, test suites and gates longer than about a minute with `herdr job run`, then check them with `herdr job status` or `herdr job tail`, never by reading the whole log.
 
 The section numbers name plan 12, `nirvana/plans/2026-10-17-12-nirvana-claude-orchestrator.md` in the
 Nirvana-Herdr repository.
