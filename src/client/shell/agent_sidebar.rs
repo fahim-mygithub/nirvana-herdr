@@ -15,6 +15,30 @@ pub(super) struct AgentRow {
     pub(super) status: crate::api::schema::AgentStatus,
     pub(super) focused: bool,
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
+    pub(super) subagents: Vec<crate::nirvana_subagents::Subagent>,
+    pub(super) subagents_overflow: usize,
+}
+
+pub(super) fn is_narrow_agent_panel(width: u16) -> bool {
+    width < 34
+}
+
+pub(super) fn agent_row_lines(row: &AgentRow, width: u16) -> usize {
+    let base = row.rows.len().max(1);
+    let narrow = is_narrow_agent_panel(width);
+    let sub_lines: usize = row
+        .subagents
+        .iter()
+        .map(|s| {
+            if !narrow && !s.description.trim().is_empty() {
+                2
+            } else {
+                1
+            }
+        })
+        .sum();
+    let overflow_line = if row.subagents_overflow > 0 { 1 } else { 0 };
+    base + sub_lines + overflow_line
 }
 
 pub(super) fn ordered_agent_pane_ids(
@@ -79,10 +103,9 @@ pub(super) fn render_agent_panel(
         config,
         agent_scroll,
         hits,
-        |row| row.rows.len(),
+        |row| agent_row_lines(row, area.width),
         |buffer, rect, row, hits| {
-            hits.agents.push((rect, row.pane_id.clone()));
-            render_agent_row(buffer, rect, row, config);
+            render_agent_row(buffer, rect, row, config, Some(hits));
         },
     );
 }
@@ -241,6 +264,7 @@ pub(super) fn agent_rows(
 ) -> Vec<AgentRow> {
     ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
         .into_iter()
+        .filter(|pane_id| !crate::nirvana_subagents::is_seat_worker_pane(pane_id))
         .filter_map(|pane_id| agent_row(snapshot, &pane_id, config, machine))
         .collect()
 }
@@ -310,11 +334,40 @@ pub(super) fn agent_row(
         },
         state_text,
     );
+
+    let folder = pane
+        .and_then(|p| p.foreground_cwd.as_deref().or(p.cwd.as_deref()))
+        .map(std::path::PathBuf::from);
+    let agent_session = agent
+        .tokens
+        .iter()
+        .find(|(k, _)| k == "agent_session")
+        .map(|(_, v)| v.clone());
+    let is_claude = agent
+        .agent
+        .as_deref()
+        .is_none_or(|a| !a.to_ascii_lowercase().contains("agy"));
+    crate::nirvana_subagents::update_pane_query(
+        pane_id,
+        folder,
+        is_claude,
+        agent_session,
+        None,
+        None,
+    );
+
+    let (subagents, subagents_overflow) = match crate::nirvana_subagents::cached(pane_id) {
+        Some(view) => (view.subagents, view.overflow),
+        None => (Vec::new(), 0),
+    };
+
     Some(AgentRow {
         pane_id: agent.pane_id.clone(),
         status: agent.agent_status,
         focused: agent.focused,
         rows,
+        subagents,
+        subagents_overflow,
     })
 }
 
@@ -323,6 +376,7 @@ pub(super) fn render_agent_row(
     rect: Rect,
     row: &AgentRow,
     config: &ClientShellConfig,
+    mut hits: Option<&mut ShellHitMap>,
 ) {
     let palette = &config.palette;
     let row_style = if row.focused {
@@ -353,7 +407,16 @@ pub(super) fn render_agent_row(
     } else {
         row.rows.clone()
     };
-    for (index, tokens) in rows.iter().take(rect.height as usize).enumerate() {
+
+    let main_height = (rows.len() as u16).min(rect.height);
+    if let Some(hits) = hits.as_mut() {
+        hits.agents.push((
+            Rect::new(rect.x, rect.y, rect.width, main_height),
+            row.pane_id.clone(),
+        ));
+    }
+
+    for (index, tokens) in rows.iter().take(main_height as usize).enumerate() {
         let indent = if index == 0 { 1 } else { 3 };
         let mut spans = vec![ratatui::text::Span::raw(" ".repeat(indent))];
         spans.extend(crate::ui::resolved_token_spans(
@@ -368,6 +431,159 @@ pub(super) fn render_agent_row(
         ));
         Paragraph::new(Line::from(spans)).style(row_style).render(
             Rect::new(rect.x, rect.y + index as u16, rect.width, 1),
+            buffer,
+        );
+    }
+
+    let mut current_y = rect.y + main_height;
+    let narrow = is_narrow_agent_panel(rect.width);
+    let drop_version = rect.width < 30;
+    let drop_elapsed = rect.width < 25;
+
+    for sub in &row.subagents {
+        if current_y >= rect.bottom() {
+            break;
+        }
+
+        let is_done = sub.state == crate::nirvana_subagents::SubagentState::Done;
+        let is_failed = sub.state == crate::nirvana_subagents::SubagentState::Failed;
+        let is_finished = is_done || is_failed;
+
+        let has_desc = !narrow && !sub.description.trim().is_empty();
+        let sub_height = if has_desc { 2 } else { 1 };
+        let actual_height = sub_height.min(rect.bottom().saturating_sub(current_y));
+
+        if let Some(hits) = hits.as_mut() {
+            let target = sub
+                .target_pane_id
+                .clone()
+                .unwrap_or_else(|| row.pane_id.clone());
+            hits.agents.push((
+                Rect::new(rect.x, current_y, rect.width, actual_height),
+                target,
+            ));
+        }
+
+        let base_indent = if sub.depth == 1 { 3 } else { 1 };
+        let mark_str = sub.provider.mark();
+        let mark_color = match sub.provider.colour() {
+            Some((r, g, b)) => ratatui::style::Color::Rgb(r, g, b),
+            None => palette.overlay1,
+        };
+        let mut mark_style = Style::default().fg(mark_color);
+        if is_finished {
+            mark_style = mark_style.add_modifier(Modifier::DIM);
+        }
+
+        let model_display = if drop_version {
+            crate::nirvana_subagents::short_model(&sub.model)
+        } else {
+            sub.model.clone()
+        };
+
+        let text_style = if is_finished {
+            Style::default().fg(palette.overlay0).add_modifier(Modifier::DIM)
+        } else {
+            Style::default().fg(palette.subtext0)
+        };
+
+        let model_style = if is_finished {
+            Style::default().fg(palette.overlay0).add_modifier(Modifier::DIM)
+        } else {
+            Style::default().fg(palette.overlay1)
+        };
+
+        let elapsed_str = crate::nirvana_subagents::format_elapsed(sub.elapsed_secs);
+        let tokens_str = crate::nirvana_subagents::format_tokens(sub.tokens);
+
+        let left_len = base_indent + 2 + sub.name.chars().count() + 1 + model_display.chars().count();
+        let right_len = if is_done || is_failed {
+            2 + if !drop_elapsed { elapsed_str.chars().count() } else { 0 }
+        } else {
+            (if !drop_elapsed { elapsed_str.chars().count() + 1 } else { 0 }) + tokens_str.chars().count()
+        };
+
+        let total_needed = left_len + right_len;
+        let gap = if (rect.width as usize) > total_needed {
+            (rect.width as usize) - total_needed
+        } else {
+            1
+        };
+
+        let mut spans = Vec::new();
+        spans.push(ratatui::text::Span::raw(" ".repeat(base_indent)));
+        spans.push(ratatui::text::Span::styled(format!("{mark_str} "), mark_style));
+        spans.push(ratatui::text::Span::styled(format!("{} ", sub.name), text_style));
+        spans.push(ratatui::text::Span::styled(model_display, model_style));
+
+        spans.push(ratatui::text::Span::raw(" ".repeat(gap)));
+
+        if is_done {
+            let mut check_style = Style::default().fg(palette.green);
+            if is_finished {
+                check_style = check_style.add_modifier(Modifier::DIM);
+            }
+            spans.push(ratatui::text::Span::styled("\u{2713} ", check_style));
+            if !drop_elapsed {
+                spans.push(ratatui::text::Span::styled(elapsed_str, model_style));
+            }
+        } else if is_failed {
+            let mut cross_style = Style::default().fg(palette.red);
+            if is_finished {
+                cross_style = cross_style.add_modifier(Modifier::DIM);
+            }
+            spans.push(ratatui::text::Span::styled("\u{2717} ", cross_style));
+            if !drop_elapsed {
+                spans.push(ratatui::text::Span::styled(elapsed_str, model_style));
+            }
+        } else {
+            if !drop_elapsed {
+                spans.push(ratatui::text::Span::styled(format!("{elapsed_str} "), model_style));
+            }
+            let mut token_style = Style::default().fg(palette.subtext0);
+            if is_finished {
+                token_style = token_style.add_modifier(Modifier::DIM);
+            }
+            spans.push(ratatui::text::Span::styled(tokens_str, token_style));
+        }
+
+        Paragraph::new(Line::from(spans)).render(
+            Rect::new(rect.x, current_y, rect.width, 1),
+            buffer,
+        );
+        current_y += 1;
+
+        if has_desc && current_y < rect.bottom() {
+            let desc_indent = if sub.depth == 1 { 5 } else { 3 };
+            let max_desc_width = (rect.width as usize).saturating_sub(desc_indent);
+            let desc_fitted = crate::client::shell::nirvana_spaces::fit(sub.description.trim(), max_desc_width);
+            let desc_style = Style::default().fg(palette.overlay0).add_modifier(Modifier::DIM);
+            let desc_spans = vec![
+                ratatui::text::Span::raw(" ".repeat(desc_indent)),
+                ratatui::text::Span::styled(desc_fitted, desc_style),
+            ];
+            Paragraph::new(Line::from(desc_spans)).render(
+                Rect::new(rect.x, current_y, rect.width, 1),
+                buffer,
+            );
+            current_y += 1;
+        }
+    }
+
+    if row.subagents_overflow > 0 && current_y < rect.bottom() {
+        if let Some(hits) = hits.as_mut() {
+            hits.agents.push((
+                Rect::new(rect.x, current_y, rect.width, 1),
+                row.pane_id.clone(),
+            ));
+        }
+        let more_style = Style::default().fg(palette.overlay0).add_modifier(Modifier::DIM);
+        let more_spans = vec![
+            ratatui::text::Span::raw("   "),
+            ratatui::text::Span::styled(format!("+{} more", row.subagents_overflow), more_style),
+        ];
+        Paragraph::new(Line::from(more_spans)).render(
+            Rect::new(rect.x, current_y, rect.width, 1),
             buffer,
         );
     }

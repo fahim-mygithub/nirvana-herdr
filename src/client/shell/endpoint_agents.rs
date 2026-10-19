@@ -70,9 +70,9 @@ pub(super) fn render_expanded(
         config,
         agent_scroll,
         hits,
-        |row| row.agent.rows.len(),
+        |row| super::agent_sidebar::agent_row_lines(&row.agent, area.width),
         |buffer, rect, row, hits| {
-            super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config);
+            super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config, None);
             if row.stale {
                 buffer.set_style(
                     rect,

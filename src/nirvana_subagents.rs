@@ -4,7 +4,7 @@
 //! and per-pane cache with poll, take_changed, and cached.
 //! (nirvana/plans/2026-10-19-17-subagents.md §3)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -154,6 +154,18 @@ pub fn format_model(model: Option<&str>, provider: SubagentProvider) -> String {
             }
         }
     }
+}
+
+/// Drops the version number from a formatted model string when displayed in narrow width.
+/// E.g. "Sonnet 5.5" -> "Sonnet", "Gemini 3.8 Flash" -> "Gemini Flash", "Gemini 4 Argon" -> "Gemini Argon", "Opus 5.5" -> "Opus".
+pub fn short_model(model: &str) -> String {
+    if let Some(rest) = model.strip_prefix("Gemini ") {
+        let parts: Vec<&str> = rest.split_whitespace().collect();
+        if parts.len() >= 2 {
+            return format!("Gemini {}", parts.last().unwrap_or(&""));
+        }
+    }
+    model.split_whitespace().next().unwrap_or(model).to_string()
 }
 
 /// Formats a token figure: e.g. "133.7k", "1.2M", "500", or "-" when none.
@@ -432,10 +444,11 @@ pub fn resolve_claude_session(
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        if agent_start_secs.is_none_or(|start| mtime >= start) && mtime <= now_secs + 300 {
-            if newest.as_ref().is_none_or(|(_, best_mtime)| mtime > *best_mtime) {
-                newest = Some((path, mtime));
-            }
+        if agent_start_secs.is_none_or(|start| mtime >= start)
+            && mtime <= now_secs + 300
+            && newest.as_ref().is_none_or(|(_, best_mtime)| mtime > *best_mtime)
+        {
+            newest = Some((path, mtime));
         }
     }
 
@@ -848,6 +861,10 @@ pub fn read_seat_orders(project_folder: &Path, orchestrator_pane_id: &str, now_s
                 order.tokens().map(|t| t.input + t.cache_read + t.output)
             };
 
+            if let Some(pane) = &order.pane {
+                record_worker_pane(pane.clone());
+            }
+
             let elapsed_secs = ended_at.unwrap_or(now_secs).saturating_sub(order.seated_at);
 
             let target_pane = order
@@ -896,17 +913,52 @@ struct PaneCacheEntry {
     shell_pid: Option<u32>,
 }
 
+struct PollTask {
+    pane_id: String,
+    folder: PathBuf,
+    is_claude: bool,
+    agent_session: Option<String>,
+    agent_start_secs: Option<u64>,
+    shell_pid: Option<u32>,
+}
+
 static ENTRIES: Mutex<Option<HashMap<String, PaneCacheEntry>>> = Mutex::new(None);
 static CHANGED: AtomicBool = AtomicBool::new(false);
+static WORKER_PANES: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 #[cfg(test)]
 thread_local! {
     static TEST_VIEW: std::cell::RefCell<Option<HashMap<String, SubagentsView>>> = const { std::cell::RefCell::new(None) };
+    static TEST_WORKER_PANES: std::cell::RefCell<Option<HashSet<String>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
 pub fn set_view_for_test(view: Option<HashMap<String, SubagentsView>>) {
     TEST_VIEW.with_borrow_mut(|v| *v = view);
+}
+
+#[cfg(test)]
+pub fn set_worker_panes_for_test(panes: Option<HashSet<String>>) {
+    TEST_WORKER_PANES.with_borrow_mut(|p| *p = panes);
+}
+
+/// Returns whether `pane_id` is a known seat worker pane, which should not also be listed
+/// as a separate top-level agent row.
+pub fn is_seat_worker_pane(pane_id: &str) -> bool {
+    #[cfg(test)]
+    {
+        if let Some(set) = TEST_WORKER_PANES.with_borrow(|s| s.clone()) {
+            return set.contains(pane_id);
+        }
+    }
+    let guard = WORKER_PANES.lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref().is_some_and(|set| set.contains(pane_id))
+}
+
+/// Records a pane ID as a seat worker pane.
+pub fn record_worker_pane(pane_id: String) {
+    let mut guard = WORKER_PANES.lock().unwrap_or_else(|e| e.into_inner());
+    guard.get_or_insert_with(HashSet::new).insert(pane_id);
 }
 
 /// Returns the cached subagents view for `pane_id`.
@@ -978,7 +1030,7 @@ pub fn poll() {
 
     let home = crate::nirvana::home();
 
-    let due: Vec<(String, PathBuf, bool, Option<String>, Option<u64>, Option<u32>)> = {
+    let due: Vec<PollTask> = {
         let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
         let Some(map) = guard.as_mut() else {
             return;
@@ -1013,14 +1065,14 @@ pub fn poll() {
                 .is_none_or(|at| at.elapsed() >= reread_interval)
             {
                 entry.reading = true;
-                to_read.push((
-                    pane_id.clone(),
+                to_read.push(PollTask {
+                    pane_id: pane_id.clone(),
                     folder,
-                    entry.is_claude,
-                    entry.agent_session.clone(),
-                    entry.agent_start_secs,
-                    entry.shell_pid,
-                ));
+                    is_claude: entry.is_claude,
+                    agent_session: entry.agent_session.clone(),
+                    agent_start_secs: entry.agent_start_secs,
+                    shell_pid: entry.shell_pid,
+                });
             }
         }
         to_read
@@ -1034,34 +1086,34 @@ pub fn poll() {
         let Some(home) = home else {
             return;
         };
-        for (pane_id, folder, is_claude, agent_session, agent_start_secs, shell_pid) in due {
+        for task in due {
             let mut all_subagents = Vec::new();
 
-            if is_claude {
+            if task.is_claude {
                 let session_path = resolve_claude_session(
-                    &pane_id,
-                    &folder,
-                    agent_session.as_deref(),
-                    agent_start_secs,
+                    &task.pane_id,
+                    &task.folder,
+                    task.agent_session.as_deref(),
+                    task.agent_start_secs,
                     &[], // Other panes checked by client query
                     &home,
                     now_secs,
                 );
 
                 if let Some(session_path) = session_path {
-                    all_subagents.extend(read_claude_subagents(&session_path, &pane_id, now_secs));
+                    all_subagents.extend(read_claude_subagents(&session_path, &task.pane_id, now_secs));
                 }
             }
 
             // Seat orders
-            all_subagents.extend(read_seat_orders(&folder, &pane_id, now_secs));
+            all_subagents.extend(read_seat_orders(&task.folder, &task.pane_id, now_secs));
 
             // agy jobs
-            all_subagents.extend(read_agy_jobs(&home, &pane_id, now_secs));
+            all_subagents.extend(read_agy_jobs(&home, &task.pane_id, now_secs));
 
             // Bash-started agy
-            if let Some(pid) = shell_pid {
-                all_subagents.extend(find_agy_processes_under(pid, &pane_id));
+            if let Some(pid) = task.shell_pid {
+                all_subagents.extend(find_agy_processes_under(pid, &task.pane_id));
             }
 
             let nested = nest_subagents(all_subagents);
@@ -1077,7 +1129,7 @@ pub fn poll() {
 
             let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(map) = guard.as_mut() {
-                if let Some(entry) = map.get_mut(&pane_id) {
+                if let Some(entry) = map.get_mut(&task.pane_id) {
                     entry.reading = false;
                     entry.read_at = Some(Instant::now());
                     if entry.view != view {
@@ -1378,5 +1430,28 @@ mod tests {
             found,
             "find_child_pids({my_pid}) did not find child pid {child_pid}"
         );
+    }
+
+    #[test]
+    fn short_model_drops_version_number() {
+        assert_eq!(short_model("Sonnet 5.5"), "Sonnet");
+        assert_eq!(short_model("Opus 5.5"), "Opus");
+        assert_eq!(short_model("Haiku 5.5"), "Haiku");
+        assert_eq!(short_model("Sonnet 3.5"), "Sonnet");
+        assert_eq!(short_model("Gemini 3.8 Flash"), "Gemini Flash");
+        assert_eq!(short_model("Gemini 4 Argon"), "Gemini Argon");
+        assert_eq!(short_model("inherit"), "inherit");
+    }
+
+    #[test]
+    fn worker_pane_filtering() {
+        let mut set = HashSet::new();
+        set.insert("worker-pane-1".to_string());
+        set_worker_panes_for_test(Some(set));
+
+        assert!(is_seat_worker_pane("worker-pane-1"));
+        assert!(!is_seat_worker_pane("orch-pane-1"));
+
+        set_worker_panes_for_test(None);
     }
 }
