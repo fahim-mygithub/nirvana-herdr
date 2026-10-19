@@ -3,7 +3,7 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
-## alpha NEXT (p13c): the session record and the memory trim (plan 13 P3)
+## alpha 0.24.0: the session record and the memory trim (plan 13 P3)
 
 Plan 13, package P3 (`plans/2026-10-18-13-smart-preload.md` §6.1's record, §6.2, §7's `herdr memory`; the record is
 `plans/2026-10-18-13-records/p13c.md`).
