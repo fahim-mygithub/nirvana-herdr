@@ -3,6 +3,18 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha NEXT (foot2): the usage foot shows 5 h and 7 d
+
+Package `foot2` (`FOOT-ORDER.md`, record `nirvana/plans/2026-10-19-foot2.md`).
+
+- **Changed:** A pool with both 5 h and week windows shows both, 5 h first (`● Claude    26% 5h  65% 7d▲`), each with its own pace mark cell in warning peach when ahead. At herdr's default sidebar width 26, the row fits exactly in 25 visible content cells without label truncation.
+  **Because:** The owner's report (2026-10-19, alpha 0.24.0): "I noticed a visual bug in the usage: I cant see the 5h and 7d its odly showing one or the other." Plan 12 O1 chose each pool's tightest window alone; the owner wants both.
+  **Measured:** `the_foot_lists_a_spaces_server_and_a_usage_row_per_pool` (exact row fit ` \u{25CF} Claude 26% 5h  65% 7d▲`), `a_pool_ahead_on_one_window_only_marks_that_window_alone` (cell 16 space, cell 24 peach `▲`), `a_wide_sidebar_draws_a_bar_and_the_reset_for_the_tightest_window`, `a_stale_week_beside_a_fresh_5h_is_muted_while_5h_is_fresh`, `a_one_window_pool_shows_that_single_window`, and `dotted_windows_are_never_shown_in_the_foot`. Controls `foot2_*` in `nirvana/controls.d/foot2.py`.
+  **If you remove this:** pools with both windows show only one or the other as before.
+- **Changed:** From `BAR_FROM_WIDTH` (34), the wide bar is filled by the tightest window and displays the tightest window's reset. If both figures, the bar, and the reset do not fit at that width, the bar is dropped first (when width between name and figures < 3), then the reset.
+  **Because:** `FOOT-ORDER.md` §2: preserve the wide bar and reset without clashing with the two-window columns.
+  **Measured:** `a_wide_sidebar_draws_a_bar_and_the_reset_for_the_tightest_window` (week reset `6d18h` on Claude, 5h reset `4h` on Gemini), `the_bar_follows_the_tightest_window` (`Figure::Windows` fill is 0.65 for Claude). Controls `foot2_wide_row_tightest_reset` and `foot2_wide_row_tightest_bar_fill`.
+  **If you remove this:** wide mode shows an arbitrary window's reset or no bar.
 ## alpha 0.25.0: the Preload reads names and code, presets combine, unedited defaults upgrade (plan 13 tuning)
 
 Plan 13 tuning, package p13d (items 1–5: dependency/build walk skipping, folder name and README word matching, `code` preset, combining presets, unedited defaults upgrade).

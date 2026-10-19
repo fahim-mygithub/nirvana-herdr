@@ -7,15 +7,19 @@ use crate::client::shell::nirvana_footer::{
 };
 use crate::nirvana_usage::{set_rows_for_test, Figure, Provider, Shown, UsageRow};
 
-fn shown(window: &str, used: f32, pace: f32, resets_in: u64) -> Figure {
-    Figure::Window(Shown {
+fn shown(window: &str, used: f32, pace: f32, resets_in: u64) -> Shown {
+    Shown {
         window: window.into(),
         used: Some(used),
         pace: Some(pace),
         resets_in: Some(resets_in),
         stale: false,
         ahead: pace > crate::nirvana_usage::AHEAD_OF_PACE,
-    })
+    }
+}
+
+fn window(window: &str, used: f32, pace: f32, resets_in: u64) -> Figure {
+    Figure::Window(shown(window, used, pace, resets_in))
 }
 
 fn row(pool: &str, provider: Provider, figure: Figure) -> UsageRow {
@@ -26,26 +30,36 @@ fn row(pool: &str, provider: Provider, figure: Figure) -> UsageRow {
     }
 }
 
-/// One row per pool (plan 12 O1), the readings of 2026-10-17: Claude's 5 h window ahead of pace.
-/// Gemini shows its week, so the foot keeps a "7d" row and a reset in days now that Argon and Google's Claude pool
-/// are hidden (2026-10-18).
+/// One row per pool (foot2: both 5 h and week windows shown, 5 h first).
+/// Claude: 5 h at 26% (behind) and week at 65% (ahead of pace: 1.01 > 1.0, tightest).
+/// Gemini: 5 h at 41% and week at 2%, both behind pace.
 fn usage() -> Vec<UsageRow> {
     vec![
-        row("max", Provider::Claude, shown("5h", 0.41, 1.01, 10_698)),
+        row(
+            "max",
+            Provider::Claude,
+            Figure::Windows(vec![
+                shown("5h", 0.26, 0.8, 10_698),
+                shown("week", 0.65, 1.01, 583_910),
+            ]),
+        ),
         row(
             "gemini",
             Provider::Antigravity,
-            shown("week", 0.02, 0.79, 583_910),
+            Figure::Windows(vec![
+                shown("5h", 0.41, 0.9, 14_400),
+                shown("week", 0.02, 0.79, 583_910),
+            ]),
         ),
         row(
             "argon",
             Provider::Antigravity,
-            shown("week", 0.021, 0.9, 583_910),
+            window("week", 0.021, 0.9, 583_910),
         ),
         row(
             "google3p",
             Provider::Antigravity,
-            shown("week", 0.04, 0.6, 133_752),
+            window("week", 0.04, 0.6, 133_752),
         ),
         row("codex", Provider::Codex, Figure::Word("not exposed".into())),
         row(
@@ -75,6 +89,7 @@ fn compose_with(
     }
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     if let Some(sidebar_width) = sidebar_width {
+        state.config.sidebar_max_width = sidebar_width.max(state.config.sidebar_max_width);
         state.sidebar_width = sidebar_width;
     }
     state.set_snapshot(Box::new(projected));
@@ -113,8 +128,8 @@ fn the_foot_lists_a_spaces_server_and_a_usage_row_per_pool() {
     assert_eq!(sidebar(head).trim_end(), " usage", "head: {head:?}");
     assert!(usage_y > servers_y);
     let expected = [
-        ("Claude", format!("41% 5h{AHEAD}")),
-        ("Gemini", "2% 7d".to_owned()),
+        ("Claude", format!("26% 5h  65% 7d{AHEAD}")),
+        ("Gemini", "41% 5h   2% 7d".to_owned()),
         ("Codex", "not exposed".to_owned()),
         ("Local", "3/32 GiB".to_owned()),
     ];
@@ -125,6 +140,11 @@ fn the_foot_lists_a_spaces_server_and_a_usage_row_per_pool() {
             "usage row {offset}: {row:?}"
         );
     }
+    // Narrow row Claude fits exactly at default sidebar width 26 (content width 25).
+    assert_eq!(
+        sidebar(&rows[usage_y + 1]),
+        format!(" \u{25CF} Claude 26% 5h  65% 7d{AHEAD}")
+    );
     // Argon and Google's Claude pool are read but not shown (the owner, 2026-10-18: "keep that internally").
     assert!(row_with(&rows, "Argon").is_none() && row_with(&rows, "G\u{b7}Claude").is_none());
     // The foot sits at the very bottom of the sidebar, its last row the accounts button.
@@ -158,8 +178,14 @@ fn a_window_ahead_of_pace_carries_its_mark_in_the_warning_colour() {
 #[test]
 fn a_stale_reading_is_muted() {
     let mut usage = usage();
-    if let Figure::Window(shown) = &mut usage[1].figure {
-        shown.stale = true;
+    match &mut usage[1].figure {
+        Figure::Window(shown) => shown.stale = true,
+        Figure::Windows(windows) => {
+            for shown in windows {
+                shown.stale = true;
+            }
+        }
+        _ => {}
     }
     set_rows_for_test(Some(usage));
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
@@ -263,21 +289,26 @@ fn a_wide_sidebar_draws_a_bar_and_the_reset_for_the_tightest_window() {
         claude.contains('\u{2501}') || claude.contains('\u{2500}'),
         "{claude:?}"
     );
-    // The reset follows the figure only here: 10,698 s is 2 h 58 min. The sidebar ends at its divider.
+    // The reset follows the figure only here: week is tightest for Claude (65% > 26%), 583,910 s is 6 d 18 h.
     let claude = claude.split('\u{2502}').next().unwrap();
     assert!(
-        claude.trim_end().ends_with(&format!("41% 5h{AHEAD} 2h58m")),
+        claude
+            .trim_end()
+            .ends_with(&format!("26% 5h  65% 7d{AHEAD} 6d18h")),
         "{claude:?}"
     );
     let gemini = rows[usage_y + 2].split('\u{2502}').next().unwrap();
-    assert!(gemini.trim_end().ends_with("2% 7d  6d18h"), "{gemini:?}");
+    assert!(
+        gemini.trim_end().ends_with("41% 5h   2% 7d     4h"),
+        "{gemini:?}"
+    );
     // Codex has no figure: a dashed track.
     let codex: String = rows[usage_y + 3].chars().take(40).collect();
     assert!(codex.contains('\u{254C}'), "{codex:?}");
     // At herdr's default width there is no reset.
     let (_, _, narrow) = compose_with("8770", 106, 40, None);
     let (usage_y, _) = row_with(&narrow, " usage").unwrap();
-    assert!(!sidebar(&narrow[usage_y + 1]).contains("2h58m"));
+    assert!(!sidebar(&narrow[usage_y + 1]).contains("6d18h"));
     // The server row has room for the whole address.
     let (servers_y, _) = row_with(&rows, " servers").unwrap();
     assert!(rows[servers_y + 1].contains("localhost:8770"));
@@ -308,15 +339,27 @@ fn the_layout_rules() {
     assert_eq!(figures(&unknown, false), "  -- 7d ");
     assert_eq!(figures(&unknown, true), "  -- 7d       ");
     assert_eq!(
-        figures(&shown("5h", 1.0, 2.0, 45 * 60), true),
+        figures(&window("5h", 1.0, 2.0, 45 * 60), true),
         format!("100% 5h{AHEAD}   45m")
     );
     // A scoped week reads as a week.
     assert_eq!(
-        figures(&shown("week.fable", 0.5, 0.9, 0), false),
+        figures(&window("week.fable", 0.5, 0.9, 0), false),
         " 50% 7d "
     );
     assert_eq!(figures(&Figure::Reading, false), "reading");
+    let two_windows = Figure::Windows(vec![
+        shown("5h", 0.26, 0.8, 10_698),
+        shown("week", 0.65, 1.01, 583_910),
+    ]);
+    assert_eq!(
+        figures(&two_windows, false),
+        format!(" 26% 5h  65% 7d{AHEAD}")
+    );
+    assert_eq!(
+        figures(&two_windows, true),
+        format!(" 26% 5h  65% 7d{AHEAD} 6d18h")
+    );
 }
 
 // ---- Feature 11: the accounts button and its panel (nirvana/plans/2026-10-17-11-accounts.md) ----
@@ -460,4 +503,148 @@ fn a_rows_button_sends_that_clis_sign_in_and_closes_the_panel() {
     );
     set_rows_for_test(None);
     crate::nirvana_accounts::set_accounts_for_test(None);
+}
+
+#[test]
+fn a_pool_ahead_on_one_window_only_marks_that_window_alone() {
+    let (state, frame, rows) = compose_with("", 106, 40, None);
+    let (usage_y, _) = row_with(&rows, " usage").unwrap();
+    let cells = |y: usize| &frame.cells[y * frame.width as usize..(y + 1) * frame.width as usize];
+    let claude = cells(usage_y + 1);
+    // Claude: 5h behind pace (cell 16 is space), week ahead of pace (cell 24 is AHEAD in peach).
+    assert_eq!(claude[16].symbol, " ");
+    assert_eq!(claude[24].symbol, AHEAD);
+    assert_eq!(
+        claude[24].fg,
+        crate::protocol::color_to_u32(state.config.palette.peach)
+    );
+    // Gemini is behind pace on both windows: no mark.
+    assert!(!sidebar(&rows[usage_y + 2]).contains(AHEAD));
+}
+
+#[test]
+fn a_stale_week_beside_a_fresh_5h_is_muted_while_5h_is_fresh() {
+    let mut usage = usage();
+    if let Figure::Windows(windows) = &mut usage[0].figure {
+        windows[0].stale = false;
+        windows[1].stale = true;
+    }
+    set_rows_for_test(Some(usage));
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    let frame = state.compose(106, 40).expect("composed frame").frame;
+    set_rows_for_test(None);
+    let rows: Vec<String> = frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| row.iter().map(|cell| cell.symbol.as_str()).collect())
+        .collect();
+    let (usage_y, _) = row_with(&rows, " usage").unwrap();
+    let claude_row = &frame.cells[(usage_y + 1) * frame.width as usize..];
+    let percent_positions: Vec<usize> = (0..25).filter(|&x| claude_row[x].symbol == "%").collect();
+    assert_eq!(
+        percent_positions.len(),
+        2,
+        "two percent signs in Claude row"
+    );
+    let palette = &state.config.palette;
+    assert_eq!(
+        claude_row[percent_positions[0]].fg,
+        crate::protocol::color_to_u32(palette.text)
+    );
+    assert_eq!(
+        claude_row[percent_positions[1]].fg,
+        crate::protocol::color_to_u32(palette.overlay0)
+    );
+}
+
+#[test]
+fn a_one_window_pool_shows_that_single_window() {
+    let mut usage = usage();
+    usage[0].figure = window("5h", 0.50, 0.8, 7200);
+    set_rows_for_test(Some(usage));
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    let narrow_frame = state.compose(106, 40).expect("composed frame").frame;
+    let narrow_rows: Vec<String> = narrow_frame
+        .cells
+        .chunks(narrow_frame.width as usize)
+        .map(|row| row.iter().map(|cell| cell.symbol.as_str()).collect())
+        .collect();
+    let (narrow_usage_y, _) = row_with(&narrow_rows, " usage").unwrap();
+    let narrow_claude = sidebar(&narrow_rows[narrow_usage_y + 1]);
+    assert!(
+        narrow_claude.trim_end().ends_with("50% 5h"),
+        "narrow: {narrow_claude:?}"
+    );
+
+    state.config.sidebar_max_width = 40;
+    state.sidebar_width = 40;
+    let wide_frame = state.compose(120, 40).expect("composed frame").frame;
+    set_rows_for_test(None);
+    let wide_rows: Vec<String> = wide_frame
+        .cells
+        .chunks(wide_frame.width as usize)
+        .map(|row| row.iter().map(|cell| cell.symbol.as_str()).collect())
+        .collect();
+    let (wide_usage_y, _) = row_with(&wide_rows, " usage").unwrap();
+    let wide_claude: String = wide_rows[wide_usage_y + 1].chars().take(40).collect();
+    let wide_claude = wide_claude.split('\u{2502}').next().unwrap();
+    assert!(
+        wide_claude.trim_end().ends_with("50% 5h     2h"),
+        "wide: {wide_claude:?}"
+    );
+    assert!(
+        wide_claude.contains('\u{2501}'),
+        "bar drawn: {wide_claude:?}"
+    );
+}
+
+#[test]
+fn dotted_windows_are_never_shown_in_the_foot() {
+    use crate::nirvana_usage::{foot_rows, Reading, Source};
+    let mut sources: [Source; 4] = Default::default();
+    sources[0].read_at = Some(100_000);
+    sources[0].readings = vec![
+        Reading {
+            pool: "max".into(),
+            window: "5h".into(),
+            used: Some(0.26),
+            resets_at: Some(110_000),
+            resets_text: None,
+            read_at: 100_000,
+            source: "claude".into(),
+        },
+        Reading {
+            pool: "max".into(),
+            window: "week.fable".into(),
+            used: Some(0.99),
+            resets_at: Some(200_000),
+            resets_text: None,
+            read_at: 100_000,
+            source: "claude".into(),
+        },
+        Reading {
+            pool: "max".into(),
+            window: "week".into(),
+            used: Some(0.65),
+            resets_at: Some(600_000),
+            resets_text: None,
+            read_at: 100_000,
+            source: "claude".into(),
+        },
+    ];
+    let rows = foot_rows(&sources, 100_000);
+    let claude_row = rows.iter().find(|r| r.pool == "max").unwrap();
+    match &claude_row.figure {
+        Figure::Windows(windows) => {
+            assert_eq!(windows.len(), 2);
+            assert_eq!(windows[0].window, "5h");
+            assert_eq!(windows[1].window, "week");
+            assert!(!windows.iter().any(|w| w.window.contains('.')));
+        }
+        other => panic!("expected Figure::Windows, got {other:?}"),
+    }
 }

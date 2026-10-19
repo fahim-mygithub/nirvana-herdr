@@ -1051,21 +1051,49 @@ pub struct Shown {
 pub enum Figure {
     /// Before the first read finished.
     Reading,
-    /// The pool's tightest window.
+    /// The pool's tightest window (package `foot2`: or single shown window).
     Window(Shown),
+    /// Both windows of a pool (5 h and week), 5 h first, or all shown windows.
+    Windows(Vec<Shown>),
     /// The GPU's memory while the local engine answers.
     Memory { used_mib: u64, total_mib: u64 },
     /// A state in a word: "not installed", "not exposed", "off", "on".
     Word(String),
 }
 
+/// The tightest window among shown windows: of non-dotted windows, the most used;
+/// a tie goes to the first listed (5 h before week).
+pub fn tightest_shown<'a>(windows: &'a [Shown]) -> Option<&'a Shown> {
+    windows
+        .iter()
+        .fold(None, |best: Option<&'a Shown>, shown| match best {
+            Some(best) if shown.used.unwrap_or(-1.0) <= best.used.unwrap_or(-1.0) => Some(best),
+            _ => Some(shown),
+        })
+}
+
 impl Figure {
+    /// The windows shown for this figure, or None if it is not a window figure.
+    pub fn windows(&self) -> Option<&[Shown]> {
+        match self {
+            Self::Window(shown) => Some(std::slice::from_ref(shown)),
+            Self::Windows(windows) => Some(windows.as_slice()),
+            _ => None,
+        }
+    }
+
     /// The bar's fill: the tightest window, or the GPU memory in use.
     pub fn fill(&self) -> Option<f32> {
         match self {
             Self::Window(Shown {
                 used: Some(used), ..
             }) => Some(used.clamp(0.0, 1.0)),
+            Self::Windows(windows) => {
+                // Foot2: the bar is filled by the tightest window.
+                tightest_shown(windows)
+                    .and_then(|shown| shown.used)
+                    .map(|used| used.clamp(0.0, 1.0))
+            }
             Self::Memory {
                 used_mib,
                 total_mib,
@@ -1075,8 +1103,13 @@ impl Figure {
     }
 
     /// A window of the pool ahead of pace, and fresh enough to say so (`Shown::ahead`).
+    #[allow(dead_code)] // Used in tests and queries for figure-level ahead status
     pub fn ahead(&self) -> bool {
-        matches!(self, Self::Window(Shown { ahead: true, .. }))
+        match self {
+            Self::Window(Shown { ahead: true, .. }) => true,
+            Self::Windows(windows) => windows.iter().any(|s| s.ahead),
+            _ => false,
+        }
     }
 }
 
@@ -1247,6 +1280,72 @@ pub fn rows() -> Vec<UsageRow> {
     rows
 }
 
+/// One row per pool from the readers' sources, for the foot (package `foot2`).
+/// A pool with both 5 h and week windows shows both, 5 h first.
+/// A pool with one window shows that one. Dotted windows (e.g. `week.fable`) are never shown.
+pub fn foot_rows(sources: &[Source; 4], now: u64) -> Vec<UsageRow> {
+    pool_names(sources.iter())
+        .into_iter()
+        .map(|pool| {
+            let provider = provider_of(&pool);
+            let source = &sources[provider.index()];
+            let mut readings: Vec<Reading> = source
+                .readings
+                .iter()
+                .filter(|reading| reading.pool == pool && !reading.window.contains('.'))
+                .cloned()
+                .collect();
+            readings.sort_by_key(|r| match r.window.as_str() {
+                "5h" => 0,
+                "week" => 1,
+                _ => 2,
+            });
+            let figure = if let Some(word) = &source.word {
+                Figure::Word(word.clone())
+            } else if source.read_at.is_none() {
+                Figure::Reading
+            } else if let Some((used_mib, total_mib)) = source.memory_mib.filter(|_| pool == LOCAL)
+            {
+                Figure::Memory {
+                    used_mib,
+                    total_mib,
+                }
+            } else if !readings.is_empty() {
+                let windows: Vec<Shown> = readings
+                    .iter()
+                    .map(|reading| {
+                        let freshness = freshness(reading, now);
+                        Shown {
+                            window: reading.window.clone(),
+                            used: reading.used,
+                            pace: pace(reading).filter(|_| freshness != Freshness::ResetPassed),
+                            resets_in: reading
+                                .resets_at
+                                .filter(|_| freshness != Freshness::ResetPassed)
+                                .map(|at| at.saturating_sub(now)),
+                            stale: freshness != Freshness::Fresh,
+                            ahead: freshness == Freshness::Fresh
+                                && pace(reading).is_some_and(|p| p > AHEAD_OF_PACE),
+                        }
+                    })
+                    .collect();
+                if windows.len() == 1 {
+                    Figure::Window(windows.into_iter().next().unwrap())
+                } else {
+                    Figure::Windows(windows)
+                }
+            } else {
+                Figure::Word("not exposed".to_owned())
+            };
+            UsageRow {
+                pool,
+                provider,
+                figure,
+            }
+        })
+        .collect()
+}
+
 fn all_rows() -> Vec<UsageRow> {
     #[cfg(test)]
     if let Some(rows) = TEST_ROWS.with_borrow(Clone::clone) {
@@ -1259,7 +1358,7 @@ fn all_rows() -> Vec<UsageRow> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    pool_rows(&sources, now())
+    foot_rows(&sources, now())
 }
 
 #[cfg(test)]
@@ -2096,6 +2195,25 @@ mod tests {
             ahead: false,
         });
         assert_eq!(figure.fill(), Some(0.4));
+        let figure_two = Figure::Windows(vec![
+            Shown {
+                window: "5h".into(),
+                used: Some(0.26),
+                pace: None,
+                resets_in: None,
+                stale: false,
+                ahead: false,
+            },
+            Shown {
+                window: "week".into(),
+                used: Some(0.65),
+                pace: None,
+                resets_in: None,
+                stale: false,
+                ahead: true,
+            },
+        ]);
+        assert_eq!(figure_two.fill(), Some(0.65));
         assert_eq!(Figure::Word("off".into()).fill(), None);
         assert_eq!(Figure::Reading.fill(), None);
     }
