@@ -163,5 +163,23 @@ CONTROLS = (
         'marks_and_colours_by_provider',
         'rust',
     ),
+    # Review fix finding 2: session id read from AgentInfo.agent_session (claude and Id)
+    Control(
+        'p17_session_id_from_agent_session_info',
+        'src/client/shell/agent_sidebar.rs',
+        "    let agent_session = agent\n        .agent_session\n        .as_ref()\n        .filter(|s| s.agent == \"claude\" && s.kind == crate::agent_resume::AgentSessionRefKind::Id)\n        .map(|s| s.value.clone());",
+        "    let agent_session = agent\n        .tokens\n        .iter()\n        .find(|(k, _)| k == \"agent_session\")\n        .map(|(_, v)| v.clone());",
+        'agent_session_id_from_agent_session_info',
+        'rust',
+    ),
+    # Review fix finding 3: only canonical Claude agent shows Claude subagents
+    Control(
+        'p17_only_canonical_claude_shows_claude_subagents',
+        'src/client/shell/agent_sidebar.rs',
+        "    let is_claude = canonical_agent == Some(crate::detect::Agent::Claude);",
+        "    let is_claude = agent\n        .agent\n        .as_deref()\n        .is_none_or(|a| !a.to_ascii_lowercase().contains(\"agy\"));",
+        'codex_pane_in_claude_folder_shows_no_claude_subagents',
+        'rust',
+    ),
 )
 

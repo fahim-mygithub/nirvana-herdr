@@ -20,6 +20,7 @@ fn agent(kind: &str) -> ClientShellAgent {
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: true,
+        agent_session: None,
     }
 }
 

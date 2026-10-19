@@ -974,6 +974,12 @@ pub fn set_worker_panes_for_test(panes: Option<HashSet<String>>) {
     TEST_WORKER_PANES.with_borrow_mut(|p| *p = panes);
 }
 
+#[cfg(test)]
+pub fn get_pane_query_for_test(pane_id: &str) -> Option<(Option<PathBuf>, bool, Option<String>)> {
+    let guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref()?.get(pane_id).map(|e| (e.folder.clone(), e.is_claude, e.agent_session.clone()))
+}
+
 /// Returns whether `pane_id` is a known seat worker pane, which should not also be listed
 /// as a separate top-level agent row.
 pub fn is_seat_worker_pane(pane_id: &str) -> bool {

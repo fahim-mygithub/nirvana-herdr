@@ -238,6 +238,7 @@ pub(super) fn snapshot_with_completions(
                 state_labels,
                 tokens,
                 focused,
+                agent_session: agent.agent_session,
             }
         })
         .collect();

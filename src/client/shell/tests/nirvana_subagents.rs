@@ -27,6 +27,7 @@ fn test_agent(pane_id: &str, name: &str) -> ClientShellAgent {
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: false,
+        agent_session: None,
     }
 }
 
@@ -781,3 +782,52 @@ fn live_scratch_home_subagents_show_in_client_snapshot() {
 
     set_view_for_test(None);
 }
+
+#[test]
+fn agent_session_id_from_agent_session_info() {
+    let mut snap = snapshot_with_agent("pane_session_1", "claude-agent");
+    snap.agents[0].agent = Some("claude".into());
+    snap.agents[0].tokens.clear();
+    snap.agents[0].agent_session = Some(crate::api::schema::AgentSessionInfo {
+        source: "herdr:claude".into(),
+        agent: "claude".into(),
+        kind: crate::agent_resume::AgentSessionRefKind::Id,
+        value: "session-xyz".into(),
+    });
+
+    let config = ClientShellConfig::from_config(&Config::default());
+    let _ = crate::client::shell::agent_sidebar::agent_row(&snap, "pane_session_1", &config, None);
+
+    let query = crate::nirvana_subagents::get_pane_query_for_test("pane_session_1");
+    assert!(query.is_some());
+    let (_folder, is_claude, session) = query.unwrap();
+    assert!(is_claude);
+    assert_eq!(session.as_deref(), Some("session-xyz"));
+
+    // Non-claude agent or non-Id kind must be ignored
+    snap.agents[0].agent_session = Some(crate::api::schema::AgentSessionInfo {
+        source: "herdr:codex".into(),
+        agent: "codex".into(),
+        kind: crate::agent_resume::AgentSessionRefKind::Id,
+        value: "session-codex".into(),
+    });
+    let _ = crate::client::shell::agent_sidebar::agent_row(&snap, "pane_session_1", &config, None);
+    let (_folder, _is_claude, session) = crate::nirvana_subagents::get_pane_query_for_test("pane_session_1").unwrap();
+    assert_eq!(session, None);
+}
+
+#[test]
+fn codex_pane_in_claude_folder_shows_no_claude_subagents() {
+    let mut snap = snapshot_with_agent("pane_codex_1", "codex-agent");
+    snap.agents[0].agent = Some("codex".into());
+    snap.agents[0].display_agent = Some("codex".into());
+
+    let config = ClientShellConfig::from_config(&Config::default());
+    let _ = crate::client::shell::agent_sidebar::agent_row(&snap, "pane_codex_1", &config, None);
+
+    let query = crate::nirvana_subagents::get_pane_query_for_test("pane_codex_1");
+    assert!(query.is_some());
+    let (_folder, is_claude, _session) = query.unwrap();
+    assert!(!is_claude, "Codex pane must have is_claude = false");
+}
+

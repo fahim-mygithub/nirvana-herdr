@@ -22,6 +22,7 @@ fn agent(pane: &str, kind: Option<&str>, tokens: &[(&str, &str)]) -> ClientShell
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect(),
         focused: false,
+        agent_session: None,
     }
 }
 

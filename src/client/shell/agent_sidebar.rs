@@ -339,14 +339,11 @@ pub(super) fn agent_row(
         .and_then(|p| p.foreground_cwd.as_deref().or(p.cwd.as_deref()))
         .map(std::path::PathBuf::from);
     let agent_session = agent
-        .tokens
-        .iter()
-        .find(|(k, _)| k == "agent_session")
-        .map(|(_, v)| v.clone());
-    let is_claude = agent
-        .agent
-        .as_deref()
-        .is_none_or(|a| !a.to_ascii_lowercase().contains("agy"));
+        .agent_session
+        .as_ref()
+        .filter(|s| s.agent == "claude" && s.kind == crate::agent_resume::AgentSessionRefKind::Id)
+        .map(|s| s.value.clone());
+    let is_claude = canonical_agent == Some(crate::detect::Agent::Claude);
     crate::nirvana_subagents::update_pane_query(
         pane_id,
         folder,
