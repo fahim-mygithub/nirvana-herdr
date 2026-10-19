@@ -3,7 +3,7 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
-## alpha NEXT (p13d): the Preload reads names and code, presets combine, unedited defaults upgrade
+## alpha 0.25.0: the Preload reads names and code, presets combine, unedited defaults upgrade (plan 13 tuning)
 
 Plan 13 tuning, package p13d (items 1–5: dependency/build walk skipping, folder name and README word matching, `code` preset, combining presets, unedited defaults upgrade).
 
