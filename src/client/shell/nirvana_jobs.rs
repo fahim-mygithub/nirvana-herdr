@@ -329,6 +329,7 @@ impl ClientShellState {
         self.nirvana_memory = None;
         self.nirvana_accounts = None;
         self.nirvana_seats = None;
+        self.nirvana_git = None;
         self.nirvana_jobs = Some(JobsPanel {
             folder: tab.folder,
             workspace_id: tab.workspace_id,

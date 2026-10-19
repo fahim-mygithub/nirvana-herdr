@@ -34,6 +34,8 @@ mod nirvana_new_menu;
 mod nirvana_seats;
 // Plan 15: the Jobs square of a space and its panel.
 mod nirvana_jobs;
+// Plan 16: the Git square of a space and its panel.
+mod nirvana_git;
 mod nirvana_spaces;
 mod notification_policy;
 mod notifications;

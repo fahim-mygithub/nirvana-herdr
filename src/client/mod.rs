@@ -2360,7 +2360,9 @@ async fn run_client_loop(
                             // while the window draws.
                             | crate::nirvana_seats_square::take_changed()
                             // Plan 15: the Jobs square; polls 2s running / 15s idle off the draw path
-                            | crate::nirvana_job::take_changed();
+                            | crate::nirvana_job::take_changed()
+                            // Plan 16: the Git square; polls 5s open / 15s idle off the draw path
+                            | crate::nirvana_git::take_changed();
                         let frame = outcome
                             .repaint
                             .then(|| shell.compose(state.reported_size.0, state.reported_size.1))

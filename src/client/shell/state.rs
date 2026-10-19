@@ -133,6 +133,10 @@ pub(super) struct ShellHitMap {
     pub(super) nirvana_jobs: Rect,
     /// Plan 15: the open Jobs panel's rows and close box.
     pub(super) nirvana_jobs_panel: super::nirvana_jobs::JobsHits,
+    /// Plan 16: the strip's Git square; a click opens its panel.
+    pub(super) nirvana_git: Rect,
+    /// Plan 16: the open Git panel's buttons and close box.
+    pub(super) nirvana_git_panel: super::nirvana_git::GitHits,
     pub(super) new_workspace: Rect,
     pub(super) new_tab: Rect,
     pub(super) tab_scroll_left: Rect,
@@ -1013,6 +1017,8 @@ pub(crate) struct ClientShellState {
     pub(super) nirvana_seats: Option<super::nirvana_seats::SeatsPanel>,
     /// Plan 15: the Jobs panel, while open.
     pub(super) nirvana_jobs: Option<super::nirvana_jobs::JobsPanel>,
+    /// Plan 16: the Git panel, while open.
+    pub(super) nirvana_git: Option<super::nirvana_git::GitPanel>,
 }
 
 pub(super) fn product_announcement_state(
@@ -1186,6 +1192,7 @@ impl ClientShellState {
             nirvana_memory: None,
             nirvana_seats: None,
             nirvana_jobs: None,
+            nirvana_git: None,
             nirvana_accounts: None,
         }
     }

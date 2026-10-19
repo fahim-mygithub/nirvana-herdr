@@ -717,6 +717,10 @@ impl ClientShellState {
         if self.overlay.is_none() && self.handle_jobs_mouse(mouse, outcome) {
             return;
         }
+        // Plan 16: and the Git panel.
+        if self.overlay.is_none() && self.handle_git_mouse(mouse, outcome) {
+            return;
+        }
         if matches!(self.overlay, Some(ClientShellOverlay::Onboarding)) {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                 && super::contains(self.hits.overlay_primary, point)
@@ -2003,6 +2007,12 @@ impl ClientShellState {
                 // Plan 15: the strip's Jobs square opens its panel.
                 if super::contains(self.hits.nirvana_jobs, point) {
                     self.toggle_jobs_panel();
+                    outcome.repaint = true;
+                    return;
+                }
+                // Plan 16: the strip's Git square opens its panel.
+                if super::contains(self.hits.nirvana_git, point) {
+                    self.toggle_git_panel();
                     outcome.repaint = true;
                     return;
                 }

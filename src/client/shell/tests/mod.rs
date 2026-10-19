@@ -262,6 +262,7 @@ mod mobile;
 mod mouse_selection;
 // Nirvana fork.
 mod nirvana_footer;
+mod nirvana_git;
 mod nirvana_jobs;
 mod nirvana_mods;
 mod nirvana_new_menu;

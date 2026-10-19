@@ -140,6 +140,8 @@ pub(super) struct StripHits {
     pub(super) seats: Rect,
     /// Plan 15: the Jobs square.
     pub(super) jobs: Rect,
+    /// Plan 16: the Git square.
+    pub(super) git: Rect,
 }
 
 /// One square: a bold label and a value on a raised background, as old Nirvana draws its squares.
@@ -208,6 +210,7 @@ pub(super) fn render_strip(
     memory: Option<(String, bool)>,
     seats: Option<Option<&crate::nirvana_seats_square::View>>,
     jobs: Option<&crate::nirvana_job::JobsView>,
+    git: Option<&crate::nirvana_git::GitView>,
     open: OpenPanel,
     palette: &Palette,
 ) -> StripHits {
@@ -323,6 +326,39 @@ pub(super) fn render_strip(
             open == OpenPanel::Memory,
             palette,
         );
+    }
+    if let Some(git_view) = git {
+        let narrow = area.width < super::nirvana_git::NARROW_STRIP;
+        let value = crate::nirvana_git::git_label(&git_view.status, git_view.ci.as_ref(), narrow);
+        if !value.is_empty() {
+            x = if hits.memory.width > 0 {
+                hits.memory.right() + 1
+            } else {
+                hits.preload.right() + 1
+            };
+            let active = git_view.status.ahead > 0
+                || git_view.status.behind > 0
+                || git_view.status.dirty > 0
+                || git_view
+                    .ci
+                    .as_ref()
+                    .is_some_and(|c| c.state == crate::nirvana_git::CiState::Failed);
+            hits.git = draw_square(
+                buffer,
+                x,
+                area.y,
+                right,
+                "Git",
+                &value,
+                if active {
+                    palette.yellow
+                } else {
+                    palette.subtext0
+                },
+                open == OpenPanel::Git,
+                palette,
+            );
+        }
     }
     hits
 }
@@ -451,6 +487,8 @@ pub(super) enum OpenPanel {
     Seats,
     /// Plan 15.
     Jobs,
+    /// Plan 16.
+    Git,
 }
 
 /// The open Running panel, for one agent's pane.
@@ -979,6 +1017,8 @@ impl ClientShellState {
             OpenPanel::Seats
         } else if self.nirvana_jobs.is_some() {
             OpenPanel::Jobs
+        } else if self.nirvana_git.is_some() {
+            OpenPanel::Git
         } else {
             OpenPanel::None
         }
@@ -994,6 +1034,7 @@ impl ClientShellState {
         };
         self.nirvana_seats = None;
         self.nirvana_jobs = None;
+        self.nirvana_git = None;
         self.nirvana_preload = None;
         self.nirvana_memory = None;
         self.nirvana_accounts = None;
@@ -1136,6 +1177,7 @@ impl ClientShellState {
         self.nirvana_accounts = None;
         self.nirvana_seats = None;
         self.nirvana_jobs = None;
+        self.nirvana_git = None;
         let Some(agent) = self.snapshot.as_deref().and_then(strip_agent) else {
             return;
         };

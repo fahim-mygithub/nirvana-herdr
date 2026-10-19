@@ -250,6 +250,9 @@ impl ClientShellState {
                 // Plan 15: the Jobs square.
                 let jobs = super::nirvana_jobs::jobs_tab(snapshot)
                     .and_then(|tab| crate::nirvana_job::cached(&tab.folder));
+                // Plan 16: the Git square.
+                let git = super::nirvana_git::git_tab(snapshot)
+                    .and_then(|tab| crate::nirvana_git::cached(&tab.folder));
                 let strip = super::nirvana_mods::render_strip(
                     &mut buffer,
                     layout.nirvana_mods,
@@ -259,6 +262,7 @@ impl ClientShellState {
                     memory,
                     seats.as_ref().map(Option::as_ref),
                     jobs.as_ref(),
+                    git.as_ref(),
                     self.open_panel(),
                     &self.config.palette,
                 );
@@ -269,6 +273,7 @@ impl ClientShellState {
                     self.hits.nirvana_memory = strip.memory;
                     self.hits.nirvana_seats = strip.seats;
                     self.hits.nirvana_jobs = strip.jobs;
+                    self.hits.nirvana_git = strip.git;
                 }
             }
         }
@@ -884,6 +889,40 @@ impl ClientShellState {
                 occlusion.cover(rendered.area);
                 self.hits.nirvana_jobs_panel = rendered;
                 self.nirvana_jobs = Some(panel);
+                frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
+            }
+        }
+        // Plan 16: the Git panel.
+        if self.overlay.is_none() {
+            if let Some(mut panel) = self.nirvana_git.clone() {
+                crate::nirvana_git::set_panel_open(&panel.folder, true);
+                let top = if layout.nirvana_mods.height > 0 {
+                    layout.nirvana_mods.y
+                } else {
+                    layout.pane_surface.y
+                };
+                let area = Rect::new(
+                    layout.pane_surface.x,
+                    top,
+                    layout.pane_surface.width,
+                    layout.pane_surface.bottom().saturating_sub(top),
+                );
+                let view = crate::nirvana_git::cached(&panel.folder);
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs());
+                let mut composed = frame.to_ratatui_buffer()?;
+                let rendered = super::nirvana_git::render_git_panel(
+                    &mut composed,
+                    area,
+                    &mut panel,
+                    view.as_ref(),
+                    now_secs,
+                    &self.config.palette,
+                );
+                occlusion.cover(rendered.area);
+                self.hits.nirvana_git_panel = rendered;
+                self.nirvana_git = Some(panel);
                 frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
             }
         }

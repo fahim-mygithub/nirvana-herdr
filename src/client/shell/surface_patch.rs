@@ -78,6 +78,9 @@ fn fast_path_blocker(
     } else if state.nirvana_jobs.is_some() {
         // Plan 15: the Jobs panel, for the same reason.
         Some("client_surface_patch.fallback.nirvana_panel")
+    } else if state.nirvana_git.is_some() {
+        // Plan 16: the Git panel, for the same reason.
+        Some("client_surface_patch.fallback.nirvana_panel")
     } else if state.endpoint_error.is_some() {
         Some("client_surface_patch.fallback.endpoint_error")
     } else if state.config_diagnostic.is_some() {

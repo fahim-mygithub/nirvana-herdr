@@ -681,6 +681,13 @@ impl ClientShellState {
             }
             return None;
         }
+        // Plan 16: and the Git panel.
+        if self.nirvana_git.is_some() {
+            if key.kind == KeyEventKind::Press {
+                self.route_git_key(key, outcome);
+            }
+            return None;
+        }
         if matches!(key.code, KeyCode::Modifier(_)) {
             return None;
         }
