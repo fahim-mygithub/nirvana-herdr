@@ -36,6 +36,15 @@ CONTROLS = (
         'stop_job_ends_only_job_process_tree',
         'rust',
     ),
+    # §2: stop leaves an ended job's pid alone, since Windows may have reused it (review, 2026-10-19).
+    Control(
+        'p15_stop_skips_ended_job',
+        'src/nirvana_job.rs',
+        '    if record.ended.is_some() {\n        return Ok(());\n    }\n    #[cfg(windows)]\n    terminate_named_job(id);\n',
+        '    if false && record.ended.is_some() {\n        return Ok(());\n    }\n    #[cfg(windows)]\n    terminate_named_job(id);\n',
+        'stop_job_leaves_an_ended_jobs_pid_alone',
+        'rust',
+    ),
     # §2: herdr job exec trailing summary line [job <name>: exit N after Xs].
     Control(
         'p15_exec_trailing_line',

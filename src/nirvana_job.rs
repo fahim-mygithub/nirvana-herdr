@@ -880,16 +880,19 @@ pub fn terminate_named_job(id: &str) {
 /// Stops a job's process tree and marks it ended if not already ended.
 pub fn stop_job(home: &Path, id: &str) -> std::io::Result<()> {
     let mut record = read_job(home, id)?;
+    // An ended job's pid may already belong to another program: Windows reuses pids, and the rule is that
+    // stop ends only what the job started. So an ended job is left alone (review of plan 15, 2026-10-19).
+    if record.ended.is_some() {
+        return Ok(());
+    }
     #[cfg(windows)]
     terminate_named_job(id);
     if let Some(pid) = record.pid {
         kill_process_tree(pid);
     }
-    if record.ended.is_none() {
-        record.ended = Some(now());
-        record.exit = Some(1);
-        let _ = write_job(home, &record);
-    }
+    record.ended = Some(now());
+    record.exit = Some(1);
+    let _ = write_job(home, &record);
     Ok(())
 }
 
@@ -1842,6 +1845,51 @@ mod tests {
         let updated = read_job(&guard.path, "job-to-stop").unwrap();
         assert!(updated.ended.is_some());
         assert_eq!(updated.exit, Some(1));
+    }
+
+    #[test]
+    fn stop_job_leaves_an_ended_jobs_pid_alone() {
+        let guard = crate::nirvana::with_test_home("job_stop_ended");
+        // The recorded pid now stands for some other program; stop must not touch it.
+        let mut child = if cfg!(windows) {
+            std::process::Command::new("ping")
+                .args(["-n", "30", "127.0.0.1"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        } else {
+            std::process::Command::new("sleep")
+                .arg("30")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        };
+        let pid = child.id();
+        let record = JobRecord {
+            id: "job-ended".into(),
+            name: "done".into(),
+            argv: vec!["sleep".into()],
+            cwd: ".".into(),
+            space: None,
+            pane: None,
+            started: now(),
+            ended: Some(now()),
+            exit: Some(0),
+            pid: Some(pid),
+        };
+        write_job(&guard.path, &record).unwrap();
+        stop_job(&guard.path, "job-ended").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let alive = is_process_alive(pid);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            alive,
+            "stop_job killed the pid of a job that had already ended"
+        );
+        assert_eq!(read_job(&guard.path, "job-ended").unwrap().exit, Some(0));
     }
 
     #[test]
