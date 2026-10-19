@@ -3,7 +3,7 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
-## alpha NEXT (p13b): the Preload panel's preset, deferred rows and memory row
+## alpha 0.26.0: the Preload panel's preset, deferred rows and memory row (plan 13 P2)
 
 Package `p13b` (`P13B-ORDER.md`, record `nirvana/plans/2026-10-18-13-records/p13b.md`).
 
