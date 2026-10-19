@@ -3,6 +3,31 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha NEXT (p13d): the Preload reads names and code, presets combine, unedited defaults upgrade
+
+Plan 13 tuning, package p13d (items 1–5: dependency/build walk skipping, folder name and README word matching, `code` preset, combining presets, unedited defaults upgrade).
+
+- **Changed:** Directory walking in `fingerprint` skips dependency and build folders case-insensitively: `node_modules`, `target`, `vendor`, `.venv`, `venv`, `env`, `build`, `dist`, `bin`, `obj`, `.next`, `.turbo`, `cmakefiles`, `cmake-build-debug`, `cmake-build-release`, `out`, `coverage`, `.gradle`, and `.yarn`.
+  **Because:** Dependency and build directories contain tens of thousands of third-party files that skew project fingerprint shares and slow down scanning.
+  **Measured:** `the_walk_skips_p13d_dependency_and_build_folders_case_insensitively` in `src/nirvana_preset/tests.rs`; control `p13d_walk_skips_vendor`.
+  **If you remove this:** Dependency trees inflate extension counts and alter preset selection.
+- **Changed:** `when.words` matches case-insensitively against the folder's name and the top 2 KB of its README. Normalisation turns underscores, dashes, and dots into spaces, and words match token prefixes. In `src/nirvana_preload.toml`, `preset.3d-print` matches 3D printing words.
+  **Because:** Many repositories name their domain in their folder name or README rather than relying strictly on file extensions or markers (e.g. `3D-Printer-Flow-xtool`).
+  **Measured:** `words_match_case_insensitively_on_folder_name_and_readme` in `src/nirvana_preset/tests.rs`; control `p13d_words_match`.
+  **If you remove this:** Projects named after their domain without extension shares default to asking Jev.
+- **Changed:** Added `preset.code` to `src/nirvana_preload.toml` matching 24 programming language extensions at a 40% share (`["c", "cc", "cpp", "cxx", "h", "hpp", "py", "ts", "tsx", "js", "jsx", "mjs", "rs", "go", "java", "kt", "cs", "swift", "rb", "php", "lua", "dart", "scala", "zig"]`), keeping `["code", "web", "db", "python", "rust", "c", "kotlin"]`. Added tags `c` and `kotlin` to `[tags]`.
+  **Because:** Polyglot codebases often have no single marker or language majority but collectively comprise application code.
+  **Measured:** `code_preset_matches_at_40_percent_across_24_extensions` in `src/nirvana_preset/tests.rs`; control `p13d_code_preset`.
+  **If you remove this:** Multi-language projects fail to match specific language presets and ask Jev.
+- **Changed:** Matching presets combine in file order: matched preset names join with `+` (e.g. `3d-print+code`), their `keep` tags union, and `auto_memory = false` wins if any component sets it false. `blank` applies only as a sole match. Jev is asked only when no rule matches. `PresetView` and `Outcome` structures are unchanged.
+  **Because:** Projects frequently bridge domains (such as a 3D printer controller project with python code), where keeping tools for both domains avoids unnecessary disables.
+  **Measured:** `matching_presets_combine_keep_tags_and_auto_memory_in_file_order` in `src/nirvana_preset/tests.rs`; controls `p13d_presets_combine` and `p13d_blank_sole_match`.
+  **If you remove this:** Only the single first matching rule applies, dropping necessary tools from co-occurring domains.
+- **Changed:** Unedited defaults for `preload.toml` and `seats.toml` upgrade themselves upon read. Old shipped defaults are tracked in source and checked against installed files after CRLF -> LF normalisation. For `seats.toml`, the top-level `mode = ...` line is set aside during comparison and restored into the upgraded table. Upgrades copy the old file to `<home>/nirvana/backup/` first. Edited files and unparseable files are preserved, and unparseable files report how to get defaults back.
+  **Because:** Updates to shipped presets or seat pricing/spare formulas should reach users who have not customized those files, while preserving any user customizations and backups.
+  **Measured:** `unedited_preload_toml_upgrades_itself_and_backs_up_old_default` and `unedited_seats_toml_upgrades_itself_preserving_mode_and_backs_up_old_default`; controls `p13d_preload_upgrade`, `p13d_preload_backup`, `p13d_seats_upgrade`, `p13d_seats_mode_preserved`, `p13d_seats_backup`.
+  **If you remove this:** Existing installs stay pinned to obsolete defaults forever unless deleted manually.
+
 ## alpha 0.24.0: the session record and the memory trim (plan 13 P3)
 
 Plan 13, package P3 (`plans/2026-10-18-13-smart-preload.md` §6.1's record, §6.2, §7's `herdr memory`; the record is
