@@ -474,14 +474,12 @@ pub fn fetch_action(path: &Path, expect_branch: &str) -> Result<String, String> 
 pub fn refresh_folder(folder: &Path) {
     let status = read_git_status(folder).ok();
     let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(map) = guard.as_mut() {
-        if let Some(entry) = map.get_mut(folder) {
-            let ci = entry.view.as_ref().and_then(|v| v.ci.clone());
-            entry.view = status.map(|s| GitView { status: s, ci });
-            entry.read_at = Some(Instant::now());
-            CHANGED.store(true, Ordering::Release);
-        }
-    }
+    let map = guard.get_or_insert_with(HashMap::new);
+    let entry = map.entry(folder.to_path_buf()).or_default();
+    let ci = entry.view.as_ref().and_then(|v| v.ci.clone());
+    entry.view = status.map(|s| GitView { status: s, ci });
+    entry.read_at = Some(Instant::now());
+    CHANGED.store(true, Ordering::Release);
 }
 
 // -----------------------------------------------------------------------------

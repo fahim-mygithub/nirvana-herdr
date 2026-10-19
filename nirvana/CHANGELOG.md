@@ -2,6 +2,15 @@
 
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
+## alpha NEXT (p16): Git square
+
+Package `p16` (`P16-ORDER.md`, record `nirvana/plans/2026-10-19-16-records/p16.md`).
+
+- **Changed:** The mod strip gains a Git square displaying the focused space's repository branch, ahead/behind status, changed file count, and optional CI mark (`Git main ↑1 ↓2 · 3 changed ▾` wide, `Git main ↑1 ↓2 · 3 ▾` narrow, or `Git main ▾` on clean level branch; hidden outside git repositories). Clicking the square opens a modal panel (`Git · <folder>`) displaying the repository folder, branch with upstream (`branch <b> → <upstream>` or `no upstream`), ahead/behind counts (`↑N ahead ↓M behind (last fetch)`), up to 8 changed file paths with rename targets, an Actions CI row (`CI <workflow> passed 12m ago`), and three action buttons: `[Pull ↓M]`, `[Push ↑N]`, and `[Fetch]`. Pull and Push enforce confirmation dialogs (`Pull M commits from origin into main? N changed files in the tree. [Pull] [Cancel]`), verify `expect_branch` matches live status before execution, operate with `GIT_TERMINAL_PROMPT=0` and 60-second timeouts, and restrict remote targets exclusively to the configured upstream. Fetch executes without confirmation. Arrow keys navigate buttons, Enter triggers actions or confirms, and Esc cancels confirmation or closes the panel. All panel close sequences across the shell (`nirvana_accounts.rs`, `nirvana_jobs.rs`, `nirvana_memory.rs`, `nirvana_mods.rs`, `nirvana_seats.rs`, `mouse.rs`) clear `self.nirvana_git = None;`.
+  **Because:** Plan 16 L1 & L2: porting old Nirvana's GitHub card (`plugins/git-widget`) into the Nirvana-Herdr mod strip, providing visible repository status and safe, confirmed Git actions (Pull, Push, Fetch) without leaving the terminal or risking branch mismatch divergence.
+  **Measured:** 17 nextest unit and integration tests across `src/nirvana_git.rs` and `src/client/shell/tests/nirvana_git.rs` covering porcelain v2 parsing, action timeouts, real Git remote push/fetch/pull operations, divergence refusal, CI status formatting, button states, and live client snapshots; 15 mutative controls in `nirvana/controls.d/p16.py` covering all plan assertions; dry-run controls total increased from 1008 to 1023 with 1023 of 1023 matched 1x; live verification on an isolated server instance with scratch bare repository.
+  **If you remove this:** users must manually run Git status, pull, push, and fetch commands in terminal panes without mod strip status visibility, confirm dialog safety, or upstream branch verification.
+
 ## alpha 0.27.0: Jobs, long commands in a visible tab (plan 15)
 
 Package `p15` (`P15-ORDER.md`, record `nirvana/plans/2026-10-19-15-records/p15.md`).

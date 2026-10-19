@@ -382,3 +382,48 @@ fn confirm_step_and_esc_or_cancel_closes() {
 
     done(root);
 }
+
+#[test]
+fn live_client_snapshot_renders_git_square_on_scratch_repo() {
+    let (mut state, root) = state_for("live-snapshot");
+    let _ = std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(&root)
+        .output();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.name", "P16 Live Tester"])
+        .current_dir(&root)
+        .output();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.email", "livetester@example.com"])
+        .current_dir(&root)
+        .output();
+    std::fs::write(root.join("README.md"), "hello\n").unwrap();
+    let _ = std::process::Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(&root)
+        .output();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(&root)
+        .output();
+    std::fs::write(root.join("dirty.txt"), "changed\n").unwrap();
+
+    set_view_for_test(None);
+    crate::nirvana_git::refresh_folder(&root);
+
+    let row = strip(&mut state, 200);
+    println!("WIDE STRIP: {row}");
+    assert!(
+        row.contains("Git main \u{b7} 1 changed \u{25BE}"),
+        "live strip wide: {row}"
+    );
+    let row_narrow = strip(&mut state, 120);
+    println!("NARROW STRIP: {row_narrow}");
+    assert!(
+        row_narrow.contains("Git main \u{b7} 1 \u{25BE}"),
+        "live strip narrow: {row_narrow}"
+    );
+
+    done(root);
+}
