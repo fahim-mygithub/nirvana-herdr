@@ -437,6 +437,7 @@ impl ClientShellState {
         self.nirvana_running = None;
         self.nirvana_memory = None;
         self.nirvana_accounts = None;
+        self.nirvana_jobs = None;
         self.nirvana_seats = Some(SeatsPanel {
             root: tab.root,
             workspace_id: tab.workspace_id,

@@ -2358,7 +2358,9 @@ async fn run_client_loop(
                             | crate::nirvana_accounts::take_changed()
                             // Plan 12 O8a: the Seats square's journals; its reads start here, never
                             // while the window draws.
-                            | crate::nirvana_seats_square::take_changed();
+                            | crate::nirvana_seats_square::take_changed()
+                            // Plan 15: the Jobs square; polls 2s running / 15s idle off the draw path
+                            | crate::nirvana_job::take_changed();
                         let frame = outcome
                             .repaint
                             .then(|| shell.compose(state.reported_size.0, state.reported_size.1))

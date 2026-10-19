@@ -674,6 +674,13 @@ impl ClientShellState {
             }
             return None;
         }
+        // Plan 15: and the Jobs panel.
+        if self.nirvana_jobs.is_some() {
+            if key.kind == KeyEventKind::Press {
+                self.route_jobs_key(key, outcome);
+            }
+            return None;
+        }
         if matches!(key.code, KeyCode::Modifier(_)) {
             return None;
         }

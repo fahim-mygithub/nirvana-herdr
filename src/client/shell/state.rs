@@ -129,6 +129,10 @@ pub(super) struct ShellHitMap {
     pub(super) nirvana_seats: Rect,
     /// Plan 12 O8a: the open Seats panel's mode row, order lines and close box.
     pub(super) nirvana_seats_panel: super::nirvana_seats::SeatsHits,
+    /// Plan 15: the strip's Jobs square; a click opens its panel.
+    pub(super) nirvana_jobs: Rect,
+    /// Plan 15: the open Jobs panel's rows and close box.
+    pub(super) nirvana_jobs_panel: super::nirvana_jobs::JobsHits,
     pub(super) new_workspace: Rect,
     pub(super) new_tab: Rect,
     pub(super) tab_scroll_left: Rect,
@@ -1007,6 +1011,8 @@ pub(crate) struct ClientShellState {
     pub(super) nirvana_accounts: Option<super::nirvana_accounts::AccountsPanel>,
     /// Plan 12 O8a: the Seats panel, while open.
     pub(super) nirvana_seats: Option<super::nirvana_seats::SeatsPanel>,
+    /// Plan 15: the Jobs panel, while open.
+    pub(super) nirvana_jobs: Option<super::nirvana_jobs::JobsPanel>,
 }
 
 pub(super) fn product_announcement_state(
@@ -1179,6 +1185,7 @@ impl ClientShellState {
             nirvana_running: None,
             nirvana_memory: None,
             nirvana_seats: None,
+            nirvana_jobs: None,
             nirvana_accounts: None,
         }
     }

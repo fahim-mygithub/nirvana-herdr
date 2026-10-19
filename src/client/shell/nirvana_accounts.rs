@@ -136,6 +136,7 @@ impl ClientShellState {
         self.nirvana_running = None;
         self.nirvana_memory = None;
         self.nirvana_seats = None;
+        self.nirvana_jobs = None;
         crate::nirvana_accounts::read_soon();
         self.nirvana_accounts = Some(AccountsPanel::default());
     }

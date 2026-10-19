@@ -75,6 +75,9 @@ fn fast_path_blocker(
         // Plan 12 O8a: the Seats panel, for the same reason. A branch of its own, so the condition above keeps
         // the bytes its control (`panel_painted_over`) finds.
         Some("client_surface_patch.fallback.nirvana_panel")
+    } else if state.nirvana_jobs.is_some() {
+        // Plan 15: the Jobs panel, for the same reason.
+        Some("client_surface_patch.fallback.nirvana_panel")
     } else if state.endpoint_error.is_some() {
         Some("client_surface_patch.fallback.endpoint_error")
     } else if state.config_diagnostic.is_some() {

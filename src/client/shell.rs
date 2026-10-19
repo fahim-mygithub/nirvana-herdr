@@ -32,6 +32,8 @@ mod nirvana_mods;
 mod nirvana_new_menu;
 // Plan 12 O8a: the Seats square of a Nirvana tab.
 mod nirvana_seats;
+// Plan 15: the Jobs square of a space and its panel.
+mod nirvana_jobs;
 mod nirvana_spaces;
 mod notification_policy;
 mod notifications;

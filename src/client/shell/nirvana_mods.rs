@@ -138,6 +138,8 @@ pub(super) struct StripHits {
     pub(super) memory: Rect,
     /// Plan 12 O8a: present only in a Nirvana tab.
     pub(super) seats: Rect,
+    /// Plan 15: the Jobs square.
+    pub(super) jobs: Rect,
 }
 
 /// One square: a bold label and a value on a raised background, as old Nirvana draws its squares.
@@ -153,7 +155,11 @@ fn draw_square(
     palette: &Palette,
 ) -> Rect {
     let label = format!(" {label} ");
-    let value = format!("{value} {} ", if open { "\u{25B4}" } else { "\u{25BE}" });
+    let value = if value.is_empty() {
+        format!("{} ", if open { "\u{25B4}" } else { "\u{25BE}" })
+    } else {
+        format!("{value} {} ", if open { "\u{25B4}" } else { "\u{25BE}" })
+    };
     let square = Rect::new(
         x,
         y,
@@ -190,8 +196,8 @@ fn draw_square(
 }
 
 /// Draws the strip: the agent, then the Running square, the Seats square in a Nirvana tab (plan 12 O8a: the
-/// tab's seating comes right after what its Claude is doing), the Preload square, and the Memory square when
-/// `memory` holds its value. `seats` is the Seats view, `Some(None)` before its first read.
+/// tab's seating comes right after what its Claude is doing), the Jobs square (plan 15), the Preload square,
+/// and the Memory square when `memory` holds its value. `seats` is the Seats view, `Some(None)` before its first read.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_strip(
     buffer: &mut Buffer,
@@ -201,6 +207,7 @@ pub(super) fn render_strip(
     view: &View,
     memory: Option<(String, bool)>,
     seats: Option<Option<&crate::nirvana_seats_square::View>>,
+    jobs: Option<&crate::nirvana_job::JobsView>,
     open: OpenPanel,
     palette: &Palette,
 ) -> StripHits {
@@ -263,6 +270,27 @@ pub(super) fn render_strip(
         );
         x = hits.seats.right() + 1;
     }
+    let narrow = area.width < super::nirvana_jobs::NARROW_STRIP;
+    let (jobs_val, jobs_active) = match jobs {
+        Some(j_view) => super::nirvana_jobs::jobs_value(j_view, narrow),
+        None => (String::new(), false),
+    };
+    hits.jobs = draw_square(
+        buffer,
+        x,
+        area.y,
+        right,
+        "Jobs",
+        &jobs_val,
+        if jobs_active {
+            palette.yellow
+        } else {
+            palette.subtext0
+        },
+        open == OpenPanel::Jobs,
+        palette,
+    );
+    x = hits.jobs.right() + 1;
     hits.preload = draw_square(
         buffer,
         x,
@@ -421,6 +449,8 @@ pub(super) enum OpenPanel {
     Memory,
     /// Plan 12 O8a.
     Seats,
+    /// Plan 15.
+    Jobs,
 }
 
 /// The open Running panel, for one agent's pane.
@@ -947,6 +977,8 @@ impl ClientShellState {
             OpenPanel::Memory
         } else if self.nirvana_seats.is_some() {
             OpenPanel::Seats
+        } else if self.nirvana_jobs.is_some() {
+            OpenPanel::Jobs
         } else {
             OpenPanel::None
         }
@@ -961,6 +993,7 @@ impl ClientShellState {
             return;
         };
         self.nirvana_seats = None;
+        self.nirvana_jobs = None;
         self.nirvana_preload = None;
         self.nirvana_memory = None;
         self.nirvana_accounts = None;
@@ -1102,6 +1135,7 @@ impl ClientShellState {
         self.nirvana_memory = None;
         self.nirvana_accounts = None;
         self.nirvana_seats = None;
+        self.nirvana_jobs = None;
         let Some(agent) = self.snapshot.as_deref().and_then(strip_agent) else {
             return;
         };

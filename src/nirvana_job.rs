@@ -30,6 +30,10 @@ impl JobState {
             Self::Lost => "lost",
         }
     }
+
+    pub fn as_str(&self) -> &'static str {
+        self.word()
+    }
 }
 
 /// The record stored in `<home>/nirvana/jobs/<id>/job.json`.
@@ -105,6 +109,10 @@ impl ClaudeTaskState {
             Self::Failed => "failed",
             Self::Unknown => "unknown",
         }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        self.word()
     }
 }
 
@@ -267,6 +275,327 @@ pub fn list_claude_tasks_in(
 /// Lists newest 10 Claude tasks for `space_folder` in the system `%TEMP%`.
 pub fn list_claude_tasks(space_folder: &Path) -> Vec<ClaudeTask> {
     list_claude_tasks_in(&std::env::temp_dir(), space_folder, now())
+}
+
+/// A view of recent and running jobs for the Jobs square and panel.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct JobsView {
+    pub jobs: Vec<JobRecord>,
+    pub job_last_lines: std::collections::HashMap<String, String>,
+    pub claude_tasks: Vec<ClaudeTask>,
+    pub running_count: usize,
+    pub failed_count: usize,
+    pub passed_count: usize,
+}
+
+pub fn load_jobs_view(space_folder: &Path, home: &Path, now_secs: u64) -> JobsView {
+    let all_jobs = list_jobs(home);
+    let twelve_hours = 12 * 3600;
+
+    let mut jobs: Vec<JobRecord> = all_jobs
+        .into_iter()
+        .filter(|j| {
+            let is_alive = j.pid.is_some_and(is_process_alive);
+            let state = j.state(is_alive);
+            if state == JobState::Running {
+                true
+            } else if let Some(ended) = j.ended {
+                now_secs.saturating_sub(ended) <= twelve_hours
+            } else {
+                now_secs.saturating_sub(j.started) <= twelve_hours
+            }
+        })
+        .collect();
+    jobs.sort_by(|a, b| b.started.cmp(&a.started).then_with(|| b.id.cmp(&a.id)));
+
+    let mut job_last_lines = std::collections::HashMap::new();
+    for j in &jobs {
+        if let Some(line) = last_line(home, &j.id) {
+            job_last_lines.insert(j.id.clone(), line);
+        }
+    }
+
+    let claude_tasks = list_claude_tasks_in(&std::env::temp_dir(), space_folder, now_secs);
+
+    let mut running = 0;
+    let mut failed = 0;
+    let mut passed = 0;
+
+    for j in &jobs {
+        let is_alive = j.pid.is_some_and(is_process_alive);
+        match j.state(is_alive) {
+            JobState::Running => running += 1,
+            JobState::Failed | JobState::Lost => failed += 1,
+            JobState::Passed => passed += 1,
+        }
+    }
+
+    for t in &claude_tasks {
+        match t.state {
+            ClaudeTaskState::Running => running += 1,
+            ClaudeTaskState::Failed => failed += 1,
+            ClaudeTaskState::Passed => passed += 1,
+            ClaudeTaskState::Unknown => {}
+        }
+    }
+
+    JobsView {
+        jobs,
+        job_last_lines,
+        claude_tasks,
+        running_count: running,
+        failed_count: failed,
+        passed_count: passed,
+    }
+}
+
+#[derive(Default)]
+struct CacheEntry {
+    asked_at: Option<Instant>,
+    read_at: Option<Instant>,
+    reading: bool,
+    view: Option<JobsView>,
+}
+
+static ENTRIES: std::sync::Mutex<Option<std::collections::HashMap<PathBuf, CacheEntry>>> =
+    std::sync::Mutex::new(None);
+static CHANGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+thread_local! {
+    static TEST_VIEW: std::cell::RefCell<Option<JobsView>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub fn set_view_for_test(view: Option<JobsView>) {
+    TEST_VIEW.with_borrow_mut(|v| *v = view);
+}
+
+pub fn cached(folder: &Path) -> Option<JobsView> {
+    #[cfg(test)]
+    {
+        if let Some(view) = TEST_VIEW.with_borrow(Clone::clone) {
+            return Some(view);
+        }
+        if let Some(home) = crate::nirvana::home() {
+            return Some(load_jobs_view(folder, &home, now()));
+        }
+        None
+    }
+    #[cfg(not(test))]
+    {
+        let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
+        let map = guard.get_or_insert_with(std::collections::HashMap::new);
+        let entry = map.entry(folder.to_path_buf()).or_default();
+        entry.asked_at = Some(Instant::now());
+        if let Some(view) = &entry.view {
+            return Some(view.clone());
+        }
+        if !entry.reading {
+            start_read(folder);
+        }
+        None
+    }
+}
+
+const FORGET_AFTER: Duration = Duration::from_secs(60);
+
+#[cfg(not(test))]
+fn start_read(folder: &Path) {
+    let folder = folder.to_path_buf();
+    std::thread::spawn(move || {
+        let home = crate::nirvana::home();
+        let view = home.map(|h| load_jobs_view(&folder, &h, now()));
+        let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(map) = guard.as_mut() {
+            if let Some(entry) = map.get_mut(&folder) {
+                entry.reading = false;
+                entry.read_at = Some(Instant::now());
+                if view.is_some() && entry.view != view {
+                    entry.view = view;
+                    CHANGED.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
+        }
+    });
+}
+
+fn poll() {
+    let due: Vec<(PathBuf, bool)> = {
+        let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(map) = guard.as_mut() else {
+            return;
+        };
+        map.retain(|_, entry| entry.asked_at.is_some_and(|at| at.elapsed() < FORGET_AFTER));
+        let mut to_read = Vec::new();
+        for (folder, entry) in map.iter_mut() {
+            if entry.reading {
+                continue;
+            }
+            let any_running = entry.view.as_ref().is_some_and(|v| v.running_count > 0);
+            let reread_interval = if any_running {
+                Duration::from_secs(2)
+            } else {
+                Duration::from_secs(15)
+            };
+            if entry
+                .read_at
+                .is_none_or(|at| at.elapsed() >= reread_interval)
+            {
+                entry.reading = true;
+                to_read.push((folder.clone(), any_running));
+            }
+        }
+        to_read
+    };
+
+    for (folder, _) in due {
+        std::thread::spawn(move || {
+            let home = crate::nirvana::home();
+            let view = home.map(|h| load_jobs_view(&folder, &h, now()));
+            let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(map) = guard.as_mut() {
+                if let Some(entry) = map.get_mut(&folder) {
+                    entry.reading = false;
+                    entry.read_at = Some(Instant::now());
+                    if view.is_some() && entry.view != view {
+                        entry.view = view;
+                        CHANGED.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                }
+            }
+        });
+    }
+}
+
+pub fn take_changed() -> bool {
+    poll();
+    CHANGED.swap(false, std::sync::atomic::Ordering::AcqRel)
+}
+
+pub fn open_tail_pane(
+    cwd: &str,
+    task_name: &str,
+    file_path: &Path,
+) -> Result<(Option<String>, String), String> {
+    let tail_cmd = if cfg!(windows) {
+        format!(
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Get-Content -Wait -Tail 30 -Path '{}'\"",
+            file_path.display()
+        )
+    } else {
+        format!("tail -n 30 -f \"{}\"", file_path.display())
+    };
+
+    let space_id = std::env::var("HERDR_WORKSPACE_ID").ok().or_else(|| {
+        let ws_list = herdr_json(&["workspace", "list"]).ok()?;
+        let workspaces = ws_list.pointer("/result/workspaces")?.as_array()?;
+        workspaces
+            .iter()
+            .find(|ws| ws.get("focused") == Some(&Value::Bool(true)))
+            .or_else(|| workspaces.first())
+            .and_then(|ws| ws.get("workspace_id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
+
+    let env = pane_env();
+    let mut env_args: Vec<&str> = Vec::new();
+    for pair in &env {
+        env_args.extend(["--env", pair.as_str()]);
+    }
+
+    // Check if Jobs tab exists
+    let mut tab_list_args = vec!["tab", "list"];
+    if let Some(space) = &space_id {
+        tab_list_args.extend(["--workspace", space.as_str()]);
+    }
+    let tabs_val = herdr_json(&tab_list_args)?;
+    let existing_jobs_tab = tabs_val
+        .pointer("/result/tabs")
+        .and_then(Value::as_array)
+        .and_then(|tabs| {
+            tabs.iter()
+                .find(|tab| tab.get("label").and_then(Value::as_str) == Some("Jobs"))
+        });
+
+    let pane_id = if let Some(jobs_tab) = existing_jobs_tab {
+        let tab_id = jobs_tab
+            .get("tab_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "missing tab_id in tab list".to_string())?;
+
+        let mut pane_list_args = vec!["pane", "list"];
+        if let Some(space) = &space_id {
+            pane_list_args.extend(["--workspace", space.as_str()]);
+        }
+        let panes_val = herdr_json(&pane_list_args)?;
+        let target_pane_id = panes_val
+            .pointer("/result/panes")
+            .and_then(Value::as_array)
+            .and_then(|panes| {
+                panes
+                    .iter()
+                    .rev()
+                    .find(|p| p.get("tab_id").and_then(Value::as_str) == Some(tab_id))
+                    .and_then(|p| p.get("pane_id").and_then(Value::as_str))
+            });
+
+        if let Some(target) = target_pane_id {
+            let mut args = vec![
+                "pane",
+                "split",
+                target,
+                "--direction",
+                "right",
+                "--cwd",
+                cwd,
+            ];
+            args.extend(env_args.iter().copied());
+            let value = herdr_json(&args)?;
+            find_str(&value, &["/result/pane/pane_id", "/pane/pane_id"])
+                .ok_or_else(|| "pane split gave no pane id".to_string())?
+                .to_owned()
+        } else {
+            let mut args = vec!["tab", "create", "--label", "Jobs", "--cwd", cwd];
+            if let Some(space) = &space_id {
+                args.extend(["--workspace", space.as_str()]);
+            }
+            args.extend(env_args.iter().copied());
+            let value = herdr_json(&args)?;
+            find_str(&value, &["/result/root_pane/pane_id", "/root_pane/pane_id"])
+                .ok_or_else(|| "tab create gave no pane id".to_string())?
+                .to_owned()
+        }
+    } else {
+        let mut args = vec!["tab", "create", "--label", "Jobs", "--cwd", cwd];
+        if let Some(space) = &space_id {
+            args.extend(["--workspace", space.as_str()]);
+        }
+        args.extend(env_args.iter().copied());
+        let value = herdr_json(&args)?;
+        find_str(&value, &["/result/root_pane/pane_id", "/root_pane/pane_id"])
+            .ok_or_else(|| "tab create gave no pane id".to_string())?
+            .to_owned()
+    };
+
+    let _ = herdr_ok(&["pane", "rename", &pane_id, task_name]);
+
+    // Wait for prompt and run tail
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(10) {
+        if herdr_text(&["pane", "read", &pane_id, "--source", "visible"])
+            .is_some_and(|screen| !screen.trim().is_empty())
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+
+    herdr_ok(&["pane", "run", &pane_id, &tail_cmd])?;
+
+    Ok((space_id, pane_id))
 }
 
 /// Current Unix timestamp in seconds.
