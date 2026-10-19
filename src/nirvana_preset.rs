@@ -2181,7 +2181,7 @@ pub fn worker_settings_for(start: &Path, root: &Path) -> Option<PathBuf> {
 /// What the panel's header and its `[p]` rows show.
 // P2's panel and P3's memory row call this (plan 13 §8); nothing in this package does yet.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresetView {
     /// The preset in force, "off" after undo, empty when the folder was never opened.
     pub name: String,
@@ -2190,16 +2190,27 @@ pub struct PresetView {
     pub off: Vec<(Switch, String)>,
     /// An estimate from the catalog's last `/context`.
     pub saved_tokens: u32,
+    /// The items pinned on over the preset.
+    pub pinned_on: Vec<Switch>,
+}
+
+impl Default for PresetView {
+    fn default() -> Self {
+        PresetView {
+            name: String::new(),
+            reason: "no preset yet: Open Nirvana chooses one".into(),
+            off: Vec::new(),
+            saved_tokens: 0,
+            pinned_on: Vec::new(),
+        }
+    }
 }
 
 // P2's panel and P3's memory row call this (plan 13 §8); nothing in this package does yet.
 #[allow(dead_code)]
 pub fn view_in(dir: &Path, cwd: &Path) -> PresetView {
     let Some(record) = read_record(dir, cwd) else {
-        return PresetView {
-            reason: "no preset yet: Open Nirvana chooses one".into(),
-            ..PresetView::default()
-        };
+        return PresetView::default();
     };
     let (off, saved) = off_now(dir, cwd, &record);
     PresetView {
@@ -2218,6 +2229,11 @@ pub fn view_in(dir: &Path, cwd: &Path) -> PresetView {
             .filter_map(|(key, tag)| Some((switch_of(&key)?, tag)))
             .collect(),
         saved_tokens: saved,
+        pinned_on: record
+            .pinned_on
+            .iter()
+            .filter_map(|key| switch_of(key))
+            .collect(),
     }
 }
 

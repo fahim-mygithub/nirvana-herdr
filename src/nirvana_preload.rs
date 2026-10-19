@@ -69,8 +69,8 @@ pub struct Report {
     /// only when searched for.
     pub total: u32,
     pub window: u32,
-    /// "System prompt", "System tools", "Skills", "Messages"... in the report's order.
-    pub categories: Vec<(String, u32)>,
+    /// "System prompt", "System tools", "Skills", "Messages"... in the report's order, with each category's kind.
+    pub categories: Vec<(String, u32, String)>,
     pub memory: Vec<Named>,
     pub skills: Vec<Named>,
     pub agents: Vec<Named>,
@@ -85,8 +85,17 @@ impl Report {
     pub fn category(&self, name: &str) -> u32 {
         self.categories
             .iter()
-            .find(|(category, _)| category == name)
-            .map_or(0, |(_, tokens)| *tokens)
+            .find(|(category, _, _)| category == name)
+            .map_or(0, |(_, tokens, _)| *tokens)
+    }
+
+    /// The tokens of categories whose kind is deferred, loaded only when searched for.
+    pub fn deferred(&self) -> u32 {
+        self.categories
+            .iter()
+            .filter(|(_, _, kind)| kind == "deferred")
+            .map(|(_, tokens, _)| *tokens)
+            .sum()
     }
 }
 
@@ -132,7 +141,13 @@ pub fn parse(stdout: &str) -> Option<Report> {
         total: count(usage, "total_tokens"),
         window: count(usage, "raw_max_tokens"),
         categories: list(usage, "categories")
-            .map(|category| (text(category, "name"), count(category, "tokens")))
+            .map(|category| {
+                (
+                    text(category, "name"),
+                    count(category, "tokens"),
+                    text(category, "kind"),
+                )
+            })
             .collect(),
         memory: list(usage, "memory_files")
             .map(|file| named(file, "path", "type", ""))
@@ -956,6 +971,8 @@ pub struct View {
     pub remembered: HashMap<Switch, Remembered>,
     /// The folder's local settings, read with the list and after each switch.
     pub local: Value,
+    /// The folder's preset.
+    pub preset: crate::nirvana_preset::PresetView,
 }
 
 #[derive(Default)]
@@ -973,12 +990,14 @@ fn folders() -> &'static Mutex<HashMap<PathBuf, Folder>> {
 
 fn store(cwd: &Path, report: Option<Report>) {
     let local = read_local(cwd).ok();
+    let preset = crate::nirvana_preset::view(cwd);
     let mut folders = folders().lock().unwrap_or_else(|e| e.into_inner());
     let folder = folders.entry(cwd.to_path_buf()).or_default();
     folder.view.reading = false;
     if let Some(local) = local {
         folder.view.local = local;
     }
+    folder.view.preset = preset;
     folder.read_at = Some(Instant::now());
     match report {
         Some(report) => {
@@ -1063,6 +1082,22 @@ pub fn refresh(cwd: &Path) {
     }
 }
 
+/// Refreshes the folder's preset view after p or pin_on (called by P2 route_preload_key and preload_switch).
+#[allow(dead_code)]
+pub fn refresh_preset(cwd: &Path) {
+    let preset = crate::nirvana_preset::view(cwd);
+    #[cfg(test)]
+    TEST_VIEW.with_borrow_mut(|slot| {
+        if let Some(view) = slot.as_mut() {
+            view.preset = preset.clone();
+        }
+    });
+    let mut folders = folders().lock().unwrap_or_else(|e| e.into_inner());
+    let folder = folders.entry(cwd.to_path_buf()).or_default();
+    folder.view.preset = preset;
+    CHANGED.store(true, Ordering::Release);
+}
+
 #[cfg(test)]
 thread_local! {
     static TEST_VIEW: std::cell::RefCell<Option<View>> = const { std::cell::RefCell::new(None) };
@@ -1109,6 +1144,7 @@ mod tests {
         assert_eq!(report.total, 23_607);
         assert_eq!(report.window, 1_000_000);
         assert_eq!(report.category("Memory files"), 155);
+        assert_eq!(report.deferred(), 129_919);
         assert_eq!(report.memory.len(), 3);
         assert_eq!(report.memory[2].source, "AutoMem");
         assert_eq!(report.skills[1].extra, "superpowers");

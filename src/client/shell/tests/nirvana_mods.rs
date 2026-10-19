@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::api::schema::Method;
-use crate::nirvana_preload::{parse, set_view_for_test, View, FIXTURE};
+use crate::nirvana_preload::{parse, set_view_for_test, Switch, View, FIXTURE};
 
 fn agent(kind: &str) -> ClientShellAgent {
     ClientShellAgent {
@@ -161,7 +161,14 @@ fn the_panel_lists_each_group_and_item_with_its_tokens() {
     let (_, rows) = rows_of(&mut state, 120, 70);
     let text = rows.join("\n");
     assert!(text.contains("Preload \u{b7} nirvana-mods-panel"), "{text}");
-    assert!(text.contains("23.6k of 1m preloaded"), "{text}");
+    assert!(
+        text.contains("23.6k a turn \u{b7} 129.9k deferred"),
+        "{text}"
+    );
+    assert!(
+        text.contains("no preset yet: Open Nirvana chooses one"),
+        "{text}"
+    );
     // Grouped by provider (feature 7), in this order: a header follows the panel's border, an item's
     // row starts with its box.
     let headers = [
@@ -761,5 +768,104 @@ fn the_jev_group_switches_the_guide_for_every_agent_and_compact_advice_for_claud
     assert!(message.contains("Codex and agy"), "{message}");
     // Switching off is `nirvana_jev_install::tests`: this panel's view is fixed under test, so a row
     // reads off however often it is switched.
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_header_line_shows_active_preset_and_deferred_tokens() {
+    let dir = folder("header-active");
+    let mut v = view(serde_json::json!({}));
+    v.preset = crate::nirvana_preset::PresetView {
+        name: "3d-print".into(),
+        reason: "matched 3mf marker".into(),
+        off: vec![
+            (Switch::Skill("benchmark".into()), "3d".into()),
+            (Switch::McpServer("bladebro".into()), "3d".into()),
+        ],
+        saved_tokens: 5_102,
+        pinned_on: Vec::new(),
+    };
+    let mut state = state_with(Some("claude"), &dir, v);
+    open(&mut state);
+    let (_, rows) = rows_of(&mut state, 130, 40);
+    let text = rows.join("\n");
+    assert!(
+        text.contains("23.6k a turn \u{b7} 129.9k deferred \u{b7} Preset 3d-print \u{b7} 2 off \u{b7} ~5.1k a turn (estimate) \u{b7} p undo"),
+        "{text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_header_line_shows_undo_preset_and_never_opened_reason() {
+    let dir = folder("header-undo");
+    let mut v = view(serde_json::json!({}));
+    v.preset = crate::nirvana_preset::PresetView {
+        name: crate::nirvana_preset::OFF.into(),
+        reason: "3d-print (turned off with p)".into(),
+        off: Vec::new(),
+        saved_tokens: 0,
+        pinned_on: Vec::new(),
+    };
+    let mut state = state_with(Some("claude"), &dir, v);
+    open(&mut state);
+    let (_, rows) = rows_of(&mut state, 120, 40);
+    let text = rows.join("\n");
+    assert!(
+        text.contains("23.6k a turn \u{b7} 129.9k deferred \u{b7} Preset off \u{b7} p on"),
+        "{text}"
+    );
+
+    // When folder was never opened (empty name), shows PresetView.reason
+    let mut v_never = view(serde_json::json!({}));
+    v_never.preset = crate::nirvana_preset::PresetView {
+        name: String::new(),
+        reason: "no preset yet: Open Nirvana chooses one".into(),
+        off: Vec::new(),
+        saved_tokens: 0,
+        pinned_on: Vec::new(),
+    };
+    let mut state_never = state_with(Some("claude"), &dir, v_never);
+    open(&mut state_never);
+    let (_, rows_never) = rows_of(&mut state_never, 120, 40);
+    let text_never = rows_never.join("\n");
+    assert!(
+        text_never.contains(
+            "23.6k a turn \u{b7} 129.9k deferred \u{b7} no preset yet: Open Nirvana chooses one"
+        ),
+        "{text_never}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_header_line_works_in_narrow_and_wide_forms() {
+    let dir = folder("header-narrow");
+    let mut v = view(serde_json::json!({}));
+    v.preset = crate::nirvana_preset::PresetView {
+        name: "3d-print".into(),
+        reason: "rule".into(),
+        off: vec![(Switch::Skill("benchmark".into()), "3d".into())],
+        saved_tokens: 5_102,
+        pinned_on: Vec::new(),
+    };
+    let mut state = state_with(Some("claude"), &dir, v);
+    open(&mut state);
+
+    // Wide form: width 120
+    let (_, wide_rows) = rows_of(&mut state, 120, 40);
+    let wide_text = wide_rows.join("\n");
+    assert!(
+        wide_text.contains("23.6k a turn \u{b7} 129.9k deferred \u{b7} Preset 3d-print"),
+        "{wide_text}"
+    );
+
+    // Narrow form: width 50
+    let (_, narrow_rows) = rows_of(&mut state, 50, 40);
+    let narrow_text = narrow_rows.join("\n");
+    assert!(
+        narrow_text.contains("23.6k a turn \u{b7} 129.9k deferred"),
+        "{narrow_text}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

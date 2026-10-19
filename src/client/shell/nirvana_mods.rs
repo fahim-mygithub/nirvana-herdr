@@ -31,7 +31,7 @@ use ratatui::style::{Color, Modifier};
 /// The strip is one row.
 pub(super) const STRIP_HEIGHT: u16 = 1;
 /// The panel is at most this wide.
-pub(super) const PANEL_WIDTH: u16 = 92;
+pub(super) const PANEL_WIDTH: u16 = 96;
 /// Rows a page key moves.
 const PAGE: usize = 10;
 /// The token column: "129.9k".
@@ -693,6 +693,21 @@ fn width_of(text: &str) -> u16 {
     width(text)
 }
 
+fn preset_summary(preset: &crate::nirvana_preset::PresetView) -> String {
+    if preset.name.is_empty() {
+        preset.reason.clone()
+    } else if preset.name == crate::nirvana_preset::OFF {
+        "Preset off \u{b7} p on".into()
+    } else {
+        format!(
+            "Preset {} \u{b7} {} off \u{b7} ~{} a turn (estimate) \u{b7} p undo",
+            preset.name,
+            preset.off.len(),
+            preload::short(preset.saved_tokens)
+        )
+    }
+}
+
 /// Draws the panel over `area` (the strip's row down to the panes' bottom).
 pub(super) fn render_panel(
     buffer: &mut Buffer,
@@ -721,16 +736,35 @@ pub(super) fn render_panel(
     let inner_width = rect.width.saturating_sub(4);
 
     // The summary and where the switches go.
+    let preset = preset_summary(&view.preset);
+    let reading = if view.reading { " \u{b7} reading" } else { "" };
     let summary = match &view.report {
-        Some(report) => format!(
-            "{} of {} preloaded \u{b7} Claude Code itself {}{}",
-            preload::short(report.total),
-            preload::short(report.window),
-            preload::short(report.category("System prompt")),
-            if view.reading { " \u{b7} reading" } else { "" }
-        ),
-        None if view.failed => "Claude Code did not answer /context in this folder".into(),
-        None => "reading what Claude preloads here".into(),
+        Some(report) => {
+            let tokens = format!(
+                "{} a turn \u{b7} {} deferred",
+                preload::short(report.total),
+                preload::short(report.deferred())
+            );
+            if preset.is_empty() {
+                format!("{tokens}{reading}")
+            } else {
+                format!("{tokens} \u{b7} {preset}{reading}")
+            }
+        }
+        None if view.failed => {
+            if preset.is_empty() {
+                "Claude Code did not answer /context in this folder".into()
+            } else {
+                format!("Claude Code did not answer /context in this folder \u{b7} {preset}")
+            }
+        }
+        None => {
+            if preset.is_empty() {
+                "reading what Claude preloads here".into()
+            } else {
+                format!("reading what Claude preloads here \u{b7} {preset}")
+            }
+        }
     };
     put_text(
         buffer,
