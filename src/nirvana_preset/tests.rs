@@ -185,6 +185,51 @@ fn preload_toml_is_written_from_the_default_once_and_the_owners_from_then_on() {
     assert_eq!(mine.presets.len(), 1);
 }
 
+#[test]
+fn unedited_preload_toml_upgrades_itself_and_backs_up_old_default() {
+    let dir = scratch("upgrade-preload");
+    let file = dir.join(CONFIG_FILE);
+    let backup = dir.join("backup").join(CONFIG_FILE);
+
+    // 1. Write historical default v1 (from 188ed907), with CRLF
+    std::fs::create_dir_all(&dir).unwrap();
+    let v1_crlf = HISTORICAL_DEFAULTS[0].replace('\n', "\r\n");
+    std::fs::write(&file, &v1_crlf).unwrap();
+
+    // 2. load_config upgrades it to current DEFAULT and backs up v1
+    let cfg = load_config(&dir).unwrap();
+    assert_eq!(cfg, config(), "upgraded config matches current DEFAULT");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        DEFAULT,
+        "installed file is replaced by current DEFAULT"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&backup).unwrap(),
+        v1_crlf,
+        "backup holds the exact old installed file"
+    );
+
+    // 3. Second load_config is a no-op (file is already current DEFAULT)
+    let _ = load_config(&dir).unwrap();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), DEFAULT);
+
+    // 4. An edited file is kept as it is, no backup overwritten
+    let edited = "core = [\"custom\"]\nresume_within_hours = 5\n[preset.custom]\nkeep = [\"*\"]\n";
+    std::fs::write(&file, edited).unwrap();
+    let edited_cfg = load_config(&dir).unwrap();
+    assert_eq!(edited_cfg.core, ["custom"]);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), edited);
+
+    // 5. An unparseable file is refused with "delete it to get herdr's default back"
+    std::fs::write(&file, "not a valid = toml ][\n").unwrap();
+    let err = load_config(&dir).unwrap_err();
+    assert!(
+        err.contains("delete it to get herdr's default back"),
+        "error tells how to get default back: {err}"
+    );
+}
+
 // ---- the fingerprint and the rules --------------------------------------------------------------------------
 
 #[test]

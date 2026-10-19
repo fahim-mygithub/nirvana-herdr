@@ -39,6 +39,11 @@ use crate::nirvana_usage::{self, Freshness, Reading};
 
 /// herdr's first seat table, written to `<home>/nirvana/seats.toml` when that is missing.
 pub const DEFAULT: &str = include_str!("nirvana_seats.toml");
+/// The defaults `seats.toml` has shipped with in past releases (from 0.13.0 on).
+pub const HISTORICAL_DEFAULTS: &[&str] = &[
+    include_str!("nirvana_seats_v1.toml"),
+    include_str!("nirvana_seats_v2.toml"),
+];
 pub const DIR: &str = "nirvana";
 pub const SEATS_FILE: &str = "seats.toml";
 pub const LEASES_FILE: &str = "leases.json";
@@ -581,7 +586,9 @@ pub fn dir() -> PathBuf {
 }
 
 /// The table's text, written from `DEFAULT` when the file is missing, and the owner's from then on.
+/// An installed file that equals an old default upgrades itself after being copied to `<home>/nirvana/backup/`.
 pub fn read_or_create(path: &Path) -> String {
+    let _ = maybe_upgrade(path);
     if let Ok(text) = std::fs::read_to_string(path) {
         return text;
     }
@@ -590,6 +597,75 @@ pub fn read_or_create(path: &Path) -> String {
     }
     let _ = std::fs::write(path, DEFAULT);
     DEFAULT.to_owned()
+}
+
+fn extract_mode_line(text: &str) -> Option<&str> {
+    let mut in_table = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') {
+            in_table = true;
+        }
+        if !in_table && trimmed.starts_with("mode") {
+            let rest = trimmed["mode".len()..].trim_start();
+            if rest.starts_with('=') {
+                return Some(line);
+            }
+        }
+    }
+    None
+}
+
+fn replace_mode_line(text: &str, new_mode_line: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut in_table = false;
+    let mut replaced = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') {
+            in_table = true;
+        }
+        if !in_table && !replaced && trimmed.starts_with("mode") {
+            let rest = trimmed["mode".len()..].trim_start();
+            if rest.starts_with('=') {
+                out.push_str(new_mode_line);
+                out.push('\n');
+                replaced = true;
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if !text.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+fn maybe_upgrade(path: &Path) -> Option<()> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let normalized = text.replace("\r\n", "\n");
+    let mode_line = extract_mode_line(&normalized)?;
+    let canonical = replace_mode_line(&normalized, "mode = \"balanced\"");
+    let current_canonical = DEFAULT.replace("\r\n", "\n");
+    if canonical == current_canonical {
+        return None;
+    }
+    let is_historical = HISTORICAL_DEFAULTS
+        .iter()
+        .any(|hist| canonical == hist.replace("\r\n", "\n"));
+    if !is_historical {
+        return None;
+    }
+    let dir = path.parent()?;
+    let backup_dir = dir.join("backup");
+    let _ = std::fs::create_dir_all(&backup_dir);
+    let _ = std::fs::copy(path, backup_dir.join(SEATS_FILE));
+
+    let upgraded = replace_mode_line(&current_canonical, mode_line);
+    let _ = write_atomic(path, upgraded.as_bytes());
+    Some(())
 }
 
 /// Plan 12 O8a: the table's text with its top-level `mode` set, every other byte as it was. The Seats square's
@@ -3282,6 +3358,53 @@ mod tests {
         ))
         .unwrap_err()
         .contains("class research.read: seat sonnet is listed twice"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unedited_seats_toml_upgrades_itself_preserving_mode_and_backs_up_old_default() {
+        let dir = temp_dir("upgrade-seats");
+        let path = dir.join(SEATS_FILE);
+        let backup = dir.join("backup").join(SEATS_FILE);
+
+        // 1. Install historical default v1 (from 0.13.0, 80ec1044), with CRLF and mode = "efficient"
+        let v1_with_mode = replace_mode_line(HISTORICAL_DEFAULTS[0], "mode = \"efficient\"");
+        let v1_crlf = v1_with_mode.replace('\n', "\r\n");
+        std::fs::write(&path, &v1_crlf).unwrap();
+
+        // 2. read_or_create upgrades to current DEFAULT, putting mode = "efficient" back, and backs up v1
+        let text = read_or_create(&path);
+        let parsed = parse(&text).expect("upgraded seats.toml parses");
+        assert_eq!(parsed.mode, Mode::Efficient, "user's mode setting is preserved");
+        assert!(
+            text.contains("spare_weight = 0.05"),
+            "upgraded seats.toml contains new plan 14 settings"
+        );
+        let current_efficient = replace_mode_line(DEFAULT, "mode = \"efficient\"");
+        assert_eq!(text, current_efficient, "matches current DEFAULT with mode put back");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            current_efficient,
+            "on-disk file is upgraded"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&backup).unwrap(),
+            v1_crlf,
+            "backup holds the exact old installed file"
+        );
+
+        // 3. Second read_or_create is a no-op
+        assert_eq!(read_or_create(&path), current_efficient);
+
+        // 4. An edited file (e.g. customized floor) is kept as it is, no backup overwritten
+        let edited = current_efficient.replace("floor = 0.05", "floor = 0.08");
+        std::fs::write(&path, &edited).unwrap();
+        assert_eq!(read_or_create(&path), edited);
+
+        // 5. Unparseable file is kept as it is
+        std::fs::write(&path, "invalid = toml ][\n").unwrap();
+        assert_eq!(read_or_create(&path), "invalid = toml ][\n");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

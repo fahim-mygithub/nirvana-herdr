@@ -42,6 +42,11 @@ use crate::nirvana_preload::Switch;
 
 /// herdr's first presets and name rules, written to `<home>/nirvana/preload.toml` when that is missing.
 pub const DEFAULT: &str = include_str!("nirvana_preload.toml");
+/// The defaults `preload.toml` has shipped with in past releases.
+pub const HISTORICAL_DEFAULTS: &[&str] = &[
+    include_str!("nirvana_preload_v1.toml"),
+    include_str!("nirvana_preload_v2.toml"),
+];
 pub const CONFIG_FILE: &str = "preload.toml";
 pub const CATALOG_FILE: &str = "preload-catalog.toml";
 /// `<home>/nirvana/preload`: the folder records, the generated settings files, the catalog's last reading.
@@ -288,17 +293,50 @@ pub fn parse_config(text: &str) -> Result<Config, String> {
 }
 
 /// `<dir>/preload.toml`, written from `DEFAULT` when missing (like `seats.toml`), the owner's from then on.
+/// An installed file that equals an old default upgrades itself after being copied to `<dir>/backup/`.
 pub fn load_config(dir: &Path) -> Result<Config, String> {
     let path = dir.join(CONFIG_FILE);
     let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
+        Ok(text) => {
+            if let Some(upgraded) = maybe_upgrade(&path, &text) {
+                upgraded
+            } else {
+                text
+            }
+        }
         Err(_) => {
             let _ = std::fs::create_dir_all(dir);
             let _ = std::fs::write(&path, DEFAULT);
             DEFAULT.to_owned()
         }
     };
-    parse_config(text.trim_start_matches('\u{feff}'))
+    parse_config(text.trim_start_matches('\u{feff}')).map_err(|err| {
+        format!(
+            "{} is refused (delete it to get herdr's default back):\n{err}",
+            path.display()
+        )
+    })
+}
+
+fn maybe_upgrade(path: &Path, text: &str) -> Option<String> {
+    let normalized = text.replace("\r\n", "\n");
+    let current = DEFAULT.replace("\r\n", "\n");
+    if normalized == current {
+        return None;
+    }
+    let is_historical = HISTORICAL_DEFAULTS
+        .iter()
+        .any(|hist| normalized == hist.replace("\r\n", "\n"));
+    if !is_historical {
+        return None;
+    }
+    let dir = path.parent()?;
+    let backup_dir = dir.join("backup");
+    let _ = std::fs::create_dir_all(&backup_dir);
+    let _ = std::fs::copy(path, backup_dir.join(CONFIG_FILE));
+
+    let _ = std::fs::write(path, DEFAULT);
+    Some(DEFAULT.to_owned())
 }
 
 /// `resume_within_hours` of this machine's `preload.toml` (the launch reads it).

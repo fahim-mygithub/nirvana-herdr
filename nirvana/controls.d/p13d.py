@@ -53,4 +53,46 @@ CONTROLS = (
         "matching_presets_combine_keep_tags_and_auto_memory_in_file_order",
         "rust",
     ),
+    # Item 5: unedited defaults upgrade themselves
+    Control(
+        "p13d_preload_upgrade",
+        PRESET,
+        "if let Some(upgraded) = maybe_upgrade(&path, &text) {",
+        "if let Some(upgraded) = None::<String> {",
+        "unedited_preload_toml_upgrades_itself_and_backs_up_old_default",
+        "rust",
+    ),
+    Control(
+        "p13d_preload_backup",
+        PRESET,
+        "let _ = std::fs::copy(path, backup_dir.join(CONFIG_FILE));",
+        "// backup skipped\n    let _ = ();",
+        "unedited_preload_toml_upgrades_itself_and_backs_up_old_default",
+        "rust",
+    ),
+    Control(
+        "p13d_seats_upgrade",
+        SEAT,
+        "    let _ = maybe_upgrade(path);",
+        "    // upgrade skipped\n    let _ = ();",
+        "unedited_seats_toml_upgrades_itself_preserving_mode_and_backs_up_old_default",
+        "rust",
+    ),
+    Control(
+        "p13d_seats_mode_preserved",
+        SEAT,
+        "let upgraded = replace_mode_line(&current_canonical, mode_line);",
+        "let upgraded = current_canonical.clone();",
+        "unedited_seats_toml_upgrades_itself_preserving_mode_and_backs_up_old_default",
+        "rust",
+    ),
+    Control(
+        "p13d_seats_backup",
+        SEAT,
+        "let _ = std::fs::copy(path, backup_dir.join(SEATS_FILE));",
+        "// backup skipped\n    let _ = ();",
+        "unedited_seats_toml_upgrades_itself_preserving_mode_and_backs_up_old_default",
+        "rust",
+    ),
 )
+
