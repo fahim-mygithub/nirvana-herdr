@@ -36,8 +36,30 @@ fn invoked(outcome: &ClientShellInput) -> Vec<crate::api::schema::CommandInvokeP
 fn new_offers_nirvana_claude_code_antigravity_and_a_shell() {
     assert_eq!(
         labels(&menu_state()),
-        ["Nirvana", "Claude Code", "Antigravity", "Shell"]
+        [
+            "Nirvana",
+            "Claude Code",
+            "Antigravity",
+            "Shell",
+            "Fresh Nirvana Claude"
+        ]
     );
+}
+
+/// Plan 13 §6.1: the fresh entry asks for its own kind and makes the window Nirvana's, as Nirvana does.
+#[test]
+fn the_fresh_entry_asks_for_a_fresh_nirvana_and_claims_the_window() {
+    super::super::nirvana_new_menu::CLAIMED_IN_TEST.with(|c| c.borrow_mut().clear());
+    let mut state = menu_state();
+    let mut outcome = ClientShellInput::default();
+    state.activate_context_menu_item(NewKind::MENU.len() + 1, &mut outcome);
+    let calls = invoked(&outcome);
+    assert_eq!(calls.len(), 1, "{:?}", outcome.actions);
+    assert_eq!(calls[0].command_id, "nirvana.new:nirvana-fresh");
+    assert_eq!(calls[0].workspace_id.as_deref(), Some("ws_1"));
+    let claimed = super::super::nirvana_new_menu::CLAIMED_IN_TEST.with(|c| c.borrow().clone());
+    assert_eq!(claimed, vec![std::path::PathBuf::from("/repo")]);
+    assert!(state.overlay.is_none(), "the menu closes");
 }
 
 #[test]

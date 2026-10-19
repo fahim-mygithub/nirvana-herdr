@@ -75,15 +75,11 @@ pub enum NewKind {
 }
 
 impl NewKind {
-    /// O4a's three, in O4a's order (its controls sabotage this line).
-    const AGENTS: [NewKind; 3] = [NewKind::Nirvana, NewKind::ClaudeCode, NewKind::Antigravity];
-    /// The menu: O4a's three with the fresh Nirvana Claude after Nirvana's own entry.
-    pub const MENU: [NewKind; 4] = [
-        Self::AGENTS[0],
-        NewKind::NirvanaFresh,
-        Self::AGENTS[1],
-        Self::AGENTS[2],
-    ];
+    /// O4a's three, above the menu's Shell.
+    pub const MENU: [NewKind; 3] = [NewKind::Nirvana, NewKind::ClaudeCode, NewKind::Antigravity];
+    /// Plan 13: below Shell, so O4a's entries and Shell keep their places (a keybindings test outside this package
+    /// clicks Shell by its index).
+    pub const AFTER_SHELL: [NewKind; 1] = [NewKind::NirvanaFresh];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -109,7 +105,10 @@ impl NewKind {
     }
 
     pub fn from_key(key: &str) -> Option<Self> {
-        Self::MENU.into_iter().find(|kind| kind.key() == key)
+        Self::MENU
+            .into_iter()
+            .chain(Self::AFTER_SHELL)
+            .find(|kind| kind.key() == key)
     }
 
     /// The herdr agent kind label `agent start` takes; the program it types is herdr's own for that kind.
@@ -529,16 +528,10 @@ mod tests {
     #[test]
     fn the_menu_offers_nirvana_claude_code_and_antigravity_in_that_order() {
         let labels: Vec<_> = NewKind::MENU.iter().map(|kind| kind.label()).collect();
-        assert_eq!(
-            labels,
-            [
-                "Nirvana",
-                "Fresh Nirvana Claude",
-                "Claude Code",
-                "Antigravity"
-            ]
-        );
-        for kind in NewKind::MENU {
+        assert_eq!(labels, ["Nirvana", "Claude Code", "Antigravity"]);
+        assert_eq!(NewKind::AFTER_SHELL, [NewKind::NirvanaFresh]);
+        assert_eq!(NewKind::NirvanaFresh.label(), "Fresh Nirvana Claude");
+        for kind in NewKind::MENU.into_iter().chain(NewKind::AFTER_SHELL) {
             assert_eq!(NewKind::from_key(kind.key()), Some(kind));
             assert_eq!(kind.command_id(), format!("nirvana.new:{}", kind.key()));
         }

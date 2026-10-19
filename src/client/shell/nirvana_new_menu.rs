@@ -7,6 +7,9 @@
 //!
 //! Choosing Nirvana also makes this client's Terminal window a Nirvana window (its own button and the folder's
 //! letter) and shows the "Nirvana · <folder>" toast, unless the verb's window already is one.
+//!
+//! Plan 13 §6.1: "Fresh Nirvana Claude", below Shell, is Nirvana Claude that never resumes the folder's last session;
+//! it makes the window Nirvana's too. Below Shell so the entries above keep their places.
 
 use super::*;
 use crate::nirvana_launch::NewKind;
@@ -23,6 +26,14 @@ pub(super) fn items() -> Vec<ClientContextMenuItem> {
         label: "Shell",
         action: ClientContextMenuAction::NewShellSpace,
     });
+    items.extend(
+        NewKind::AFTER_SHELL
+            .iter()
+            .map(|kind| ClientContextMenuItem {
+                label: kind.label(),
+                action: ClientContextMenuAction::NewSpace(*kind),
+            }),
+    );
     items
 }
 
@@ -66,7 +77,7 @@ impl ClientShellState {
                     ),
                     outcome,
                 );
-                if kind == NewKind::Nirvana {
+                if kind.is_nirvana() {
                     if let Some(cwd) = cwd {
                         nirvana_window(std::path::PathBuf::from(cwd));
                     }

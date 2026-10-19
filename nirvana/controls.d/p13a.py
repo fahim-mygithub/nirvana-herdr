@@ -5,6 +5,9 @@ LAUNCH = "src/nirvana_launch.rs"
 NEW = "src/app/nirvana_new.rs"
 WORKER = "src/nirvana_worker.rs"
 TASKBAR = "src/nirvana_taskbar.rs"
+MENU_FILE = "src/client/shell/nirvana_new_menu.rs"
+MENU_LABELS = "new_offers_nirvana_claude_code_antigravity_and_a_shell"
+FRESH_ENTRY = "the_fresh_entry_asks_for_a_fresh_nirvana_and_claims_the_window"
 
 ORDER = "the_default_presets_parse_in_the_files_order_with_their_core_tags_and_rules"
 WRITTEN = "preload_toml_is_written_from_the_default_once_and_the_owners_from_then_on"
@@ -136,6 +139,15 @@ CONTROLS = (
     Control("p13a_plugin_settings_kept", NEW,
             "Some(crate::nirvana_launch::launch_args(\n                    &home,\n                    folder,\n                    resume.as_deref(),\n                ))",
             "{ let _ = resume; Some(kind.args(&home)) }", SERVER, "rust"),
+    # The "new" menu's fresh entry (the team lead gave P1 the two client menu files, 2026-10-18).
+    Control("p13a_fresh_not_listed", MENU_FILE, "        NewKind::AFTER_SHELL\n            .iter()",
+            "        NewKind::AFTER_SHELL[..0]\n            .iter()", MENU_LABELS, "rust"),
+    Control("p13a_fresh_entry_missing", MENU_FILE, "        NewKind::AFTER_SHELL\n            .iter()",
+            "        NewKind::AFTER_SHELL[..0]\n            .iter()", FRESH_ENTRY, "rust"),
+    Control("p13a_fresh_no_claim", MENU_FILE, "if kind.is_nirvana() {", "if kind == NewKind::Nirvana {",
+            FRESH_ENTRY, "rust"),
+    Control("p13a_fresh_key_unknown", LAUNCH, ".chain(Self::AFTER_SHELL)",
+            ".chain(Self::AFTER_SHELL.into_iter().take(0))", MENU, "rust"),
     # The worker and the toast.
     Control("p13a_agy_gets_settings", WORKER, 'if argv.first().map(String::as_str) == Some("claude") {', "if true {",
             WORKER_ARGS, "rust"),
