@@ -3,7 +3,7 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
-## alpha NEXT (foot2): the usage foot shows 5 h and 7 d
+## alpha 0.25.1: the usage foot shows 5 h and 7 d
 
 Package `foot2` (`FOOT-ORDER.md`, record `nirvana/plans/2026-10-19-foot2.md`).
 
