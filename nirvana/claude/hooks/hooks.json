@@ -12,6 +12,15 @@
               "digest"
             ],
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe",
+            "args": [
+              "memory",
+              "record-session"
+            ],
+            "timeout": 10
           }
         ]
       }
@@ -93,6 +102,15 @@
               "stop"
             ],
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe",
+            "args": [
+              "memory",
+              "record-session"
+            ],
+            "timeout": 10
           }
         ]
       }

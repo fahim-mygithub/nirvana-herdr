@@ -45,6 +45,7 @@ mod nirvana_jev_roles;
 mod nirvana_launch;
 mod nirvana_lessons;
 mod nirvana_media;
+mod nirvana_memory_trim;
 mod nirvana_preload;
 mod nirvana_preset;
 mod nirvana_retro;
@@ -53,6 +54,7 @@ mod nirvana_running;
 mod nirvana_seat;
 mod nirvana_seats_square;
 mod nirvana_servers;
+mod nirvana_session_record;
 mod nirvana_spaces;
 mod nirvana_taskbar;
 mod nirvana_usage;
@@ -626,6 +628,11 @@ fn main() -> io::Result<()> {
     // Nirvana fork, plan 13 P1: the smart Preload's presets, catalog and generated settings file.
     if args.get(1).map(String::as_str) == Some("preload") {
         return nirvana_preset::cli(&args[2..]);
+    }
+
+    // Nirvana fork, plan 13 P3: the folder's last session record (run by the hooks) and the auto memory trim.
+    if args.get(1).map(String::as_str) == Some("memory") {
+        return nirvana_memory_trim::cli(&args[2..]);
     }
 
     finish_cli(cli::maybe_run(&args))?;

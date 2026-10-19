@@ -3,6 +3,43 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha NEXT (p13c): the session record and the memory trim (plan 13 P3)
+
+Plan 13, package P3 (`plans/2026-10-18-13-smart-preload.md` §6.1's record, §6.2, §7's `herdr memory`; the record is
+`plans/2026-10-18-13-records/p13c.md`).
+
+- **Changed:** Nirvana Claude's `SessionStart` and `Stop` hooks run `herdr memory record-session`, which writes
+  `<home>/nirvana/sessions/<folder_hash>.json` (`session_id`, `at`, `transcript`) for the folder the session started in.
+  It always exits 0 and writes nothing on a bad hook. The folder is `CLAUDE_PROJECT_DIR`, the hook's `cwd` only as a
+  fallback.
+  **Because:** §6.1: "Open Nirvana on a folder whose record is under `resume_within_hours` old launches with `--resume`"
+  (P1 reads the record). A hook's `cwd` is not the folder the window opened once Claude has changed directory.
+  **Measured:** `claude -p` on 2.1.302 in a scratch folder, hooks dumping stdin and env, one Bash call `cd sub`: `cwd`
+  was `proj` at `SessionStart` and `proj\sub` at `Stop`; `CLAUDE_PROJECT_DIR` was `proj` (forward slashes) at both.
+  `nirvana_session_record::tests::*`; controls `p13c_*` in `controls.d/p13c.py`.
+  **If you remove this:** no record, P1's launch never finds a session to resume and always starts fresh.
+- **Changed:** `herdr memory status|trim|accept|discard|restore [<folder>]` and the module functions P2 calls
+  (`status`, `propose`, `accept`, `discard`). `trim` writes `MEMORY.md.proposed` beside the folder's auto memory index;
+  `accept` copies the original to `<home>/nirvana/backup/memory/<folder_hash>-<time>-<nn>.md`, checks the copy is
+  byte-identical, then replaces the index; `restore` puts the newest backup back. A proposal that drops a link target or
+  a `[[link]]` of the original, or is not smaller, is refused and not written; `accept` checks again.
+  **Because:** §6.2: "Jev's output is rejected if any pointer line of the original is missing from it"; an oversized
+  MEMORY.md is paid every turn (7.8k in the owner's 3D folder, plan §1).
+  **Measured:** on a scratch copy of the owner's largest MEMORY.md (17,694 bytes, 116 entries; the original never
+  touched), two live Jev calls of about $0.001 each: the first, ladder only, took it from 4.4k to 4.1k estimated tokens;
+  the second, with the last phase, to 4.0k (17,694 to 15,980 bytes), the backup byte-identical (sha256), restore
+  byte-identical. `nirvana_memory_trim::tests::*` through a fake Jev.
+  **If you remove this:** an oversized index is trimmed by hand.
+- **Changed:** Jev judges each index entry's hook text (`needed`, `helpful`, `redundant`, one choice question per entry,
+  the 0.7 floor) and code assembles the shorter index with a fixed ladder of cuts; Jev writes no text.
+  **Because:** Jev's wire has probability, choice and score answers and no free text (`nirvana_jev::check_reply`
+  rejects any other type), so plan §6.2's "Jev rewrites the index" cannot be built as worded. A judged cut cannot lose a
+  pointer by construction, and the pointer check proves it.
+  **Measured:** the live call above: Jev rated almost every hook of the owner's index `needed` or `helpful` (their hooks
+  average 8 words), so the ladder's word cuts changed nothing and the last phase, dropping whole hooks one at a time, did
+  the work. This is a hypothesis for other indexes: the size of a terse index is its 116 titles and file names, which this
+  cannot merge.
+  **If you remove this:** the trim needs a model that writes text.
 ## alpha 0.23.0: the smart Preload's engine, a preset per folder at Open Nirvana (plan 13 P1)
 
 Plan 13, package P1 (`plans/2026-10-18-13-smart-preload.md` §2, §3, §4 without the panel, §6.1's launch side, §6.3,
