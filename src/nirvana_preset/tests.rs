@@ -134,7 +134,7 @@ fn the_default_presets_parse_in_the_files_order_with_their_core_tags_and_rules()
     let names: Vec<&str> = config.presets.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(
         names,
-        ["3d-print", "photo", "rust", "web", "python", "research", "blank", "general"]
+        ["3d-print", "photo", "rust", "web", "python", "research", "code", "blank", "general"]
     );
     assert_eq!(
         config.core,
@@ -403,6 +403,51 @@ fn words_match_case_insensitively_on_folder_name_and_readme() {
     assert!(matches_words(&["g-code".into()], "my_g_code", None));
 }
 
+#[test]
+fn code_preset_matches_at_40_percent_across_24_extensions() {
+    let config = config();
+    let code_preset = config.preset("code").expect("code preset exists");
+    assert_eq!(
+        code_preset.keep,
+        ["code", "web", "db", "python", "rust", "c", "kotlin"]
+    );
+    assert!(code_preset.auto_memory);
+    let when = code_preset.when.as_ref().unwrap();
+    assert_eq!(when.share, Some(0.4));
+    let expected_exts = [
+        "c", "cc", "cpp", "cxx", "h", "hpp", "py", "ts", "tsx", "js", "jsx", "mjs", "rs", "go",
+        "java", "kt", "cs", "swift", "rb", "php", "lua", "dart", "scala", "zig",
+    ];
+    assert_eq!(when.ext.len(), 24);
+    for ext in expected_exts {
+        assert!(when.ext.contains(&ext.to_string()), "missing ext: {ext}");
+    }
+
+    let base = scratch("code-preset");
+    // 1. Exactly 40% (2 of 5 files) matching across different code extensions
+    let folder40 = base.join("proj40");
+    touch(
+        &folder40,
+        &["main.zig", "lib.cpp", "data1.csv", "data2.csv", "notes.txt"],
+    );
+    let fp40 = fingerprint(&folder40, &markers());
+    assert_eq!(fp40.files, 5);
+    assert!(
+        matches!(by_rules(&config, &fp40), Ruled::Chosen(c) if c.preset == "code"),
+        "40% code files should trigger code preset"
+    );
+
+    // 2. Below 40% (1 of 3 = 33.3%) should not trigger code preset
+    let folder33 = base.join("proj33");
+    touch(&folder33, &["app.dart", "data.csv", "notes.txt"]);
+    let fp33 = fingerprint(&folder33, &markers());
+    assert_eq!(fp33.files, 3);
+    assert!(
+        !matches!(by_rules(&config, &fp33), Ruled::Chosen(c) if c.preset == "code"),
+        "33% code files should not trigger code preset"
+    );
+}
+
 // ---- Jev for the folder ---------------------------------------------------------------------------------
 
 #[test]
@@ -444,7 +489,7 @@ fn the_folder_question_carries_counts_markers_and_the_readme_never_a_files_text(
     let offered: Vec<&str> = criteria.keys().map(String::as_str).collect();
     // Blank and general are never offered; none always is.
     for name in [
-        "3d-print", "photo", "rust", "web", "python", "research", NONE,
+        "3d-print", "photo", "rust", "web", "python", "research", "code", NONE,
     ] {
         assert!(offered.contains(&name), "{offered:?}");
     }

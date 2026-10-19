@@ -27,4 +27,13 @@ CONTROLS = (
         "words_match_case_insensitively_on_folder_name_and_readme",
         "rust",
     ),
+    # Item 3: code preset with 24 extensions at 40 percent
+    Control(
+        "p13d_code_preset",
+        "src/nirvana_preload.toml",
+        'share = 0.4 }\nkeep = ["code", "web", "db", "python", "rust", "c", "kotlin"]',
+        'share = 0.95 }\nkeep = ["code", "web", "db", "python", "rust", "c", "kotlin"]',
+        "code_preset_matches_at_40_percent_across_24_extensions",
+        "rust",
+    ),
 )

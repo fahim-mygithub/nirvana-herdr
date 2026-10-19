@@ -30,6 +30,8 @@ photo = "editing photographs: colour correction, raw files, batches of photos"
 research = "researching a question across web sources and writing up what was found"
 writing = "writing documents, prose, slides or spreadsheets"
 personal = "personal life: email, calendar, shopping, food delivery, travel, maps"
+c = "C and C++ languages, build systems and debuggers"
+kotlin = "Kotlin language and Android projects"
 
 # The presets in this order. A rule's `when` may hold:
 # - `words = ["..."]`: matched case-insensitively against the folder's name or README (head, 2 KB).
@@ -60,6 +62,10 @@ keep = ["code", "python"]
 [preset.research]
 when = { ext = ["md", "tex", "bib", "pdf"], share = 0.6 }
 keep = ["research", "writing"]
+
+[preset.code]
+when = { ext = ["c", "cc", "cpp", "cxx", "h", "hpp", "py", "ts", "tsx", "js", "jsx", "mjs", "rs", "go", "java", "kt", "cs", "swift", "rb", "php", "lua", "dart", "scala", "zig"], share = 0.4 }
+keep = ["code", "web", "db", "python", "rust", "c", "kotlin"]
 
 [preset.blank]
 when = { blank = true }
