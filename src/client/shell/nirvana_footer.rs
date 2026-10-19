@@ -240,6 +240,17 @@ pub(super) fn render_footer(
         button,
         Style::default().fg(palette.overlay0),
     );
+    let drift = crate::nirvana_accounts::antigravity_drift();
+    if drift.is_some() && area.width >= button_width + 3 {
+        put_text(
+            buffer,
+            area.x + 1 + button_width,
+            button_y,
+            2,
+            " \u{26A0}",
+            Style::default().fg(palette.yellow),
+        );
+    }
     *accounts = Rect::new(area.x, button_y, button_width + 1, 1);
     let area = Rect::new(area.x, area.y, area.width, area.height - 1);
     if area.height == 0 {

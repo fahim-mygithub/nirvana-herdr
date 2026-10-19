@@ -2,6 +2,16 @@
 
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
+
+## alpha NEXT (p18): Antigravity account guard
+
+Package `p18` (`P18-ORDER.md`, record `nirvana/plans/2026-10-19-18-records/p18.md`).
+
+- **Changed:** Herdr records the Antigravity account chosen on sign-in (`herdr account login antigravity`) in `<home>/nirvana/accounts.json` as `{"antigravity": "<email>"}` through an atomic temp file write and rename when ending signed in. A background drift check runs off the draw path every 60s reading the latest `agy` log and whether an `Antigravity.exe` process is running via the existing Toolhelp walk. When the live account drifts from the chosen account, the Accounts row displays `<current> ⚠ chosen <chosen>` in warning color (`palette.yellow`) with its button remaining `[ switch ]`, a cause line is drawn directly under the row explaining why (`The Antigravity app put this account back. Sign the app in as <chosen> too.` if `Antigravity.exe` is running, or `agy went back to this account. Press switch to sign in again.` otherwise), and the sidebar footer's `accounts` button gains a yellow ` ⚠` mark so drift is immediately visible without opening the panel. On narrow widths, the row progressively drops the word `"chosen"` and the chosen email while retaining `⚠`. When the account matches or no choice was recorded, display remains unchanged. No credential files, token databases, or Windows Credential Manager entries are ever opened or written.
+  **Because:** Plan 18 L1 & L2: The Antigravity desktop app and `agy` CLI share a single credential slot in Windows Credential Manager, causing hourly sign-in flips back to `fahim.private@gmail.com`. The guard remembers the owner's chosen account, alerts immediately upon drift across both the panel and the foot button, and guides the owner to align desktop app credentials.
+  **Measured:** 5 unit tests in `src/nirvana_accounts.rs` testing atomic record writing, pure `drift_ruling` across all states (matching, different, no choice, no log), cause lines, and cache update signaling; 4 client tests in `src/client/shell/tests/nirvana_footer.rs` verifying wide/narrow row formatting, cause lines, yellow warning colors, and footer button warning mark; 18 sabotage controls in `nirvana/controls.d/p18.py` covering all assertions; dry-run controls total increased from 1027 to 1045 with 1045 of 1045 matched 1x; all 18 `p18_` controls pass individually.
+  **If you remove this:** hourly sign-in flips by the Antigravity desktop app will silently switch `agy` to an unchosen account without warning in the Accounts panel or sidebar foot button.
+
 ## alpha 0.28.0: the Git square, old Nirvana's GitHub card in the strip (plan 16)
 
 Package `p16` (`P16-ORDER.md`, record `nirvana/plans/2026-10-19-16-records/p16.md`).

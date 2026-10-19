@@ -11,6 +11,7 @@
 //! status`, `codex login status`) and, for Antigravity, which has no status command, the line its own log writes on
 //! every start. Codex's email is only in its `auth.json`, a credential file, so Codex shows its sign-in kind.
 
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -252,9 +253,111 @@ pub const READ_EVERY: Duration = Duration::from_secs(10);
 /// A panel that has not asked for this long is closed: the worker stops reading.
 const ASKED_WITHIN: Duration = Duration::from_secs(3);
 
+pub const DRIFT_CHECK_EVERY: Duration = Duration::from_secs(60);
+
 static CHANGED: AtomicBool = AtomicBool::new(false);
 static ASKED_AT: AtomicU64 = AtomicU64::new(0);
 static READ_NOW: AtomicBool = AtomicBool::new(false);
+static DRIFT: Mutex<Option<Drift>> = Mutex::new(None);
+
+/// The ruling when the live agy account differs from the chosen account (plan 18 §3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Drift {
+    pub chosen: String,
+    pub current: String,
+    pub app_running: bool,
+}
+
+impl Drift {
+    /// The sentence explaining why the account drifted (plan 18 §3).
+    pub fn cause_line(&self) -> String {
+        cause_line(&self.chosen, self.app_running)
+    }
+}
+
+/// The sentence explaining why the account drifted (plan 18 §3).
+pub fn cause_line(chosen: &str, app_running: bool) -> String {
+    if app_running {
+        format!("The Antigravity app put this account back. Sign the app in as {chosen} too.")
+    } else {
+        "agy went back to this account. Press switch to sign in again.".to_string()
+    }
+}
+
+/// Pure ruling function of (chosen, current, app running) (plan 18 §3).
+/// Returns Some(Drift) when both chosen and current are known and differ; None otherwise.
+pub fn drift_ruling(
+    chosen: Option<&str>,
+    current: Option<&str>,
+    app_running: bool,
+) -> Option<Drift> {
+    let chosen = chosen?.trim();
+    if chosen.is_empty() {
+        return None;
+    }
+    let current = current?.trim();
+    if current.is_empty() {
+        return None;
+    }
+    if chosen != current {
+        Some(Drift {
+            chosen: chosen.to_owned(),
+            current: current.to_owned(),
+            app_running,
+        })
+    } else {
+        None
+    }
+}
+
+/// Whether an `Antigravity.exe` process is currently running, via the existing Toolhelp walk (plan 18 §3).
+pub fn is_antigravity_running() -> bool {
+    crate::nirvana_servers::read::processes()
+        .iter()
+        .any(|p| p.name.eq_ignore_ascii_case("Antigravity.exe"))
+}
+
+/// Checks drift given a home folder, an agy log directory, and whether the app is running.
+pub fn check_drift_in(home: &Path, log_dir: &Path, app_running: bool) -> Option<Drift> {
+    let chosen = read_chosen(home, Cli::Antigravity);
+    let current = agy_account_in(log_dir);
+    drift_ruling(chosen.as_deref(), current.as_deref(), app_running)
+}
+
+/// Stores a new drift ruling in the cache, marking `CHANGED` if different.
+pub fn store_drift(ruling: Option<Drift>) {
+    let mut lock = DRIFT.lock().unwrap_or_else(|e| e.into_inner());
+    if *lock != ruling {
+        *lock = ruling;
+        CHANGED.store(true, Ordering::Release);
+    }
+}
+
+/// Updates the cached drift ruling from disk and process state.
+pub fn check_drift() {
+    let home = crate::nirvana::home();
+    let log_dir = agy_log_dir();
+    let ruling = match (home, log_dir) {
+        (Some(home), Some(log_dir)) => {
+            let app_running = is_antigravity_running();
+            check_drift_in(&home, &log_dir, app_running)
+        }
+        _ => None,
+    };
+    store_drift(ruling);
+}
+
+/// The cached drift ruling. Off the draw path: reads memory only, never touches files or processes.
+pub fn antigravity_drift() -> Option<Drift> {
+    #[cfg(test)]
+    if let Some(drift) = TEST_DRIFT.with_borrow(Clone::clone) {
+        return drift;
+    }
+    if !cfg!(test) {
+        start_worker();
+    }
+    DRIFT.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -291,18 +394,28 @@ fn start_worker() {
     static STARTED: OnceLock<()> = OnceLock::new();
     STARTED.get_or_init(|| {
         let _ = crate::thread_spawn::spawn_named("nirvana-accounts", || {
-            let mut last: Option<Instant> = None;
+            let mut last_accounts: Option<Instant> = None;
+            let mut last_drift: Option<Instant> = None;
             loop {
+                let read_now = READ_NOW.swap(false, Ordering::AcqRel);
                 let asked = now_ms().saturating_sub(ASKED_AT.load(Ordering::Acquire))
                     < ASKED_WITHIN.as_millis() as u64;
-                let due = last.is_none_or(|last| last.elapsed() >= READ_EVERY)
-                    || READ_NOW.swap(false, Ordering::AcqRel);
-                if asked && due {
+                let accounts_due =
+                    last_accounts.is_none_or(|last| last.elapsed() >= READ_EVERY) || read_now;
+                if asked && accounts_due {
                     for cli in Cli::ALL {
                         store(cli, read(cli));
                     }
-                    last = Some(Instant::now());
+                    last_accounts = Some(Instant::now());
                 }
+
+                let drift_due =
+                    last_drift.is_none_or(|last| last.elapsed() >= DRIFT_CHECK_EVERY) || read_now;
+                if drift_due {
+                    check_drift();
+                    last_drift = Some(Instant::now());
+                }
+
                 std::thread::sleep(Duration::from_millis(250));
             }
         });
@@ -336,11 +449,17 @@ pub fn take_changed() -> bool {
 #[cfg(test)]
 thread_local! {
     static TEST_ROWS: std::cell::RefCell<Option<Vec<Account>>> = const { std::cell::RefCell::new(None) };
+    static TEST_DRIFT: std::cell::RefCell<Option<Option<Drift>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
 pub fn set_accounts_for_test(rows: Option<Vec<Account>>) {
     TEST_ROWS.with_borrow_mut(|slot| *slot = rows);
+}
+
+#[cfg(test)]
+pub fn set_drift_for_test(drift: Option<Option<Drift>>) {
+    TEST_DRIFT.with_borrow_mut(|slot| *slot = drift);
 }
 
 // ---- the sign-in tab ----
@@ -487,6 +606,74 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
     }
 }
 
+// ---- chosen account record (plan 18 §2) ----
+
+pub const ACCOUNTS_FILE: &str = "accounts.json";
+
+/// `<home>/nirvana/accounts.json`, where herdr records the chosen account.
+pub fn accounts_path(home: &Path) -> PathBuf {
+    home.join("nirvana").join(ACCOUNTS_FILE)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AccountsFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub antigravity: Option<String>,
+}
+
+/// Reads the chosen account for `cli` from `<home>/nirvana/accounts.json`.
+/// Only Antigravity is tracked (plan 18 §2); Claude Code and Codex keep one account per CLI.
+pub fn read_chosen(home: &Path, cli: Cli) -> Option<String> {
+    if cli != Cli::Antigravity {
+        return None;
+    }
+    let path = accounts_path(home);
+    let text = std::fs::read_to_string(path).ok()?;
+    let accounts: AccountsFile = serde_json::from_str(&text).ok()?;
+    accounts.antigravity.filter(|a| !a.trim().is_empty())
+}
+
+/// Writes `<home>/nirvana/accounts.json` with `{"antigravity": "<email>"}` through a temp file and rename.
+/// Only Antigravity is tracked (plan 18 §2).
+pub fn write_chosen(home: &Path, cli: Cli, account: &str) -> std::io::Result<()> {
+    if cli != Cli::Antigravity {
+        return Ok(());
+    }
+    let path = accounts_path(home);
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("no parent dir"))?;
+    std::fs::create_dir_all(dir)?;
+    let mut data: serde_json::Map<String, serde_json::Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    data.insert(
+        "antigravity".to_string(),
+        serde_json::Value::String(account.to_string()),
+    );
+    let json = serde_json::to_string_pretty(&data)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let temp = dir.join(format!(".{ACCOUNTS_FILE}.{}.tmp", std::process::id()));
+    std::fs::write(&temp, json.as_bytes())?;
+    std::fs::rename(&temp, &path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp);
+    })?;
+    Ok(())
+}
+
+/// Records the account at the end of `herdr account login antigravity` when it ends signed in.
+/// Returns whether an account was recorded.
+pub fn record_after_login(home: &Path, cli: Cli, after: &Signed) -> std::io::Result<bool> {
+    if cli == Cli::Antigravity {
+        if let Signed::In(ref email) = after {
+            write_chosen(home, cli, email)?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn login(cli: Cli) -> std::io::Result<()> {
     let before = read(cli);
     println!("{}", intro(cli, &before));
@@ -511,7 +698,11 @@ fn login(cli: Cli) -> std::io::Result<()> {
                 }
             }
         }
-        println!("\nNow: {}", read(cli).text());
+        let after = read(cli);
+        println!("\nNow: {}", after.text());
+        if let Some(home) = crate::nirvana::home() {
+            let _ = record_after_login(&home, cli, &after);
+        }
     }
     println!("Press Enter to close this tab.");
     wait_enter();
@@ -613,5 +804,206 @@ mod tests {
         let text = intro(Cli::Antigravity, &Signed::In("old@example.com".into()));
         assert!(text.contains("/logout") && text.contains("old@example.com"));
         assert!(!intro(Cli::Antigravity, &Signed::Out).contains("/logout"));
+    }
+
+    #[test]
+    fn the_chosen_antigravity_account_records_on_signed_in_login_and_not_signed_out() {
+        let guard = crate::nirvana::with_test_home("p18-record");
+        let path = accounts_path(&guard.path);
+        assert!(!path.exists());
+
+        // Signed out does not write the file
+        let recorded = record_after_login(&guard.path, Cli::Antigravity, &Signed::Out).unwrap();
+        assert!(!recorded);
+        assert!(!path.exists());
+        assert_eq!(read_chosen(&guard.path, Cli::Antigravity), None);
+
+        // Claude signed in does not write the file
+        let recorded = record_after_login(
+            &guard.path,
+            Cli::Claude,
+            &Signed::In("me@example.com".into()),
+        )
+        .unwrap();
+        assert!(!recorded);
+        assert!(!path.exists());
+        assert_eq!(read_chosen(&guard.path, Cli::Claude), None);
+
+        // Antigravity signed in writes the file atomically through a temp file and rename
+        let recorded = record_after_login(
+            &guard.path,
+            Cli::Antigravity,
+            &Signed::In("personal.fahim.amin@gmail.com".into()),
+        )
+        .unwrap();
+        assert!(recorded);
+        assert!(path.is_file());
+
+        // Read it back
+        assert_eq!(
+            read_chosen(&guard.path, Cli::Antigravity),
+            Some("personal.fahim.amin@gmail.com".into())
+        );
+
+        // Check file content is JSON with {"antigravity": "..."}
+        let content = std::fs::read_to_string(&path).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            val.get("antigravity").and_then(|v| v.as_str()),
+            Some("personal.fahim.amin@gmail.com")
+        );
+
+        // Temp file is cleaned up after rename
+        let temp = guard
+            .path
+            .join("nirvana")
+            .join(format!(".{ACCOUNTS_FILE}.{}.tmp", std::process::id()));
+        assert!(!temp.exists());
+    }
+
+    #[test]
+    fn drift_ruling_matching_different_no_choice_no_log() {
+        // Matching: no drift
+        assert_eq!(
+            drift_ruling(Some("same@example.com"), Some("same@example.com"), false),
+            None
+        );
+        assert_eq!(
+            drift_ruling(Some("same@example.com"), Some("same@example.com"), true),
+            None
+        );
+
+        // Different: drift with app_running captured
+        assert_eq!(
+            drift_ruling(
+                Some("chosen@example.com"),
+                Some("current@example.com"),
+                false
+            ),
+            Some(Drift {
+                chosen: "chosen@example.com".into(),
+                current: "current@example.com".into(),
+                app_running: false,
+            })
+        );
+        assert_eq!(
+            drift_ruling(
+                Some("chosen@example.com"),
+                Some("current@example.com"),
+                true
+            ),
+            Some(Drift {
+                chosen: "chosen@example.com".into(),
+                current: "current@example.com".into(),
+                app_running: true,
+            })
+        );
+
+        // No choice: no drift
+        assert_eq!(drift_ruling(None, Some("current@example.com"), false), None);
+        assert_eq!(
+            drift_ruling(Some(""), Some("current@example.com"), false),
+            None
+        );
+
+        // No log: no drift
+        assert_eq!(drift_ruling(Some("chosen@example.com"), None, false), None);
+        assert_eq!(
+            drift_ruling(Some("chosen@example.com"), Some(""), false),
+            None
+        );
+    }
+
+    #[test]
+    fn cause_line_with_and_without_app_process() {
+        let chosen = "personal.fahim.amin@gmail.com";
+        // While Antigravity.exe runs
+        assert_eq!(
+            cause_line(chosen, true),
+            "The Antigravity app put this account back. Sign the app in as personal.fahim.amin@gmail.com too."
+        );
+        // When Antigravity.exe is not running
+        assert_eq!(
+            cause_line(chosen, false),
+            "agy went back to this account. Press switch to sign in again."
+        );
+    }
+
+    #[test]
+    fn check_drift_in_on_recorded_log_folders() {
+        let guard = crate::nirvana::with_test_home("p18-drift-logs");
+        let log_dir =
+            std::env::temp_dir().join(format!("nirvana-agy-drift-logs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&log_dir);
+        std::fs::create_dir_all(&log_dir).unwrap();
+
+        let log_line = |email: &str| {
+            format!("I1017 12:00:12.211749 1 server_oauth.go:229] {AGY_SIGNED_IN}{email}\n")
+        };
+
+        // Write chosen account in test home
+        write_chosen(&guard.path, Cli::Antigravity, "chosen@example.com").unwrap();
+
+        // 1. Different account in log: returns drift
+        std::fs::write(
+            log_dir.join("cli-20261019_100000.log"),
+            log_line("fahim.private@gmail.com"),
+        )
+        .unwrap();
+        let drift = check_drift_in(&guard.path, &log_dir, true).expect("drift detected");
+        assert_eq!(drift.chosen, "chosen@example.com");
+        assert_eq!(drift.current, "fahim.private@gmail.com");
+        assert!(drift.app_running);
+        assert_eq!(
+            drift.cause_line(),
+            "The Antigravity app put this account back. Sign the app in as chosen@example.com too."
+        );
+
+        // 2. Matching account in log (newer start): no drift
+        std::fs::write(
+            log_dir.join("cli-20261019_110000.log"),
+            log_line("chosen@example.com"),
+        )
+        .unwrap();
+        assert_eq!(check_drift_in(&guard.path, &log_dir, true), None);
+
+        // 3. No choice (accounts.json removed): no drift
+        let _ = std::fs::remove_file(accounts_path(&guard.path));
+        assert_eq!(check_drift_in(&guard.path, &log_dir, true), None);
+
+        // 4. No log (empty log dir): no drift even with chosen account
+        write_chosen(&guard.path, Cli::Antigravity, "chosen@example.com").unwrap();
+        let empty_dir =
+            std::env::temp_dir().join(format!("nirvana-agy-empty-logs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&empty_dir);
+        std::fs::create_dir_all(&empty_dir).unwrap();
+        assert_eq!(check_drift_in(&guard.path, &empty_dir, true), None);
+
+        let _ = std::fs::remove_dir_all(&log_dir);
+        let _ = std::fs::remove_dir_all(&empty_dir);
+    }
+
+    #[test]
+    fn store_drift_updates_cache_and_sets_take_changed() {
+        let _ = take_changed();
+        let drift = Drift {
+            chosen: "chosen@example.com".into(),
+            current: "current@example.com".into(),
+            app_running: false,
+        };
+
+        // Setting new drift marks changed
+        store_drift(Some(drift.clone()));
+        assert!(take_changed());
+        assert_eq!(antigravity_drift(), Some(drift.clone()));
+
+        // Setting identical drift does not mark changed
+        store_drift(Some(drift.clone()));
+        assert!(!take_changed());
+
+        // Clearing drift marks changed
+        store_drift(None);
+        assert!(take_changed());
+        assert_eq!(antigravity_drift(), None);
     }
 }

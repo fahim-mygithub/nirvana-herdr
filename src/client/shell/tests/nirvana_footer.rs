@@ -648,3 +648,251 @@ fn dotted_windows_are_never_shown_in_the_foot() {
         other => panic!("expected Figure::Windows, got {other:?}"),
     }
 }
+
+#[test]
+fn accounts_footer_button_shows_warning_mark_on_drift_and_hides_when_matched() {
+    let drift = crate::nirvana_accounts::Drift {
+        chosen: "personal.fahim.amin@gmail.com".into(),
+        current: "fahim.private@gmail.com".into(),
+        app_running: true,
+    };
+
+    // 1. When drift is set, foot button shows "accounts ⚠" with ⚠ in yellow
+    crate::nirvana_accounts::set_drift_for_test(Some(Some(drift)));
+    let (state, frame, rows) = compose_with("", 106, 40, None);
+    let button_y = rows.len() - 1;
+    let button_row = &rows[button_y];
+    assert!(
+        button_row.contains("accounts \u{26A0}"),
+        "button row should contain 'accounts ⚠': {button_row:?}"
+    );
+
+    // Verify ⚠ cell color is palette.yellow
+    let row_cells = &frame.cells[button_y * frame.width as usize..][..(frame.width as usize)];
+    let warn_cell = row_cells
+        .iter()
+        .find(|cell| cell.symbol == "\u{26A0}")
+        .expect("warning mark cell in footer");
+    assert_eq!(
+        warn_cell.fg,
+        crate::protocol::color_to_u32(state.config.palette.yellow),
+        "warning mark cell should use palette.yellow"
+    );
+
+    // 2. When drift is cleared (matches or no choice), " ⚠" is hidden
+    crate::nirvana_accounts::set_drift_for_test(Some(None));
+    let (_, _, rows) = compose_with("", 106, 40, None);
+    let button_row = &rows[rows.len() - 1];
+    assert!(button_row.contains("accounts"));
+    assert!(
+        !button_row.contains('\u{26A0}'),
+        "no warning mark when matched: {button_row:?}"
+    );
+
+    crate::nirvana_accounts::set_drift_for_test(None);
+}
+
+#[test]
+fn accounts_panel_row_and_cause_line_with_app_running_wide() {
+    use crate::client::shell::nirvana_accounts::AccountsPanel;
+    let chosen = "personal.fahim.amin@gmail.com";
+    let current = "fahim.private@gmail.com";
+    let drift = crate::nirvana_accounts::Drift {
+        chosen: chosen.into(),
+        current: current.into(),
+        app_running: true,
+    };
+    let accounts_list = vec![
+        crate::nirvana_accounts::Account {
+            cli: crate::nirvana_accounts::Cli::Claude,
+            signed: crate::nirvana_accounts::Signed::In("me@example.com · max".into()),
+        },
+        crate::nirvana_accounts::Account {
+            cli: crate::nirvana_accounts::Cli::Codex,
+            signed: crate::nirvana_accounts::Signed::Out,
+        },
+        crate::nirvana_accounts::Account {
+            cli: crate::nirvana_accounts::Cli::Antigravity,
+            signed: crate::nirvana_accounts::Signed::In(current.into()),
+        },
+    ];
+
+    crate::nirvana_accounts::set_accounts_for_test(Some(accounts_list));
+    crate::nirvana_accounts::set_drift_for_test(Some(Some(drift)));
+
+    let (mut state, _, _) = compose_with("", 140, 40, None);
+    state.nirvana_accounts = Some(AccountsPanel::default());
+
+    let frame = state.compose(140, 40).expect("composed frame").frame;
+    let rows: Vec<String> = frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| row.iter().map(|cell| cell.symbol.as_str()).collect())
+        .collect();
+
+    let (agy_y, agy_row) = row_with(&rows, "Antigravity").expect("Antigravity row");
+    assert!(
+        agy_row.contains(&format!("{current} \u{26A0} chosen {chosen}")),
+        "wide row format: {agy_row:?}"
+    );
+    assert!(
+        agy_row.contains("[ switch ]"),
+        "button stays switch: {agy_row:?}"
+    );
+
+    // The ⚠ cell in the Antigravity row has palette.yellow
+    let row_cells = &frame.cells[agy_y * frame.width as usize..][..(frame.width as usize)];
+    let warn_cell = row_cells
+        .iter()
+        .find(|cell| cell.symbol == "\u{26A0}")
+        .expect("warning mark in agy row");
+    assert_eq!(
+        warn_cell.fg,
+        crate::protocol::color_to_u32(state.config.palette.yellow),
+        "warning mark should be palette.yellow"
+    );
+
+    // The line under the row says why while Antigravity.exe runs
+    let cause_row = &rows[agy_y + 1];
+    let expected_cause =
+        format!("The Antigravity app put this account back. Sign the app in as {chosen} too.");
+    assert!(
+        cause_row.contains(&expected_cause),
+        "cause line under row: {cause_row:?}"
+    );
+
+    crate::nirvana_accounts::set_accounts_for_test(None);
+    crate::nirvana_accounts::set_drift_for_test(None);
+}
+
+#[test]
+fn accounts_panel_cause_line_without_app_running() {
+    use crate::client::shell::nirvana_accounts::AccountsPanel;
+    let chosen = "personal.fahim.amin@gmail.com";
+    let current = "fahim.private@gmail.com";
+    let drift = crate::nirvana_accounts::Drift {
+        chosen: chosen.into(),
+        current: current.into(),
+        app_running: false,
+    };
+    let accounts_list = vec![
+        crate::nirvana_accounts::Account {
+            cli: crate::nirvana_accounts::Cli::Claude,
+            signed: crate::nirvana_accounts::Signed::In("me@example.com · max".into()),
+        },
+        crate::nirvana_accounts::Account {
+            cli: crate::nirvana_accounts::Cli::Codex,
+            signed: crate::nirvana_accounts::Signed::Out,
+        },
+        crate::nirvana_accounts::Account {
+            cli: crate::nirvana_accounts::Cli::Antigravity,
+            signed: crate::nirvana_accounts::Signed::In(current.into()),
+        },
+    ];
+
+    crate::nirvana_accounts::set_accounts_for_test(Some(accounts_list));
+    crate::nirvana_accounts::set_drift_for_test(Some(Some(drift)));
+
+    let (mut state, _, _) = compose_with("", 130, 40, None);
+    state.nirvana_accounts = Some(AccountsPanel::default());
+
+    let frame = state.compose(130, 40).expect("composed frame").frame;
+    let rows: Vec<String> = frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| row.iter().map(|cell| cell.symbol.as_str()).collect())
+        .collect();
+
+    let (agy_y, _) = row_with(&rows, "Antigravity").expect("Antigravity row");
+    let cause_row = &rows[agy_y + 1];
+    assert!(
+        cause_row.contains("agy went back to this account. Press switch to sign in again."),
+        "cause line without app running: {cause_row:?}"
+    );
+
+    crate::nirvana_accounts::set_accounts_for_test(None);
+    crate::nirvana_accounts::set_drift_for_test(None);
+}
+
+#[test]
+fn accounts_row_narrow_drops_chosen_word_then_drops_email_keeping_warning_mark() {
+    use crate::client::shell::nirvana_accounts::{
+        account_drift_text, row_text_with_drift, AccountsPanel,
+    };
+    let chosen = "personal.fahim.amin@gmail.com";
+    let current = "fahim.private@gmail.com";
+    let drift = crate::nirvana_accounts::Drift {
+        chosen: chosen.into(),
+        current: current.into(),
+        app_running: true,
+    };
+
+    // Wide room (65 cells): includes "chosen" word and chosen email
+    let wide = account_drift_text(current, &drift, 65);
+    assert_eq!(wide, format!("{current} \u{26A0} chosen {chosen}"));
+
+    // Medium room (55 cells): drops the word "chosen", keeps email
+    let medium = account_drift_text(current, &drift, 55);
+    assert_eq!(medium, format!("{current} \u{26A0} {chosen}"));
+    assert!(!medium.contains("chosen"));
+
+    // Narrow room (35 cells): drops chosen email, keeps warning mark
+    let narrow = account_drift_text(current, &drift, 35);
+    assert_eq!(narrow, format!("{current} \u{26A0}"));
+    assert!(!narrow.contains(chosen));
+    assert!(narrow.contains('\u{26A0}'));
+
+    // Row text formatting with drift
+    let account = crate::nirvana_accounts::Account {
+        cli: crate::nirvana_accounts::Cli::Antigravity,
+        signed: crate::nirvana_accounts::Signed::In(current.into()),
+    };
+    let (left, button) = row_text_with_drift(&account, Some(&drift), 92);
+    assert!(left.contains(&format!("{current} \u{26A0} chosen {chosen}")));
+    assert_eq!(button, "[ switch ]");
+
+    // Narrow row text
+    let (narrow_left, _) = row_text_with_drift(&account, Some(&drift), 55);
+    assert!(narrow_left.contains('\u{26A0}'));
+    assert!(!narrow_left.contains("chosen"));
+
+    // Client compose test at narrow window width (85): row drops the word "chosen" and email, keeps ⚠
+    let accounts_list = vec![
+        crate::nirvana_accounts::Account {
+            cli: crate::nirvana_accounts::Cli::Claude,
+            signed: crate::nirvana_accounts::Signed::In("me@example.com · max".into()),
+        },
+        crate::nirvana_accounts::Account {
+            cli: crate::nirvana_accounts::Cli::Codex,
+            signed: crate::nirvana_accounts::Signed::Out,
+        },
+        crate::nirvana_accounts::Account {
+            cli: crate::nirvana_accounts::Cli::Antigravity,
+            signed: crate::nirvana_accounts::Signed::In(current.into()),
+        },
+    ];
+    crate::nirvana_accounts::set_accounts_for_test(Some(accounts_list));
+    crate::nirvana_accounts::set_drift_for_test(Some(Some(drift)));
+
+    let (mut state, _, _) = compose_with("", 85, 40, None);
+    state.nirvana_accounts = Some(AccountsPanel::default());
+    let frame = state.compose(85, 40).expect("composed frame").frame;
+    let rows: Vec<String> = frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| row.iter().map(|cell| cell.symbol.as_str()).collect())
+        .collect();
+
+    let (_, agy_row) = row_with(&rows, "Antigravity").expect("Antigravity row in narrow");
+    assert!(
+        agy_row.contains('\u{26A0}'),
+        "narrow row retains warning mark: {agy_row:?}"
+    );
+    assert!(
+        !agy_row.contains("chosen"),
+        "narrow row drops chosen word: {agy_row:?}"
+    );
+
+    crate::nirvana_accounts::set_accounts_for_test(None);
+    crate::nirvana_accounts::set_drift_for_test(None);
+}

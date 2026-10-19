@@ -14,7 +14,7 @@ use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::style::{Color, Modifier};
 
 /// The panel's width at most; it sits at the bottom left of the pane area, beside the button.
-pub(super) const ACCOUNTS_WIDTH: u16 = 72;
+pub(super) const ACCOUNTS_WIDTH: u16 = 104;
 /// The CLI name column: "Antigravity" and "Claude Code" are the widest.
 const NAME: usize = 12;
 
@@ -40,16 +40,47 @@ pub(super) struct AccountsHits {
 /// 2026-10-17, of "[ accounts ]": "have it looks like the text here" (the "new ... menu" row).
 pub(super) const BUTTON: &str = "accounts";
 
+/// Formats the account text for a drifted row given available cell room (plan 18 §3).
+/// Wide: "<current> ⚠ chosen <chosen>".
+/// Narrow: drops the word "chosen" ("<current> ⚠ <chosen>"), then drops the chosen email ("<current> ⚠").
+pub(super) fn account_drift_text(
+    current: &str,
+    drift: &crate::nirvana_accounts::Drift,
+    room: usize,
+) -> String {
+    let full = format!("{current} \u{26A0} chosen {}", drift.chosen);
+    if unicode_width::UnicodeWidthStr::width(full.as_str()) <= room {
+        return full;
+    }
+    let without_chosen_word = format!("{current} \u{26A0} {}", drift.chosen);
+    if unicode_width::UnicodeWidthStr::width(without_chosen_word.as_str()) <= room {
+        return without_chosen_word;
+    }
+    let mark_only = format!("{current} \u{26A0}");
+    fit(&mark_only, room)
+}
+
 /// One row's text: the name, the account, and the button at the right of `inner` cells.
-pub(super) fn row_text(account: &Account, inner: usize) -> (String, String) {
+pub(super) fn row_text_with_drift(
+    account: &Account,
+    drift: Option<&crate::nirvana_accounts::Drift>,
+    inner: usize,
+) -> (String, String) {
     let button = format!("[ {} ]", account.signed.button());
     let room = inner.saturating_sub(2 + NAME + 1 + button.len() + 1);
-    let left = format!(
-        "\u{25CF} {:<NAME$} {}",
-        account.cli.name(),
-        fit(&account.signed.text(), room)
-    );
+    let text = match drift {
+        Some(drift) if account.cli == Cli::Antigravity => {
+            account_drift_text(&account.signed.text(), drift, room)
+        }
+        _ => fit(&account.signed.text(), room),
+    };
+    let left = format!("\u{25CF} {:<NAME$} {}", account.cli.name(), text);
     (left, button)
+}
+
+/// Backward-compatible row_text without drift.
+pub(super) fn row_text(account: &Account, inner: usize) -> (String, String) {
+    row_text_with_drift(account, None, inner)
 }
 
 /// Draws the panel at the bottom left of `area`, as tall as its rows.
@@ -61,8 +92,10 @@ pub(super) fn render_accounts_panel(
     palette: &Palette,
 ) -> AccountsHits {
     let mut hits = AccountsHits::default();
+    let drift = crate::nirvana_accounts::antigravity_drift();
+    let cause_lines = if drift.is_some() { 1 } else { 0 };
     let width = area.width.saturating_sub(2).min(ACCOUNTS_WIDTH);
-    let height = accounts.len() as u16 + 6;
+    let height = accounts.len() as u16 + 6 + cause_lines;
     if width < 44 || area.height < height + 1 {
         return hits;
     }
@@ -81,12 +114,32 @@ pub(super) fn render_accounts_panel(
         } else {
             base
         };
-        let (left, button) = row_text(account, inner);
+        let (left, button) = if drift.is_some() {
+            row_text_with_drift(account, drift.as_ref(), inner)
+        } else {
+            row_text(account, inner)
+        };
         let row = Rect::new(x, y, inner as u16, 1);
         buffer.set_style(row, style);
         put_text(buffer, x, y, inner as u16, &left, style);
         let (r, g, b) = account.cli.colour();
         put_text(buffer, x, y, 1, "\u{25CF}", style.fg(Color::Rgb(r, g, b)));
+        if account.cli == Cli::Antigravity {
+            if let Some(drift) = &drift {
+                let button_width = button.len() as u16;
+                let room = inner.saturating_sub(2 + NAME + 1 + button_width as usize + 1);
+                let text = account_drift_text(&account.signed.text(), drift, room);
+                let text_x = x + 2 + NAME as u16 + 1;
+                put_text(
+                    buffer,
+                    text_x,
+                    y,
+                    room as u16,
+                    &text,
+                    style.fg(palette.yellow),
+                );
+            }
+        }
         let button_width = button.len() as u16;
         let button_x = row.right().saturating_sub(button_width);
         put_text(
@@ -101,6 +154,13 @@ pub(super) fn render_accounts_panel(
             .push((Rect::new(button_x, y, button_width, 1), account.cli));
         hits.rows.push((row, index));
         y += 1;
+        if account.cli == Cli::Antigravity {
+            if let Some(drift) = &drift {
+                let cause = drift.cause_line();
+                put_text(buffer, x, y, inner as u16, &fit(&cause, inner), muted);
+                y += 1;
+            }
+        }
     }
     y += 1;
     put_text(
