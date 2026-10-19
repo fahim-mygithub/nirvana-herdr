@@ -3375,13 +3375,20 @@ mod tests {
         // 2. read_or_create upgrades to current DEFAULT, putting mode = "efficient" back, and backs up v1
         let text = read_or_create(&path);
         let parsed = parse(&text).expect("upgraded seats.toml parses");
-        assert_eq!(parsed.mode, Mode::Efficient, "user's mode setting is preserved");
+        assert_eq!(
+            parsed.mode,
+            Mode::Efficient,
+            "user's mode setting is preserved"
+        );
         assert!(
             text.contains("spare_weight = 0.05"),
             "upgraded seats.toml contains new plan 14 settings"
         );
         let current_efficient = replace_mode_line(DEFAULT, "mode = \"efficient\"");
-        assert_eq!(text, current_efficient, "matches current DEFAULT with mode put back");
+        assert_eq!(
+            text, current_efficient,
+            "matches current DEFAULT with mode put back"
+        );
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             current_efficient,
