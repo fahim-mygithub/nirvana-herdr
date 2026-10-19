@@ -56,6 +56,10 @@ Plan 13, package P1 (`plans/2026-10-18-13-smart-preload.md` §2, §3, §4 withou
   `nirvana_resumes_the_folders_last_session_with_its_preset_file_and_fresh_never_resumes`; not run against a real
   session record, which P3 writes. Hypothesis: P3's record format is §8's.
   **If you remove this:** every open starts a fresh session.
+- **Changed:** fix round: manual local toggles win and local denied MCP servers merge; unreadable folders read general, not blank; first open with no reading writes base settings immediately without waiting and toasts next open; core checks full keys, prefixes, and short names; top-level markers only; workers find parent preset up to root; strict session ID and path validation on resume; tests never resolve real installed home.
+  **Because:** review findings 1–9, 11–13 from `P13A-REVIEW.md`.
+  **Measured:** 19 new controls `p13a_*` in `nirvana/controls.d/p13a.py` all passing.
+  **If you remove this:** review regressions return.
 ## alpha 0.22.1: a seats.toml from before 0.22.0 still parses
 
 - **Changed:** `constants.spare_weight` is optional in seats.toml, defaulting to 0.05.

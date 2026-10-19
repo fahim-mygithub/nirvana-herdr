@@ -1158,7 +1158,8 @@ pub fn exec(
         let argv = match argv(&spec) {
             Ok(argv) => with_preset_settings(
                 argv,
-                crate::nirvana_preset::worker_settings_for(&project.root).as_deref(),
+                crate::nirvana_preset::worker_settings_for(Path::new(&seated.cwd), &project.root)
+                    .as_deref(),
             ),
             Err(why) => {
                 end_failed(project, &journal, run, &seated, &why, None)?;

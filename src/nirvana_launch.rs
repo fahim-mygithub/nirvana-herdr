@@ -216,9 +216,23 @@ pub fn session_record_path(home: &Path, folder: &Path) -> PathBuf {
         .join(format!("{}.json", folder_hash(folder)))
 }
 
-/// A session id as Claude Code writes one: it is typed into a shell, so only `[A-Za-z0-9-]`, at most 64.
+/// Encodes a project folder path the way Claude Code encodes it for ~/.claude/projects/<enc>.
+/// Each character that is not an ASCII letter or digit becomes `-`.
+pub fn encode_project_folder(folder: &Path) -> String {
+    let s = folder.to_string_lossy().replace('\\', "/");
+    let trimmed = s.trim_end_matches('/');
+    let s = if trimmed.is_empty() { &s[..] } else { trimmed };
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// A session id as Claude Code writes one: it matches ^[A-Za-z0-9][A-Za-z0-9-]{0,63}$.
 fn plain_session_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    !id.is_empty()
+        && id.len() <= 64
+        && id.as_bytes()[0].is_ascii_alphanumeric()
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 /// §6.1: the session to resume, when the folder's record is under `within_hours` old at `now` (Unix seconds) and
@@ -232,10 +246,29 @@ pub fn resume_session_at(
     let text = std::fs::read_to_string(session_record_path(home, folder)).ok()?;
     let record: SessionRecord = serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?;
     let at = crate::nirvana_usage::rfc3339(&record.at)?;
+    if at > now + 300 {
+        return None;
+    }
     let age = now.saturating_sub(at);
+    let transcript = Path::new(&record.transcript);
+    let expected_folder_enc = encode_project_folder(folder);
+    let stem_matches = transcript.file_stem().and_then(|s| s.to_str()) == Some(&record.session_id);
+    let parent_matches = transcript
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .is_some_and(|parent| {
+            if cfg!(windows) {
+                parent.eq_ignore_ascii_case(&expected_folder_enc)
+            } else {
+                parent == expected_folder_enc
+            }
+        });
     if !plain_session_id(&record.session_id)
         || (age as f64) >= within_hours * 3600.0
         || !Path::new(&record.transcript).is_file()
+        || !stem_matches
+        || !parent_matches
     {
         return None;
     }
@@ -598,7 +631,11 @@ mod tests {
     fn a_recent_session_with_its_transcript_resumes_and_anything_else_starts_fresh() {
         let home = scratch_home("resume");
         let folder = Path::new(r"C:\work\print");
-        let transcript = home.join("t.jsonl");
+        let enc = encode_project_folder(folder);
+        let transcript_dir = home.join(&enc);
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        let session_id = "6f1c2a3b-0000-4000-8000-000000000001";
+        let transcript = transcript_dir.join(format!("{session_id}.jsonl"));
         std::fs::write(&transcript, "{}\n").unwrap();
         let at = "2026-10-18T10:00:00Z";
         let then = crate::nirvana_usage::rfc3339(at).unwrap();
@@ -607,16 +644,10 @@ mod tests {
             None,
             "no record"
         );
-        record(
-            &home,
-            folder,
-            "6f1c2a3b-0000-4000-8000-000000000001",
-            at,
-            &transcript,
-        );
+        record(&home, folder, session_id, at, &transcript);
         assert_eq!(
             resume_session_at(&home, folder, then + 3600, 24.0).as_deref(),
-            Some("6f1c2a3b-0000-4000-8000-000000000001")
+            Some(session_id)
         );
         // The record's folder is the folder's hash: the same folder in another case still resumes.
         assert!(resume_session_at(&home, Path::new("c:/WORK/print/"), then + 60, 24.0).is_some());
@@ -630,6 +661,27 @@ mod tests {
         std::fs::remove_file(&transcript).unwrap();
         assert_eq!(resume_session_at(&home, folder, then + 60, 24.0), None);
         std::fs::write(&transcript, "{}\n").unwrap();
+        // Finding 7: transcript file stem must equal session id.
+        let wrong_stem = transcript_dir.join("other-id.jsonl");
+        std::fs::write(&wrong_stem, "{}\n").unwrap();
+        record(&home, folder, session_id, at, &wrong_stem);
+        assert_eq!(resume_session_at(&home, folder, then + 60, 24.0), None);
+        // Finding 7: transcript parent folder must equal Claude Code's encoding of folder.
+        let wrong_parent_dir = home.join("C--other-folder");
+        std::fs::create_dir_all(&wrong_parent_dir).unwrap();
+        let wrong_parent = wrong_parent_dir.join(format!("{session_id}.jsonl"));
+        std::fs::write(&wrong_parent, "{}\n").unwrap();
+        record(&home, folder, session_id, at, &wrong_parent);
+        assert_eq!(resume_session_at(&home, folder, then + 60, 24.0), None);
+        // Finding 7: leading hyphen in session id is rejected.
+        let hyphen_transcript = transcript_dir.join("-leading-hyphen.jsonl");
+        std::fs::write(&hyphen_transcript, "{}\n").unwrap();
+        record(&home, folder, "-leading-hyphen", at, &hyphen_transcript);
+        assert_eq!(resume_session_at(&home, folder, then + 60, 24.0), None);
+        // Finding 7: at cannot be more than 5 minutes (300 s) in the future.
+        record(&home, folder, session_id, at, &transcript);
+        assert_eq!(resume_session_at(&home, folder, then - 301, 24.0), None);
+        assert!(resume_session_at(&home, folder, then - 60, 24.0).is_some());
         // An id that is not one Claude Code writes is never typed into a shell.
         record(&home, folder, "x; rm -rf /", at, &transcript);
         assert_eq!(resume_session_at(&home, folder, then + 60, 24.0), None);

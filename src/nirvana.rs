@@ -45,9 +45,52 @@ pub fn home() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os(HOME_ENV).filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(home));
     }
+    #[cfg(test)]
+    {
+        None
+    }
+    #[cfg(not(test))]
     std::env::var_os("LOCALAPPDATA")
         .filter(|v| !v.is_empty())
         .map(|base| PathBuf::from(base).join("Programs").join("Nirvana-Herdr"))
+}
+
+#[cfg(test)]
+pub fn test_home_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+#[cfg(test)]
+pub struct TestHomeGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    pub path: PathBuf,
+}
+
+#[cfg(test)]
+impl Drop for TestHomeGuard {
+    fn drop(&mut self) {
+        std::env::remove_var(HOME_ENV);
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+#[cfg(test)]
+pub fn with_test_home(name: &str) -> TestHomeGuard {
+    let guard = test_home_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let path = std::env::temp_dir().join(format!(
+        "nirvana-test-home-{}-{}-{}",
+        name,
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).unwrap();
+    std::env::set_var(HOME_ENV, &path);
+    TestHomeGuard { _lock: guard, path }
 }
 
 pub fn installed_exe_in(home: &Path) -> PathBuf {

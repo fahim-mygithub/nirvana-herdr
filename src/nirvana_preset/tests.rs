@@ -4,9 +4,15 @@ use super::*;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+static SCRATCH_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
 /// A scratch folder of this test process, emptied first.
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("nirvana-p13a-{}-{name}", std::process::id()));
+    let count = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!(
+        "nirvana-p13a-{}-{count}-{name}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -151,6 +157,13 @@ fn the_default_presets_parse_in_the_files_order_with_their_core_tags_and_rules()
     }
     // A typo in the owner's file is said, never half-read.
     assert!(parse_config("core = []\n[preset.x]\nkeeps = [\"code\"]\n").is_err());
+    // Finding 12: preset_order keeps file order for headers with inline comments and single quotes.
+    let commented = parse_config(
+        "[preset.'beta'] # comment 1\nkeep = [\"b\"]\n[preset.alpha] # comment 2\nkeep = [\"a\"]\n",
+    )
+    .unwrap();
+    let ordered_names: Vec<&str> = commented.presets.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(ordered_names, ["beta", "alpha"]);
 }
 
 #[test]
@@ -225,16 +238,51 @@ fn a_marker_beats_a_share_and_two_close_shares_go_to_jev() {
     .unwrap();
     let even = scratch("close");
     touch(&even, &["a.stl", "b.stl", "c.md", "d.md", "e.md"]);
-    // 40% and 60% are 20 points apart: no tie, and the first in file order wins, whatever its share.
+    // 40% stl and 60% md: highest share wins (b), not file order.
     assert!(matches!(
         by_rules(&close, &fingerprint(&even, &close.markers())),
-        Ruled::Chosen(c) if c.preset == "a"
+        Ruled::Chosen(c) if c.preset == "b"
     ));
     let tie = scratch("tie");
     touch(&tie, &["a.stl", "b.stl", "c.md", "d.md"]);
     assert!(matches!(
         by_rules(&close, &fingerprint(&tie, &close.markers())),
         Ruled::Ask(why) if why == "a 50% and b 50% are within 10%"
+    ));
+    // Finding 4: 80% .3mf against 20% .jpg picks 3d over photo.
+    let photo_3d = parse_config(
+        "[preset.print]\nwhen = { ext = [\"3mf\"], share = 0.2 }\nkeep = [\"3d-print\"]\n\
+         [preset.photo]\nwhen = { ext = [\"jpg\"], share = 0.2 }\nkeep = [\"photo\"]\n",
+    )
+    .unwrap();
+    let sample = scratch("3mf-vs-jpg");
+    touch(&sample, &["1.3mf", "2.3mf", "3.3mf", "4.3mf", "pic.jpg"]);
+    let fp_photo_3d = fingerprint(&sample, &photo_3d.markers());
+    assert!(matches!(
+        by_rules(&photo_3d, &fp_photo_3d),
+        Ruled::Chosen(c) if c.preset == "print"
+    ));
+    // Finding 12: A marker is a top-level file only. A deep .3mf counts toward extension shares, never as a marker.
+    let deep_sample = scratch("deep-3mf-marker");
+    touch(&deep_sample, &["sub/model.3mf", "main.rs"]);
+    let marker_cfg = parse_config(
+        "[preset.marked]\nwhen = { marker = [\"*.3mf\"] }\nkeep = [\"3d-print\"]\n\
+         [preset.rust]\nwhen = { ext = [\"rs\"], share = 0.5 }\nkeep = [\"rust\"]\n",
+    )
+    .unwrap();
+    let fp_deep = fingerprint(&deep_sample, &marker_cfg.markers());
+    assert!(!fp_deep.markers.contains("*.3mf"));
+    assert_eq!(fp_deep.ext.get("3mf"), Some(&1));
+    assert!(matches!(
+        by_rules(&marker_cfg, &fp_deep),
+        Ruled::Chosen(c) if c.preset == "rust"
+    ));
+    touch(&deep_sample, &["top.3mf"]);
+    let fp_top = fingerprint(&deep_sample, &marker_cfg.markers());
+    assert!(fp_top.markers.contains("*.3mf"));
+    assert!(matches!(
+        by_rules(&marker_cfg, &fp_top),
+        Ruled::Chosen(c) if c.preset == "marked"
     ));
 }
 
@@ -415,6 +463,11 @@ fn past_the_wall_the_open_goes_ahead_on_general_and_the_answer_is_used_next_time
         (record.choice.as_str(), record.by.as_str(), record.retry),
         (GENERAL, "timeout", true)
     );
+    // Finding 8: A late Jev answer updates only the folder record's cached choice.
+    // It never rewrites the generated settings file or the pins.
+    let generated = settings_path(&dir, &folder);
+    std::fs::create_dir_all(generated.parent().unwrap()).unwrap();
+    std::fs::write(&generated, "{\"initial\":true}\n").unwrap();
     // The asking thread records Jev's answer when it comes.
     let deadline = Instant::now() + Duration::from_secs(5);
     let late = loop {
@@ -427,6 +480,11 @@ fn past_the_wall_the_open_goes_ahead_on_general_and_the_answer_is_used_next_time
     assert_eq!(
         (late.choice.as_str(), late.by.as_str(), late.retry),
         ("python", "jev", false)
+    );
+    // The generated file was NOT rewritten by the late Jev answer.
+    assert_eq!(
+        std::fs::read_to_string(&generated).unwrap(),
+        "{\"initial\":true}\n"
     );
     // ...so the next open spends nothing.
     assert_eq!(
@@ -675,10 +733,24 @@ fn seeded(name: &str) -> (PathBuf, Config, Catalog, Reading) {
                 vec!["personal".into()],
                 "owner".into(),
             ),
+            // Finding 1: An item whose catalog tags include "core" is never switched off.
+            (
+                "skill:tagged-core-helper".into(),
+                vec!["core".into()],
+                "owner".into(),
+            ),
         ],
     )
     .unwrap();
     let catalog = read_catalog(&dir);
+    let mut reading = reading;
+    reading.items.insert(
+        "skill:tagged-core-helper".into(),
+        ReadItem {
+            tokens: 100,
+            about: "helper".into(),
+        },
+    );
     (dir, config, catalog, reading)
 }
 
@@ -709,6 +781,7 @@ fn each_fixture_preset_switches_off_what_section_9_expects() {
         "skill:bambu-h2c-cosplay-print",
         "skill:blender-stl-manipulation",
         "skill:dataviz",
+        "skill:tagged-core-helper",
         "mcp:bladebro",
         "mcp:plugin:context7:context7",
         "plugin:superpowers@superpowers-marketplace",
@@ -732,6 +805,7 @@ fn each_fixture_preset_switches_off_what_section_9_expects() {
         !blank_keys.contains(&"skill:scholar-core"),
         "blank keeps research"
     );
+    assert!(!blank_keys.contains(&"skill:tagged-core-helper"));
     // rust: "the 3D, photo and personal items are off."
     let rust = off_items(&config, "rust", &catalog, Some(&reading), &[]);
     let rust_keys = keys(&rust);
@@ -744,6 +818,7 @@ fn each_fixture_preset_switches_off_what_section_9_expects() {
         assert!(rust_keys.contains(&off), "{off}: {rust_keys:?}");
     }
     assert!(!rust_keys.contains(&"plugin:rust-analyzer-lsp@claude-plugins-official"));
+    assert!(!rust_keys.contains(&"skill:tagged-core-helper"));
     assert!(!rust_keys.contains(&AUTO_MEMORY));
     // general and an unknown preset switch nothing.
     assert!(off_items(&config, GENERAL, &catalog, Some(&reading), &[]).is_empty());
@@ -942,10 +1017,10 @@ fn the_reading_lists_switchable_items_with_their_turn_cost() {
             "plugin:github@claude-plugins-official",
             "plugin:superpowers@superpowers-marketplace",
             "skill:benchmark",
-            "skill:dataviz",
             "skill:docx",
         ]
     );
+    assert!(!reading.items.contains_key("skill:dataviz"));
     assert_eq!(reading.items["skill:benchmark"].tokens, 112);
     // Deferred tool schemas are not a turn's cost: a connected server's share of instructions and the tool list.
     let share = (2_685 + 618) / 3;
@@ -1003,6 +1078,13 @@ fn names_rules_and_core_match_as_written() {
         assert!(is_core(&config, core), "{core}");
     }
     assert!(!is_core(&config, "plugin:nirvana-cc@nirvana-c"));
+    let mut config_keys = config.clone();
+    config_keys.core.push("skill:my-helper".into());
+    config_keys.core.push("claude.ai Gmail".into());
+    assert!(is_core(&config_keys, "skill:my-helper"));
+    assert!(is_core(&config_keys, "skill:MY-HELPER"));
+    assert!(is_core(&config_keys, "mcp:claude.ai Gmail"));
+    assert!(is_core(&config_keys, "mcp:CLAUDE.AI GMAIL"));
     for switch in [
         Switch::Skill("x".into()),
         Switch::McpServer("claude.ai Gmail".into()),
@@ -1010,5 +1092,264 @@ fn names_rules_and_core_match_as_written() {
         Switch::AutoMemory,
     ] {
         assert_eq!(switch_of(&key_of(&switch).unwrap()), Some(switch));
+    }
+}
+
+#[test]
+fn at_open_with_no_reading_writes_plugin_settings_alone_and_returns_next_open_toast() {
+    let dir = scratch("at_open_no_reading");
+    let folder = scratch("folder_no_reading");
+    let _ = std::fs::remove_file(dir.join(READING_FILE));
+    let toast = at_open_in(&dir, &folder, None);
+    assert_eq!(toast.as_deref(), Some("preset from next open"));
+    assert!(settings_path(&dir, &folder).is_file());
+    assert!(worker_settings_path(&dir, &folder).is_file());
+    let worker_text = std::fs::read_to_string(worker_settings_path(&dir, &folder)).unwrap();
+    assert_eq!(worker_text.trim(), "{}");
+}
+
+#[test]
+fn manual_local_settings_win_over_preset_generated_settings() {
+    let dir = scratch("local_toggles_dir");
+    let folder = scratch("local_toggles_project");
+    let _ = load_config(&dir).unwrap();
+    write_atomic(
+        &dir.join(CATALOG_FILE),
+        "\"skill:scholar-core\" = [\"research\"] # rule\n\
+         \"skill:bambu-h2c-cosplay-print\" = [\"3d-print\"] # rule\n\
+         \"plugin:kotlin-lsp@claude-plugins-official\" = [\"kotlin\"] # rule\n\
+         \"mcp:claude.ai Gmail\" = [\"personal\"] # rule\n",
+    )
+    .unwrap();
+    let reading = Reading {
+        items: BTreeMap::from([
+            (
+                "skill:scholar-core".into(),
+                ReadItem {
+                    tokens: 100,
+                    about: String::new(),
+                },
+            ),
+            (
+                "skill:bambu-h2c-cosplay-print".into(),
+                ReadItem {
+                    tokens: 200,
+                    about: String::new(),
+                },
+            ),
+            (
+                "plugin:kotlin-lsp@claude-plugins-official".into(),
+                ReadItem {
+                    tokens: 300,
+                    about: String::new(),
+                },
+            ),
+            (
+                "mcp:claude.ai Gmail".into(),
+                ReadItem {
+                    tokens: 400,
+                    about: String::new(),
+                },
+            ),
+        ]),
+        total: 1000,
+        at: 100,
+    };
+    write_atomic(
+        &preload_dir(&dir).join(READING_FILE),
+        &serde_json::to_string(&reading).unwrap(),
+    )
+    .unwrap();
+
+    let local_dir = folder.join(".claude");
+    std::fs::create_dir_all(&local_dir).unwrap();
+    std::fs::write(
+        local_dir.join("settings.local.json"),
+        serde_json::json!({
+            "skillOverrides": {
+                "scholar-core": "on"
+            },
+            "enabledPlugins": {
+                "kotlin-lsp@claude-plugins-official": true
+            },
+            "autoMemoryEnabled": true,
+            "deniedMcpServers": [
+                { "serverName": "manual-disabled-mcp" }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let record = Record {
+        folder: folder.display().to_string(),
+        fingerprint: "abc".into(),
+        preset: ON.into(),
+        choice: "3d-print".into(),
+        reason: "rule".into(),
+        by: "rule".into(),
+        retry: false,
+        pinned_on: Vec::new(),
+        at: utc_now(),
+    };
+    let outcome = regenerate(&dir, &folder, &record).unwrap();
+    let off_keys: Vec<&str> = outcome.off.iter().map(|(k, _)| k.as_str()).collect();
+    assert!(
+        !off_keys.contains(&"skill:scholar-core"),
+        "scholar-core was manually enabled"
+    );
+    assert!(
+        !off_keys.contains(&"plugin:kotlin-lsp@claude-plugins-official"),
+        "kotlin was manually enabled"
+    );
+    assert!(
+        !off_keys.contains(&AUTO_MEMORY),
+        "auto memory was manually enabled"
+    );
+    assert!(
+        off_keys.contains(&"mcp:claude.ai Gmail"),
+        "Gmail should still be off"
+    );
+
+    let gen: Value =
+        serde_json::from_str(&std::fs::read_to_string(&outcome.settings).unwrap()).unwrap();
+    let denied = gen
+        .get("deniedMcpServers")
+        .and_then(Value::as_array)
+        .unwrap();
+    let denied_names: Vec<&str> = denied
+        .iter()
+        .filter_map(|e| e.get("serverName").and_then(Value::as_str))
+        .collect();
+    assert!(denied_names.contains(&"claude.ai Gmail"));
+    assert!(denied_names.contains(&"manual-disabled-mcp"));
+
+    std::fs::write(local_dir.join("settings.local.json"), "{ invalid json = ").unwrap();
+    let outcome_bad = regenerate(&dir, &folder, &record).unwrap();
+    assert!(outcome_bad.settings.is_file());
+}
+
+#[test]
+fn unreadable_folder_reads_general_never_blank() {
+    let dir = scratch("unreadable_dir");
+    let _ = load_config(&dir).unwrap();
+    let non_existent = dir.join("does_not_exist_subfolder");
+    let record = choose(&dir, &non_existent, None, Duration::ZERO).unwrap();
+    assert_eq!(record.choice, GENERAL);
+    assert_ne!(record.choice, "blank");
+}
+
+#[test]
+fn set_preset_on_unopened_folder_runs_rules_and_jev() {
+    let dir = scratch("unopened_set_preset_dir");
+    let folder = scratch("unopened_folder");
+    let _ = load_config(&dir).unwrap();
+    touch(&folder, &["sample.stl"]);
+    let outcome = set_preset_in_with_judge(&dir, &folder, true, None).unwrap();
+    assert_eq!(outcome.record.choice, "3d-print");
+    assert_eq!(outcome.record.preset, ON);
+}
+
+#[test]
+fn worker_settings_finds_nearest_ancestor_up_to_root() {
+    let dir = scratch("worker_finds_dir");
+    let root = scratch("worker_repo_root");
+    let sub = root.join("packages").join("app");
+    let deep = sub.join("src");
+    std::fs::create_dir_all(&deep).unwrap();
+
+    let sub_worker = worker_settings_path(&dir, &sub);
+    std::fs::create_dir_all(sub_worker.parent().unwrap()).unwrap();
+    std::fs::write(&sub_worker, "{}").unwrap();
+
+    let found = worker_settings_in(&dir, &deep, &root);
+    assert_eq!(found, Some(sub_worker.clone()));
+
+    let _ = std::fs::remove_file(&sub_worker);
+    let root_worker = worker_settings_path(&dir, &root);
+    std::fs::write(&root_worker, "{}").unwrap();
+    let found_root = worker_settings_in(&dir, &deep, &root);
+    assert_eq!(found_root, Some(root_worker.clone()));
+
+    let _ = std::fs::remove_file(&root_worker);
+    let above_root = root.parent().unwrap();
+    let above_worker = worker_settings_path(&dir, above_root);
+    std::fs::write(&above_worker, "{}").unwrap();
+    let found_none = worker_settings_in(&dir, &deep, &root);
+    assert_eq!(found_none, None);
+    let _ = std::fs::remove_file(&above_worker);
+}
+
+#[test]
+fn at_open_broken_config_removes_stale_settings_files() {
+    let dir = scratch("at_open_broken_dir");
+    let folder = scratch("at_open_broken_project");
+    let _ = load_config(&dir).unwrap();
+    let reading = Reading {
+        items: BTreeMap::new(),
+        total: 0,
+        at: 100,
+    };
+    write_atomic(
+        &preload_dir(&dir).join(READING_FILE),
+        &serde_json::to_string(&reading).unwrap(),
+    )
+    .unwrap();
+
+    let _ = at_open_in(&dir, &folder, None);
+    assert!(settings_path(&dir, &folder).is_file());
+    assert!(worker_settings_path(&dir, &folder).is_file());
+
+    std::fs::write(dir.join(CONFIG_FILE), "broken [ toml = =").unwrap();
+
+    let toast = at_open_in(&dir, &folder, None);
+    assert_eq!(toast, None);
+    assert!(!settings_path(&dir, &folder).is_file());
+    assert!(!worker_settings_path(&dir, &folder).is_file());
+}
+
+#[test]
+fn tag_with_unoffered_high_confidence_is_recorded_as_unsure() {
+    let dir = scratch("tag_unoffered_dir");
+    let config = config();
+    let recorded = Recorded::new(vec![Ok(json!({
+        "i1": choice("cooking", 0.95),
+        "i2": choice("code", 0.20)
+    }))]);
+    let tagged = tag_with(
+        recorded.as_ref(),
+        &dir,
+        &config,
+        &[
+            ("skill:bake".into(), "baking".into()),
+            ("skill:prog".into(), "coding".into()),
+        ],
+        1,
+    );
+    assert_eq!(tagged.tagged, 0);
+    assert_eq!(tagged.left_on, 2);
+    let catalog = read_catalog(&dir);
+    assert_eq!(
+        catalog.entries["skill:bake"].source,
+        "jev unsure cooking 0.95"
+    );
+    assert_eq!(catalog.entries["skill:prog"].source, "jev none 0.20");
+}
+
+#[test]
+fn nirvana_preset_never_resolves_real_installed_home_in_tests() {
+    let _lock = crate::nirvana::test_home_lock().lock().unwrap();
+    let old = std::env::var_os(crate::nirvana::HOME_ENV);
+    std::env::remove_var(crate::nirvana::HOME_ENV);
+    let resolved = crate::nirvana::home();
+    if let Some(ref val) = old {
+        std::env::set_var(crate::nirvana::HOME_ENV, val);
+    }
+    if let Some(home) = resolved {
+        let s = home.to_string_lossy().to_lowercase();
+        assert!(
+            !s.contains("programs\\nirvana-herdr") && !s.contains("programs/nirvana-herdr"),
+            "resolved real installed home in test: {home:?}"
+        );
     }
 }

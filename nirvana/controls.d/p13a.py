@@ -37,6 +37,15 @@ MENU = "the_menu_offers_nirvana_claude_code_and_antigravity_in_that_order"
 SERVER = "nirvana_resumes_the_folders_last_session_with_its_preset_file_and_fresh_never_resumes"
 WORKER_ARGS = "a_claude_worker_gets_the_folders_preset_file_and_agy_does_not"
 TOAST = "the_open_toast_carries_the_presets_line_after_the_folder"
+NIRVANA = "src/nirvana.rs"
+AT_OPEN_NO_WAIT = "at_open_with_no_reading_writes_plugin_settings_alone_and_returns_next_open_toast"
+LOCAL_SETTINGS = "manual_local_settings_win_over_preset_generated_settings"
+NO_REAL_HOME = "nirvana_preset_never_resolves_real_installed_home_in_tests"
+UNREADABLE = "unreadable_folder_reads_general_never_blank"
+SET_PRESET = "set_preset_on_unopened_folder_runs_rules_and_jev"
+WORKER_FINDS = "worker_settings_finds_nearest_ancestor_up_to_root"
+AT_OPEN_BROKEN = "at_open_broken_config_removes_stale_settings_files"
+TAG_UNOFFERED = "tag_with_unoffered_high_confidence_is_recorded_as_unsure"
 
 CONTROLS = (
     # preload.toml: file order, the defaults, a typo refused, written once.
@@ -59,8 +68,8 @@ CONTROLS = (
             "if !SKIP_DIRS.contains(&low.as_str()) && !crate::nirvana_jev::excluded_dir(&low) {", "if true {",
             WALK, "rust"),
     Control("p13a_bucket_exact", PRESET, "32 - count.leading_zeros()", "count", WALK, "rust"),
-    Control("p13a_git_no_marker", PRESET, 'const MARKERS: [&str; 6] = [\n    ".git",',
-            'const MARKERS: [&str; 6] = [\n    ".gitx",', WALK, "rust"),
+    Control("p13a_git_no_marker", PRESET, 'const MARKERS: [&str; 8] = [\n    ".git",',
+            'const MARKERS: [&str; 8] = [\n    ".gitx",', WALK, "rust"),
     # Jev for the folder: the floor, none, the cache, a failure, the wall.
     Control("p13a_folder_floor_ignored", PRESET, "if known && confidence >= CHOICE_FLOOR {", "if known {",
             FLOOR, "rust"),
@@ -86,6 +95,8 @@ CONTROLS = (
             TAG, "rust"),
     Control("p13a_call_cap_ignored", PRESET, "if out.calls >= max_calls {", "if false {", TAG, "rust"),
     # What goes off (§3.3) and the generated files (§2).
+    Control("p13a_core_catalog_tag_switched_off", PRESET,
+            '|| entry\n                    .tags\n                    .iter()\n                    .any(|tag| tag.eq_ignore_ascii_case("core"))', "/* dropped */", OFF, "rust"),
     Control("p13a_core_switched_off", PRESET, "                || is_core(config, key)\n                || pinned",
             "                || pinned", OFF, "rust"),
     Control("p13a_keep_ignored", PRESET,
@@ -97,10 +108,10 @@ CONTROLS = (
             "if preset.auto_memory && !pinned", OFF, "rust"),
     Control("p13a_switch_left_on", PRESET, "crate::nirvana_preload::set(&mut value, &switch, false);",
             "crate::nirvana_preload::set(&mut value, &switch, true);", GENERATED, "rust"),
-    Control("p13a_worker_gets_plugin_env", PRESET, "&generated(&Value::Object(Map::new()), &outcome.off),",
-            "&generated(&plugin_settings(dir), &outcome.off),", APPLY, "rust"),
+    Control("p13a_worker_gets_plugin_env", PRESET, "generated(&Value::Object(Map::new()), &outcome.off)",
+            "generated(&plugin_settings(dir), &outcome.off)", APPLY, "rust"),
     Control("p13a_toast_no_undo", PRESET, 'Preload p to undo",', 'Preload p",', APPLY, "rust"),
-    Control("p13a_undo_keeps_preset", PRESET, "let off = if record.preset == OFF {", "let off = if false {",
+    Control("p13a_undo_keeps_preset", PRESET, "let mut off = if record.preset == OFF {", "let mut off = if false {",
             UNDO, "rust"),
     Control("p13a_view_ignores_undo", PRESET, "        name: if record.preset == OFF {", "        name: if false {",
             UNDO, "rust"),
@@ -109,7 +120,9 @@ CONTROLS = (
     Control("p13a_view_estimate_zero", PRESET, "        saved_tokens: saved,", "        saved_tokens: 0,",
             VIEW, "rust"),
     # The reading of /context.
-    Control("p13a_plugin_skills_listed", PRESET, '.filter(|skill| skill.source != "plugin")', ".filter(|_| true)",
+    Control("p13a_plugin_skills_listed", PRESET, '.filter(|skill| !is_builtin_skill_source(&skill.source))', ".filter(|_| true)",
+            READING, "rust"),
+    Control("p13a_builtin_skills_excluded", PRESET, '"plugin" | "bundled" | "built-in" | "builtin"', '"plugin"',
             READING, "rust"),
     Control("p13a_needs_auth_costed", PRESET, 'tokens: if server.extra == "connected" {', "tokens: if true {",
             READING, "rust"),
@@ -118,8 +131,21 @@ CONTROLS = (
     Control("p13a_folded_description_dropped", PRESET, "out.push_str(line.trim());", "let _ = line;",
             DESCRIPTION, "rust"),
     Control("p13a_glob_suffix_ignored", PRESET, "return rest.ends_with(part);", "return true;", NAMES, "rust"),
-    Control("p13a_core_by_full_key", PRESET, ".any(|core| core.eq_ignore_ascii_case(&name))",
-            ".any(|core| core.eq_ignore_ascii_case(key))", NAMES, "rust"),
+    Control("p13a_core_by_full_key", PRESET, "|| core.eq_ignore_ascii_case(&name)", "/* dropped */", NAMES, "rust"),
+    Control("p13a_core_matches_full_key", PRESET, "core.eq_ignore_ascii_case(key)", "false", NAMES, "rust"),
+    Control("p13a_highest_share_wins", PRESET,
+            "shares.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));", "/* no sort */",
+            MARKER, "rust"),
+    Control("p13a_late_answer_no_regenerate", PRESET,
+            "let _ = write_record(&thread_dir, &thread_folder, &record);",
+            "let _ = write_record(&thread_dir, &thread_folder, &record);\n                let _ = regenerate(&thread_dir, &thread_folder, &record);",
+            WALL, "rust"),
+    Control("p13a_preset_order_inline_comment", PRESET,
+            "let line = line.split('#').next()?.trim();", "let line = line.trim();",
+            ORDER, "rust"),
+    Control("p13a_marker_top_level_only", PRESET,
+            "glob_match(m, &name)", "false",
+            MARKER, "rust"),
     # The launch: the generated file, the resume (§6.1), the fresh choice.
     Control("p13a_generated_ignored", LAUNCH, "    if generated.is_file() {", "    if false {",
             LAUNCH_SETTINGS, "rust"),
@@ -130,6 +156,11 @@ CONTROLS = (
     Control("p13a_age_unchecked", LAUNCH, "        || (age as f64) >= within_hours * 3600.0\n", "", RESUME, "rust"),
     Control("p13a_session_id_unchecked", LAUNCH, "    if !plain_session_id(&record.session_id)\n",
             "    if false\n", RESUME, "rust"),
+    Control("p13a_resume_foreign_stem", LAUNCH, "        || !stem_matches\n", "", RESUME, "rust"),
+    Control("p13a_resume_foreign_parent", LAUNCH, "        || !parent_matches\n", "", RESUME, "rust"),
+    Control("p13a_resume_future_at", LAUNCH, "    if at > now + 300 {", "    if false {", RESUME, "rust"),
+    Control("p13a_resume_leading_hyphen", LAUNCH,
+            "        && id.as_bytes()[0].is_ascii_alphanumeric()\n", "", RESUME, "rust"),
     Control("p13a_fresh_own_name", LAUNCH, "Self::NirvanaFresh => Self::Nirvana.key(),",
             "Self::NirvanaFresh => self.key(),", MENU, "rust"),
     Control("p13a_second_nirvana_resumes", NEW, "if self.nirvana_space_on(folder).is_some() {", "if false {",
@@ -155,4 +186,41 @@ CONTROLS = (
             "let _ = file;", WORKER_ARGS, "rust"),
     Control("p13a_toast_drops_line", TASKBAR, r'Some(line) => format!("{title} \u{b7} {line}"),', "Some(_) => title,",
             TOAST, "rust"),
+    # Finding 2: no wait at open
+    Control("p13a_at_open_no_wait", PRESET, 'return Some("preset from next open".into());', "return None;",
+            AT_OPEN_NO_WAIT, "rust"),
+    # Finding 3: manual local settings win & denied MCP servers merged
+    Control("p13a_local_settings_manual_toggles_win", PRESET,
+            "off.retain(|(key, _)| !is_manually_enabled(&local, key));", "/* dropped */",
+            LOCAL_SETTINGS, "rust"),
+    Control("p13a_local_settings_denied_mcp_merged", PRESET,
+            "    let Some(local_denied) = local\n        .and_then(|l| l.get(\"deniedMcpServers\"))\n        .and_then(Value::as_array)\n    else {\n        return val;\n    };",
+            "    let Some(local_denied): Option<&Vec<Value>> = None else {\n        return val;\n    };",
+            LOCAL_SETTINGS, "rust"),
+    # Finding 6: no test writes real home
+    Control("p13a_no_test_writes_real_home", NIRVANA,
+            "    #[cfg(test)]\n    {\n        None\n    }",
+            "    #[cfg(test)]\n    {\n        Some(std::path::PathBuf::from(\"Programs/Nirvana-Herdr\"))\n    }",
+            NO_REAL_HOME, "rust"),
+    # Finding 9: unreadable folder not blank & set_preset runs rules and jev
+    Control("p13a_unreadable_folder_not_blank", PRESET,
+            "fp.blank = false;\n        return fp;", "fp.blank = true;\n        return fp;",
+            UNREADABLE, "rust"),
+    Control("p13a_set_preset_runs_rules_and_jev", PRESET,
+            "_ => choose(dir, folder, judge, OPEN_WALL),", "_ => Ok(Record::default()),",
+            SET_PRESET, "rust"),
+    # Finding 11: workers find parent preset up to root
+    Control("p13a_worker_finds_parent_preset", PRESET,
+            "        if path == root {\n            break;\n        }\n        cur = path.parent();",
+            "        if path == root {\n            break;\n        }\n        cur = None;",
+            WORKER_FINDS, "rust"),
+    # Finding 13: at_open broken config cleanup & tag_with unoffered tag marked unsure
+    Control("p13a_at_open_error_removes_stale_settings", PRESET,
+            "            eprintln!(\"nirvana: the folder's preset was not applied: {why}\");\n            let _ = std::fs::remove_file(settings_path(dir, folder));",
+            "            eprintln!(\"nirvana: the folder's preset was not applied: {why}\");\n            let _ = dir;",
+            AT_OPEN_BROKEN, "rust"),
+    Control("p13a_tag_with_unoffered_tag_unsure", PRESET,
+            "                let said = if choice == NONE || confidence <= NO_CEILING {\n                    format!(\"jev none {confidence:.2}\")\n                } else {\n                    format!(\"jev unsure {choice} {confidence:.2}\")\n                };",
+            "                let said = if choice == NONE || confidence <= NO_CEILING {\n                    format!(\"jev none {confidence:.2}\")\n                } else {\n                    format!(\"jev none {confidence:.2}\")\n                };",
+            TAG_UNOFFERED, "rust"),
 )

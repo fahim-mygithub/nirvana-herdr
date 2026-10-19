@@ -309,13 +309,12 @@ mod tests {
 
     #[tokio::test]
     async fn nirvana_starts_with_the_plugin_argv_and_plain_kinds_with_none() {
+        let _guard = crate::nirvana::with_test_home("starts");
+        let home = _guard.path.clone();
         let folder = std::env::temp_dir();
-        let home = std::env::temp_dir().join("nirvana-o4a-home");
         let mut app = app_with_a_space(&folder);
         let pane = app.state.workspaces[0].tabs[0].root_pane;
-        std::env::set_var(crate::nirvana::HOME_ENV, &home);
         let response = app.nirvana_start_response("n".into(), 0, pane, NewKind::Nirvana, &folder);
-        std::env::remove_var(crate::nirvana::HOME_ENV);
         let (name, argv) = started(&response);
         assert_eq!(name.as_deref(), Some("nirvana"));
         assert_eq!(argv[0], "claude");
@@ -360,13 +359,16 @@ mod tests {
     #[tokio::test]
     async fn nirvana_resumes_the_folders_last_session_with_its_preset_file_and_fresh_never_resumes()
     {
+        let _guard = crate::nirvana::with_test_home("resumes");
+        let home = _guard.path.clone();
         let folder = std::env::temp_dir();
-        let home = std::env::temp_dir().join(format!("nirvana-p13a-new-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
         let generated = crate::nirvana_preset::settings_path(&home.join("nirvana"), &folder);
         std::fs::create_dir_all(generated.parent().unwrap()).unwrap();
         std::fs::write(&generated, "{}").unwrap();
-        let transcript = home.join("session.jsonl");
+        let encoded_folder = crate::nirvana_launch::encode_project_folder(&folder);
+        let transcript_dir = home.join(encoded_folder);
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        let transcript = transcript_dir.join("0c0ffee0-1111-4222-8333-444455556666.jsonl");
         std::fs::write(&transcript, "{}\n").unwrap();
         let record = crate::nirvana_launch::session_record_path(&home, &folder);
         std::fs::create_dir_all(record.parent().unwrap()).unwrap();
@@ -379,7 +381,6 @@ mod tests {
                 .to_string(),
         )
         .unwrap();
-        std::env::set_var(crate::nirvana::HOME_ENV, &home);
         let start = |kind: NewKind| {
             let mut app = app_with_a_space(&folder);
             let pane = app.state.workspaces[0].tabs[0].root_pane;
@@ -394,7 +395,6 @@ mod tests {
         assert_eq!(app.nirvana_space_on(&folder), Some(0));
         let second = app.nirvana_resume(&home, &folder);
         let first = app_with_a_space(&folder).nirvana_resume(&home, &folder);
-        std::env::remove_var(crate::nirvana::HOME_ENV);
         assert_eq!(
             first.as_deref(),
             Some("0c0ffee0-1111-4222-8333-444455556666")
@@ -411,11 +411,11 @@ mod tests {
         assert_eq!(settings_of(&fresh), generated.display().to_string());
         assert!(!fresh.iter().any(|a| a == "--resume"), "{fresh:?}");
         assert_eq!(second, None);
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[tokio::test]
     async fn the_verbs_second_click_focuses_the_nirvana_already_on_the_folder() {
+        let _guard = crate::nirvana::with_test_home("second_click");
         let folder = std::env::temp_dir();
         let mut app = app_with_a_space(&folder);
         // The fresh server's seeded shell takes Nirvana Claude instead of a second space.
@@ -455,6 +455,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_relative_folder_and_an_unknown_kind_open_nothing() {
+        let _guard = crate::nirvana::with_test_home("relative");
         let mut app = app_with_a_space(&std::env::temp_dir());
         let response = app.nirvana_open_folder("o".into(), "relative/folder");
         assert!(response.contains("invalid_folder"), "{response}");
