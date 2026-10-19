@@ -3,7 +3,7 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
-## alpha NEXT (p18): Antigravity account guard
+## alpha 0.29.0: the Antigravity account guard (plan 18)
 
 Package `p18` (`P18-ORDER.md`, record `nirvana/plans/2026-10-19-18-records/p18.md`).
 

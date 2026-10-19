@@ -1,6 +1,6 @@
 # Feature 18: the Antigravity account stays the one the owner picked
 
-Status: **PLANNED (2026-10-19).**
+Status: **BUILT, alpha 0.29.0 (2026-10-19).** Built on agy (Gemini 3.8 Flash high); record `2026-10-19-18-records/p18.md`.
 
 ## Ledger
 
