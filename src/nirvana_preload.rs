@@ -194,6 +194,20 @@ pub fn tool_server_key(server: &str) -> String {
         .collect()
 }
 
+/// An MCP server's per-turn share of "MCP server instructions" plus "MCP tools", split evenly among
+/// connected servers as P1 does (choice 9 in its record). P1's function in `nirvana_preset` is private
+/// (`read_items`), so this computes it the exact same way.
+pub fn mcp_server_share(report: &Report) -> u32 {
+    let connected = report
+        .servers
+        .iter()
+        .filter(|server| server.extra == "connected")
+        .count()
+        .max(1);
+    (report.category("MCP server instructions") + report.category("MCP tools"))
+        / u32::try_from(connected).unwrap_or(1)
+}
+
 /// What kind of thing an item is, its order inside its provider's group. A plugin's own row comes first,
 /// above the parts it switches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -555,6 +569,9 @@ pub fn items(
                 file,
             ));
         }
+        // §1: an MCP server's per-turn cost is its instructions and its share of the tool-name list; `/context` does
+        // not split those per server, so each connected server gets an even share (P1 choice 9).
+        let mcp_share = mcp_server_share(report);
         for server in &report.servers {
             let key = tool_server_key(&server.name);
             let tools: Vec<_> = report
@@ -563,6 +580,7 @@ pub fn items(
                 .filter(|tool| tool.source == key)
                 .collect();
             let provider = Provider::of_server(&server.name, &server.source);
+            let deferred_tokens: u32 = tools.iter().map(|tool| tool.tokens).sum();
             let mut detail = format!(
                 "{}, {} tool{}",
                 if provider == Provider::ClaudeAi {
@@ -573,15 +591,23 @@ pub fn items(
                 tools.len(),
                 if tools.len() == 1 { "" } else { "s" }
             );
+            if !tools.is_empty() {
+                detail = format!("{detail} \u{b7} deferred {}", short(deferred_tokens));
+            }
             if server.extra != "connected" && !server.extra.is_empty() {
                 detail = format!("{detail}, {}", server.extra);
             }
+            let turn_tokens = if server.extra == "connected" {
+                mcp_share
+            } else {
+                0
+            };
             items.push(item(
                 provider,
                 Group::Mcp,
                 server.name.clone(),
                 detail,
-                Some(tools.iter().map(|tool| tool.tokens).sum()),
+                Some(turn_tokens),
                 Some(Switch::McpServer(server.name.clone())),
                 None,
             ));
@@ -592,7 +618,6 @@ pub fn items(
                 continue;
             }
             let prefix = format!("{}:", plugin.name);
-            let server_prefix = format!("plugin_{}_", tool_server_key(&plugin.name));
             let tokens = report
                 .skills
                 .iter()
@@ -604,13 +629,6 @@ pub fn items(
                         .iter()
                         .filter(|agent| agent.name.starts_with(&prefix))
                         .map(|agent| agent.tokens),
-                )
-                .chain(
-                    report
-                        .mcp_tools
-                        .iter()
-                        .filter(|tool| tool.source.starts_with(&server_prefix))
-                        .map(|tool| tool.tokens),
                 )
                 .sum();
             items.push(item(
@@ -1199,9 +1217,14 @@ mod tests {
             find("bladebro").switch,
             Some(Switch::McpServer("bladebro".into()))
         );
-        assert_eq!(find("bladebro").tokens, Some(3_224 + 864));
-        assert_eq!(find("bladebro").detail, "MCP, 2 tools");
-        assert_eq!(find("claude.ai Gmail").tokens, Some(1_200));
+        assert_eq!(find("bladebro").tokens, Some(1_101));
+        assert_eq!(find("bladebro").detail, "MCP, 2 tools \u{b7} deferred 4.1k");
+        assert_eq!(find("claude.ai Gmail").tokens, Some(1_101));
+        assert_eq!(
+            find("claude.ai Gmail").detail,
+            "connector, 1 tool \u{b7} deferred 1.2k"
+        );
+        assert_eq!(find("claude.ai Tavily").tokens, Some(0));
         assert_eq!(
             find("claude.ai Tavily").detail,
             "connector, 0 tools, needs-auth"
@@ -1210,8 +1233,21 @@ mod tests {
             find("github").switch,
             Some(Switch::Plugin("github@claude-plugins-official".into()))
         );
-        assert_eq!(find("github").tokens, Some(108));
+        assert_eq!(find("github").tokens, Some(0));
         assert_eq!(find("superpowers").tokens, Some(76 + 350));
+        // Provider sums count used tokens only (deferred schemas excluded, per-turn share included).
+        assert_eq!(
+            provider_tokens(&items, &Provider::User, Some(&report())),
+            3_902 + 112 + 1_101
+        );
+        assert_eq!(
+            provider_tokens(&items, &Provider::Plugin("github".into()), Some(&report())),
+            1_101
+        );
+        assert_eq!(
+            provider_tokens(&items, &Provider::ClaudeAi, Some(&report())),
+            12 + 1_101
+        );
         assert!(items.iter().all(|item| item.name != "cc-plugin-telemetry"));
         assert_eq!(find("demo").switch, None);
         assert_eq!(find("Bash").switch, Some(Switch::Tool("Bash".into())));

@@ -194,6 +194,10 @@ fn the_panel_lists_each_group_and_item_with_its_tokens() {
     );
     // Built in's header counts the built-in tools, which /context does not split per tool.
     assert!(rows[at[6]].contains("7.5k"), "{}", rows[at[6]]);
+    // Provider sums count used tokens only.
+    assert!(rows[at[2]].contains("5.1k"), "{}", rows[at[2]]);
+    assert!(rows[at[3]].contains("1.1k"), "{}", rows[at[3]]);
+    assert!(rows[at[5]].contains("1.1k"), "{}", rows[at[5]]);
     let row = |name: &str| {
         rows.iter()
             .find(|row| row.contains(name))
@@ -202,7 +206,8 @@ fn the_panel_lists_each_group_and_item_with_its_tokens() {
     };
     assert!(row("MEMORY.md").contains("[x]"));
     assert!(row("MEMORY.md").contains("3.9k"));
-    assert!(row("bladebro").contains("4.1k"));
+    assert!(row("bladebro").contains("1.1k"));
+    assert!(row("bladebro").contains("deferred 4.1k"));
     // A plugin's skill has no switch of its own: a dot, not a box.
     assert!(row("superpowers:brainstorming").contains(" \u{b7} "));
     assert!(!row("superpowers:brainstorming").contains("[x]"));

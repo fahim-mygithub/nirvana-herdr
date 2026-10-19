@@ -36,8 +36,8 @@ pub(super) const PANEL_WIDTH: u16 = 96;
 const PAGE: usize = 10;
 /// The token column: "129.9k".
 const TOKENS: usize = 6;
-/// The detail column: "plugin superpowers".
-const DETAIL: usize = 22;
+/// The detail column: "MCP, 46 tools · deferred 19.6k".
+const DETAIL: usize = 32;
 
 /// The agent the strip belongs to: the focused pane's Claude, else the first Claude in the focused tab.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -808,7 +808,7 @@ pub(super) fn render_panel(
     panel.scroll = panel.scroll.min(lines.len().saturating_sub(body_height));
 
     let tokens_x = inner_x + inner_width - TOKENS as u16 - 5;
-    let detail_width = DETAIL.min(usize::from(inner_width) / 4) as u16;
+    let detail_width = (DETAIL as u16).min(inner_width.saturating_sub(40).max(12));
     let detail_x = tokens_x.saturating_sub(detail_width + 1);
     let name_x = inner_x + 4;
     let name_width = detail_x.saturating_sub(name_x + 1);
