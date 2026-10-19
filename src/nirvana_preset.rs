@@ -66,7 +66,13 @@ const WALK_WALL: Duration = Duration::from_secs(1);
 /// §3.1: "It reads the first 2 KB of `README*`."
 const README_BYTES: usize = 2 * 1024;
 /// §3.4: "two rules match within 10% share", read as ten points of share apart.
+/// Plan 13 tuning (p13d): obsolete for choosing because presets combine; kept for control compatibility.
+#[allow(dead_code)]
 const SHARE_TIE: f64 = 0.10;
+#[allow(dead_code)]
+fn _p13a_share_sort_compat(mut shares: Vec<(&Preset, &When, f64)>) {
+    shares.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+}
 /// §4: "Jev is called only on a cache miss, with a 3 s wall."
 pub const OPEN_WALL: Duration = Duration::from_secs(3);
 /// `herdr preload apply` has nobody waiting on a window, so it waits for Jev's own deadline.
@@ -563,8 +569,8 @@ pub fn matches_words(words: &[String], folder_name: &str, readme: Option<&str>) 
     matching_word(words, folder_name, readme).is_some()
 }
 
-/// §3.4 step 1: blank first, then the first marker match in file order, then the first share match; two shares
-/// within 10 points, or no match, go to Jev.
+/// §3.4 step 1: in p13d, all matching presets combine in file order.
+/// Blank applies only as sole match. Jev is asked only when no preset matches.
 pub fn by_rules(config: &Config, fp: &Fingerprint) -> Ruled {
     let chosen = |preset: &Preset, reason: String| {
         Ruled::Chosen(Choice {
@@ -579,12 +585,56 @@ pub fn by_rules(config: &Config, fp: &Fingerprint) -> Ruled {
             .iter()
             .filter_map(|preset| Some((preset, preset.when.as_ref()?)))
     };
-    if fp.blank {
-        if let Some((preset, _)) = with_when().find(|(_, when)| when.blank) {
-            return chosen(preset, "rule: the folder is blank".into());
+
+    let mut matching: Vec<(&Preset, &When, String)> = Vec::new();
+
+    for (preset, when) in with_when() {
+        if when.blank && fp.blank {
+            matching.push((preset, when, "the folder is blank".into()));
+            continue;
+        }
+        if let Some(marker) = when
+            .marker
+            .iter()
+            .find(|marker| fp.markers.iter().any(|m| m.eq_ignore_ascii_case(marker)))
+        {
+            matching.push((preset, when, format!("marker {marker}")));
+            continue;
+        }
+        if matches_words(&when.words, &fp.folder_name, fp.readme.as_deref()) {
+            let word =
+                matching_word(&when.words, &fp.folder_name, fp.readme.as_deref()).unwrap_or("");
+            matching.push((preset, when, format!("word {word}")));
+            continue;
+        }
+        if !when.ext.is_empty() {
+            let share = &fp.share(&when.ext);
+            if *share > 0.0 && *share >= when.share.unwrap_or(0.0) {
+                matching.push((
+                    preset,
+                    when,
+                    format!(
+                        "{} are {} of the files (at least {})",
+                        when.ext.join(", "),
+                        percent(*share),
+                        percent(when.share.unwrap_or(0.0))
+                    ),
+                ));
+            }
         }
     }
-    for (preset, when) in with_when() {
+
+    // The blank preset applies only when it is the SOLE match: if another rule fires, blank is not combined into it.
+    if matching.len() > 1 {
+        matching.retain(|(p, _, _)| p.name != "blank");
+    }
+
+    if matching.is_empty() {
+        return Ruled::Ask("no rule matches".into());
+    }
+
+    if matching.len() == 1 {
+        let (preset, when, reason_detail) = &matching[0];
         if let Some(marker) = when
             .marker
             .iter()
@@ -592,44 +642,28 @@ pub fn by_rules(config: &Config, fp: &Fingerprint) -> Ruled {
         {
             return chosen(preset, format!("rule: marker {marker}"));
         }
+        return chosen(preset, format!("rule: {reason_detail}"));
     }
-    for (preset, when) in with_when() {
-        if matches_words(&when.words, &fp.folder_name, fp.readme.as_deref()) {
-            let word =
-                matching_word(&when.words, &fp.folder_name, fp.readme.as_deref()).unwrap_or("");
-            return chosen(preset, format!("rule: word {word}"));
-        }
-    }
-    let mut shares: Vec<(&Preset, &When, f64)> = with_when()
-        .filter(|(_, when)| !when.ext.is_empty())
-        .map(|(preset, when)| (preset, when, fp.share(&when.ext)))
-        .filter(|(_, when, share)| *share > 0.0 && *share >= when.share.unwrap_or(0.0))
-        .collect();
-    shares.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-    let Some((first, when, share)) = shares.first().copied() else {
-        return Ruled::Ask("no rule matches".into());
-    };
-    if let Some((other, _, close)) = shares[1..]
+
+    let combined_name = matching
         .iter()
-        .find(|(_, _, other)| (share - *other) <= SHARE_TIE)
-    {
-        return Ruled::Ask(format!(
-            "{} {} and {} {} are within 10%",
-            first.name,
-            percent(share),
-            other.name,
-            percent(*close)
-        ));
-    }
-    chosen(
-        first,
-        format!(
-            "rule: {} are {} of the files (at least {})",
-            when.ext.join(", "),
-            percent(share),
-            percent(when.share.unwrap_or(0.0))
-        ),
-    )
+        .map(|(p, _, _)| p.name.as_str())
+        .collect::<Vec<_>>()
+        .join("+");
+    let combined_reason = format!(
+        "rules: {}",
+        matching
+            .iter()
+            .map(|(p, _, detail)| format!("{}: {detail}", p.name))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+
+    Ruled::Chosen(Choice {
+        preset: combined_name,
+        reason: combined_reason,
+        by: "rule".into(),
+    })
 }
 
 /// Jev, through a trait so tests answer from recordings (the brief: "through a client trait so tests use recorded
@@ -1513,8 +1547,29 @@ pub fn off_items(
     reading: Option<&Reading>,
     pinned: &[String],
 ) -> Vec<(String, String)> {
-    let Some(preset) = config.preset(preset) else {
-        return Vec::new();
+    let resolved_preset;
+    let preset: &Preset = if preset.contains('+') {
+        let parts: Vec<&Preset> = preset
+            .split('+')
+            .filter_map(|name| config.preset(name))
+            .collect();
+        if parts.is_empty() {
+            return Vec::new();
+        }
+        let keep: Vec<String> = parts.iter().flat_map(|p| p.keep.iter().cloned()).collect();
+        let auto_memory = parts.iter().all(|p| p.auto_memory);
+        resolved_preset = Preset {
+            name: preset.to_string(),
+            when: None,
+            keep,
+            auto_memory,
+        };
+        &resolved_preset
+    } else {
+        let Some(preset) = config.preset(preset) else {
+            return Vec::new();
+        };
+        preset
     };
     let mut off = Vec::new();
     if !preset.keeps_all() {

@@ -216,9 +216,7 @@ fn a_folder_of_3mf_and_stl_reads_3d_print_and_an_empty_one_blank() {
     assert_eq!(fp.files, 0, ".claude and .git are never walked");
     assert!(matches!(ruled(&blank), Ruled::Chosen(c) if c.preset == "blank"));
     let rust = fixture("rust");
-    assert!(
-        matches!(ruled(&rust), Ruled::Chosen(c) if c.preset == "rust" && c.reason == "rule: marker Cargo.toml")
-    );
+    assert!(matches!(ruled(&rust), Ruled::Chosen(c) if c.preset == "rust+code"));
     assert!(matches!(ruled(&fixture("mixed")), Ruled::Ask(why) if why == "no rule matches"));
 }
 
@@ -228,8 +226,8 @@ fn a_marker_beats_a_share_and_two_close_shares_go_to_jev() {
     let folder = fixture("3d");
     touch(&folder, &["package.json"]);
     assert!(
-        matches!(by_rules(&config, &fingerprint(&folder, &markers())), Ruled::Chosen(c) if c.preset == "web"),
-        "§3.4: a marker match beats an extension share"
+        matches!(by_rules(&config, &fingerprint(&folder, &markers())), Ruled::Chosen(c) if c.preset == "3d-print+web"),
+        "§3.4: matching rules combine in file order"
     );
     let close = parse_config(
         "[preset.a]\nwhen = { ext = [\"stl\"], share = 0.2 }\nkeep = [\"x\"]\n\
@@ -238,18 +236,18 @@ fn a_marker_beats_a_share_and_two_close_shares_go_to_jev() {
     .unwrap();
     let even = scratch("close");
     touch(&even, &["a.stl", "b.stl", "c.md", "d.md", "e.md"]);
-    // 40% stl and 60% md: highest share wins (b), not file order.
+    // 40% stl and 60% md: both match and combine in file order.
     assert!(matches!(
         by_rules(&close, &fingerprint(&even, &close.markers())),
-        Ruled::Chosen(c) if c.preset == "b"
+        Ruled::Chosen(c) if c.preset == "a+b"
     ));
     let tie = scratch("tie");
     touch(&tie, &["a.stl", "b.stl", "c.md", "d.md"]);
     assert!(matches!(
         by_rules(&close, &fingerprint(&tie, &close.markers())),
-        Ruled::Ask(why) if why == "a 50% and b 50% are within 10%"
+        Ruled::Chosen(c) if c.preset == "a+b"
     ));
-    // Finding 4: 80% .3mf against 20% .jpg picks 3d over photo.
+    // Finding 4: 80% .3mf against 20% .jpg matches both print and photo in file order.
     let photo_3d = parse_config(
         "[preset.print]\nwhen = { ext = [\"3mf\"], share = 0.2 }\nkeep = [\"3d-print\"]\n\
          [preset.photo]\nwhen = { ext = [\"jpg\"], share = 0.2 }\nkeep = [\"photo\"]\n",
@@ -260,7 +258,7 @@ fn a_marker_beats_a_share_and_two_close_shares_go_to_jev() {
     let fp_photo_3d = fingerprint(&sample, &photo_3d.markers());
     assert!(matches!(
         by_rules(&photo_3d, &fp_photo_3d),
-        Ruled::Chosen(c) if c.preset == "print"
+        Ruled::Chosen(c) if c.preset == "print+photo"
     ));
     // Finding 12: A marker is a top-level file only. A deep .3mf counts toward extension shares, never as a marker.
     let deep_sample = scratch("deep-3mf-marker");
@@ -361,8 +359,17 @@ fn words_match_case_insensitively_on_folder_name_and_readme() {
     let fp = fingerprint(&xtool, &markers());
     assert_eq!(fp.folder_name, "3D-Printer-Flow-xtool");
     assert!(
-        matches!(by_rules(&config, &fp), Ruled::Chosen(c) if c.preset == "3d-print"),
-        "3D-Printer-Flow-xtool matches '3d print' / '3d printer' in 3d-print"
+        matches!(by_rules(&config, &fp), Ruled::Chosen(c) if c.preset == "3d-print+code"),
+        "3D-Printer-Flow-xtool matches 3d-print (words) and code (share) -> 3d-print+code"
+    );
+
+    // 1b. Match on folder name alone when no code files present
+    let xtool_notes = base.join("3D-Printer-Models");
+    touch(&xtool_notes, &["notes.txt"]);
+    let fp_notes = fingerprint(&xtool_notes, &markers());
+    assert!(
+        matches!(by_rules(&config, &fp_notes), Ruled::Chosen(c) if c.preset == "3d-print"),
+        "3D-Printer-Models matches '3d print' / '3d printer' alone -> 3d-print"
     );
 
     // 2. Normalisation: underscores, dashes, dots become spaces; prefix matching
@@ -445,6 +452,91 @@ fn code_preset_matches_at_40_percent_across_24_extensions() {
     assert!(
         !matches!(by_rules(&config, &fp33), Ruled::Chosen(c) if c.preset == "code"),
         "33% code files should not trigger code preset"
+    );
+}
+
+#[test]
+fn matching_presets_combine_keep_tags_and_auto_memory_in_file_order() {
+    let config = config();
+    let base = scratch("combine");
+
+    // 1. xtool matches 3d-print (by words) and code (by 40% share) -> 3d-print+code
+    let xtool = base.join("3D-Printer-Flow-xtool");
+    touch(&xtool, &["main.py", "tool.py", "notes.txt"]);
+    let fp_xtool = fingerprint(&xtool, &markers());
+    assert!(
+        matches!(by_rules(&config, &fp_xtool), Ruled::Chosen(c) if c.preset == "3d-print+code"),
+        "xtool matches 3d-print and code -> 3d-print+code"
+    );
+
+    // 2. Off items with 3d-print+code combines keep tags of both presets
+    let mut catalog = Catalog::default();
+    catalog.entries.insert(
+        "skill:bambu".into(),
+        Entry {
+            tags: vec!["3d-print".into()],
+            source: "bambu".into(),
+        },
+    );
+    catalog.entries.insert(
+        "skill:python-tools".into(),
+        Entry {
+            tags: vec!["python".into()],
+            source: "python".into(),
+        },
+    );
+    catalog.entries.insert(
+        "skill:unrelated-photo".into(),
+        Entry {
+            tags: vec!["photo".into()],
+            source: "photo".into(),
+        },
+    );
+    let off = off_items(&config, "3d-print+code", &catalog, None, &[]);
+    let off_keys: Vec<&str> = off.iter().map(|(k, _)| k.as_str()).collect();
+    // 3d-print is kept (from 3d-print preset), python is kept (from code preset), photo goes off
+    assert!(!off_keys.contains(&"skill:bambu"), "3d-print tag kept");
+    assert!(!off_keys.contains(&"skill:python-tools"), "python tag kept");
+    assert!(
+        off_keys.contains(&"skill:unrelated-photo"),
+        "photo tag turned off"
+    );
+
+    // 3. auto_memory = false wins when any matching preset has auto_memory = false
+    let auto_mem_cfg = parse_config(
+        "[preset.first]\nwhen = { marker = [\"first.txt\"] }\nkeep = [\"a\"]\nauto_memory = true\n\
+         [preset.second]\nwhen = { marker = [\"second.txt\"] }\nkeep = [\"b\"]\nauto_memory = false\n",
+    )
+    .unwrap();
+    let mem_folder = base.join("auto-mem");
+    touch(&mem_folder, &["first.txt", "second.txt"]);
+    let fp_mem = fingerprint(&mem_folder, &auto_mem_cfg.markers());
+    let ruled_mem = by_rules(&auto_mem_cfg, &fp_mem);
+    assert!(matches!(ruled_mem, Ruled::Chosen(c) if c.preset == "first+second"));
+    let mem_off = off_items(&auto_mem_cfg, "first+second", &catalog, None, &[]);
+    assert!(
+        mem_off.iter().any(|(k, _)| k == AUTO_MEMORY),
+        "false wins for auto_memory when combined"
+    );
+
+    // 4. blank applies only as sole match; if another rule fires, blank is not combined
+    let blank_cfg = parse_config(
+        "[preset.blank]\nwhen = { blank = true }\nkeep = [\"b\"]\nauto_memory = false\n\
+         [preset.named]\nwhen = { words = [\"test\"] }\nkeep = [\"n\"]\n",
+    )
+    .unwrap();
+    // Sole match: blank
+    let empty_folder = base.join("empty");
+    std::fs::create_dir_all(&empty_folder).unwrap();
+    let fp_empty = fingerprint(&empty_folder, &blank_cfg.markers());
+    assert!(matches!(by_rules(&blank_cfg, &fp_empty), Ruled::Chosen(c) if c.preset == "blank"));
+
+    // Both match: blank and named -> named wins, blank not combined
+    let named_empty = base.join("test-folder");
+    std::fs::create_dir_all(&named_empty).unwrap();
+    let fp_named_empty = fingerprint(&named_empty, &blank_cfg.markers());
+    assert!(
+        matches!(by_rules(&blank_cfg, &fp_named_empty), Ruled::Chosen(c) if c.preset == "named")
     );
 }
 

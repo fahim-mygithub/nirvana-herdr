@@ -36,4 +36,21 @@ CONTROLS = (
         "code_preset_matches_at_40_percent_across_24_extensions",
         "rust",
     ),
+    # Item 4: matching presets combine, blank only as sole match
+    Control(
+        "p13d_presets_combine",
+        PRESET,
+        '        let keep: Vec<String> = parts.iter().flat_map(|p| p.keep.iter().cloned()).collect();',
+        '        let keep: Vec<String> = Vec::new();',
+        "matching_presets_combine_keep_tags_and_auto_memory_in_file_order",
+        "rust",
+    ),
+    Control(
+        "p13d_blank_sole_match",
+        PRESET,
+        '    if matching.len() > 1 {\n        matching.retain(|(p, _, _)| p.name != "blank");\n    }',
+        '    if false {\n        matching.retain(|(p, _, _)| p.name != "blank");\n    }',
+        "matching_presets_combine_keep_tags_and_auto_memory_in_file_order",
+        "rust",
+    ),
 )
