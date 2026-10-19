@@ -487,17 +487,7 @@ pub fn open_tail_pane(
         format!("tail -n 30 -f \"{}\"", file_path.display())
     };
 
-    let space_id = std::env::var("HERDR_WORKSPACE_ID").ok().or_else(|| {
-        let ws_list = herdr_json(&["workspace", "list"]).ok()?;
-        let workspaces = ws_list.pointer("/result/workspaces")?.as_array()?;
-        workspaces
-            .iter()
-            .find(|ws| ws.get("focused") == Some(&Value::Bool(true)))
-            .or_else(|| workspaces.first())
-            .and_then(|ws| ws.get("workspace_id"))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-    });
+    let space_id = resolve_or_create_workspace().ok().flatten();
 
     let env = pane_env();
     let mut env_args: Vec<&str> = Vec::new();
@@ -584,7 +574,7 @@ pub fn open_tail_pane(
     // Wait for prompt and run tail
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(10) {
-        if herdr_text(&["pane", "read", &pane_id, "--source", "visible"])
+        if herdr_text(&["pane", "read", &pane_id, "--source", "recent"])
             .is_some_and(|screen| !screen.trim().is_empty())
         {
             break;
@@ -1287,8 +1277,50 @@ fn find_str<'a>(value: &'a Value, pointers: &[&str]) -> Option<&'a str> {
 }
 
 pub fn in_herdr() -> bool {
-    std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR).is_some()
+    if std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR).is_some()
         || std::env::var_os("HERDR_PANE_ID").is_some()
+    {
+        return true;
+    }
+    if let Ok(val) = herdr_json(&["status", "--json"]) {
+        if val.pointer("/server/running").and_then(Value::as_bool) == Some(true) {
+            return true;
+        }
+    }
+    false
+}
+
+fn resolve_or_create_workspace() -> Result<Option<String>, String> {
+    if let Ok(id) = std::env::var("HERDR_WORKSPACE_ID") {
+        if !id.is_empty() {
+            return Ok(Some(id));
+        }
+    }
+    let ws_list = herdr_json(&["workspace", "list"]).ok();
+    let workspaces = ws_list
+        .as_ref()
+        .and_then(|val| val.pointer("/result/workspaces"))
+        .and_then(Value::as_array);
+
+    if let Some(workspaces) = workspaces {
+        if let Some(ws) = workspaces
+            .iter()
+            .find(|ws| ws.get("focused") == Some(&Value::Bool(true)))
+            .or_else(|| workspaces.first())
+        {
+            if let Some(id) = ws.get("workspace_id").and_then(Value::as_str) {
+                return Ok(Some(id.to_string()));
+            }
+        }
+    }
+
+    let created = herdr_json(&["workspace", "create", "--label", "main"])?;
+    let id = find_str(
+        &created,
+        &["/result/workspace/workspace_id", "/workspace/workspace_id"],
+    )
+    .map(str::to_owned);
+    Ok(id)
 }
 
 fn pane_env() -> Vec<String> {
@@ -1311,17 +1343,7 @@ fn pane_env() -> Vec<String> {
 }
 
 fn open_job_pane(cwd: &str, name: &str, id: &str) -> Result<(Option<String>, String), String> {
-    let space_id = std::env::var("HERDR_WORKSPACE_ID").ok().or_else(|| {
-        let ws_list = herdr_json(&["workspace", "list"]).ok()?;
-        let workspaces = ws_list.pointer("/result/workspaces")?.as_array()?;
-        workspaces
-            .iter()
-            .find(|ws| ws.get("focused") == Some(&Value::Bool(true)))
-            .or_else(|| workspaces.first())
-            .and_then(|ws| ws.get("workspace_id"))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-    });
+    let space_id = resolve_or_create_workspace().ok().flatten();
 
     let env = pane_env();
     let mut env_args: Vec<&str> = Vec::new();
@@ -1426,7 +1448,7 @@ fn open_job_pane(cwd: &str, name: &str, id: &str) -> Result<(Option<String>, Str
     // Wait for the shell prompt to be drawn
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(10) {
-        if herdr_text(&["pane", "read", &pane_id, "--source", "visible"])
+        if herdr_text(&["pane", "read", &pane_id, "--source", "recent"])
             .is_some_and(|screen| !screen.trim().is_empty())
         {
             break;

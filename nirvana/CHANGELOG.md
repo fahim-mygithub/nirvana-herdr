@@ -2,6 +2,14 @@
 
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
+## alpha NEXT (p15): Jobs
+
+Package `p15` (`P15-ORDER.md`, record `nirvana/plans/2026-10-19-15-records/p15.md`).
+
+- **Changed:** `herdr job run --name <name> [--cwd <dir>] [--wait] -- <command...>` runs long commands in visible herdr panes within a dedicated "Jobs" tab per workspace. Commands stream output to the pane and to `<home>/nirvana/jobs/<id>/out.log`, updating `job.json` with execution status (`started`, `ended`, `exit`, `pid`). With `--wait`, `herdr job run` blocks until the job finishes, prints the last 20 lines, and exits with the job's code. Commands `list`, `status`, `tail`, `stop`, and `clean` provide job lifecycle inspection and process management. Outside herdr with no server, `run` executes commands in place. Claude Code background task files in `%TEMP%/claude/<encoded>/<session>/tasks/*.output` are discovered and displayed alongside herdr jobs. A "Jobs" square in the mod strip displays active counts (`Jobs 2 running · 1 failed` or narrow `2 run`), opening a dropdown panel with live job status, click-to-focus pane switching, and click-to-tail task views.
+  **Because:** Plan 15 L1 & L2: long-running builds, test suites, and gates need separate visible execution shells in Nirvana so users and agents can monitor progress in real time without locking active working tabs.
+  **Measured:** 59 unit tests across `src/nirvana_job.rs` and `src/client/shell/tests/nirvana_jobs.rs`; 12 controls in `nirvana/controls.d/p15.py` covering all assertions; live verification in an isolated server session confirming pane output streaming, tab deduplication, `--wait` exit code propagation, and `herdr job list` reporting.
+  **If you remove this:** long builds and test runs must run in the caller's foreground shell or in invisible background processes with no progress visibility or dedicated log tracking in Nirvana.
 
 ## alpha 0.26.0: the Preload panel's preset, deferred rows and memory row (plan 13 P2)
 
