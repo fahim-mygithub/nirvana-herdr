@@ -3,6 +3,18 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.25.2: Nirvana Claude starts with --rc and --chrome
+
+- **Changed:** Nirvana Claude's launch adds `--rc` (remote control) and `--chrome` (Claude in Chrome), after `--settings`.
+- **Because:** the owner's own Claude runs as `claude --rc --dangerously-skip-permissions --chrome`, a plain Claude Code
+  that gets none of Nirvana's plugin, so it could not see the usage pools ("I can't see your Claude or Gemini usage
+  meters"). Asked how a pane's Claude should see both pools, the owner answered "Use Nirvana Claude instead", whose text
+  was "Add --rc and --chrome to Nirvana Claude's launch so it can replace your plain Claude".
+  `--dangerously-skip-permissions` is not added: it was not asked for.
+- **Measured:** the argv test lists both flags; controls `rc_flag_missing` and `rc_chrome_missing` redden it.
+- **If you remove this:** Nirvana Claude cannot be reached from the phone or drive Chrome, so the owner keeps the plain
+  Claude that sees no pools.
+
 ## alpha 0.25.1: the usage foot shows 5 h and 7 d
 
 Package `foot2` (`FOOT-ORDER.md`, record `nirvana/plans/2026-10-19-foot2.md`).
