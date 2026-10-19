@@ -911,7 +911,8 @@ fn preset_off_rows_render_p_mark_and_tokens_in_wide_and_narrow() {
         .iter()
         .find(|(_, idx)| items[*idx].name == "benchmark")
         .unwrap();
-    let cell = &wide_frame.cells[box_rect.y as usize * wide_frame.width as usize + box_rect.x as usize];
+    let cell =
+        &wide_frame.cells[box_rect.y as usize * wide_frame.width as usize + box_rect.x as usize];
     assert_eq!(
         cell.fg,
         crate::protocol::color_to_u32(state.config.palette.yellow)
@@ -946,16 +947,16 @@ fn space_pins_preset_off_row_and_unpins_pinned_row() {
     std::fs::write(&reading_file, serde_json::to_string(&reading_json).unwrap()).unwrap();
     crate::nirvana_preset::append_catalog(
         &seat_dir,
-        &[("skill:benchmark".into(), vec!["python".into()], "rule".into())],
+        &[(
+            "skill:benchmark".into(),
+            vec!["python".into()],
+            "rule".into(),
+        )],
     )
     .unwrap();
-    let outcome = crate::nirvana_preset::apply(
-        &seat_dir,
-        &dir,
-        None,
-        std::time::Duration::from_millis(50),
-    )
-    .unwrap();
+    let outcome =
+        crate::nirvana_preset::apply(&seat_dir, &dir, None, std::time::Duration::from_millis(50))
+            .unwrap();
     assert_eq!(outcome.record.choice, "rust");
 
     let mut v = view(serde_json::json!({}));
@@ -1041,13 +1042,9 @@ fn p_key_toggles_preset_on_and_off_and_updates_header() {
     std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"pt\"\n").unwrap();
     let seat_dir = crate::nirvana_seat::dir();
     let _ = crate::nirvana_preset::load_config(&seat_dir).unwrap();
-    let _ = crate::nirvana_preset::apply(
-        &seat_dir,
-        &dir,
-        None,
-        std::time::Duration::from_millis(50),
-    )
-    .unwrap();
+    let _ =
+        crate::nirvana_preset::apply(&seat_dir, &dir, None, std::time::Duration::from_millis(50))
+            .unwrap();
 
     let mut v = view(serde_json::json!({}));
     v.preset = crate::nirvana_preset::view(&dir);
@@ -1073,5 +1070,144 @@ fn p_key_toggles_preset_on_and_off_and_updates_header() {
     assert!(text_on.contains("Preset rust"), "{text_on}");
     assert!(text_on.contains("p undo"), "{text_on}");
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+type TrimmerFn = Box<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
+struct FakeTrimmer(TrimmerFn);
+impl crate::nirvana_memory_trim::Trimmer for FakeTrimmer {
+    fn rewrite(&self, original: &str, _limit: u64) -> Result<String, String> {
+        (self.0)(original)
+    }
+}
+
+#[test]
+fn memory_row_shows_over_limit_proposal_and_responds_to_t_a_x_keys() {
+    let _home = crate::nirvana::with_test_home("memory-row-trim");
+    let dir = folder("memory-row-trim");
+    let projects_dir = _home.path.join("projects");
+    std::env::set_var(crate::nirvana_memory_trim::PROJECTS_ENV, &projects_dir);
+    std::env::set_var(crate::nirvana_memory_trim::LIMIT_ENV, "4000");
+
+    let enc = crate::nirvana_memory_trim::encode(&dir);
+    let mem_file = projects_dir.join(enc).join("memory").join("MEMORY.md");
+    std::fs::create_dir_all(mem_file.parent().unwrap()).unwrap();
+
+    // ~18,500 bytes => content_tokens is ~4,625 tokens (over 4,000 limit)
+    let padding = "word ".repeat(3_700);
+    let original = format!("# Auto Memory\n- [Entry 1](entry1.md) \u{2014} {padding}\n");
+    std::fs::write(&mem_file, &original).unwrap();
+
+    // Verify status says over limit
+    let status = crate::nirvana_memory_trim::status(&dir).expect("status exists");
+    assert!(status.over);
+    assert_eq!(status.limit, 4_000);
+
+    // Setup trimmer that produces ~4,225 tokens (still over 4,000), saving ~400 tokens (0.4k)
+    let shorter_padding = "word ".repeat(3_380);
+    let proposed = format!("# Auto Memory\n- [Entry 1](entry1.md) \u{2014} {shorter_padding}\n");
+    let prop_saved = crate::nirvana_memory_trim::tokens_of(&original)
+        .saturating_sub(crate::nirvana_memory_trim::tokens_of(&proposed));
+    assert!((350..=450).contains(&prop_saved)); // ~0.4k
+    assert!(crate::nirvana_memory_trim::tokens_of(&proposed) > 4_000);
+
+    let proposed_clone = proposed.clone();
+    crate::nirvana_memory_trim::set_trimmer_for_test(Some(std::sync::Arc::new(FakeTrimmer(
+        Box::new(move |_| Ok(proposed_clone.clone())),
+    ))));
+
+    let mut v = view(serde_json::json!({}));
+    v.trim = Some(status);
+    let mut state = state_with(Some("claude"), &dir, v);
+    open(&mut state);
+
+    // Wide and narrow check for "over 4k · t trim"
+    let (_, rows) = rows_of(&mut state, 120, 40);
+    let mem_row = rows
+        .iter()
+        .find(|r| r.contains("MEMORY.md"))
+        .expect("MEMORY.md row");
+    assert!(mem_row.contains("over 4k \u{b7} t trim"), "{mem_row}");
+
+    let (_, narrow_rows) = rows_of(&mut state, 50, 40);
+    let mem_narrow = narrow_rows
+        .iter()
+        .find(|r| r.contains("MEMORY.md"))
+        .expect("MEMORY.md narrow");
+    assert!(mem_narrow.contains("over 4k"), "{mem_narrow}");
+
+    // Press 't': runs propose off draw path -> shows "−0.4k · a accept · x discard"
+    key(&mut state, KeyCode::Char('t'));
+    let (_, rows_proposed) = rows_of(&mut state, 120, 40);
+    let mem_row_prop = rows_proposed
+        .iter()
+        .find(|r| r.contains("MEMORY.md"))
+        .unwrap();
+    assert!(
+        mem_row_prop.contains("\u{2212}0.4k \u{b7} a accept \u{b7} x discard"),
+        "{mem_row_prop}"
+    );
+
+    // Press 'x': discards proposal -> goes back to "over 4k · t trim"
+    key(&mut state, KeyCode::Char('x'));
+    let (_, rows_discarded) = rows_of(&mut state, 120, 40);
+    let mem_row_disc = rows_discarded
+        .iter()
+        .find(|r| r.contains("MEMORY.md"))
+        .unwrap();
+    assert!(
+        mem_row_disc.contains("over 4k \u{b7} t trim"),
+        "{mem_row_disc}"
+    );
+
+    // Press 't' again to propose again
+    key(&mut state, KeyCode::Char('t'));
+    let (_, rows_prop2) = rows_of(&mut state, 120, 40);
+    assert!(rows_prop2
+        .iter()
+        .find(|r| r.contains("MEMORY.md"))
+        .unwrap()
+        .contains("a accept"));
+
+    // Press 'a': accepts proposal -> replaces MEMORY.md with shorter one
+    key(&mut state, KeyCode::Char('a'));
+    let (_, rows_accepted) = rows_of(&mut state, 120, 40);
+    let mem_row_acc = rows_accepted
+        .iter()
+        .find(|r| r.contains("MEMORY.md"))
+        .unwrap();
+    assert!(
+        mem_row_acc.contains("over 4k \u{b7} t trim"),
+        "mem_row_acc was: {mem_row_acc}"
+    );
+
+    // Now test trimming down under limit
+    let under_text = "# Auto Memory\n- [Entry 1](entry1.md)\n";
+    let under_clone = under_text.to_owned();
+    crate::nirvana_memory_trim::set_trimmer_for_test(Some(std::sync::Arc::new(FakeTrimmer(
+        Box::new(move |_| Ok(under_clone.clone())),
+    ))));
+    key(&mut state, KeyCode::Char('t'));
+    key(&mut state, KeyCode::Char('a'));
+    let (_, rows_under) = rows_of(&mut state, 120, 40);
+    let mem_row_under = rows_under.iter().find(|r| r.contains("MEMORY.md")).unwrap();
+    assert!(mem_row_under.contains("auto memory"), "{mem_row_under}");
+
+    // Test error case: when propose errors, shows error on detail without panic
+    crate::nirvana_memory_trim::set_trimmer_for_test(Some(std::sync::Arc::new(FakeTrimmer(
+        Box::new(|_| Err("Jev cannot trim this file".into())),
+    ))));
+    // Write back over-limit file
+    std::fs::write(&mem_file, &original).unwrap();
+    crate::nirvana_preload::refresh_trim(&dir);
+    key(&mut state, KeyCode::Char('t'));
+    let (_, rows_err) = rows_of(&mut state, 120, 40);
+    let mem_row_err = rows_err.iter().find(|r| r.contains("MEMORY.md")).unwrap();
+    assert!(
+        mem_row_err.contains("Jev cannot trim this file"),
+        "{mem_row_err}"
+    );
+
+    crate::nirvana_memory_trim::set_trimmer_for_test(None);
     let _ = std::fs::remove_dir_all(&dir);
 }

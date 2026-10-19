@@ -563,6 +563,8 @@ pub fn items(
     config_dir: Option<&Path>,
     remembered: &HashMap<Switch, Remembered>,
     preset: Option<&crate::nirvana_preset::PresetView>,
+    trim: Option<&crate::nirvana_memory_trim::TrimStatus>,
+    trim_error: Option<&str>,
 ) -> Vec<Item> {
     let mut items = Vec::new();
     let item =
@@ -862,6 +864,14 @@ pub fn items(
             }
         }
     }
+    for item in &mut items {
+        if item.switch == Some(Switch::AutoMemory) {
+            item.detail = auto_memory_detail(trim, trim_error);
+            if item.tokens.is_none() {
+                item.tokens = trim.map(|t| t.tokens as u32);
+            }
+        }
+    }
     items.sort_by(|a, b| {
         a.provider
             .cmp(&b.provider)
@@ -1099,6 +1109,33 @@ fn trim_tenths(value: f64) -> String {
     text.strip_suffix(".0").map_or(text.clone(), str::to_owned)
 }
 
+/// A token figure for trim display: 400 -> "0.4k", 4000 -> "4k", 3900 -> "3.9k".
+pub fn trim_saved_short(tokens: u64) -> String {
+    let k = tokens as f64 / 1_000.0;
+    format!("{}k", trim_tenths(k))
+}
+
+pub fn auto_memory_detail(
+    trim: Option<&crate::nirvana_memory_trim::TrimStatus>,
+    trim_error: Option<&str>,
+) -> String {
+    if let Some(err) = trim_error {
+        return err.to_owned();
+    }
+    if let Some(trim) = trim {
+        if let Some(proposal) = &trim.proposal {
+            return format!(
+                "\u{2212}{} \u{b7} a accept \u{b7} x discard",
+                trim_saved_short(proposal.saved)
+            );
+        }
+        if trim.over {
+            return format!("over {} \u{b7} t trim", trim_saved_short(trim.limit));
+        }
+    }
+    "auto memory".into()
+}
+
 /// What the window knows of a folder's list.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct View {
@@ -1111,6 +1148,10 @@ pub struct View {
     pub local: Value,
     /// The folder's preset.
     pub preset: crate::nirvana_preset::PresetView,
+    /// The auto memory trim status.
+    pub trim: Option<crate::nirvana_memory_trim::TrimStatus>,
+    /// Any error from trim operations.
+    pub trim_error: Option<String>,
 }
 
 #[derive(Default)]
@@ -1129,6 +1170,7 @@ fn folders() -> &'static Mutex<HashMap<PathBuf, Folder>> {
 fn store(cwd: &Path, report: Option<Report>) {
     let local = read_local(cwd).ok();
     let preset = crate::nirvana_preset::view(cwd);
+    let trim = crate::nirvana_memory_trim::status(cwd);
     let mut folders = folders().lock().unwrap_or_else(|e| e.into_inner());
     let folder = folders.entry(cwd.to_path_buf()).or_default();
     folder.view.reading = false;
@@ -1136,6 +1178,8 @@ fn store(cwd: &Path, report: Option<Report>) {
         folder.view.local = local;
     }
     folder.view.preset = preset;
+    folder.view.trim = trim;
+    folder.view.trim_error = None;
     folder.read_at = Some(Instant::now());
     match report {
         Some(report) => {
@@ -1146,6 +1190,8 @@ fn store(cwd: &Path, report: Option<Report>) {
                 cwd,
                 config_dir.as_deref(),
                 &HashMap::new(),
+                None,
+                None,
                 None,
             ) {
                 if let Some(switch) = item.switch {
@@ -1237,6 +1283,143 @@ pub fn refresh_preset(cwd: &Path) {
     CHANGED.store(true, Ordering::Release);
 }
 
+/// Runs propose off the draw path (or synchronously under test), updating the folder's view with the proposal or error.
+pub fn start_trim_propose(cwd: &Path) {
+    let folder = cwd.to_path_buf();
+    let run = move || {
+        let res = crate::nirvana_memory_trim::propose(&folder);
+        let status = crate::nirvana_memory_trim::status(&folder);
+        #[cfg(test)]
+        TEST_VIEW.with_borrow_mut(|slot| {
+            if let Some(view) = slot.as_mut() {
+                match &res {
+                    Ok(s) => {
+                        view.trim = Some(s.clone());
+                        view.trim_error = None;
+                    }
+                    Err(err) => {
+                        view.trim_error = Some(err.clone());
+                        view.trim = status.clone();
+                    }
+                }
+            }
+        });
+        let mut folders = folders().lock().unwrap_or_else(|e| e.into_inner());
+        let f = folders.entry(folder.clone()).or_default();
+        match res {
+            Ok(s) => {
+                f.view.trim = Some(s);
+                f.view.trim_error = None;
+            }
+            Err(err) => {
+                f.view.trim_error = Some(err);
+                f.view.trim = status;
+            }
+        }
+        CHANGED.store(true, Ordering::Release);
+    };
+    if cfg!(test) {
+        run();
+    } else {
+        let spawned = crate::thread_spawn::spawn_named("nirvana-memory-trim", run);
+        if spawned.is_err() {
+            set_trim_error(cwd, "could not start trim thread".into());
+        }
+    }
+}
+
+pub fn trim_accept(cwd: &Path) {
+    let res = crate::nirvana_memory_trim::accept(cwd);
+    let status = crate::nirvana_memory_trim::status(cwd);
+    #[cfg(test)]
+    TEST_VIEW.with_borrow_mut(|slot| {
+        if let Some(view) = slot.as_mut() {
+            match &res {
+                Ok(_) => {
+                    view.trim = status.clone();
+                    view.trim_error = None;
+                }
+                Err(err) => {
+                    view.trim_error = Some(err.clone());
+                }
+            }
+        }
+    });
+    let mut folders = folders().lock().unwrap_or_else(|e| e.into_inner());
+    let folder = folders.entry(cwd.to_path_buf()).or_default();
+    match res {
+        Ok(_) => {
+            folder.view.trim = status;
+            folder.view.trim_error = None;
+        }
+        Err(err) => {
+            folder.view.trim_error = Some(err);
+        }
+    }
+    CHANGED.store(true, Ordering::Release);
+}
+
+pub fn trim_discard(cwd: &Path) {
+    let res = crate::nirvana_memory_trim::discard(cwd);
+    let status = crate::nirvana_memory_trim::status(cwd);
+    #[cfg(test)]
+    TEST_VIEW.with_borrow_mut(|slot| {
+        if let Some(view) = slot.as_mut() {
+            match &res {
+                Ok(_) => {
+                    view.trim = status.clone();
+                    view.trim_error = None;
+                }
+                Err(err) => {
+                    view.trim_error = Some(err.clone());
+                }
+            }
+        }
+    });
+    let mut folders = folders().lock().unwrap_or_else(|e| e.into_inner());
+    let folder = folders.entry(cwd.to_path_buf()).or_default();
+    match res {
+        Ok(_) => {
+            folder.view.trim = status;
+            folder.view.trim_error = None;
+        }
+        Err(err) => {
+            folder.view.trim_error = Some(err);
+        }
+    }
+    CHANGED.store(true, Ordering::Release);
+}
+
+pub fn set_trim_error(cwd: &Path, error: String) {
+    #[cfg(test)]
+    TEST_VIEW.with_borrow_mut(|slot| {
+        if let Some(view) = slot.as_mut() {
+            view.trim_error = Some(error.clone());
+        }
+    });
+    let mut folders = folders().lock().unwrap_or_else(|e| e.into_inner());
+    let folder = folders.entry(cwd.to_path_buf()).or_default();
+    folder.view.trim_error = Some(error);
+    CHANGED.store(true, Ordering::Release);
+}
+
+#[allow(dead_code)]
+pub fn refresh_trim(cwd: &Path) {
+    let trim = crate::nirvana_memory_trim::status(cwd);
+    #[cfg(test)]
+    TEST_VIEW.with_borrow_mut(|slot| {
+        if let Some(view) = slot.as_mut() {
+            view.trim = trim.clone();
+            view.trim_error = None;
+        }
+    });
+    let mut folders = folders().lock().unwrap_or_else(|e| e.into_inner());
+    let folder = folders.entry(cwd.to_path_buf()).or_default();
+    folder.view.trim = trim;
+    folder.view.trim_error = None;
+    CHANGED.store(true, Ordering::Release);
+}
+
 #[cfg(test)]
 thread_local! {
     static TEST_VIEW: std::cell::RefCell<Option<View>> = const { std::cell::RefCell::new(None) };
@@ -1310,6 +1493,8 @@ mod tests {
             cwd,
             Some(Path::new(r"C:\home\.claude")),
             &HashMap::new(),
+            None,
+            None,
             None,
         );
         let find = |name: &str| {
@@ -1415,7 +1600,16 @@ mod tests {
         let mut next = report();
         next.skills.retain(|skill| skill.name != "benchmark");
         next.servers.retain(|server| server.name != "bladebro");
-        let items = items(Some(&next), &local, cwd, None, &remembered, None);
+        let items = items(
+            Some(&next),
+            &local,
+            cwd,
+            None,
+            &remembered,
+            None,
+            None,
+            None,
+        );
         let bladebro = items
             .iter()
             .find(|item| item.name == "bladebro")
@@ -1449,6 +1643,8 @@ mod tests {
             cwd,
             Some(Path::new(r"C:\home\.claude")),
             &HashMap::new(),
+            None,
+            None,
             None,
         );
         let provider = |name: &str| {
@@ -1516,6 +1712,8 @@ mod tests {
             Some(Path::new(r"C:\home\.claude")),
             &HashMap::new(),
             Some(&preset),
+            None,
+            None,
         );
         let find = |name: &str| {
             items
@@ -1657,5 +1855,77 @@ mod tests {
             tool_server_key("plugin:github:github"),
             "plugin_github_github"
         );
+    }
+
+    #[test]
+    fn auto_memory_row_shows_over_limit_proposal_and_error() {
+        let cwd = Path::new(r"C:\work\proj");
+        assert_eq!(trim_saved_short(400), "0.4k");
+        assert_eq!(trim_saved_short(4_000), "4k");
+        assert_eq!(trim_saved_short(3_900), "3.9k");
+
+        // 1. Over limit: "over 4k · t trim"
+        let trim_over = crate::nirvana_memory_trim::TrimStatus {
+            index: PathBuf::from("MEMORY.md"),
+            tokens: 4_500,
+            limit: 4_000,
+            over: true,
+            proposal: None,
+            backup: None,
+        };
+        let items_over = items(
+            Some(&report()),
+            &json!({}),
+            cwd,
+            None,
+            &HashMap::new(),
+            None,
+            Some(&trim_over),
+            None,
+        );
+        let mem = items_over.iter().find(|it| it.name == "MEMORY.md").unwrap();
+        assert_eq!(mem.detail, "over 4k \u{b7} t trim");
+
+        // 2. Proposal exists: "−0.4k · a accept · x discard"
+        let trim_proposed = crate::nirvana_memory_trim::TrimStatus {
+            index: PathBuf::from("MEMORY.md"),
+            tokens: 4_500,
+            limit: 4_000,
+            over: true,
+            proposal: Some(crate::nirvana_memory_trim::ProposalStatus {
+                tokens: 4_100,
+                saved: 400,
+            }),
+            backup: None,
+        };
+        let items_proposed = items(
+            Some(&report()),
+            &json!({}),
+            cwd,
+            None,
+            &HashMap::new(),
+            None,
+            Some(&trim_proposed),
+            None,
+        );
+        let mem = items_proposed
+            .iter()
+            .find(|it| it.name == "MEMORY.md")
+            .unwrap();
+        assert_eq!(mem.detail, "\u{2212}0.4k \u{b7} a accept \u{b7} x discard");
+
+        // 3. Error displays on row detail
+        let items_err = items(
+            Some(&report()),
+            &json!({}),
+            cwd,
+            None,
+            &HashMap::new(),
+            None,
+            Some(&trim_proposed),
+            Some("failed to trim: pointer dropped"),
+        );
+        let mem = items_err.iter().find(|it| it.name == "MEMORY.md").unwrap();
+        assert_eq!(mem.detail, "failed to trim: pointer dropped");
     }
 }

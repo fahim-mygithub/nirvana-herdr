@@ -159,7 +159,7 @@ pub fn tokens_of(text: &str) -> u64 {
 // ---- the public status -------------------------------------------------------------------------------
 
 /// What `status` knows about a folder's index. P2 draws the panel's memory row from this.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrimStatus {
     pub index: PathBuf,
     pub tokens: u64,
@@ -172,7 +172,7 @@ pub struct TrimStatus {
     pub backup: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProposalStatus {
     pub tokens: u64,
     pub saved: u64,
@@ -910,9 +910,24 @@ pub fn propose_in(ctx: &Ctx, folder: &Path, trimmer: &dyn Trimmer) -> Result<Tri
     status_in(ctx, folder).ok_or_else(|| "the index vanished".into())
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_TRIMMER: std::cell::RefCell<Option<std::sync::Arc<dyn Trimmer + Send + Sync>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub fn set_trimmer_for_test(trimmer: Option<std::sync::Arc<dyn Trimmer + Send + Sync>>) {
+    TEST_TRIMMER.with_borrow_mut(|slot| *slot = trimmer);
+}
+
 /// `propose` with the live Jev.
 pub fn propose(cwd: &Path) -> Result<TrimStatus, String> {
     let ctx = Ctx::from_env().ok_or("no home")?;
+    #[cfg(test)]
+    if let Some(trimmer) = TEST_TRIMMER.with_borrow(|slot| slot.clone()) {
+        return propose_in(&ctx, cwd, trimmer.as_ref());
+    }
     let trimmer = live_trimmer(&ctx.home)?;
     propose_in(&ctx, cwd, &trimmer)
 }

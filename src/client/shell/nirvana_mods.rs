@@ -356,6 +356,8 @@ pub(super) fn panel_items(panel: &PreloadPanel, view: &View) -> Vec<Item> {
         config_dir.as_deref(),
         &view.remembered,
         Some(&view.preset),
+        view.trim.as_ref(),
+        view.trim_error.as_deref(),
     )
 }
 
@@ -1273,7 +1275,8 @@ impl ClientShellState {
             KeyCode::Char('p') => {
                 let cwd = panel.cwd.clone();
                 let view = preload::view(&cwd);
-                let is_on = !view.preset.name.is_empty() && view.preset.name != crate::nirvana_preset::OFF;
+                let is_on =
+                    !view.preset.name.is_empty() && view.preset.name != crate::nirvana_preset::OFF;
                 match crate::nirvana_preset::set_preset(&cwd, !is_on) {
                     Ok(()) => {
                         preload::refresh_preset(&cwd);
@@ -1282,6 +1285,15 @@ impl ClientShellState {
                 }
             }
             KeyCode::Char('r') => self.preload_restart(outcome),
+            KeyCode::Char('t') => {
+                preload::start_trim_propose(&panel.cwd);
+            }
+            KeyCode::Char('a') => {
+                preload::trim_accept(&panel.cwd);
+            }
+            KeyCode::Char('x') => {
+                preload::trim_discard(&panel.cwd);
+            }
             _ => {}
         }
         outcome.repaint = true;
