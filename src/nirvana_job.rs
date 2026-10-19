@@ -87,6 +87,188 @@ pub fn log_path(home: &Path, id: &str) -> PathBuf {
     job_dir(home, id).join("out.log")
 }
 
+/// The state of a Claude Code task output file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClaudeTaskState {
+    Running,
+    Passed,
+    Failed,
+    Unknown,
+}
+
+impl ClaudeTaskState {
+    pub fn word(&self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// A parsed Claude Code background task file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeTask {
+    pub id: String,
+    pub name: String,
+    pub path: PathBuf,
+    pub state: ClaudeTaskState,
+    pub exit_code: Option<i32>,
+    pub modified: u64,
+    pub elapsed: u64,
+    pub last_line: Option<String>,
+}
+
+/// Encodes a folder path for Claude Code task paths:
+/// each character that is not an ASCII letter or digit becomes `-`.
+pub fn encode_folder(folder: &Path) -> String {
+    let s = folder.to_string_lossy();
+    encode_folder_str(&s)
+}
+
+pub fn encode_folder_str(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// Parses a Claude Code task output content and returns (state, exit_code, last_line).
+pub fn parse_claude_task_content(
+    content: &str,
+    modified_secs: u64,
+    now_secs: u64,
+) -> (ClaudeTaskState, Option<i32>, Option<String>) {
+    let mut exit_code = None;
+    let mut last_line = None;
+
+    for line in content.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if last_line.is_none() {
+            last_line = Some(trimmed.to_string());
+        }
+        if exit_code.is_none() {
+            if let Some(rest) = trimmed.strip_prefix("[exited with code ") {
+                if let Some(code_str) = rest.strip_suffix(']') {
+                    if let Ok(code) = code_str.trim().parse::<i32>() {
+                        exit_code = Some(code);
+                    }
+                }
+            }
+        }
+        if exit_code.is_some() && last_line.is_some() {
+            break;
+        }
+    }
+
+    let state = match exit_code {
+        Some(0) => ClaudeTaskState::Passed,
+        Some(_) => ClaudeTaskState::Failed,
+        None => {
+            if now_secs.saturating_sub(modified_secs) >= 24 * 3600 {
+                ClaudeTaskState::Unknown
+            } else {
+                ClaudeTaskState::Running
+            }
+        }
+    };
+
+    (state, exit_code, last_line)
+}
+
+/// Reads a single Claude task output file.
+pub fn read_claude_task(path: &Path, now_secs: u64) -> std::io::Result<ClaudeTask> {
+    let metadata = std::fs::metadata(path)?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let content = std::fs::read_to_string(path)?;
+    let (state, exit_code, last_line) = parse_claude_task_content(&content, modified, now_secs);
+
+    let id = path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let name = format!("task·{id}");
+    let elapsed = now_secs.saturating_sub(modified);
+
+    Ok(ClaudeTask {
+        id,
+        name,
+        path: path.to_path_buf(),
+        state,
+        exit_code,
+        modified,
+        elapsed,
+        last_line,
+    })
+}
+
+/// Lists newest 10 Claude task files modified in the last 12 hours under
+/// `<temp_base>/claude/<encoded folder>/*/tasks/*.output`.
+pub fn list_claude_tasks_in(
+    temp_base: &Path,
+    space_folder: &Path,
+    now_secs: u64,
+) -> Vec<ClaudeTask> {
+    let encoded = encode_folder(space_folder);
+    let base = temp_base.join("claude").join(encoded);
+    let Ok(session_entries) = std::fs::read_dir(base) else {
+        return Vec::new();
+    };
+
+    let mut tasks = Vec::new();
+    let twelve_hours = 12 * 3600;
+
+    for session_entry in session_entries.flatten() {
+        let session_dir = session_entry.path();
+        if !session_dir.is_dir() {
+            continue;
+        }
+        let tasks_dir = session_dir.join("tasks");
+        let Ok(task_entries) = std::fs::read_dir(tasks_dir) else {
+            continue;
+        };
+        for task_entry in task_entries.flatten() {
+            let task_path = task_entry.path();
+            if task_path.is_file() {
+                if let Ok(metadata) = std::fs::metadata(&task_path) {
+                    let mtime = metadata
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    // Modified in the last 12 hours
+                    if now_secs.saturating_sub(mtime) <= twelve_hours {
+                        if let Ok(task) = read_claude_task(&task_path, now_secs) {
+                            tasks.push(task);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort newest first
+    tasks.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| b.id.cmp(&a.id)));
+    tasks.truncate(10);
+    tasks
+}
+
+/// Lists newest 10 Claude tasks for `space_folder` in the system `%TEMP%`.
+pub fn list_claude_tasks(space_folder: &Path) -> Vec<ClaudeTask> {
+    list_claude_tasks_in(&std::env::temp_dir(), space_folder, now())
+}
+
 /// Current Unix timestamp in seconds.
 pub fn now() -> u64 {
     #[cfg(test)]
@@ -1482,5 +1664,93 @@ mod tests {
             .last()
             .unwrap()
             .starts_with("[job test_in_place_fail: exit 42 after "));
+    }
+
+    #[test]
+    fn claude_folder_encoding_replaces_non_alphanumeric_with_hyphens() {
+        assert_eq!(
+            encode_folder_str(r"C:\Users\fahim\Desktop\Pojects\Nirvana-Herdr-p15"),
+            "C--Users-fahim-Desktop-Pojects-Nirvana-Herdr-p15"
+        );
+        assert_eq!(
+            encode_folder_str("/home/user/my_project.1"),
+            "-home-user-my-project-1"
+        );
+    }
+
+    #[test]
+    fn claude_task_state_and_exit_parsing_covers_running_passed_failed_unknown() {
+        let now = 100_000u64;
+
+        // 1. Running: recent modified, no exit line
+        let running_content = "Building...\nRunning tests...";
+        let (state, code, last) = parse_claude_task_content(running_content, now - 600, now);
+        assert_eq!(state, ClaudeTaskState::Running);
+        assert_eq!(code, None);
+        assert_eq!(last, Some("Running tests...".into()));
+
+        // 2. Passed: has [exited with code 0]
+        let passed_content = "Running tests...\nok\n[exited with code 0]";
+        let (state, code, last) = parse_claude_task_content(passed_content, now - 3600, now);
+        assert_eq!(state, ClaudeTaskState::Passed);
+        assert_eq!(code, Some(0));
+        assert_eq!(last, Some("[exited with code 0]".into()));
+
+        // 3. Failed: has [exited with code 1]
+        let failed_content = "error: test failed\n[exited with code 1]\n";
+        let (state, code, last) = parse_claude_task_content(failed_content, now - 7200, now);
+        assert_eq!(state, ClaudeTaskState::Failed);
+        assert_eq!(code, Some(1));
+        assert_eq!(last, Some("[exited with code 1]".into()));
+
+        // 4. Unknown: no exit line and modified over 24 hours ago
+        let unknown_content = "Started build...\nStill building...";
+        let (state, code, last) = parse_claude_task_content(unknown_content, now - 25 * 3600, now);
+        assert_eq!(state, ClaudeTaskState::Unknown);
+        assert_eq!(code, None);
+        assert_eq!(last, Some("Still building...".into()));
+    }
+
+    #[test]
+    fn claude_task_list_filters_twelve_hours_sorts_newest_first_and_limits_to_ten() {
+        let guard = crate::nirvana::with_test_home("claude_task_list");
+        let temp_dir = guard.path.join("temp");
+        let space_folder = Path::new(r"C:\Projects\TestSpace");
+        let encoded = encode_folder(space_folder);
+        let session_tasks_dir = temp_dir
+            .join("claude")
+            .join(&encoded)
+            .join("session-xyz")
+            .join("tasks");
+        std::fs::create_dir_all(&session_tasks_dir).unwrap();
+
+        // Create 12 files within 12h and 2 files older than 12h
+        // We write task-01 to task-12 inside the 12h window, and task-old1, task-old2 outside 12h.
+        for i in 1..=12 {
+            let file_path = session_tasks_dir.join(format!("task-{i:02}.output"));
+            std::fs::write(
+                &file_path,
+                format!("output from task {i}\n[exited with code 0]"),
+            )
+            .unwrap();
+        }
+        let old_file = session_tasks_dir.join("task-old.output");
+        std::fs::write(&old_file, "old output").unwrap();
+
+        // When reading from list_claude_tasks_in, it checks filesystem mtime against `now`.
+        // Since newly written files have mtime close to real system time, let's use the real system time as `now`.
+        let real_now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let tasks = list_claude_tasks_in(&temp_dir, space_folder, real_now);
+        // All 13 files are just created, so they are within 12h, but truncate(10) limits to 10!
+        assert_eq!(tasks.len(), 10);
+
+        // If now is shifted 13 hours into the future, all files should be excluded (>12h old)
+        let future_now = real_now + 13 * 3600;
+        let empty_tasks = list_claude_tasks_in(&temp_dir, space_folder, future_now);
+        assert!(empty_tasks.is_empty());
     }
 }
