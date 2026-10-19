@@ -464,8 +464,7 @@ fn read_head(path: &Path, bytes: usize) -> Option<String> {
 /// §3.1's bounded walk. `markers` are the names noted at the top level.
 pub fn fingerprint(folder: &Path, markers: &[String]) -> Fingerprint {
     let started = Instant::now();
-    let mut fp = Fingerprint::default();
-    fp.folder_name = folder
+    let folder_name = folder
         .components()
         .filter_map(|c| match c {
             std::path::Component::Normal(p) => Some(p.to_string_lossy().into_owned()),
@@ -473,6 +472,10 @@ pub fn fingerprint(folder: &Path, markers: &[String]) -> Fingerprint {
         })
         .next_back()
         .unwrap_or_default();
+    let mut fp = Fingerprint {
+        folder_name,
+        ..Default::default()
+    };
     let Ok(entries) = std::fs::read_dir(folder) else {
         fp.blank = false;
         return fp;
@@ -594,7 +597,7 @@ pub fn matching_word<'a>(
         if matches_word(&name_tokens, &word_tokens)
             || readme_tokens
                 .as_ref()
-                .map_or(false, |rt| matches_word(rt, &word_tokens))
+                .is_some_and(|rt| matches_word(rt, &word_tokens))
         {
             Some(word.as_str())
         } else {
