@@ -18,4 +18,13 @@ CONTROLS = (
         WALK_P13D,
         "rust",
     ),
+    # Item 2: words match on folder name and readme
+    Control(
+        "p13d_words_match",
+        PRESET,
+        "if matches_words(&when.words, &fp.folder_name, fp.readme.as_deref()) {",
+        "if false && matches_words(&when.words, &fp.folder_name, fp.readme.as_deref()) {",
+        "words_match_case_insensitively_on_folder_name_and_readme",
+        "rust",
+    ),
 )

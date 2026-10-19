@@ -31,10 +31,14 @@ research = "researching a question across web sources and writing up what was fo
 writing = "writing documents, prose, slides or spreadsheets"
 personal = "personal life: email, calendar, shopping, food delivery, travel, maps"
 
-# The first preset in this order whose `when` matches wins; a marker match beats an extension share. Two shares
-# within 10% of each other, or no match at all, go to Jev.
+# The presets in this order. A rule's `when` may hold:
+# - `words = ["..."]`: matched case-insensitively against the folder's name or README (head, 2 KB).
+#   Dashes, underscores and dots become spaces; every token of a word matches as a prefix.
+# - `marker = ["..."]`: marker files at the top level.
+# - `ext = ["..."]`, `share = 0.x`: share of counted files with these extensions.
+# - `blank = true`: empty folder.
 [preset.3d-print]
-when = { ext = ["3mf", "stl", "gcode", "step", "scad", "f3d"], share = 0.2 }
+when = { ext = ["3mf", "stl", "gcode", "step", "scad", "f3d"], share = 0.2, words = ["3d print", "3d printer", "bambu", "gcode", "g-code", "filament", "slicer", "prusa", "orca"] }
 keep = ["3d-print", "cad", "code"]
 
 [preset.photo]

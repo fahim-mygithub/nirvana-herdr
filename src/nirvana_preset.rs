@@ -142,6 +142,8 @@ pub struct When {
     pub marker: Vec<String>,
     #[serde(default)]
     pub blank: bool,
+    #[serde(default)]
+    pub words: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -321,6 +323,8 @@ pub struct Fingerprint {
     pub readme: Option<String>,
     /// The walk stopped at its file cap or its wall.
     pub cut_short: bool,
+    /// The last normal path component of the folder.
+    pub folder_name: String,
 }
 
 /// A count as its power-of-two bucket: 1, 2-3, 4-7... A file more or less keeps the hash, a folder that doubles
@@ -417,6 +421,14 @@ fn read_head(path: &Path, bytes: usize) -> Option<String> {
 pub fn fingerprint(folder: &Path, markers: &[String]) -> Fingerprint {
     let started = Instant::now();
     let mut fp = Fingerprint::default();
+    fp.folder_name = folder
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(p) => Some(p.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .next_back()
+        .unwrap_or_default();
     let Ok(entries) = std::fs::read_dir(folder) else {
         fp.blank = false;
         return fp;
@@ -491,6 +503,66 @@ fn percent(share: f64) -> String {
     format!("{:.0}%", share * 100.0)
 }
 
+/// Plan 13 tuning (p13d): normalise text for word matching (dashes, underscores, dots become spaces, lowercased).
+pub fn normalise_tokens(s: &str) -> Vec<String> {
+    s.chars()
+        .map(|c| {
+            if c == '-' || c == '_' || c == '.' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .to_lowercase()
+        .split_whitespace()
+        .map(|tok| tok.to_string())
+        .collect()
+}
+
+/// Plan 13 tuning (p13d): A word matches if every whitespace-separated token of the word matches a
+/// whitespace-separated token in the normalised text as a prefix (consecutively).
+pub fn matches_word(text_tokens: &[String], word_tokens: &[String]) -> bool {
+    if word_tokens.is_empty() || text_tokens.len() < word_tokens.len() {
+        return false;
+    }
+    text_tokens.windows(word_tokens.len()).any(|window| {
+        window
+            .iter()
+            .zip(word_tokens)
+            .all(|(text_tok, word_tok)| text_tok.starts_with(word_tok))
+    })
+}
+
+/// Plan 13 tuning (p13d): Returns the first word in `words` that matches the folder name or README.
+pub fn matching_word<'a>(
+    words: &'a [String],
+    folder_name: &str,
+    readme: Option<&str>,
+) -> Option<&'a str> {
+    if words.is_empty() {
+        return None;
+    }
+    let name_tokens = normalise_tokens(folder_name);
+    let readme_tokens = readme.map(normalise_tokens);
+    words.iter().find_map(|word| {
+        let word_tokens = normalise_tokens(word);
+        if matches_word(&name_tokens, &word_tokens)
+            || readme_tokens
+                .as_ref()
+                .map_or(false, |rt| matches_word(rt, &word_tokens))
+        {
+            Some(word.as_str())
+        } else {
+            None
+        }
+    })
+}
+
+pub fn matches_words(words: &[String], folder_name: &str, readme: Option<&str>) -> bool {
+    matching_word(words, folder_name, readme).is_some()
+}
+
 /// §3.4 step 1: blank first, then the first marker match in file order, then the first share match; two shares
 /// within 10 points, or no match, go to Jev.
 pub fn by_rules(config: &Config, fp: &Fingerprint) -> Ruled {
@@ -519,6 +591,13 @@ pub fn by_rules(config: &Config, fp: &Fingerprint) -> Ruled {
             .find(|marker| fp.markers.iter().any(|m| m.eq_ignore_ascii_case(marker)))
         {
             return chosen(preset, format!("rule: marker {marker}"));
+        }
+    }
+    for (preset, when) in with_when() {
+        if matches_words(&when.words, &fp.folder_name, fp.readme.as_deref()) {
+            let word =
+                matching_word(&when.words, &fp.folder_name, fp.readme.as_deref()).unwrap_or("");
+            return chosen(preset, format!("rule: word {word}"));
         }
     }
     let mut shares: Vec<(&Preset, &When, f64)> = with_when()
@@ -572,6 +651,12 @@ pub fn live_judge() -> Option<Arc<dyn Judge>> {
 
 fn describe_when(when: &When) -> String {
     let mut parts = Vec::new();
+    if !when.words.is_empty() {
+        parts.push(format!(
+            "folder name or readme mentioning {}",
+            when.words.join(", ")
+        ));
+    }
     if !when.ext.is_empty() {
         parts.push(format!(
             "mostly {} files",

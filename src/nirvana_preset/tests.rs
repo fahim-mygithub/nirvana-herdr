@@ -351,6 +351,58 @@ fn the_walk_skips_p13d_dependency_and_build_folders_case_insensitively() {
     assert_eq!(after.hash(), before.hash());
 }
 
+#[test]
+fn words_match_case_insensitively_on_folder_name_and_readme() {
+    let config = config();
+    let base = scratch("words");
+    // 1. Match on folder name with prefix and normalisation
+    let xtool = base.join("3D-Printer-Flow-xtool");
+    touch(&xtool, &["code.py"]);
+    let fp = fingerprint(&xtool, &markers());
+    assert_eq!(fp.folder_name, "3D-Printer-Flow-xtool");
+    assert!(
+        matches!(by_rules(&config, &fp), Ruled::Chosen(c) if c.preset == "3d-print"),
+        "3D-Printer-Flow-xtool matches '3d print' / '3d printer' in 3d-print"
+    );
+
+    // 2. Normalisation: underscores, dashes, dots become spaces; prefix matching
+    let bambu = base.join("my_bambu_lab.project");
+    touch(&bambu, &["file.txt"]);
+    let fp_bambu = fingerprint(&bambu, &markers());
+    assert_eq!(fp_bambu.folder_name, "my_bambu_lab.project");
+    assert!(
+        matches!(by_rules(&config, &fp_bambu), Ruled::Chosen(c) if c.preset == "3d-print"),
+        "my_bambu_lab.project matches bambu"
+    );
+
+    // 3. Match on README (even if folder name is arbitrary)
+    let custom = base.join("custom-unrelated-name");
+    touch(&custom, &["file.txt"]);
+    std::fs::write(
+        custom.join("README.md"),
+        "This project generates g-code for orca slicer.\n",
+    )
+    .unwrap();
+    let fp_custom = fingerprint(&custom, &markers());
+    assert!(
+        matches!(by_rules(&config, &fp_custom), Ruled::Chosen(c) if c.preset == "3d-print"),
+        "README with orca slicer and g-code matches 3d-print"
+    );
+
+    // 4. Negative test: unrelated words do not match
+    let unrelated = base.join("data_pipeline");
+    touch(&unrelated, &["file.txt"]);
+    let fp_unrelated = fingerprint(&unrelated, &markers());
+    assert!(
+        !matches!(by_rules(&config, &fp_unrelated), Ruled::Chosen(c) if c.preset == "3d-print"),
+        "data_pipeline should not match 3d-print"
+    );
+
+    assert!(matches_words(&["3d print".into()], "3d-printer", None));
+    assert!(matches_words(&["print".into()], "printer", None));
+    assert!(matches_words(&["g-code".into()], "my_g_code", None));
+}
+
 // ---- Jev for the folder ---------------------------------------------------------------------------------
 
 #[test]
