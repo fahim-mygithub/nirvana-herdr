@@ -49,7 +49,7 @@ Plan 13, package P1 (`plans/2026-10-18-13-smart-preload.md` §2, §3, §4 withou
   **If you remove this:** Nirvana Claude starts with the plugin's settings and every tool in every folder.
 - **Changed:** Nirvana Claude resumes the folder's last session (`--resume <id>`) when the session record P3's hooks
   write is under `resume_within_hours` (24) old and its transcript is there, unless another Nirvana Claude already runs
-  on the folder; the "new" menu gains "Fresh Nirvana Claude", which never resumes. `ROLE.md` says a tool may be off by
+  on the folder; the "new" menu gains "Fresh Nirvana Claude" below Shell, which never resumes and claims the window like Nirvana. `ROLE.md` says a tool may be off by
   the folder's preset.
   **Because:** §6.1; R3, "Resume last session".
   **Measured:** `a_recent_session_with_its_transcript_resumes_and_anything_else_starts_fresh`,
