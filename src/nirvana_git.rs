@@ -16,6 +16,8 @@ pub const FILES_SHOWN: usize = 8;
 
 /// Timeout for local read-only status.
 pub const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
+/// Timeout for network actions (Pull, Push, Fetch).
+pub const NET_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The parsed state of a git repository from `git status --porcelain=v2 --branch`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -315,6 +317,170 @@ pub fn read_git_status(path: &Path) -> Result<GitStatus, String> {
         return Err(res.text);
     }
     Ok(parse_porcelain_v2(&res.text, path.to_path_buf()))
+}
+
+// -----------------------------------------------------------------------------
+// Step 2: The Actions (Pull, Push, Fetch)
+// -----------------------------------------------------------------------------
+
+/// What Pull, Push and Fetch share before acting:
+/// 1. Re-read status from the repository.
+/// 2. Hold the caller to the branch it displayed (`expect_branch`).
+/// 3. Verify that the branch has an upstream remote configured.
+/// 4. Resolve the remote and upstream branch from `# branch.upstream`.
+///
+/// Nothing acts yet when this returns an Err refusal.
+pub fn stage_action(
+    path: &Path,
+    expect_branch: &str,
+    verb: &str,
+) -> Result<(GitStatus, String, String), String> {
+    let status = read_git_status(path)
+        .map_err(|e| format!("git {verb}: refused. Failed to read status: {e}"))?;
+
+    if expect_branch.is_empty() {
+        return Err(format!(
+            "git {verb}: refused. This command acts on the working tree, so the caller must name the branch it was looking at as expect_branch; the repository is on {}.",
+            if status.branch.is_empty() { "(detached)" } else { &status.branch }
+        ));
+    }
+
+    if expect_branch != status.branch {
+        return Err(format!(
+            "git {verb}: refused. The panel offered {:?} and {} is on {:?}. Nothing ran.",
+            expect_branch,
+            path.display(),
+            if status.branch.is_empty() {
+                "(detached)"
+            } else {
+                &status.branch
+            }
+        ));
+    }
+
+    if status.upstream.is_empty() {
+        return Err(format!(
+            "git {verb}: refused. {} has no upstream, so there is no remote to {verb} {}. git branch --set-upstream-to sets one.",
+            status.branch,
+            if verb == "pull" { "from" } else { "to" }
+        ));
+    }
+
+    let (remote, upstream_branch) = match status.upstream.split_once('/') {
+        Some((r, b)) if !r.is_empty() && !b.is_empty() => (r.to_string(), b.to_string()),
+        _ => {
+            return Err(format!(
+                "git {verb}: refused. The upstream {:?} does not read as <remote>/<branch>, and this command will not guess one.",
+                status.upstream
+            ));
+        }
+    };
+
+    if verb == "push" && status.ahead == 0 {
+        return Err("git push: refused. Nothing ahead to push.".to_string());
+    }
+
+    Ok((status, remote, upstream_branch))
+}
+
+/// Executes `git pull --ff-only <remote> <branch>`.
+pub fn pull_action(path: &Path, expect_branch: &str) -> Result<String, String> {
+    let (_status, remote, branch) = stage_action(path, expect_branch, "pull")?;
+    let res = run_cmd(
+        path,
+        "git",
+        &["pull", "--ff-only", &remote, &branch],
+        NET_TIMEOUT,
+        &[("GIT_TERMINAL_PROMPT", "0")],
+    );
+    refresh_folder(path);
+    if res.code != 0 {
+        Err(format!(
+            "git pull: {}",
+            if res.text.is_empty() {
+                "git failed with no message"
+            } else {
+                &res.text
+            }
+        ))
+    } else {
+        Ok(if res.text.is_empty() {
+            "git pull: nothing to report".into()
+        } else {
+            res.text
+        })
+    }
+}
+
+/// Executes `git push <remote> <branch>` (no force, no lease, no delete, no refspec).
+pub fn push_action(path: &Path, expect_branch: &str) -> Result<String, String> {
+    let (_status, remote, branch) = stage_action(path, expect_branch, "push")?;
+    let res = run_cmd(
+        path,
+        "git",
+        &["push", &remote, &branch],
+        NET_TIMEOUT,
+        &[("GIT_TERMINAL_PROMPT", "0")],
+    );
+    refresh_folder(path);
+    if res.code != 0 {
+        Err(format!(
+            "git push: {}",
+            if res.text.is_empty() {
+                "git failed with no message"
+            } else {
+                &res.text
+            }
+        ))
+    } else {
+        Ok(if res.text.is_empty() {
+            "git push: nothing to report".into()
+        } else {
+            res.text
+        })
+    }
+}
+
+/// Executes `git fetch <remote>`.
+pub fn fetch_action(path: &Path, expect_branch: &str) -> Result<String, String> {
+    let (_status, remote, _branch) = stage_action(path, expect_branch, "fetch")?;
+    let res = run_cmd(
+        path,
+        "git",
+        &["fetch", &remote],
+        NET_TIMEOUT,
+        &[("GIT_TERMINAL_PROMPT", "0")],
+    );
+    refresh_folder(path);
+    if res.code != 0 {
+        Err(format!(
+            "git fetch: {}",
+            if res.text.is_empty() {
+                "git failed with no message"
+            } else {
+                &res.text
+            }
+        ))
+    } else {
+        Ok(if res.text.is_empty() {
+            "git fetch: nothing to report".into()
+        } else {
+            res.text
+        })
+    }
+}
+
+/// Refreshes the cached entry for a folder immediately after an action.
+pub fn refresh_folder(folder: &Path) {
+    let view = load_git_view(folder);
+    let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(map) = guard.as_mut() {
+        if let Some(entry) = map.get_mut(folder) {
+            entry.view = view;
+            entry.read_at = Some(Instant::now());
+            CHANGED.store(true, Ordering::Release);
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -632,5 +798,216 @@ mod tests {
             git_label(&status, Some(&ci_failed), false),
             "main \u{b7} 4 changed \u{2717}"
         );
+    }
+
+    #[test]
+    fn expect_branch_refusal() {
+        let tmp =
+            std::env::temp_dir().join(format!("nirvana-git-test-refuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Initialize a real repo
+        let _ = std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&tmp)
+            .output();
+
+        // Mismatched branch
+        let err = pull_action(&tmp, "other-branch").unwrap_err();
+        assert!(err.contains("refused"), "expected refusal: {err}");
+        assert!(err.contains("other-branch"));
+
+        // No upstream
+        let err2 = pull_action(&tmp, "main").unwrap_err();
+        assert!(err2.contains("refused"), "expected refusal: {err2}");
+        assert!(err2.contains("has no upstream"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn real_git_push_fetch_pull_and_diverged() {
+        let base_tmp = std::env::temp_dir().join(format!(
+            "nirvana-git-real-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&base_tmp);
+        std::fs::create_dir_all(&base_tmp).unwrap();
+
+        let bare = base_tmp.join("bare.git");
+        let repo1 = base_tmp.join("repo1");
+        let repo2 = base_tmp.join("repo2");
+
+        // 1. Bare remote
+        let res = std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&bare)
+            .output()
+            .unwrap();
+        assert!(res.status.success());
+
+        // 2. Clone repo1
+        let res = std::process::Command::new("git")
+            .args(["clone"])
+            .arg(&bare)
+            .arg(&repo1)
+            .output()
+            .unwrap();
+        assert!(res.status.success());
+
+        // Configure user locally in repo1
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.name", "P16 Tester"])
+            .current_dir(&repo1)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.email", "tester@example.com"])
+            .current_dir(&repo1)
+            .output();
+
+        // Initial commit on main
+        let _ = std::process::Command::new("git")
+            .args(["checkout", "-b", "main"])
+            .current_dir(&repo1)
+            .output();
+        std::fs::write(repo1.join("file.txt"), "init\n").unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["add", "file.txt"])
+            .current_dir(&repo1)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo1)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["push", "-u", "origin", "main"])
+            .current_dir(&repo1)
+            .output();
+
+        // 3. Clone repo2
+        let res = std::process::Command::new("git")
+            .args(["clone", "-b", "main"])
+            .arg(&bare)
+            .arg(&repo2)
+            .output()
+            .unwrap();
+        assert!(res.status.success());
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.name", "P16 Tester 2"])
+            .current_dir(&repo2)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.email", "tester2@example.com"])
+            .current_dir(&repo2)
+            .output();
+
+        // Case 1: Push from repo1
+        std::fs::write(repo1.join("file.txt"), "change 1\n").unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["commit", "-am", "change 1"])
+            .current_dir(&repo1)
+            .output();
+        let st = read_git_status(&repo1).unwrap();
+        assert_eq!(st.ahead, 1);
+
+        let push_msg = push_action(&repo1, "main").expect("push succeeds");
+        assert!(!push_msg.is_empty());
+        let st_after_push = read_git_status(&repo1).unwrap();
+        assert_eq!(st_after_push.ahead, 0);
+
+        // Case 2: repo2 pushes a commit; repo1 fetches then pulls
+        let _ = std::process::Command::new("git")
+            .args(["pull"])
+            .current_dir(&repo2)
+            .output();
+        std::fs::write(repo2.join("file2.txt"), "repo2 commit\n").unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["add", "file2.txt"])
+            .current_dir(&repo2)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["commit", "-m", "repo2 commit"])
+            .current_dir(&repo2)
+            .output();
+        let push_res = std::process::Command::new("git")
+            .args(["push", "origin", "main"])
+            .current_dir(&repo2)
+            .output()
+            .unwrap();
+        assert!(
+            push_res.status.success(),
+            "repo2 push must succeed: {}",
+            String::from_utf8_lossy(&push_res.stderr)
+        );
+
+        // Before fetch in repo1, behind is 0
+        let st1_pre_fetch = read_git_status(&repo1).unwrap();
+        assert_eq!(st1_pre_fetch.behind, 0);
+
+        // Fetch in repo1
+        fetch_action(&repo1, "main").expect("fetch succeeds");
+        let st1_post_fetch = read_git_status(&repo1).unwrap();
+        assert_eq!(st1_post_fetch.behind, 1);
+
+        // Pull in repo1 fast-forwards
+        pull_action(&repo1, "main").expect("pull succeeds");
+        let st1_post_pull = read_git_status(&repo1).unwrap();
+        assert_eq!(st1_post_pull.behind, 0);
+        assert!(repo1.join("file2.txt").exists());
+
+        // Case 3: Diverged branch: Pull is refused by git, and local commit is kept
+        // repo2 makes a commit and pushes
+        std::fs::write(repo2.join("diverge2.txt"), "repo2 diverge\n").unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["add", "diverge2.txt"])
+            .current_dir(&repo2)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["commit", "-m", "repo2 diverge"])
+            .current_dir(&repo2)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["push", "origin", "main"])
+            .current_dir(&repo2)
+            .output();
+
+        // repo1 makes a different local commit
+        std::fs::write(repo1.join("diverge1.txt"), "repo1 diverge\n").unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["add", "diverge1.txt"])
+            .current_dir(&repo1)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["commit", "-m", "local commit Y"])
+            .current_dir(&repo1)
+            .output();
+
+        // Fetch in repo1 shows 1 ahead and 1 behind
+        fetch_action(&repo1, "main").expect("fetch succeeds");
+        let st_diverged = read_git_status(&repo1).unwrap();
+        assert_eq!(st_diverged.ahead, 1);
+        assert_eq!(st_diverged.behind, 1);
+
+        // Pull in repo1 is refused by git (--ff-only)
+        let pull_err =
+            pull_action(&repo1, "main").expect_err("ff-only pull must fail on divergence");
+        assert!(pull_err.contains("git pull:"));
+
+        // Verify local commit is kept
+        let log = std::process::Command::new("git")
+            .args(["log", "-1", "--format=%s"])
+            .current_dir(&repo1)
+            .output()
+            .unwrap();
+        let commit_subject = String::from_utf8_lossy(&log.stdout);
+        assert_eq!(commit_subject.trim(), "local commit Y");
+        assert!(repo1.join("diverge1.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&base_tmp);
     }
 }
