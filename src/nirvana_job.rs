@@ -3,6 +3,7 @@
 //! (nirvana/plans/2026-10-19-15-jobs.md §2)
 
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -489,9 +490,160 @@ fn stop_cli(args: &[String]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn exec_cli(_args: &[String]) -> std::io::Result<()> {
-    // Implemented in Step 2
-    todo!("exec implemented in step 2")
+/// Runs the command for a job, piping output, writing to out.log and stdout,
+/// updating ended and exit in job.json, and appending `[job <name>: exit N after Xs]`.
+pub fn run_exec(home: &Path, id: &str) -> std::io::Result<i32> {
+    let mut record = read_job(home, id)?;
+    let log_p = log_path(home, id);
+    let mut log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_p)?;
+
+    if record.argv.is_empty() {
+        let elapsed = now().saturating_sub(record.started);
+        let end_line = format!("[job {}: exit 0 after {elapsed}s]", record.name);
+        println!("{end_line}");
+        let _ = writeln!(log_file, "{end_line}");
+        record.ended = Some(now());
+        record.exit = Some(0);
+        write_job(home, &record)?;
+        return Ok(0);
+    }
+
+    let mut command = std::process::Command::new(&record.argv[0]);
+    command.args(&record.argv[1..]);
+    if !record.cwd.is_empty() {
+        command.current_dir(&record.cwd);
+    }
+    command.stdin(std::process::Stdio::null());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            let err_line = format!("herdr job: failed to spawn {}: {err}", record.argv[0]);
+            eprintln!("{err_line}");
+            let _ = writeln!(log_file, "{err_line}");
+            let elapsed = now().saturating_sub(record.started);
+            let end_line = format!("[job {}: exit 127 after {elapsed}s]", record.name);
+            println!("{end_line}");
+            let _ = writeln!(log_file, "{end_line}");
+            record.ended = Some(now());
+            record.exit = Some(127);
+            let _ = write_job(home, &record);
+            return Ok(127);
+        }
+    };
+
+    let child_pid = child.id();
+    record.pid = Some(child_pid);
+    let _ = write_job(home, &record);
+
+    #[cfg(windows)]
+    let _job_handle = {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        struct ScopedJob(windows_sys::Win32::Foundation::HANDLE);
+        impl Drop for ScopedJob {
+            fn drop(&mut self) {
+                if !self.0.is_null() {
+                    unsafe { CloseHandle(self.0) };
+                }
+            }
+        }
+        let name_wide: Vec<u16> = format!("nirvana-job-{id}\0").encode_utf16().collect();
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), name_wide.as_ptr()) };
+        if !job.is_null() {
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            unsafe {
+                SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::from_ref(&limits).cast(),
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                );
+                AssignProcessToJobObject(job, child.as_raw_handle().cast());
+            }
+        }
+        ScopedJob(job)
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let tx_err = tx.clone();
+
+    let stdout = child.stdout.take();
+    let t_out = std::thread::spawn(move || {
+        if let Some(stdout) = stdout {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(stdout);
+            for line in reader.lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    let stderr = child.stderr.take();
+    let t_err = std::thread::spawn(move || {
+        if let Some(stderr) = stderr {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                if tx_err.send(line).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    while let Ok(line) = rx.recv() {
+        println!("{line}");
+        let _ = writeln!(log_file, "{line}");
+        let _ = log_file.flush();
+    }
+    let _ = t_out.join();
+    let _ = t_err.join();
+
+    let status = child.wait()?;
+    let exit_code = status.code().unwrap_or(1);
+    let elapsed = now().saturating_sub(record.started);
+    let end_line = format!("[job {}: exit {exit_code} after {elapsed}s]", record.name);
+    println!("{end_line}");
+    let _ = writeln!(log_file, "{end_line}");
+    let _ = log_file.flush();
+
+    record.ended = Some(now());
+    record.exit = Some(exit_code);
+    write_job(home, &record)?;
+
+    Ok(exit_code)
+}
+
+fn exec_cli(args: &[String]) -> std::io::Result<()> {
+    let Some(id) = args.first() else {
+        eprintln!("usage: herdr job exec <id>");
+        std::process::exit(2);
+    };
+    let home =
+        crate::nirvana::home().ok_or_else(|| std::io::Error::other("no home folder found"))?;
+    let code = run_exec(&home, id)?;
+    std::process::exit(code);
 }
 
 fn run_cli(_args: &[String]) -> std::io::Result<()> {
@@ -775,5 +927,76 @@ mod tests {
         let updated = read_job(&guard.path, "job-to-stop").unwrap();
         assert!(updated.ended.is_some());
         assert_eq!(updated.exit, Some(1));
+    }
+
+    #[test]
+    fn exec_runs_command_copies_output_to_log_and_records_exit() {
+        let guard = crate::nirvana::with_test_home("job_exec_pass");
+        let record = create_job(
+            &guard.path,
+            "job-exec-pass",
+            "demo_pass",
+            vec![
+                "python".into(),
+                "-c".into(),
+                "print('first line'); print('second line')".into(),
+            ],
+            ".",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(record.ended, None);
+        assert_eq!(record.exit, None);
+
+        let code = run_exec(&guard.path, "job-exec-pass").unwrap();
+        assert_eq!(code, 0);
+
+        let updated = read_job(&guard.path, "job-exec-pass").unwrap();
+        assert!(updated.ended.is_some());
+        assert_eq!(updated.exit, Some(0));
+        assert_eq!(updated.state(false), JobState::Passed);
+
+        let lines = tail_job(&guard.path, "job-exec-pass", 10).unwrap();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "first line");
+        assert_eq!(lines[1], "second line");
+        assert!(lines[2].starts_with("[job demo_pass: exit 0 after "));
+        assert!(lines[2].ends_with("s]"));
+    }
+
+    #[test]
+    fn exec_records_nonzero_exit_and_ended() {
+        let guard = crate::nirvana::with_test_home("job_exec_fail");
+        let _ = create_job(
+            &guard.path,
+            "job-exec-fail",
+            "demo_fail",
+            vec![
+                "python".into(),
+                "-c".into(),
+                "import sys; print('failing output'); sys.exit(3)".into(),
+            ],
+            ".",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let code = run_exec(&guard.path, "job-exec-fail").unwrap();
+        assert_eq!(code, 3);
+
+        let updated = read_job(&guard.path, "job-exec-fail").unwrap();
+        assert!(updated.ended.is_some());
+        assert_eq!(updated.exit, Some(3));
+        assert_eq!(updated.state(false), JobState::Failed);
+
+        let lines = tail_job(&guard.path, "job-exec-fail", 10).unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "failing output");
+        assert!(lines[1].starts_with("[job demo_fail: exit 3 after "));
+        assert!(lines[1].ends_with("s]"));
     }
 }
