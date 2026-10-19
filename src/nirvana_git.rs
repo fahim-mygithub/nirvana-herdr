@@ -472,15 +472,150 @@ pub fn fetch_action(path: &Path, expect_branch: &str) -> Result<String, String> 
 
 /// Refreshes the cached entry for a folder immediately after an action.
 pub fn refresh_folder(folder: &Path) {
-    let view = load_git_view(folder);
+    let status = read_git_status(folder).ok();
     let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(map) = guard.as_mut() {
         if let Some(entry) = map.get_mut(folder) {
-            entry.view = view;
+            let ci = entry.view.as_ref().and_then(|v| v.ci.clone());
+            entry.view = status.map(|s| GitView { status: s, ci });
             entry.read_at = Some(Instant::now());
             CHANGED.store(true, Ordering::Release);
         }
     }
+}
+
+// -----------------------------------------------------------------------------
+// Step 3: The CI Reader
+// -----------------------------------------------------------------------------
+
+/// Checks whether a remote URL points to github.com.
+pub fn is_github_remote_url(url: &str) -> bool {
+    url.contains("github.com")
+}
+
+/// Retrieves the configured URL for a named remote.
+pub fn get_remote_url(repo: &Path, remote: &str) -> Option<String> {
+    let res = run_cmd(
+        repo,
+        "git",
+        &["remote", "get-url", remote],
+        STATUS_TIMEOUT,
+        &[("GIT_TERMINAL_PROMPT", "0")],
+    );
+    if res.code == 0 && !res.text.trim().is_empty() {
+        Some(res.text.trim().to_string())
+    } else {
+        None
+    }
+}
+
+/// Builds the argv for listing workflow runs via `gh run list`.
+pub fn gh_run_list_argv(upstream_branch: &str) -> Vec<String> {
+    vec![
+        "run".into(),
+        "list".into(),
+        "--branch".into(),
+        upstream_branch.into(),
+        "--limit".into(),
+        "1".into(),
+        "--json".into(),
+        "status,conclusion,workflowName,createdAt,url".into(),
+    ]
+}
+
+/// Stock program that opens nothing, preventing sign-in popups (CLAUDE.md rule 15).
+pub fn gh_no_browser_program() -> &'static str {
+    if cfg!(windows) {
+        r"C:\Windows\System32\where.exe"
+    } else {
+        "/bin/true"
+    }
+}
+
+/// Environment variables for gh invocations that make browser launch and prompt impossible.
+pub fn gh_env() -> Vec<(&'static str, &'static str)> {
+    let no_browser = gh_no_browser_program();
+    vec![
+        ("BROWSER", no_browser),
+        ("GH_BROWSER", no_browser),
+        ("GH_PROMPT_DISABLED", "1"),
+    ]
+}
+
+/// Parses the JSON output of `gh run list`.
+pub fn parse_ci_json(json_str: &str, _now_secs: u64) -> Option<CiRun> {
+    #[derive(Deserialize)]
+    struct GhRun {
+        status: String,
+        conclusion: Option<String>,
+        #[serde(rename = "workflowName")]
+        workflow_name: String,
+        #[serde(rename = "createdAt")]
+        created_at: String,
+        #[serde(default)]
+        url: String,
+    }
+
+    let runs: Vec<GhRun> = serde_json::from_str(json_str).ok()?;
+    let first = runs.into_iter().next()?;
+
+    let (state, conclusion_word) = if first.status != "completed" {
+        (CiState::Running, "running".to_string())
+    } else if first.conclusion.as_deref() == Some("success") {
+        (CiState::Passed, "passed".to_string())
+    } else {
+        let word = first.conclusion.unwrap_or_else(|| "failed".to_string());
+        (CiState::Failed, word)
+    };
+
+    let created_at_secs = crate::nirvana_usage::rfc3339(&first.created_at).unwrap_or(0);
+
+    Some(CiRun {
+        workflow_name: first.workflow_name,
+        state,
+        conclusion_word,
+        created_at_secs,
+        url: first.url,
+    })
+}
+
+/// Formats the panel CI row text: `CI  <workflow>  passed  12m ago`.
+pub fn ci_row_text(ci: &CiRun, now_secs: u64) -> String {
+    let elapsed = now_secs.saturating_sub(ci.created_at_secs);
+    let ago = crate::nirvana_usage::short_duration(elapsed);
+    format!(
+        "CI  {}  {}  {} ago",
+        ci.workflow_name, ci.conclusion_word, ago
+    )
+}
+
+/// Reads the CI status using `gh` if on PATH, remote is github.com, and upstream is set.
+pub fn read_ci_status(repo: &Path, status: &GitStatus) -> Option<CiRun> {
+    if cfg!(test) {
+        // Safety guardrail: unit and integration tests never execute real gh
+        return None;
+    }
+    if status.upstream.is_empty() {
+        return None;
+    }
+    let (remote, upstream_branch) = status.upstream.split_once('/')?;
+    let remote_url = get_remote_url(repo, remote)?;
+    if !is_github_remote_url(&remote_url) {
+        return None;
+    }
+
+    let argv_strings = gh_run_list_argv(upstream_branch);
+    let argv_refs: Vec<&str> = argv_strings.iter().map(String::as_str).collect();
+    let envs = gh_env();
+
+    let res = run_cmd(repo, "gh", &argv_refs, STATUS_TIMEOUT, &envs);
+    if res.code != 0 {
+        return None;
+    }
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    parse_ci_json(&res.text, now_secs)
 }
 
 // -----------------------------------------------------------------------------
@@ -492,6 +627,7 @@ struct CacheEntry {
     view: Option<GitView>,
     reading: bool,
     read_at: Option<Instant>,
+    ci_read_at: Option<Instant>,
     asked_at: Option<Instant>,
     panel_open: bool,
 }
@@ -509,16 +645,15 @@ pub fn set_view_for_test(view: Option<GitView>) {
 
 /// Loads a fresh GitView synchronously for `folder`.
 pub fn load_git_view(folder: &Path) -> Option<GitView> {
-    match read_git_status(folder) {
-        Ok(status) => Some(GitView { status, ci: None }),
-        Err(_) => None,
-    }
+    let status = read_git_status(folder).ok()?;
+    let ci = read_ci_status(folder, &status);
+    Some(GitView { status, ci })
 }
 
 const FORGET_AFTER: Duration = Duration::from_secs(60);
 
 fn poll() {
-    let due: Vec<(PathBuf, bool)> = {
+    let due: Vec<(PathBuf, bool, bool)> = {
         let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
         let Some(map) = guard.as_mut() else {
             return;
@@ -534,25 +669,46 @@ fn poll() {
             } else {
                 Duration::from_secs(15)
             };
-            if entry
+            let status_due = entry
                 .read_at
-                .is_none_or(|at| at.elapsed() >= reread_interval)
-            {
+                .is_none_or(|at| at.elapsed() >= reread_interval);
+            let ci_due = entry
+                .ci_read_at
+                .is_none_or(|at| at.elapsed() >= Duration::from_secs(60));
+            if status_due || ci_due {
                 entry.reading = true;
-                to_read.push((folder.clone(), entry.panel_open));
+                to_read.push((folder.clone(), entry.panel_open, ci_due));
             }
         }
         to_read
     };
 
-    for (folder, _panel_open) in due {
+    for (folder, _panel_open, read_ci) in due {
         std::thread::spawn(move || {
-            let new_view = load_git_view(&folder);
+            let status_opt = read_git_status(&folder).ok();
+            let ci_opt = if read_ci {
+                if let Some(status) = &status_opt {
+                    read_ci_status(&folder, status)
+                } else {
+                    None
+                }
+            } else {
+                let guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
+                guard
+                    .as_ref()
+                    .and_then(|m| m.get(&folder))
+                    .and_then(|e| e.view.as_ref())
+                    .and_then(|v| v.ci.clone())
+            };
+            let new_view = status_opt.map(|status| GitView { status, ci: ci_opt });
             let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(map) = guard.as_mut() {
                 if let Some(entry) = map.get_mut(&folder) {
                     entry.reading = false;
                     entry.read_at = Some(Instant::now());
+                    if read_ci {
+                        entry.ci_read_at = Some(Instant::now());
+                    }
                     if entry.view != new_view {
                         entry.view = new_view;
                         CHANGED.store(true, Ordering::Release);
@@ -599,12 +755,19 @@ pub fn cached(folder: &Path) -> Option<GitView> {
         entry.reading = true;
         let folder_clone = folder.to_path_buf();
         std::thread::spawn(move || {
-            let view = load_git_view(&folder_clone);
+            let status_opt = read_git_status(&folder_clone).ok();
+            let ci_opt = if let Some(status) = &status_opt {
+                read_ci_status(&folder_clone, status)
+            } else {
+                None
+            };
+            let view = status_opt.map(|status| GitView { status, ci: ci_opt });
             let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(map) = guard.as_mut() {
                 if let Some(entry) = map.get_mut(&folder_clone) {
                     entry.reading = false;
                     entry.read_at = Some(Instant::now());
+                    entry.ci_read_at = Some(Instant::now());
                     if entry.view != view {
                         entry.view = view;
                         CHANGED.store(true, Ordering::Release);
@@ -1009,5 +1172,107 @@ mod tests {
         assert!(repo1.join("diverge1.txt").exists());
 
         let _ = std::fs::remove_dir_all(&base_tmp);
+    }
+
+    #[test]
+    fn ci_parse_cases() {
+        let now = 1_700_000_000;
+
+        // 1. Running (status != "completed")
+        let running_json = r#"[
+            {
+                "status": "in_progress",
+                "conclusion": null,
+                "workflowName": "Build & Test",
+                "createdAt": "2025-10-09T08:00:00Z",
+                "url": "https://github.com/org/repo/actions/runs/1"
+            }
+        ]"#;
+        let ci = parse_ci_json(running_json, now).expect("parsed running");
+        assert_eq!(ci.state, CiState::Running);
+        assert_eq!(ci.conclusion_word, "running");
+        assert_eq!(ci.workflow_name, "Build & Test");
+
+        // 2. Passed (status == "completed", conclusion == "success")
+        let passed_json = r#"[
+            {
+                "status": "completed",
+                "conclusion": "success",
+                "workflowName": "CI",
+                "createdAt": "2025-10-09T08:00:00Z",
+                "url": "https://github.com/org/repo/actions/runs/2"
+            }
+        ]"#;
+        let ci = parse_ci_json(passed_json, now).expect("parsed passed");
+        assert_eq!(ci.state, CiState::Passed);
+        assert_eq!(ci.conclusion_word, "passed");
+
+        // 3. Failed
+        let failed_json = r#"[
+            {
+                "status": "completed",
+                "conclusion": "failure",
+                "workflowName": "Lint",
+                "createdAt": "2025-10-09T08:00:00Z",
+                "url": "https://github.com/org/repo/actions/runs/3"
+            }
+        ]"#;
+        let ci = parse_ci_json(failed_json, now).expect("parsed failed");
+        assert_eq!(ci.state, CiState::Failed);
+        assert_eq!(ci.conclusion_word, "failure");
+
+        // 4. Empty list
+        assert!(parse_ci_json("[]", now).is_none());
+
+        // 5. Invalid JSON
+        assert!(parse_ci_json("not valid json", now).is_none());
+    }
+
+    #[test]
+    fn ci_probe_rules() {
+        // gh argv
+        let argv = gh_run_list_argv("main");
+        assert_eq!(
+            argv,
+            vec![
+                "run",
+                "list",
+                "--branch",
+                "main",
+                "--limit",
+                "1",
+                "--json",
+                "status,conclusion,workflowName,createdAt,url"
+            ]
+        );
+
+        // gh env prohibits browser launches and disables prompts
+        let envs = gh_env();
+        let env_map: HashMap<_, _> = envs.into_iter().collect();
+        assert_eq!(env_map.get("GH_PROMPT_DISABLED"), Some(&"1"));
+        assert!(env_map.contains_key("BROWSER"));
+        assert!(env_map.contains_key("GH_BROWSER"));
+
+        // GitHub remote check
+        assert!(is_github_remote_url(
+            "https://github.com/herdrdev/herdr.git"
+        ));
+        assert!(is_github_remote_url("git@github.com:herdrdev/herdr.git"));
+        assert!(!is_github_remote_url("https://gitlab.com/org/repo.git"));
+        assert!(!is_github_remote_url("file:///tmp/repo.git"));
+    }
+
+    #[test]
+    fn ci_row_text_formatting() {
+        let ci = CiRun {
+            workflow_name: "CI".into(),
+            state: CiState::Passed,
+            conclusion_word: "passed".into(),
+            created_at_secs: 1_000,
+            url: "https://github.com/org/repo/actions/runs/1".into(),
+        };
+        // 1000 + 12 * 60 = 1720
+        let row = ci_row_text(&ci, 1_720);
+        assert_eq!(row, "CI  CI  passed  12m ago");
     }
 }
