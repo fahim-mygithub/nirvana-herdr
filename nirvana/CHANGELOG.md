@@ -3,6 +3,22 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha NEXT (p13b): the Preload panel's preset, deferred rows and memory row
+
+Package `p13b` (`P13B-ORDER.md`, record `nirvana/plans/2026-10-18-13-records/p13b.md`).
+
+- **Changed:** The Preload panel header displays the active preset name and the count of disabled items with the estimated per-turn savings and undo shortcut (`Preset 3d-print · 31 off · ~5.1k a turn (estimate) · p undo`). When the preset is toggled off, it indicates `Preset off (31 disabled) · p re-enable`. For directories never opened before, it shows `Preset 3d-print (preview) · space to pin`. When deferred MCP tools are present, it shows their total schema footprint (`· 42.1k deferred tools`).
+  **Because:** Plan 13 §2: users need visibility into what the active preset disabled, how many prompt tokens are saved per turn, and when a preset is previewed or toggled off, without having to calculate tool schema weight themselves.
+  **Measured:** Tests `header_shows_active_preset_name_count_and_savings`, `header_shows_preset_off_and_p_re_enable`, `header_shows_preview_when_folder_never_opened`, and `header_separates_deferred_mcp_tool_tokens` in `src/nirvana_preload/tests.rs`; controls `p13b_header_active_preset`, `p13b_header_preset_off`, `p13b_header_never_opened`, and `p13b_header_deferred_tokens` in `nirvana/controls.d/p13b.py`.
+  **If you remove this:** users have no visibility into active preset state, per-turn prompt savings, or deferred schema footprint in the Preload panel.
+- **Changed:** MCP tool rows display their deferred status and token count in the detail column (`42.1k deferred (loaded on first call)`). Provider rows sum only used tokens from active/on items and indicate server share (`MCP 3 servers: 18.2k/turn · 42.1k deferred`). Preset-off rows display the `[p]` mark; pressing `Space` on a preset-off row pins it on or unpins a pinned item, while `p` toggles the entire preset on or off.
+  **Because:** Deferred tools do not consume per-turn context until invoked. Users need to distinguish between active per-turn costs and deferred schemas, toggle individual items out of a preset with `Space`, and toggle the whole preset with `p`.
+  **Measured:** Tests `mcp_tool_rows_show_deferred_marker_and_tokens_in_detail_column`, `provider_sum_includes_only_used_tokens`, `mcp_provider_row_shows_server_share`, `preset_off_rows_marked_with_p_tag`, `space_key_pins_preset_off_item_on`, `space_key_unpins_pinned_on_item`, and `p_key_toggles_preset_off_and_on` in `src/nirvana_preload/tests.rs`; controls `p13b_deferred_row_detail`, `p13b_provider_sum_used_only`, `p13b_mcp_server_share`, `p13b_preset_off_row_mark`, `p13b_space_pins_preset_off`, `p13b_space_unpins_pinned`, and `p13b_p_key_toggle` in `nirvana/controls.d/p13b.py`.
+  **If you remove this:** provider token sums inflate with deferred schemas, deferred tools lack explanation, and users cannot pin preset-off items or toggle presets.
+- **Changed:** The Memory row shows warning peach text when memory exceeds the threshold (`over 4k · t trim`), displays pending trim proposals (`propose 2.1k · a accept · x discard`), and indicates trim errors (`trim failed · retry`). Pressing `t` triggers proposal generation, `a` accepts the proposed trim, and `x` cancels it. The draw path uses a non-blocking cached clone of the memory view.
+  **Because:** Plan 13 §2: users need in-panel memory visibility and interactive trimming to prevent memory context bloat without blocking TUI renders during memory trims.
+  **Measured:** Tests `memory_row_shows_over_limit_proposal_and_responds_to_t_a_x_keys`, `preload_draw_uses_cached_view_without_blocking`, and `preload_draw_view_invalidated_on_events` in `src/nirvana_preload/tests.rs`; controls `p13b_memory_row_over_limit`, `p13b_memory_row_proposal`, `p13b_memory_row_error`, `p13b_memory_key_t`, `p13b_memory_key_a`, `p13b_memory_key_x`, `p13b_draw_cache_propose_trim`, and `p13b_draw_cache_refresh_preset` in `nirvana/controls.d/p13b.py`.
+  **If you remove this:** users cannot inspect or trim oversized memory files from the Preload panel, and rendering could block on trimmer operations.
 ## alpha 0.25.3: the A/B bench keeps the owner-only flags out
 
 - **Changed:** `nirvana/bench/ab.py` names `OWNER_ONLY_FLAGS` (`--rc`, `--chrome`); arm N launches without them and its
