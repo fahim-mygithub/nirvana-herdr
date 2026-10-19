@@ -2,7 +2,7 @@
 
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
-## alpha NEXT (p16): Git square
+## alpha 0.28.0: the Git square, old Nirvana's GitHub card in the strip (plan 16)
 
 Package `p16` (`P16-ORDER.md`, record `nirvana/plans/2026-10-19-16-records/p16.md`).
 
@@ -10,6 +10,17 @@ Package `p16` (`P16-ORDER.md`, record `nirvana/plans/2026-10-19-16-records/p16.m
   **Because:** Plan 16 L1 & L2: porting old Nirvana's GitHub card (`plugins/git-widget`) into the Nirvana-Herdr mod strip, providing visible repository status and safe, confirmed Git actions (Pull, Push, Fetch) without leaving the terminal or risking branch mismatch divergence.
   **Measured:** 17 nextest unit and integration tests across `src/nirvana_git.rs` and `src/client/shell/tests/nirvana_git.rs` covering porcelain v2 parsing, action timeouts, real Git remote push/fetch/pull operations, divergence refusal, CI status formatting, button states, and live client snapshots; 15 mutative controls in `nirvana/controls.d/p16.py` covering all plan assertions; dry-run controls total increased from 1008 to 1023 with 1023 of 1023 matched 1x; live verification on an isolated server instance with scratch bare repository.
   **If you remove this:** users must manually run Git status, pull, push, and fetch commands in terminal panes without mod strip status visibility, confirm dialog safety, or upstream branch verification.
+- **Changed (review at merge):** Pull, Push and Fetch run on a worker thread (`nirvana_git::start_action`); the button
+  reads `Pulling…` and git's words reach the panel at the next draw. `run_cmd` polls its child and kills it at the
+  timeout.
+  **Because:** the build ran the actions inline in the key and mouse handlers, so the whole window froze while git
+  talked to the remote (plan 16 §3 says off the draw path), and `run_cmd` joined a thread blocked in `wait()` at the
+  timeout, so a push hung on a credential helper never came back.
+  **Measured:** `run_cmd_kills_a_child_past_its_timeout` returns code 124 in about 0.5 s on a 30 s ping;
+  `start_action_returns_before_the_action_ends` and `confirmed_pull_runs_off_the_input_path_and_reports_back` pass;
+  4 controls (`p16_run_cmd_kills_at_timeout`, `p16_start_action_on_a_thread`, `p16_confirmed_pull_marks_busy`,
+  `p16_action_result_reaches_panel`) turn them red. Dry run 1027 of 1027 (master 1008 + 19).
+  **If you remove this:** a Push on a slow or hung remote freezes Nirvana until git gives up, or forever.
 
 ## alpha 0.27.0: Jobs, long commands in a visible tab (plan 15)
 
