@@ -3,7 +3,7 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
-## alpha NEXT (p13a): the smart Preload's engine, a preset per folder at Open Nirvana (plan 13 P1)
+## alpha 0.23.0: the smart Preload's engine, a preset per folder at Open Nirvana (plan 13 P1)
 
 Plan 13, package P1 (`plans/2026-10-18-13-smart-preload.md` §2, §3, §4 without the panel, §6.1's launch side, §6.3,
 §7's `herdr preload`; the record is `plans/2026-10-18-13-records/p13a.md`).
