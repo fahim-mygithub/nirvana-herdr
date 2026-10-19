@@ -1,6 +1,8 @@
 # Feature 13: the smart Preload, a preset per folder chosen when "Open Nirvana" opens it
 
-Status: **DESIGNED 2026-10-18, awaiting the owner's go.** Built on Preload (features 5 and 7, `src/nirvana_preload.rs`),
+Status: **BUILT, alpha 0.23.0 to 0.26.0 (2026-10-19).** P1 0.23.0, P3 0.24.0, tuning 0.25.0, P2 0.26.0; records in
+`2026-10-18-13-records/`. Measured: 5.1k fewer tokens a turn on a 3D fixture (paid Haiku count); the owner's xtool folder
+reads `3d-print+code`, 23 items off, ~4.7k a turn (estimate). Built on Preload (features 5 and 7, `src/nirvana_preload.rs`),
 Jev (features 9, 10 and plan 12 O8b) and the launch (plan 12 O4a/O4b).
 
 ## Ledger
