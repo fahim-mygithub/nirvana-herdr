@@ -874,3 +874,204 @@ fn the_header_line_works_in_narrow_and_wide_forms() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn preset_off_rows_render_p_mark_and_tokens_in_wide_and_narrow() {
+    let dir = folder("preset-off-mark");
+    let mut v = view(serde_json::json!({}));
+    v.preset = crate::nirvana_preset::PresetView {
+        name: "rust".into(),
+        reason: "rule".into(),
+        off: vec![(Switch::Skill("benchmark".into()), "python".into())],
+        saved_tokens: 112,
+        pinned_on: Vec::new(),
+    };
+    let mut state = state_with(Some("claude"), &dir, v);
+    open(&mut state);
+
+    // Wide form
+    let (wide_frame, wide_rows) = rows_of(&mut state, 120, 40);
+    let wide_row = wide_rows
+        .iter()
+        .find(|row| row.contains("benchmark"))
+        .expect("benchmark listed");
+    assert!(wide_row.contains("[p]"), "{wide_row}");
+    assert!(wide_row.contains("112"), "{wide_row}");
+
+    // Cell color check: [p] is drawn with palette.yellow
+    let panel = state.nirvana_preload.as_ref().unwrap();
+    let items = crate::client::shell::nirvana_mods::panel_items(
+        panel,
+        &crate::nirvana_preload::view(&panel.cwd),
+    );
+    let (box_rect, _) = state
+        .hits
+        .nirvana_panel
+        .boxes
+        .iter()
+        .find(|(_, idx)| items[*idx].name == "benchmark")
+        .unwrap();
+    let cell = &wide_frame.cells[box_rect.y as usize * wide_frame.width as usize + box_rect.x as usize];
+    assert_eq!(
+        cell.fg,
+        crate::protocol::color_to_u32(state.config.palette.yellow)
+    );
+
+    // Narrow form (width 50)
+    let (_, narrow_rows) = rows_of(&mut state, 50, 40);
+    let narrow_row = narrow_rows
+        .iter()
+        .find(|row| row.contains("benchmark"))
+        .expect("benchmark listed narrow");
+    assert!(narrow_row.contains("[p]"), "{narrow_row}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn space_pins_preset_off_row_and_unpins_pinned_row() {
+    let _home = crate::nirvana::with_test_home("space-pins");
+    let dir = folder("space-pins");
+    std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"sp\"\n").unwrap();
+    let seat_dir = crate::nirvana_seat::dir();
+    let _ = crate::nirvana_preset::load_config(&seat_dir).unwrap();
+    let reading_file = seat_dir.join("preload").join("reading.json");
+    std::fs::create_dir_all(reading_file.parent().unwrap()).unwrap();
+    let reading_json = serde_json::json!({
+        "at": 1000,
+        "total": 23607,
+        "items": {
+            "skill:benchmark": { "tokens": 112, "about": "bench" }
+        }
+    });
+    std::fs::write(&reading_file, serde_json::to_string(&reading_json).unwrap()).unwrap();
+    crate::nirvana_preset::append_catalog(
+        &seat_dir,
+        &[("skill:benchmark".into(), vec!["python".into()], "rule".into())],
+    )
+    .unwrap();
+    let outcome = crate::nirvana_preset::apply(
+        &seat_dir,
+        &dir,
+        None,
+        std::time::Duration::from_millis(50),
+    )
+    .unwrap();
+    assert_eq!(outcome.record.choice, "rust");
+
+    let mut v = view(serde_json::json!({}));
+    v.preset = crate::nirvana_preset::view(&dir);
+    let mut state = state_with(Some("claude"), &dir, v);
+    open(&mut state);
+
+    // Find index of benchmark in panel items
+    let panel = state.nirvana_preload.as_ref().unwrap();
+    let items = crate::client::shell::nirvana_mods::panel_items(
+        panel,
+        &crate::nirvana_preload::view(&panel.cwd),
+    );
+    let bench_idx = items
+        .iter()
+        .position(|it| it.name == "benchmark")
+        .expect("benchmark item");
+    assert!(items[bench_idx].preset_off);
+
+    // Select benchmark row
+    state.nirvana_preload.as_mut().unwrap().selected = bench_idx;
+
+    // Press Space: pins it on
+    key(&mut state, KeyCode::Char(' '));
+    let msg = state
+        .nirvana_preload
+        .as_ref()
+        .unwrap()
+        .message
+        .clone()
+        .unwrap_or_default();
+    assert!(msg.contains("benchmark pinned on"), "{msg}");
+
+    // Panel items now reflect pinned_on
+    let panel = state.nirvana_preload.as_ref().unwrap();
+    let updated_items = crate::client::shell::nirvana_mods::panel_items(
+        panel,
+        &crate::nirvana_preload::view(&panel.cwd),
+    );
+    assert!(updated_items[bench_idx].preset_pinned);
+    assert!(updated_items[bench_idx].on);
+
+    let (_, updated_rows) = rows_of(&mut state, 120, 50);
+    let bench_row = updated_rows
+        .iter()
+        .find(|r| r.contains("benchmark"))
+        .unwrap();
+    assert!(bench_row.contains("[x]"), "{bench_row}");
+
+    // Press Space again: unpins it
+    key(&mut state, KeyCode::Char(' '));
+    let msg2 = state
+        .nirvana_preload
+        .as_ref()
+        .unwrap()
+        .message
+        .clone()
+        .unwrap_or_default();
+    assert!(msg2.contains("benchmark pin removed"), "{msg2}");
+
+    let panel = state.nirvana_preload.as_ref().unwrap();
+    let unpinned_items = crate::client::shell::nirvana_mods::panel_items(
+        panel,
+        &crate::nirvana_preload::view(&panel.cwd),
+    );
+    assert!(unpinned_items[bench_idx].preset_off);
+    assert!(!unpinned_items[bench_idx].on);
+
+    let (_, unpinned_rows) = rows_of(&mut state, 120, 50);
+    let bench_row2 = unpinned_rows
+        .iter()
+        .find(|r| r.contains("benchmark"))
+        .unwrap();
+    assert!(bench_row2.contains("[p]"), "{bench_row2}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn p_key_toggles_preset_on_and_off_and_updates_header() {
+    let _home = crate::nirvana::with_test_home("p-key-toggle");
+    let dir = folder("p-key-toggle");
+    std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"pt\"\n").unwrap();
+    let seat_dir = crate::nirvana_seat::dir();
+    let _ = crate::nirvana_preset::load_config(&seat_dir).unwrap();
+    let _ = crate::nirvana_preset::apply(
+        &seat_dir,
+        &dir,
+        None,
+        std::time::Duration::from_millis(50),
+    )
+    .unwrap();
+
+    let mut v = view(serde_json::json!({}));
+    v.preset = crate::nirvana_preset::view(&dir);
+    assert_eq!(v.preset.name, "rust");
+
+    let mut state = state_with(Some("claude"), &dir, v);
+    open(&mut state);
+    let (_, rows) = rows_of(&mut state, 120, 40);
+    let text = rows.join("\n");
+    assert!(text.contains("Preset rust"), "{text}");
+    assert!(text.contains("p undo"), "{text}");
+
+    // Press 'p': toggles preset off
+    key(&mut state, KeyCode::Char('p'));
+    let (_, rows_off) = rows_of(&mut state, 120, 40);
+    let text_off = rows_off.join("\n");
+    assert!(text_off.contains("Preset off \u{b7} p on"), "{text_off}");
+
+    // Press 'p' again: toggles preset back on
+    key(&mut state, KeyCode::Char('p'));
+    let (_, rows_on) = rows_of(&mut state, 120, 40);
+    let text_on = rows_on.join("\n");
+    assert!(text_on.contains("Preset rust"), "{text_on}");
+    assert!(text_on.contains("p undo"), "{text_on}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

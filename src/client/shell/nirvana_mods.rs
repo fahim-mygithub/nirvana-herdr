@@ -355,6 +355,7 @@ pub(super) fn panel_items(panel: &PreloadPanel, view: &View) -> Vec<Item> {
         &panel.cwd,
         config_dir.as_deref(),
         &view.remembered,
+        Some(&view.preset),
     )
 }
 
@@ -849,10 +850,11 @@ pub(super) fn render_panel(
                 let row_rect = Rect::new(inner_x, y, inner_width, 1);
                 buffer.set_style(row_rect, row_style);
                 hits.rows.push((row_rect, *index));
-                let (mark, mark_style) = match (&item.switch, item.on) {
-                    (None, _) => (" \u{b7} ", row_style.fg(palette.overlay0)),
-                    (Some(_), true) => ("[x]", row_style.fg(palette.green)),
-                    (Some(_), false) => ("[ ]", row_style.fg(palette.overlay1)),
+                let (mark, mark_style) = match (&item.switch, item.preset_off, item.on) {
+                    (None, _, _) => (" \u{b7} ", row_style.fg(palette.overlay0)),
+                    (Some(_), true, _) => ("[p]", row_style.fg(palette.yellow)),
+                    (Some(_), false, true) => ("[x]", row_style.fg(palette.green)),
+                    (Some(_), false, false) => ("[ ]", row_style.fg(palette.overlay1)),
                 };
                 put_text(buffer, inner_x, y, 3, mark, mark_style);
                 if item.switch.is_some() {
@@ -1151,6 +1153,28 @@ impl ClientShellState {
             self.preload_say(reason);
             return;
         };
+        if item.preset_off {
+            let message = match crate::nirvana_preset::pin_on(&cwd, &switch, true) {
+                Ok(()) => {
+                    preload::refresh_preset(&cwd);
+                    format!("{} pinned on; r restarts this one", item.name)
+                }
+                Err(err) => format!("not pinned: {err}"),
+            };
+            self.preload_say(message);
+            return;
+        }
+        if item.preset_pinned {
+            let message = match crate::nirvana_preset::pin_on(&cwd, &switch, false) {
+                Ok(()) => {
+                    preload::refresh_preset(&cwd);
+                    format!("{} pin removed; r restarts this one", item.name)
+                }
+                Err(err) => format!("not unpinned: {err}"),
+            };
+            self.preload_say(message);
+            return;
+        }
         let message = match preload::switch_item(&cwd, &switch, !item.on) {
             // Feature 9: herdr's own switches reach more than Claude, and compact advice is a Stop
             // hook, which a running Claude picks up with no restart (measured for the board's hook).
@@ -1246,6 +1270,17 @@ impl ClientShellState {
             KeyCode::End => panel.selected = last,
             KeyCode::Char(' ') | KeyCode::Enter => self.preload_switch(selected),
             KeyCode::Char('e') => self.preload_edit(selected, outcome),
+            KeyCode::Char('p') => {
+                let cwd = panel.cwd.clone();
+                let view = preload::view(&cwd);
+                let is_on = !view.preset.name.is_empty() && view.preset.name != crate::nirvana_preset::OFF;
+                match crate::nirvana_preset::set_preset(&cwd, !is_on) {
+                    Ok(()) => {
+                        preload::refresh_preset(&cwd);
+                    }
+                    Err(err) => self.preload_say(format!("preset: {err}")),
+                }
+            }
             KeyCode::Char('r') => self.preload_restart(outcome),
             _ => {}
         }

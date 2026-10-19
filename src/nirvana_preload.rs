@@ -321,7 +321,7 @@ impl Provider {
 pub fn provider_tokens(items: &[Item], provider: &Provider, report: Option<&Report>) -> u32 {
     let rows: u32 = items
         .iter()
-        .filter(|item| &item.provider == provider && item.group != Group::Plugins)
+        .filter(|item| &item.provider == provider && item.group != Group::Plugins && item.on)
         .filter_map(|item| item.tokens)
         .sum();
     let tools = match (provider, report) {
@@ -366,6 +366,8 @@ pub struct Item {
     pub detail: String,
     pub tokens: Option<u32>,
     pub on: bool,
+    pub preset_off: bool,
+    pub preset_pinned: bool,
     /// `None`: nothing switches it off by itself (a plugin's skill, an agent).
     pub switch: Option<Switch>,
     /// The file to open for editing.
@@ -495,6 +497,61 @@ pub fn off_count(local: &Value) -> usize {
     off_switches(local).len()
 }
 
+pub fn switch_details(
+    switch: &Switch,
+    cwd: &Path,
+    config_dir: Option<&Path>,
+) -> Option<(Group, String, String, Option<PathBuf>)> {
+    let (group, name, detail, file) = match switch {
+        Switch::ClaudeMd(path) => (
+            Group::Memory,
+            shown_path(path, cwd, config_dir),
+            "memory file".into(),
+            Some(PathBuf::from(path)),
+        ),
+        Switch::AutoMemory => (
+            Group::Memory,
+            "MEMORY.md".into(),
+            "auto memory".into(),
+            None,
+        ),
+        Switch::Skill(name) => (Group::Skills, name.clone(), "skill".into(), None),
+        Switch::McpServer(name) => (Group::Mcp, name.clone(), "MCP".into(), None),
+        Switch::Plugin(id) => (
+            Group::Plugins,
+            id.split('@').next().unwrap_or(id).to_owned(),
+            "whole plugin".into(),
+            None,
+        ),
+        Switch::Tool(name) => (Group::Tools, name.clone(), "tool".into(), None),
+        Switch::Hooks => (
+            Group::Hooks,
+            "session start text".into(),
+            "all hooks".into(),
+            None,
+        ),
+        Switch::JevGuide | Switch::JevCompact => return None,
+    };
+    Some((group, name, detail, file))
+}
+
+fn switch_tokens(switch: &Switch, remembered: &HashMap<Switch, Remembered>) -> Option<u32> {
+    if let Some(tokens) = remembered.get(switch).and_then(|seen| seen.tokens) {
+        return Some(tokens);
+    }
+    if let Some(home) = crate::nirvana::home() {
+        let dir = home.join(crate::nirvana_seat::DIR);
+        if let Some(reading) = crate::nirvana_preset::read_reading(&dir) {
+            if let Some(key) = crate::nirvana_preset::key_of(switch) {
+                if let Some(item) = reading.items.get(&key) {
+                    return Some(item.tokens);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// The panel's rows: what the report lists, each on unless the folder's settings switch it off, then
 /// each item switched off there that the report no longer lists. `remembered` holds what an item was
 /// when it was last listed. Rows go by provider, then kind, then name, so a row keeps its place when
@@ -505,6 +562,7 @@ pub fn items(
     cwd: &Path,
     config_dir: Option<&Path>,
     remembered: &HashMap<Switch, Remembered>,
+    preset: Option<&crate::nirvana_preset::PresetView>,
 ) -> Vec<Item> {
     let mut items = Vec::new();
     let item =
@@ -513,6 +571,8 @@ pub fn items(
                 provider,
                 group,
                 on: switch.as_ref().is_none_or(|switch| !is_off(local, switch)),
+                preset_off: false,
+                preset_pinned: false,
                 name,
                 detail,
                 tokens,
@@ -696,43 +756,15 @@ pub fn items(
         {
             continue;
         }
+        let Some((group, name, detail, file)) = switch_details(&switch, cwd, config_dir) else {
+            continue;
+        };
         let seen = remembered.get(&switch);
         let tokens = seen.and_then(|seen| seen.tokens);
         let provider = seen.map_or_else(
             || Provider::of_switch(&switch, cwd, config_dir),
             |seen| seen.provider.clone(),
         );
-        let (group, name, detail, file) = match &switch {
-            Switch::ClaudeMd(path) => (
-                Group::Memory,
-                shown_path(path, cwd, config_dir),
-                "memory file".into(),
-                Some(PathBuf::from(path)),
-            ),
-            Switch::AutoMemory => (
-                Group::Memory,
-                "MEMORY.md".into(),
-                "auto memory".into(),
-                None,
-            ),
-            Switch::Skill(name) => (Group::Skills, name.clone(), "skill".into(), None),
-            Switch::McpServer(name) => (Group::Mcp, name.clone(), "MCP".into(), None),
-            Switch::Plugin(id) => (
-                Group::Plugins,
-                id.split('@').next().unwrap_or(id).to_owned(),
-                "whole plugin".into(),
-                None,
-            ),
-            Switch::Tool(name) => (Group::Tools, name.clone(), "tool".into(), None),
-            Switch::Hooks => (
-                Group::Hooks,
-                "session start text".into(),
-                "all hooks".into(),
-                None,
-            ),
-            // Listed by `jev_items` always; never one of `off_switches`.
-            Switch::JevGuide | Switch::JevCompact => continue,
-        };
         items.push(Item {
             provider,
             group,
@@ -740,9 +772,95 @@ pub fn items(
             detail,
             tokens,
             on: false,
+            preset_off: false,
+            preset_pinned: false,
             switch: Some(switch),
             file,
         });
+    }
+    if let Some(preset) = preset {
+        for (switch, _) in &preset.off {
+            if is_off(local, switch) {
+                continue;
+            }
+            if items
+                .iter()
+                .any(|item| item.switch.as_ref() == Some(switch))
+            {
+                continue;
+            }
+            let Some((group, name, detail, file)) = switch_details(switch, cwd, config_dir) else {
+                continue;
+            };
+            let seen = remembered.get(switch);
+            let provider = seen.map_or_else(
+                || Provider::of_switch(switch, cwd, config_dir),
+                |seen| seen.provider.clone(),
+            );
+            let tokens = switch_tokens(switch, remembered);
+            items.push(Item {
+                provider,
+                group,
+                name,
+                detail,
+                tokens,
+                on: false,
+                preset_off: true,
+                preset_pinned: false,
+                switch: Some(switch.clone()),
+                file,
+            });
+        }
+        for switch in &preset.pinned_on {
+            if is_off(local, switch) {
+                continue;
+            }
+            if items
+                .iter()
+                .any(|item| item.switch.as_ref() == Some(switch))
+            {
+                continue;
+            }
+            let Some((group, name, detail, file)) = switch_details(switch, cwd, config_dir) else {
+                continue;
+            };
+            let seen = remembered.get(switch);
+            let provider = seen.map_or_else(
+                || Provider::of_switch(switch, cwd, config_dir),
+                |seen| seen.provider.clone(),
+            );
+            let tokens = switch_tokens(switch, remembered);
+            items.push(Item {
+                provider,
+                group,
+                name,
+                detail,
+                tokens,
+                on: true,
+                preset_off: false,
+                preset_pinned: true,
+                switch: Some(switch.clone()),
+                file,
+            });
+        }
+        for item in &mut items {
+            let Some(switch) = &item.switch else {
+                continue;
+            };
+            if is_off(local, switch) {
+                item.preset_off = false;
+                item.preset_pinned = false;
+                item.on = false;
+            } else if preset.pinned_on.contains(switch) {
+                item.preset_pinned = true;
+                item.preset_off = false;
+                item.on = true;
+            } else if preset.off.iter().any(|(s, _)| s == switch) {
+                item.preset_off = true;
+                item.preset_pinned = false;
+                item.on = false;
+            }
+        }
     }
     items.sort_by(|a, b| {
         a.provider
@@ -761,6 +879,8 @@ fn jev_items(local: &Value, cwd: &Path) -> Vec<Item> {
         provider: Provider::Jev,
         group: Group::Jev,
         on: switch.as_ref().is_none_or(|s| !is_off(local, s)),
+        preset_off: false,
+        preset_pinned: false,
         name: name.into(),
         detail,
         tokens,
@@ -1026,6 +1146,7 @@ fn store(cwd: &Path, report: Option<Report>) {
                 cwd,
                 config_dir.as_deref(),
                 &HashMap::new(),
+                None,
             ) {
                 if let Some(switch) = item.switch {
                     folder.view.remembered.insert(
@@ -1189,6 +1310,7 @@ mod tests {
             cwd,
             Some(Path::new(r"C:\home\.claude")),
             &HashMap::new(),
+            None,
         );
         let find = |name: &str| {
             items
@@ -1293,7 +1415,7 @@ mod tests {
         let mut next = report();
         next.skills.retain(|skill| skill.name != "benchmark");
         next.servers.retain(|server| server.name != "bladebro");
-        let items = items(Some(&next), &local, cwd, None, &remembered);
+        let items = items(Some(&next), &local, cwd, None, &remembered, None);
         let bladebro = items
             .iter()
             .find(|item| item.name == "bladebro")
@@ -1327,6 +1449,7 @@ mod tests {
             cwd,
             Some(Path::new(r"C:\home\.claude")),
             &HashMap::new(),
+            None,
         );
         let provider = |name: &str| {
             items
@@ -1366,6 +1489,64 @@ mod tests {
         assert_eq!(
             provider_tokens(&items, &Provider::BuiltIn, Some(&report())),
             480 + 1_620 + 5_381
+        );
+    }
+
+    #[test]
+    fn preset_off_rows_are_marked_off_and_pinned_rows_are_marked_on() {
+        let cwd = Path::new(r"C:\work\proj");
+        let preset = crate::nirvana_preset::PresetView {
+            name: "rust".into(),
+            reason: "rule: Cargo.toml".into(),
+            off: vec![
+                (Switch::Skill("benchmark".into()), "python".into()),
+                (Switch::McpServer("bladebro".into()), "3d-print".into()),
+            ],
+            saved_tokens: 4_388,
+            pinned_on: vec![Switch::Skill("dataviz".into())],
+        };
+        // local settings has bladebro turned off manually
+        let mut local = json!({});
+        set(&mut local, &Switch::McpServer("bladebro".into()), false);
+
+        let items = items(
+            Some(&report()),
+            &local,
+            cwd,
+            Some(Path::new(r"C:\home\.claude")),
+            &HashMap::new(),
+            Some(&preset),
+        );
+        let find = |name: &str| {
+            items
+                .iter()
+                .find(|item| item.name == name)
+                .unwrap_or_else(|| panic!("{name}"))
+        };
+
+        // benchmark was turned off by preset: preset_off is true, on is false, tokens kept
+        let benchmark = find("benchmark");
+        assert!(benchmark.preset_off);
+        assert!(!benchmark.preset_pinned);
+        assert!(!benchmark.on);
+        assert_eq!(benchmark.tokens, Some(112));
+
+        // bladebro was turned off by local settings: preset_off is false, on is false
+        let bladebro = find("bladebro");
+        assert!(!bladebro.preset_off);
+        assert!(!bladebro.preset_pinned);
+        assert!(!bladebro.on);
+
+        // dataviz was pinned on: preset_pinned is true, on is true
+        let dataviz = find("dataviz");
+        assert!(!dataviz.preset_off);
+        assert!(dataviz.preset_pinned);
+        assert!(dataviz.on);
+
+        // benchmark (112) and bladebro (1,101) are both off, so only MEMORY.md (3,902) is counted
+        assert_eq!(
+            provider_tokens(&items, &Provider::User, Some(&report())),
+            3_902
         );
     }
 
