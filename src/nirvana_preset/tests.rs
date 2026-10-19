@@ -320,6 +320,37 @@ fn the_walk_skips_build_and_dependency_folders_and_the_hash_moves_with_a_doublin
     assert_eq!(bucket(4), 3);
 }
 
+#[test]
+fn the_walk_skips_p13d_dependency_and_build_folders_case_insensitively() {
+    let folder = fixture("rust");
+    let before = fingerprint(&folder, &markers());
+    touch(
+        &folder,
+        &[
+            "Vendor/lib.cpp",
+            "third_party/a.c",
+            "thirdparty/b.c",
+            "External/ext.h",
+            "deps/d.h",
+            "Build/app.exe",
+            "dist/bundle.js",
+            "out/binary.bin",
+            "bin/tool.exe",
+            "obj/file.o",
+            ".cache/cached.tmp",
+            "__pycache__/mod.pyc",
+            ".gradle/wrapper.jar",
+            ".idea/workspace.xml",
+            ".vs/config.json",
+            "Pods/pod.m",
+            "packages/pkg.dll",
+        ],
+    );
+    let after = fingerprint(&folder, &markers());
+    assert_eq!(after.files, before.files, "{after:?}");
+    assert_eq!(after.hash(), before.hash());
+}
+
 // ---- Jev for the folder ---------------------------------------------------------------------------------
 
 #[test]

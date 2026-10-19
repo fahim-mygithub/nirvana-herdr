@@ -89,7 +89,31 @@ const CONTEXT_ARGS: [&str; 6] = [
 ];
 /// Folder names the walk never enters, besides Jev's own excluded folders. `.claude` is the folder's Claude
 /// settings, not its project.
-const SKIP_DIRS: [&str; 5] = [".git", "node_modules", "target", ".venv", ".claude"];
+///
+/// Plan 13 tuning (p13d): dependency and build folders skipped case-insensitively.
+#[rustfmt::skip]
+const SKIP_DIRS: [&str; 22] = [
+    "vendor",
+    "third_party",
+    "thirdparty",
+    "external",
+    "deps",
+    "build",
+    "dist",
+    "out",
+    "bin",
+    "obj",
+    ".cache",
+    "__pycache__",
+    ".gradle",
+    ".idea",
+    ".vs",
+    "pods",
+    "packages",
+    ".git",
+    "node_modules",
+    "target",
+    ".venv", ".claude"];
 /// §3.1's marker files, read at the folder's top level; a preset's own `marker` names are added to these.
 const MARKERS: [&str; 8] = [
     ".git",
