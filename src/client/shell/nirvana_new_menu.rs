@@ -77,7 +77,13 @@ impl ClientShellState {
                     ),
                     outcome,
                 );
-                if kind.is_nirvana() {
+                // Plan 13: the fresh entry is Nirvana Claude too, so it makes the window Nirvana's.
+                let kind = if kind == NewKind::NirvanaFresh {
+                    NewKind::Nirvana
+                } else {
+                    kind
+                };
+                if kind == NewKind::Nirvana {
                     if let Some(cwd) = cwd {
                         nirvana_window(std::path::PathBuf::from(cwd));
                     }

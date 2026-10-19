@@ -144,8 +144,8 @@ CONTROLS = (
             "        NewKind::AFTER_SHELL[..0]\n            .iter()", MENU_LABELS, "rust"),
     Control("p13a_fresh_entry_missing", MENU_FILE, "        NewKind::AFTER_SHELL\n            .iter()",
             "        NewKind::AFTER_SHELL[..0]\n            .iter()", FRESH_ENTRY, "rust"),
-    Control("p13a_fresh_no_claim", MENU_FILE, "if kind.is_nirvana() {", "if kind == NewKind::Nirvana {",
-            FRESH_ENTRY, "rust"),
+    Control("p13a_fresh_no_claim", MENU_FILE, "let kind = if kind == NewKind::NirvanaFresh {",
+            "let kind = if false {", FRESH_ENTRY, "rust"),
     Control("p13a_fresh_key_unknown", LAUNCH, ".chain(Self::AFTER_SHELL)",
             ".chain(Self::AFTER_SHELL.into_iter().take(0))", MENU, "rust"),
     # The worker and the toast.
