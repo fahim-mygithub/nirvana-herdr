@@ -28,6 +28,10 @@ reserve_window = "5h"
 pace_ease = 0.10
 pace_min = 0.5
 pace_max = 2.0
+# Plan 14 §2.2: the share of an order inside `spare = max(0, 1 - projected - booked)` is weighted by this so
+# projected-unused quota is spent before non-spare quota, while cheaper seats still win inside the spare.
+# A hypothesis (plan 14 §2.2).
+spare_weight = 0.05
 # Quota about to be lost is cheap: a window with more than reset_left left and under reset_within_min
 # minutes to its reset is discounted by up to reset_discount, scaled by the share of the order that fits
 # before the reset. Hypotheses (Argon's review, §4.3).
@@ -68,8 +72,8 @@ lease_minutes = 480
 [[pool]]
 id = "max"
 windows = ["5h", "week"]
-per_usd = { "5h" = 0.04, week = 0.005 }
-basis = "prior: not separable in P4 (other agents ran on Max); $25 of list price per 5 h window and $200 per week, to replace with an order run alone"
+per_usd = { "5h" = 0.04, week = 0.00078 }
+basis = "derived: week of 2026-10-16, $796 at list price for 62%; 5h stays a prior ($25 of list price per 5 h window, not measured)"
 
 [[pool]]
 id = "gemini"
@@ -325,14 +329,13 @@ effort = "medium"
 weight = 1.0
 bars = { efficient = 70, balanced = 85, sota = 100 }
 why = "P4: every seat passed a small order; flash at medium and high spent 9x to 16x flash low's output for the same result"
-# Plan 12 §5.4's row: sonnet, argon, flash, g-sonnet. P4: Google's Claude pool took 3.3% of its 5 h window
-# for one order, an overflow seat and not a second Max, so g-sonnet comes last (the orchestrator's ruling,
-# 2026-10-18; at 88 it was seated ahead of argon whenever Max was filtered).
+# Plan 12 §5.4's row: sonnet, argon, flash, g-sonnet. Plan 14 §2.3: g-sonnet is the same model as sonnet
+# (88, a hypothesis), and Google's 3.3% 5 h window cost is priced by the rule once its spare is spent.
 seats = [
   { seat = "sonnet", score = 88 },
   { seat = "argon", score = 82, effort = "low" },
   { seat = "flash", score = 78, effort = "low" },
-  { seat = "g-sonnet", score = 77 },
+  { seat = "g-sonnet", score = 88 },
 ]
 
 [[class]]

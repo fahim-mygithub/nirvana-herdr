@@ -31,8 +31,8 @@ CONTROLS = (
             'bars = { efficient = 60, balanced = 70, sota = 100 }',
             ROWS, "rust"),
     Control('seat_toml_g_sonnet_last', 'src/nirvana_seats.toml',
-            '  { seat = "g-sonnet", score = 77 },',
-            '  { seat = "g-sonnet", score = 88 },',
+            '  { seat = "flash", score = 78, effort = "low" },\n  { seat = "g-sonnet", score = 88 },',
+            '  { seat = "flash", score = 78, effort = "low" },\n  { seat = "g-sonnet", score = 77 },',
             ROWS, "rust"),
     # S2: known headroom, then unread, then a known window too small; an unread reserve is said; no windows is unread.
     Control('seat_short_ranks_above_unread', 'src/nirvana_seat.rs',

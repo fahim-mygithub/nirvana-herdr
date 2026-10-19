@@ -3,6 +3,50 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha NEXT (p14): spend-down seating
+
+Plan 14, package p14 (`plans/2026-10-18-14-seat-spend-down.md`; the record is
+`plans/2026-10-18-14-records/p14.md`).
+
+- **Changed:** each fresh window reading in `nirvana_seat` gains `elapsed`, `projected` (`used / max(elapsed, pace_ease)`,
+  neither clamped to `pace_min` nor adding `pace_ease` to `used`), and `spare` (`max(0, 1 - projected - booked)`).
+  `WindowState::pressure` splits an order's expected share `e` into `spare_part = min(e, spare)` and `rest = max(0, e - spare)`,
+  pricing `spare_part` at `spare_weight = 0.05` (a new `[constants]` key in `seats.toml`) and `rest` at the existing
+  pressure formula `rest / headroom * pace * reset_factor`. When every window of the winning seat holds the order inside
+  its `spare`, the reason line says `fits <Pool>'s spare (<window> <pct>% projected unused, resets in <duration>)`,
+  naming the window furthest along (`max_by(elapsed)`).
+  **Because:** plan 12 §5.3 priced an order by `expected / headroom * pace * reset_factor` even when a pool was projected
+  to expire largely unused, so Max's 20x–30x larger `5h` pool beat G·Claude (`g-opus`, `g-sonnet`) on every single-order
+  pick while G·Claude's week reset 96% unspent and Max's week paced at 1.38x.
+  **Measured:** `projected_spare_uses_elapsed_with_ease_floor_and_subtracts_booked_leases`,
+  `cost_splits_spare_and_rest_across_fresh_resetting_racing_and_booked_windows`,
+  `spend_down_on_2026_10_18_readings_and_when_max_has_spare_too`; 9 controls in `controls.d/p14.py`. On the 2026-10-18
+  readings (`max` 5h 24% used, `max` week 48% used at pace 1.38; `google3p` 5h 0% used, week 4.02% used with 11h to
+  reset), `plan`, `fix.debug`, and `review.adversary --not-family google` at small and medium pick `g-opus`, and
+  `build.bounded` picks `g-sonnet`, with the reason line `fits G·Claude's spare (week 96% projected unused, resets in 11h)`;
+  when Max also has spare (5% used with 90% of the window left), `opus` and `sonnet` win again. Live: one `sweep.mechanical`
+  order (`mul`) seated on `flash low` in pane `w1:p2` of an isolated server (`sweep.mechanical → flash low: fits Gemini's
+  spare (week 89% projected unused, resets in 5d15h)`), delivered in 33 s (73,110 in, 60,289 cache read, 1,033 out), and
+  passed `herdr gate run` on all axes. **Hypothesis:** `spare_weight = 0.05` is a tunable weight chosen so a 50%-of-5h
+  order inside spare costs 0.025 (above a 2%-of-Max order when Max also has spare, below a 2%-of-Max order when Max is
+  racing at pace >= 1.0 and 24% used).
+  **If you remove this:** `g-opus` and `g-sonnet` never win a single order while Max has headroom above its 15% reserve,
+  leaving G·Claude's week to reset unused.
+- **Changed:** in `src/nirvana_seats.toml`, `max` pool's `per_usd.week` is `0.00078` (was `0.005`, a 6.4x overestimate
+  against the week of 2026-10-16: $796 at list price for 62% of the week; `5h = 0.04` stays a prior), and `build.bounded`
+  scores `g-sonnet` at `88` (same as `sonnet`, was `77`). `lease_for` rounds `Lease.expected` shares with `round6` so
+  in-memory leases match their serialized `leases.json` representation (`g-sonnet` medium's `0.0331 * 5.0` in `f32`).
+  **Because:** plan 14 §2.3: both `sonnet` and `g-sonnet` are `claude-sonnet-5-5` at medium effort, and the `77` score
+  kept `g-sonnet` below `build.bounded`'s Balanced bar `85`. Note: `pool.per_usd` is used by `computed_use` when recording
+  token spend, whereas `candidate` reads each `[[seat]]`'s pre-baked `use` table. **Hypothesis:** that `g-sonnet` matches
+  `sonnet` on `build.bounded` (`88`) is unmeasured on the Moto A/B (`record.jsonl` will test it).
+  **Measured:** `the_default_table_is_written_once_parses_and_holds_the_plans_seats_and_classes`,
+  `a_bounded_build_at_balanced_goes_to_sonnet_medium_with_its_reason_line`,
+  `a_booking_is_idempotent_per_order_and_released_by_id`; controls `p14_toml_max_week_per_usd`,
+  `p14_toml_build_bounded_g_sonnet_score`, `seat_toml_g_sonnet_last`.
+  **If you remove this:** `g-sonnet` is filtered out by `build.bounded`'s Balanced bar `85` before cost comparison, and
+  recorded token spend on `max` `week` is overstated 6.4x.
+
 ## alpha 0.21.0 (2026-10-18): the Seats square of a Nirvana tab, and the mode (plan 12 O8a)
 
 Plan 12, package O8a (`plans/2026-10-17-12-nirvana-claude-orchestrator.md` §5.3 step 5, §8; the record is
