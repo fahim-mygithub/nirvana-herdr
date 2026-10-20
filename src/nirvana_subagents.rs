@@ -91,9 +91,9 @@ pub fn encode_project_folder(folder: &Path) -> String {
         .collect()
 }
 
-/// Claude projects directory under `home`: `<home>/.claude/projects/<encoded_folder>`.
-pub fn claude_project_dir(home: &Path, folder: &Path) -> PathBuf {
-    home.join(".claude")
+/// Claude projects directory under `claude_dir`: `<claude_dir>/projects/<encoded_folder>`.
+pub fn claude_project_dir(claude_dir: &Path, folder: &Path) -> PathBuf {
+    claude_dir
         .join("projects")
         .join(encode_project_folder(folder))
 }
@@ -289,6 +289,7 @@ pub struct TranscriptTail {
     pub model: Option<String>,
     pub tokens: Option<u64>,
     pub timestamp_secs: Option<u64>,
+    pub has_assistant: bool,
 }
 
 /// Reads at most `max_bytes` from the tail of `path`.
@@ -335,10 +336,39 @@ pub fn parse_transcript_tail(text: &str) -> TranscriptTail {
                 model,
                 tokens,
                 timestamp_secs,
+                has_assistant: true,
             };
         }
     }
     TranscriptTail::default()
+}
+
+pub const INITIAL_TAIL_WINDOW: u64 = 65536; // 64 KB
+pub const MAX_TAIL_WINDOW: u64 = 8 * 1024 * 1024; // 8 MB
+
+/// Reads transcript tail with window expansion: starts at 64 KB, multiplying by 4 up to 8 MB
+/// until an assistant turn is found or the beginning of file is reached.
+pub fn read_transcript_tail_with_expansion(path: &Path) -> TranscriptTail {
+    let mut window = INITIAL_TAIL_WINDOW;
+    loop {
+        let tail_text = match read_file_tail(path, window) {
+            Ok(t) => t,
+            Err(_) => return TranscriptTail::default(),
+        };
+        let tail = parse_transcript_tail(&tail_text);
+        if tail.has_assistant {
+            return tail;
+        }
+        if window >= MAX_TAIL_WINDOW {
+            return tail;
+        }
+        if let Ok(meta) = std::fs::metadata(path) {
+            if meta.len() <= window {
+                return tail;
+            }
+        }
+        window = (window * 4).min(MAX_TAIL_WINDOW);
+    }
 }
 
 /// Determines whether a subagent is Running, Done, or Failed.
@@ -379,7 +409,8 @@ pub fn resolve_claude_session(
     agent_session: Option<&str>,
     agent_start_secs: Option<u64>,
     other_claude_panes: &[(&str, &Path, Option<&str>)],
-    home: &Path,
+    claude_dir: &Path,
+    nirvana_home: &Path,
     now_secs: u64,
 ) -> Option<PathBuf> {
     let enc_folder = encode_project_folder(pane_folder);
@@ -404,7 +435,7 @@ pub fn resolve_claude_session(
         return None;
     }
 
-    let projects_dir = home.join(".claude").join("projects").join(&enc_folder);
+    let projects_dir = claude_dir.join("projects").join(&enc_folder);
 
     // 1. herdr's own agent_session
     if let Some(session) = agent_session.map(str::trim).filter(|s| !s.is_empty()) {
@@ -419,7 +450,7 @@ pub fn resolve_claude_session(
     }
 
     // 2. Nirvana session record for the pane's folder
-    if let Some(record) = crate::nirvana_session_record::read(home, pane_folder) {
+    if let Some(record) = crate::nirvana_session_record::read(nirvana_home, pane_folder) {
         if let Some(record_at) = crate::nirvana_usage::rfc3339(&record.at) {
             let younger = agent_start_secs.is_none_or(|start| record_at >= start);
             let transcript = Path::new(&record.transcript);
@@ -509,10 +540,7 @@ pub fn read_claude_subagents(
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let tail = read_file_tail(&transcript_path, 65536)
-                .ok()
-                .map(|t| parse_transcript_tail(&t))
-                .unwrap_or_default();
+            let tail = read_transcript_tail_with_expansion(&transcript_path);
             (mtime, tail)
         } else {
             (now_secs, TranscriptTail::default())
@@ -718,24 +746,110 @@ pub fn find_child_pids(_parent_pid: u32) -> Vec<u32> {
     Vec::new()
 }
 
+/// Returns true if the command line starts with an executable named `agy` or `agy.exe`.
+pub fn is_agy_cmdline(cmdline: &str) -> bool {
+    let trimmed = cmdline.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let exe = if let Some(stripped) = trimmed.strip_prefix('"') {
+        stripped.split('"').next().unwrap_or("")
+    } else {
+        trimmed.split_whitespace().next().unwrap_or("")
+    };
+    is_agy_executable(exe)
+}
+
+/// Returns true if `exe_path` has the file name `agy.exe` or `agy`.
+pub fn is_agy_executable(exe_path: &str) -> bool {
+    let path = Path::new(exe_path);
+    let file_name = path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(exe_path);
+    file_name.eq_ignore_ascii_case("agy.exe") || file_name.eq_ignore_ascii_case("agy")
+}
+
+/// Converts Windows FILETIME ticks (100-nanosecond intervals since January 1, 1601 UTC)
+/// to Unix epoch seconds (seconds since January 1, 1970 UTC).
+pub fn filetime_ticks_to_unix_secs(ticks: u64) -> u64 {
+    const TICKS_PER_SEC: u64 = 10_000_000;
+    const UNIX_EPOCH_TICKS: u64 = 116_444_736_000_000_000;
+    if ticks < UNIX_EPOCH_TICKS {
+        0
+    } else {
+        (ticks - UNIX_EPOCH_TICKS) / TICKS_PER_SEC
+    }
+}
+
+/// Returns process creation time in Unix epoch seconds from GetProcessTimes.
+#[cfg(windows)]
+pub fn process_creation_secs(pid: u32) -> Option<u64> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+    let mut creation_time = unsafe { std::mem::zeroed::<FILETIME>() };
+    let mut exit_time = unsafe { std::mem::zeroed::<FILETIME>() };
+    let mut kernel_time = unsafe { std::mem::zeroed::<FILETIME>() };
+    let mut user_time = unsafe { std::mem::zeroed::<FILETIME>() };
+    let ok = unsafe {
+        GetProcessTimes(
+            handle,
+            &mut creation_time,
+            &mut exit_time,
+            &mut kernel_time,
+            &mut user_time,
+        )
+    };
+    unsafe { CloseHandle(handle) };
+    if ok == 0 {
+        return None;
+    }
+    let ticks = (u64::from(creation_time.dwHighDateTime) << 32)
+        | u64::from(creation_time.dwLowDateTime);
+    Some(filetime_ticks_to_unix_secs(ticks))
+}
+
+#[cfg(not(windows))]
+pub fn process_creation_secs(_pid: u32) -> Option<u64> {
+    None
+}
+
 /// Finds `agy` processes running under `shell_pid` (e.g. started from a Bash call in Claude).
-pub fn find_agy_processes_under(shell_pid: u32, parent_pane_id: &str) -> Vec<Subagent> {
+pub fn find_agy_processes_under(shell_pid: u32, parent_pane_id: &str, now_secs: u64) -> Vec<Subagent> {
     let mut subagents = Vec::new();
     for pid in find_child_pids(shell_pid) {
         if let Some(cmdline) = crate::platform::process_command_line(pid) {
-            let lower = cmdline.to_ascii_lowercase();
-            if lower.contains("agy") {
+            if is_agy_cmdline(&cmdline) {
                 let model_name = parse_cmdline_model(&cmdline);
                 let model = format_model(model_name.as_deref(), SubagentProvider::Gemini);
+                let description = crate::platform::process_cwd(pid)
+                    .and_then(|cwd| {
+                        cwd.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(String::from)
+                    })
+                    .unwrap_or_default();
+                let created_secs = process_creation_secs(pid);
+                let elapsed_secs = created_secs
+                    .map(|c| now_secs.saturating_sub(c))
+                    .unwrap_or(0);
+
                 subagents.push(Subagent {
                     id: format!("agy-{pid}"),
                     parent_id: None,
                     name: "agy".into(),
-                    description: cmdline,
+                    description,
                     provider: SubagentProvider::Gemini,
                     model,
                     state: SubagentState::Running,
-                    elapsed_secs: 0,
+                    elapsed_secs,
                     tokens: None, // Probed: agy db does not expose readable token figures; shows '-'
                     ended_at: None,
                     depth: 0,
@@ -952,11 +1066,92 @@ struct PollTask {
     agent_session: Option<String>,
     agent_start_secs: Option<u64>,
     shell_pid: Option<u32>,
+    other_claude: Vec<(String, PathBuf, Option<String>)>,
 }
 
 static ENTRIES: Mutex<Option<HashMap<String, PaneCacheEntry>>> = Mutex::new(None);
 static CHANGED: AtomicBool = AtomicBool::new(false);
 static WORKER_PANES: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+static TEST_CLAUDE_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Claude Code's config folder: `CLAUDE_CONFIG_DIR`, else `USERPROFILE` (then `HOME`) joined with `.claude`.
+pub fn claude_config_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        let guard = TEST_CLAUDE_DIR.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(dir) = guard.as_ref() {
+            return Some(dir.clone());
+        }
+    }
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    std::env::var_os("USERPROFILE")
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var_os("HOME").filter(|v| !v.is_empty()))
+        .map(|home| PathBuf::from(home).join(".claude"))
+}
+
+#[cfg(test)]
+pub fn set_claude_dir_for_test(dir: Option<PathBuf>) {
+    let mut guard = TEST_CLAUDE_DIR.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = dir;
+}
+
+fn herdr_self(args: &[&str], timeout: Duration) -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let mut command = std::process::Command::new(exe);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    crate::platform::configure_background_command(&mut command);
+    let mut child = command.spawn().ok()?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    let mut stdout = Vec::new();
+                    if let Some(mut out) = child.stdout.take() {
+                        let _ = std::io::Read::read_to_end(&mut out, &mut stdout);
+                    }
+                    return Some(String::from_utf8_lossy(&stdout).into_owned());
+                } else {
+                    return None;
+                }
+            }
+            Ok(None) => {
+                if started.elapsed() > timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+/// Queries herdr's own `pane.process_info` to get the pane's shell pid.
+pub fn query_pane_shell_pid(pane_id: &str) -> Option<u32> {
+    let out = herdr_self(&["pane", "process-info", pane_id, "--json"], Duration::from_secs(2))?;
+    let val: Value = serde_json::from_str(&out).ok()?;
+    [
+        "/result/process_info/shell_pid",
+        "/process_info/shell_pid",
+        "/shell_pid",
+    ]
+    .iter()
+    .find_map(|pointer| val.pointer(pointer).and_then(Value::as_u64))
+    .map(|p| p as u32)
+}
 
 #[cfg(test)]
 thread_local! {
@@ -1051,6 +1246,9 @@ pub fn update_pane_query(
             agent_start_secs,
             shell_pid,
         });
+    if entry.folder != folder || entry.agent_session != agent_session {
+        entry.read_at = None;
+    }
     entry.folder = folder;
     entry.is_claude = is_claude;
     entry.agent_session = agent_session;
@@ -1058,16 +1256,12 @@ pub fn update_pane_query(
     entry.shell_pid = shell_pid;
 }
 
-/// Polls panes off the draw path: fills the cache per pane, every 2s while any listed
-/// subagent runs and every 10s otherwise.
-pub fn poll() {
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    let home = crate::nirvana::home();
-
+fn poll_with(
+    now_secs: u64,
+    home: Option<PathBuf>,
+    claude_dir: Option<PathBuf>,
+    sync: bool,
+) {
     let due: Vec<PollTask> = {
         let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
         let Some(map) = guard.as_mut() else {
@@ -1079,6 +1273,15 @@ pub fn poll() {
                 .asked_at
                 .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
         });
+
+        let mut all_claude: Vec<(String, PathBuf, Option<String>)> = Vec::new();
+        for (pane_id, entry) in map.iter() {
+            if entry.is_claude {
+                if let Some(folder) = &entry.folder {
+                    all_claude.push((pane_id.clone(), folder.clone(), entry.agent_session.clone()));
+                }
+            }
+        }
 
         let mut to_read = Vec::new();
         for (pane_id, entry) in map.iter_mut() {
@@ -1104,6 +1307,11 @@ pub fn poll() {
                 .is_none_or(|at| at.elapsed() >= reread_interval)
             {
                 entry.reading = true;
+                let other_claude = all_claude
+                    .iter()
+                    .filter(|(id, _, _)| id != pane_id)
+                    .cloned()
+                    .collect();
                 to_read.push(PollTask {
                     pane_id: pane_id.clone(),
                     folder,
@@ -1111,6 +1319,7 @@ pub fn poll() {
                     agent_session: entry.agent_session.clone(),
                     agent_start_secs: entry.agent_start_secs,
                     shell_pid: entry.shell_pid,
+                    other_claude,
                 });
             }
         }
@@ -1121,23 +1330,30 @@ pub fn poll() {
         return;
     }
 
-    std::thread::spawn(move || {
-        let Some(home) = home else {
-            return;
-        };
+    let run_tasks = move || {
         for task in due {
             let mut all_subagents = Vec::new();
 
             if task.is_claude {
-                let session_path = resolve_claude_session(
-                    &task.pane_id,
-                    &task.folder,
-                    task.agent_session.as_deref(),
-                    task.agent_start_secs,
-                    &[], // Other panes checked by client query
-                    &home,
-                    now_secs,
-                );
+                let other_claude_refs: Vec<(&str, &Path, Option<&str>)> = task
+                    .other_claude
+                    .iter()
+                    .map(|(id, folder, sess)| (id.as_str(), folder.as_path(), sess.as_deref()))
+                    .collect();
+
+                let session_path = match (&claude_dir, &home) {
+                    (Some(c_dir), Some(h_dir)) => resolve_claude_session(
+                        &task.pane_id,
+                        &task.folder,
+                        task.agent_session.as_deref(),
+                        task.agent_start_secs,
+                        &other_claude_refs,
+                        c_dir,
+                        h_dir,
+                        now_secs,
+                    ),
+                    _ => None,
+                };
 
                 if let Some(session_path) = session_path {
                     all_subagents.extend(read_claude_subagents(
@@ -1152,11 +1368,14 @@ pub fn poll() {
             all_subagents.extend(read_seat_orders(&task.folder, &task.pane_id, now_secs));
 
             // agy jobs
-            all_subagents.extend(read_agy_jobs(&home, &task.pane_id, now_secs));
+            if let Some(home) = &home {
+                all_subagents.extend(read_agy_jobs(home, &task.pane_id, now_secs));
+            }
 
-            // Bash-started agy
-            if let Some(pid) = task.shell_pid {
-                all_subagents.extend(find_agy_processes_under(pid, &task.pane_id));
+            // Bash-started agy: shell_pid from cache, or query pane.process_info off draw path
+            let shell_pid = task.shell_pid.or_else(|| query_pane_shell_pid(&task.pane_id));
+            if let Some(pid) = shell_pid {
+                all_subagents.extend(find_agy_processes_under(pid, &task.pane_id, now_secs));
             }
 
             let nested = nest_subagents(all_subagents);
@@ -1173,6 +1392,9 @@ pub fn poll() {
             let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(map) = guard.as_mut() {
                 if let Some(entry) = map.get_mut(&task.pane_id) {
+                    if entry.shell_pid.is_none() && shell_pid.is_some() {
+                        entry.shell_pid = shell_pid;
+                    }
                     entry.reading = false;
                     entry.read_at = Some(Instant::now());
                     if entry.view != view {
@@ -1182,7 +1404,36 @@ pub fn poll() {
                 }
             }
         }
-    });
+    };
+
+    if sync {
+        run_tasks();
+    } else {
+        std::thread::spawn(run_tasks);
+    }
+}
+
+/// Polls panes off the draw path: fills the cache per pane, every 2s while any listed
+/// subagent runs and every 10s otherwise.
+pub fn poll() {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let home = crate::nirvana::home();
+    let claude_dir = claude_config_dir();
+    poll_with(now_secs, home, claude_dir, false);
+}
+
+#[cfg(test)]
+pub fn poll_sync_for_test(now_secs: u64, home: Option<&Path>, claude_dir: Option<&Path>) {
+    poll_with(
+        now_secs,
+        home.map(PathBuf::from),
+        claude_dir.map(PathBuf::from),
+        true,
+    );
 }
 
 /// Returns whether any subagents view changed since the last call, triggering UI repaint.
@@ -1371,8 +1622,16 @@ mod tests {
         let pane1 = "pane-1";
         let pane2 = "pane-2";
         let other_panes = vec![(pane2, proj.as_path(), None)];
-        let res =
-            resolve_claude_session(pane1, &proj, None, Some(100), &other_panes, &temp.path, 200);
+        let res = resolve_claude_session(
+            pane1,
+            &proj,
+            None,
+            Some(100),
+            &other_panes,
+            &temp.path,
+            &temp.path,
+            200,
+        );
         assert!(res.is_none(), "Shared folder conflict must be refused");
 
         // 2. Case 1: distinct agent_session reported
@@ -1386,9 +1645,262 @@ mod tests {
             Some(100),
             &other_distinct,
             &temp.path,
+            &temp.path,
             200,
         );
         assert_eq!(res, Some(file1));
+    }
+
+    #[test]
+    fn claude_subagents_found_under_claude_dir_separate_from_nirvana_home() {
+        let nirvana_temp = crate::nirvana::with_test_home("subagent-nirvana-home");
+        let claude_dir = std::env::temp_dir().join(format!(
+            "test-claude-dir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&claude_dir);
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        struct DirGuard(PathBuf);
+        impl Drop for DirGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _claude_guard = DirGuard(claude_dir.clone());
+
+        let proj = nirvana_temp.path.join("my-project");
+        std::fs::create_dir_all(&proj).unwrap();
+
+        // Subagents exist ONLY under claude_dir/projects/<enc_folder>/
+        let enc_folder = encode_project_folder(&proj);
+        let projects_dir = claude_dir.join("projects").join(&enc_folder);
+        std::fs::create_dir_all(&projects_dir).unwrap();
+
+        let session_file = projects_dir.join("test-sess.jsonl");
+        std::fs::write(&session_file, "{}\n").unwrap();
+
+        // When resolve_claude_session is called with claude_dir as claude_dir and nirvana_temp as nirvana_home:
+        let resolved = resolve_claude_session(
+            "p1",
+            &proj,
+            Some("test-sess"),
+            None,
+            &[],
+            &claude_dir,
+            &nirvana_temp.path,
+            1000,
+        );
+        assert_eq!(resolved, Some(session_file));
+
+        // Nirvana home has NO projects folder, and resolving with nirvana_temp as claude_dir yields None
+        let resolved_wrong = resolve_claude_session(
+            "p1",
+            &proj,
+            Some("test-sess"),
+            None,
+            &[],
+            &nirvana_temp.path,
+            &nirvana_temp.path,
+            1000,
+        );
+        assert_eq!(
+            resolved_wrong, None,
+            "Must not find subagents under Nirvana home"
+        );
+    }
+
+    #[test]
+    fn shared_folder_refusal_in_poll() {
+        let nirvana_temp = crate::nirvana::with_test_home("poll-refusal-nirvana");
+        let claude_dir = std::env::temp_dir().join(format!(
+            "poll-refusal-claude-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&claude_dir);
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        struct DirGuard(PathBuf);
+        impl Drop for DirGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _claude_guard = DirGuard(claude_dir.clone());
+
+        let proj = claude_dir.join("shared-proj");
+        std::fs::create_dir_all(&proj).unwrap();
+
+        let enc_folder = encode_project_folder(&proj);
+        let projects_dir = claude_dir.join("projects").join(&enc_folder);
+        std::fs::create_dir_all(&projects_dir).unwrap();
+
+        let sess1_file = projects_dir.join("sess-1.jsonl");
+        std::fs::write(&sess1_file, "{}\n").unwrap();
+        let sub1_dir = projects_dir.join("sess-1").join("subagents");
+        std::fs::create_dir_all(&sub1_dir).unwrap();
+        std::fs::write(
+            sub1_dir.join("agent-sub1.meta.json"),
+            r#"{"agentType":"Architect","description":"arch1"}"#,
+        )
+        .unwrap();
+
+        let sess2_file = projects_dir.join("sess-2.jsonl");
+        std::fs::write(&sess2_file, "{}\n").unwrap();
+        let sub2_dir = projects_dir.join("sess-2").join("subagents");
+        std::fs::create_dir_all(&sub2_dir).unwrap();
+        std::fs::write(
+            sub2_dir.join("agent-sub2.meta.json"),
+            r#"{"agentType":"Coder","description":"coder2"}"#,
+        )
+        .unwrap();
+
+        // Case 1: Two Claude panes in the same folder with NO session IDs
+        update_pane_query("pane-a", Some(proj.clone()), true, None, None, None);
+        update_pane_query("pane-b", Some(proj.clone()), true, None, None, None);
+
+        poll_sync_for_test(1000, Some(&nirvana_temp.path), Some(&claude_dir));
+
+        let view_a = cached("pane-a").unwrap();
+        let view_b = cached("pane-b").unwrap();
+        assert!(
+            view_a.subagents.is_empty(),
+            "Ambiguous shared folder in poll must refuse subagents for pane-a"
+        );
+        assert!(
+            view_b.subagents.is_empty(),
+            "Ambiguous shared folder in poll must refuse subagents for pane-b"
+        );
+
+        // Case 2: Give each pane its distinct session
+        update_pane_query(
+            "pane-a",
+            Some(proj.clone()),
+            true,
+            Some("sess-1".into()),
+            None,
+            None,
+        );
+        update_pane_query(
+            "pane-b",
+            Some(proj.clone()),
+            true,
+            Some("sess-2".into()),
+            None,
+            None,
+        );
+
+        poll_sync_for_test(1000, Some(&nirvana_temp.path), Some(&claude_dir));
+
+        let view_a = cached("pane-a").unwrap();
+        let view_b = cached("pane-b").unwrap();
+        assert_eq!(view_a.subagents.len(), 1);
+        assert_eq!(view_a.subagents[0].id, "sub1");
+        assert_eq!(view_b.subagents.len(), 1);
+        assert_eq!(view_b.subagents[0].id, "sub2");
+    }
+
+    #[test]
+    fn agy_exec_name_matching() {
+        // Pure function tests for is_agy_cmdline and is_agy_executable
+        assert!(is_agy_cmdline("agy"));
+        assert!(is_agy_cmdline("agy.exe"));
+        assert!(is_agy_cmdline(r#"C:\Users\bin\agy.exe --model flash"#));
+        assert!(is_agy_cmdline(r#""C:\Program Files\agy.exe" --prompt hello"#));
+        assert!(is_agy_cmdline("/usr/local/bin/agy -m flash"));
+        // Substring matches that are NOT agy executables must return false
+        assert!(!is_agy_cmdline("python run.py --agent agy"));
+        assert!(!is_agy_cmdline(r#"cmd.exe /c "echo agy""#));
+        assert!(!is_agy_cmdline("notagy.exe --test"));
+
+        // Pure function tests for filetime_ticks_to_unix_secs
+        const EPOCH_TICKS: u64 = 116_444_736_000_000_000;
+        assert_eq!(filetime_ticks_to_unix_secs(EPOCH_TICKS), 0);
+        assert_eq!(
+            filetime_ticks_to_unix_secs(EPOCH_TICKS + 42 * 10_000_000),
+            42
+        );
+        assert_eq!(
+            filetime_ticks_to_unix_secs(EPOCH_TICKS + 1_700_000_000 * 10_000_000),
+            1_700_000_000
+        );
+        assert_eq!(filetime_ticks_to_unix_secs(100), 0);
+
+        // Spawn a child process named so old substring rule matches but new executable rule does not
+        #[cfg(windows)]
+        {
+            struct ChildGuard(std::process::Child);
+            impl Drop for ChildGuard {
+                fn drop(&mut self) {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+
+            let mut cmd = std::process::Command::new("ping");
+            cmd.args(["-n", "30", "127.0.0.1", "-a", "agy"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            crate::platform::configure_background_command(&mut cmd);
+            let child = cmd.spawn().expect("spawn ping child with agy arg");
+            let _guard = ChildGuard(child);
+
+            // Give process table a moment
+            std::thread::sleep(Duration::from_millis(50));
+
+            // find_agy_processes_under test process: ping has 'agy' in arguments, but executable is ping.exe
+            let subagents = find_agy_processes_under(std::process::id(), "p1", 2_000_000_000);
+            assert!(
+                subagents.iter().all(|s| s.name == "agy" && is_agy_cmdline(&s.id)),
+                "Processes that merely mention agy in args must not be reported as agy subagents"
+            );
+        }
+    }
+
+    #[test]
+    fn tail_window_expands_to_find_assistant() {
+        let temp = crate::nirvana::with_test_home("tail-expansion-test");
+        let transcript_path = temp.path.join("large_tail.jsonl");
+
+        let assistant_line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "model": "claude-3-5-sonnet-20241022",
+                "usage": {
+                    "input_tokens": 5000,
+                    "output_tokens": 1200
+                }
+            },
+            "timestamp": "2026-10-19T12:00:00Z"
+        })
+        .to_string();
+
+        // 200 KB user line following the assistant line
+        let large_user_line = serde_json::json!({
+            "type": "user",
+            "content": "x".repeat(200_000)
+        })
+        .to_string();
+
+        let mut content = String::with_capacity(250_000);
+        content.push_str(&assistant_line);
+        content.push('\n');
+        content.push_str(&large_user_line);
+        content.push('\n');
+
+        std::fs::write(&transcript_path, content).unwrap();
+
+        // Tail reading with window expansion must expand beyond 64 KB up to 256 KB and find the assistant line
+        let tail = read_transcript_tail_with_expansion(&transcript_path);
+        assert!(tail.has_assistant, "Must find assistant line despite 200 KB trailing user line");
+        assert_eq!(tail.tokens, Some(6200));
+        assert_eq!(tail.model.as_deref(), Some("claude-3-5-sonnet-20241022"));
     }
 
     #[test]
