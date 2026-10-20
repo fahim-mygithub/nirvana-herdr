@@ -1026,4 +1026,28 @@ mod tests {
             assert_eq!(run_pane_command(&args(&[name])).unwrap(), 2);
         }
     }
+
+    #[test]
+    fn pane_process_info_args_parsed_by_cli() {
+        let full_args = crate::nirvana_subagents::pane_process_info_args("target-pane-42");
+        assert_eq!(
+            full_args,
+            vec!["pane", "process-info", "--pane", "target-pane-42"]
+        );
+        let str_args: Vec<&str> = full_args[2..].iter().map(String::as_str).collect();
+        let req = request("process-info", &str_args).expect("valid process-info args");
+        assert_eq!(req.method.operation().name, "pane.process_info");
+        match req.method {
+            crate::api::schema::Method::PaneProcessInfo(ref params) => {
+                assert_eq!(params.pane_id.as_deref(), Some("target-pane-42"));
+            }
+            _ => panic!("Expected Method::PaneProcessInfo"),
+        }
+
+        // The old form without --pane flag must fail that test
+        let old_form = &["target-pane-42", "--json"];
+        assert!(request("process-info", old_form).is_err(), "Old form must fail");
+        let old_form_pos = &["target-pane-42"];
+        assert!(request("process-info", old_form_pos).is_err(), "Old positional form must fail");
+    }
 }

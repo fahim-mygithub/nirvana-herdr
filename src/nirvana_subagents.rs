@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -1057,6 +1057,7 @@ struct PaneCacheEntry {
     agent_session: Option<String>,
     agent_start_secs: Option<u64>,
     shell_pid: Option<u32>,
+    shell_pid_failed_at: Option<Instant>,
 }
 
 struct PollTask {
@@ -1066,6 +1067,7 @@ struct PollTask {
     agent_session: Option<String>,
     agent_start_secs: Option<u64>,
     shell_pid: Option<u32>,
+    shell_pid_failed_at: Option<Instant>,
     other_claude: Vec<(String, PathBuf, Option<String>)>,
 }
 
@@ -1139,9 +1141,21 @@ fn herdr_self(args: &[&str], timeout: Duration) -> Option<String> {
     }
 }
 
+/// Returns the CLI arguments for querying pane process information.
+pub fn pane_process_info_args(pane_id: &str) -> Vec<String> {
+    vec![
+        "pane".into(),
+        "process-info".into(),
+        "--pane".into(),
+        pane_id.into(),
+    ]
+}
+
 /// Queries herdr's own `pane.process_info` to get the pane's shell pid.
 pub fn query_pane_shell_pid(pane_id: &str) -> Option<u32> {
-    let out = herdr_self(&["pane", "process-info", pane_id, "--json"], Duration::from_secs(2))?;
+    let args = pane_process_info_args(pane_id);
+    let str_args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = herdr_self(&str_args, Duration::from_secs(2))?;
     let val: Value = serde_json::from_str(&out).ok()?;
     [
         "/result/process_info/shell_pid",
@@ -1217,6 +1231,7 @@ pub fn cached(pane_id: &str) -> Option<SubagentsView> {
             agent_session: None,
             agent_start_secs: None,
             shell_pid: None,
+            shell_pid_failed_at: None,
         });
     entry.asked_at = Some(Instant::now());
     entry.view.clone()
@@ -1245,6 +1260,7 @@ pub fn update_pane_query(
             agent_session: agent_session.clone(),
             agent_start_secs,
             shell_pid,
+            shell_pid_failed_at: None,
         });
     if entry.folder != folder || entry.agent_session != agent_session {
         entry.read_at = None;
@@ -1252,16 +1268,24 @@ pub fn update_pane_query(
     entry.folder = folder;
     entry.is_claude = is_claude;
     entry.agent_session = agent_session;
-    entry.agent_start_secs = agent_start_secs;
-    entry.shell_pid = shell_pid;
+    if agent_start_secs.is_some() {
+        entry.agent_start_secs = agent_start_secs;
+    }
+    // Finding B: keep cached shell_pid when caller passes None
+    if shell_pid.is_some() {
+        entry.shell_pid = shell_pid;
+    }
 }
 
-fn poll_with(
+pub fn poll_with<F>(
     now_secs: u64,
     home: Option<PathBuf>,
     claude_dir: Option<PathBuf>,
+    query_shell_pid: F,
     sync: bool,
-) {
+) where
+    F: Fn(&str) -> Option<u32> + Send + Sync + 'static,
+{
     let due: Vec<PollTask> = {
         let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
         let Some(map) = guard.as_mut() else {
@@ -1319,6 +1343,7 @@ fn poll_with(
                     agent_session: entry.agent_session.clone(),
                     agent_start_secs: entry.agent_start_secs,
                     shell_pid: entry.shell_pid,
+                    shell_pid_failed_at: entry.shell_pid_failed_at,
                     other_claude,
                 });
             }
@@ -1373,7 +1398,21 @@ fn poll_with(
             }
 
             // Bash-started agy: shell_pid from cache, or query pane.process_info off draw path
-            let shell_pid = task.shell_pid.or_else(|| query_pane_shell_pid(&task.pane_id));
+            let mut shell_pid = task.shell_pid;
+            let mut query_failed = false;
+
+            if shell_pid.is_none() {
+                let recent_failure = task
+                    .shell_pid_failed_at
+                    .is_some_and(|failed_at| failed_at.elapsed() < Duration::from_secs(60));
+                if !recent_failure {
+                    shell_pid = query_shell_pid(&task.pane_id);
+                    if shell_pid.is_none() {
+                        query_failed = true;
+                    }
+                }
+            }
+
             if let Some(pid) = shell_pid {
                 all_subagents.extend(find_agy_processes_under(pid, &task.pane_id, now_secs));
             }
@@ -1394,6 +1433,9 @@ fn poll_with(
                 if let Some(entry) = map.get_mut(&task.pane_id) {
                     if entry.shell_pid.is_none() && shell_pid.is_some() {
                         entry.shell_pid = shell_pid;
+                        entry.shell_pid_failed_at = None;
+                    } else if query_failed {
+                        entry.shell_pid_failed_at = Some(Instant::now());
                     }
                     entry.reading = false;
                     entry.read_at = Some(Instant::now());
@@ -1423,7 +1465,7 @@ pub fn poll() {
 
     let home = crate::nirvana::home();
     let claude_dir = claude_config_dir();
-    poll_with(now_secs, home, claude_dir, false);
+    poll_with(now_secs, home, claude_dir, query_pane_shell_pid, false);
 }
 
 #[cfg(test)]
@@ -1432,6 +1474,25 @@ pub fn poll_sync_for_test(now_secs: u64, home: Option<&Path>, claude_dir: Option
         now_secs,
         home.map(PathBuf::from),
         claude_dir.map(PathBuf::from),
+        |_| None,
+        true,
+    );
+}
+
+#[cfg(test)]
+pub fn poll_sync_with_query_for_test<F>(
+    now_secs: u64,
+    home: Option<&Path>,
+    claude_dir: Option<&Path>,
+    query_fn: F,
+) where
+    F: Fn(&str) -> Option<u32> + Send + Sync + 'static,
+{
+    poll_with(
+        now_secs,
+        home.map(PathBuf::from),
+        claude_dir.map(PathBuf::from),
+        query_fn,
         true,
     );
 }
@@ -1998,5 +2059,90 @@ mod tests {
         assert!(!is_seat_worker_pane("orch-pane-1"));
 
         set_worker_panes_for_test(None);
+    }
+
+    #[test]
+    fn pane_process_info_args_format() {
+        let args = pane_process_info_args("target-pane-42");
+        assert_eq!(
+            args,
+            vec!["pane", "process-info", "--pane", "target-pane-42"]
+        );
+    }
+
+    #[test]
+    fn cached_shell_pid_survives_none_update_and_failed_query_throttled() {
+        // Part 1: cached Some(pid) survives update_pane_query with None
+        update_pane_query(
+            "pane-survive-test",
+            None,
+            false,
+            None,
+            None,
+            Some(54321),
+        );
+        {
+            let guard = ENTRIES.lock().unwrap();
+            let entry = guard.as_ref().unwrap().get("pane-survive-test").unwrap();
+            assert_eq!(entry.shell_pid, Some(54321));
+        }
+
+        // Simulated frame draw call with shell_pid = None:
+        update_pane_query(
+            "pane-survive-test",
+            None,
+            false,
+            None,
+            None,
+            None,
+        );
+        {
+            let guard = ENTRIES.lock().unwrap();
+            let entry = guard.as_ref().unwrap().get("pane-survive-test").unwrap();
+            assert_eq!(
+                entry.shell_pid,
+                Some(54321),
+                "Cached shell_pid must survive update_pane_query with None"
+            );
+        }
+
+        // Part 2: failed query is not repeated inside 60s
+        use std::sync::atomic::AtomicUsize;
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let cc = call_count.clone();
+        let query_fn = move |_pane_id: &str| {
+            cc.fetch_add(1, Ordering::SeqCst);
+            None // Simulated failed query
+        };
+
+        let temp_folder = std::env::temp_dir();
+        update_pane_query(
+            "pane-throttle-test",
+            Some(temp_folder),
+            false,
+            None,
+            None,
+            None,
+        );
+
+        // First poll: should call query_fn once
+        poll_sync_with_query_for_test(1000, None, None, query_fn.clone());
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+
+        // Force entry to be due for reading again
+        {
+            let mut guard = ENTRIES.lock().unwrap();
+            if let Some(entry) = guard.as_mut().and_then(|m| m.get_mut("pane-throttle-test")) {
+                entry.read_at = None;
+            }
+        }
+
+        // Second poll immediately (within 60s of failure): should NOT call query_fn again
+        poll_sync_with_query_for_test(1005, None, None, query_fn);
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "Failed shell pid query must not be repeated within 60s"
+        );
     }
 }
