@@ -1,7 +1,7 @@
 # Feature 20: every Claude spawn is seated, and the orchestrator's own seat follows the mode
 
-Status: **PLANNED (2026-10-20).** Builds after plan 19, whose climb (§6.2) it reads. To be built on agy (Gemini 3.8
-Flash high); record `2026-10-20-20-records/p20.md`.
+Status: **BUILT (2026-10-20)** as alpha 0.32.0, on agy (Gemini 3.8 Flash high), with one review fix by the
+orchestrator; record `2026-10-20-20-records/p20.md`.
 
 ## Ledger
 

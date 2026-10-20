@@ -3,7 +3,7 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
-## alpha NEXT (p20): every spawn seated, orchestrator seat follows the mode
+## alpha 0.32.0: every spawn seated, orchestrator seat follows the mode (plan 20)
 
 Package `p20` (`P20-ORDER.md`, record `nirvana/plans/2026-10-20-20-records/p20.md`).
 
