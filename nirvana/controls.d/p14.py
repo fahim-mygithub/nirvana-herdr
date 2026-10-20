@@ -41,8 +41,8 @@ CONTROLS = (
             'per_usd = { "5h" = 0.04, week = 0.005 }\n',
             TABLE, "rust"),
     Control('p14_toml_build_bounded_g_sonnet_score', 'src/nirvana_seats.toml',
-            '  { seat = "flash", score = 78, effort = "low" },\n  { seat = "g-sonnet", score = 88 },',
-            '  { seat = "flash", score = 78, effort = "low" },\n  { seat = "g-sonnet", score = 77 },',
+            '  { seat = "haiku", score = 70 },\n  { seat = "g-sonnet", score = 88 },',
+            '  { seat = "haiku", score = 70 },\n  { seat = "g-sonnet", score = 77 },',
             SPEND_DOWN, "rust"),
     # 0.22.1: a table written before plan 14 (no spare_weight line) still parses, with the default.
     Control('p14_spare_weight_required', 'src/nirvana_seat.rs',

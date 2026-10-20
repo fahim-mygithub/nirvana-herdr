@@ -43,6 +43,7 @@ pub const DEFAULT: &str = include_str!("nirvana_seats.toml");
 pub const HISTORICAL_DEFAULTS: &[&str] = &[
     include_str!("nirvana_seats_v1.toml"),
     include_str!("nirvana_seats_v2.toml"),
+    include_str!("nirvana_seats_v3.toml"),
 ];
 pub const DIR: &str = "nirvana";
 pub const SEATS_FILE: &str = "seats.toml";
@@ -190,6 +191,16 @@ fn default_spare_weight() -> f32 {
     0.05
 }
 
+/// Plan 19 §6.2's `climb_start` when a table written before it leaves the line out.
+fn default_climb_start() -> f32 {
+    0.70
+}
+
+/// Plan 19 §6.2's `climb_full` when a table written before it leaves the line out.
+fn default_climb_full() -> f32 {
+    1.00
+}
+
 /// The rule's numbers (plan 12 §5.3). Each is commented with its source in the default file.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -212,6 +223,11 @@ pub struct Constants {
     pub overrides_per_run: u32,
     pub record_prior: f32,
     pub record_shrink: f32,
+    /// Plan 19 §6.2: Balanced mode climb thresholds.
+    #[serde(default = "default_climb_start")]
+    pub climb_start: f32,
+    #[serde(default = "default_climb_full")]
+    pub climb_full: f32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -256,6 +272,9 @@ pub struct Seat {
     pub efforts: Vec<Effort>,
     pub capabilities: Vec<String>,
     pub enabled: bool,
+    /// Plan 19 §6.4: Fallback seats rank after every survivor without fallback in all modes.
+    #[serde(default)]
+    pub fallback: bool,
     #[serde(default)]
     pub prices: Vec<Price>,
     #[serde(rename = "use")]
@@ -294,6 +313,9 @@ pub struct Class {
     pub chain: String,
     pub blast: Blast,
     pub effort: Effort,
+    /// Plan 19 §5: Effort for Efficient mode.
+    #[serde(default)]
+    pub efficient_effort: Option<Effort>,
     #[serde(default)]
     pub sota_effort: Option<Effort>,
     #[serde(default)]
@@ -407,10 +429,15 @@ impl Table {
             ("reset_left", c.reset_left),
             ("reset_discount", c.reset_discount),
             ("record_prior", c.record_prior),
+            ("climb_start", c.climb_start),
+            ("climb_full", c.climb_full),
         ] {
             if !(0.0..=1.0).contains(&value) {
                 problems.push(format!("constants.{name} {value} is not between 0 and 1"));
             }
+        }
+        if c.climb_start >= c.climb_full {
+            problems.push("constants: climb_start must be less than climb_full".into());
         }
         if c.record_prior <= 0.0 {
             problems.push("constants.record_prior must be above 0".into());
@@ -3347,14 +3374,14 @@ mod tests {
                 .contains("constants.spare_weight 1.5 is not between 0 and 1")
         );
         assert!(parse(&DEFAULT.replace(
-            "bars = { efficient = 70, balanced = 85, sota = 100 }\nwhy = \"P4",
-            "bars = { efficient = 90, balanced = 85, sota = 100 }\nwhy = \"P4"
+            "bars = { efficient = 70, balanced = 85, sota = 100 }\nwhy = \"plan 19 §4",
+            "bars = { efficient = 90, balanced = 85, sota = 100 }\nwhy = \"plan 19 §4"
         ))
         .unwrap_err()
         .contains("class build.bounded: bars must rise"));
         assert!(parse(&DEFAULT.replace(
-            "  { seat = \"sonnet\", score = 85 },\n  { seat = \"flash\", score = 78, effort = \"low\" },",
-            "  { seat = \"sonnet\", score = 85 },\n  { seat = \"sonnet\", score = 80 },\n  { seat = \"flash\", score = 78, effort = \"low\" },"
+            "  { seat = \"sonnet\", score = 85 },\n  { seat = \"opus\", score = 88 },",
+            "  { seat = \"sonnet\", score = 85 },\n  { seat = \"sonnet\", score = 80 },\n  { seat = \"opus\", score = 88 },"
         ))
         .unwrap_err()
         .contains("class research.read: seat sonnet is listed twice"));
@@ -3411,6 +3438,102 @@ mod tests {
         // 5. Unparseable file is kept as it is
         std::fs::write(&path, "invalid = toml ][\n").unwrap();
         assert_eq!(read_or_create(&path), "invalid = toml ][\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn l7_google_family_enabled_seats_are_flash_and_argon_only() {
+        let table = table();
+        let mut google_enabled: Vec<&str> = table
+            .seats
+            .iter()
+            .filter(|s| s.enabled && s.family == "google")
+            .map(|s| s.id.as_str())
+            .collect();
+        google_enabled.sort();
+        assert_eq!(google_enabled, ["argon", "flash"]);
+    }
+
+    #[test]
+    fn section2_shipped_table_per_usd_and_use_cells_match_plan19() {
+        let table = table();
+        let gemini = table.pool("gemini").unwrap();
+        assert!(close(gemini.per_usd["week"] as f32, 0.00107));
+        assert!(close(gemini.per_usd["5h"] as f32, 0.0021));
+
+        let google3p = table.pool("google3p").unwrap();
+        assert!(close(google3p.per_usd["week"] as f32, 0.166));
+        assert!(close(google3p.per_usd["5h"] as f32, 0.31));
+
+        let max = table.pool("max").unwrap();
+        assert!(close(max.per_usd["week"] as f32, 0.00078));
+        assert!(close(max.per_usd["5h"] as f32, 0.04));
+
+        let flash = table.seat("flash").unwrap();
+        let cell_low = flash.uses.iter().find(|u| u.effort == Effort::Low).unwrap();
+        assert!(close(cell_low.windows["5h"], 0.000017424));
+        assert!(close(cell_low.windows["week"], 0.000008712));
+        let cell_med = flash.uses.iter().find(|u| u.effort == Effort::Medium).unwrap();
+        assert!(close(cell_med.windows["5h"], 0.00016632));
+        assert!(close(cell_med.windows["week"], 0.00008316));
+        let cell_high = flash.uses.iter().find(|u| u.effort == Effort::High).unwrap();
+        assert!(close(cell_high.windows["5h"], 0.00026928));
+        assert!(close(cell_high.windows["week"], 0.00013464));
+
+        let g_opus = table.seat("g-opus").unwrap();
+        assert!(g_opus.fallback);
+        let cell_low = g_opus.uses.iter().find(|u| u.effort == Effort::Low).unwrap();
+        assert!(close(cell_low.windows["5h"], 0.006624));
+        assert!(close(cell_low.windows["week"], 0.003536));
+        let cell_med = g_opus.uses.iter().find(|u| u.effort == Effort::Medium).unwrap();
+        assert!(close(cell_med.windows["5h"], 0.010971));
+        assert!(close(cell_med.windows["week"], 0.0058565));
+        let cell_high = g_opus.uses.iter().find(|u| u.effort == Effort::High).unwrap();
+        assert!(close(cell_high.windows["5h"], 0.017595));
+        assert!(close(cell_high.windows["week"], 0.009282));
+
+        let g_sonnet = table.seat("g-sonnet").unwrap();
+        assert!(g_sonnet.fallback);
+        let cell_low = g_sonnet.uses.iter().find(|u| u.effort == Effort::Low).unwrap();
+        assert!(close(cell_low.windows["5h"], 0.0041193));
+        assert!(close(cell_low.windows["week"], 0.00221));
+        let cell_med = g_sonnet.uses.iter().find(|u| u.effort == Effort::Medium).unwrap();
+        assert!(close(cell_med.windows["5h"], 0.0068517));
+        assert!(close(cell_med.windows["week"], 0.0036686));
+        let cell_high = g_sonnet.uses.iter().find(|u| u.effort == Effort::High).unwrap();
+        assert!(close(cell_high.windows["5h"], 0.010971));
+        assert!(close(cell_high.windows["week"], 0.0058786));
+
+        assert!(close(table.constants.climb_start, 0.70));
+        assert!(close(table.constants.climb_full, 1.00));
+    }
+
+    #[test]
+    fn section10_v3_upgrade_keeps_efficient_mode_and_edited_does_not() {
+        let dir = temp_dir("upgrade-v3");
+        let path = dir.join(SEATS_FILE);
+        let backup = dir.join("backup").join(SEATS_FILE);
+
+        let v3_with_mode = replace_mode_line(HISTORICAL_DEFAULTS[2], "mode = \"efficient\"");
+        std::fs::write(&path, &v3_with_mode).unwrap();
+
+        let text = read_or_create(&path);
+        let parsed = parse(&text).expect("upgraded seats.toml parses");
+        assert_eq!(
+            parsed.mode,
+            Mode::Efficient,
+            "mode = efficient preserved"
+        );
+        let current_efficient = replace_mode_line(DEFAULT, "mode = \"efficient\"");
+        assert_eq!(text, current_efficient);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), current_efficient);
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), v3_with_mode);
+
+        // An edited file is never upgraded
+        let edited = current_efficient.replace("floor = 0.05", "floor = 0.08");
+        std::fs::write(&path, &edited).unwrap();
+        assert_eq!(read_or_create(&path), edited);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

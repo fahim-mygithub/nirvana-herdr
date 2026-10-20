@@ -45,6 +45,9 @@ overrides_per_run = 3
 # Decision 0029: multiplier = min(1, ((passes + shrink * prior) / (orders + shrink)) / prior).
 record_prior = 0.80
 record_shrink = 5.0
+# Plan 19 §6.2: Balanced mode climb thresholds. Hypotheses (plan 19 §6.2).
+climb_start = 0.70
+climb_full = 1.00
 
 # An order's size scales its expected use and its lease. `use` is a multiple of probe P4's order (one
 # `slugify` function and its tests, about 45k tokens read and 1.3k written): small is that order.
@@ -78,14 +81,14 @@ basis = "derived: week of 2026-10-16, $796 at list price for 62%; 5h stays a pri
 [[pool]]
 id = "gemini"
 windows = ["5h", "week"]
-per_usd = { "5h" = 0.053, week = 0.027 }
-basis = "derived: P4 flash high spent 0.68% of the 5 h window for $0.128 at list price (cache reads priced at a tenth of input, unverified); the week at half that, as google3p measured"
+per_usd = { "5h" = 0.0021, week = 0.00107 }
+basis = "derived: plan 19 §2, six Flash high builds moved week 0% to 4.08% for $38.30 (0.00107); 5h at twice, a hypothesis (0.0021)"
 
 [[pool]]
 id = "google3p"
 windows = ["5h", "week"]
-per_usd = { "5h" = 1.50, week = 0.75 }
-basis = "derived: P4 g-sonnet medium spent 3.31% of the 5 h window and 1.66% of the week for $0.022 at list price (fresh input not recorded)"
+per_usd = { "5h" = 0.31, week = 0.166 }
+basis = "measured: plan 19 §2, G·Claude Sonnet high fix round took week 4% to 58% for $3.25 (0.166); 5h 0% to 100% (0.31, a floor)"
 
 [[pool]]
 id = "argon"
@@ -188,13 +191,14 @@ pool = "google3p"
 efforts = ["low", "medium", "high"]
 capabilities = ["code", "tools", "image", "pdf", "web"]
 enabled = true
+fallback = true
 prices = [
   { from = "2026-10-17", input = 4.0, output = 20.0, cache_read = 0.20, cache_write = 5.0, basis = "Anthropic's list price; agy's own rate unpublished (agy: quota is consumed proportionally to the cost of the tokens)" },
 ]
 use = [
-  { effort = "low", windows = { "5h" = 0.032, week = 0.016 }, at = "2026-10-17", basis = "prior: medium x 0.6" },
-  { effort = "medium", windows = { "5h" = 0.053, week = 0.0265 }, at = "2026-10-17", basis = "prior: P4 g-sonnet medium x 1.6, the opus to sonnet cost of its tokens" },
-  { effort = "high", windows = { "5h" = 0.085, week = 0.042 }, at = "2026-10-17", basis = "prior: medium x 1.6" },
+  { effort = "low", windows = { "5h" = 0.006624, week = 0.003536 }, at = "2026-10-20", basis = "prior: plan 19 §2, scaled by 0.207 (5h) and 0.221 (week) from 2026-10-17 cell" },
+  { effort = "medium", windows = { "5h" = 0.010971, week = 0.0058565 }, at = "2026-10-20", basis = "prior: plan 19 §2, scaled by 0.207 (5h) and 0.221 (week) from 2026-10-17 cell" },
+  { effort = "high", windows = { "5h" = 0.017595, week = 0.009282 }, at = "2026-10-20", basis = "prior: plan 19 §2, scaled by 0.207 (5h) and 0.221 (week) from 2026-10-17 cell" },
 ]
 
 [[seat]]
@@ -206,13 +210,14 @@ pool = "google3p"
 efforts = ["low", "medium", "high"]
 capabilities = ["code", "tools", "image", "pdf", "web"]
 enabled = true
+fallback = true
 prices = [
   { from = "2026-10-17", input = 2.0, output = 10.0, cache_read = 0.20, cache_write = 2.5, basis = "Anthropic's list price; agy's own rate unpublished" },
 ]
 use = [
-  { effort = "low", windows = { "5h" = 0.0199, week = 0.0100 }, at = "2026-10-17", basis = "prior: medium x 0.6" },
-  { effort = "medium", windows = { "5h" = 0.0331, week = 0.0166 }, at = "2026-10-17", basis = "measured: P4 g-sonnet medium, one order alone" },
-  { effort = "high", windows = { "5h" = 0.053, week = 0.0266 }, at = "2026-10-17", basis = "prior: medium x 1.6" },
+  { effort = "low", windows = { "5h" = 0.0041193, week = 0.00221 }, at = "2026-10-20", basis = "prior: plan 19 §2, scaled by 0.207 (5h) and 0.221 (week) from 2026-10-17 cell" },
+  { effort = "medium", windows = { "5h" = 0.0068517, week = 0.0036686 }, at = "2026-10-20", basis = "measured: plan 19 §2, scaled by 0.207 (5h) and 0.221 (week) from P4 g-sonnet medium" },
+  { effort = "high", windows = { "5h" = 0.010971, week = 0.0058786 }, at = "2026-10-20", basis = "prior: plan 19 §2, scaled by 0.207 (5h) and 0.221 (week) from 2026-10-17 cell" },
 ]
 
 [[seat]]
@@ -248,9 +253,9 @@ prices = [
   { from = "2026-10-17", input = 0.75, output = 3.75, cache_read = 0.075, cache_write = 0.75, basis = "aggregators, medium confidence (plan 12 §2); cache read at a tenth of input, unverified" },
 ]
 use = [
-  { effort = "low", windows = { "5h" = 0.00044, week = 0.00022 }, at = "2026-10-17", basis = "derived: P4 flash low's tokens, $0.0083, times the gemini factor (its own delta was under the refill noise)" },
-  { effort = "medium", windows = { "5h" = 0.0042, week = 0.0021 }, at = "2026-10-17", basis = "derived: P4 flash medium's tokens, $0.079, times the gemini factor (its delta was refill noise)" },
-  { effort = "high", windows = { "5h" = 0.0068, week = 0.0034 }, at = "2026-10-17", basis = "measured: P4 flash high, 0.68% of the 5 h window; the week at half, a prior" },
+  { effort = "low", windows = { "5h" = 0.000017424, week = 0.000008712 }, at = "2026-10-20", basis = "derived: plan 19 §2, scaled by 0.0396 from P4 tokens" },
+  { effort = "medium", windows = { "5h" = 0.00016632, week = 0.00008316 }, at = "2026-10-20", basis = "derived: plan 19 §2, scaled by 0.0396 from P4 tokens" },
+  { effort = "high", windows = { "5h" = 0.00026928, week = 0.00013464 }, at = "2026-10-20", basis = "measured: plan 19 §2, scaled by 0.0396 from P4 flash high" },
 ]
 
 [[seat]]
@@ -297,14 +302,17 @@ id = "plan"
 chain = "plan"
 blast = "load_bearing"
 effort = "high"
-sota_effort = "xhigh"
+efficient_effort = "medium"
+sota_effort = "high"
 weight = 2.0
-why = "strongest at agentic coding (Terminal-Bench 4.0: Opus 5.5 66.4%, Argon 57.4%, vendor)"
+bars = { efficient = 70, balanced = 90, sota = 100 }
+why = "plan 19 §4: strongest at agentic coding"
 seats = [
   { seat = "opus", score = 95 },
-  { seat = "g-opus", score = 95 },
   { seat = "argon", score = 87 },
-  { seat = "fable", score = 97 },
+  { seat = "sonnet", score = 86 },
+  { seat = "flash", score = 74 },
+  { seat = "g-opus", score = 95 },
 ]
 
 [[class]]
@@ -312,13 +320,17 @@ id = "build.load_bearing"
 chain = "build.load_bearing"
 blast = "load_bearing"
 effort = "high"
-sota_effort = "xhigh"
+efficient_effort = "medium"
+sota_effort = "high"
 weight = 3.0
-why = "quality first; argon only when both Claude pools are spent, and then a Claude reviews"
+bars = { efficient = 70, balanced = 90, sota = 100 }
+why = "plan 19 §4: quality first"
 seats = [
   { seat = "opus", score = 95 },
-  { seat = "g-opus", score = 95 },
   { seat = "argon", score = 86 },
+  { seat = "sonnet", score = 85 },
+  { seat = "flash", score = 74 },
+  { seat = "g-opus", score = 95 },
 ]
 
 [[class]]
@@ -326,15 +338,17 @@ id = "build.bounded"
 chain = "build.bounded"
 blast = "bounded"
 effort = "medium"
+efficient_effort = "low"
+sota_effort = "high"
 weight = 1.0
 bars = { efficient = 70, balanced = 85, sota = 100 }
-why = "P4: every seat passed a small order; flash at medium and high spent 9x to 16x flash low's output for the same result"
-# Plan 12 §5.4's row: sonnet, argon, flash, g-sonnet. Plan 14 §2.3: g-sonnet is the same model as sonnet
-# (88, a hypothesis), and Google's 3.3% 5 h window cost is priced by the rule once its spare is spent.
+why = "plan 19 §4: bounded build tasks"
 seats = [
+  { seat = "opus", score = 92 },
   { seat = "sonnet", score = 88 },
-  { seat = "argon", score = 82, effort = "low" },
-  { seat = "flash", score = 78, effort = "low" },
+  { seat = "argon", score = 84 },
+  { seat = "flash", score = 80 },
+  { seat = "haiku", score = 70 },
   { seat = "g-sonnet", score = 88 },
 ]
 
@@ -343,13 +357,17 @@ id = "build.frontend"
 chain = "build.visual"
 blast = "bounded"
 effort = "high"
+efficient_effort = "medium"
+sota_effort = "high"
 weight = 2.0
-bars = { efficient = 85, balanced = 90, sota = 100 }
-why = "the owner's rule: visual work and visual verification go to Opus; anything that moves goes to argon, which sees video"
+bars = { efficient = 70, balanced = 90, sota = 100 }
+why = "plan 19 §4: visual work goes to Opus; argon now competes at 86"
 seats = [
   { seat = "opus", score = 95 },
+  { seat = "sonnet", score = 86 },
+  { seat = "argon", score = 86 },
+  { seat = "flash", score = 72 },
   { seat = "g-opus", score = 95 },
-  { seat = "argon", score = 86, only_with = ["video"] },
 ]
 
 [[class]]
@@ -357,13 +375,17 @@ id = "judge.visual"
 chain = "build.visual"
 blast = "bounded"
 effort = "high"
+efficient_effort = "medium"
+sota_effort = "high"
 weight = 1.0
-bars = { efficient = 85, balanced = 90, sota = 100 }
-why = "the owner's rule: visual verification goes to Opus; a recording goes to argon"
+bars = { efficient = 70, balanced = 90, sota = 100 }
+why = "plan 19 §4: visual verification goes to Opus; argon now competes at 86"
 seats = [
   { seat = "opus", score = 95 },
+  { seat = "argon", score = 86 },
+  { seat = "sonnet", score = 84 },
+  { seat = "flash", score = 74 },
   { seat = "g-opus", score = 95 },
-  { seat = "argon", score = 86, only_with = ["video"] },
 ]
 
 [[class]]
@@ -371,13 +393,17 @@ id = "fix.debug"
 chain = "fix.debug"
 blast = "bounded"
 effort = "medium"
+efficient_effort = "medium"
+sota_effort = "high"
 weight = 2.0
-bars = { efficient = 80, balanced = 90, sota = 100 }
-why = "argon at medium under-reasons on a root cause (Argon's review), so it runs high"
+bars = { efficient = 70, balanced = 88, sota = 100 }
+why = "plan 19 §4: argon at medium under-reasons on a root cause, so it runs high"
 seats = [
   { seat = "opus", score = 93 },
-  { seat = "g-opus", score = 93 },
   { seat = "argon", score = 85, effort = "high" },
+  { seat = "sonnet", score = 84 },
+  { seat = "flash", score = 72 },
+  { seat = "g-opus", score = 93 },
 ]
 
 [[class]]
@@ -385,12 +411,17 @@ id = "ops.terminal"
 chain = "build.bounded"
 blast = "bounded"
 effort = "medium"
+efficient_effort = "low"
+sota_effort = "medium"
 weight = 1.0
 bars = { efficient = 70, balanced = 85, sota = 100 }
+why = "plan 19 §4: terminal operations"
 seats = [
   { seat = "sonnet", score = 88 },
+  { seat = "opus", score = 90 },
+  { seat = "flash", score = 78 },
+  { seat = "haiku", score = 72 },
   { seat = "g-sonnet", score = 88 },
-  { seat = "flash", score = 76 },
 ]
 
 [[class]]
@@ -398,14 +429,17 @@ id = "review.adversary"
 chain = "review"
 blast = "bounded"
 effort = "high"
+efficient_effort = "medium"
+sota_effort = "high"
 weight = 1.5
-bars = { efficient = 80, balanced = 88, sota = 100 }
-why = "decision 0017: another family reviews; pass --not-family with the builder's family"
+bars = { efficient = 74, balanced = 88, sota = 100 }
+why = "plan 19 §4: adversary review across families"
 seats = [
   { seat = "opus", score = 94 },
-  { seat = "g-opus", score = 94 },
   { seat = "argon", score = 90 },
-  { seat = "fable", score = 96 },
+  { seat = "sonnet", score = 86 },
+  { seat = "flash", score = 76 },
+  { seat = "g-opus", score = 94 },
 ]
 
 [[class]]
@@ -413,11 +447,16 @@ id = "acceptance.author"
 chain = "review"
 blast = "bounded"
 effort = "medium"
+efficient_effort = "low"
+sota_effort = "high"
 weight = 1.0
-why = "decision 0019: another family from the builder writes the held-out check"
+bars = { efficient = 70, balanced = 84, sota = 100 }
+why = "plan 19 §4: held-out check author"
 seats = [
+  { seat = "opus", score = 90 },
   { seat = "argon", score = 85 },
   { seat = "sonnet", score = 85 },
+  { seat = "flash", score = 74 },
 ]
 
 [[class]]
@@ -425,11 +464,17 @@ id = "research.read"
 chain = "research"
 blast = "bounded"
 effort = "medium"
+efficient_effort = "low"
+sota_effort = "medium"
 weight = 0.5
-why = "M1: a question on a cheaper seat lost quality, so flash extracts and a Claude answers"
+bars = { efficient = 68, balanced = 80, sota = 100 }
+why = "plan 19 §4: research and document reading"
 seats = [
   { seat = "sonnet", score = 85 },
-  { seat = "flash", score = 78, effort = "low" },
+  { seat = "opus", score = 88 },
+  { seat = "flash", score = 78 },
+  { seat = "argon", score = 80 },
+  { seat = "haiku", score = 70 },
 ]
 
 [[class]]
@@ -437,14 +482,17 @@ id = "research.web"
 chain = "research"
 blast = "bounded"
 effort = "low"
+efficient_effort = "low"
+sota_effort = "medium"
 weight = 0.5
-bars = { efficient = 70, balanced = 82, sota = 100 }
-why = "agy searches and reads URLs at no Max cost"
+bars = { efficient = 68, balanced = 80, sota = 100 }
+why = "plan 19 §4: agy searches and reads URLs"
 seats = [
   { seat = "flash", score = 84 },
   { seat = "argon", score = 84 },
+  { seat = "sonnet", score = 80 },
+  { seat = "opus", score = 82 },
   { seat = "g-sonnet", score = 80 },
-  { seat = "sonnet", score = 78 },
 ]
 
 [[class]]
@@ -452,9 +500,12 @@ id = "read.huge"
 chain = "research"
 blast = "bounded"
 effort = "medium"
+efficient_effort = "low"
+sota_effort = "high"
 needs = ["context_1m"]
 weight = 6.0
-why = "an input over 400k tokens; on Claude it spends the >150k usage the Max notes name"
+bars = { efficient = 70, balanced = 80, sota = 100 }
+why = "plan 19 §4: huge context over 400k tokens"
 seats = [
   { seat = "flash", score = 85 },
   { seat = "argon", score = 83 },
@@ -465,12 +516,16 @@ id = "write.docs"
 chain = "research"
 blast = "bounded"
 effort = "low"
+efficient_effort = "low"
+sota_effort = "medium"
 weight = 0.8
-bars = { efficient = 70, balanced = 85, sota = 100 }
-why = "Argon's Vals Index lead; keeps docs off the Max pool; a Claude edits owner-facing text to the house style"
+bars = { efficient = 70, balanced = 82, sota = 100 }
+why = "plan 19 §4: docs drafting and editing"
 seats = [
   { seat = "argon", score = 86 },
   { seat = "sonnet", score = 82 },
+  { seat = "opus", score = 84 },
+  { seat = "flash", score = 76 },
   { seat = "g-sonnet", score = 82 },
 ]
 
@@ -479,13 +534,15 @@ id = "media.video"
 chain = "media"
 blast = "bounded"
 effort = "medium"
+efficient_effort = "low"
+sota_effort = "high"
 needs = ["video"]
 weight = 2.0
 bars = { efficient = 70, balanced = 85, sota = 100 }
-why = "only Gemini sees video; P2: both read MP4 and WebM given the full path; argon watches and reads the source, flash transcribes"
+why = "plan 19 §4: video processing on Gemini"
 seats = [
   { seat = "argon", score = 90 },
-  { seat = "flash", score = 82, effort = "low" },
+  { seat = "flash", score = 82 },
 ]
 
 [[class]]
@@ -493,8 +550,12 @@ id = "media.audio"
 chain = "media"
 blast = "bounded"
 effort = "low"
+efficient_effort = "low"
+sota_effort = "medium"
 needs = ["audio"]
 weight = 1.0
+bars = { efficient = 70, balanced = 82, sota = 100 }
+why = "plan 19 §4: audio processing on Gemini"
 seats = [
   { seat = "flash", score = 86 },
   { seat = "argon", score = 85 },
@@ -505,13 +566,15 @@ id = "sweep.mechanical"
 chain = "chore"
 blast = "bounded"
 effort = "low"
+efficient_effort = "low"
+sota_effort = "medium"
 weight = 1.0
-# Balanced 79 admits flash alone: at 70 it admitted haiku too, and max's cheap prior seated haiku ahead of
-# §5.4's head (the orchestrator's ruling, 2026-10-18). Efficient lets both compete on pressure.
 bars = { efficient = 60, balanced = 79, sota = 100 }
+why = "plan 19 §4: mechanical sweeps"
 seats = [
   { seat = "flash", score = 80 },
   { seat = "haiku", score = 78 },
+  { seat = "sonnet", score = 80 },
 ]
 
 [[class]]
@@ -519,12 +582,15 @@ id = "chore.memory"
 chain = "chore"
 blast = "bounded"
 effort = "low"
+efficient_effort = "low"
+sota_effort = "medium"
 weight = 0.3
 bars = { efficient = 60, balanced = 70, sota = 100 }
+why = "plan 19 §4: memory maintenance"
 seats = [
   { seat = "haiku", score = 80 },
   { seat = "flash", score = 78 },
-  { seat = "local", score = 70 },
+  { seat = "sonnet", score = 82 },
 ]
 
 [[class]]
@@ -532,12 +598,15 @@ id = "chore.script"
 chain = "chore"
 blast = "bounded"
 effort = "low"
+efficient_effort = "low"
+sota_effort = "medium"
 weight = 0.3
 bars = { efficient = 60, balanced = 70, sota = 100 }
+why = "plan 19 §4: script chores"
 seats = [
   { seat = "haiku", score = 80 },
   { seat = "flash", score = 78 },
-  { seat = "local", score = 70 },
+  { seat = "sonnet", score = 82 },
 ]
 
 [[class]]
@@ -545,10 +614,13 @@ id = "chore.github"
 chain = "chore"
 blast = "bounded"
 effort = "low"
+efficient_effort = "low"
+sota_effort = "medium"
 weight = 0.3
 bars = { efficient = 60, balanced = 70, sota = 100 }
+why = "plan 19 §4: github chores"
 seats = [
   { seat = "haiku", score = 80 },
   { seat = "flash", score = 78 },
-  { seat = "local", score = 70 },
+  { seat = "sonnet", score = 82 },
 ]
