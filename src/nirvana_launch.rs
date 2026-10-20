@@ -174,9 +174,10 @@ pub fn orchestrator_launch_seat(home: &Path) -> (String, String) {
         Some(t) => t,
         None => return (MODEL.to_owned(), EFFORT.to_owned()),
     };
-    let leases = crate::nirvana_seat::load_leases(&nirvana_dir.join(crate::nirvana_seat::LEASES_FILE))
-        .unwrap_or_default()
-        .leases;
+    let leases =
+        crate::nirvana_seat::load_leases(&nirvana_dir.join(crate::nirvana_seat::LEASES_FILE))
+            .unwrap_or_default()
+            .leases;
     let usage_path = nirvana_dir.join(crate::nirvana_usage::CACHE_FILE);
     let cache = crate::nirvana_usage::read_cache(&usage_path);
     let readings: Vec<crate::nirvana_usage::Reading> = cache

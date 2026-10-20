@@ -213,6 +213,23 @@ fn lines(view: &SeatsView, inner: usize, now: u64) -> Vec<Line> {
     if let Some(note) = &view.note {
         lines.push(Line::Text(note.clone(), Tone::Attention));
     }
+    if let Some(orch) = &view.orchestrator {
+        let mut text = format!(
+            "Nirvana Claude \u{b7} {} {} \u{b7} {}",
+            orch.seat,
+            orch.effort.word(),
+            orch.detail
+        );
+        if orch.restart_to_switch {
+            text.push_str(" \u{b7} restart to switch");
+        }
+        let tone = if orch.restart_to_switch {
+            Tone::Attention
+        } else {
+            Tone::Plain
+        };
+        lines.push(Line::Text(text, tone));
+    }
     if view.rows.is_empty() {
         lines.push(Line::Text(String::new(), Tone::Plain));
         lines.push(Line::Text(

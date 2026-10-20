@@ -1605,18 +1605,17 @@ fn evaluate(
         if let Some(best) = best_idx {
             let best_cand = &candidates[best];
             let hot_pool = table.seats[best_cand.index].pool.clone();
-            let (_climb, t) = if let Some((climb, _)) =
-                windows_climb(&best_cand.windows, constants.pace_ease)
-            {
-                climb_info = Some(climb);
-                (
-                    climb,
-                    climb_t(climb, constants.climb_start, constants.climb_full),
-                )
-            } else {
-                climb_info = Some(0.0);
-                (0.0, 0.0)
-            };
+            let (_climb, t) =
+                if let Some((climb, _)) = windows_climb(&best_cand.windows, constants.pace_ease) {
+                    climb_info = Some(climb);
+                    (
+                        climb,
+                        climb_t(climb, constants.climb_start, constants.climb_full),
+                    )
+                } else {
+                    climb_info = Some(0.0);
+                    (0.0, 0.0)
+                };
             let bars = table.bars(class);
             let b_bar = bars.balanced - t * (bars.balanced - bars.efficient);
             if t >= 0.5 {
@@ -2954,7 +2953,11 @@ pub fn orchestrator_seat(table: &Table, world: &World) -> OrchestratorSeat {
             }
 
             if let Some((climb, best_window)) = windows_climb(&windows, table.constants.pace_ease) {
-                let t = climb_t(climb, table.constants.climb_start, table.constants.climb_full);
+                let t = climb_t(
+                    climb,
+                    table.constants.climb_start,
+                    table.constants.climb_full,
+                );
                 let (seat, effort) = if t < 0.5 {
                     ("opus".to_string(), Effort::Medium)
                 } else {

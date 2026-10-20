@@ -519,3 +519,67 @@ fn sota_word_is_red_in_title_and_mode_row_when_sota_is_on_not_otherwise() {
 
     done(root, home);
 }
+
+#[test]
+fn the_seats_square_shows_orchestrator_row_with_and_without_restart_to_switch() {
+    let (mut state, root, home) = state_for("orch-row", "nirvana");
+
+    // Case 1: Without restart to switch (running seat matches rule)
+    // Mode is Balanced with recorded leases -> rule seats sonnet medium.
+    // Record running session on sonnet medium.
+    let sessions_dir = home.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    let session_rec = crate::nirvana_claude::SessionSeatRecord {
+        session_id: "orch-sess-1".into(),
+        model: "claude-sonnet-5-5".into(),
+        seat: "sonnet".into(),
+        effort: "medium".into(),
+        last_notified_seat: None,
+        last_notified_effort: None,
+    };
+    std::fs::write(
+        sessions_dir.join("orch-sess-1.json"),
+        serde_json::to_string(&session_rec).unwrap(),
+    )
+    .unwrap();
+
+    let rows = open(&mut state, 200);
+    let orch_line = line(&rows, "Nirvana Claude");
+    assert!(
+        orch_line.contains("Nirvana Claude \u{b7} sonnet medium"),
+        "expected orchestrator row: {orch_line}"
+    );
+    assert!(
+        !orch_line.contains("restart to switch"),
+        "must not contain restart to switch when matching: {orch_line}"
+    );
+
+    // Case 2: With restart to switch (running seat differs from rule)
+    // Switch running session to opus medium
+    let session_rec_opus = crate::nirvana_claude::SessionSeatRecord {
+        session_id: "orch-sess-1".into(),
+        model: "claude-opus-5-5".into(),
+        seat: "opus".into(),
+        effort: "medium".into(),
+        last_notified_seat: None,
+        last_notified_effort: None,
+    };
+    std::fs::write(
+        sessions_dir.join("orch-sess-1.json"),
+        serde_json::to_string(&session_rec_opus).unwrap(),
+    )
+    .unwrap();
+
+    let rows_diff = rows_of(&mut state, 200, 40);
+    let orch_diff = line(&rows_diff, "Nirvana Claude");
+    assert!(
+        orch_diff.contains("Nirvana Claude \u{b7} sonnet medium"),
+        "rule still seats sonnet medium: {orch_diff}"
+    );
+    assert!(
+        orch_diff.contains("restart to switch"),
+        "must contain restart to switch when differing: {orch_diff}"
+    );
+
+    done(root, home);
+}

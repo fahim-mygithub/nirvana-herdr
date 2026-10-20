@@ -15,8 +15,8 @@ CONTROLS = (
     Control(
         'p20_guard_agy_refusal',
         'src/nirvana_claude.rs',
-        '    if lease_seat_def.as_ref().map_or(false, |s| s.cli == "agy") {\n',
-        '    if false && lease_seat_def.as_ref().map_or(false, |s| s.cli == "agy") {\n',
+        '    if lease_seat_def.as_ref().is_some_and(|s| s.cli == "agy") {\n',
+        '    if false && lease_seat_def.as_ref().is_some_and(|s| s.cli == "agy") {\n',
         'guard_spawn_booking_rules_and_refusal_messages',
         'rust',
     ),
@@ -108,6 +108,69 @@ CONTROLS = (
         '    if is_nirvana {\n',
         '    if false && is_nirvana {\n',
         'restart_argv_for_nirvana_claude_uses_launch_args_and_takes_current_mode',
+        'rust',
+    ),
+    # Step 4 (§3.3): Notice stays quiet when running seat matches rule seat
+    Control(
+        'p20_notice_same_seat_quiet',
+        'src/nirvana_claude.rs',
+        '    if running_seat == rule_seat && running_effort == rule_effort {\n',
+        '    if false && running_seat == rule_seat && running_effort == rule_effort {\n',
+        'seat_notice_reports_once_per_change_and_stays_quiet_when_same',
+        'rust',
+    ),
+    # Step 4 (§3.3): Notice stays quiet on same difference again
+    Control(
+        'p20_notice_same_diff_quiet',
+        'src/nirvana_claude.rs',
+        '        if notified_seat == rule_seat && notified_effort == rule_effort {\n',
+        '        if false && notified_seat == rule_seat && notified_effort == rule_effort {\n',
+        'seat_notice_reports_once_per_change_and_stays_quiet_when_same',
+        'rust',
+    ),
+    # Step 4 (§3.3): Notice message format
+    Control(
+        'p20_notice_message_format',
+        'src/nirvana_claude.rs',
+        '        "Nirvana Claude runs on {running_seat} {running_effort}; the mode now seats {rule_seat} {rule_effort} ({rule_detail}). Press Restart Claude to switch."\n',
+        '        "Nirvana Claude runs on {running_seat} {running_effort}; mode seats {rule_seat}. Restart."\n',
+        'seat_notice_reports_once_per_change_and_stays_quiet_when_same',
+        'rust',
+    ),
+    # Step 4 (§3.3): Session start records running seat in session file
+    Control(
+        'p20_session_start_records_seat',
+        'src/nirvana_claude.rs',
+        '        last_notified_effort: None,\n    };\n    let path = session_seat_path(home, session_id);\n',
+        '        last_notified_effort: None,\n    };\n    let path = session_seat_path(home, &format!("{session_id}-bad"));\n',
+        'session_start_records_running_seat_in_session_file',
+        'rust',
+    ),
+    # Step 4 (§3.3): Seats square orchestrator row text
+    Control(
+        'p20_seats_square_orchestrator_row',
+        'src/client/shell/nirvana_seats.rs',
+        '        let mut text = format!(\n            "Nirvana Claude \\u{b7} {} {} \\u{b7} {}",\n',
+        '        let mut text = format!(\n            "Nirvana \\u{b7} {} {} \\u{b7} {}",\n',
+        'the_seats_square_shows_orchestrator_row_with_and_without_restart_to_switch',
+        'rust',
+    ),
+    # Step 4 (§3.3): Seats square restart to switch text
+    Control(
+        'p20_seats_square_restart_to_switch',
+        'src/client/shell/nirvana_seats.rs',
+        '        if orch.restart_to_switch {\n            text.push_str(" \\u{b7} restart to switch");\n        }\n',
+        '        if false && orch.restart_to_switch {\n            text.push_str(" \\u{b7} restart to switch");\n        }\n',
+        'the_seats_square_shows_orchestrator_row_with_and_without_restart_to_switch',
+        'rust',
+    ),
+    # Step 4 (§3.3): Seats square restart diff logic
+    Control(
+        'p20_seats_square_restart_diff_logic',
+        'src/nirvana_seats_square.rs',
+        '        let restart_to_switch = running\n            .as_ref()\n            .is_some_and(|(s, e)| s != &rule.seat || e != rule.effort.word());\n',
+        '        let restart_to_switch = running\n            .as_ref()\n            .is_some_and(|(s, e)| false && (s != &rule.seat || e != rule.effort.word()));\n',
+        'the_seats_square_shows_orchestrator_row_with_and_without_restart_to_switch',
         'rust',
     ),
 )

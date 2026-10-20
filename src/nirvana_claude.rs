@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::nirvana_run::{self, Phase, Project, RunState};
@@ -559,8 +560,115 @@ fn digest_cli() -> std::io::Result<()> {
             .unwrap_or_default(),
         memory: memory.display().to_string(),
     };
+    if let Some(session_id) = hook.get("session_id").and_then(Value::as_str) {
+        let model = hook
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or(crate::nirvana_launch::MODEL);
+        let (_launch_model, launch_effort) = crate::nirvana_launch::orchestrator_launch_seat(&home);
+        let _ = record_session_seat(&home, session_id, model, &launch_effort);
+    }
     println!("{}", digest_text(&digest));
     Ok(())
+}
+
+/// Plan 20 §3.3: records the orchestrator's seat at session start in <home>/nirvana/sessions/<session_id>.json.
+pub fn session_seat_path(home: &Path, session_id: &str) -> PathBuf {
+    home.join(nirvana_seat::DIR)
+        .join("sessions")
+        .join(format!("{session_id}.json"))
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionSeatRecord {
+    pub session_id: String,
+    pub model: String,
+    pub seat: String,
+    pub effort: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_notified_seat: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_notified_effort: Option<String>,
+}
+
+pub fn record_session_seat(
+    home: &Path,
+    session_id: &str,
+    model: &str,
+    effort: &str,
+) -> std::io::Result<PathBuf> {
+    let seat = if let Ok(table) = crate::nirvana_seat::table() {
+        seat_for_model(&table, model)
+            .map(|s| s.id.clone())
+            .unwrap_or_else(|| {
+                if model.contains("sonnet") {
+                    "sonnet".to_string()
+                } else {
+                    "opus".to_string()
+                }
+            })
+    } else if model.contains("sonnet") {
+        "sonnet".to_string()
+    } else {
+        "opus".to_string()
+    };
+    let record = SessionSeatRecord {
+        session_id: session_id.to_string(),
+        model: model.to_string(),
+        seat,
+        effort: effort.to_string(),
+        last_notified_seat: None,
+        last_notified_effort: None,
+    };
+    let path = session_seat_path(home, session_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let text = serde_json::to_string_pretty(&record)?;
+    std::fs::write(&path, text)?;
+    Ok(path)
+}
+
+pub fn read_session_seat(home: &Path, session_id: &str) -> Option<SessionSeatRecord> {
+    let path = session_seat_path(home, session_id);
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()
+}
+
+pub fn write_session_seat(home: &Path, record: &SessionSeatRecord) -> std::io::Result<()> {
+    let path = session_seat_path(home, &record.session_id);
+    let text = serde_json::to_string_pretty(record)?;
+    std::fs::write(&path, text)
+}
+
+/// Plan 20 §3.3: compares the running seat with the rule's seat now.
+/// Returns (Some(line), Some(notified_pair)) when they differ, once per change.
+pub fn seat_notice(
+    running_seat: &str,
+    running_effort: &str,
+    rule_seat: &str,
+    rule_effort: &str,
+    rule_detail: &str,
+    last_notified: Option<(&str, &str)>,
+) -> (Option<String>, Option<(String, String)>) {
+    if running_seat == rule_seat && running_effort == rule_effort {
+        return (None, None);
+    }
+    if let Some((notified_seat, notified_effort)) = last_notified {
+        if notified_seat == rule_seat && notified_effort == rule_effort {
+            return (
+                None,
+                Some((notified_seat.to_string(), notified_effort.to_string())),
+            );
+        }
+    }
+    let line = format!(
+        "Nirvana Claude runs on {running_seat} {running_effort}; the mode now seats {rule_seat} {rule_effort} ({rule_detail}). Press Restart Claude to switch."
+    );
+    (
+        Some(line),
+        Some((rule_seat.to_string(), rule_effort.to_string())),
+    )
 }
 
 // ---- guard-spawn (PreToolUse on Agent) ----
@@ -844,7 +952,7 @@ pub fn guard_with_leases(
     };
 
     let lease_seat_def = table.seat(&lease.seat);
-    if lease_seat_def.as_ref().map_or(false, |s| s.cli == "agy") {
+    if lease_seat_def.as_ref().is_some_and(|s| s.cli == "agy") {
         return Verdict::Deny(format!(
             "herdr guard: the picker seated {} on {} {} ({}). Start it with herdr seat run {} --order ...",
             lease.order,

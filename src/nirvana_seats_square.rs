@@ -87,6 +87,14 @@ pub struct RunLine {
     pub mode_changed: Option<(u64, Mode)>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrchestratorRow {
+    pub seat: String,
+    pub effort: Effort,
+    pub detail: String,
+    pub restart_to_switch: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct View {
     /// `seats.toml`'s mode; `None` when the table is refused, with why in `note`.
@@ -94,6 +102,7 @@ pub struct View {
     pub note: Option<String>,
     pub runs: Vec<RunLine>,
     pub rows: Vec<Row>,
+    pub orchestrator: Option<OrchestratorRow>,
 }
 
 impl View {
@@ -292,6 +301,54 @@ fn read_table(seats_dir: &Path) -> (Option<Table>, Option<String>) {
 /// Replayed runs, kept per journal with its signature.
 type Replays = HashMap<PathBuf, (Signature, RunState)>;
 
+fn running_seat_for(root: &Path, seats_dir: &Path) -> Option<(String, String)> {
+    let sessions_dir = seats_dir.join("sessions");
+    let hash = crate::nirvana_launch::folder_hash(root);
+    let folder_record_path = sessions_dir.join(format!("{hash}.json"));
+    if let Ok(text) = std::fs::read_to_string(&folder_record_path) {
+        if let Ok(record) =
+            serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}'))
+        {
+            if let Some(session_id) = record.get("session_id").and_then(|v| v.as_str()) {
+                let seat_path = sessions_dir.join(format!("{session_id}.json"));
+                if let Ok(text) = std::fs::read_to_string(&seat_path) {
+                    if let Ok(seat_rec) = serde_json::from_str::<
+                        crate::nirvana_claude::SessionSeatRecord,
+                    >(text.trim_start_matches('\u{feff}'))
+                    {
+                        return Some((seat_rec.seat, seat_rec.effort));
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+        let mut candidates = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    if let Ok(seat_rec) = serde_json::from_str::<
+                        crate::nirvana_claude::SessionSeatRecord,
+                    >(text.trim_start_matches('\u{feff}'))
+                    {
+                        let mtime = entry
+                            .metadata()
+                            .and_then(|m| m.modified())
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                        candidates.push((mtime, seat_rec));
+                    }
+                }
+            }
+        }
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.0));
+        if let Some((_, seat_rec)) = candidates.into_iter().next() {
+            return Some((seat_rec.seat, seat_rec.effort));
+        }
+    }
+    None
+}
+
 /// Reads the project's view. `replays` keeps each journal's last replay; an unchanged journal is reused.
 fn read(root: &Path, seats_dir: &Path, replays: &mut Replays, now: u64) -> View {
     let project = Project::at(root);
@@ -322,7 +379,24 @@ fn read(root: &Path, seats_dir: &Path, replays: &mut Replays, now: u64) -> View 
             Leases::default()
         }
     };
-    compose(table.as_ref(), note, &runs, &leases, now)
+    let mut view = compose(table.as_ref(), note, &runs, &leases, now);
+    if let Some(table) = table.as_ref() {
+        let mut world = nirvana_seat::live_world(table);
+        world.leases = leases.leases.clone();
+        let rule = nirvana_seat::orchestrator_seat(table, &world);
+        let running = running_seat_for(root, seats_dir);
+        let restart_to_switch = running
+            .as_ref()
+            .is_some_and(|(s, e)| s != &rule.seat || e != rule.effort.word());
+        let detail = rule.square_summary();
+        view.orchestrator = Some(OrchestratorRow {
+            seat: rule.seat,
+            effort: rule.effort,
+            detail,
+            restart_to_switch,
+        });
+    }
+    view
 }
 
 /// The view for a project, read now, for the tests; the window uses `cached`.

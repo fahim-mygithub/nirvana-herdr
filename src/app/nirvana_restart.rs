@@ -205,9 +205,8 @@ pub fn restart_argv(
     home: &std::path::Path,
     cwd: &std::path::Path,
 ) -> Vec<String> {
-    let mut argv = vec![
-        crate::detect::interactive_agent_executable(crate::detect::Agent::Claude).to_string(),
-    ];
+    let mut argv =
+        vec![crate::detect::interactive_agent_executable(crate::detect::Agent::Claude).to_string()];
     let is_nirvana = agent_name.is_some_and(crate::nirvana_launch::is_nirvana_agent_name)
         || old_args.iter().any(|a| a == "--agent") && old_args.iter().any(|a| a == "nirvana");
     if is_nirvana {

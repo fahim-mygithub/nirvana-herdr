@@ -362,10 +362,7 @@ fn a_spawn_with_no_model_or_no_effort_is_refused() {
     // A call that names both needs no agent file.
     let mut explore = spawn("Explore", Some("haiku"), Some("low"));
     explore.prompt = "Class: review.adversary\nOrder: r2\nRead the diff.".into();
-    assert_eq!(
-        guard(&explore, None, &table, &room(0.2)),
-        Verdict::Allow
-    );
+    assert_eq!(guard(&explore, None, &table, &room(0.2)), Verdict::Allow);
 }
 
 #[test]
@@ -550,7 +547,12 @@ fn guard_spawn_booking_rules_and_refusal_messages() {
     // 6. A lease on sonnet medium with a sonnet high spawn
     let mut sonnet_high_spawn = spawn("nirvana:worker-sonnet-high", None, None);
     sonnet_high_spawn.prompt = "Class: build.bounded\nOrder: o-live-sonnet\nRun: r-1".into();
-    match guard(&sonnet_high_spawn, Some(&def_sonnet_high), &table, &room(0.2)) {
+    match guard(
+        &sonnet_high_spawn,
+        Some(&def_sonnet_high),
+        &table,
+        &room(0.2),
+    ) {
         Verdict::Deny(why) => {
             assert!(
                 why.contains("herdr guard: o-live-sonnet is booked on sonnet medium, but this spawn is on sonnet high. A spawn must match its booking: spawn nirvana:worker-sonnet-medium, or seat with herdr seat pick --override sonnet --book o-live-sonnet"),
@@ -1104,4 +1106,82 @@ fn the_wake_guard_knows_this_launch_and_not_plain_claude() {
         nirvana_run::pane_program(&pane, &plain, Some(&plugin)),
         nirvana_run::PaneProgram::NirvanaClaude
     );
+}
+
+#[test]
+fn seat_notice_reports_once_per_change_and_stays_quiet_when_same() {
+    // 1. Same seat: stays quiet
+    let (notice, notified) = seat_notice("opus", "medium", "opus", "medium", "Balanced", None);
+    assert_eq!(notice, None);
+    assert_eq!(notified, None);
+
+    // 2. Different seat: speaks once
+    let (notice, notified) = seat_notice(
+        "opus",
+        "medium",
+        "sonnet",
+        "medium",
+        "Balanced, max week climb 1.18",
+        None,
+    );
+    assert_eq!(
+        notice.as_deref(),
+        Some(
+            "Nirvana Claude runs on opus medium; the mode now seats sonnet medium (Balanced, max week climb 1.18). Press Restart Claude to switch."
+        )
+    );
+    assert_eq!(notified, Some(("sonnet".to_string(), "medium".to_string())));
+
+    // 3. Same difference again: stays quiet
+    let (notice_again, notified_again) = seat_notice(
+        "opus",
+        "medium",
+        "sonnet",
+        "medium",
+        "Balanced, max week climb 1.18",
+        Some(("sonnet", "medium")),
+    );
+    assert_eq!(notice_again, None);
+    assert_eq!(
+        notified_again,
+        Some(("sonnet".to_string(), "medium".to_string()))
+    );
+
+    // 4. A second change: speaks again with new target
+    let (notice_second, notified_second) = seat_notice(
+        "opus",
+        "medium",
+        "opus",
+        "high",
+        "SOTA",
+        Some(("sonnet", "medium")),
+    );
+    assert_eq!(
+        notice_second.as_deref(),
+        Some("Nirvana Claude runs on opus medium; the mode now seats opus high (SOTA). Press Restart Claude to switch.")
+    );
+    assert_eq!(
+        notified_second,
+        Some(("opus".to_string(), "high".to_string()))
+    );
+}
+
+#[test]
+fn session_start_records_running_seat_in_session_file() {
+    let home = scratch("session_seat");
+    let session_id = "test-session-123";
+    let path =
+        record_session_seat(&home, session_id, "claude-sonnet-5-5", "medium").expect("recorded");
+    assert!(path.exists());
+    assert_eq!(path, session_seat_path(&home, session_id));
+
+    let record = read_session_seat(&home, session_id).expect("read");
+    assert_eq!(record.session_id, session_id);
+    assert_eq!(record.model, "claude-sonnet-5-5");
+    assert_eq!(record.seat, "sonnet");
+    assert_eq!(record.effort, "medium");
+    assert_eq!(record.last_notified_seat, None);
+    assert_eq!(record.last_notified_effort, None);
+
+    let _ = std::fs::remove_dir_all(&home);
 }

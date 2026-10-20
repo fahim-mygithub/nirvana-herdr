@@ -727,6 +727,43 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
     }
 }
 
+fn check_seat_notice(session: &str) -> Option<String> {
+    let home = crate::nirvana::home().unwrap_or_else(|| std::env::temp_dir().join("nirvana-herdr"));
+    let mut record = crate::nirvana_claude::read_session_seat(&home, session)?;
+    let table = crate::nirvana_seat::table().ok()?;
+    let mut world = crate::nirvana_seat::live_world(&table);
+    world.leases = crate::nirvana_seat::load_leases(
+        &home
+            .join(crate::nirvana_seat::DIR)
+            .join(crate::nirvana_seat::LEASES_FILE),
+    )
+    .unwrap_or_default()
+    .leases;
+    let rule = crate::nirvana_seat::orchestrator_seat(&table, &world);
+    let last = match (&record.last_notified_seat, &record.last_notified_effort) {
+        (Some(s), Some(e)) => Some((s.as_str(), e.as_str())),
+        _ => None,
+    };
+    let (line, notified) = crate::nirvana_claude::seat_notice(
+        &record.seat,
+        &record.effort,
+        &rule.seat,
+        rule.effort.word(),
+        &rule.reason,
+        last,
+    );
+    if let Some((s, e)) = notified {
+        if record.last_notified_seat.as_deref() != Some(&s)
+            || record.last_notified_effort.as_deref() != Some(&e)
+        {
+            record.last_notified_seat = Some(s);
+            record.last_notified_effort = Some(e);
+            let _ = crate::nirvana_claude::write_session_seat(&home, &record);
+        }
+    }
+    line
+}
+
 /// The hook: prints what changed for this session, then remembers what it saw. Never fails the prompt: any
 /// problem prints nothing.
 fn run_notice(input: &str) {
@@ -735,6 +772,11 @@ fn run_notice(input: &str) {
         .get("session_id")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    if !session.is_empty() {
+        if let Some(line) = check_seat_notice(session) {
+            println!("{line}");
+        }
+    }
     let cwd = hook
         .get("cwd")
         .and_then(Value::as_str)
