@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -1074,6 +1074,7 @@ struct PollTask {
 static ENTRIES: Mutex<Option<HashMap<String, PaneCacheEntry>>> = Mutex::new(None);
 static CHANGED: AtomicBool = AtomicBool::new(false);
 static WORKER_PANES: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+#[cfg(test)]
 static TEST_CLAUDE_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// Claude Code's config folder: `CLAUDE_CONFIG_DIR`, else `USERPROFILE` (then `HOME`) joined with `.claude`.
@@ -1513,6 +1514,7 @@ pub fn take_changed() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn folder_encoding_converts_non_alphanumeric_to_dash() {
