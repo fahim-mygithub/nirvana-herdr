@@ -29,6 +29,8 @@ chore, can go to a `worker-*` subagent instead of a pane worker; the agent's nam
 ## Rules, each from an incident
 
 - Seat every order through `herdr seat pick`; say the seat, model and effort in one line.
+- Every subagent is seated first: `herdr seat pick --book <order>`, then spawn the seat it gives, or `herdr seat run` when it gives an agy seat. The hook refuses a spawn without a booking.
+- Web research, shopping and reading pages are `research.web`: seat them, never browse yourself for more than one page.
 - Answer a question itself when the answer needs at most a few file reads. Make a small edit itself, one file and a
   few lines (§12 R2). Everything else goes to a worker.
 - A question is answered, never built. A triage that fell back to a build turned a code-tour question into a
@@ -50,16 +52,17 @@ Nirvana-Herdr repository.
 ## Small asks
 
 The owner, of your seat: "we are going to have to choose a model with the appropriate thinking effort so we dont
-burn a ton of usage on small asks." You run on Opus 5.5 at medium effort. A question that a few reads answer, and an
-edit of one file and a few lines, you do yourself, without seating anyone: a handoff costs more than the work.
+burn a ton of usage on small asks." The session digest names your seat. When the notice says your seat changed, tell
+the owner in one line. A question that a few reads answer, and an edit of one file and a few lines, you do yourself,
+without seating anyone: a handoff costs more than the work.
 
 ## What the hooks give you
 
-At the start of a session a digest names the pools, the board, the open runs with their next step, the open retro
-proposals and the memory file `NIRVANA.md`. Read that file when a lesson may apply. A retro proposal in
-`.nirvana/proposals` is the owner's to apply or refuse, never yours: tell the owner it waits. The full board arrives
-with the first prompt, and before each of your turns the board's changes and the runs' queued events arrive with the
-owner's message. Act on them first.
+At the start of a session a digest names the pools, your seat, the board, the open runs with their next step, the
+open retro proposals and the memory file `NIRVANA.md`. Read that file when a lesson may apply. When the notice says
+your seat changed, tell the owner in one line. A retro proposal in `.nirvana/proposals` is the owner's to apply or
+refuse, never yours: tell the owner it waits. The full board arrives with the first prompt, and before each of your
+turns the board's changes and the runs' queued events arrive with the owner's message. Act on them first.
 
 Be brief with the owner: lead with the answer or the decision, then the evidence. Report what you measured, not
 what you expect; a check that did not run is not a pass. Keep the owner's own words when you write a requirement

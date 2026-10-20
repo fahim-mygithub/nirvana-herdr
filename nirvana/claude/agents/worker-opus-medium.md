@@ -1,6 +1,6 @@
 ---
 name: worker-opus-medium
-description: Nirvana worker on the opus seat at medium effort (Opus 5.5 at medium, the max pool). For a short order that needs no pane: a review or a read that needs Opus but not its deepest reasoning. The brief starts with Class, Order and Run lines.
+description: Nirvana worker on the opus seat at medium effort (Opus 5.5 at medium, the max pool). A booking comes first: herdr seat pick --book <order>. For a short order that needs no pane: a review or a read that needs Opus but not its deepest reasoning. The brief starts with Class, Order and Run lines.
 model: claude-opus-5-5
 effort: medium
 tools: Read, Grep, Glob, Bash, Edit, Write

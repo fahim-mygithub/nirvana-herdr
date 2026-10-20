@@ -25,6 +25,7 @@ Pick the **class**, the **needs** and the **size**; herdr picks the seat (plan 1
 
 Size: `small` (minutes), `medium` (under an hour), `large`. A question is answered, never built: a question is
 `research.read`, and you answer it yourself when a few reads do.
+Web research, shopping and reading pages are `research.web`: seat them, never browse yourself for more than one page.
 
 ## 2. Pick
 
@@ -47,9 +48,11 @@ owner's words where they matter. Then:
   It reuses the booking, opens a pane, and returns at once. A second `seat run` of the same order returns the first.
 - **A worker subagent** (a short read, review or chore on Claude that needs no pane): spawn
   `nirvana:worker-<seat>-<effort>` with the seat and effort the pick gave (`opus-high`, `opus-medium`,
-  `sonnet-medium`, `sonnet-low`, `haiku-low`). Start its brief with three lines, `Class: <class>`,
-  `Order: <order>`, `Run: <run>`; herdr records its outcome under them when it stops. A spawn that names no model
-  or effort, or that would break your reserve on `max`, is refused by the `PreToolUse` hook.
+  `sonnet-medium`, `sonnet-low`, `haiku-low`). Every subagent is seated first: `herdr seat pick --book <order>`,
+  then spawn the seat it gives, or `herdr seat run` when it gives an agy seat. The hook refuses a spawn without a
+  booking. Start its brief with three lines, `Class: <class>`, `Order: <order>`, `Run: <run>`; herdr records its
+  outcome under them when it stops. A spawn that names no model or effort, or that would break your reserve on `max`,
+  is refused by the `PreToolUse` hook.
 
 ## 4. Read it
 

@@ -172,12 +172,20 @@ class FilesTest(unittest.TestCase):
         self.assertEqual(body.strip(), "")
         text = (claude / "ROLE.md").read_text(encoding="utf-8")
         self.assertFalse(text.startswith("---"), "ROLE.md is prompt text, with no front matter")
-        self.assertIn("Opus 5.5 at medium", text)
+        self.assertIn("The session digest names your seat.", text)
         for rule in ("Seat every order through `herdr seat pick`; say the seat, model and effort in one line.",
+                     "Every subagent is seated first: `herdr seat pick --book <order>`",
+                     "Web research, shopping and reading pages are `research.web`: seat them, never browse yourself for more than one page.",
                      "A question is answered, never built.",
                      "Never resume a finished worker for a new question;",
                      "A merge to `main` asks the owner, except in auto mode within its budgets (§12 R6)."):
             self.assertIn(rule, text)
+
+    def test_seat_skill_and_workers_have_booking_rules(self):
+        claude = ws.ROOT / "nirvana" / "claude"
+        skill = (claude / "skills" / "seat" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("Every subagent is seated first: `herdr seat pick --book <order>`", skill)
+        self.assertIn("Web research, shopping and reading pages are `research.web`: seat them, never browse yourself for more than one page.", skill)
 
     def test_themes_fragment_and_assets_land_where_claude_and_terminal_read_them(self):
         with tempfile.TemporaryDirectory() as tmp:

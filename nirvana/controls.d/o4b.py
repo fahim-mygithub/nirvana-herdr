@@ -25,7 +25,7 @@ CONTROLS = (
             "color: cyan\n---\n", "color: cyan\n---\nYou are Nirvana Claude, the orchestrator.\n",
             "nirvana_claude_takes_the_plugin_agent_name_and_settings_from_home", "rust"),
     Control("o4b_role_effort_high", "nirvana/claude/ROLE.md",
-            "Opus 5.5 at medium", "Opus 5.5 at high",
+            "The session digest names your seat.", "The session digest hides your seat.",
             "nirvana.test_windows_shell.FilesTest.test_the_agent_is_opus_at_medium_with_the_plans_rules", "python"),
     Control("o4b_guard_spawns_orchestrator", "src/nirvana_claude.rs",
             '    if matches!(spawn.agent_type.as_str(), "nirvana" | "nirvana:nirvana") {', "    if false {",

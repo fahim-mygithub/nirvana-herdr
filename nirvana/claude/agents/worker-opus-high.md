@@ -1,6 +1,6 @@
 ---
 name: worker-opus-high
-description: Nirvana worker on the opus seat at high effort (Opus 5.5 at high, the max pool). For a short order that needs no pane: a review that needs the strongest judgment, a hard read, a debugging read. The brief starts with Class, Order and Run lines.
+description: Nirvana worker on the opus seat at high effort (Opus 5.5 at high, the max pool). A booking comes first: herdr seat pick --book <order>. For a short order that needs no pane: a review that needs the strongest judgment, a hard read, a debugging read. The brief starts with Class, Order and Run lines.
 model: claude-opus-5-5
 effort: high
 tools: Read, Grep, Glob, Bash, Edit, Write

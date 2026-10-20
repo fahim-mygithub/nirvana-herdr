@@ -661,6 +661,14 @@ fn every_worker_agent_names_its_model_and_effort() {
             !tools.split(',').any(|tool| tool.trim() == "Agent"),
             "{stem}: {tools}"
         );
+        let desc = head
+            .lines()
+            .find_map(|line| line.strip_prefix("description:"))
+            .unwrap_or_else(|| panic!("{stem}: lists no description"));
+        assert!(
+            desc.contains("booking comes first"),
+            "{stem}: description does not say booking comes first: {desc}"
+        );
         assert!(text.contains("Work Report"), "{stem}: no Work Report");
         names.push(stem);
     }

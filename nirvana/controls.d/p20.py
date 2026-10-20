@@ -173,4 +173,49 @@ CONTROLS = (
         'the_seats_square_shows_orchestrator_row_with_and_without_restart_to_switch',
         'rust',
     ),
+    # Step 5 (§2, §3.3): ROLE.md subagent booking rule
+    Control(
+        'p20_role_subagent_booking',
+        'nirvana/claude/ROLE.md',
+        '- Every subagent is seated first: `herdr seat pick --book <order>`, then spawn the seat it gives, or `herdr seat run` when it gives an agy seat. The hook refuses a spawn without a booking.\n',
+        '- Every subagent is started first: `herdr seat run <order>`. The hook refuses a spawn without a booking.\n',
+        'nirvana.test_windows_shell.FilesTest.test_the_agent_is_opus_at_medium_with_the_plans_rules',
+        'python',
+    ),
+    # Step 5 (§2, §3.3): ROLE.md research.web rule
+    Control(
+        'p20_role_research_web',
+        'nirvana/claude/ROLE.md',
+        '- Web research, shopping and reading pages are `research.web`: seat them, never browse yourself for more than one page.\n',
+        '- Web research, shopping and reading pages are `research.web`: browse them yourself.\n',
+        'nirvana.test_windows_shell.FilesTest.test_the_agent_is_opus_at_medium_with_the_plans_rules',
+        'python',
+    ),
+    # Step 5 (§2, §3.3): seat skill subagent booking rule
+    Control(
+        'p20_seat_skill_booking',
+        'nirvana/claude/skills/seat/SKILL.md',
+        '  `sonnet-medium`, `sonnet-low`, `haiku-low`). Every subagent is seated first: `herdr seat pick --book <order>`,\n',
+        '  `sonnet-medium`, `sonnet-low`, `haiku-low`). Every subagent is started first: `herdr seat run <order>`,\n',
+        'nirvana.test_windows_shell.FilesTest.test_seat_skill_and_workers_have_booking_rules',
+        'python',
+    ),
+    # Step 5 (§2, §3.3): seat skill research.web rule
+    Control(
+        'p20_seat_skill_research_web',
+        'nirvana/claude/skills/seat/SKILL.md',
+        'Web research, shopping and reading pages are `research.web`: seat them, never browse yourself for more than one page.\n',
+        'Web research, shopping and reading pages are `research.web`: browse them yourself.\n',
+        'nirvana.test_windows_shell.FilesTest.test_seat_skill_and_workers_have_booking_rules',
+        'python',
+    ),
+    # Step 5 (§2, §3.3): worker agent description booking rule
+    Control(
+        'p20_worker_description_booking',
+        'nirvana/claude/agents/worker-haiku-low.md',
+        'A booking comes first: herdr seat pick --book <order>.',
+        'A booking is optional: herdr seat pick --book <order>.',
+        'every_worker_agent_names_its_model_and_effort',
+        'rust',
+    ),
 )

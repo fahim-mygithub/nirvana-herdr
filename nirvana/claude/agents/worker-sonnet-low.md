@@ -1,6 +1,6 @@
 ---
 name: worker-sonnet-low
-description: Nirvana worker on the sonnet seat at low effort (Sonnet 5.5 at low, the max pool). For a short order that needs no pane: a quick read, a lookup in the repository, a summary. The brief starts with Class, Order and Run lines.
+description: Nirvana worker on the sonnet seat at low effort (Sonnet 5.5 at low, the max pool). A booking comes first: herdr seat pick --book <order>. For a short order that needs no pane: a quick read, a lookup in the repository, a summary. The brief starts with Class, Order and Run lines.
 model: claude-sonnet-5-5
 effort: low
 tools: Read, Grep, Glob, Bash, Edit, Write

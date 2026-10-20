@@ -1,6 +1,6 @@
 ---
 name: worker-sonnet-medium
-description: Nirvana worker on the sonnet seat at medium effort (Sonnet 5.5 at medium, the max pool). For a short order that needs no pane: a bounded read, a review of a small diff, a short build step. The brief starts with Class, Order and Run lines.
+description: Nirvana worker on the sonnet seat at medium effort (Sonnet 5.5 at medium, the max pool). A booking comes first: herdr seat pick --book <order>. For a short order that needs no pane: a bounded read, a review of a small diff, a short build step. The brief starts with Class, Order and Run lines.
 model: claude-sonnet-5-5
 effort: medium
 tools: Read, Grep, Glob, Bash, Edit, Write
