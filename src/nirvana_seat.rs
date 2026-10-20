@@ -1225,6 +1225,32 @@ fn spare_phrase(pool: &str, windows: &[WindowState], now: u64) -> Option<String>
 
 /// Seats an order: the rule of §5.3, deterministic and pure. A NoSeat names every seat the class takes and
 /// why it was skipped, and the soonest reset that would free one.
+/// Plan 19 §6.2: climb over windows of a pool, and the window that yielded the max climb.
+pub fn windows_climb(windows: &[WindowState], pace_ease: f32) -> Option<(f32, String)> {
+    let mut best: Option<(f32, String)> = None;
+    for w in windows {
+        if let Some(u) = w.used {
+            let el = w.elapsed.unwrap_or(0.0).max(pace_ease);
+            let climb = (u + w.booked) / el;
+            match &best {
+                None => best = Some((climb, w.window.clone())),
+                Some((cur, _)) if climb > *cur => best = Some((climb, w.window.clone())),
+                _ => {}
+            }
+        }
+    }
+    best
+}
+
+/// Plan 19 §6.2: climb t factor clamped to [0, 1].
+pub fn climb_t(climb: f32, climb_start: f32, climb_full: f32) -> f32 {
+    if climb <= climb_start || climb_full <= climb_start {
+        0.0
+    } else {
+        ((climb - climb_start) / (climb_full - climb_start)).clamp(0.0, 1.0)
+    }
+}
+
 pub fn pick(table: &Table, world: &World, request: &Request) -> Result<Pick, NoSeat> {
     let Some(class) = table.class(&request.class) else {
         return Err(NoSeat {
@@ -1579,23 +1605,17 @@ fn evaluate(
         if let Some(best) = best_idx {
             let best_cand = &candidates[best];
             let hot_pool = table.seats[best_cand.index].pool.clone();
-            let climb = best_cand
-                .windows
-                .iter()
-                .filter_map(|w| {
-                    let u = w.used?;
-                    let el = w.elapsed.unwrap_or(0.0).max(constants.pace_ease);
-                    Some((u + w.booked) / el)
-                })
-                .fold(0.0f32, f32::max);
-            climb_info = Some(climb);
-            let t = if climb <= constants.climb_start
-                || constants.climb_full <= constants.climb_start
+            let (_climb, t) = if let Some((climb, _)) =
+                windows_climb(&best_cand.windows, constants.pace_ease)
             {
-                0.0
+                climb_info = Some(climb);
+                (
+                    climb,
+                    climb_t(climb, constants.climb_start, constants.climb_full),
+                )
             } else {
-                ((climb - constants.climb_start) / (constants.climb_full - constants.climb_start))
-                    .clamp(0.0, 1.0)
+                climb_info = Some(0.0);
+                (0.0, 0.0)
             };
             let bars = table.bars(class);
             let b_bar = bars.balanced - t * (bars.balanced - bars.efficient);
@@ -2764,6 +2784,230 @@ pub fn read_argon_from_herdr(now: u64) -> f32 {
     argon_record_used(&record_lines, &leases.leases, now)
 }
 
+/// Plan 20 §3.1: the orchestrator's seat, following the table's mode and climb.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrchestratorSeat {
+    pub seat: String,
+    pub effort: Effort,
+    pub mode: Mode,
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub climb: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub t: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
+    pub reason: String,
+    pub line: String,
+}
+
+impl OrchestratorSeat {
+    /// Format for the Seats square row: "Balanced, climb 1.18" or "Efficient", etc.
+    pub fn square_summary(&self) -> String {
+        if self.mode == Mode::Balanced {
+            if let Some(climb) = self.climb {
+                format!("Balanced, climb {:.2}", climb)
+            } else {
+                self.reason.clone()
+            }
+        } else {
+            self.mode.title().to_string()
+        }
+    }
+}
+
+/// Plan 20 §3.1: decides the orchestrator's seat from the table's mode and readings.
+pub fn orchestrator_seat(table: &Table, world: &World) -> OrchestratorSeat {
+    let mode = table.mode;
+    match mode {
+        Mode::Efficient => {
+            let seat = "sonnet".to_string();
+            let effort = Effort::Medium;
+            let model = table
+                .seat(&seat)
+                .map(|s| s.model.clone())
+                .unwrap_or_else(|| "claude-sonnet-5-5".into());
+            let reason = "Efficient".to_string();
+            let line = format!("nirvana claude -> {seat} {}: {reason}", effort.word());
+            OrchestratorSeat {
+                seat,
+                effort,
+                mode,
+                model,
+                climb: None,
+                t: None,
+                window: None,
+                reason,
+                line,
+            }
+        }
+        Mode::Sota => {
+            let seat = "opus".to_string();
+            let effort = Effort::High;
+            let model = table
+                .seat(&seat)
+                .map(|s| s.model.clone())
+                .unwrap_or_else(|| "claude-opus-5-5".into());
+            let reason = "SOTA".to_string();
+            let line = format!("nirvana claude -> {seat} {}: {reason}", effort.word());
+            OrchestratorSeat {
+                seat,
+                effort,
+                mode,
+                model,
+                climb: None,
+                t: None,
+                window: None,
+                reason,
+                line,
+            }
+        }
+        Mode::Balanced => {
+            let pool_name = "max";
+            let window_names: Vec<String> = table
+                .pool(pool_name)
+                .map(|p| p.windows.clone())
+                .unwrap_or_else(|| vec!["5h".into(), "week".into()]);
+
+            let pool_readings: Vec<&Reading> = world
+                .readings
+                .iter()
+                .filter(|r| r.pool == pool_name && r.used.is_some())
+                .collect();
+
+            if pool_readings.is_empty() {
+                let seat = "opus".to_string();
+                let effort = Effort::Medium;
+                let model = table
+                    .seat(&seat)
+                    .map(|s| s.model.clone())
+                    .unwrap_or_else(|| "claude-opus-5-5".into());
+                let reason = "Balanced, readings missing".to_string();
+                let line = format!("nirvana claude -> {seat} {}: {reason}", effort.word());
+                return OrchestratorSeat {
+                    seat,
+                    effort,
+                    mode,
+                    model,
+                    climb: None,
+                    t: None,
+                    window: None,
+                    reason,
+                    line,
+                };
+            }
+
+            let fresh_readings: Vec<&Reading> = pool_readings
+                .iter()
+                .copied()
+                .filter(|r| nirvana_usage::freshness(r, world.now) == Freshness::Fresh)
+                .collect();
+
+            if fresh_readings.is_empty() {
+                let seat = "opus".to_string();
+                let effort = Effort::Medium;
+                let model = table
+                    .seat(&seat)
+                    .map(|s| s.model.clone())
+                    .unwrap_or_else(|| "claude-opus-5-5".into());
+                let reason = "Balanced, readings stale".to_string();
+                let line = format!("nirvana claude -> {seat} {}: {reason}", effort.word());
+                return OrchestratorSeat {
+                    seat,
+                    effort,
+                    mode,
+                    model,
+                    climb: None,
+                    t: None,
+                    window: None,
+                    reason,
+                    line,
+                };
+            }
+
+            let mut windows = Vec::new();
+            for win_name in &window_names {
+                let fresh = fresh_readings.iter().find(|r| &r.window == win_name);
+                let booked: f32 = world
+                    .leases
+                    .iter()
+                    .filter(|lease| lease.live(world.now) && lease.pool == pool_name)
+                    .filter_map(|lease| lease.expected.get(win_name))
+                    .fold(0.0, |sum, share| sum + share);
+                let used = fresh.and_then(|r| r.used);
+                let elapsed = fresh.and_then(|r| nirvana_usage::elapsed(r));
+                windows.push(WindowState {
+                    window: win_name.clone(),
+                    used,
+                    booked,
+                    left: used.map(|u| 1.0 - u - booked),
+                    headroom: None,
+                    resets_at: fresh.and_then(|r| r.resets_at),
+                    elapsed,
+                    projected: None,
+                    spare: None,
+                    pace: None,
+                    reset_factor: 1.0,
+                    spare_weight: table.constants.spare_weight,
+                    expected: 0.0,
+                });
+            }
+
+            if let Some((climb, best_window)) = windows_climb(&windows, table.constants.pace_ease) {
+                let t = climb_t(climb, table.constants.climb_start, table.constants.climb_full);
+                let (seat, effort) = if t < 0.5 {
+                    ("opus".to_string(), Effort::Medium)
+                } else {
+                    ("sonnet".to_string(), Effort::Medium)
+                };
+                let model = table
+                    .seat(&seat)
+                    .map(|s| s.model.clone())
+                    .unwrap_or_else(|| {
+                        if seat == "opus" {
+                            "claude-opus-5-5".into()
+                        } else {
+                            "claude-sonnet-5-5".into()
+                        }
+                    });
+                let reason = format!("Balanced, {pool_name} {best_window} climb {:.2}", climb);
+                let line = format!("nirvana claude -> {seat} {}: {reason}", effort.word());
+                OrchestratorSeat {
+                    seat,
+                    effort,
+                    mode,
+                    model,
+                    climb: Some(climb),
+                    t: Some(t),
+                    window: Some(best_window),
+                    reason,
+                    line,
+                }
+            } else {
+                let seat = "opus".to_string();
+                let effort = Effort::Medium;
+                let model = table
+                    .seat(&seat)
+                    .map(|s| s.model.clone())
+                    .unwrap_or_else(|| "claude-opus-5-5".into());
+                let reason = "Balanced, readings missing".to_string();
+                let line = format!("nirvana claude -> {seat} {}: {reason}", effort.word());
+                OrchestratorSeat {
+                    seat,
+                    effort,
+                    mode,
+                    model,
+                    climb: None,
+                    t: None,
+                    window: None,
+                    reason,
+                    line,
+                }
+            }
+        }
+    }
+}
+
 // ---- the CLI ----
 
 const USAGE: &str = "usage: herdr seat list [--json]
@@ -2772,6 +3016,7 @@ const USAGE: &str = "usage: herdr seat list [--json]
                        [--override <seat> --reason \"...\"] [--json]
        herdr seat release <order>
        herdr seat record --json '<line>'
+       herdr seat orchestrator [--json]
        herdr seat mode [efficient|balanced|sota]   (prints the mode, or sets seats.toml's; plan 12 O8a)
        herdr seat run|exec|status|read|stop|cleanup ...   (plan 12 O3; `herdr seat run` alone prints its usage)
 --size defaults to medium (seats.toml's [size.medium]); --mode to seats.toml's mode.
@@ -2941,6 +3186,7 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         Some("pick") => pick_cli(&args[1..]),
         Some("release") => release_cli(&args[1..]),
         Some("record") => record_cli(&args[1..]),
+        Some("orchestrator") => orchestrator_cli(&args[1..]),
         // Plan 12 O8a: the mode the Seats square shows and changes.
         Some("mode") => crate::nirvana_seats_square::mode_cli(&args[1..]),
         // Plan 12 O3: the runner's verbs live in `nirvana_worker`.
@@ -2949,6 +3195,25 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         }
         _ => usage_exit(),
     }
+}
+
+fn orchestrator_cli(args: &[String]) -> std::io::Result<()> {
+    let json = match args {
+        [] => false,
+        [flag] if flag == "--json" => true,
+        _ => usage_exit(),
+    };
+    let table = load_table();
+    let mut world = live_world(&table);
+    let dir = dir();
+    world.leases = leases_or_exit(&dir.join(LEASES_FILE)).leases;
+    let seat = orchestrator_seat(&table, &world);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&seat)?);
+    } else {
+        println!("{}", seat.line);
+    }
+    Ok(())
 }
 
 fn list_cli(args: &[String]) -> std::io::Result<()> {
@@ -5513,5 +5778,144 @@ mod tests {
 
         let sum = argon_record_used(&[rec1, rec2], &[lease1, lease_dup], now);
         assert!(close(sum, 0.05)); // 0.03 from rec2 + 0.02 from lease1
+    }
+
+    #[test]
+    fn orchestrator_seat_efficient_mode() {
+        let mut table = table();
+        table.mode = Mode::Efficient;
+        let world = world();
+        let seat = orchestrator_seat(&table, &world);
+        assert_eq!(seat.seat, "sonnet");
+        assert_eq!(seat.effort, Effort::Medium);
+        assert_eq!(seat.model, "claude-sonnet-5-5");
+        assert_eq!(seat.line, "nirvana claude -> sonnet medium: Efficient");
+        assert_eq!(seat.square_summary(), "Efficient");
+    }
+
+    #[test]
+    fn orchestrator_seat_sota_mode() {
+        let mut table = table();
+        table.mode = Mode::Sota;
+        let world = world();
+        let seat = orchestrator_seat(&table, &world);
+        assert_eq!(seat.seat, "opus");
+        assert_eq!(seat.effort, Effort::High);
+        assert_eq!(seat.model, "claude-opus-5-5");
+        assert_eq!(seat.line, "nirvana claude -> opus high: SOTA");
+        assert_eq!(seat.square_summary(), "SOTA");
+    }
+
+    #[test]
+    fn orchestrator_seat_balanced_at_t_0_3() {
+        let mut table = table();
+        table.mode = Mode::Balanced;
+        let mut world = world();
+        let el_week = nirvana_usage::elapsed(
+            world
+                .readings
+                .iter()
+                .find(|r| r.pool == "max" && r.window == "week")
+                .unwrap(),
+        )
+        .unwrap();
+        // climb = 0.70 + 0.3 * (1.00 - 0.70) = 0.79 -> t = 0.30
+        set(&mut world, "max", "5h", 0.05);
+        set(&mut world, "max", "week", 0.79 * el_week);
+        let seat = orchestrator_seat(&table, &world);
+        assert_eq!(seat.seat, "opus");
+        assert_eq!(seat.effort, Effort::Medium);
+        assert!(close(seat.t.unwrap(), 0.30));
+        assert!(close(seat.climb.unwrap(), 0.79));
+        assert_eq!(
+            seat.line,
+            "nirvana claude -> opus medium: Balanced, max week climb 0.79"
+        );
+    }
+
+    #[test]
+    fn orchestrator_seat_balanced_at_t_0_5() {
+        let mut table = table();
+        table.mode = Mode::Balanced;
+        let mut world = world();
+        let el_week = nirvana_usage::elapsed(
+            world
+                .readings
+                .iter()
+                .find(|r| r.pool == "max" && r.window == "week")
+                .unwrap(),
+        )
+        .unwrap();
+        // climb = 0.70 + 0.5 * (1.00 - 0.70) = 0.85 -> t = 0.50
+        set(&mut world, "max", "5h", 0.05);
+        set(&mut world, "max", "week", 0.85 * el_week);
+        let seat = orchestrator_seat(&table, &world);
+        assert_eq!(seat.seat, "sonnet");
+        assert_eq!(seat.effort, Effort::Medium);
+        assert!(close(seat.t.unwrap(), 0.50));
+        assert!(close(seat.climb.unwrap(), 0.85));
+        assert_eq!(
+            seat.line,
+            "nirvana claude -> sonnet medium: Balanced, max week climb 0.85"
+        );
+    }
+
+    #[test]
+    fn orchestrator_seat_balanced_at_t_1_0() {
+        let mut table = table();
+        table.mode = Mode::Balanced;
+        let mut world = world();
+        let el_week = nirvana_usage::elapsed(
+            world
+                .readings
+                .iter()
+                .find(|r| r.pool == "max" && r.window == "week")
+                .unwrap(),
+        )
+        .unwrap();
+        // climb = 1.18 -> t = 1.00
+        set(&mut world, "max", "5h", 0.05);
+        set(&mut world, "max", "week", 1.18 * el_week);
+        let seat = orchestrator_seat(&table, &world);
+        assert_eq!(seat.seat, "sonnet");
+        assert_eq!(seat.effort, Effort::Medium);
+        assert!(close(seat.t.unwrap(), 1.00));
+        assert!(close(seat.climb.unwrap(), 1.18));
+        assert_eq!(
+            seat.line,
+            "nirvana claude -> sonnet medium: Balanced, max week climb 1.18"
+        );
+        assert_eq!(seat.square_summary(), "Balanced, climb 1.18");
+    }
+
+    #[test]
+    fn orchestrator_seat_balanced_stale_readings() {
+        let mut table = table();
+        table.mode = Mode::Balanced;
+        let mut world = world();
+        world.now = NOW + 10_000; // Far in future: all readings stale
+        let seat = orchestrator_seat(&table, &world);
+        assert_eq!(seat.seat, "opus");
+        assert_eq!(seat.effort, Effort::Medium);
+        assert_eq!(
+            seat.line,
+            "nirvana claude -> opus medium: Balanced, readings stale"
+        );
+        assert_eq!(seat.square_summary(), "Balanced, readings stale");
+    }
+
+    #[test]
+    fn orchestrator_seat_balanced_missing_readings() {
+        let mut table = table();
+        table.mode = Mode::Balanced;
+        let mut world = world();
+        world.readings.retain(|r| r.pool != "max");
+        let seat = orchestrator_seat(&table, &world);
+        assert_eq!(seat.seat, "opus");
+        assert_eq!(seat.effort, Effort::Medium);
+        assert_eq!(
+            seat.line,
+            "nirvana claude -> opus medium: Balanced, readings missing"
+        );
     }
 }
