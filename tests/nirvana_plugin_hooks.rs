@@ -34,9 +34,28 @@ impl Scratch {
         let root =
             std::env::temp_dir().join(format!("nirvana-o4b-hooks-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        for dir in ["proj/.git", "home", "config"] {
+        for dir in ["proj/.git", "home/nirvana", "config"] {
             std::fs::create_dir_all(root.join(dir)).expect("scratch");
         }
+        let leases = json!({
+            "version": 1,
+            "leases": [
+                {
+                    "order": "o-hook",
+                    "seat": "haiku",
+                    "effort": "low",
+                    "pool": "fable",
+                    "class": "chore.script",
+                    "use": {},
+                    "booked_at": 1000,
+                    "expires_at": 9999999999u64
+                }
+            ]
+        });
+        let _ = std::fs::write(
+            root.join("home").join("nirvana").join("leases.json"),
+            serde_json::to_string(&leases).unwrap(),
+        );
         Self { root }
     }
 
@@ -84,7 +103,7 @@ fn event(name: &str, scratch: &Scratch) -> Value {
         "PreToolUse" => {
             input["tool_name"] = "Agent".into();
             input["tool_input"] = json!({"subagent_type": "nirvana:worker-haiku-low", "description": "d",
-                                         "prompt": "Class: chore.script\nCount the files."});
+                                         "prompt": "Class: chore.script\nOrder: o-hook\nCount the files."});
         }
         "SubagentStop" => {
             input["agent_type"] = "Explore".into();

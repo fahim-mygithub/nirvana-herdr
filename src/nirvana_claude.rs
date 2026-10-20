@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use crate::nirvana_run::{self, Phase, Project, RunState};
-use crate::nirvana_seat::{self, Effort, Table, Tokens};
+use crate::nirvana_seat::{self, Effort, Leases, Table, Tokens};
 use crate::nirvana_usage::{self, Figure, Freshness, Provider, Reading, Source};
 
 /// The digest's ceiling. The brief: "Keep it under 300 tokens". `/context` counted digests on 2026-10-18 at 1.8 to
@@ -760,9 +760,27 @@ fn effort_of(word: &str) -> Option<Effort> {
     serde_json::from_value(Value::String(word.to_ascii_lowercase())).ok()
 }
 
-/// The rule (plan 12 §6, CLAUDE.md rule 5): a spawn names a model and an effort, its own or its agent file's, and a
-/// spawn on the reserve pool leaves the orchestrator its reserve of the reserve window.
+/// Loads live leases from `<home>/nirvana/leases.json`.
+pub fn load_live_leases(home: &Path) -> Leases {
+    let path = home.join(nirvana_seat::DIR).join(nirvana_seat::LEASES_FILE);
+    nirvana_seat::load_leases(&path).unwrap_or_default()
+}
+
+/// The rule (plan 12 §6, plan 20 §2, CLAUDE.md rule 5): a spawn names a model and an effort, its own or its agent file's;
+/// its brief's `Order:` must have a live booking in `leases.json` for that seat and effort (plan 20 §2); and a spawn on
+/// the reserve pool leaves the orchestrator its reserve of the reserve window.
 pub fn guard(spawn: &Spawn, def: Option<&AgentDef>, table: &Table, reserve: &Reserve) -> Verdict {
+    let leases = load_live_leases(&home_dir());
+    guard_with_leases(spawn, def, table, reserve, &leases)
+}
+
+pub fn guard_with_leases(
+    spawn: &Spawn,
+    def: Option<&AgentDef>,
+    table: &Table,
+    reserve: &Reserve,
+    leases: &Leases,
+) -> Verdict {
     // The orchestrator's own agent file has no prompt (it keeps Claude Code's), so a spawn of it is a bare Opus
     // subagent at the orchestrator's effort, not a worker.
     if matches!(spawn.agent_type.as_str(), "nirvana" | "nirvana:nirvana") {
@@ -808,17 +826,64 @@ pub fn guard(spawn: &Spawn, def: Option<&AgentDef>, table: &Table, reserve: &Res
             "herdr guard: effort {effort_word:?} is not one of low, medium, high, xhigh, max."
         ));
     };
-    let constants = &table.constants;
-    let Some(seat) = seat_for_model(table, &model) else {
-        return Verdict::Allow;
+
+    // Plan 20 §2: A spawn needs a booking in leases.json for this seat and effort.
+    let fields = brief_fields(&spawn.prompt);
+    let lease = fields
+        .order
+        .as_deref()
+        .and_then(|order| leases.live(order, reserve.now));
+
+    let Some(lease) = lease else {
+        let class_arg = fields.class.as_deref().unwrap_or("<class>");
+        let order_arg = fields.order.as_deref().unwrap_or("<order>");
+        let run_arg = fields.run.as_deref().unwrap_or("<run>");
+        return Verdict::Deny(format!(
+            "herdr guard: seat this first: herdr seat pick --class {class_arg} --size small --book {order_arg} --run {run_arg}"
+        ));
     };
+
+    let lease_seat_def = table.seat(&lease.seat);
+    if lease_seat_def.as_ref().map_or(false, |s| s.cli == "agy") {
+        return Verdict::Deny(format!(
+            "herdr guard: the picker seated {} on {} {} ({}). Start it with herdr seat run {} --order ...",
+            lease.order,
+            lease.seat,
+            lease.effort.word(),
+            lease.pool,
+            lease.seat,
+        ));
+    }
+
+    let spawn_seat = seat_for_model(table, &model);
+    let seat_matches = spawn_seat.is_some_and(|s| s.id == lease.seat);
+    let effort_ok = effort <= lease.effort;
+
+    if !seat_matches || !effort_ok {
+        let spawn_seat_id = spawn_seat.map(|s| s.id.as_str()).unwrap_or(model.as_str());
+        return Verdict::Deny(format!(
+            "herdr guard: {} is booked on {} {}, but this spawn is on {} {}. A spawn must match its booking: spawn nirvana:worker-{}-{}, or seat with herdr seat pick --override {} --book {}",
+            lease.order,
+            lease.seat,
+            lease.effort.word(),
+            spawn_seat_id,
+            effort.word(),
+            lease.seat,
+            lease.effort.word(),
+            spawn_seat_id,
+            lease.order,
+        ));
+    }
+
+    let constants = &table.constants;
+    let seat = spawn_seat.unwrap();
     if seat.pool != constants.reserve_pool {
         return Verdict::Allow;
     }
     let Some(used) = reserve.used else {
         return Verdict::Allow;
     };
-    let weight = brief_fields(&spawn.prompt)
+    let weight = fields
         .class
         .and_then(|class| table.class(&class).map(|class| class.weight))
         .unwrap_or(1.0);

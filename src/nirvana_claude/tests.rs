@@ -281,6 +281,40 @@ fn worker_def(model: &str, effort: &str) -> AgentDef {
 
 #[test]
 fn a_spawn_with_no_model_or_no_effort_is_refused() {
+    let _guard = crate::nirvana::with_test_home("no_model_or_effort");
+    let nirvana_dir = _guard.path.join(nirvana_seat::DIR);
+    std::fs::create_dir_all(&nirvana_dir).unwrap();
+    let leases = json!({
+        "version": 1,
+        "leases": [
+            {
+                "order": "r1",
+                "seat": "sonnet",
+                "effort": "medium",
+                "pool": "max",
+                "class": "review.adversary",
+                "use": {},
+                "booked_at": NOW,
+                "expires_at": NOW + 3600
+            },
+            {
+                "order": "r2",
+                "seat": "haiku",
+                "effort": "low",
+                "pool": "fable",
+                "class": "review.adversary",
+                "use": {},
+                "booked_at": NOW,
+                "expires_at": NOW + 3600
+            }
+        ]
+    });
+    std::fs::write(
+        nirvana_dir.join(nirvana_seat::LEASES_FILE),
+        serde_json::to_string(&leases).unwrap(),
+    )
+    .unwrap();
+
     let table = table();
     for (model, effort, missing) in [
         (None, None, "no model and no effort"),
@@ -326,19 +360,40 @@ fn a_spawn_with_no_model_or_no_effort_is_refused() {
         Verdict::Allow
     );
     // A call that names both needs no agent file.
+    let mut explore = spawn("Explore", Some("haiku"), Some("low"));
+    explore.prompt = "Class: review.adversary\nOrder: r2\nRead the diff.".into();
     assert_eq!(
-        guard(
-            &spawn("Explore", Some("haiku"), Some("low")),
-            None,
-            &table,
-            &room(0.2)
-        ),
+        guard(&explore, None, &table, &room(0.2)),
         Verdict::Allow
     );
 }
 
 #[test]
 fn a_spawn_on_max_that_would_break_the_reserve_is_refused() {
+    let _guard = crate::nirvana::with_test_home("reserve_break");
+    let nirvana_dir = _guard.path.join(nirvana_seat::DIR);
+    std::fs::create_dir_all(&nirvana_dir).unwrap();
+    let leases = json!({
+        "version": 1,
+        "leases": [
+            {
+                "order": "r1",
+                "seat": "opus",
+                "effort": "high",
+                "pool": "max",
+                "class": "review.adversary",
+                "use": {},
+                "booked_at": NOW,
+                "expires_at": NOW + 3600
+            }
+        ]
+    });
+    std::fs::write(
+        nirvana_dir.join(nirvana_seat::LEASES_FILE),
+        serde_json::to_string(&leases).unwrap(),
+    )
+    .unwrap();
+
     let table = table();
     let def = worker_def("claude-opus-5-5", "high");
     let opus = spawn("nirvana:worker-opus-high", None, None);
@@ -373,6 +428,145 @@ fn a_spawn_on_max_that_would_break_the_reserve_is_refused() {
         ..room(0.0)
     };
     assert_eq!(guard(&opus, Some(&def), &table, &unknown), Verdict::Allow);
+}
+
+#[test]
+fn guard_spawn_booking_rules_and_refusal_messages() {
+    let _guard = crate::nirvana::with_test_home("guard_booking");
+    let nirvana_dir = _guard.path.join(nirvana_seat::DIR);
+    std::fs::create_dir_all(&nirvana_dir).unwrap();
+    let table = table();
+
+    let leases = json!({
+        "version": 1,
+        "leases": [
+            {
+                "order": "o-live-sonnet",
+                "seat": "sonnet",
+                "effort": "medium",
+                "pool": "max",
+                "class": "build.bounded",
+                "use": {},
+                "booked_at": NOW - 100,
+                "expires_at": NOW + 3600
+            },
+            {
+                "order": "o-expired",
+                "seat": "sonnet",
+                "effort": "medium",
+                "pool": "max",
+                "class": "build.bounded",
+                "use": {},
+                "booked_at": NOW - 1000,
+                "expires_at": NOW - 10
+            },
+            {
+                "order": "o-flash",
+                "seat": "flash",
+                "effort": "medium",
+                "pool": "gemini",
+                "class": "research.web",
+                "use": {},
+                "booked_at": NOW - 100,
+                "expires_at": NOW + 3600
+            }
+        ]
+    });
+    std::fs::write(
+        nirvana_dir.join(nirvana_seat::LEASES_FILE),
+        serde_json::to_string(&leases).unwrap(),
+    )
+    .unwrap();
+
+    let def_sonnet_med = worker_def("claude-sonnet-5-5", "medium");
+    let def_sonnet_high = worker_def("claude-sonnet-5-5", "high");
+    let def_opus_med = worker_def("claude-opus-5-5", "medium");
+
+    // 1. No Order: line -> refusal says "seat this first: herdr seat pick ..."
+    let mut no_order = spawn("general-purpose", Some("sonnet"), Some("medium"));
+    no_order.prompt = "Class: build.bounded\nNo order id here.\nRun: r-1".into();
+    match guard(&no_order, None, &table, &room(0.2)) {
+        Verdict::Deny(why) => {
+            assert!(
+                why.contains("herdr guard: seat this first: herdr seat pick --class build.bounded --size small --book <order> --run r-1"),
+                "no order line: {why}"
+            );
+        }
+        Verdict::Allow => panic!("expected deny for no order line"),
+    }
+
+    // 2. An order with no lease
+    let mut no_lease = spawn("general-purpose", Some("sonnet"), Some("medium"));
+    no_lease.prompt = "Class: build.bounded\nOrder: o-missing\nRun: r-1".into();
+    match guard(&no_lease, None, &table, &room(0.2)) {
+        Verdict::Deny(why) => {
+            assert!(
+                why.contains("herdr guard: seat this first: herdr seat pick --class build.bounded --size small --book o-missing --run r-1"),
+                "order with no lease: {why}"
+            );
+        }
+        Verdict::Allow => panic!("expected deny for unbooked order"),
+    }
+
+    // 3. An expired lease
+    let mut expired = spawn("general-purpose", Some("sonnet"), Some("medium"));
+    expired.prompt = "Class: build.bounded\nOrder: o-expired\nRun: r-1".into();
+    match guard(&expired, None, &table, &room(0.2)) {
+        Verdict::Deny(why) => {
+            assert!(
+                why.contains("herdr guard: seat this first: herdr seat pick --class build.bounded --size small --book o-expired --run r-1"),
+                "expired lease: {why}"
+            );
+        }
+        Verdict::Allow => panic!("expected deny for expired lease"),
+    }
+
+    // 4. A lease on flash (agy seat)
+    let mut agy_spawn = spawn("general-purpose", Some("sonnet"), Some("medium"));
+    agy_spawn.prompt = "Class: research.web\nOrder: o-flash\nRun: r-1".into();
+    match guard(&agy_spawn, None, &table, &room(0.2)) {
+        Verdict::Deny(why) => {
+            assert!(
+                why.contains("herdr guard: the picker seated o-flash on flash medium (gemini). Start it with herdr seat run flash --order ..."),
+                "lease on flash: {why}"
+            );
+        }
+        Verdict::Allow => panic!("expected deny for agy lease"),
+    }
+
+    // 5. A lease on sonnet medium with an opus spawn
+    let mut opus_spawn = spawn("nirvana:worker-opus-medium", None, None);
+    opus_spawn.prompt = "Class: build.bounded\nOrder: o-live-sonnet\nRun: r-1".into();
+    match guard(&opus_spawn, Some(&def_opus_med), &table, &room(0.2)) {
+        Verdict::Deny(why) => {
+            assert!(
+                why.contains("herdr guard: o-live-sonnet is booked on sonnet medium, but this spawn is on opus medium. A spawn must match its booking: spawn nirvana:worker-sonnet-medium, or seat with herdr seat pick --override opus --book o-live-sonnet"),
+                "opus spawn for sonnet lease: {why}"
+            );
+        }
+        Verdict::Allow => panic!("expected deny for opus spawn on sonnet lease"),
+    }
+
+    // 6. A lease on sonnet medium with a sonnet high spawn
+    let mut sonnet_high_spawn = spawn("nirvana:worker-sonnet-high", None, None);
+    sonnet_high_spawn.prompt = "Class: build.bounded\nOrder: o-live-sonnet\nRun: r-1".into();
+    match guard(&sonnet_high_spawn, Some(&def_sonnet_high), &table, &room(0.2)) {
+        Verdict::Deny(why) => {
+            assert!(
+                why.contains("herdr guard: o-live-sonnet is booked on sonnet medium, but this spawn is on sonnet high. A spawn must match its booking: spawn nirvana:worker-sonnet-medium, or seat with herdr seat pick --override sonnet --book o-live-sonnet"),
+                "sonnet high spawn for sonnet medium lease: {why}"
+            );
+        }
+        Verdict::Allow => panic!("expected deny for high effort spawn on medium lease"),
+    }
+
+    // 7. A lease on sonnet medium with a sonnet medium spawn -> ALLOWED!
+    let mut sonnet_med_spawn = spawn("nirvana:worker-sonnet-medium", None, None);
+    sonnet_med_spawn.prompt = "Class: build.bounded\nOrder: o-live-sonnet\nRun: r-1".into();
+    assert_eq!(
+        guard(&sonnet_med_spawn, Some(&def_sonnet_med), &table, &room(0.2)),
+        Verdict::Allow
+    );
 }
 
 #[test]
