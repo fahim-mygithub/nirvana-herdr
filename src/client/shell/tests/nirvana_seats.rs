@@ -411,3 +411,82 @@ fn an_open_seats_panel_is_composed_again_when_a_pane_prints() {
     );
     done(root, home);
 }
+
+#[test]
+fn sota_word_is_red_in_title_and_mode_row_when_sota_is_on_not_otherwise() {
+    let (mut state, root, home) = state_for("sota-red", "nirvana");
+    let red_u32 = crate::protocol::color_to_u32(state.config.palette.red);
+
+    // Initially mode is Balanced.
+    let _ = open(&mut state, 200);
+    let area = state.hits.nirvana_seats_panel.area;
+    let mode_row = state.hits.nirvana_seats_panel.mode;
+
+    // Check Balanced title: contains "Balanced" (not red)
+    let frame = state.compose(200, 40).expect("composed frame").frame;
+    let title_cells: Vec<_> = (area.x..area.right())
+        .map(|x| &frame.cells[(area.y * frame.width + x) as usize])
+        .collect();
+    let title_text: String = title_cells.iter().map(|c| c.symbol.as_str()).collect();
+    assert!(title_text.contains("Balanced"));
+    assert!(!title_cells.iter().any(|c| c.fg == red_u32));
+
+    // Check mode row in Balanced: [Balanced] is green, SOTA is muted (not red)
+    let mode_cells: Vec<_> = (mode_row.x..mode_row.right())
+        .map(|x| &frame.cells[(mode_row.y * frame.width + x) as usize])
+        .collect();
+    let mode_text: String = mode_cells.iter().map(|c| c.symbol.as_str()).collect();
+    assert!(mode_text.contains("[Balanced]"));
+    assert!(mode_text.contains(" SOTA "));
+    assert!(!mode_cells.iter().any(|c| c.fg == red_u32));
+
+    // Now press 'm' to change mode to SOTA!
+    let _ = key(&mut state, KeyCode::Char('m'));
+    let frame = state.compose(200, 40).expect("composed frame").frame;
+
+    // Check SOTA title: contains "SOTA", and the cells for "SOTA" are red!
+    let title_cells: Vec<_> = (area.x..area.right())
+        .map(|x| &frame.cells[(area.y * frame.width + x) as usize])
+        .collect();
+    let title_text: String = title_cells.iter().map(|c| c.symbol.as_str()).collect();
+    assert!(title_text.contains("SOTA"));
+    let sota_title_red = title_cells
+        .windows(4)
+        .any(|w| {
+            w[0].symbol == "S" && w[1].symbol == "O" && w[2].symbol == "T" && w[3].symbol == "A"
+                && w.iter().all(|c| c.fg == red_u32)
+        });
+    assert!(sota_title_red, "SOTA in title must be red");
+
+    // Check mode row in SOTA: [SOTA] is red!
+    let mode_cells: Vec<_> = (mode_row.x..mode_row.right())
+        .map(|x| &frame.cells[(mode_row.y * frame.width + x) as usize])
+        .collect();
+    let mode_text: String = mode_cells.iter().map(|c| c.symbol.as_str()).collect();
+    assert!(mode_text.contains("[SOTA]"));
+    let sota_mode_red = mode_cells
+        .windows(4)
+        .any(|w| {
+            w[0].symbol == "S" && w[1].symbol == "O" && w[2].symbol == "T" && w[3].symbol == "A"
+                && w.iter().all(|c| c.fg == red_u32)
+        });
+    assert!(sota_mode_red, "SOTA in mode row must be red");
+
+    // Now press 'm' again to change mode to Efficient!
+    let _ = key(&mut state, KeyCode::Char('m'));
+    let frame = state.compose(200, 40).expect("composed frame").frame;
+
+    // Check title in Efficient: no red
+    let title_cells: Vec<_> = (area.x..area.right())
+        .map(|x| &frame.cells[(area.y * frame.width + x) as usize])
+        .collect();
+    assert!(!title_cells.iter().any(|c| c.fg == red_u32));
+
+    // Check mode row in Efficient: [Efficient] is green, SOTA is muted (not red)
+    let mode_cells: Vec<_> = (mode_row.x..mode_row.right())
+        .map(|x| &frame.cells[(mode_row.y * frame.width + x) as usize])
+        .collect();
+    assert!(!mode_cells.iter().any(|c| c.fg == red_u32));
+
+    done(root, home);
+}

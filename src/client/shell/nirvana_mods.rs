@@ -271,6 +271,21 @@ pub(super) fn render_strip(
             open == OpenPanel::Seats,
             palette,
         );
+        if seats.and_then(|s| s.mode) == Some(crate::nirvana_seat::Mode::Sota) {
+            for col in hits.seats.x..hits.seats.right().saturating_sub(3) {
+                if buffer[(col, area.y)].symbol() == "S"
+                    && buffer[(col + 1, area.y)].symbol() == "O"
+                    && buffer[(col + 2, area.y)].symbol() == "T"
+                    && buffer[(col + 3, area.y)].symbol() == "A"
+                {
+                    buffer[(col, area.y)].set_fg(palette.red);
+                    buffer[(col + 1, area.y)].set_fg(palette.red);
+                    buffer[(col + 2, area.y)].set_fg(palette.red);
+                    buffer[(col + 3, area.y)].set_fg(palette.red);
+                    break;
+                }
+            }
+        }
         x = hits.seats.right() + 1;
     }
     let narrow = area.width < super::nirvana_jobs::NARROW_STRIP;

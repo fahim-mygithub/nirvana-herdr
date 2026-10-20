@@ -329,6 +329,22 @@ pub(super) fn render_seats_panel(
         None => format!(" Seats \u{b7} {} ", folder_name(&panel.root)),
     };
     hits.close = draw_frame(buffer, rect, &title, palette);
+    if shown.mode == Some(Mode::Sota) {
+        let top = rect.y;
+        for col in rect.x..rect.right().saturating_sub(3) {
+            if buffer[(col, top)].symbol() == "S"
+                && buffer[(col + 1, top)].symbol() == "O"
+                && buffer[(col + 2, top)].symbol() == "T"
+                && buffer[(col + 3, top)].symbol() == "A"
+            {
+                buffer[(col, top)].set_fg(palette.red);
+                buffer[(col + 1, top)].set_fg(palette.red);
+                buffer[(col + 2, top)].set_fg(palette.red);
+                buffer[(col + 3, top)].set_fg(palette.red);
+                break;
+            }
+        }
+    }
     let x = rect.x + 2;
     let body_height = usize::from(rect.height.saturating_sub(4));
     // Keep the selected order's first line in view.
@@ -359,7 +375,12 @@ pub(super) fn render_seats_panel(
                         format!(" {} ", mode.title())
                     };
                     let style = if on {
-                        base.fg(palette.green).add_modifier(Modifier::BOLD)
+                        let color = if mode == Mode::Sota {
+                            palette.red
+                        } else {
+                            palette.green
+                        };
+                        base.fg(color).add_modifier(Modifier::BOLD)
                     } else {
                         muted
                     };
