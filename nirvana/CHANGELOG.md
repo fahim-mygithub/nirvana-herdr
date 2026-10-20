@@ -3,6 +3,15 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha NEXT (p20): every spawn seated, orchestrator seat follows the mode
+
+Package `p20` (`P20-ORDER.md`, record `nirvana/plans/2026-10-20-20-records/p20.md`).
+
+- **Changed:** `herdr nirvana guard-spawn` enforces a mandatory live booking in `leases.json` for every subagent spawn (booked via `herdr seat pick --book <order>`). Spawns without an `Order:` line or without a live lease are refused with actionable guidance naming the pick command; spawns on an agy lease are instructed to run via `herdr seat run`; and spawns attempting to run on a higher effort or different seat than booked are refused. The orchestrator's own seat follows the active mode (`herdr seat orchestrator [--json]`): Efficient seats Sonnet medium; Balanced seats Opus medium while the max pool climb metric `t < 0.5` and Sonnet medium from `0.5`; SOTA seats Opus high. `nirvana_claude_args` and `launch_args` supply these flags dynamically at launch (falling back to Opus medium if the seats table fails), and Restart Claude routes through `launch_args` to switch seats without losing conversation state. At session start, `digest_cli` records the running seat in `<home>/nirvana/sessions/<session_id>.json`; `UserPromptSubmit` notices emit a single-line warning once per change when the running seat differs from the rule seat; and the Seats square displays the orchestrator seat as its first row (`Nirvana Claude · sonnet medium · Balanced, climb 1.18`) with `restart to switch` when differing. `ROLE.md`, `skills/seat/SKILL.md`, and all `worker-*` subagents are updated to require bookings before spawning.
+  **Because:** Plan 20 L1, L2, L3: In real usage (e.g. 3D-Printer-Flow-xtool), Nirvana Claude spawned 12 subagents without booking them once, while the orchestrator ran 341 Opus turns ($28) on trivial tasks. Enforcing booking guards ensures all subagents are classified and routed to appropriate seats, while tying the orchestrator seat to the mode allows Sonnet medium under high usage or in Efficient mode, reserving Opus for deep reasoning or SOTA mode.
+  **Measured:** 16 nextest unit and client tests across `src/nirvana_claude/tests.rs`, `src/nirvana_seat/tests.rs`, `src/nirvana_launch/tests.rs`, and `src/client/shell/tests/nirvana_seats.rs`; 24 sabotage controls in `nirvana/controls.d/p20.py` covering spawn booking rules, refusal messages, orchestrator seat mode rules, launch args, mid-session seat notices, Seats square orchestrator rows, and documentation directives; dry-run controls total increased from 1086 to 1110 (all 1110 matched 1x); all 24 `p20_` controls pass individually.
+  **If you remove this:** Nirvana Claude spawns subagents on unbooked seats without using `seat pick`, web browsing runs on expensive models rather than `research.web`, and the orchestrator remains locked to Opus medium regardless of usage exhaustion or user mode settings.
+
 ## alpha 0.31.0: seat modes recalibrated (plan 19)
 
 Package `p19` (`P19-ORDER.md`, record `nirvana/plans/2026-10-20-19-records/p19.md`).
