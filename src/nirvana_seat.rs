@@ -1122,12 +1122,7 @@ fn effort_for(
         .or_else(|| offered.iter().copied().min())
         .unwrap_or(want);
     if got != want {
-        let seat_note = format!(
-            "{} has no {}; {}",
-            seat.id,
-            want.word(),
-            got.word()
-        );
+        let seat_note = format!("{} has no {}; {}", seat.id, want.word(), got.word());
         note = Some(match note {
             Some(n) => format!("{n}; {seat_note}"),
             None => seat_note,
@@ -1332,10 +1327,8 @@ fn evaluate(
 
     // Filter 6: an order this window cannot hold, while another pool could hold it whole (§4.4). A pool
     // with a window not read is not counted as one that holds. SOTA skips headroom filter (filter 6).
-    let holders: Vec<(String, String)> = if request.mode == Mode::Sota {
-        Vec::new()
-    } else {
-        candidates
+    if request.mode != Mode::Sota {
+        let holders: Vec<(String, String)> = candidates
             .iter()
             .filter(|cand| cand.skip.is_none())
             .filter(|cand| {
@@ -1347,40 +1340,38 @@ fn evaluate(
                 let seat = &table.seats[cand.index];
                 (seat.pool.clone(), seat.id.clone())
             })
-            .collect()
-    };
-    for cand in candidates.iter_mut().filter(|cand| cand.skip.is_none()) {
-        if request.mode == Mode::Sota {
-            break;
+            .collect();
+        for cand in candidates.iter_mut().filter(|cand| cand.skip.is_none()) {
+            let seat = &table.seats[cand.index];
+            let Some(short) = cand
+                .windows
+                .iter()
+                .find(|window| window.known() && !window.holds())
+            else {
+                continue;
+            };
+            let Some((other_pool, other_seat)) =
+                holders.iter().find(|(pool, _)| *pool != seat.pool)
+            else {
+                continue;
+            };
+            let reserve = if short.headroom != short.left {
+                " after the reserve"
+            } else {
+                ""
+            };
+            cand.skip = Some(Skip {
+                kind: SkipKind::Headroom,
+                why: format!(
+                    "{} {} has {} left{reserve} for an order of {}; {other_seat} on {other_pool} can hold it",
+                    seat.pool,
+                    short.window,
+                    pct(short.headroom.unwrap_or(0.0)),
+                    pct(short.expected)
+                ),
+                resets_at: short.resets_at,
+            });
         }
-        let seat = &table.seats[cand.index];
-        let Some(short) = cand
-            .windows
-            .iter()
-            .find(|window| window.known() && !window.holds())
-        else {
-            continue;
-        };
-        let Some((other_pool, other_seat)) = holders.iter().find(|(pool, _)| *pool != seat.pool)
-        else {
-            continue;
-        };
-        let reserve = if short.headroom != short.left {
-            " after the reserve"
-        } else {
-            ""
-        };
-        cand.skip = Some(Skip {
-            kind: SkipKind::Headroom,
-            why: format!(
-                "{} {} has {} left{reserve} for an order of {}; {other_seat} on {other_pool} can hold it",
-                seat.pool,
-                short.window,
-                pct(short.headroom.unwrap_or(0.0)),
-                pct(short.expected)
-            ),
-            resets_at: short.resets_at,
-        });
     }
 
     // Filter 7: the orchestrator's reserve (§3).
@@ -1598,9 +1589,14 @@ fn evaluate(
                 })
                 .fold(0.0f32, f32::max);
             climb_info = Some(climb);
-            let t = ((climb - constants.climb_start)
-                / (constants.climb_full - constants.climb_start))
-                .clamp(0.0, 1.0);
+            let t = if climb <= constants.climb_start
+                || constants.climb_full <= constants.climb_start
+            {
+                0.0
+            } else {
+                ((climb - constants.climb_start) / (constants.climb_full - constants.climb_start))
+                    .clamp(0.0, 1.0)
+            };
             let bars = table.bars(class);
             let b_bar = bars.balanced - t * (bars.balanced - bars.efficient);
             if t >= 0.5 {
@@ -1951,7 +1947,7 @@ fn rank(
     };
     let best_score = candidates[best].score;
     let (bar, dropped) = if mode == Mode::Sota {
-        (best_score, false)
+        (0.0, false)
     } else if best_score + EDGE >= wanted {
         (wanted, false)
     } else if best_score + EDGE >= bars.efficient {
@@ -2012,7 +2008,7 @@ fn build_pick(
     dropped: bool,
     step_down: bool,
     now: u64,
-    climb: Option<f32>,
+    _climb: Option<f32>,
 ) -> Pick {
     let constants = &table.constants;
     let won = &candidates[winner];
@@ -2114,21 +2110,18 @@ fn build_pick(
             reason.push_str(&format!(", reserve {}", pct(constants.reserve)));
         }
     }
-    if request.mode == Mode::Balanced {
-        if let Some(c) = climb {
-            reason.push_str(&format!("; climb {c:.2}, bar {bar:.0}"));
-        }
-    } else if request.mode == Mode::Sota {
-        reason.push_str("; best score");
-    }
     if seat.fallback {
         let skipped: Vec<String> = candidates
             .iter()
             .filter(|c| c.in_class && !table.seats[c.index].fallback)
-            .filter_map(|c| {
+            .map(|c| {
                 let s = &table.seats[c.index];
-                let why = c.skip.as_ref().map(|sk| sk.why.as_str()).unwrap_or("skipped");
-                Some(format!("{} ({})", s.id, why))
+                let why = c
+                    .skip
+                    .as_ref()
+                    .map(|sk| sk.why.as_str())
+                    .unwrap_or("skipped");
+                format!("{} ({})", s.id, why)
             })
             .collect();
         if !skipped.is_empty() {
@@ -3740,34 +3733,66 @@ mod tests {
         let cell_low = flash.uses.iter().find(|u| u.effort == Effort::Low).unwrap();
         assert!(close(cell_low.windows["5h"], 0.000017424));
         assert!(close(cell_low.windows["week"], 0.000008712));
-        let cell_med = flash.uses.iter().find(|u| u.effort == Effort::Medium).unwrap();
+        let cell_med = flash
+            .uses
+            .iter()
+            .find(|u| u.effort == Effort::Medium)
+            .unwrap();
         assert!(close(cell_med.windows["5h"], 0.00016632));
         assert!(close(cell_med.windows["week"], 0.00008316));
-        let cell_high = flash.uses.iter().find(|u| u.effort == Effort::High).unwrap();
+        let cell_high = flash
+            .uses
+            .iter()
+            .find(|u| u.effort == Effort::High)
+            .unwrap();
         assert!(close(cell_high.windows["5h"], 0.00026928));
         assert!(close(cell_high.windows["week"], 0.00013464));
 
         let g_opus = table.seat("g-opus").unwrap();
         assert!(g_opus.fallback);
-        let cell_low = g_opus.uses.iter().find(|u| u.effort == Effort::Low).unwrap();
+        let cell_low = g_opus
+            .uses
+            .iter()
+            .find(|u| u.effort == Effort::Low)
+            .unwrap();
         assert!(close(cell_low.windows["5h"], 0.006624));
         assert!(close(cell_low.windows["week"], 0.003536));
-        let cell_med = g_opus.uses.iter().find(|u| u.effort == Effort::Medium).unwrap();
+        let cell_med = g_opus
+            .uses
+            .iter()
+            .find(|u| u.effort == Effort::Medium)
+            .unwrap();
         assert!(close(cell_med.windows["5h"], 0.010971));
         assert!(close(cell_med.windows["week"], 0.0058565));
-        let cell_high = g_opus.uses.iter().find(|u| u.effort == Effort::High).unwrap();
+        let cell_high = g_opus
+            .uses
+            .iter()
+            .find(|u| u.effort == Effort::High)
+            .unwrap();
         assert!(close(cell_high.windows["5h"], 0.017595));
         assert!(close(cell_high.windows["week"], 0.009282));
 
         let g_sonnet = table.seat("g-sonnet").unwrap();
         assert!(g_sonnet.fallback);
-        let cell_low = g_sonnet.uses.iter().find(|u| u.effort == Effort::Low).unwrap();
+        let cell_low = g_sonnet
+            .uses
+            .iter()
+            .find(|u| u.effort == Effort::Low)
+            .unwrap();
         assert!(close(cell_low.windows["5h"], 0.0041193));
         assert!(close(cell_low.windows["week"], 0.00221));
-        let cell_med = g_sonnet.uses.iter().find(|u| u.effort == Effort::Medium).unwrap();
+        let cell_med = g_sonnet
+            .uses
+            .iter()
+            .find(|u| u.effort == Effort::Medium)
+            .unwrap();
         assert!(close(cell_med.windows["5h"], 0.0068517));
         assert!(close(cell_med.windows["week"], 0.0036686));
-        let cell_high = g_sonnet.uses.iter().find(|u| u.effort == Effort::High).unwrap();
+        let cell_high = g_sonnet
+            .uses
+            .iter()
+            .find(|u| u.effort == Effort::High)
+            .unwrap();
         assert!(close(cell_high.windows["5h"], 0.010971));
         assert!(close(cell_high.windows["week"], 0.0058786));
 
@@ -3786,11 +3811,7 @@ mod tests {
 
         let text = read_or_create(&path);
         let parsed = parse(&text).expect("upgraded seats.toml parses");
-        assert_eq!(
-            parsed.mode,
-            Mode::Efficient,
-            "mode = efficient preserved"
-        );
+        assert_eq!(parsed.mode, Mode::Efficient, "mode = efficient preserved");
         let current_efficient = replace_mode_line(DEFAULT, "mode = \"efficient\"");
         assert_eq!(text, current_efficient);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), current_efficient);
@@ -3806,9 +3827,11 @@ mod tests {
 
     #[test]
     fn a_bounded_build_at_balanced_goes_to_sonnet_medium_with_its_reason_line() {
-        let table = table();
-        // Plan 14 §2.3 & §3: g-sonnet scores 88 (same as sonnet) and fits in G·Claude's spare while Max is
-        // projected past 100%.
+        // Plan 14 §2.3 & §3 table fixture: g-sonnet scores 88 (same as sonnet) and fits in G·Claude's spare while Max is
+        // projected past 100%. Plan 14 balanced mode did not drop the bar via climb.
+        let mut table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
+        table.constants.climb_start = 99.0;
+        table.constants.climb_full = 100.0;
         let got = chosen(&table, &world(), &request("build.bounded"));
         assert_eq!(
             (got.seat.as_str(), got.effort, got.cli.as_str()),
@@ -3861,7 +3884,8 @@ mod tests {
 
     #[test]
     fn a_seat_that_is_off_or_whose_cli_is_not_ready_is_skipped_with_why() {
-        let table = table();
+        // Plan 14 table: fable is an off seat.
+        let table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
         // Fable is off: at SOTA it would be the best plan seat (97).
         let mut sota = request("plan");
         sota.mode = Mode::Sota;
@@ -3880,7 +3904,8 @@ mod tests {
 
     #[test]
     fn a_need_the_seat_lacks_and_a_class_that_does_not_take_it_skip_it() {
-        let table = table();
+        // Plan 14 table: build.frontend restricted argon to only_with = ["video"].
+        let table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
         let mut web = request("research.web");
         web.needs = vec!["video".into()];
         let got = chosen(&table, &world(), &web);
@@ -3922,7 +3947,8 @@ mod tests {
 
     #[test]
     fn the_caller_can_exclude_a_family_so_another_family_reviews() {
-        let table = table();
+        // Plan 14 table: g-opus is an unreserved anthropic twin.
+        let table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
         let mut review = request("review.adversary");
         review.not_family = vec!["anthropic".into()];
         let got = chosen(&table, &world(), &review);
@@ -3941,7 +3967,8 @@ mod tests {
     /// Decision 0017: "A review prefers another family, falls back to its own in a fresh session".
     #[test]
     fn a_review_with_no_other_family_left_falls_back_to_its_own_in_a_fresh_session() {
-        let table = table();
+        // Plan 14 table: review.adversary has only anthropic and argon.
+        let table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
         let mut world = world();
         set(&mut world, "argon", "week", 0.97);
         let mut review = request("review.adversary");
@@ -4010,7 +4037,8 @@ mod tests {
 
     #[test]
     fn an_order_a_window_cannot_hold_goes_to_a_pool_that_can() {
-        let table = table();
+        // Plan 14 table: g-opus on google3p per_usd factor and build.load_bearing weight.
+        let table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
         let mut world = world();
         // 83% of max's 5 h used: 2% left after the reserve, for an order expected at 3.4%.
         set(&mut world, "max", "5h", 0.83);
@@ -4040,7 +4068,8 @@ mod tests {
 
     #[test]
     fn the_bar_drops_to_the_best_seat_left_and_never_under_the_efficient_bar() {
-        let mut table = table();
+        // Plan 14 table: build.bounded had argon at 82, flash at 78, bar at 85, efficient at 80.
+        let mut table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
         let mut world = world();
         set(&mut world, "max", "5h", 0.86);
         set(&mut world, "google3p", "5h", 0.96);
@@ -4133,14 +4162,16 @@ mod tests {
 
     #[test]
     fn quota_about_to_reset_is_discounted_by_the_share_of_the_order_before_it() {
-        let c = table().constants;
+        // Plan 14 table: g-sonnet on ops.terminal.
+        let table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
+        let c = &table.constants;
         // Half left, 30 min to the reset: a 15 min order runs wholly before it, half price.
-        assert!(close(reset_factor(0.5, 1800, 15, &c), 0.5));
+        assert!(close(reset_factor(0.5, 1800, 15, c), 0.5));
         // A 2 h order: a quarter runs before it.
-        assert!(close(reset_factor(0.5, 1800, 120, &c), 0.875));
+        assert!(close(reset_factor(0.5, 1800, 120, c), 0.875));
         // 20% left is not "more than 30%"; 61 min is not "under 60".
-        assert!(close(reset_factor(0.2, 1800, 15, &c), 1.0));
-        assert!(close(reset_factor(0.5, 61 * 60, 15, &c), 1.0));
+        assert!(close(reset_factor(0.2, 1800, 15, c), 1.0));
+        assert!(close(reset_factor(0.5, 61 * 60, 15, c), 1.0));
         // In a got: google3p's 5 h window has 32% left (> 30%) and resets in 59 min (elapsed 0.803, so
         // projected is 84.6% and spare is 15.4%); g-sonnet medium on ops.terminal expects 16.55%, spilling
         // 1.2% past the spare into rest, where the reset discount prices it.
@@ -4153,7 +4184,7 @@ mod tests {
         g5.used = Some(0.68);
         g5.resets_at = Some(NOW + 3540);
         world.readings.retain(|r| r.pool != "max");
-        let got = chosen(&table(), &world, &request("ops.terminal"));
+        let got = chosen(&table, &world, &request("ops.terminal"));
         assert_eq!(got.seat, "g-sonnet");
         let five = got.windows.iter().find(|w| w.window == "5h").unwrap();
         assert!(close(five.reset_factor, 0.5), "{five:?}");
@@ -4169,6 +4200,7 @@ mod tests {
         // after the reserve, so its reset 20 minutes off is no discount.
         let mut world = self::world();
         set(&mut world, "max", "5h", 0.65);
+        set(&mut world, "max", "week", 0.05);
         set(&mut world, "google3p", "5h", 0.90);
         world
             .readings
@@ -4176,7 +4208,7 @@ mod tests {
             .find(|r| r.pool == "max" && r.window == "5h")
             .unwrap()
             .resets_at = Some(NOW + 1200);
-        let got = chosen(&table(), &world, &request("build.bounded"));
+        let got = chosen(&table, &world, &request("build.bounded"));
         assert_eq!(got.seat, "sonnet");
         assert!(
             close(got.windows[0].reset_factor, 1.0),
@@ -4227,8 +4259,8 @@ mod tests {
 
     #[test]
     fn a_window_not_read_ranks_below_known_headroom_and_above_a_window_too_small() {
-        // ops.terminal: sonnet and its same-model twin g-sonnet both 88 (§5.4: sonnet, g-sonnet, flash).
-        let table = table();
+        // Plan 14 §5.4 table: sonnet and its same-model twin g-sonnet both 88 (sonnet, g-sonnet, flash).
+        let table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
         let mut world = world();
         world.readings.retain(|r| r.pool != "max");
         let got = chosen(&table, &world, &request("ops.terminal"));
@@ -4278,7 +4310,10 @@ mod tests {
              g-sonnet scores the same (google3p 5h 90% used, week 4% used)"
         );
         // A pool with no windows to read is unread, not free: local would have won every chore at pressure 0.
-        let mut table = self::table();
+        // Plan 14 table: chore.script included local.
+        let mut table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
+        table.constants.climb_start = 99.0;
+        table.constants.climb_full = 100.0;
         table
             .seats
             .iter_mut()
@@ -4310,7 +4345,8 @@ mod tests {
 
     #[test]
     fn live_leases_take_headroom_expired_ones_and_the_orders_own_do_not() {
-        let table = table();
+        // Plan 14 table: build.bounded had sonnet without haiku.
+        let table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
         let mut world = world();
         agy_out(&mut world);
         set(&mut world, "max", "5h", 0.80);
@@ -4397,7 +4433,8 @@ mod tests {
 
     #[test]
     fn an_override_passes_every_filter_and_three_are_taken_per_run() {
-        let table = table();
+        // Plan 14 table: build.bounded rule pick was g-sonnet medium.
+        let table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
         let mut over = request("build.bounded");
         over.override_seat = Some(("argon".into(), "wants a Gemini build".into()));
         let got = chosen(&table, &world(), &over);
@@ -4506,15 +4543,15 @@ mod tests {
             .push(Effort::Max);
         let got = chosen(&table, &self::world(), &request("plan"));
         assert_eq!((got.seat.as_str(), got.effort), ("flash", Effort::High));
-        assert_eq!(
-            got.effort_note.as_deref(),
-            Some("capped at high")
-        );
+        assert_eq!(got.effort_note.as_deref(), Some("capped at high"));
         // An explicit override can still choose max.
         let mut over_max = request("plan");
         over_max.override_seat = Some(("opus:max".into(), "explicit max".into()));
         let got_max = chosen(&table, &self::world(), &over_max);
-        assert_eq!((got_max.seat.as_str(), got_max.effort), ("opus", Effort::Max));
+        assert_eq!(
+            (got_max.seat.as_str(), got_max.effort),
+            ("opus", Effort::Max)
+        );
         assert_eq!(
             got_max.effort_note.as_deref(),
             Some("effort overridden to max")
@@ -4568,7 +4605,8 @@ mod tests {
 
     #[test]
     fn under_pressure_with_nothing_left_one_effort_step_down() {
-        let table = table();
+        // Plan 14 table: plan seats were g-opus, opus, argon (sonnet was not in plan).
+        let table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
         let mut world = world();
         agy_out(&mut world);
         // 16.8% left: opus high (2.2%) breaks the 15% reserve, opus medium (1.4%) does not.
@@ -4634,7 +4672,7 @@ mod tests {
             existing_booking(&leases, "o-9", Some("argon"), NOW + 5)
                 .unwrap()
                 .unwrap_err(),
-            "override argon refused: o-9 is already booked on g-sonnet medium (the rule's pick); \
+            "override argon refused: o-9 is already booked on flash medium (the rule's pick); \
              release it first (herdr seat release o-9)"
         );
         assert!(existing_booking(&leases, "o-404", Some("argon"), NOW).is_none());
@@ -4747,7 +4785,10 @@ mod tests {
             ("chore.script", &[], &["flash", "haiku"]),
             ("chore.github", &[], &["flash", "haiku"]),
         ];
-        let table = table();
+        // Plan 14 §5.4 table and rows: Plan 14 balanced mode did not have climb bar drop.
+        let mut table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
+        table.constants.climb_start = 99.0;
+        table.constants.climb_full = 100.0;
         let mut covered: Vec<&str> = ROWS.iter().map(|(class, _, _)| *class).collect();
         covered.dedup();
         let classes: Vec<&str> = table.classes.iter().map(|c| c.id.as_str()).collect();
@@ -4782,7 +4823,8 @@ mod tests {
 
     #[test]
     fn no_seat_names_every_skip_and_the_earliest_reset() {
-        let table = table();
+        // Plan 14 table: build.bounded candidates and reasons.
+        let table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
         let mut world = world();
         set(&mut world, "max", "5h", 0.86);
         set(&mut world, "google3p", "5h", 0.97);
@@ -4889,7 +4931,10 @@ mod tests {
         // No record, or one at or above the prior, changes nothing.
         assert!(close(multiplier(0, 0, 0.8, 5.0), 1.0));
         assert!(close(multiplier(4, 4, 0.8, 5.0), 1.0));
-        let mut table = table();
+        // Plan 14 table: build.bounded pick was g-sonnet without use_record; Plan 14 balanced mode did not drop the bar via climb.
+        let mut table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
+        table.constants.climb_start = 99.0;
+        table.constants.climb_full = 100.0;
         let mut world = world();
         world.record.insert(
             ("g-sonnet".into(), Effort::Medium, "build.bounded".into()),
@@ -4913,7 +4958,8 @@ mod tests {
 
     #[test]
     fn a_finished_order_is_recorded_with_its_use_from_its_own_tokens() {
-        let table = table();
+        // Plan 14 table: factors fit on P4's order under Plan 14 per_usd factors.
+        let table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
         let line: RecordLine = serde_json::from_str(
             r#"{"order":"o-1","run":"r-1","seat":"g-sonnet","effort":"medium","class":"build.bounded","outcome":"pass","tokens":{"cache_read":45863,"output":1287}}"#,
         )
@@ -5104,7 +5150,10 @@ mod tests {
         let want = 0.15 * 0.05 + 0.10 / 0.40 * 0.9 * 0.5;
         assert!(close(straddle.pressure().unwrap(), want));
         // A booked lease on a pool reduces its spare so an order that fitted before now spills into rest.
-        let table = table();
+        // Plan 14 table: g-opus is an unreserved twin candidate; Plan 14 balanced mode did not drop the bar.
+        let mut table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
+        table.constants.climb_start = 99.0;
+        table.constants.climb_full = 100.0;
         let mut world = world();
         world.leases.push(lease(
             "o-booked",
@@ -5138,7 +5187,10 @@ mod tests {
     /// Plan 14 §3: fixture test on the 2026-10-18 readings, and when Max has spare too.
     #[test]
     fn spend_down_on_2026_10_18_readings_and_when_max_has_spare_too() {
-        let table = table();
+        // Plan 14 balanced mode did not drop the bar via climb.
+        let mut table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
+        table.constants.climb_start = 99.0;
+        table.constants.climb_full = 100.0;
         // 2026-10-18T21:48:31Z: Max 5h 24% used (resets 02:00Z), Max week 48% used (pace 1.38, resets
         // 2026-10-23T16:00Z); G·Claude 5h 0% used, G·Claude week 4.02% used resetting in 11h; Gemini 5h 0%
         // used, week 2.52% used; Argon week 2.12% used.
@@ -5273,7 +5325,11 @@ mod tests {
                 class.id, pick.effort, expected_effort
             );
             let winner_seat = table.seats.iter().find(|s| s.id == pick.seat).unwrap();
-            assert!(!winner_seat.fallback, "winner {} should not be fallback", winner_seat.id);
+            assert!(
+                !winner_seat.fallback,
+                "winner {} should not be fallback",
+                winner_seat.id
+            );
         }
     }
 
@@ -5316,7 +5372,7 @@ mod tests {
         set(&mut world_85, "max", "5h", 0.05);
         set(&mut world_85, "max", "week", 0.85 * el_week);
         let pick_85 = chosen(&table, &world_85, &req_plan);
-        assert!(pick_85.reason.contains("bar 80"));
+        assert!(close(pick_85.bar, 80.0));
         let opus_loser = pick_85.runners_up.iter().find(|l| l.seat == "opus");
         if pick_85.seat == "opus" {
             assert_eq!(pick_85.effort, Effort::Medium);
@@ -5361,6 +5417,9 @@ mod tests {
             req.mode = Mode::Sota;
             let pick_zero = chosen(&table, &world_zero, &req);
             let pick_94 = chosen(&table, &world_94, &req);
+            if class.id == "plan" {
+                assert_eq!(pick_zero.seat, "opus");
+            }
             assert_eq!(
                 pick_zero.seat, pick_94.seat,
                 "class {} had seat {:?} at 0%, but {:?} at 94%",
@@ -5389,6 +5448,12 @@ mod tests {
         let pick_floor = chosen(&table, &world_floor, &req_plan);
         assert_eq!(pick_floor.seat, "flash");
         assert!(why(&pick_floor.runners_up, "argon").contains("floor"));
+
+        // 3. Filter 6 (headroom) is bypassed in SOTA:
+        let mut world_f6 = world_zero.clone();
+        set(&mut world_f6, "max", "5h", 0.79); // left = 0.21 > reserve 0.20, but headroom 0.01 < use 0.015
+        let pick_f6 = chosen(&table, &world_f6, &req_plan);
+        assert_eq!(pick_f6.seat, "opus");
     }
 
     #[test]

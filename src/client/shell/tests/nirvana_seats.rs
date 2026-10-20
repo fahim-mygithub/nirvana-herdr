@@ -450,12 +450,13 @@ fn sota_word_is_red_in_title_and_mode_row_when_sota_is_on_not_otherwise() {
         .collect();
     let title_text: String = title_cells.iter().map(|c| c.symbol.as_str()).collect();
     assert!(title_text.contains("SOTA"));
-    let sota_title_red = title_cells
-        .windows(4)
-        .any(|w| {
-            w[0].symbol == "S" && w[1].symbol == "O" && w[2].symbol == "T" && w[3].symbol == "A"
-                && w.iter().all(|c| c.fg == red_u32)
-        });
+    let sota_title_red = title_cells.windows(4).any(|w| {
+        w[0].symbol == "S"
+            && w[1].symbol == "O"
+            && w[2].symbol == "T"
+            && w[3].symbol == "A"
+            && w.iter().all(|c| c.fg == red_u32)
+    });
     assert!(sota_title_red, "SOTA in title must be red");
 
     // Check mode row in SOTA: [SOTA] is red!
@@ -464,13 +465,29 @@ fn sota_word_is_red_in_title_and_mode_row_when_sota_is_on_not_otherwise() {
         .collect();
     let mode_text: String = mode_cells.iter().map(|c| c.symbol.as_str()).collect();
     assert!(mode_text.contains("[SOTA]"));
-    let sota_mode_red = mode_cells
-        .windows(4)
-        .any(|w| {
-            w[0].symbol == "S" && w[1].symbol == "O" && w[2].symbol == "T" && w[3].symbol == "A"
-                && w.iter().all(|c| c.fg == red_u32)
-        });
+    let sota_mode_red = mode_cells.windows(4).any(|w| {
+        w[0].symbol == "S"
+            && w[1].symbol == "O"
+            && w[2].symbol == "T"
+            && w[3].symbol == "A"
+            && w.iter().all(|c| c.fg == red_u32)
+    });
     assert!(sota_mode_red, "SOTA in mode row must be red");
+
+    // Check Seats square in mod strip in SOTA: SOTA is red!
+    let square = state.hits.nirvana_seats;
+    assert!(square.width > 0);
+    let square_cells: Vec<_> = (square.x..square.right())
+        .map(|x| &frame.cells[(square.y * frame.width + x) as usize])
+        .collect();
+    let sota_square_red = square_cells.windows(4).any(|w| {
+        w[0].symbol == "S"
+            && w[1].symbol == "O"
+            && w[2].symbol == "T"
+            && w[3].symbol == "A"
+            && w.iter().all(|c| c.fg == red_u32)
+    });
+    assert!(sota_square_red, "SOTA in mod strip square must be red");
 
     // Now press 'm' again to change mode to Efficient!
     let _ = key(&mut state, KeyCode::Char('m'));
@@ -487,6 +504,18 @@ fn sota_word_is_red_in_title_and_mode_row_when_sota_is_on_not_otherwise() {
         .map(|x| &frame.cells[(mode_row.y * frame.width + x) as usize])
         .collect();
     assert!(!mode_cells.iter().any(|c| c.fg == red_u32));
+
+    let square = state.hits.nirvana_seats;
+    let square_cells: Vec<_> = (square.x..square.right())
+        .map(|x| &frame.cells[(square.y * frame.width + x) as usize])
+        .collect();
+    assert!(!square_cells.windows(4).any(|w| {
+        w[0].symbol == "S"
+            && w[1].symbol == "O"
+            && w[2].symbol == "T"
+            && w[3].symbol == "A"
+            && w.iter().all(|c| c.fg == red_u32)
+    }));
 
     done(root, home);
 }

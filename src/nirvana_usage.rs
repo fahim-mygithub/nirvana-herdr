@@ -426,7 +426,10 @@ pub fn agy_readings_with_argon(
     if has_gemini_group && !has_argon_group && !has_argon_bucket {
         let argon_used = record_argon_used
             .unwrap_or_else(|| crate::nirvana_seat::read_argon_from_herdr(read_at));
-        if let Some(r) = readings.iter_mut().find(|r| r.pool == ARGON && r.window == "week") {
+        if let Some(r) = readings
+            .iter_mut()
+            .find(|r| r.pool == ARGON && r.window == "week")
+        {
             r.used = Some(argon_used);
             r.source = "agy /usage: no Argon group, herdr's own count".to_owned();
         }
@@ -1864,7 +1867,10 @@ mod tests {
         let readings = agy_readings_with_argon(no_argon, READ_1017, Some(0.042)).unwrap();
         let argon = window(&readings, ARGON, "week").expect("argon week window");
         assert_eq!(argon.used, Some(0.042));
-        assert_eq!(argon.source, "agy /usage: no Argon group, herdr's own count");
+        assert_eq!(
+            argon.source,
+            "agy /usage: no Argon group, herdr's own count"
+        );
 
         // When agy stream lists an Argon group, agy's reading wins:
         let readings_with_argon =

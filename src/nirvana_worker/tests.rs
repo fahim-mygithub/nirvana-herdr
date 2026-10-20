@@ -376,18 +376,19 @@ fn a_spent_pool_reseats_on_another_pool() {
         ..nirvana_seat::World::default()
     };
     let request = nirvana_seat::Request::new("chore.script");
+    // Plan 19 §4: chore.script at balanced picks flash on gemini.
     let before = nirvana_seat::pick(&table, &world, &request).expect("a seat");
-    assert_eq!(before.pool, "max");
+    assert_eq!(before.pool, "gemini");
     let limit = RateLimit {
         signal: "rate_limit_event".into(),
-        pool: Some("max".into()),
+        pool: Some("gemini".into()),
         window: Some("5h".into()),
         resets_at: Some(now + 7200),
         detail: String::new(),
     };
-    let spent = spent_world(&table, world.clone(), &limit, "max");
+    let spent = spent_world(&table, world.clone(), &limit, "gemini");
     let after = nirvana_seat::pick(&table, &spent, &request).expect("another seat");
-    assert_ne!(after.pool, "max", "{}", after.reason);
+    assert_ne!(after.pool, "gemini", "{}", after.reason);
     // agy's exit 3 names no window: every window of the pool reads spent.
     let agy = RateLimit {
         window: None,

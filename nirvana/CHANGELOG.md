@@ -3,6 +3,15 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha NEXT (p19): seat modes recalibrated
+
+Package `p19` (`P19-ORDER.md`, record `nirvana/plans/2026-10-20-19-records/p19.md`).
+
+- **Changed:** `src/nirvana_seats.toml` recalibrated with measured `per_usd` rates (gemini week 0.00107, 5h 0.0021; google3p week 0.166, 5h 0.31) and scaled use cells (flash scaled by 0.0396; g-opus and g-sonnet scaled by 0.221 on week, 0.207 on 5h). Class rows updated with multi-seat candidate lists, bars (Efficient/Balanced/SOTA), and per-mode efforts (`efficient_effort`, `effort`, `sota_effort`). Fallback seats (`g-opus`, `g-sonnet`) marked `fallback = true`, ranking behind non-fallback candidates in every mode. Efforts capped at `High` for all automatic picks unless overridden with `--override`. In Efficient mode, seats lowest-pressure seat at `efficient_effort`. In Balanced mode, climb metric `climb = max((used + booked) / max(elapsed, pace_ease))` drops the bar smoothly between `climb_start = 0.70` and `climb_full = 1.00`, stepping down effort for the hot pool at `t >= 0.5`. In SOTA mode, ranks strictly by score descending, bypassing pressure, climb, headroom filter 6, and reset discount. When agy's `/usage` omits the Argon group, argon week quota is synthesized from herdr's own order journal. SOTA text drawn in error red (`palette.red`) in the Seats square title, mode row, and mod strip when active. Previous default table archived as `src/nirvana_seats_v3.toml` in `HISTORICAL_DEFAULTS`, preserving user-selected mode upon upgrade.
+  **Because:** Plan 19 L1-L9: Previous pricing made Gemini Flash appear 25x dearer than actual cost, starving Gemini quota (4% used vs 71% Claude Max) and sending tasks to Max Opus. Recalibrating `per_usd` and establishing three distinct seat modes ensures Efficient picks aggressive cheapest seats, Balanced adapts to usage climb by stepping down bar and effort, SOTA selects highest capability at high effort in red text, and fallback models in AGY activate only when primary seats are exhausted.
+  **Measured:** Nextest unit tests across `src/nirvana_seat.rs`, `src/nirvana_usage.rs`, `src/nirvana_worker/tests.rs`, and `src/client/shell/tests/nirvana_seats.rs` (all 3982 passing, 1 known upstream failure); 15 sabotage controls in `nirvana/controls.d/p19.py` covering L1-L9, §2 table pricing, §5 effort caps, §6 mode rules, §7 red SOTA styling, §8 Argon record fallback, and §10 upgrade preservation; controls dry-run increased from 1071 to 1086 (1086 of 1086 matched 1x); all 15 `p19_` controls pass alone.
+  **If you remove this:** Flash is priced 25x too high, starving Gemini quota and forcing tasks to Claude Max; Balanced does not scale down under pressure; SOTA fails to pick top-scoring seats at High effort; fallback Claude models in AGY displace cheaper native seats; and missing Argon groups in agy prevent Argon from ever being chosen.
+
 ## alpha 0.30.0: subagents in the agents panel (plan 17)
 
 Package `p17` (`P17-ORDER.md`, record `nirvana/plans/2026-10-19-17-records/p17.md`).
