@@ -731,14 +731,9 @@ fn check_seat_notice(session: &str) -> Option<String> {
     let home = crate::nirvana::home().unwrap_or_else(|| std::env::temp_dir().join("nirvana-herdr"));
     let mut record = crate::nirvana_claude::read_session_seat(&home, session)?;
     let table = crate::nirvana_seat::table().ok()?;
-    let mut world = crate::nirvana_seat::live_world(&table);
-    world.leases = crate::nirvana_seat::load_leases(
-        &home
-            .join(crate::nirvana_seat::DIR)
-            .join(crate::nirvana_seat::LEASES_FILE),
-    )
-    .unwrap_or_default()
-    .leases;
+    // The cache alone: a stale reading must not run `claude /usage` inside the prompt hook (cached_world).
+    let now = crate::nirvana_usage::unix(std::time::SystemTime::now());
+    let world = crate::nirvana_seat::cached_world(&home.join(crate::nirvana_seat::DIR), now);
     let rule = crate::nirvana_seat::orchestrator_seat(&table, &world);
     let last = match (&record.last_notified_seat, &record.last_notified_effort) {
         (Some(s), Some(e)) => Some((s.as_str(), e.as_str())),

@@ -174,24 +174,8 @@ pub fn orchestrator_launch_seat(home: &Path) -> (String, String) {
         Some(t) => t,
         None => return (MODEL.to_owned(), EFFORT.to_owned()),
     };
-    let leases =
-        crate::nirvana_seat::load_leases(&nirvana_dir.join(crate::nirvana_seat::LEASES_FILE))
-            .unwrap_or_default()
-            .leases;
-    let usage_path = nirvana_dir.join(crate::nirvana_usage::CACHE_FILE);
-    let cache = crate::nirvana_usage::read_cache(&usage_path);
-    let readings: Vec<crate::nirvana_usage::Reading> = cache
-        .sources
-        .values()
-        .flat_map(|source| source.readings.iter().cloned())
-        .collect();
     let now = crate::nirvana_usage::unix(std::time::SystemTime::now());
-    let world = crate::nirvana_seat::World {
-        now,
-        readings,
-        leases,
-        ..Default::default()
-    };
+    let world = crate::nirvana_seat::cached_world(&nirvana_dir, now);
     let seat = crate::nirvana_seat::orchestrator_seat(&table, &world);
     (seat.model, seat.effort.word().to_owned())
 }

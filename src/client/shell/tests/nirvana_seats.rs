@@ -524,11 +524,51 @@ fn sota_word_is_red_in_title_and_mode_row_when_sota_is_on_not_otherwise() {
 fn the_seats_square_shows_orchestrator_row_with_and_without_restart_to_switch() {
     let (mut state, root, home) = state_for("orch-row", "nirvana");
 
-    // Case 1: Without restart to switch (running seat matches rule)
-    // Mode is Balanced with recorded leases -> rule seats sonnet medium.
-    // Record running session on sonnet medium.
+    // The home's own readings: the max week 90% used a day before its reset, a climb past 1, so Balanced seats
+    // sonnet medium. The first build wrote none, and its square ran the real `claude /usage` to get the owner's.
+    let usage = format!(
+        r#"{{"version":1,"sources":{{"claude":{{"read_at":{NOW},"readings":[{{"pool":"max","window":"week","used":0.9,"resets_at":{},"read_at":{NOW},"source":"claude /usage"}}]}}}}}}"#,
+        NOW + 86_400
+    );
+    std::fs::write(home.join("usage.json"), usage).unwrap();
     let sessions_dir = home.join("sessions");
     std::fs::create_dir_all(&sessions_dir).unwrap();
+
+    // Case 0: another project's session on opus medium is not this project's: no running seat, no restart line.
+    let other = crate::nirvana_claude::SessionSeatRecord {
+        session_id: "other-sess".into(),
+        model: "claude-opus-5-5".into(),
+        seat: "opus".into(),
+        effort: "medium".into(),
+        last_notified_seat: None,
+        last_notified_effort: None,
+    };
+    std::fs::write(
+        sessions_dir.join("other-sess.json"),
+        serde_json::to_string(&other).unwrap(),
+    )
+    .unwrap();
+    let rows_other = open(&mut state, 200);
+    let orch_other = line(&rows_other, "Nirvana Claude");
+    assert!(
+        orch_other.contains("Nirvana Claude \u{b7} sonnet medium"),
+        "the rule on the home's readings: {orch_other}"
+    );
+    assert!(
+        !orch_other.contains("restart to switch"),
+        "another project's seat must not count: {orch_other}"
+    );
+
+    // Case 1: Without restart to switch (running seat matches rule)
+    // This folder's session record (plan 13 §8) names the session; its seat record is sonnet medium.
+    std::fs::write(
+        sessions_dir.join(format!(
+            "{}.json",
+            crate::nirvana_launch::folder_hash(&root)
+        )),
+        r#"{"session_id":"orch-sess-1","at":"2026-10-20T00:00:00Z","transcript":"t.jsonl"}"#,
+    )
+    .unwrap();
     let session_rec = crate::nirvana_claude::SessionSeatRecord {
         session_id: "orch-sess-1".into(),
         model: "claude-sonnet-5-5".into(),
@@ -543,7 +583,7 @@ fn the_seats_square_shows_orchestrator_row_with_and_without_restart_to_switch() 
     )
     .unwrap();
 
-    let rows = open(&mut state, 200);
+    let rows = rows_of(&mut state, 200, 40);
     let orch_line = line(&rows, "Nirvana Claude");
     assert!(
         orch_line.contains("Nirvana Claude \u{b7} sonnet medium"),

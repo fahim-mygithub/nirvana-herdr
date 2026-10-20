@@ -322,30 +322,9 @@ fn running_seat_for(root: &Path, seats_dir: &Path) -> Option<(String, String)> {
             }
         }
     }
-    if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
-        let mut candidates = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                if let Ok(text) = std::fs::read_to_string(&path) {
-                    if let Ok(seat_rec) = serde_json::from_str::<
-                        crate::nirvana_claude::SessionSeatRecord,
-                    >(text.trim_start_matches('\u{feff}'))
-                    {
-                        let mtime = entry
-                            .metadata()
-                            .and_then(|m| m.modified())
-                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                        candidates.push((mtime, seat_rec));
-                    }
-                }
-            }
-        }
-        candidates.sort_by_key(|b| std::cmp::Reverse(b.0));
-        if let Some((_, seat_rec)) = candidates.into_iter().next() {
-            return Some((seat_rec.seat, seat_rec.effort));
-        }
-    }
+    // No folder record, no running seat. The first build fell back to the newest seat record of any folder, which
+    // showed another project's seat and read every file of a folder that only grows (review of the p20 build,
+    // 2026-10-20).
     None
 }
 
@@ -381,7 +360,8 @@ fn read(root: &Path, seats_dir: &Path, replays: &mut Replays, now: u64) -> View 
     };
     let mut view = compose(table.as_ref(), note, &runs, &leases, now);
     if let Some(table) = table.as_ref() {
-        let mut world = nirvana_seat::live_world(table);
+        // The cache alone, never a CLI read from the square (nirvana_seat::cached_world).
+        let mut world = nirvana_seat::cached_world(seats_dir, now);
         world.leases = leases.leases.clone();
         let rule = nirvana_seat::orchestrator_seat(table, &world);
         let running = running_seat_for(root, seats_dir);

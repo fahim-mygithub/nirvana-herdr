@@ -218,4 +218,24 @@ CONTROLS = (
         'every_worker_agent_names_its_model_and_effort',
         'rust',
     ),
+    # Review fix (2026-10-20): the square's rule reads the home's usage.json, never a CLI. Pointed at a folder with
+    # no cache, the rule reads missing and seats opus medium, and the test's "sonnet medium" goes red.
+    Control(
+        'p20_square_reads_the_home_cache',
+        'src/nirvana_seats_square.rs',
+        '        let mut world = nirvana_seat::cached_world(seats_dir, now);\n',
+        '        let mut world = nirvana_seat::cached_world(&seats_dir.join("none"), now);\n',
+        'the_seats_square_shows_orchestrator_row_with_and_without_restart_to_switch',
+        'rust',
+    ),
+    # Review fix (2026-10-20): no folder record, no running seat. Put back a fallback to another session's record
+    # and case 0's "another project's seat must not count" goes red.
+    Control(
+        'p20_square_no_other_folder_seat',
+        'src/nirvana_seats_square.rs',
+        '    // 2026-10-20).\n    None\n}\n',
+        '    // 2026-10-20).\n    std::fs::read_to_string(sessions_dir.join("other-sess.json")).ok().and_then(|t| serde_json::from_str::<crate::nirvana_claude::SessionSeatRecord>(&t).ok()).map(|s| (s.seat, s.effort))\n}\n',
+        'the_seats_square_shows_orchestrator_row_with_and_without_restart_to_switch',
+        'rust',
+    ),
 )

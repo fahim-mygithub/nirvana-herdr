@@ -3153,6 +3153,27 @@ fn leases_or_exit(path: &Path) -> Leases {
     })
 }
 
+/// The world from `<dir>/usage.json` and `<dir>/leases.json` alone, for the orchestrator's seat at launch, in the
+/// prompt notice and in the Seats square (plan 20 §3). `live_world` re-reads a stale source by running
+/// `claude /usage` and `agy /usage`: in a `UserPromptSubmit` hook that stalls every prompt after an idle gap, and a
+/// test with no cache ran the real CLIs on the owner's sign-in (review of the p20 build, 2026-10-20). A stale
+/// reading here is stale, which the rule turns into opus medium.
+pub fn cached_world(dir: &Path, now: u64) -> World {
+    let cache = nirvana_usage::read_cache(&dir.join(nirvana_usage::CACHE_FILE));
+    World {
+        now,
+        readings: cache
+            .sources
+            .values()
+            .flat_map(|source| source.readings.iter().cloned())
+            .collect(),
+        leases: load_leases(&dir.join(LEASES_FILE))
+            .unwrap_or_default()
+            .leases,
+        ..World::default()
+    }
+}
+
 /// The world as this machine has it: usage from `usage.json` (stale readers read first, as `herdr usage`
 /// does), the accounts, and the record when the table blends it.
 pub fn live_world(table: &Table) -> World {
