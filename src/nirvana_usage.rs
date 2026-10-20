@@ -349,7 +349,14 @@ pub(crate) fn rfc3339(text: &str) -> Option<u64> {
 /// agy's `/usage` stream: the `command_result` event's groups and buckets, taken as they come (plan 12 §3).
 /// used = 1 - `remaining_fraction`: agy prints what is left, Claude what is used, and reading one as the other
 /// drew 1% left on a full account. Two buckets landing on one window keep the tighter, which binds.
-pub fn agy_readings(stream: &str, read_at: u64) -> Option<Vec<Reading>> {
+/// Plan 19 §8: when agy reading succeeds, lists Gemini group, but no Argon group, set Argon week used from
+/// herdr's record (sum expected use of argon orders booked/recorded in last 7 days), source "agy /usage: no Argon group, herdr's own count".
+/// If Argon group present, agy wins.
+pub fn agy_readings_with_argon(
+    stream: &str,
+    read_at: u64,
+    record_argon_used: Option<f32>,
+) -> Option<Vec<Reading>> {
     let data = stream.lines().find_map(|line| {
         let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
         let command = value.get("command")?;
@@ -365,8 +372,17 @@ pub fn agy_readings(stream: &str, read_at: u64) -> Option<Vec<Reading>> {
             .map(str::to_owned)
     };
     let mut readings: Vec<Reading> = Vec::new();
+    let mut has_gemini_group = false;
+    let mut has_argon_group = false;
     for group in data.get("groups")?.as_array()? {
         let group_name = text(group, "name").unwrap_or_default();
+        let lower = group_name.to_ascii_lowercase();
+        if lower.contains("gemini") && !lower.contains("argon") {
+            has_gemini_group = true;
+        }
+        if lower.contains("argon") {
+            has_argon_group = true;
+        }
         for bucket in group
             .get("buckets")
             .and_then(serde_json::Value::as_array)
@@ -404,9 +420,24 @@ pub fn agy_readings(stream: &str, read_at: u64) -> Option<Vec<Reading>> {
     for pool in [GEMINI, GOOGLE3P, ARGON] {
         add_unknown(&mut readings, pool, read_at, "agy /usage");
     }
+    let has_argon_bucket = readings
+        .iter()
+        .any(|r| r.pool == ARGON && r.used.is_some() && r.source.starts_with("agy gemini-argon"));
+    if has_gemini_group && !has_argon_group && !has_argon_bucket {
+        let argon_used = record_argon_used
+            .unwrap_or_else(|| crate::nirvana_seat::read_argon_from_herdr(read_at));
+        if let Some(r) = readings.iter_mut().find(|r| r.pool == ARGON && r.window == "week") {
+            r.used = Some(argon_used);
+            r.source = "agy /usage: no Argon group, herdr's own count".to_owned();
+        }
+    }
     // agy lists the week first; 5 h first, as Claude prints them, so a tie in `tightest` goes the same way.
     readings.sort_by_key(|reading| window_rank(&reading.window));
     Some(readings)
+}
+
+pub fn agy_readings(stream: &str, read_at: u64) -> Option<Vec<Reading>> {
+    agy_readings_with_argon(stream, read_at, None)
 }
 
 /// 5 h, the week, a scoped week, anything else; a stable sort keeps each pool's order within a rank.
@@ -1824,6 +1855,26 @@ mod tests {
         let blank = AGY_STREAM_1017.replace(r#""remaining_fraction":0.9803827404975891,"#, "");
         let readings = agy_readings(&blank, READ_1017).unwrap();
         assert_eq!(used(&readings, GEMINI, "5h"), Some(None));
+    }
+
+    #[test]
+    fn section8_agy_stream_with_no_argon_group_gives_known_argon_week_from_record() {
+        // When agy stream lists Gemini group, but no Argon group:
+        let no_argon = r#"{"event":"command_result","command":{"name":"usage","data":{"description":"Within each group, models share a weekly limit and a 5-hour limit.","groups":[{"name":"Gemini Models","description":"Models within this group: Gemini Flash, Gemini Pro","buckets":[{"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.9831965565681458,"reset_time":"2026-10-24T15:48:02Z"},{"id":"gemini-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":0.9803827404975891,"reset_time":"2026-10-18T02:35:36Z"}]},{"name":"Claude and GPT models","description":"Models within this group: Claude Opus, Claude Sonnet, GPT-OSS","buckets":[{"id":"3p-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.9597715735435486,"reset_time":"2026-10-19T10:54:24Z"},{"id":"3p-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":0.9668887853622437,"reset_time":"2026-10-18T02:40:32Z"}]}]}}}"#;
+        let readings = agy_readings_with_argon(no_argon, READ_1017, Some(0.042)).unwrap();
+        let argon = window(&readings, ARGON, "week").expect("argon week window");
+        assert_eq!(argon.used, Some(0.042));
+        assert_eq!(argon.source, "agy /usage: no Argon group, herdr's own count");
+
+        // When agy stream lists an Argon group, agy's reading wins:
+        let readings_with_argon =
+            agy_readings_with_argon(AGY_STREAM_1017, READ_1017, Some(0.042)).unwrap();
+        let argon_agy = window(&readings_with_argon, ARGON, "week").expect("argon week window");
+        assert!(close(
+            used(&readings_with_argon, ARGON, "week"),
+            1.0 - 0.97882664
+        ));
+        assert_eq!(argon_agy.source, "agy gemini-argon-wtu-weekly");
     }
 
     /// Codex 0.42's `token_count` event, from a rollout on this machine (2025-09-27).

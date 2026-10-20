@@ -2733,6 +2733,44 @@ pub fn read_record(path: &Path) -> Vec<RecordLine> {
         .collect()
 }
 
+/// Sum of expected use of argon orders booked or recorded in the last 7 days (plan 19 §8).
+pub fn argon_record_used(record_lines: &[RecordLine], leases: &[Lease], now: u64) -> f32 {
+    let cutoff = now.saturating_sub(7 * 86_400);
+    let mut sum = 0.0_f32;
+    let mut seen_orders = std::collections::HashSet::new();
+    for line in record_lines {
+        let is_argon = line.seat == "argon" || line.pool.as_deref() == Some("argon");
+        let at = line.at.or(line.ended_at).or(line.seated_at).unwrap_or(0);
+        if is_argon && at >= cutoff {
+            seen_orders.insert(&line.order);
+            let expected = line
+                .expected
+                .as_ref()
+                .and_then(|exp| exp.get("week").copied())
+                .or_else(|| line.spent.as_ref().and_then(|s| s.get("week").copied()))
+                .unwrap_or(0.0);
+            sum += expected;
+        }
+    }
+    for lease in leases {
+        let is_argon = lease.pool == "argon" || lease.seat == "argon";
+        let at = lease.booked_at;
+        if is_argon && at >= cutoff && !seen_orders.contains(&lease.order) {
+            let expected = lease.expected.get("week").copied().unwrap_or(0.0);
+            sum += expected;
+        }
+    }
+    sum
+}
+
+/// Read the expected argon week use from herdr's record.jsonl and leases.json in dir() (plan 19 §8).
+pub fn read_argon_from_herdr(now: u64) -> f32 {
+    let dir = dir();
+    let record_lines = read_record(&dir.join(RECORD_FILE));
+    let leases = load_leases(&dir.join(LEASES_FILE)).unwrap_or_default();
+    argon_record_used(&record_lines, &leases.leases, now)
+}
+
 // ---- the CLI ----
 
 const USAGE: &str = "usage: herdr seat list [--json]
@@ -5376,5 +5414,39 @@ mod tests {
         assert!(pick_g_opus.reason.contains("argon"));
         assert!(pick_g_opus.reason.contains("sonnet"));
         assert!(pick_g_opus.reason.contains("flash"));
+    }
+
+    #[test]
+    fn section8_argon_record_used_sums_last_7_days_of_booked_and_recorded() {
+        let now = 1_000_000;
+        let day = 86_400;
+        let rec1: RecordLine = serde_json::from_str(&format!(
+            r#"{{"order":"o-old","seat":"argon","effort":"medium","class":"plan","outcome":"pass","at":{},"expected":{{"week":0.05}}}}"#,
+            now - 8 * day
+        )).unwrap();
+        let rec2: RecordLine = serde_json::from_str(&format!(
+            r#"{{"order":"o-recent","seat":"argon","effort":"medium","class":"plan","outcome":"pass","at":{},"expected":{{"week":0.03}}}}"#,
+            now - 2 * day
+        )).unwrap();
+
+        let lease1 = Lease {
+            order: "o-booked".into(),
+            seat: "argon".into(),
+            effort: Effort::Medium,
+            pool: "argon".into(),
+            class: "plan".into(),
+            run: None,
+            expected: BTreeMap::from([("week".into(), 0.02)]),
+            booked_at: now - 3600,
+            expires_at: now + 3600,
+            pick: serde_json::Value::Null,
+        };
+
+        // Booked order already in record should not double count
+        let mut lease_dup = lease1.clone();
+        lease_dup.order = "o-recent".into();
+
+        let sum = argon_record_used(&[rec1, rec2], &[lease1, lease_dup], now);
+        assert!(close(sum, 0.05)); // 0.03 from rec2 + 0.02 from lease1
     }
 }
