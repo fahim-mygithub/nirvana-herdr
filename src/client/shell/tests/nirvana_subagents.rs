@@ -812,7 +812,8 @@ fn agent_session_id_from_agent_session_info() {
         value: "session-codex".into(),
     });
     let _ = crate::client::shell::agent_sidebar::agent_row(&snap, "pane_session_1", &config, None);
-    let (_folder, _is_claude, session) = crate::nirvana_subagents::get_pane_query_for_test("pane_session_1").unwrap();
+    let (_folder, _is_claude, session) =
+        crate::nirvana_subagents::get_pane_query_for_test("pane_session_1").unwrap();
     assert_eq!(session, None);
 }
 
@@ -830,4 +831,3 @@ fn codex_pane_in_claude_folder_shows_no_claude_subagents() {
     let (_folder, is_claude, _session) = query.unwrap();
     assert!(!is_claude, "Codex pane must have is_claude = false");
 }
-

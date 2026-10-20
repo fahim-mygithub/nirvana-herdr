@@ -811,8 +811,8 @@ pub fn process_creation_secs(pid: u32) -> Option<u64> {
     if ok == 0 {
         return None;
     }
-    let ticks = (u64::from(creation_time.dwHighDateTime) << 32)
-        | u64::from(creation_time.dwLowDateTime);
+    let ticks =
+        (u64::from(creation_time.dwHighDateTime) << 32) | u64::from(creation_time.dwLowDateTime);
     Some(filetime_ticks_to_unix_secs(ticks))
 }
 
@@ -822,7 +822,11 @@ pub fn process_creation_secs(_pid: u32) -> Option<u64> {
 }
 
 /// Finds `agy` processes running under `shell_pid` (e.g. started from a Bash call in Claude).
-pub fn find_agy_processes_under(shell_pid: u32, parent_pane_id: &str, now_secs: u64) -> Vec<Subagent> {
+pub fn find_agy_processes_under(
+    shell_pid: u32,
+    parent_pane_id: &str,
+    now_secs: u64,
+) -> Vec<Subagent> {
     let mut subagents = Vec::new();
     for pid in find_child_pids(shell_pid) {
         if let Some(cmdline) = crate::platform::process_command_line(pid) {
@@ -830,11 +834,7 @@ pub fn find_agy_processes_under(shell_pid: u32, parent_pane_id: &str, now_secs: 
                 let model_name = parse_cmdline_model(&cmdline);
                 let model = format_model(model_name.as_deref(), SubagentProvider::Gemini);
                 let description = crate::platform::process_cwd(pid)
-                    .and_then(|cwd| {
-                        cwd.file_name()
-                            .and_then(|n| n.to_str())
-                            .map(String::from)
-                    })
+                    .and_then(|cwd| cwd.file_name().and_then(|n| n.to_str()).map(String::from))
                     .unwrap_or_default();
                 let created_secs = process_creation_secs(pid);
                 let elapsed_secs = created_secs
@@ -1186,7 +1186,10 @@ pub fn set_worker_panes_for_test(panes: Option<HashSet<String>>) {
 #[cfg(test)]
 pub fn get_pane_query_for_test(pane_id: &str) -> Option<(Option<PathBuf>, bool, Option<String>)> {
     let guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
-    guard.as_ref()?.get(pane_id).map(|e| (e.folder.clone(), e.is_claude, e.agent_session.clone()))
+    guard
+        .as_ref()?
+        .get(pane_id)
+        .map(|e| (e.folder.clone(), e.is_claude, e.agent_session.clone()))
 }
 
 /// Returns whether `pane_id` is a known seat worker pane, which should not also be listed
@@ -1878,7 +1881,9 @@ mod tests {
         assert!(is_agy_cmdline("agy"));
         assert!(is_agy_cmdline("agy.exe"));
         assert!(is_agy_cmdline(r#"C:\Users\bin\agy.exe --model flash"#));
-        assert!(is_agy_cmdline(r#""C:\Program Files\agy.exe" --prompt hello"#));
+        assert!(is_agy_cmdline(
+            r#""C:\Program Files\agy.exe" --prompt hello"#
+        ));
         assert!(is_agy_cmdline("/usr/local/bin/agy -m flash"));
         // Substring matches that are NOT agy executables must return false
         assert!(!is_agy_cmdline("python run.py --agent agy"));
@@ -1923,7 +1928,9 @@ mod tests {
             // find_agy_processes_under test process: ping has 'agy' in arguments, but executable is ping.exe
             let subagents = find_agy_processes_under(std::process::id(), "p1", 2_000_000_000);
             assert!(
-                subagents.iter().all(|s| s.name == "agy" && is_agy_cmdline(&s.id)),
+                subagents
+                    .iter()
+                    .all(|s| s.name == "agy" && is_agy_cmdline(&s.id)),
                 "Processes that merely mention agy in args must not be reported as agy subagents"
             );
         }
@@ -1964,7 +1971,10 @@ mod tests {
 
         // Tail reading with window expansion must expand beyond 64 KB up to 256 KB and find the assistant line
         let tail = read_transcript_tail_with_expansion(&transcript_path);
-        assert!(tail.has_assistant, "Must find assistant line despite 200 KB trailing user line");
+        assert!(
+            tail.has_assistant,
+            "Must find assistant line despite 200 KB trailing user line"
+        );
         assert_eq!(tail.tokens, Some(6200));
         assert_eq!(tail.model.as_deref(), Some("claude-3-5-sonnet-20241022"));
     }
@@ -2078,14 +2088,7 @@ mod tests {
     #[test]
     fn cached_shell_pid_survives_none_update_and_failed_query_throttled() {
         // Part 1: cached Some(pid) survives update_pane_query with None
-        update_pane_query(
-            "pane-survive-test",
-            None,
-            false,
-            None,
-            None,
-            Some(54321),
-        );
+        update_pane_query("pane-survive-test", None, false, None, None, Some(54321));
         {
             let guard = ENTRIES.lock().unwrap();
             let entry = guard.as_ref().unwrap().get("pane-survive-test").unwrap();
@@ -2093,14 +2096,7 @@ mod tests {
         }
 
         // Simulated frame draw call with shell_pid = None:
-        update_pane_query(
-            "pane-survive-test",
-            None,
-            false,
-            None,
-            None,
-            None,
-        );
+        update_pane_query("pane-survive-test", None, false, None, None, None);
         {
             let guard = ENTRIES.lock().unwrap();
             let entry = guard.as_ref().unwrap().get("pane-survive-test").unwrap();

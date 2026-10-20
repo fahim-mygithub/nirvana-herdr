@@ -1046,8 +1046,14 @@ mod tests {
 
         // The old form without --pane flag must fail that test
         let old_form = &["target-pane-42", "--json"];
-        assert!(request("process-info", old_form).is_err(), "Old form must fail");
+        assert!(
+            request("process-info", old_form).is_err(),
+            "Old form must fail"
+        );
         let old_form_pos = &["target-pane-42"];
-        assert!(request("process-info", old_form_pos).is_err(), "Old positional form must fail");
+        assert!(
+            request("process-info", old_form_pos).is_err(),
+            "Old positional form must fail"
+        );
     }
 }
