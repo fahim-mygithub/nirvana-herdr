@@ -181,5 +181,59 @@ CONTROLS = (
         'codex_pane_in_claude_folder_shows_no_claude_subagents',
         'rust',
     ),
+    # Review fix finding 1: resolve Claude Code dir via separate claude_dir, not Nirvana home
+    Control(
+        'p17_claude_dir_separate_from_nirvana_home',
+        'src/nirvana_subagents.rs',
+        "    if has_conflict {\n        // Refusal: two Claude panes share one folder and nothing tells them apart\n        return None;\n    }\n\n    let projects_dir = claude_dir.join(\"projects\").join(&enc_folder);",
+        "    if has_conflict {\n        // Refusal: two Claude panes share one folder and nothing tells them apart\n        return None;\n    }\n\n    let projects_dir = nirvana_home.join(\"projects\").join(&enc_folder);",
+        'claude_subagents_found_under_claude_dir_separate_from_nirvana_home',
+        'rust',
+    ),
+    # Review fix finding 4: shared folder refusal runs across other Claude panes in poll
+    Control(
+        'p17_shared_folder_refusal_in_poll',
+        'src/nirvana_subagents.rs',
+        "                let other_claude = all_claude\n                    .iter()\n                    .filter(|(id, _, _)| id != pane_id)\n                    .cloned()\n                    .collect();",
+        "                let other_claude = Vec::new();",
+        'shared_folder_refusal_in_poll',
+        'rust',
+    ),
+    # Review fix finding 5: match agy by executable name, not cmdline substring
+    Control(
+        'p17_agy_cmdline_executable_match',
+        'src/nirvana_subagents.rs',
+        "pub fn is_agy_cmdline(cmdline: &str) -> bool {\n    let trimmed = cmdline.trim();\n    if trimmed.is_empty() {\n        return false;\n    }\n    let exe = if let Some(stripped) = trimmed.strip_prefix('\"') {\n        stripped.split('\"').next().unwrap_or(\"\")\n    } else {\n        trimmed.split_whitespace().next().unwrap_or(\"\")\n    };\n    is_agy_executable(exe)\n}",
+        "pub fn is_agy_cmdline(cmdline: &str) -> bool {\n    cmdline.contains(\"agy\")\n}",
+        'agy_exec_name_matching',
+        'rust',
+    ),
+    # Review fix finding 6: expand transcript tail window up to 8 MB to find assistant turn
+    Control(
+        'p17_transcript_tail_window_expansion',
+        'src/nirvana_subagents.rs',
+        "        if window >= MAX_TAIL_WINDOW {\n            return tail;\n        }\n        if let Ok(meta) = std::fs::metadata(path) {\n            if meta.len() <= window {\n                return tail;\n            }\n        }\n        window = (window * 4).min(MAX_TAIL_WINDOW);",
+        "        return tail;",
+        'tail_window_expands_to_find_assistant',
+        'rust',
+    ),
+    # Review fix finding A: pane process-info CLI args use --pane <id>
+    Control(
+        'p17_pane_process_info_cli_args',
+        'src/nirvana_subagents.rs',
+        "pub fn pane_process_info_args(pane_id: &str) -> Vec<String> {\n    vec![\n        \"pane\".into(),\n        \"process-info\".into(),\n        \"--pane\".into(),\n        pane_id.into(),\n    ]\n}",
+        "pub fn pane_process_info_args(pane_id: &str) -> Vec<String> {\n    vec![\n        \"pane\".into(),\n        \"process-info\".into(),\n        pane_id.into(),\n        \"--json\".into(),\n    ]\n}",
+        'pane_process_info_args_parsed_by_cli',
+        'rust',
+    ),
+    # Review fix finding B: cached shell pid survives None update and failed query throttled 60s
+    Control(
+        'p17_cached_shell_pid_survives_and_query_throttled',
+        'src/nirvana_subagents.rs',
+        "    // Finding B: keep cached shell_pid when caller passes None\n    if shell_pid.is_some() {\n        entry.shell_pid = shell_pid;\n    }",
+        "    entry.shell_pid = shell_pid;",
+        'cached_shell_pid_survives_none_update_and_failed_query_throttled',
+        'rust',
+    ),
 )
 

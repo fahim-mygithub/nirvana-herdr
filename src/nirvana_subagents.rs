@@ -1826,7 +1826,12 @@ mod tests {
         update_pane_query("pane-a", Some(proj.clone()), true, None, None, None);
         update_pane_query("pane-b", Some(proj.clone()), true, None, None, None);
 
-        poll_sync_for_test(1000, Some(&nirvana_temp.path), Some(&claude_dir));
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        poll_sync_for_test(now_secs, Some(&nirvana_temp.path), Some(&claude_dir));
 
         let view_a = cached("pane-a").unwrap();
         let view_b = cached("pane-b").unwrap();
@@ -1857,7 +1862,7 @@ mod tests {
             None,
         );
 
-        poll_sync_for_test(1000, Some(&nirvana_temp.path), Some(&claude_dir));
+        poll_sync_for_test(now_secs, Some(&nirvana_temp.path), Some(&claude_dir));
 
         let view_a = cached("pane-a").unwrap();
         let view_b = cached("pane-b").unwrap();
