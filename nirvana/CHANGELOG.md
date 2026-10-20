@@ -3,7 +3,7 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
-## alpha NEXT (p17): subagents in the agents panel
+## alpha 0.30.0: subagents in the agents panel (plan 17)
 
 Package `p17` (`P17-ORDER.md`, record `nirvana/plans/2026-10-19-17-records/p17.md`).
 
