@@ -145,16 +145,21 @@ impl App {
             std::thread::sleep(SHELL_POLL);
         };
 
-        let mut argv =
-            vec![
-                crate::detect::interactive_agent_executable(crate::detect::Agent::Claude)
-                    .to_string(),
-            ];
-        argv.extend(if unsaved {
-            crate::nirvana::restart_args_unsaved(&old_args)
-        } else {
-            crate::nirvana::restart_args(&old_args, session_id.as_deref())
-        });
+        let (agent_name, cwd) = self
+            .state
+            .terminals
+            .get(terminal_id)
+            .map(|t| (t.agent_name.clone(), t.cwd.clone()))
+            .ok_or("the pane closed while Claude was stopping")?;
+        let home = crate::nirvana::home().unwrap_or_else(std::env::temp_dir);
+        let argv = restart_argv(
+            agent_name.as_deref(),
+            &old_args,
+            session_id.as_deref(),
+            unsaved,
+            &home,
+            std::path::Path::new(&cwd),
+        );
         let command = crate::platform::interactive_shell_command(&argv, &shell_name)
             .ok_or("the restart command could not be written for this shell")?;
         let runtime = self
@@ -191,9 +196,104 @@ impl App {
     }
 }
 
+/// Plan 20 §3.2: Restart Claude resumes Nirvana Claude through launch_args.
+pub fn restart_argv(
+    agent_name: Option<&str>,
+    old_args: &[String],
+    session_id: Option<&str>,
+    unsaved: bool,
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Vec<String> {
+    let mut argv = vec![
+        crate::detect::interactive_agent_executable(crate::detect::Agent::Claude).to_string(),
+    ];
+    let is_nirvana = agent_name.is_some_and(crate::nirvana_launch::is_nirvana_agent_name)
+        || old_args.iter().any(|a| a == "--agent") && old_args.iter().any(|a| a == "nirvana");
+    if is_nirvana {
+        let mut launch = if unsaved {
+            crate::nirvana_launch::launch_args(home, cwd, None)
+        } else if let Some(id) = session_id {
+            crate::nirvana_launch::launch_args(home, cwd, Some(id))
+        } else {
+            let mut args = crate::nirvana_launch::launch_args(home, cwd, None);
+            args.push("--continue".to_string());
+            args
+        };
+        argv.append(&mut launch);
+    } else {
+        argv.extend(if unsaved {
+            crate::nirvana::restart_args_unsaved(old_args)
+        } else {
+            crate::nirvana::restart_args(old_args, session_id)
+        });
+    }
+    argv
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restart_argv_for_nirvana_claude_uses_launch_args_and_takes_current_mode() {
+        let home = std::env::temp_dir().join(format!("test-restart-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let nirvana_dir = home.join("nirvana");
+        std::fs::create_dir_all(&nirvana_dir).unwrap();
+        // Set mode = "efficient" in seats.toml
+        std::fs::write(
+            nirvana_dir.join("seats.toml"),
+            crate::nirvana_seat::DEFAULT.replace("mode = \"balanced\"", "mode = \"efficient\""),
+        )
+        .unwrap();
+
+        let old_args = vec![
+            "--agent".to_string(),
+            "nirvana".to_string(),
+            "--model".to_string(),
+            "claude-opus-5-5".to_string(),
+            "--effort".to_string(),
+            "medium".to_string(),
+        ];
+        let cwd = std::path::Path::new(r"C:\work\repo");
+        let argv = restart_argv(
+            Some("nirvana"),
+            &old_args,
+            Some("sess-456"),
+            false,
+            &home,
+            cwd,
+        );
+        // Should use launch_args with rule's seat (sonnet medium for efficient), not the old opus
+        let model_idx = argv.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(argv[model_idx + 1], "claude-sonnet-5-5");
+        let effort_idx = argv.iter().position(|a| a == "--effort").unwrap();
+        assert_eq!(argv[effort_idx + 1], "medium");
+        // And carries --resume sess-456
+        let resume_idx = argv.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(argv[resume_idx + 1], "sess-456");
+
+        // For plain claude, keeps old args
+        let plain_old = vec![
+            "--model".to_string(),
+            "claude-opus-5-5".to_string(),
+            "--effort".to_string(),
+            "medium".to_string(),
+        ];
+        let plain_argv = restart_argv(
+            Some("claude"),
+            &plain_old,
+            Some("sess-456"),
+            false,
+            &home,
+            cwd,
+        );
+        let plain_model_idx = plain_argv.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(plain_argv[plain_model_idx + 1], "claude-opus-5-5");
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     fn app_with_a_tab() -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();

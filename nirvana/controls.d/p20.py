@@ -83,4 +83,31 @@ CONTROLS = (
         'orchestrator_seat_balanced_missing_readings',
         'rust',
     ),
+    # Step 3 (§3.2): Launch args carries rule seat for mode
+    Control(
+        'p20_launch_args_efficient_seat',
+        'src/nirvana_launch.rs',
+        '    (seat.model, seat.effort.word().to_owned())\n',
+        '    (MODEL.to_owned(), EFFORT.to_owned())\n',
+        'launch_args_carries_rule_model_and_effort_in_efficient_mode',
+        'rust',
+    ),
+    # Step 3 (§3.2): Launch args falls back to opus medium when table fails to parse
+    Control(
+        'p20_launch_table_parse_fallback',
+        'src/nirvana_launch.rs',
+        '        None => return (MODEL.to_owned(), EFFORT.to_owned()),\n',
+        '        None => return ("claude-sonnet-5-5".to_owned(), EFFORT.to_owned()),\n',
+        'launch_args_falls_back_to_opus_medium_when_table_fails_to_parse',
+        'rust',
+    ),
+    # Step 3 (§3.2): Restart Claude goes through launch_args
+    Control(
+        'p20_restart_claude_resumes_through_launch_args',
+        'src/app/nirvana_restart.rs',
+        '    if is_nirvana {\n',
+        '    if false && is_nirvana {\n',
+        'restart_argv_for_nirvana_claude_uses_launch_args_and_takes_current_mode',
+        'rust',
+    ),
 )

@@ -7,11 +7,11 @@ HOOKS_TEST = "every_hook_names_a_herdr_subcommand_that_runs_quiet_and_fast"
 CONTROLS = (
     # The launch: Claude Code's own prompt stays, the role is appended, Opus 5.5 at medium (R1).
     Control("o4b_launch_replaces_prompt", "src/nirvana_launch.rs",
-            '        EFFORT.into(),\n        "--append-system-prompt-file".into(),\n',
-            '        EFFORT.into(),\n        "--system-prompt-file".into(),\n',
+            '        effort,\n        "--append-system-prompt-file".into(),\n',
+            '        effort,\n        "--system-prompt-file".into(),\n',
             "nirvana_claude_takes_the_plugin_agent_name_and_settings_from_home", "rust"),
     Control("o4b_launch_wrong_model", "src/nirvana_launch.rs",
-            "        MODEL.into(),\n", '        "claude-fable-5-1".into(),\n',
+            "        model,\n", '        "claude-fable-5-1".into(),\n',
             "nirvana_claude_takes_the_plugin_agent_name_and_settings_from_home", "rust"),
     Control("o4b_launch_no_agent", "src/nirvana_launch.rs",
             'plugin.display().to_string(),\n        "--agent".into(),\n        "nirvana".into(),\n',

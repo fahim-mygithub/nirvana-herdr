@@ -162,18 +162,52 @@ pub const ROLE_FILE: &str = "ROLE.md";
 pub const MODEL: &str = "claude-opus-5-5";
 pub const EFFORT: &str = "medium";
 
+/// The orchestrator's seat at launch (plan 20 §3.2): from the seat rule, or today's seat (opus medium)
+/// when the table or the readings fail to load.
+pub fn orchestrator_launch_seat(home: &Path) -> (String, String) {
+    let nirvana_dir = home.join(crate::nirvana_seat::DIR);
+    let seats_path = nirvana_dir.join(crate::nirvana_seat::SEATS_FILE);
+    let table = match std::fs::read_to_string(&seats_path)
+        .ok()
+        .and_then(|text| crate::nirvana_seat::parse(&text).ok())
+    {
+        Some(t) => t,
+        None => return (MODEL.to_owned(), EFFORT.to_owned()),
+    };
+    let leases = crate::nirvana_seat::load_leases(&nirvana_dir.join(crate::nirvana_seat::LEASES_FILE))
+        .unwrap_or_default()
+        .leases;
+    let usage_path = nirvana_dir.join(crate::nirvana_usage::CACHE_FILE);
+    let cache = crate::nirvana_usage::read_cache(&usage_path);
+    let readings: Vec<crate::nirvana_usage::Reading> = cache
+        .sources
+        .values()
+        .flat_map(|source| source.readings.iter().cloned())
+        .collect();
+    let now = crate::nirvana_usage::unix(std::time::SystemTime::now());
+    let world = crate::nirvana_seat::World {
+        now,
+        readings,
+        leases,
+        ..Default::default()
+    };
+    let seat = crate::nirvana_seat::orchestrator_seat(&table, &world);
+    (seat.model, seat.effort.word().to_owned())
+}
+
 /// The arguments after `claude` (plan 12 §6, O4b), in its order.
 pub fn nirvana_claude_args(home: &Path) -> Vec<String> {
     let plugin = plugin_dir(home);
+    let (model, effort) = orchestrator_launch_seat(home);
     vec![
         "--plugin-dir".into(),
         plugin.display().to_string(),
         "--agent".into(),
         "nirvana".into(),
         "--model".into(),
-        MODEL.into(),
+        model,
         "--effort".into(),
-        EFFORT.into(),
+        effort,
         "--append-system-prompt-file".into(),
         plugin.join(ROLE_FILE).display().to_string(),
         "--name".into(),
@@ -764,5 +798,56 @@ mod tests {
             let rest = id.strip_prefix(OPEN_COMMAND).unwrap();
             assert_eq!(parse_open_command(rest), (folder.to_path_buf(), fresh));
         }
+    }
+
+    #[test]
+    fn launch_args_carries_rule_model_and_effort_in_efficient_mode() {
+        let home = scratch_home("efficient");
+        let folder = Path::new(r"C:\work\print");
+        std::fs::write(
+            home.join("nirvana").join("seats.toml"),
+            crate::nirvana_seat::DEFAULT.replace("mode = \"balanced\"", "mode = \"efficient\""),
+        )
+        .unwrap();
+        let args = launch_args(&home, folder, None);
+        let m_idx = args.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(args[m_idx + 1], "claude-sonnet-5-5");
+        let e_idx = args.iter().position(|a| a == "--effort").unwrap();
+        assert_eq!(args[e_idx + 1], "medium");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn launch_args_carries_rule_model_and_effort_in_sota_mode() {
+        let home = scratch_home("sota");
+        let folder = Path::new(r"C:\work\print");
+        std::fs::write(
+            home.join("nirvana").join("seats.toml"),
+            crate::nirvana_seat::DEFAULT.replace("mode = \"balanced\"", "mode = \"sota\""),
+        )
+        .unwrap();
+        let args = launch_args(&home, folder, None);
+        let m_idx = args.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(args[m_idx + 1], "claude-opus-5-5");
+        let e_idx = args.iter().position(|a| a == "--effort").unwrap();
+        assert_eq!(args[e_idx + 1], "high");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn launch_args_falls_back_to_opus_medium_when_table_fails_to_parse() {
+        let home = scratch_home("broken-table");
+        let folder = Path::new(r"C:\work\print");
+        std::fs::write(
+            home.join("nirvana").join("seats.toml"),
+            "not valid toml { [ {",
+        )
+        .unwrap();
+        let args = launch_args(&home, folder, None);
+        let m_idx = args.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(args[m_idx + 1], "claude-opus-5-5");
+        let e_idx = args.iter().position(|a| a == "--effort").unwrap();
+        assert_eq!(args[e_idx + 1], "medium");
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
