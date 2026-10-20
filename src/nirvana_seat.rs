@@ -1331,21 +1331,28 @@ fn evaluate(
         .collect();
 
     // Filter 6: an order this window cannot hold, while another pool could hold it whole (§4.4). A pool
-    // with a window not read is not counted as one that holds.
-    let holders: Vec<(String, String)> = candidates
-        .iter()
-        .filter(|cand| cand.skip.is_none())
-        .filter(|cand| {
-            cand.windows
-                .iter()
-                .all(|window| window.known() && window.holds())
-        })
-        .map(|cand| {
-            let seat = &table.seats[cand.index];
-            (seat.pool.clone(), seat.id.clone())
-        })
-        .collect();
+    // with a window not read is not counted as one that holds. SOTA skips headroom filter (filter 6).
+    let holders: Vec<(String, String)> = if request.mode == Mode::Sota {
+        Vec::new()
+    } else {
+        candidates
+            .iter()
+            .filter(|cand| cand.skip.is_none())
+            .filter(|cand| {
+                cand.windows
+                    .iter()
+                    .all(|window| window.known() && window.holds())
+            })
+            .map(|cand| {
+                let seat = &table.seats[cand.index];
+                (seat.pool.clone(), seat.id.clone())
+            })
+            .collect()
+    };
     for cand in candidates.iter_mut().filter(|cand| cand.skip.is_none()) {
+        if request.mode == Mode::Sota {
+            break;
+        }
         let seat = &table.seats[cand.index];
         let Some(short) = cand
             .windows
@@ -1488,7 +1495,8 @@ fn evaluate(
                 false,
             ));
         }
-        let rule = rank(table, &candidates, class, request.mode).ok();
+        let mode_bar = table.bars(class).at(request.mode);
+        let rule = rank(table, &candidates, class, request.mode, mode_bar).ok();
         let rule_pick = rule.as_ref().map(|(order, _, _)| {
             let winner = &candidates[order[0]];
             format!(
@@ -1497,7 +1505,6 @@ fn evaluate(
                 winner.effort.map_or("", Effort::word)
             )
         });
-        let mode_bar = table.bars(class).at(request.mode);
         let index = candidates
             .iter()
             .position(|cand| table.seats[cand.index].id == seat_id)
@@ -1518,6 +1525,7 @@ fn evaluate(
             false,
             step_down,
             world.now,
+            None,
         );
         out.override_reason = Some(reason.clone());
         out.rule_pick = rule_pick.clone();
@@ -1557,7 +1565,78 @@ fn evaluate(
             priced,
         ));
     }
-    match rank(table, &candidates, class, request.mode) {
+    let mut climb_info: Option<f32> = None;
+    let wanted_bar = if request.mode == Mode::Balanced {
+        let primary_survivors: Vec<usize> = candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.in_class && c.skip.is_none() && !table.seats[c.index].fallback)
+            .map(|(i, _)| i)
+            .collect();
+        let best_idx = primary_survivors
+            .iter()
+            .copied()
+            .max_by(|&a, &b| candidates[a].score.total_cmp(&candidates[b].score))
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| c.in_class && c.skip.is_none())
+                    .map(|(i, _)| i)
+                    .max_by(|&a, &b| candidates[a].score.total_cmp(&candidates[b].score))
+            });
+        if let Some(best) = best_idx {
+            let best_cand = &candidates[best];
+            let hot_pool = table.seats[best_cand.index].pool.clone();
+            let climb = best_cand
+                .windows
+                .iter()
+                .filter_map(|w| {
+                    let u = w.used?;
+                    let el = w.elapsed.unwrap_or(0.0).max(constants.pace_ease);
+                    Some((u + w.booked) / el)
+                })
+                .fold(0.0f32, f32::max);
+            climb_info = Some(climb);
+            let t = ((climb - constants.climb_start)
+                / (constants.climb_full - constants.climb_start))
+                .clamp(0.0, 1.0);
+            let bars = table.bars(class);
+            let b_bar = bars.balanced - t * (bars.balanced - bars.efficient);
+            if t >= 0.5 {
+                for cand in candidates.iter_mut() {
+                    let seat = &table.seats[cand.index];
+                    if cand.in_class && cand.skip.is_none() && seat.pool == hot_pool {
+                        let entry = class.seats.iter().find(|e| e.seat == seat.id);
+                        let base_effort = entry.and_then(|e| e.effort).unwrap_or(class.effort);
+                        let min_effort = class.efficient_effort.unwrap_or(class.effort);
+                        let stepped_effort =
+                            base_effort.down().unwrap_or(base_effort).max(min_effort);
+                        if cand.effort.is_some_and(|eff| eff > stepped_effort) {
+                            cand.effort = Some(stepped_effort);
+                            cand.stepped = true;
+                            populate_windows(
+                                table,
+                                world,
+                                request,
+                                class,
+                                size,
+                                seat,
+                                cand,
+                                stepped_effort,
+                            );
+                        }
+                    }
+                }
+            }
+            b_bar
+        } else {
+            table.bars(class).balanced
+        }
+    } else {
+        table.bars(class).at(request.mode)
+    };
+    match rank(table, &candidates, class, request.mode, wanted_bar) {
         Ok((order, bar, dropped)) => Ok(build_pick(
             table,
             &candidates,
@@ -1569,8 +1648,101 @@ fn evaluate(
             dropped,
             step_down,
             world.now,
+            climb_info,
         )),
         Err(reason) => Err(fail(reason, &candidates, priced)),
+    }
+}
+
+fn populate_windows(
+    table: &Table,
+    world: &World,
+    request: &Request,
+    class: &Class,
+    size: &Size,
+    seat: &Seat,
+    cand: &mut Candidate,
+    effort: Effort,
+) {
+    let constants = &table.constants;
+    let Some(pool) = table.pool(&seat.pool) else {
+        return;
+    };
+    cand.windows.clear();
+    let cell = seat.use_cell(effort);
+    cand.use_basis =
+        cell.map(|cell| format!("{} at {}: {}", seat.id, cell.effort.word(), cell.basis));
+    let scale = cell
+        .and_then(|cell| date(&cell.at))
+        .map_or(1.0, |at| seat.price_scale(at, world.now))
+        * class.weight
+        * size.use_factor;
+    let fallback = cell.map_or(0.0, |cell| {
+        cell.windows.values().copied().fold(0.0, f32::max)
+    });
+    for name in seat_windows(seat, pool) {
+        let expected = cell
+            .and_then(|cell| cell.windows.get(&name).copied())
+            .unwrap_or(fallback)
+            * scale;
+        let reading = world
+            .readings
+            .iter()
+            .find(|reading| reading.pool == seat.pool && reading.window == name)
+            .filter(|reading| {
+                reading.used.is_some()
+                    && nirvana_usage::freshness(reading, world.now) == Freshness::Fresh
+            });
+        let booked: f32 = world
+            .leases
+            .iter()
+            .filter(|lease| lease.live(world.now) && lease.pool == seat.pool)
+            .filter(|lease| request.order.as_deref() != Some(lease.order.as_str()))
+            .filter_map(|lease| lease.expected.get(&name))
+            .fold(0.0, |sum, share| sum + share);
+        let used = reading.and_then(|reading| reading.used);
+        let left = used.map(|used| 1.0 - used - booked);
+        let reserve = if seat.pool == constants.reserve_pool && name == constants.reserve_window {
+            constants.reserve
+        } else {
+            0.0
+        };
+        let headroom = left.map(|left| left - reserve);
+        let resets_at = reading.and_then(|reading| reading.resets_at);
+        let (elapsed, projected, spare) = reading
+            .map(|reading| projected_spare(reading, booked, constants.pace_ease))
+            .unwrap_or((None, None, None));
+        let pace = reading.and_then(|reading| {
+            nirvana_usage::pace_with(
+                reading,
+                constants.pace_ease,
+                constants.pace_min,
+                constants.pace_max,
+            )
+        });
+        // "More than 30% left" is what this order could still use: after booked orders and the reserve. At
+        // max 5 h with 35% unused, 20% is usable, and that is not quota about to be lost (review nit).
+        let reset_factor = match (headroom, resets_at) {
+            (Some(room), Some(at)) if request.mode != Mode::Sota => {
+                reset_factor(room, at.saturating_sub(world.now), size.minutes, constants)
+            }
+            _ => 1.0,
+        };
+        cand.windows.push(WindowState {
+            window: name,
+            used,
+            booked,
+            left,
+            headroom,
+            resets_at,
+            elapsed,
+            projected,
+            spare,
+            pace,
+            reset_factor,
+            spare_weight: constants.spare_weight,
+            expected,
+        });
     }
 }
 
@@ -1698,84 +1870,7 @@ fn candidate(
             ));
         }
     }
-    let Some(pool) = table.pool(&seat.pool) else {
-        return cand;
-    };
-    let cell = seat.use_cell(effort);
-    cand.use_basis =
-        cell.map(|cell| format!("{} at {}: {}", seat.id, cell.effort.word(), cell.basis));
-    let scale = cell
-        .and_then(|cell| date(&cell.at))
-        .map_or(1.0, |at| seat.price_scale(at, world.now))
-        * class.weight
-        * size.use_factor;
-    let fallback = cell.map_or(0.0, |cell| {
-        cell.windows.values().copied().fold(0.0, f32::max)
-    });
-    for name in seat_windows(seat, pool) {
-        let expected = cell
-            .and_then(|cell| cell.windows.get(&name).copied())
-            .unwrap_or(fallback)
-            * scale;
-        let reading = world
-            .readings
-            .iter()
-            .find(|reading| reading.pool == seat.pool && reading.window == name)
-            .filter(|reading| {
-                reading.used.is_some()
-                    && nirvana_usage::freshness(reading, world.now) == Freshness::Fresh
-            });
-        let booked: f32 = world
-            .leases
-            .iter()
-            .filter(|lease| lease.live(world.now) && lease.pool == seat.pool)
-            .filter(|lease| request.order.as_deref() != Some(lease.order.as_str()))
-            .filter_map(|lease| lease.expected.get(&name))
-            .fold(0.0, |sum, share| sum + share);
-        let used = reading.and_then(|reading| reading.used);
-        let left = used.map(|used| 1.0 - used - booked);
-        let reserve = if seat.pool == constants.reserve_pool && name == constants.reserve_window {
-            constants.reserve
-        } else {
-            0.0
-        };
-        let headroom = left.map(|left| left - reserve);
-        let resets_at = reading.and_then(|reading| reading.resets_at);
-        let (elapsed, projected, spare) = reading
-            .map(|reading| projected_spare(reading, booked, constants.pace_ease))
-            .unwrap_or((None, None, None));
-        let pace = reading.and_then(|reading| {
-            nirvana_usage::pace_with(
-                reading,
-                constants.pace_ease,
-                constants.pace_min,
-                constants.pace_max,
-            )
-        });
-        // "More than 30% left" is what this order could still use: after booked orders and the reserve. At
-        // max 5 h with 35% unused, 20% is usable, and that is not quota about to be lost (review nit).
-        let reset_factor = match (headroom, resets_at) {
-            (Some(room), Some(at)) => {
-                reset_factor(room, at.saturating_sub(world.now), size.minutes, constants)
-            }
-            _ => 1.0,
-        };
-        cand.windows.push(WindowState {
-            window: name,
-            used,
-            booked,
-            left,
-            headroom,
-            resets_at,
-            elapsed,
-            projected,
-            spare,
-            pace,
-            reset_factor,
-            spare_weight: constants.spare_weight,
-            expected,
-        });
-    }
+    populate_windows(table, world, request, class, size, seat, &mut cand, effort);
     // Filter 5: a window at or under the floor.
     let floored: Vec<&WindowState> = cand
         .windows
@@ -1832,20 +1927,32 @@ fn rank(
     candidates: &[Candidate],
     class: &Class,
     mode: Mode,
+    wanted: f32,
 ) -> Result<(Vec<usize>, f32, bool), String> {
     let bars = table.bars(class);
     let survivors: Vec<usize> = (0..candidates.len())
         .filter(|&i| candidates[i].skip.is_none())
         .collect();
-    let Some(&best) = survivors
+    let primary_survivors: Vec<usize> = survivors
+        .iter()
+        .copied()
+        .filter(|&i| !table.seats[candidates[i].index].fallback)
+        .collect();
+    let effective_survivors = if !primary_survivors.is_empty() {
+        &primary_survivors
+    } else {
+        &survivors
+    };
+    let Some(&best) = effective_survivors
         .iter()
         .max_by(|&&a, &&b| candidates[a].score.total_cmp(&candidates[b].score))
     else {
         return Err(format!("no seat left for {}", class.id));
     };
     let best_score = candidates[best].score;
-    let wanted = bars.at(mode);
-    let (bar, dropped) = if best_score + EDGE >= wanted {
+    let (bar, dropped) = if mode == Mode::Sota {
+        (best_score, false)
+    } else if best_score + EDGE >= wanted {
         (wanted, false)
     } else if best_score + EDGE >= bars.efficient {
         // SOTA's bar is 100 so that it means the best seat left (decision 0018 §2): not a drop to report.
@@ -1870,7 +1977,19 @@ fn rank(
             .position(|entry| entry.seat == table.seats[cand.index].id)
     };
     order.sort_by(|&a, &b| {
-        let (a, b) = (&candidates[a], &candidates[b]);
+        let (cand_a, cand_b) = (&candidates[a], &candidates[b]);
+        let fallback_a = table.seats[cand_a.index].fallback;
+        let fallback_b = table.seats[cand_b.index].fallback;
+        if fallback_a != fallback_b {
+            return fallback_a.cmp(&fallback_b);
+        }
+        if mode == Mode::Sota {
+            return cand_b
+                .score
+                .total_cmp(&cand_a.score)
+                .then(place(cand_a).cmp(&place(cand_b)));
+        }
+        let (a, b) = (cand_a, cand_b);
         a.tier()
             .cmp(&b.tier())
             .then(a.pressure().total_cmp(&b.pressure()))
@@ -1893,6 +2012,7 @@ fn build_pick(
     dropped: bool,
     step_down: bool,
     now: u64,
+    climb: Option<f32>,
 ) -> Pick {
     let constants = &table.constants;
     let won = &candidates[winner];
@@ -1900,6 +2020,17 @@ fn build_pick(
     let effort = won.effort.unwrap_or(class.effort);
     let mode_bar = table.bars(class).at(request.mode);
     let lost_to = |cand: &Candidate| -> String {
+        let cand_seat = &table.seats[cand.index];
+        let won_seat = &table.seats[won.index];
+        if !won_seat.fallback && cand_seat.fallback {
+            return format!("fallback seat; {} is not", won_seat.id);
+        }
+        if request.mode == Mode::Sota {
+            if (cand.score - won.score).abs() > EDGE {
+                return format!("scores {:.1}, under {:.1}", cand.score, won.score);
+            }
+            return "same score, later in the class's order".to_owned();
+        }
         let (a, b) = (cand.pressure(), won.pressure());
         let pool = &table.seats[cand.index].pool;
         match (cand.tier(), won.tier(), cand.short()) {
@@ -1981,6 +2112,27 @@ fn build_pick(
             ));
         } else {
             reason.push_str(&format!(", reserve {}", pct(constants.reserve)));
+        }
+    }
+    if request.mode == Mode::Balanced {
+        if let Some(c) = climb {
+            reason.push_str(&format!("; climb {c:.2}, bar {bar:.0}"));
+        }
+    } else if request.mode == Mode::Sota {
+        reason.push_str("; best score");
+    }
+    if seat.fallback {
+        let skipped: Vec<String> = candidates
+            .iter()
+            .filter(|c| c.in_class && !table.seats[c.index].fallback)
+            .filter_map(|c| {
+                let s = &table.seats[c.index];
+                let why = c.skip.as_ref().map(|sk| sk.why.as_str()).unwrap_or("skipped");
+                Some(format!("{} ({})", s.id, why))
+            })
+            .collect();
+        if !skipped.is_empty() {
+            reason.push_str(&format!("; fallback: {}", skipped.join("; ")));
         }
     }
     if dropped {
@@ -4268,7 +4420,7 @@ mod tests {
         };
         assert_eq!(
             effort("build.bounded", Mode::Balanced),
-            ("g-sonnet".into(), Effort::Medium)
+            ("flash".into(), Effort::Medium)
         );
         assert_eq!(
             effort("build.bounded", Mode::Sota),
@@ -4276,13 +4428,13 @@ mod tests {
         );
         assert_eq!(
             effort("fix.debug", Mode::Balanced),
-            ("g-opus".into(), Effort::Medium)
+            ("flash".into(), Effort::Medium)
         );
         assert_eq!(
             effort("plan", Mode::Balanced),
-            ("g-opus".into(), Effort::High)
+            ("flash".into(), Effort::High)
         );
-        assert_eq!(effort("plan", Mode::Sota), ("g-opus".into(), Effort::High));
+        assert_eq!(effort("plan", Mode::Sota), ("opus".into(), Effort::High));
         // An override asking xhigh on g-opus gets high because g-opus offers no xhigh.
         let mut over = request("plan");
         over.override_seat = Some(("g-opus:xhigh".into(), "trickier".into()));
@@ -4303,12 +4455,19 @@ mod tests {
         table
             .seats
             .iter_mut()
+            .find(|s| s.id == "flash")
+            .unwrap()
+            .efforts
+            .push(Effort::Max);
+        table
+            .seats
+            .iter_mut()
             .find(|s| s.id == "opus")
             .unwrap()
             .efforts
             .push(Effort::Max);
         let got = chosen(&table, &self::world(), &request("plan"));
-        assert_eq!((got.seat.as_str(), got.effort), ("g-opus", Effort::High));
+        assert_eq!((got.seat.as_str(), got.effort), ("flash", Effort::High));
         assert_eq!(
             got.effort_note.as_deref(),
             Some("capped at high")
@@ -5059,5 +5218,163 @@ mod tests {
             chosen(&table, &max_spare, &request("build.load_bearing")).seat,
             "opus"
         );
+    }
+
+    #[test]
+    fn l2_efficient_for_every_class_seats_lowest_pressure_at_efficient_effort() {
+        let table = table();
+        let world = world();
+        for class in &table.classes {
+            let mut req = request(&class.id);
+            req.mode = Mode::Efficient;
+            let pick = chosen(&table, &world, &req);
+            let expected_effort = class.efficient_effort.unwrap_or(class.effort);
+            assert_eq!(
+                pick.effort, expected_effort,
+                "class {} in Efficient mode got effort {:?}, expected {:?}",
+                class.id, pick.effort, expected_effort
+            );
+            let winner_seat = table.seats.iter().find(|s| s.id == pick.seat).unwrap();
+            assert!(!winner_seat.fallback, "winner {} should not be fallback", winner_seat.id);
+        }
+    }
+
+    #[test]
+    fn l3_balanced_on_cool_world_seats_opus_and_sonnet_and_climbs() {
+        let table = table();
+        let mut world_cool = world();
+        let el_week = nirvana_usage::elapsed(
+            world_cool
+                .readings
+                .iter()
+                .find(|r| r.pool == "max" && r.window == "week")
+                .unwrap(),
+        )
+        .unwrap();
+        // climb 0.5: week used = 0.5 * el_week, 5h used = 0.05
+        set(&mut world_cool, "max", "5h", 0.05);
+        set(&mut world_cool, "max", "week", 0.50 * el_week);
+
+        let mut req_plan = request("plan");
+        req_plan.mode = Mode::Balanced;
+        let pick_plan = chosen(&table, &world_cool, &req_plan);
+        assert_eq!(pick_plan.seat, "opus");
+        assert_eq!(pick_plan.effort, Effort::High);
+
+        let mut req_load = request("build.load_bearing");
+        req_load.mode = Mode::Balanced;
+        let pick_load = chosen(&table, &world_cool, &req_load);
+        assert_eq!(pick_load.seat, "opus");
+        assert_eq!(pick_load.effort, Effort::High);
+
+        let mut req_bounded = request("build.bounded");
+        req_bounded.mode = Mode::Balanced;
+        let pick_bounded = chosen(&table, &world_cool, &req_bounded);
+        assert_eq!(pick_bounded.seat, "sonnet");
+        assert_eq!(pick_bounded.effort, Effort::Medium);
+
+        // at 0.85: bar is half-way (80) and Max's effort is down one (High -> Medium)
+        let mut world_85 = world();
+        set(&mut world_85, "max", "5h", 0.05);
+        set(&mut world_85, "max", "week", 0.85 * el_week);
+        let pick_85 = chosen(&table, &world_85, &req_plan);
+        assert!(pick_85.reason.contains("bar 80"));
+        let opus_loser = pick_85.runners_up.iter().find(|l| l.seat == "opus");
+        if pick_85.seat == "opus" {
+            assert_eq!(pick_85.effort, Effort::Medium);
+        } else if let Some(loser) = opus_loser {
+            assert_eq!(loser.effort, Some(Effort::Medium));
+        }
+
+        // at 1.2: argon or flash wins plan
+        let mut world_12 = world();
+        set(&mut world_12, "max", "5h", 0.41);
+        set(&mut world_12, "max", "week", 1.20 * el_week);
+        let pick_12 = chosen(&table, &world_12, &req_plan);
+        assert!(
+            pick_12.seat == "argon" || pick_12.seat == "flash",
+            "at climb 1.2, expected argon or flash to win plan, got {}",
+            pick_12.seat
+        );
+    }
+
+    #[test]
+    fn l5_sota_pick_is_the_same_with_no_use_and_with_non_floored_pool_at_95_pct() {
+        let table = table();
+        let mut world_zero = world();
+        for r in &mut world_zero.readings {
+            r.used = Some(0.0);
+        }
+
+        // World with non-floored pools:
+        // Gemini and Argon at 94% (so left = 6% > floor 5%).
+        // Max: week at 94%, 5h at 75% (so left = 25% > reserve 20% + expected use).
+        let mut world_94 = world();
+        for r in &mut world_94.readings {
+            if r.pool == "max" && r.window == "5h" {
+                r.used = Some(0.75);
+            } else {
+                r.used = Some(0.94);
+            }
+        }
+
+        for class in &table.classes {
+            let mut req = request(&class.id);
+            req.mode = Mode::Sota;
+            let pick_zero = chosen(&table, &world_zero, &req);
+            let pick_94 = chosen(&table, &world_94, &req);
+            assert_eq!(
+                pick_zero.seat, pick_94.seat,
+                "class {} had seat {:?} at 0%, but {:?} at 94%",
+                class.id, pick_zero.seat, pick_94.seat
+            );
+            assert_eq!(
+                pick_zero.effort, pick_94.effort,
+                "class {} had effort {:?} at 0%, but {:?} at 94%",
+                class.id, pick_zero.effort, pick_94.effort
+            );
+        }
+
+        // Floor and reserve still skip:
+        // 1. Reserve skip on max 5h:
+        let mut world_reserve = world();
+        set(&mut world_reserve, "max", "5h", 0.85); // left = 15% <= 20% reserve
+        let mut req_plan = request("plan");
+        req_plan.mode = Mode::Sota;
+        let pick_res = chosen(&table, &world_reserve, &req_plan);
+        assert_eq!(pick_res.seat, "argon");
+        assert!(why(&pick_res.runners_up, "opus").contains("under the orchestrator's reserve"));
+
+        // 2. Floor skip on argon:
+        let mut world_floor = world_reserve;
+        set(&mut world_floor, "argon", "week", 0.96); // left = 4% <= 5% floor
+        let pick_floor = chosen(&table, &world_floor, &req_plan);
+        assert_eq!(pick_floor.seat, "flash");
+        assert!(why(&pick_floor.runners_up, "argon").contains("floor"));
+    }
+
+    #[test]
+    fn l8_g_opus_wins_plan_only_when_all_non_fallback_seats_are_skipped() {
+        let table = table();
+        let mut world_test = world();
+        let mut req_plan = request("plan");
+        req_plan.mode = Mode::Sota;
+
+        // Skip opus, argon, sonnet:
+        set(&mut world_test, "max", "5h", 0.85); // skips opus and sonnet by reserve
+        set(&mut world_test, "argon", "week", 0.96); // skips argon by floor
+        let pick_flash = chosen(&table, &world_test, &req_plan);
+        assert_eq!(pick_flash.seat, "flash");
+        assert!(why(&pick_flash.runners_up, "g-opus").contains("fallback seat; flash is not"));
+
+        // Now also skip flash:
+        set(&mut world_test, "gemini", "5h", 0.96); // skips flash by floor
+        let pick_g_opus = chosen(&table, &world_test, &req_plan);
+        assert_eq!(pick_g_opus.seat, "g-opus");
+        assert!(pick_g_opus.reason.contains("; fallback:"));
+        assert!(pick_g_opus.reason.contains("opus"));
+        assert!(pick_g_opus.reason.contains("argon"));
+        assert!(pick_g_opus.reason.contains("sonnet"));
+        assert!(pick_g_opus.reason.contains("flash"));
     }
 }
