@@ -3,7 +3,7 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
-## alpha NEXT (p19): seat modes recalibrated
+## alpha 0.31.0: seat modes recalibrated (plan 19)
 
 Package `p19` (`P19-ORDER.md`, record `nirvana/plans/2026-10-20-19-records/p19.md`).
 
