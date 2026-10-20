@@ -87,6 +87,17 @@ impl Effort {
         }
     }
 
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" => Some(Self::Xhigh),
+            "max" => Some(Self::Max),
+            _ => None,
+        }
+    }
+
     fn down(self) -> Option<Self> {
         match self {
             Self::Low => None,
@@ -1068,9 +1079,20 @@ fn effort_for(
     seat: &Seat,
     mode: Mode,
     step_down: bool,
+    is_override: bool,
+    override_effort: Option<Effort>,
 ) -> (Effort, Option<String>) {
-    let mut want = entry.effort.unwrap_or(class.effort);
-    if mode == Mode::Sota {
+    let mut note = None;
+    let mut want = if let Some(eff) = override_effort {
+        eff
+    } else {
+        entry.effort.unwrap_or_else(|| match mode {
+            Mode::Efficient => class.efficient_effort.unwrap_or(class.effort),
+            Mode::Balanced => class.effort,
+            Mode::Sota => class.effort,
+        })
+    };
+    if override_effort.is_none() && mode == Mode::Sota {
         if let Some(lift) = class.sota_effort {
             want = want.max(lift);
         }
@@ -1078,16 +1100,19 @@ fn effort_for(
     if step_down {
         want = want.down().unwrap_or(want);
     }
-    let mut note = None;
-    if want == Effort::Max {
-        want = Effort::Xhigh;
-        note = Some("max is never chosen automatically".to_owned());
+    if let Some(eff) = override_effort {
+        if eff > Effort::High {
+            note = Some(format!("effort overridden to {}", eff.word()));
+        }
+    } else if want > Effort::High {
+        want = Effort::High;
+        note = Some("capped at high".to_owned());
     }
     let offered: Vec<Effort> = seat
         .efforts
         .iter()
         .copied()
-        .filter(|effort| *effort != Effort::Max)
+        .filter(|effort| is_override || *effort != Effort::Max)
         .collect();
     let got = offered
         .iter()
@@ -1097,12 +1122,16 @@ fn effort_for(
         .or_else(|| offered.iter().copied().min())
         .unwrap_or(want);
     if got != want {
-        note = Some(format!(
+        let seat_note = format!(
             "{} has no {}; {}",
             seat.id,
             want.word(),
             got.word()
-        ));
+        );
+        note = Some(match note {
+            Some(n) => format!("{n}; {seat_note}"),
+            None => seat_note,
+        });
     }
     (got, note)
 }
@@ -1417,11 +1446,25 @@ fn evaluate(
         }
     };
 
-    if let Some((seat_id, reason)) = &request.override_seat {
+    if let Some((override_target, reason)) = &request.override_seat {
+        let (seat_id, override_effort) = match override_target.split_once(':') {
+            Some((id, eff_str)) => {
+                let Some(eff) = Effort::parse(eff_str) else {
+                    return Err(fail(
+                        format!("override {override_target} refused: unknown effort {eff_str}"),
+                        &candidates,
+                        false,
+                    ));
+                };
+                (id.trim(), Some(eff))
+            }
+            None => (override_target.trim(), None),
+        };
+        let _ = override_effort;
         if world.overrides_used >= constants.overrides_per_run {
             return Err(fail(
                 format!(
-                    "override {seat_id} refused: {} of {} overrides already taken in this run; more is the owner's call",
+                    "override {override_target} refused: {} of {} overrides already taken in this run; more is the owner's call",
                     world.overrides_used, constants.overrides_per_run
                 ),
                 &candidates,
@@ -1430,17 +1473,17 @@ fn evaluate(
         }
         let Some(cand) = candidates
             .iter()
-            .find(|cand| table.seats[cand.index].id == *seat_id)
+            .find(|cand| table.seats[cand.index].id == seat_id)
         else {
             return Err(fail(
-                format!("override {seat_id} refused: no such seat"),
+                format!("override {override_target} refused: no such seat"),
                 &candidates,
                 false,
             ));
         };
         if let Some(skip) = &cand.skip {
             return Err(fail(
-                format!("override {seat_id} refused: {}", skip.why),
+                format!("override {override_target} refused: {}", skip.why),
                 &candidates,
                 false,
             ));
@@ -1457,7 +1500,7 @@ fn evaluate(
         let mode_bar = table.bars(class).at(request.mode);
         let index = candidates
             .iter()
-            .position(|cand| table.seats[cand.index].id == *seat_id)
+            .position(|cand| table.seats[cand.index].id == seat_id)
             .expect("found above");
         // The bar the seat stands at: an override can take a seat under the mode's bar, and the pick says
         // so instead of reporting a bar it did not clear (review nit).
@@ -1480,7 +1523,7 @@ fn evaluate(
         out.rule_pick = rule_pick.clone();
         let under = if under {
             format!(
-                "; {seat_id} scores {score:.0}, under the bar {mode_bar:.0} at {}",
+                "; {override_target} scores {score:.0}, under the bar {mode_bar:.0} at {}",
                 request.mode.word()
             )
         } else {
@@ -1601,11 +1644,44 @@ fn candidate(
         );
         return cand;
     }
-    let (effort, note) = effort_for(class, entry, seat, request.mode, step_down);
+    let (is_override, override_effort) = match &request.override_seat {
+        Some((target, _)) => {
+            let (target_id, target_eff) = match target.split_once(':') {
+                Some((id, eff_str)) => (id.trim(), Effort::parse(eff_str)),
+                None => (target.trim(), None),
+            };
+            if target_id == seat.id {
+                (true, target_eff)
+            } else {
+                (false, None)
+            }
+        }
+        None => (false, None),
+    };
+    let (effort, note) = effort_for(
+        class,
+        entry,
+        seat,
+        request.mode,
+        step_down,
+        is_override,
+        override_effort,
+    );
     cand.effort = Some(effort);
     cand.effort_note = note;
     // A seat already at its lowest effort (argon low, flash low in build.bounded) is not stepped down.
-    cand.stepped = step_down && effort < effort_for(class, entry, seat, request.mode, false).0;
+    cand.stepped = step_down
+        && effort
+            < effort_for(
+                class,
+                entry,
+                seat,
+                request.mode,
+                false,
+                is_override,
+                override_effort,
+            )
+            .0;
     if table.use_record {
         let key = (seat.id.clone(), effort, class.chain.clone());
         if let Some(tally) = world.record.get(&key) {
@@ -2093,7 +2169,7 @@ pub fn existing_booking<'a>(
         .get("override")
         .is_some_and(|value| !value.is_null());
     Some(match override_seat {
-        Some(seat) if !(overrode && known.seat == seat) => Err(format!(
+        Some(seat) if !(overrode && (known.seat == seat || seat.starts_with(&format!("{}:", known.seat)))) => Err(format!(
             "override {seat} refused: {order} is already booked on {} {} ({}); release it first (herdr seat release {order})",
             known.seat,
             known.effort.word(),
@@ -4196,7 +4272,7 @@ mod tests {
         );
         assert_eq!(
             effort("build.bounded", Mode::Sota),
-            ("g-sonnet".into(), Effort::Medium)
+            ("opus".into(), Effort::High)
         );
         assert_eq!(
             effort("fix.debug", Mode::Balanced),
@@ -4204,23 +4280,19 @@ mod tests {
         );
         assert_eq!(
             effort("plan", Mode::Balanced),
-            ("opus".into(), Effort::High)
+            ("g-opus".into(), Effort::High)
         );
-        assert_eq!(effort("plan", Mode::Sota), ("opus".into(), Effort::Xhigh));
-        // g-opus offers no xhigh: high, said so.
-        let mut world = self::world();
-        world
-            .clis
-            .insert("claude".into(), "claude not signed in".into());
-        let mut sota = request("plan");
-        sota.mode = Mode::Sota;
-        let got = chosen(&table, &world, &sota);
+        assert_eq!(effort("plan", Mode::Sota), ("g-opus".into(), Effort::High));
+        // An override asking xhigh on g-opus gets high because g-opus offers no xhigh.
+        let mut over = request("plan");
+        over.override_seat = Some(("g-opus:xhigh".into(), "trickier".into()));
+        let got = chosen(&table, &world, &over);
         assert_eq!((got.seat.as_str(), got.effort), ("g-opus", Effort::High));
         assert_eq!(
             got.effort_note.as_deref(),
-            Some("g-opus has no xhigh; high")
+            Some("effort overridden to xhigh; g-opus has no xhigh; high")
         );
-        // A class asking max gets xhigh, even from a seat that lists max.
+        // A class asking max gets high, even from a seat that lists max.
         let mut table = table;
         table
             .classes
@@ -4236,11 +4308,65 @@ mod tests {
             .efforts
             .push(Effort::Max);
         let got = chosen(&table, &self::world(), &request("plan"));
-        assert_eq!((got.seat.as_str(), got.effort), ("opus", Effort::Xhigh));
+        assert_eq!((got.seat.as_str(), got.effort), ("g-opus", Effort::High));
         assert_eq!(
             got.effort_note.as_deref(),
-            Some("max is never chosen automatically")
+            Some("capped at high")
         );
+        // An explicit override can still choose max.
+        let mut over_max = request("plan");
+        over_max.override_seat = Some(("opus:max".into(), "explicit max".into()));
+        let got_max = chosen(&table, &self::world(), &over_max);
+        assert_eq!((got_max.seat.as_str(), got_max.effort), ("opus", Effort::Max));
+        assert_eq!(
+            got_max.effort_note.as_deref(),
+            Some("effort overridden to max")
+        );
+    }
+
+    #[test]
+    fn l6_no_class_in_any_mode_chooses_an_effort_above_high_and_override_works() {
+        let table = table();
+        let world = world();
+        // 1. Every class across every mode picks an effort <= High
+        for class in &table.classes {
+            for mode in [Mode::Efficient, Mode::Balanced, Mode::Sota] {
+                let mut req = request(&class.id);
+                req.mode = mode;
+                let pick = chosen(&table, &world, &req);
+                assert!(
+                    pick.effort <= Effort::High,
+                    "class {} in mode {:?} picked effort {:?} > High",
+                    class.id,
+                    mode,
+                    pick.effort
+                );
+            }
+        }
+
+        // 2. When a class or seat wanted Xhigh or Max, note is "capped at high"
+        let mut modified_table = table.clone();
+        modified_table
+            .classes
+            .iter_mut()
+            .find(|c| c.id == "plan")
+            .unwrap()
+            .effort = Effort::Xhigh;
+        let pick = chosen(&modified_table, &world, &request("plan"));
+        assert_eq!(pick.effort, Effort::High);
+        assert_eq!(pick.effort_note.as_deref(), Some("capped at high"));
+
+        // 3. An override to xhigh still works and says so in effort_note
+        let mut req_xhigh = request("plan");
+        req_xhigh.override_seat = Some(("opus:xhigh".into(), "override reason".into()));
+        let pick_xhigh = chosen(&table, &world, &req_xhigh);
+        assert_eq!(pick_xhigh.seat, "opus");
+        assert_eq!(pick_xhigh.effort, Effort::Xhigh);
+        assert_eq!(
+            pick_xhigh.effort_note.as_deref(),
+            Some("effort overridden to xhigh")
+        );
+        assert!(pick_xhigh.reason.contains("effort overridden to xhigh"));
     }
 
     #[test]
