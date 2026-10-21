@@ -251,9 +251,11 @@ pub fn toast_logo_path(letter: char) -> PathBuf {
 }
 
 #[cfg(windows)]
-// The menu's claim runs only outside tests (client/shell/nirvana_new_menu.rs), so a test build never uses it.
-#[cfg_attr(test, allow(unused_imports))]
-pub use windows_impl::{claim_menu_window, claim_window, letter_coverage, release_window};
+// The menu's claim runs only outside tests (client/shell/nirvana_new_menu.rs), and terminal_window is used in step 2.
+#[allow(unused_imports)]
+pub use windows_impl::{
+    claim_menu_window, claim_window, letter_coverage, release_window, terminal_window,
+};
 
 #[cfg(not(windows))]
 pub fn claim_window(_folder: &Path) -> std::io::Result<()> {
@@ -265,6 +267,10 @@ pub fn claim_menu_window(_folder: &Path) {}
 pub fn release_window() {}
 #[cfg(not(windows))]
 pub fn letter_coverage(_letter: char, _size: u32) -> Option<Vec<u8>> {
+    None
+}
+#[cfg(not(windows))]
+pub fn terminal_window() -> Option<usize> {
     None
 }
 
@@ -340,7 +346,7 @@ mod windows_impl {
     const APP_USER_MODEL: windows::core::GUID =
         windows::core::GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3);
 
-    fn terminal_window() -> Option<usize> {
+    pub fn terminal_window() -> Option<usize> {
         use windows_sys::Win32::System::Console::GetConsoleWindow;
         use windows_sys::Win32::UI::WindowsAndMessaging::{GetAncestor, GA_ROOTOWNER};
         // SAFETY: both calls take and return plain handles; a null console window gives a null ancestor.

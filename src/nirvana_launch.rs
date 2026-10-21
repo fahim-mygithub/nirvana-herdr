@@ -405,6 +405,168 @@ pub fn parse_open_command(rest: &str) -> (PathBuf, bool) {
     }
 }
 
+/// A mark written by a live Nirvana window at `<home>/nirvana/window.json` (plan 21 §3.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WindowMark {
+    pub pid: u32,
+    pub hwnd: usize,
+    pub at: u64,
+}
+
+// Plan 21 §3.1: window mark and liveness facts, wired into window and open in step 2.
+#[allow(dead_code)]
+pub const WINDOW_MARK_FILE: &str = "window.json";
+
+/// `<home>/nirvana/window.json`
+#[allow(dead_code)]
+pub fn window_mark_path(home: &Path) -> PathBuf {
+    home.join("nirvana").join(WINDOW_MARK_FILE)
+}
+
+/// Writes `mark` to `<home>/nirvana/window.json` with write_bytes semantics (single file write).
+#[allow(dead_code)]
+pub fn write_window_mark(home: &Path, mark: &WindowMark) -> std::io::Result<()> {
+    let path = window_mark_path(home);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let data = serde_json::to_vec_pretty(mark)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(path, data)
+}
+
+/// Reads the mark at `<home>/nirvana/window.json`; empty or torn files read as no mark.
+#[allow(dead_code)]
+pub fn read_window_mark(home: &Path) -> Option<WindowMark> {
+    let path = window_mark_path(home);
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Removes the mark at `<home>/nirvana/window.json` only when its pid matches `pid`.
+#[allow(dead_code)]
+pub fn remove_window_mark(home: &Path, pid: u32) -> std::io::Result<bool> {
+    let path = window_mark_path(home);
+    let Some(mark) = read_window_mark(home) else {
+        return Ok(false);
+    };
+    if mark.pid == pid {
+        std::fs::remove_file(path)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Pure liveness check over the three facts (plan 21 §3.1):
+/// process at pid runs and is herdr.exe, IsWindow(hwnd) is true, server is listening.
+#[allow(dead_code)]
+pub fn is_mark_live(
+    process_runs_herdr: bool,
+    window_is_window: bool,
+    server_listening: bool,
+) -> bool {
+    process_runs_herdr && window_is_window && server_listening
+}
+
+/// Pure helper parameterized with predicates for unit testing without a real window.
+#[allow(dead_code)]
+pub fn check_mark_live_with<F1, F2, F3>(
+    mark: &WindowMark,
+    mut process_runs_herdr: F1,
+    mut window_is_window: F2,
+    mut server_listening: F3,
+) -> bool
+where
+    F1: FnMut(u32) -> bool,
+    F2: FnMut(usize) -> bool,
+    F3: FnMut() -> bool,
+{
+    is_mark_live(
+        process_runs_herdr(mark.pid),
+        window_is_window(mark.hwnd),
+        server_listening(),
+    )
+}
+
+#[cfg(windows)]
+#[allow(dead_code)]
+pub fn is_herdr_process(pid: u32) -> bool {
+    if pid <= 4 {
+        return false;
+    }
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    const STILL_ACTIVE: u32 = 259;
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return false;
+    }
+    let mut exit_code: u32 = 0;
+    let ok = unsafe { GetExitCodeProcess(handle, &mut exit_code) } != 0;
+    if !ok || exit_code != STILL_ACTIVE {
+        unsafe { CloseHandle(handle) };
+        return false;
+    }
+    let mut path = vec![0_u16; 1024];
+    let mut len = path.len() as u32;
+    let success = unsafe { QueryFullProcessImageNameW(handle, 0, path.as_mut_ptr(), &mut len) } != 0;
+    unsafe { CloseHandle(handle) };
+    if !success || len == 0 {
+        return false;
+    }
+    let full_path = String::from_utf16_lossy(&path[..len as usize]);
+    let exe_name = Path::new(&full_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    exe_name.eq_ignore_ascii_case("herdr.exe")
+}
+
+#[cfg(not(windows))]
+#[allow(dead_code)]
+pub fn is_herdr_process(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(windows)]
+#[allow(dead_code)]
+pub fn is_valid_window(hwnd: usize) -> bool {
+    if hwnd == 0 {
+        return false;
+    }
+    use windows_sys::Win32::UI::WindowsAndMessaging::IsWindow;
+    unsafe { IsWindow(hwnd as _) != 0 }
+}
+
+#[cfg(not(windows))]
+#[allow(dead_code)]
+pub fn is_valid_window(_hwnd: usize) -> bool {
+    false
+}
+
+#[allow(dead_code)]
+pub fn is_server_listening_now() -> bool {
+    crate::server::autodetect::is_server_listening().unwrap_or(false)
+}
+
+/// Checks if a mark is live against the real system facts.
+#[allow(dead_code)]
+pub fn is_live_window_mark(mark: &WindowMark) -> bool {
+    check_mark_live_with(
+        mark,
+        is_herdr_process,
+        is_valid_window,
+        is_server_listening_now,
+    )
+}
+
 const USAGE: &str = "usage: herdr --session nirvana nirvana window <folder>
   Opens Nirvana Claude on <folder> in this terminal: starts the session's server if it is not running, focuses the
   Nirvana Claude already on the folder or opens a space with one, marks this Windows Terminal window with the
@@ -833,6 +995,71 @@ mod tests {
         assert_eq!(args[m_idx + 1], "claude-opus-5-5");
         let e_idx = args.iter().position(|a| a == "--effort").unwrap();
         assert_eq!(args[e_idx + 1], "medium");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn liveness_check_requires_all_three_facts() {
+        // Plan 21 §3.1 and §7: each of the three facts false alone gives not live; all true gives live.
+        let mark = WindowMark {
+            pid: 1234,
+            hwnd: 5678,
+            at: 1729500000,
+        };
+        assert!(is_mark_live(true, true, true));
+        assert!(!is_mark_live(false, true, true));
+        assert!(!is_mark_live(true, false, true));
+        assert!(!is_mark_live(true, true, false));
+        assert!(!is_mark_live(false, false, false));
+
+        assert!(check_mark_live_with(&mark, |_| true, |_| true, || true));
+        assert!(!check_mark_live_with(&mark, |_| false, |_| true, || true));
+        assert!(!check_mark_live_with(&mark, |_| true, |_| false, || true));
+        assert!(!check_mark_live_with(&mark, |_| true, |_| true, || false));
+    }
+
+    #[test]
+    fn window_mark_write_read_and_remove_by_own_pid() {
+        // Plan 21 §3.1 and §7: write, read back, remove only by its own pid.
+        let home = scratch_home("mark");
+        assert_eq!(read_window_mark(&home), None);
+
+        let mark = WindowMark {
+            pid: 4321,
+            hwnd: 8765,
+            at: 1729512345,
+        };
+        write_window_mark(&home, &mark).unwrap();
+        assert_eq!(read_window_mark(&home), Some(mark));
+
+        // Removing with a different pid fails and keeps the mark
+        assert_eq!(remove_window_mark(&home, 9999).unwrap(), false);
+        assert_eq!(read_window_mark(&home), Some(mark));
+
+        // Removing with the mark's pid succeeds and deletes the file
+        assert_eq!(remove_window_mark(&home, 4321).unwrap(), true);
+        assert_eq!(read_window_mark(&home), None);
+        assert!(!window_mark_path(&home).exists());
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn torn_or_empty_window_mark_reads_as_no_mark() {
+        // Plan 21 §3.1 and §7: a torn or empty file reads as no mark.
+        let home = scratch_home("torn-mark");
+        let path = window_mark_path(&home);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        std::fs::write(&path, b"").unwrap();
+        assert_eq!(read_window_mark(&home), None);
+
+        std::fs::write(&path, b"{\"pid\": 1234, \"hwnd\": ").unwrap();
+        assert_eq!(read_window_mark(&home), None);
+
+        std::fs::write(&path, b"not json at all").unwrap();
+        assert_eq!(read_window_mark(&home), None);
+
         let _ = std::fs::remove_dir_all(&home);
     }
 }
