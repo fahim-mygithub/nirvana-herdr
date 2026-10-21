@@ -3,6 +3,19 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.34.1: herdr's upstream fixes to 2026-10-21
+
+- **Changed:** merged herdr's `master` at a2008661, three commits past the fork's base b431a063: Windows SSH output
+  no longer delays typing (#5463), a resize that samples a zero-sized grid keeps polling (#5310), and a steadier
+  plugin worker lease test (#5467). The merge had no conflicts; upstream and the fork both touched
+  `src/platform/mod.rs` and `src/platform/windows.rs`, upstream only adding there.
+  **Because:** the owner, 2026-10-21: "can you check the actualy herder project that I forked rofm any changes and
+  bring it up to date with Nirvana?"
+  **Measured:** the full suite 4073 of 4074, the one failure the known Windows plugin-root test it failed before the
+  merge; upstream added two tests. Clippy clean, the Python tests OK, every control still finds its text (1144); no
+  control targets the two shared files.
+  **If you remove this:** the fork drifts from herdr, and each later sync carries more to merge.
+
 ## alpha 0.34.0: Nirvana Claude comes back after a reload, and the agents panel follows the space
 
 - **Changed:** after the reload badge restarts the server, each pane that ran Nirvana Claude gets it again, typed the
