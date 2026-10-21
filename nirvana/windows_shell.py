@@ -18,9 +18,10 @@ Both are retired after the new verb is written: Nirvana-C's outright, old Nirvan
 when its command names old Nirvana's launcher (`retire_old_nirvana_verb`).
 
 The verb runs nirvana-open.exe directly, so there is no console flash:
-`"<home>\\bin\\nirvana-open.exe" "%1"` (and `"%V"` for the background verb). `-w new` keeps the folder's own
-window (the taskbar id is per window), and `herdr nirvana window` starts the server, Nirvana Claude, the button,
-the badge and the toast (src/nirvana_launch.rs). Limits: a folder whose name has a `;` is split by Windows Terminal,
+`"<home>\\bin\\nirvana-open.exe" "%1"` (and `"%V"` for the background verb). Plan 21: it runs `herdr nirvana open`,
+which opens the folder's space in the one live Nirvana window and flashes its button, or, with none live, starts
+`wt -w new ... herdr nirvana window`, which starts the server, Nirvana Claude, the button, the badge and the toast
+(src/nirvana_launch.rs). Limits: a folder whose name has a `;` is split by Windows Terminal,
 which reads `;` as its own command separator; a drive root arrives as `C:"` and herdr puts the `\\` back.
 """
 from __future__ import annotations

@@ -47,6 +47,8 @@ pub const ORCHESTRATOR_ENV: &str = "NIRVANA_ORCHESTRATOR";
 /// Set by `herdr nirvana window` for the client it supervises: this Terminal window is already Nirvana's, with this
 /// folder's button and badge, so the client's own menu does not claim it again.
 pub const WINDOW_FOLDER_ENV: &str = "NIRVANA_WINDOW_FOLDER";
+/// Set by `herdr nirvana window` once it has claimed the Terminal window, for its child client (plan 21 §5).
+pub const WINDOW_CLAIMED_ENV: &str = "NIRVANA_WINDOW_CLAIMED";
 /// The herdr session the verb opens, as Nirvana-C's verb did, so the fork never meets a server on the default one.
 pub const SESSION: &str = "nirvana";
 /// `command.invoke` id from the "new" menu: a new space with this kind's agent; the kind's key after it.
@@ -543,7 +545,16 @@ pub fn is_herdr_process(pid: u32) -> bool {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("");
-    exe_name.eq_ignore_ascii_case("herdr.exe")
+    is_herdr_image(exe_name)
+}
+
+/// The window's image name, as `QueryFullProcessImageNameW` reports it: `herdr.exe`, or, after an install, the
+/// running copy `install.py` renamed to `herdr.old-<stamp>-<pid>.exe` (a running exe cannot be overwritten on
+/// Windows, only renamed). Review of plan 21: with `herdr.exe` alone, every install made the open window read as
+/// dead, so the next "Open Nirvana" made a second window, the mirror this plan removes.
+pub fn is_herdr_image(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name == "herdr.exe" || (name.starts_with("herdr.old-") && name.ends_with(".exe"))
 }
 
 #[cfg(not(windows))]
@@ -667,6 +678,10 @@ pub fn open(folder: Option<&Path>) -> std::io::Result<i32> {
             return Ok(1);
         }
     };
+    // The open command refuses a relative folder (`nirvana_open_folder`); Explorer passes absolute ones, a hand-typed
+    // `herdr nirvana open .` does not.
+    let folder = folder.map(|f| std::path::absolute(f).unwrap_or_else(|_| f.to_path_buf()));
+    let folder = folder.as_deref();
     let mark = read_window_mark(&home);
     let live_mark = mark.as_ref().filter(|m| is_live_window_mark(m));
     let route = route_open(live_mark, folder);
@@ -817,6 +832,11 @@ fn window(folder: Option<&Path>) -> std::io::Result<i32> {
     let claimed = crate::nirvana_taskbar::claim_window(folder_abs.as_deref());
     if let Err(err) = &claimed {
         eprintln!("nirvana: the taskbar button was not set: {err}");
+    } else {
+        // The client runs as a child (`supervise_code`), so this process's claim is invisible to it; the badge that
+        // follows the current space (`client/shell/state.rs`) reads this. A window with no folder sets no
+        // `WINDOW_FOLDER_ENV`, so that alone left its badge fixed (review of plan 21).
+        std::env::set_var(WINDOW_CLAIMED_ENV, "1");
     }
     if let Some(folder) = &folder_abs {
         crate::nirvana_taskbar::toast_open_with(folder, preset.as_deref());
@@ -1237,6 +1257,17 @@ mod tests {
         assert!(!check_mark_live_with(&mark, |_| false, |_| true, || true));
         assert!(!check_mark_live_with(&mark, |_| true, |_| false, || true));
         assert!(!check_mark_live_with(&mark, |_| true, |_| true, || false));
+    }
+
+    #[test]
+    fn a_window_renamed_by_an_install_still_runs_herdr() {
+        // Review of plan 21: install.py renames the running herdr.exe to herdr.old-<stamp>-<pid>.exe.
+        assert!(is_herdr_image("herdr.exe"));
+        assert!(is_herdr_image("HERDR.EXE"));
+        assert!(is_herdr_image("herdr.old-20261021-120000-4242.exe"));
+        assert!(!is_herdr_image("notepad.exe"));
+        assert!(!is_herdr_image("nirvana-open.exe"));
+        assert!(!is_herdr_image("herdr.old-1.txt"));
     }
 
     #[test]

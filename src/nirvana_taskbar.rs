@@ -490,7 +490,7 @@ mod windows_impl {
     }
 
     pub fn is_window_claimed() -> bool {
-        std::env::var_os(crate::nirvana_launch::WINDOW_FOLDER_ENV).is_some()
+        std::env::var_os(crate::nirvana_launch::WINDOW_CLAIMED_ENV).is_some()
             || CLAIMED.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
@@ -533,6 +533,7 @@ mod windows_impl {
     #[cfg_attr(test, allow(dead_code))]
     pub fn claim_menu_window(folder: &Path) {
         if std::env::var_os(crate::nirvana_launch::WINDOW_FOLDER_ENV).is_some()
+            || std::env::var_os(crate::nirvana_launch::WINDOW_CLAIMED_ENV).is_some()
             || CLAIMED.lock().unwrap_or_else(|e| e.into_inner()).is_some()
         {
             return;
@@ -686,6 +687,21 @@ mod windows_impl {
     }
 }
 
+/// Plan 21 §5: the letter the badge shows for the current space, from the snapshot's `(workspace id, folder)` per
+/// pane: the first pane of the focused space that has a folder. `None` when it has none, so the badge keeps its last
+/// letter.
+pub fn space_badge_letter<'a>(
+    focused: Option<&str>,
+    panes: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+) -> Option<char> {
+    let focused = focused?;
+    panes
+        .into_iter()
+        .filter(|(workspace, _)| *workspace == focused)
+        .find_map(|(_, folder)| folder)
+        .map(|folder| crate::nirvana_launch::folder_letter(Path::new(folder)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -829,26 +845,20 @@ mod tests {
 
     #[test]
     fn the_badge_letter_follows_the_current_spaces_folder() {
-        let mut shell = Recorder::default();
-        let home = Path::new(r"C:\Users\o\AppData\Local\Programs\Nirvana-Herdr");
-        let herdr = home.join("bin").join("herdr.exe");
-        let id = Identity::window(home, &herdr, 'P');
-        apply(&mut shell, &set_steps(&id), false).unwrap();
-        assert_eq!(shell.steps.last(), Some(&Step::Overlay(Some('P'))));
-
-        // When switching space to a folder whose letter is 'M':
-        shell.overlay(Some('M')).unwrap();
-        assert_eq!(shell.steps.last(), Some(&Step::Overlay(Some('M'))));
-
-        // When switching to a space with no folder, the last letter is kept:
-        assert_eq!(
-            shell
-                .steps
-                .iter()
-                .filter(|s| matches!(s, Step::Overlay(_)))
-                .count(),
-            2
-        );
+        // Review of plan 21: the build's test set overlays on the recorder by hand and never ran the code that picks
+        // the letter; this one does.
+        let panes = [
+            ("w1", Some(r"C:\work\Pojects")),
+            ("w2", None),
+            ("w2", Some(r"C:\work\MotoProject")),
+            ("w3", None),
+        ];
+        assert_eq!(space_badge_letter(Some("w1"), panes), Some('P'));
+        // The focused space's own folder, not the first pane's in the list; a pane with no folder is passed over.
+        assert_eq!(space_badge_letter(Some("w2"), panes), Some('M'));
+        // A space with no folder, or no focused space: no letter, so the badge keeps its last one.
+        assert_eq!(space_badge_letter(Some("w3"), panes), None);
+        assert_eq!(space_badge_letter(None, panes), None);
     }
 
     #[test]

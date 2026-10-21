@@ -123,9 +123,18 @@ CONTROLS = (
     Control(
         'p21_taskbar_badge_follows_space',
         'src/nirvana_taskbar.rs',
-        '        shell.overlay(Some(\'M\')).unwrap();\n',
-        '        shell.overlay(Some(\'P\')).unwrap();\n',
+        '        .filter(|(workspace, _)| *workspace == focused)\n',
+        '        .filter(|(_, _)| !focused.is_empty())\n',
         'the_badge_letter_follows_the_current_spaces_folder',
+        'rust',
+    ),
+    # Review fix (§3.1): a window whose herdr.exe an install renamed is still live
+    Control(
+        'p21_mark_renamed_install_image',
+        'src/nirvana_launch.rs',
+        '    name == "herdr.exe" || (name.starts_with("herdr.old-") && name.ends_with(".exe"))\n',
+        '    name == "herdr.exe"\n',
+        'a_window_renamed_by_an_install_still_runs_herdr',
         'rust',
     ),
     # Step 5 (§2): The launcher builds the open command

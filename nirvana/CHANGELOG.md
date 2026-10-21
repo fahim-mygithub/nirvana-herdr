@@ -7,10 +7,20 @@ which the fork never edits.
 
 Package `p21` (`P21-ORDER.md`, record `nirvana/plans/2026-10-21-21-records/p21.md`).
 
-- **Changed:** One single Nirvana window manages all spaces across folders. A filesystem mark file at `<home>/nirvana/window.json` records `{pid, hwnd, at}` written only on claiming the window property (`Nirvana.Herdr.WindowClaimed`) and verified live via three concurrent facts: the process runs herdr, the HWND is a valid top-level window, and the named session's server is listening. Re-clicking "Open Nirvana" on an already-open folder brings the existing space to the front and flashes the window via `FlashWindowEx(FLASHW_ALL | FLASHW_TIMERNOFG)`; clicking an un-opened folder opens a new space in the single window and flashes it; clicking with no folder flashes the single window without opening any redundant space; opening a space while Nirvana is unfocused leaves the root pane unseen with an orange badge (`[o]`) until focused. The Explorer verb and pinned taskbar button invoke the standalone `#![windows_subsystem = "windows"]` launcher binary `nirvana-open.exe`, which spawns `herdr.exe --session nirvana nirvana open [<folder>]` with `CREATE_NO_WINDOW` and exits immediately without flashing a console window. The taskbar identity is unified to a single application ID `Nirvana.Herdr.Window` with display name `Nirvana` and relaunch command `"<home>\bin\nirvana-open.exe"`, while the overlay badge follows the focused space's folder initial letter.
-  **Because:** Plan 21: previously, every folder click spawned a separate Windows Terminal window (`wt -w new`), and clicking an already-open folder launched duplicate windows. Pinned taskbar buttons had per-folder identities and grouped inconsistently. Spawning a single window with a live-checked mark file and routing clicks via `nirvana-open.exe` ensures one shared window instance with instant focus/switching and no console flash.
-  **Measured:** 21 unit and integration tests across `src/nirvana_launch/tests.rs`, `src/app/nirvana_new.rs`, `src/nirvana_taskbar/tests.rs`, `src/bin/nirvana-open.rs`, `nirvana/test_windows_shell.py`, and `nirvana/test_scripts.py`; 17 sabotage controls in `nirvana/controls.d/p21.py` covering liveness checks, mark PID checks, torn mark handling, 4 routing table states, log appending, new-space flag preservation, unfocused unseen pane marking and focus checking, unified taskbar window identity, relaunch command formatting, dynamic taskbar badge updating, launcher command arguments, verb launcher naming, and binary installation; controls dry-run increased from 1112 to 1129 (all 1129 finding text exactly 1x); all 17 `p21_` controls passing alone.
-  **If you remove this:** Explorer verb clicks open duplicate windows, console windows flash briefly on launcher invocation, clicking an already open folder opens a new redundant workspace instead of switching to it, taskbar buttons do not group into a single Nirvana instance, and badges do not update to reflect the active space.
+- **Changed:** "Open Nirvana" runs `nirvana-open.exe`, a launcher with no console, which runs `herdr nirvana open`.
+  When a Nirvana window is live (its mark `<home>/nirvana/window.json` names a herdr process, a real window, and the
+  session's server is listening), the folder's space opens or is focused in that window, is drawn unseen until the
+  window is focused, and the taskbar button flashes (`FlashWindowEx`, `FLASHW_TRAY | FLASHW_TIMERNOFG`); no second
+  window opens. With none live, a window starts as before. The window has one taskbar identity,
+  `Nirvana.Herdr.Window`, whose relaunch is `nirvana-open.exe`, and its letter badge follows the current space.
+  **Because:** the owner, 2026-10-21: "it opens a seperate window but functionally you just have two windows
+  mirroring each other." herdr keeps one current space per session (`AppState.active`), so every window on the
+  `nirvana` session draws the same space; the verb's `wt -w new` made one per folder (plan 12 O4a).
+  **Measured:** 18 controls in `nirvana/controls.d/p21.py`, each tripping alone; dry run 1112 to 1130; four plan 12
+  O4a controls re-aimed at the new verb and relaunch. The review found that `install.py` renames the running
+  `herdr.exe` to `herdr.old-*.exe`, so a check on `herdr.exe` alone read the open window as dead after every
+  install; the check takes both names.
+  **If you remove this:** each "Open Nirvana" on another folder opens a mirror window again.
 
 ## alpha 0.32.0: every spawn seated, orchestrator seat follows the mode (plan 20)
 

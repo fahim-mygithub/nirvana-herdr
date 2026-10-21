@@ -1721,15 +1721,16 @@ impl ClientShellState {
         let Some(snapshot) = self.snapshot.as_ref() else {
             return;
         };
-        let focused_ws_id = snapshot.focused_workspace_id.as_deref();
-        let folder = snapshot
-            .panes
-            .iter()
-            .find(|p| Some(p.workspace_id.as_str()) == focused_ws_id)
-            .and_then(|p| p.cwd.as_deref().or(p.foreground_cwd.as_deref()));
-
-        if let Some(folder_str) = folder {
-            let letter = crate::nirvana_launch::folder_letter(std::path::Path::new(folder_str));
+        let letter = crate::nirvana_taskbar::space_badge_letter(
+            snapshot.focused_workspace_id.as_deref(),
+            snapshot.panes.iter().map(|p| {
+                (
+                    p.workspace_id.as_str(),
+                    p.cwd.as_deref().or(p.foreground_cwd.as_deref()),
+                )
+            }),
+        );
+        if let Some(letter) = letter {
             if self.last_badge_letter != Some(letter) {
                 self.last_badge_letter = Some(letter);
                 let _ = crate::nirvana_taskbar::set_badge(letter);
