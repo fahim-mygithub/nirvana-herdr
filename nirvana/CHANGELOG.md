@@ -3,7 +3,7 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
-## alpha NEXT (p21): one Nirvana window
+## alpha 0.33.0: one Nirvana window (plan 21)
 
 Package `p21` (`P21-ORDER.md`, record `nirvana/plans/2026-10-21-21-records/p21.md`).
 
