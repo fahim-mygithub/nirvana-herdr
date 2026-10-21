@@ -38,6 +38,25 @@ class InstallTest(unittest.TestCase):
             self.assertEqual([p.read_bytes() for p in aside], [b"old"])
             self.assertFalse((root / "bin" / (install.STAMP + ".tmp")).exists())
 
+    def test_install_copies_both_binaries_and_moves_old_aside(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            built = tmp / install.EXE
+            built.write_bytes(b"new-herdr")
+            built_open = tmp / install.OPEN_EXE
+            built_open.write_bytes(b"new-open")
+            root = tmp / "home"
+            (root / "bin").mkdir(parents=True)
+            (root / "bin" / install.EXE).write_bytes(b"old-herdr")
+            (root / "bin" / install.OPEN_EXE).write_bytes(b"old-open")
+            target = install.install(built, root, "0.1.1", built_open=built_open)
+            self.assertEqual(target.read_bytes(), b"new-herdr")
+            self.assertEqual((root / "bin" / install.OPEN_EXE).read_bytes(), b"new-open")
+            herdr_aside = list((root / "bin").glob("herdr.old-*"))
+            self.assertEqual([p.read_bytes() for p in herdr_aside], [b"old-herdr"])
+            open_aside = list((root / "bin").glob("nirvana-open.old-*"))
+            self.assertEqual([p.read_bytes() for p in open_aside], [b"old-open"])
+
 
 class VersionTest(unittest.TestCase):
     def test_bump(self):

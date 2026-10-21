@@ -128,4 +128,31 @@ CONTROLS = (
         'the_badge_letter_follows_the_current_spaces_folder',
         'rust',
     ),
+    # Step 5 (§2): The launcher builds the open command
+    Control(
+        'p21_launcher_command_args',
+        'src/bin/nirvana-open.rs',
+        '    cmd.args(["--session", "nirvana", "nirvana", "open"]);\n',
+        '    cmd.args(["--session", "wrong", "nirvana", "open"]);\n',
+        'test_nirvana_open_command_args',
+        'rust',
+    ),
+    # Step 5 (§2): The verb command uses nirvana-open.exe
+    Control(
+        'p21_verb_command_names_launcher',
+        'nirvana/windows_shell.py',
+        'def nirvana_open_exe(home: Path) -> Path:\n    return Path(home) / "bin" / "nirvana-open.exe"\n',
+        'def nirvana_open_exe(home: Path) -> Path:\n    return Path(home) / "bin" / "wrong.exe"\n',
+        'nirvana.test_windows_shell.VerbTest.test_install_writes_the_verb_and_toast_id_and_removes_nirvana_cs_verb',
+        'python',
+    ),
+    # Step 5 (§2): install.py copies nirvana-open.exe
+    Control(
+        'p21_install_copies_nirvana_open',
+        'nirvana/install.py',
+        '    if built_open is not None and built_open.is_file():\n        install_binary(built_open, bin_dir / OPEN_EXE, "nirvana-open")\n',
+        '    if False and built_open is not None and built_open.is_file():\n        install_binary(built_open, bin_dir / OPEN_EXE, "nirvana-open")\n',
+        'nirvana.test_scripts.InstallTest.test_install_copies_both_binaries_and_moves_old_aside',
+        'python',
+    ),
 )

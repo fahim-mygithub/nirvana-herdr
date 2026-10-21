@@ -32,6 +32,7 @@ import windows_shell  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 EXE = "herdr.exe" if os.name == "nt" else "herdr"
+OPEN_EXE = "nirvana-open.exe" if os.name == "nt" else "nirvana-open"
 STAMP = "nirvana-version.txt"
 
 
@@ -47,18 +48,30 @@ def version() -> str:
     return (ROOT / "nirvana" / "VERSION").read_text(encoding="utf-8").strip()
 
 
-def install(built: Path, root: Path, ver: str) -> Path:
-    bin_dir = root / "bin"
+def install_binary(built: Path, target: Path, prefix: str) -> Path:
+    bin_dir = target.parent
     bin_dir.mkdir(parents=True, exist_ok=True)
-    target = bin_dir / EXE
-    for old in bin_dir.glob("herdr.old-*"):
+    for old in bin_dir.glob(f"{prefix}.old-*"):
         try:
             old.unlink()          # an old build still running (a supervisor, a server) stays locked; skip it
         except OSError:
             pass
     if target.exists():
-        target.rename(bin_dir / f"herdr.old-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}{target.suffix}")
+        target.rename(bin_dir / f"{prefix}.old-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}{target.suffix}")
     shutil.copy2(built, target)
+    return target
+
+
+def install(built: Path, root: Path, ver: str, built_open: Path | None = None) -> Path:
+    bin_dir = root / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    target = install_binary(built, bin_dir / EXE, "herdr")
+    if built_open is None:
+        candidate = built.parent / OPEN_EXE
+        if candidate.is_file():
+            built_open = candidate
+    if built_open is not None and built_open.is_file():
+        install_binary(built_open, bin_dir / OPEN_EXE, "nirvana-open")
     tmp = bin_dir / (STAMP + ".tmp")
     tmp.write_bytes((ver + "\n").encode("utf-8"))
     os.replace(tmp, bin_dir / STAMP)
@@ -77,14 +90,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"install: cargo build failed (exit {done.returncode}); nothing installed")
             return done.returncode
     built = ROOT / "target" / "release" / EXE
+    built_open = ROOT / "target" / "release" / OPEN_EXE
     if not built.exists():
         print(f"install: {built} is missing; run without --no-build")
+        return 2
+    if not built_open.exists():
+        print(f"install: {built_open} is missing; run without --no-build")
         return 2
     ver = version()
     root = home()
     plugin = windows_shell.install_plugin(root)
     print(f"installed the Nirvana Claude plugin at {plugin}")
-    target = install(built, root, ver)
+    target = install(built, root, ver, built_open=built_open)
     print(f"installed Nirvana-Herdr alpha {ver} at {target}")
     if os.name == "nt" and not ns.no_shell:
         report = windows_shell.install_all(root, font=not ns.no_font)

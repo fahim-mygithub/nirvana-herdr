@@ -137,7 +137,7 @@ CONTROLS = (
 
     # install.py's Windows side (nirvana/windows_shell.py) and the plugin's files.
     Control("o4a_py_verb_window", "nirvana/windows_shell.py",
-            "return (f'\"{wt}\" -w new -p", "return (f'\"{wt}\" -w last -p",
+            'return f\'"{launcher}" "{token}"\'', 'return f\'"{launcher}"\'',
             "nirvana.test_windows_shell.VerbTest.test_the_verb_runs_the_window_command_on_the_clicked_folder",
             "python"),
     Control("o4a_py_verb_key_collides", "nirvana/windows_shell.py",
@@ -149,10 +149,10 @@ CONTROLS = (
             "nirvana.test_windows_shell.VerbTest.test_install_writes_the_verb_and_toast_id_and_removes_nirvana_cs_verb",
             "python"),
     Control("o4a_py_old_verb_first", "nirvana/windows_shell.py",
-            '    report["verb"] = install_verb(reg, base, wt, herdr_exe(home), icon_path(home))\n'
+            '    report["verb"] = install_verb(reg, base, nirvana_open_exe(home), icon_path(home))\n'
             '    report["old_verb_removed"] = remove_old_verb(reg, base)\n',
             '    report["old_verb_removed"] = remove_old_verb(reg, base)  # sabotage: removed first\n'
-            '    report["verb"] = install_verb(reg, base, wt, herdr_exe(home), icon_path(home))\n',
+            '    report["verb"] = install_verb(reg, base, nirvana_open_exe(home), icon_path(home))\n',
             "nirvana.test_windows_shell.VerbTest.test_install_writes_the_verb_and_toast_id_and_removes_nirvana_cs_verb",
             "python"),
     Control("o4a_py_toast_no_icon", "nirvana/windows_shell.py",

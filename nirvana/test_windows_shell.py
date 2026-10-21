@@ -17,13 +17,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import windows_shell as ws  # noqa: E402
 
 # The line a click runs.
-GOLDEN_VERB = (r'"C:\L\Microsoft\WindowsApps\wt.exe" -w new -p "Nirvana" -d "%1" "C:\H\bin\herdr.exe" '
-               r'--session nirvana nirvana window "%1"')
+GOLDEN_VERB = r'"C:\H\bin\nirvana-open.exe" "%1"'
 
 
 class VerbTest(unittest.TestCase):
     def test_the_verb_runs_the_window_command_on_the_clicked_folder(self):
-        self.assertEqual(ws.verb_command(r"C:\L\Microsoft\WindowsApps\wt.exe", r"C:\H\bin\herdr.exe", "%1"),
+        self.assertEqual(ws.verb_command(r"C:\H\bin\nirvana-open.exe", "%1"),
                          GOLDEN_VERB)
 
     def test_the_verb_key_is_neither_old_nirvanas_nor_nirvana_cs(self):
@@ -61,8 +60,7 @@ class VerbTest(unittest.TestCase):
             self.assertEqual(reg.get(rf"{base}\{sub}", "MUIVerb"), "Open Nirvana")
             self.assertEqual(reg.get(rf"{base}\{sub}", "Icon"), str(home / "nirvana" / "assets" / "nirvana.ico"))
             command = reg.get(rf"{base}\{sub}\command", None)
-            self.assertEqual(command, ws.verb_command(r"C:\L\Microsoft\WindowsApps\wt.exe",
-                                                      home / "bin" / "herdr.exe", token))
+            self.assertEqual(command, ws.verb_command(home / "bin" / "nirvana-open.exe", token))
         for sub in ws.OLD_VERBS:
             self.assertFalse(reg.exists(rf"{base}\{sub}"), sub)
             self.assertFalse(reg.exists(rf"{base}\{sub}\command"), sub)
@@ -117,7 +115,7 @@ class RealRegistryTest(unittest.TestCase):
         for sub in ws.OLD_VERBS:
             self.reg.set(rf"{self.base}\{sub}", "MUIVerb", "Open Nirvana - CC")
             self.reg.set(rf"{self.base}\{sub}\command", None, "x")
-        written = ws.install_verb(self.reg, self.base, r"C:\wt.exe", r"C:\h\herdr.exe", r"C:\h\n.ico")
+        written = ws.install_verb(self.reg, self.base, r"C:\h\bin\nirvana-open.exe", r"C:\h\n.ico")
         ws.register_toast_id(self.reg, self.base, r"C:\h\n.png")
         removed = ws.remove_old_verb(self.reg, self.base)
         read = ws.read_verb(self.reg, self.base)

@@ -17,8 +17,8 @@ owner's machine (read 2026-10-17) and `NirvanaC` holds Nirvana-C's; a second wri
 Both are retired after the new verb is written: Nirvana-C's outright, old Nirvana's after a JSON backup and only
 when its command names old Nirvana's launcher (`retire_old_nirvana_verb`).
 
-The verb runs Windows Terminal directly, so there is no launcher process and no console flash: `wt -w new -p
-Nirvana -d "%1" "<home>\\bin\\herdr.exe" --session nirvana nirvana window "%1"`. `-w new` keeps the folder's own
+The verb runs nirvana-open.exe directly, so there is no console flash:
+`"<home>\\bin\\nirvana-open.exe" "%1"` (and `"%V"` for the background verb). `-w new` keeps the folder's own
 window (the taskbar id is per window), and `herdr nirvana window` starts the server, Nirvana Claude, the button,
 the badge and the toast (src/nirvana_launch.rs). Limits: a folder whose name has a `;` is split by Windows Terminal,
 which reads `;` as its own command separator; a drive root arrives as `C:"` and herdr puts the `\\` back.
@@ -98,6 +98,10 @@ def claude_config_dir(env: dict | None = None) -> Path:
 
 def herdr_exe(home: Path) -> Path:
     return Path(home) / "bin" / "herdr.exe"
+
+
+def nirvana_open_exe(home: Path) -> Path:
+    return Path(home) / "bin" / "nirvana-open.exe"
 
 
 def icon_path(home: Path) -> Path:
@@ -295,17 +299,15 @@ class FakeRegistry:
         return bool(found)
 
 
-def verb_command(wt: Path | str, herdr: Path | str, token: str) -> str:
-    """The command a click runs. A pinned button's relaunch line (src/nirvana_taskbar.rs `relaunch_command`) is the
-    same window in a shorter form: the window property takes at most 255 characters, measured 2026-10-17."""
-    return (f'"{wt}" -w new -p "{PROFILE_NAME}" -d "{token}" "{herdr}" --session {SESSION} '
-            f'nirvana window "{token}"')
+def verb_command(launcher: Path | str, token: str) -> str:
+    """The command a click runs: nirvana-open starts herdr without a console window."""
+    return f'"{launcher}" "{token}"'
 
 
-def install_verb(reg, base: str, wt: Path | str, herdr: Path | str, icon: Path | str) -> dict:
+def install_verb(reg, base: str, launcher: Path | str, icon: Path | str) -> dict:
     written = {}
     for sub, token in VERBS:
-        command = verb_command(wt, herdr, token)
+        command = verb_command(launcher, token)
         reg.set(rf"{base}\{sub}", "MUIVerb", VERB_TEXT)
         reg.set(rf"{base}\{sub}", "Icon", str(icon))
         reg.set(rf"{base}\{sub}\command", None, command)
@@ -450,7 +452,7 @@ def install_all(home: Path, *, reg=None, base: str = CLASSES, fragments: Path | 
     else:
         report["font"] = "already installed" if font else "skipped"
     report["toast"] = register_toast_id(reg, base, toast_icon_path(home))
-    report["verb"] = install_verb(reg, base, wt, herdr_exe(home), icon_path(home))
+    report["verb"] = install_verb(reg, base, nirvana_open_exe(home), icon_path(home))
     report["old_verb_removed"] = remove_old_verb(reg, base)
     report["old_nirvana_verb_retired"] = retire_old_nirvana_verb(reg, base,
                                                                  home / "nirvana" / "backup" / "old-nirvana-verb.json")
