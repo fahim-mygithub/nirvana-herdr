@@ -77,6 +77,7 @@ impl Identity {
 /// The longest `RelaunchCommand` the window property store takes. Measured 2026-10-17 on this machine (Windows 11
 /// 26200) by `IPropertyStore::SetValue` on a Terminal window: 255 characters set, 256 to 259 gave E_INVALIDARG, 260
 /// and more ERROR_INSUFFICIENT_BUFFER.
+#[cfg(test)]
 pub const RELAUNCH_MAX: usize = 255;
 
 /// What a pinned Nirvana button starts: `"<home>\bin\nirvana-open.exe"`, which focuses or opens the one window (plan 21 §5).
@@ -281,7 +282,7 @@ pub fn flash_window(hwnd: usize) -> std::io::Result<()> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         FlashWindowEx, FLASHWINFO, FLASHW_TIMERNOFG, FLASHW_TRAY,
     };
-    let mut info = FLASHWINFO {
+    let info = FLASHWINFO {
         cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
         hwnd: hwnd as _,
         dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG,
@@ -289,7 +290,7 @@ pub fn flash_window(hwnd: usize) -> std::io::Result<()> {
         dwTimeout: 0,
     };
     // SAFETY: info has its cbSize set correctly, FlashWindowEx safely handles invalid window handles.
-    unsafe { FlashWindowEx(&mut info) };
+    unsafe { FlashWindowEx(&info) };
     Ok(())
 }
 

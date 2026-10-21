@@ -63,6 +63,7 @@ pub const TOAST_APP_ID: &str = "Nirvana.Herdr";
 pub const WINDOW_APP_ID: &str = "Nirvana.Herdr.Window";
 /// The taskbar id's prefix; each folder gets its own (P7: "Two windows with one id combine into one button showing
 /// only the last badge").
+#[cfg(test)]
 pub const WINDOW_APP_ID_PREFIX: &str = "Nirvana.Herdr.";
 /// What the taskbar button and the toast call the app.
 pub const DISPLAY_NAME: &str = "Nirvana";
@@ -344,6 +345,7 @@ pub fn folder_hash(folder: &Path) -> String {
     digest[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+#[cfg(test)]
 pub fn window_app_id(folder: &Path) -> String {
     format!("{WINDOW_APP_ID_PREFIX}{}", folder_hash(folder))
 }
@@ -1252,11 +1254,11 @@ mod tests {
         assert_eq!(read_window_mark(&home), Some(mark));
 
         // Removing with a different pid fails and keeps the mark
-        assert_eq!(remove_window_mark(&home, 9999).unwrap(), false);
+        assert!(!remove_window_mark(&home, 9999).unwrap());
         assert_eq!(read_window_mark(&home), Some(mark));
 
         // Removing with the mark's pid succeeds and deletes the file
-        assert_eq!(remove_window_mark(&home, 4321).unwrap(), true);
+        assert!(remove_window_mark(&home, 4321).unwrap());
         assert_eq!(read_window_mark(&home), None);
         assert!(!window_mark_path(&home).exists());
 
