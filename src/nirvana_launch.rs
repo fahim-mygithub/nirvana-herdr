@@ -530,7 +530,8 @@ pub fn is_herdr_process(pid: u32) -> bool {
     }
     let mut path = vec![0_u16; 1024];
     let mut len = path.len() as u32;
-    let success = unsafe { QueryFullProcessImageNameW(handle, 0, path.as_mut_ptr(), &mut len) } != 0;
+    let success =
+        unsafe { QueryFullProcessImageNameW(handle, 0, path.as_mut_ptr(), &mut len) } != 0;
     unsafe { CloseHandle(handle) };
     if !success || len == 0 {
         return false;
@@ -640,7 +641,13 @@ pub fn spawn_window(folder: Option<&Path>) -> std::io::Result<()> {
     if let Some(folder) = folder {
         cmd.args(["-d", &folder.to_string_lossy()]);
         cmd.arg(&herdr);
-        cmd.args(["--session", SESSION, "nirvana", "window", &folder.to_string_lossy()]);
+        cmd.args([
+            "--session",
+            SESSION,
+            "nirvana",
+            "window",
+            &folder.to_string_lossy(),
+        ]);
     } else {
         cmd.arg(&herdr);
         cmd.args(["--session", SESSION, "nirvana", "window"]);
@@ -763,7 +770,8 @@ fn window(folder: Option<&Path>) -> std::io::Result<i32> {
         if let Some(mark) = read_window_mark(home) {
             if is_live_window_mark(&mark) && mark.pid != current_pid {
                 if let Some(folder) = folder {
-                    let folder = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
+                    let folder =
+                        std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
                     let fresh = !crate::server::autodetect::is_server_listening().unwrap_or(false);
                     let preset = crate::nirvana_preset::at_open(&folder);
                     if let Err(err) = invoke_open(&folder, fresh, true) {

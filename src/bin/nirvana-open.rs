@@ -50,7 +50,10 @@ mod tests {
     fn test_nirvana_open_command_args() {
         let cmd = build_command(std::path::Path::new("herdr.exe"), Some("C:\\proj"));
         let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
-        assert_eq!(args, &["--session", "nirvana", "nirvana", "open", "C:\\proj"]);
+        assert_eq!(
+            args,
+            &["--session", "nirvana", "nirvana", "open", "C:\\proj"]
+        );
     }
 
     #[test]

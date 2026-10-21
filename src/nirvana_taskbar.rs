@@ -239,8 +239,8 @@ pub fn toast_logo_path(letter: char) -> PathBuf {
 // The menu's claim runs only outside tests (client/shell/nirvana_new_menu.rs), and terminal_window is used in step 2.
 #[allow(unused_imports)]
 pub use windows_impl::{
-    claim_menu_window, claim_window, is_window_claimed, letter_coverage, release_window,
-    set_badge, terminal_window,
+    claim_menu_window, claim_window, is_window_claimed, letter_coverage, release_window, set_badge,
+    terminal_window,
 };
 
 #[cfg(not(windows))]
@@ -507,7 +507,8 @@ mod windows_impl {
         let dummy = std::path::PathBuf::from("");
         let folder = folder.unwrap_or(&dummy);
         let letter = crate::nirvana_launch::folder_letter(folder);
-        let home = crate::nirvana::home().ok_or_else(|| std::io::Error::other("no nirvana home"))?;
+        let home =
+            crate::nirvana::home().ok_or_else(|| std::io::Error::other("no nirvana home"))?;
         let herdr = super::herdr_exe();
         let identity = Identity::window(&home, &herdr, letter);
         let steps = set_steps(&identity);
