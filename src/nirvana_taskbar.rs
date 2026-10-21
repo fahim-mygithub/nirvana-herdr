@@ -258,7 +258,7 @@ pub use windows_impl::{
 };
 
 #[cfg(not(windows))]
-pub fn claim_window(_folder: &Path) -> std::io::Result<()> {
+pub fn claim_window(_folder: Option<&Path>) -> std::io::Result<()> {
     Err(std::io::Error::other("the taskbar button is Windows only"))
 }
 #[cfg(not(windows))]
@@ -272,6 +272,31 @@ pub fn letter_coverage(_letter: char, _size: u32) -> Option<Vec<u8>> {
 #[cfg(not(windows))]
 pub fn terminal_window() -> Option<usize> {
     None
+}
+#[cfg(not(windows))]
+pub fn flash_window(_hwnd: usize) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Plan 21 §5: FlashWindowEx on the mark's window handle with FLASHW_TRAY | FLASHW_TIMERNOFG.
+#[cfg(windows)]
+pub fn flash_window(hwnd: usize) -> std::io::Result<()> {
+    if hwnd == 0 {
+        return Ok(());
+    }
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FlashWindowEx, FLASHWINFO, FLASHW_TIMERNOFG, FLASHW_TRAY,
+    };
+    let mut info = FLASHWINFO {
+        cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
+        hwnd: hwnd as _,
+        dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG,
+        uCount: 0,
+        dwTimeout: 0,
+    };
+    // SAFETY: info has its cbSize set correctly, FlashWindowEx safely handles invalid window handles.
+    unsafe { FlashWindowEx(&mut info) };
+    Ok(())
 }
 
 /// The toast "Nirvana · <folder>" with the folder's letter as its picture.
@@ -470,8 +495,10 @@ mod windows_impl {
     }
 
     /// Makes this process's Terminal window a Nirvana window for `folder`: its own button with the mark, the letter.
-    pub fn claim_window(folder: &Path) -> std::io::Result<()> {
+    pub fn claim_window(folder: Option<&Path>) -> std::io::Result<()> {
         let window = terminal_window().ok_or_else(|| std::io::Error::other("no console window"))?;
+        let dummy = std::path::PathBuf::from("");
+        let folder = folder.unwrap_or(&dummy);
         let identity = Identity::for_folder(folder, &super::herdr_exe());
         let steps = set_steps(&identity);
         on_com_thread(move || {
@@ -498,7 +525,7 @@ mod windows_impl {
         {
             return;
         }
-        if let Err(err) = claim_window(folder) {
+        if let Err(err) = claim_window(Some(folder)) {
             tracing::warn!(%err, "nirvana: the taskbar identity was not set");
         }
     }

@@ -567,11 +567,137 @@ pub fn is_live_window_mark(mark: &WindowMark) -> bool {
     )
 }
 
-const USAGE: &str = "usage: herdr --session nirvana nirvana window <folder>
+/// The route taken by `herdr nirvana open [<folder>]` (plan 21 §3.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenRoute {
+    FocusOrOpenFolder { folder: PathBuf, hwnd: usize },
+    FlashWindow { hwnd: usize },
+    StartWindowFolder { folder: PathBuf },
+    StartWindowNoFolder,
+}
+
+/// Pure routing logic over live mark and folder inputs (plan 21 §3.2).
+pub fn route_open(live_mark: Option<&WindowMark>, folder: Option<&Path>) -> OpenRoute {
+    match (live_mark, folder) {
+        (Some(mark), Some(folder)) => OpenRoute::FocusOrOpenFolder {
+            folder: folder.to_path_buf(),
+            hwnd: mark.hwnd,
+        },
+        (Some(mark), None) => OpenRoute::FlashWindow { hwnd: mark.hwnd },
+        (None, Some(folder)) => OpenRoute::StartWindowFolder {
+            folder: folder.to_path_buf(),
+        },
+        (None, None) => OpenRoute::StartWindowNoFolder,
+    }
+}
+
+pub const OPEN_LOG_FILE: &str = "open.log";
+
+/// `<home>/nirvana/open.log`
+pub fn open_log_path(home: &Path) -> PathBuf {
+    home.join("nirvana").join(OPEN_LOG_FILE)
+}
+
+/// Appends a one-line failure description to `<home>/nirvana/open.log` (plan 21 §3.2).
+pub fn log_open_error(home: &Path, error: &str) {
+    let path = open_log_path(home);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    use std::io::Write;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(file, "[{now}] {error}");
+    }
+}
+
+/// Spawns a new Windows Terminal window running herdr nirvana window (plan 21 §3.2).
+pub fn spawn_window(folder: Option<&Path>) -> std::io::Result<()> {
+    let herdr = crate::nirvana_taskbar::herdr_exe();
+    let mut cmd = std::process::Command::new("wt.exe");
+    cmd.args(["-w", "new", "-p", DISPLAY_NAME]);
+    if let Some(folder) = folder {
+        cmd.args(["-d", &folder.to_string_lossy()]);
+        cmd.arg(&herdr);
+        cmd.args(["--session", SESSION, "nirvana", "window", &folder.to_string_lossy()]);
+    } else {
+        cmd.arg(&herdr);
+        cmd.args(["--session", SESSION, "nirvana", "window"]);
+    }
+    cmd.spawn()?;
+    Ok(())
+}
+
+/// `herdr nirvana open [<folder>]` (plan 21 §3.2).
+pub fn open(folder: Option<&Path>) -> std::io::Result<i32> {
+    let home = match crate::nirvana::home() {
+        Some(h) => h,
+        None => {
+            eprintln!("nirvana: neither NIRVANA_HERDR_HOME nor LOCALAPPDATA is set");
+            return Ok(1);
+        }
+    };
+    let mark = read_window_mark(&home);
+    let live_mark = mark.as_ref().filter(|m| is_live_window_mark(m));
+    let route = route_open(live_mark, folder);
+
+    match route {
+        OpenRoute::FocusOrOpenFolder { folder, hwnd } => {
+            let res = (|| -> std::io::Result<()> {
+                let fresh = !crate::server::autodetect::is_server_listening().unwrap_or(false);
+                let preset = crate::nirvana_preset::at_open(&folder);
+                invoke_open(&folder, fresh)?;
+                crate::nirvana_taskbar::flash_window(hwnd)?;
+                crate::nirvana_taskbar::toast_open_with(&folder, preset.as_deref());
+                Ok(())
+            })();
+            if let Err(err) = res {
+                log_open_error(&home, &format!("failed to open into live window: {err}"));
+                if let Err(spawn_err) = spawn_window(Some(&folder)) {
+                    log_open_error(&home, &format!("failed to spawn window: {spawn_err}"));
+                }
+            }
+        }
+        OpenRoute::FlashWindow { hwnd } => {
+            if let Err(err) = crate::nirvana_taskbar::flash_window(hwnd) {
+                log_open_error(&home, &format!("failed to flash window: {err}"));
+            }
+        }
+        OpenRoute::StartWindowFolder { folder } => {
+            if let Err(err) = spawn_window(Some(&folder)) {
+                log_open_error(&home, &format!("failed to spawn window: {err}"));
+            }
+        }
+        OpenRoute::StartWindowNoFolder => {
+            if let Err(err) = spawn_window(None) {
+                log_open_error(&home, &format!("failed to spawn window: {err}"));
+            }
+        }
+    }
+    Ok(0)
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+}
+
+const USAGE: &str = "usage: herdr --session nirvana nirvana window [<folder>]
   Opens Nirvana Claude on <folder> in this terminal: starts the session's server if it is not running, focuses the
   Nirvana Claude already on the folder or opens a space with one, marks this Windows Terminal window with the
   Nirvana button and the folder's letter, and runs the herdr client until it exits. Explorer's \"Open Nirvana\"
   runs it.
+       herdr nirvana open [<folder>]
+  Routes to the live Nirvana window if one is open (focusing or opening the space and flashing the window),
+  otherwise starts a window.
        herdr nirvana digest|guard-spawn|subagent-stop|stop|statusline
   The Nirvana Claude plugin's hooks and statusline (plan 12 O4b); each reads Claude Code's JSON on stdin.
   Before Claude starts, the window applies the folder's preset (plan 13; `herdr preload why <folder>`).";
@@ -580,7 +706,19 @@ const USAGE: &str = "usage: herdr --session nirvana nirvana window <folder>
 pub fn cli(args: &[String]) -> std::io::Result<()> {
     match args.first().map(String::as_str) {
         Some("window") if args.len() == 2 => {
-            let code = window(&verb_folder(&args[1]))?;
+            let code = window(Some(&verb_folder(&args[1])))?;
+            std::process::exit(code);
+        }
+        Some("window") if args.len() == 1 => {
+            let code = window(None)?;
+            std::process::exit(code);
+        }
+        Some("open") if args.len() == 2 => {
+            let code = open(Some(&verb_folder(&args[1])))?;
+            std::process::exit(code);
+        }
+        Some("open") if args.len() == 1 => {
+            let code = open(None)?;
             std::process::exit(code);
         }
         // Plan 12 O4b: the plugin's hooks and statusline.
@@ -595,39 +733,93 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
 }
 
 /// The verb's window: the server, the space, the button and badge, the toast, then the client until it exits.
-fn window(folder: &Path) -> std::io::Result<i32> {
-    if !folder.is_dir() {
-        eprintln!("nirvana: {} is not a folder", folder.display());
-        hold_window();
-        return Ok(2);
+fn window(folder: Option<&Path>) -> std::io::Result<i32> {
+    if let Some(folder) = folder {
+        if !folder.is_dir() {
+            eprintln!("nirvana: {} is not a folder", folder.display());
+            hold_window();
+            return Ok(2);
+        }
     }
-    let folder = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
+    let home = crate::nirvana::home();
+    let current_pid = std::process::id();
+
+    // Check if another window is already live (plan 21 §3.2)
+    if let Some(home) = &home {
+        if let Some(mark) = read_window_mark(home) {
+            if is_live_window_mark(&mark) && mark.pid != current_pid {
+                if let Some(folder) = folder {
+                    let folder = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
+                    let fresh = !crate::server::autodetect::is_server_listening().unwrap_or(false);
+                    let preset = crate::nirvana_preset::at_open(&folder);
+                    if let Err(err) = invoke_open(&folder, fresh) {
+                        eprintln!("nirvana: Nirvana Claude did not start: {err}");
+                    }
+                    let _ = crate::nirvana_taskbar::flash_window(mark.hwnd);
+                    crate::nirvana_taskbar::toast_open_with(&folder, preset.as_deref());
+                    return Ok(0);
+                } else {
+                    let _ = crate::nirvana_taskbar::flash_window(mark.hwnd);
+                    return Ok(0);
+                }
+            }
+        }
+    }
+
+    let folder_abs = folder.map(|f| std::path::absolute(f).unwrap_or_else(|_| f.to_path_buf()));
     let fresh = !crate::server::autodetect::is_server_listening().unwrap_or(false);
     if fresh {
-        // The server seeds its first space from its start folder; the open below then takes that space.
-        std::env::set_current_dir(&folder)?;
+        let start_dir = folder_abs
+            .clone()
+            .or_else(user_home_dir)
+            .unwrap_or_else(|| PathBuf::from("."));
+        std::env::set_current_dir(&start_dir)?;
         crate::server::autodetect::spawn_server_daemon()?;
         crate::server::autodetect::wait_for_server_socket(
             &crate::server::socket_paths::client_socket_path(),
             std::time::Duration::from_secs(15),
         )?;
     }
-    // Plan 13 §4: the folder's preset, in this process and before Claude starts; the server's launch then names the
-    // generated file. Jev waits at most 3 s, and a failure leaves the plugin's own settings.
-    let preset = crate::nirvana_preset::at_open(&folder);
-    if let Err(err) = invoke_open(&folder, fresh) {
-        // The window still opens: the space and its shell are there to see why.
-        eprintln!("nirvana: Nirvana Claude did not start: {err}");
+
+    let preset = folder_abs
+        .as_ref()
+        .and_then(|f| crate::nirvana_preset::at_open(f));
+    if let Some(folder) = &folder_abs {
+        if let Err(err) = invoke_open(folder, fresh) {
+            eprintln!("nirvana: Nirvana Claude did not start: {err}");
+        }
     }
-    let claimed = crate::nirvana_taskbar::claim_window(&folder);
+
+    let claimed = crate::nirvana_taskbar::claim_window(folder_abs.as_deref());
     if let Err(err) = &claimed {
-        // This command runs before herdr's logging starts, so the window itself says it.
         eprintln!("nirvana: the taskbar button was not set: {err}");
     }
-    crate::nirvana_taskbar::toast_open_with(&folder, preset.as_deref());
-    std::env::set_var(WINDOW_FOLDER_ENV, &folder);
+    if let Some(folder) = &folder_abs {
+        crate::nirvana_taskbar::toast_open_with(folder, preset.as_deref());
+        std::env::set_var(WINDOW_FOLDER_ENV, folder);
+    }
+
+    // Write the mark now that the window is claimed
+    if let Some(home) = &home {
+        let hwnd = crate::nirvana_taskbar::terminal_window().unwrap_or(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mark = WindowMark {
+            pid: current_pid,
+            hwnd,
+            at: now,
+        };
+        let _ = write_window_mark(home, &mark);
+    }
+
     let code = crate::nirvana::supervise_code(&[]);
-    // Badge first, then the properties (P7): the Terminal window outlives this process.
+
+    // On exit: remove the mark only when mark's pid is its own
+    if let Some(home) = &home {
+        let _ = remove_window_mark(home, current_pid);
+    }
     if claimed.is_ok() {
         crate::nirvana_taskbar::release_window();
     }
@@ -1059,6 +1251,63 @@ mod tests {
 
         std::fs::write(&path, b"not json at all").unwrap();
         assert_eq!(read_window_mark(&home), None);
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn route_table_covers_all_four_rows_as_data() {
+        // Plan 21 §3.2 and §7: all four rows from fixed liveness and folder inputs as data
+        let mark = WindowMark {
+            pid: 1234,
+            hwnd: 5678,
+            at: 1729500000,
+        };
+        let folder = Path::new(r"C:\work\print");
+
+        // Row 1: live mark = yes, folder = yes
+        assert_eq!(
+            route_open(Some(&mark), Some(folder)),
+            OpenRoute::FocusOrOpenFolder {
+                folder: folder.to_path_buf(),
+                hwnd: 5678,
+            }
+        );
+
+        // Row 2: live mark = yes, folder = no
+        assert_eq!(
+            route_open(Some(&mark), None),
+            OpenRoute::FlashWindow { hwnd: 5678 }
+        );
+
+        // Row 3: live mark = no, folder = yes
+        assert_eq!(
+            route_open(None, Some(folder)),
+            OpenRoute::StartWindowFolder {
+                folder: folder.to_path_buf(),
+            }
+        );
+
+        // Row 4: live mark = no, folder = no
+        assert_eq!(route_open(None, None), OpenRoute::StartWindowNoFolder);
+    }
+
+    #[test]
+    fn open_log_appends_errors() {
+        // Plan 21 §3.2: open.log records failures with one line per error
+        let home = scratch_home("open-log");
+        let log = open_log_path(&home);
+        assert!(!log.exists());
+
+        log_open_error(&home, "first error message");
+        assert!(log.is_file());
+        let text1 = std::fs::read_to_string(&log).unwrap();
+        assert!(text1.contains("first error message"));
+
+        log_open_error(&home, "second error message");
+        let text2 = std::fs::read_to_string(&log).unwrap();
+        assert!(text2.contains("first error message"));
+        assert!(text2.contains("second error message"));
 
         let _ = std::fs::remove_dir_all(&home);
     }

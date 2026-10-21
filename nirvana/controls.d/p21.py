@@ -29,4 +29,49 @@ CONTROLS = (
         'torn_or_empty_window_mark_reads_as_no_mark',
         'rust',
     ),
+    # Step 2 (§3.2): Route Row 1 (live mark + folder -> focus or open)
+    Control(
+        'p21_route_focus_or_open',
+        'src/nirvana_launch.rs',
+        '        (Some(mark), Some(folder)) => OpenRoute::FocusOrOpenFolder {\n            folder: folder.to_path_buf(),\n            hwnd: mark.hwnd,\n        },\n',
+        '        (Some(mark), Some(_folder)) => OpenRoute::FlashWindow { hwnd: mark.hwnd },\n',
+        'route_table_covers_all_four_rows_as_data',
+        'rust',
+    ),
+    # Step 2 (§3.2): Route Row 2 (live mark + no folder -> flash)
+    Control(
+        'p21_route_flash_window',
+        'src/nirvana_launch.rs',
+        '        (Some(mark), None) => OpenRoute::FlashWindow { hwnd: mark.hwnd },\n',
+        '        (Some(_mark), None) => OpenRoute::StartWindowNoFolder,\n',
+        'route_table_covers_all_four_rows_as_data',
+        'rust',
+    ),
+    # Step 2 (§3.2): Route Row 3 (no mark + folder -> start window folder)
+    Control(
+        'p21_route_start_window_folder',
+        'src/nirvana_launch.rs',
+        '        (None, Some(folder)) => OpenRoute::StartWindowFolder {\n            folder: folder.to_path_buf(),\n        },\n',
+        '        (None, Some(_folder)) => OpenRoute::StartWindowNoFolder,\n',
+        'route_table_covers_all_four_rows_as_data',
+        'rust',
+    ),
+    # Step 2 (§3.2): Route Row 4 (no mark + no folder -> start window no folder)
+    Control(
+        'p21_route_start_window_no_folder',
+        'src/nirvana_launch.rs',
+        '        (None, None) => OpenRoute::StartWindowNoFolder,\n',
+        '        (None, None) => OpenRoute::FlashWindow { hwnd: 0 },\n',
+        'route_table_covers_all_four_rows_as_data',
+        'rust',
+    ),
+    # Step 2 (§3.2): open.log appends errors
+    Control(
+        'p21_open_log_appends',
+        'src/nirvana_launch.rs',
+        '        .append(true)\n',
+        '        .append(false)\n',
+        'open_log_appends_errors',
+        'rust',
+    ),
 )
