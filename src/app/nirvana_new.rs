@@ -48,10 +48,21 @@ impl App {
         self.nirvana_open_space(id, kind, cwd)
     }
 
+    fn mark_space_unseen_if_unfocused(&mut self, ws_idx: usize, new_space: bool) {
+        if new_space && self.state.outer_terminal_focus == Some(false) {
+            if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
+                let root_pane = ws.tabs[ws.active_tab].root_pane;
+                if let Some(pane) = ws.pane_state_mut(root_pane) {
+                    pane.seen = false;
+                }
+            }
+        }
+    }
+
     pub(crate) fn nirvana_open_folder(&mut self, id: String, rest: &str) -> String {
         use crate::app::api::responses::{encode_error, encode_success};
 
-        let (folder, fresh) = crate::nirvana_launch::parse_open_command(rest);
+        let (folder, fresh, new_space) = crate::nirvana_launch::parse_open_command(rest);
         if !folder.is_absolute() {
             return encode_error(
                 id,
@@ -62,6 +73,7 @@ impl App {
         if let Some(ws_idx) = self.nirvana_space_on(&folder) {
             self.state.switch_workspace(ws_idx);
             self.state.mode = crate::app::Mode::Terminal;
+            self.mark_space_unseen_if_unfocused(ws_idx, new_space);
             tracing::info!(folder = %folder.display(), "nirvana: focused Nirvana Claude on the folder");
             return encode_success(id, crate::api::schema::ResponseResult::Ok {});
         }
@@ -69,10 +81,15 @@ impl App {
             if let Some((ws_idx, pane_id)) = self.nirvana_seeded_space(&folder) {
                 self.state.switch_workspace(ws_idx);
                 self.state.mode = crate::app::Mode::Terminal;
+                self.mark_space_unseen_if_unfocused(ws_idx, new_space);
                 return self.nirvana_start_response(id, ws_idx, pane_id, NewKind::Nirvana, &folder);
             }
         }
-        self.nirvana_open_space(id, NewKind::Nirvana, folder)
+        let res = self.nirvana_open_space(id, NewKind::Nirvana, folder);
+        if let Some(ws_idx) = self.state.active {
+            self.mark_space_unseen_if_unfocused(ws_idx, new_space);
+        }
+        res
     }
 
     fn nirvana_open_space(&mut self, id: String, kind: NewKind, cwd: PathBuf) -> String {
@@ -443,7 +460,7 @@ mod tests {
         }
         let response = app.nirvana_open_folder(
             "o".into(),
-            &crate::nirvana_launch::open_command_id(&folder, false)
+            &crate::nirvana_launch::open_command_id(&folder, false, false)
                 [crate::nirvana_launch::OPEN_COMMAND.len()..],
         );
         assert!(response.contains("\"ok\""), "{response}");
@@ -453,6 +470,34 @@ mod tests {
         let pane = plain.state.workspaces[0].tabs[0].root_pane;
         let _ = plain.nirvana_start_response("c".into(), 0, pane, NewKind::ClaudeCode, &folder);
         assert_eq!(plain.nirvana_space_on(&folder), None);
+    }
+
+    #[tokio::test]
+    async fn open_with_new_space_flag_and_unfocused_terminal_leaves_root_pane_unseen() {
+        let _guard = crate::nirvana::with_test_home("unseen_open");
+        let folder = std::env::temp_dir();
+        let mut app = app_with_a_space(&folder);
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let _ = app.nirvana_start_response("n".into(), 0, pane, NewKind::Nirvana, &folder);
+
+        // With new_space = true and outer_terminal_focus = Some(false): pane is unseen
+        app.state.outer_terminal_focus = Some(false);
+        let cmd = crate::nirvana_launch::open_command_id(&folder, false, true);
+        let rest = &cmd[crate::nirvana_launch::OPEN_COMMAND.len()..];
+        let _ = app.nirvana_open_folder("o1".into(), rest);
+        assert!(!app.state.workspaces[0].panes[&pane].seen);
+
+        // With new_space = true and outer_terminal_focus = Some(true): pane is seen
+        app.state.outer_terminal_focus = Some(true);
+        let _ = app.nirvana_open_folder("o2".into(), rest);
+        assert!(app.state.workspaces[0].panes[&pane].seen);
+
+        // With new_space = false and outer_terminal_focus = Some(false): pane is seen
+        app.state.outer_terminal_focus = Some(false);
+        let cmd_no_new = crate::nirvana_launch::open_command_id(&folder, false, false);
+        let rest_no_new = &cmd_no_new[crate::nirvana_launch::OPEN_COMMAND.len()..];
+        let _ = app.nirvana_open_folder("o3".into(), rest_no_new);
+        assert!(app.state.workspaces[0].panes[&pane].seen);
     }
 
     #[tokio::test]

@@ -55,6 +55,7 @@ pub const NEW_COMMAND: &str = "nirvana.new:";
 /// window's own click started the server, then the folder.
 pub const OPEN_COMMAND: &str = "nirvana.open:";
 pub const OPEN_FRESH: &str = "fresh:";
+pub const OPEN_NEW: &str = "new:";
 /// The fork's own toast app id, registered by `install.py` and by the toast code. One id for every toast, so the
 /// header always reads "Nirvana" with the mark.
 pub const TOAST_APP_ID: &str = "Nirvana.Herdr";
@@ -389,20 +390,31 @@ pub fn verb_folder(arg: &str) -> PathBuf {
 }
 
 /// The `command.invoke` id the verb's window sends.
-pub fn open_command_id(folder: &Path, fresh: bool) -> String {
+pub fn open_command_id(folder: &Path, fresh: bool, new_space: bool) -> String {
     format!(
-        "{OPEN_COMMAND}{}{}",
+        "{OPEN_COMMAND}{}{}{}",
+        if new_space { OPEN_NEW } else { "" },
         if fresh { OPEN_FRESH } else { "" },
         folder.display()
     )
 }
 
-/// The folder and the fresh flag back from an `OPEN_COMMAND` id's tail.
-pub fn parse_open_command(rest: &str) -> (PathBuf, bool) {
-    match rest.strip_prefix(OPEN_FRESH) {
-        Some(folder) => (PathBuf::from(folder), true),
-        None => (PathBuf::from(rest), false),
+/// The folder, the fresh flag, and the new-space flag back from an `OPEN_COMMAND` id's tail.
+pub fn parse_open_command(mut rest: &str) -> (PathBuf, bool, bool) {
+    let mut fresh = false;
+    let mut new_space = false;
+    loop {
+        if let Some(tail) = rest.strip_prefix(OPEN_FRESH) {
+            fresh = true;
+            rest = tail;
+        } else if let Some(tail) = rest.strip_prefix(OPEN_NEW) {
+            new_space = true;
+            rest = tail;
+        } else {
+            break;
+        }
     }
+    (PathBuf::from(rest), fresh, new_space)
 }
 
 /// A mark written by a live Nirvana window at `<home>/nirvana/window.json` (plan 21 §3.1).
@@ -653,7 +665,7 @@ pub fn open(folder: Option<&Path>) -> std::io::Result<i32> {
             let res = (|| -> std::io::Result<()> {
                 let fresh = !crate::server::autodetect::is_server_listening().unwrap_or(false);
                 let preset = crate::nirvana_preset::at_open(&folder);
-                invoke_open(&folder, fresh)?;
+                invoke_open(&folder, fresh, true)?;
                 crate::nirvana_taskbar::flash_window(hwnd)?;
                 crate::nirvana_taskbar::toast_open_with(&folder, preset.as_deref());
                 Ok(())
@@ -752,7 +764,7 @@ fn window(folder: Option<&Path>) -> std::io::Result<i32> {
                     let folder = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
                     let fresh = !crate::server::autodetect::is_server_listening().unwrap_or(false);
                     let preset = crate::nirvana_preset::at_open(&folder);
-                    if let Err(err) = invoke_open(&folder, fresh) {
+                    if let Err(err) = invoke_open(&folder, fresh, true) {
                         eprintln!("nirvana: Nirvana Claude did not start: {err}");
                     }
                     let _ = crate::nirvana_taskbar::flash_window(mark.hwnd);
@@ -785,7 +797,7 @@ fn window(folder: Option<&Path>) -> std::io::Result<i32> {
         .as_ref()
         .and_then(|f| crate::nirvana_preset::at_open(f));
     if let Some(folder) = &folder_abs {
-        if let Err(err) = invoke_open(folder, fresh) {
+        if let Err(err) = invoke_open(folder, fresh, false) {
             eprintln!("nirvana: Nirvana Claude did not start: {err}");
         }
     }
@@ -826,12 +838,12 @@ fn window(folder: Option<&Path>) -> std::io::Result<i32> {
     code
 }
 
-fn invoke_open(folder: &Path, fresh: bool) -> std::io::Result<()> {
+fn invoke_open(folder: &Path, fresh: bool, new_space: bool) -> std::io::Result<()> {
     let request = crate::api::schema::Request {
         id: "nirvana:open".into(),
         method: crate::api::schema::Method::CommandInvoke(
             crate::api::schema::CommandInvokeParams {
-                command_id: open_command_id(folder, fresh),
+                command_id: open_command_id(folder, fresh, new_space),
                 workspace_id: None,
                 tab_id: None,
                 pane_id: None,
@@ -1133,9 +1145,14 @@ mod tests {
     fn the_open_command_round_trips_folder_and_fresh() {
         let folder = Path::new(r"C:\Users\o\My Work");
         for fresh in [false, true] {
-            let id = open_command_id(folder, fresh);
-            let rest = id.strip_prefix(OPEN_COMMAND).unwrap();
-            assert_eq!(parse_open_command(rest), (folder.to_path_buf(), fresh));
+            for new_space in [false, true] {
+                let id = open_command_id(folder, fresh, new_space);
+                let rest = id.strip_prefix(OPEN_COMMAND).unwrap();
+                assert_eq!(
+                    parse_open_command(rest),
+                    (folder.to_path_buf(), fresh, new_space)
+                );
+            }
         }
     }
 

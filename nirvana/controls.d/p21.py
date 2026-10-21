@@ -74,4 +74,31 @@ CONTROLS = (
         'open_log_appends_errors',
         'rust',
     ),
+    # Step 3 (§4): The new-space flag in the open command
+    Control(
+        'p21_open_drops_new',
+        'src/nirvana_launch.rs',
+        '            new_space = true;\n',
+        '            new_space = false;\n',
+        'the_open_command_round_trips_folder_and_fresh',
+        'rust',
+    ),
+    # Step 3 (§4): Unfocused open leaves root pane unseen
+    Control(
+        'p21_open_unfocused_leaves_unseen',
+        'src/app/nirvana_new.rs',
+        '                if let Some(pane) = ws.pane_state_mut(root_pane) {\n                    pane.seen = false;\n',
+        '                if let Some(pane) = ws.pane_state_mut(root_pane) {\n                    pane.seen = true;\n',
+        'open_with_new_space_flag_and_unfocused_terminal_leaves_root_pane_unseen',
+        'rust',
+    ),
+    # Step 3 (§4): Focus check requires outer_terminal_focus == Some(false)
+    Control(
+        'p21_open_unfocused_focus_check',
+        'src/app/nirvana_new.rs',
+        '        if new_space && self.state.outer_terminal_focus == Some(false) {\n',
+        '        if new_space && self.state.outer_terminal_focus != Some(false) {\n',
+        'open_with_new_space_flag_and_unfocused_terminal_leaves_root_pane_unseen',
+        'rust',
+    ),
 )

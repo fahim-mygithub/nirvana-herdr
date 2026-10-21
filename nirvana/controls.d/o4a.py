@@ -38,7 +38,7 @@ CONTROLS = (
             r'return PathBuf::from(format!("{trimmed}\\"));', "return PathBuf::from(trimmed);",
             "the_verb_folder_survives_explorers_quoting_of_a_drive_root", "rust"),
     Control("o4a_open_drops_fresh", "src/nirvana_launch.rs",
-            "Some(folder) => (PathBuf::from(folder), true),", "Some(folder) => (PathBuf::from(folder), false),",
+            "            fresh = true;\n", "            fresh = false;\n",
             "the_open_command_round_trips_folder_and_fresh", "rust"),
 
     # The taskbar order, P7 (src/nirvana_taskbar.rs).
