@@ -3,6 +3,18 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.33.1: the plain Claude Code look
+
+- **Changed:** the "Nirvana" Windows Terminal profile sets no font, colour scheme, padding or cursor, so the window
+  takes Terminal's defaults (Cascadia Mono 12, Campbell); Nirvana Claude's `settings.json` names no theme, so it takes
+  the owner's own Claude Code theme instead of `custom:nirvana-dark`. The two Nirvana schemes and themes are still
+  installed, so either can be picked by hand.
+  **Because:** the owner, 2026-10-21, beside a screenshot of a plain Claude Code window: "I would like the standard
+  Claude Code color scheme back Like the one on the right and the font as well".
+  **Measured:** two controls in `nirvana/controls.d/look.py`, each reddening its test alone; dry run 1130 to 1132.
+  An open Terminal window keeps its old look until Windows Terminal restarts and Nirvana Claude restarts.
+  **If you remove this:** Nirvana windows go back to JetBrains Mono 11 and the Nirvana Dark scheme.
+
 ## alpha 0.33.0: one Nirvana window (plan 21)
 
 Package `p21` (`P21-ORDER.md`, record `nirvana/plans/2026-10-21-21-records/p21.md`).

@@ -154,9 +154,11 @@ class FilesTest(unittest.TestCase):
             self.assertEqual(installed["statusLine"]["command"], f'"{exe}" nirvana statusline')
             self.assertNotIn(b"\r", (dst / "settings.json").read_bytes())
 
-    def test_settings_carry_the_theme_and_the_orchestrator_env(self):
+    def test_settings_carry_the_orchestrator_env_and_leave_the_theme_to_claude_code(self):
+        # The owner, 2026-10-21: "the standard Claude Code color scheme back". No theme key, so Nirvana Claude
+        # takes the owner's own Claude Code theme.
         settings = json.loads((ws.ROOT / "nirvana" / "claude" / "settings.json").read_bytes())
-        self.assertEqual(settings["theme"], "custom:nirvana-dark")
+        self.assertNotIn("theme", settings)
         self.assertEqual(settings["env"], {"NIRVANA_ORCHESTRATOR": "1"})
 
     def test_the_agent_is_opus_at_medium_with_the_plans_rules(self):
@@ -203,7 +205,8 @@ class FilesTest(unittest.TestCase):
             (profile,) = data["profiles"]
             self.assertEqual(profile["name"], "Nirvana")
             self.assertIn("--session nirvana nirvana-shell", profile["commandline"])
-            self.assertEqual(profile["font"]["face"], "JetBrains Mono, Cascadia Mono")
+            for key in ("font", "colorScheme", "padding", "cursorShape"):
+                self.assertNotIn(key, profile)   # Windows Terminal's defaults, the plain Claude Code look
             self.assertEqual([s["name"] for s in data["schemes"]], ["Nirvana Light", "Nirvana Dark"])
             assets = ws.install_assets(tmp / "home")
             self.assertEqual({p.name for p in assets}, set(ws.ASSETS))

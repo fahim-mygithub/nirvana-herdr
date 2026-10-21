@@ -65,9 +65,6 @@ SESSION = "nirvana"
 FRAGMENT_APP = "Nirvana-Herdr"
 OLD_FRAGMENT_APP = "Nirvana-C"
 FRAGMENT_FILE = "nirvana.json"
-FONT_SIZE = 11
-PADDING = "12, 8, 12, 8"
-FONT_FACE = "JetBrains Mono, Cascadia Mono"
 THEMES = ("nirvana-light.json", "nirvana-dark.json")
 # The mark files a running herdr and the registry point at.
 ASSETS = ("nirvana.ico", "nirvana-256.png", "nirvana.svg", "nirvana-small.svg", "nirvana-tiny.svg")
@@ -178,19 +175,18 @@ def schemes(src: Path | None = None) -> list[dict]:
 
 def profile(home: Path) -> dict:
     """The "Nirvana" profile, Nirvana-C's with the fork's herdr as its program: chosen from Windows Terminal's list it
-    attaches to the `nirvana` session; the verb names the profile and passes its own command."""
+    attaches to the `nirvana` session; the verb names the profile and passes its own command.
+
+    No font, colour scheme, padding or cursor: the window takes Windows Terminal's defaults, the look plain Claude
+    Code has in the owner's PowerShell window. The owner, 2026-10-21: "I would like the standard Claude Code color
+    scheme back ... and the font as well". The Nirvana schemes stay in the fragment, so either can still be picked
+    in Terminal's settings."""
     return {
         "name": PROFILE_NAME,
         "commandline": subprocess.list2cmdline([str(herdr_exe(home)), "--session", SESSION, "nirvana-shell"]),
         "icon": str(icon_path(home)),
         "tabTitle": PROFILE_NAME,
         "suppressApplicationTitle": True,
-        "font": {"face": FONT_FACE, "size": FONT_SIZE},
-        "colorScheme": {"light": "Nirvana Light", "dark": "Nirvana Dark"},
-        "cursorShape": "bar",
-        "padding": PADDING,
-        "useAcrylic": False,
-        "intenseTextStyle": "bright",
     }
 
 
