@@ -69,6 +69,15 @@ pub(super) fn seats_tab(snapshot: &ClientShellSnapshot) -> Option<SeatsTab> {
     })
 }
 
+/// The mode's word as the strip writes it.
+pub(super) fn mode_label(mode: Mode, narrow: bool) -> &'static str {
+    if narrow {
+        mode_short(mode)
+    } else {
+        mode.title()
+    }
+}
+
 fn mode_short(mode: Mode) -> &'static str {
     match mode {
         Mode::Efficient => "Eff",

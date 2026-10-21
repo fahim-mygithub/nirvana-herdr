@@ -1,13 +1,15 @@
-//! Nirvana fork, feature 3: under each space in the spaces list, two rows per agent running there, as
-//! the old Nirvana's request list draws a task (the owner's Image #16, 2026-10-15):
+//! Nirvana fork, feature 3: under each space in the spaces list, one row per agent running there: the
+//! agent's icon, the task's summarized title, then its provider and model. Two rows until 0.33.2; the owner,
+//! 2026-10-21: "Can we instead pu that in a single line like Icon of the model then Nirvana - Claude Sonnet 5.5".
 //!
 //! ```text
 //!  ● clockedin-sorting
-//!    Sort the clocked-in list
-//!    ✻ Claude Sonnet 5.5
+//!    ✻ Nirvana - Claude Sonnet 5.5
 //! ```
 //!
-//! The first row is the task's summarized title, the second the agent's icon and its provider and model.
+//! When the row does not fit, the model's first word goes first, since the icon already names the provider
+//! ("✻ Nirvana - Sonnet 5.5"); then the task is cut, so the model stays readable ("✻ Nirva… - Sonnet 5.5");
+//! only when the task would keep fewer than four cells is the end of the row cut instead.
 //! The icon stands where Nirvana drew a small green circle and keeps herdr's status colour, so the shape
 //! says which agent and the colour says what it is doing. The server sends the kind and the model as
 //! agent tokens (`crate::nirvana_spaces`); an older server sends none and the row falls back to the
@@ -18,8 +20,8 @@ use super::*;
 use crate::nirvana_spaces::{task_title, Kind, KIND_TOKEN, MODEL_TOKEN};
 use crate::protocol::ClientShellAgent;
 
-/// The task row and the agent row.
-pub(super) const ROWS_PER_AGENT: usize = 2;
+/// One row per agent: icon, task, model.
+pub(super) const ROWS_PER_AGENT: usize = 1;
 /// A space shows this many agents, then one "+N more" row. Ten agents would make one space twenty rows
 /// tall and push every other space out of the list (upstream's scrollbar test has ten in one space); the
 /// agents panel below still lists them all.
@@ -105,6 +107,30 @@ pub(super) fn fit(text: &str, width: usize) -> String {
     out
 }
 
+/// The text after an agent's icon, `<task> - <model>` fitted to `width` cells, and how many of its cells are
+/// the task's, so the task and the model keep their own colours.
+pub(super) fn agent_line(task: &str, model: &str, width: usize) -> (String, usize) {
+    use unicode_width::UnicodeWidthStr;
+    const SEPARATOR: &str = " - ";
+    /// Fewer task cells than this and the task says nothing; the end of the row is cut instead.
+    const MIN_TASK: usize = 4;
+    let cells = |text: &str| UnicodeWidthStr::width(text);
+    let full = format!("{task}{SEPARATOR}{model}");
+    if cells(&full) <= width {
+        return (full, cells(task));
+    }
+    let model = model.split_once(' ').map_or(model, |(_, rest)| rest);
+    let budget = width.saturating_sub(cells(SEPARATOR) + cells(model));
+    if budget >= MIN_TASK {
+        let task = fit(task, budget);
+        let task_cells = cells(&task);
+        return (format!("{task}{SEPARATOR}{model}"), task_cells);
+    }
+    let line = fit(&format!("{task}{SEPARATOR}{model}"), width);
+    let task_cells = cells(task).min(cells(&line));
+    (line, task_cells)
+}
+
 /// Draws the agents' rows from `area.y` down, inside `area`. `indented` is a worktree space under its
 /// parent, whose rows carry the parent's tree line on the left unless it is the last child.
 pub(super) fn render_space_agents(
@@ -153,18 +179,6 @@ pub(super) fn render_space_agents(
             buffer,
             x,
             y,
-            width as u16,
-            &fit(&agent.task, width),
-            task_style,
-        );
-        let y = y + 1;
-        if y >= area.bottom() {
-            break;
-        }
-        put_text(
-            buffer,
-            x,
-            y,
             1,
             agent.icon,
             Style::default()
@@ -172,14 +186,9 @@ pub(super) fn render_space_agents(
                 .add_modifier(Modifier::BOLD),
         );
         if width > 2 {
-            put_text(
-                buffer,
-                x + 2,
-                y,
-                (width - 2) as u16,
-                &fit(&agent.model, width - 2),
-                model_style,
-            );
+            let (line, task_cells) = agent_line(&agent.task, &agent.model, width - 2);
+            put_text(buffer, x + 2, y, (width - 2) as u16, &line, model_style);
+            put_text(buffer, x + 2, y, task_cells as u16, &line, task_style);
         }
     }
 }

@@ -437,8 +437,8 @@ fn the_strip_puts_running_before_preload_and_says_when_claude_waits() {
     let cell = &frame.cells[y * frame.width as usize + square.x as usize + 10];
     assert_eq!(
         cell.fg,
-        crate::protocol::color_to_u32(state.config.palette.yellow),
-        "waiting reads in yellow"
+        crate::protocol::color_to_u32(state.config.palette.red),
+        "waiting reads in red, herdr's colour for an agent that waits on you"
     );
 }
 
@@ -1211,4 +1211,52 @@ fn memory_row_shows_over_limit_proposal_and_responds_to_t_a_x_keys() {
 
     crate::nirvana_memory_trim::set_trimmer_for_test(None);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// The owner, 2026-10-21: "SO I can tell quickly were runing eficient mode or the git is several commits behind".
+#[test]
+fn the_strip_colours_the_mode_and_the_commits_behind() {
+    use crate::client::shell::nirvana_mods::{git_marks, mode_tone, running_tone, Mark, Tone};
+    use crate::nirvana_seat::Mode;
+    assert_eq!(mode_tone(Mode::Efficient), Tone::Good);
+    assert_eq!(mode_tone(Mode::Balanced), Tone::Info);
+    assert_eq!(mode_tone(Mode::Sota), Tone::Bad);
+    assert_eq!(running_tone(AgentStatus::Blocked), Some(Tone::Bad));
+    assert_eq!(running_tone(AgentStatus::Working), Some(Tone::Busy));
+    assert_eq!(running_tone(AgentStatus::Idle), Some(Tone::Good));
+    let status = crate::nirvana_git::GitStatus {
+        branch: "main".into(),
+        ahead: 1,
+        behind: 3,
+        dirty: 2,
+        ..Default::default()
+    };
+    let ci = crate::nirvana_git::CiRun {
+        workflow_name: "ci".into(),
+        state: crate::nirvana_git::CiState::Failed,
+        conclusion_word: "failure".into(),
+        created_at_secs: 0,
+        url: String::new(),
+    };
+    let marks = git_marks(&status, Some(&ci), false);
+    let tone = |text: &str| {
+        marks
+            .iter()
+            .find(|m: &&Mark| m.text == text)
+            .map(|m| m.tone)
+    };
+    assert_eq!(tone("main"), Some(Tone::Branch));
+    assert_eq!(tone("\u{2191}1"), Some(Tone::Info));
+    assert_eq!(tone("\u{2193}3"), Some(Tone::Bad));
+    assert_eq!(tone("2 changed"), Some(Tone::Busy));
+    assert_eq!(tone("\u{2717}"), Some(Tone::Bad));
+    // Every mark is text the label really writes, so the tint finds it.
+    let label = crate::nirvana_git::git_label(&status, Some(&ci), false);
+    for mark in &marks {
+        assert!(
+            label.contains(&mark.text),
+            "{label:?} lacks {:?}",
+            mark.text
+        );
+    }
 }

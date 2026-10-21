@@ -60,15 +60,9 @@ fn compose(agents: Vec<ClientShellAgent>) -> (ClientShellState, FrameData, Vec<S
 #[test]
 fn a_space_lists_its_agents_task_and_model_with_the_agent_icon() {
     let (state, frame, rows, space) = compose(vec![claude_sonnet()]);
-    let task_y = usize::from(space.bottom() - 2);
     let agent_y = usize::from(space.bottom() - 1);
     assert!(
-        rows[task_y].contains("Sort clocked-in"),
-        "task row: {:?}",
-        rows[task_y]
-    );
-    assert!(
-        rows[agent_y].contains("\u{273B} Claude Sonnet 5.5"),
+        rows[agent_y].contains("\u{273B} Sort") && rows[agent_y].contains(" - Sonnet 5.5"),
         "agent row: {:?}",
         rows[agent_y]
     );
@@ -115,33 +109,41 @@ fn each_kind_draws_its_own_icon_and_others_keep_the_dot() {
         .map(|agents| compose(agents).2.join("\n"))
         .collect::<Vec<_>>()
         .join("\n");
-    for expected in [
-        "\u{273B} Claude Sonnet 5.5",
-        "\u{2756} GPT-5 Codex",
-        "\u{25B2} Gemini 3.8 Flash",
-        "\u{2302} Local qwen3:8b",
-        "\u{25CB} pi",
+    // At the default width each row keeps its icon, the start of its task and its model without the provider.
+    for (icon, model) in [
+        ("\u{273B} Sort", " - Sonnet 5.5"),
+        ("\u{2756} No task", " - Codex"),
+        ("\u{25B2} No", " - 3.8 Flash"),
+        ("\u{2302} No", " - qwen3:8b"),
+        ("\u{25CB} No task yet", " - pi"),
     ] {
-        assert!(text.contains(expected), "missing {expected:?} in\n{text}");
+        assert!(
+            text.lines()
+                .any(|row| row.contains(icon) && row.contains(model)),
+            "missing {icon:?} with {model:?} in\n{text}"
+        );
     }
 }
 
 #[test]
 fn an_older_server_without_tokens_still_names_the_agent() {
     let (_, _, rows, space) = compose(vec![agent("pane_1", Some("claude"), &[])]);
-    assert!(rows[usize::from(space.bottom() - 2)].contains("No task yet"));
-    assert!(rows[usize::from(space.bottom() - 1)].contains("\u{273B} Claude"));
+    let row = &rows[usize::from(space.bottom() - 1)];
+    assert!(
+        row.contains("\u{273B} No task") && row.contains(" - Claude"),
+        "{row:?}"
+    );
 }
 
 #[test]
-fn each_agent_adds_two_rows_to_its_space() {
+fn each_agent_adds_one_row_to_its_space() {
     let (_, _, _, alone) = compose(Vec::new());
     let (_, _, _, one) = compose(vec![claude_sonnet()]);
     let mut second = claude_sonnet();
     second.pane_id = "pane_2".into();
     let (_, _, _, two) = compose(vec![claude_sonnet(), second]);
-    assert_eq!(one.height, alone.height + 2);
-    assert_eq!(two.height, alone.height + 4);
+    assert_eq!(one.height, alone.height + 1);
+    assert_eq!(two.height, alone.height + 2);
 }
 
 #[test]
@@ -150,23 +152,25 @@ fn a_long_title_is_cut_to_the_sidebar_with_an_ellipsis() {
     claude.terminal_title_stripped =
         Some("Sort the clocked-in list by shift and then by name".into());
     let (_, _, rows, space) = compose(vec![claude]);
-    let row = &rows[usize::from(space.bottom() - 2)];
-    let task = row.split('\u{2502}').next().unwrap().trim();
-    assert!(task.starts_with("Sort the"), "{task:?}");
-    assert!(task.ends_with('\u{2026}'), "{task:?}");
+    let row = &rows[usize::from(space.bottom() - 1)];
+    let text = row.split('\u{2502}').next().unwrap().trim();
+    assert!(text.starts_with("\u{273B} Sort"), "{text:?}");
+    assert!(text.contains("\u{2026} - Sonnet 5.5"), "{text:?}");
 }
 
 #[test]
 fn spaces_with_agents_make_the_list_scroll() {
     let scroll_with = |agents_per_space: usize| {
         let mut projected = snapshot();
-        let mut second = projected.workspaces[0].clone();
-        second.workspace_id = "ws_2".into();
-        second.label = "second".into();
-        second.number = 2;
-        second.focused = false;
-        projected.workspaces.push(second);
-        for space in ["ws_1", "ws_2"] {
+        for number in 2..=4 {
+            let mut other = projected.workspaces[0].clone();
+            other.workspace_id = format!("ws_{number}");
+            other.label = format!("space {number}");
+            other.number = number;
+            other.focused = false;
+            projected.workspaces.push(other);
+        }
+        for space in ["ws_1", "ws_2", "ws_3", "ws_4"] {
             for index in 0..agents_per_space {
                 let mut claude = claude_sonnet();
                 claude.pane_id = format!("{space}_pane_{index}");
@@ -181,8 +185,9 @@ fn spaces_with_agents_make_the_list_scroll() {
         state.hits.workspace_max_scroll
     };
     assert_eq!(scroll_with(0), 0);
-    // Three agents are six more rows in each space: the two spaces no longer fit, so the list scrolls.
-    assert!(scroll_with(3) > 0);
+    // Three agents and a "+N more" row are four more rows in each space: the four spaces no longer fit, so the
+    // list scrolls.
+    assert!(scroll_with(5) > 0);
 }
 
 #[test]
@@ -196,13 +201,35 @@ fn a_space_shows_three_agents_then_how_many_more() {
         .collect::<Vec<_>>();
     let (_, _, alone_rows, alone) = compose(Vec::new());
     let (_, _, rows, space) = compose(agents);
-    assert_eq!(space.height, alone.height + 3 * 2 + 1);
+    assert_eq!(space.height, alone.height + 3 + 1);
     let last = rows[usize::from(space.bottom() - 1)].clone();
     assert!(last.contains("+2 more"), "{last:?}");
     let shown = rows[usize::from(space.y)..usize::from(space.bottom())]
         .iter()
-        .filter(|row| row.contains("\u{273B} Claude Sonnet 5.5"))
+        .filter(|row| row.contains("\u{273B} Sort") && row.contains(" - Sonnet 5.5"))
         .count();
     assert_eq!(shown, 3);
     drop(alone_rows);
+}
+
+#[test]
+fn the_row_drops_the_provider_word_before_it_cuts() {
+    use crate::client::shell::nirvana_spaces::agent_line;
+    let model = "Claude Sonnet 5.5";
+    assert_eq!(
+        agent_line("Nirvana", model, 30),
+        ("Nirvana - Claude Sonnet 5.5".to_string(), 7)
+    );
+    assert_eq!(
+        agent_line("Nirvana", model, 21),
+        ("Nirvana - Sonnet 5.5".to_string(), 7)
+    );
+    assert_eq!(
+        agent_line("Nirvana", model, 19),
+        ("Nirva\u{2026} - Sonnet 5.5".to_string(), 6)
+    );
+    assert_eq!(
+        agent_line("Nirvana", model, 12),
+        ("Nirvana - S\u{2026}".to_string(), 7)
+    );
 }

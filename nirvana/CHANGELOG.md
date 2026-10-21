@@ -3,6 +3,24 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.33.2: one row per agent in a space, and a strip that reads at a glance
+
+- **Changed:** under each space an agent takes one row, `✻ Nirvana - Claude Sonnet 5.5`: its icon in its status
+  colour, the task, the model. A row that does not fit drops the model's provider word first (the icon names it),
+  then cuts the task, so the model stays readable: at herdr's default 26 columns, `✻ Nirva… - Sonnet 5.5`. The
+  strip colours its values in bold by what they say: Running working yellow, waits on you red (it was yellow;
+  herdr draws a waiting agent red), idle green; the seat mode Efficient green, Balanced blue, SOTA red; Git's branch
+  mauve, `↑N` blue, `↓N` red, `N changed` yellow, CI ✓ green and ✗ red; Jobs running yellow, failed red, passed
+  green.
+  **Because:** the owner, 2026-10-21: "Can we instead pu that in a single line like Icon of the model then Nirvana -
+  Claude Sonnet 5.5", and "improve the readbility maybe include bg color or text color for this top module toolbar.
+  SO I can tell quickly were runing eficient mode or the git is several commits behind". Bold text, not a coloured
+  background, so plan 19's SOTA-in-red test holds and a light theme needs no second text colour.
+  **Measured:** six controls in `nirvana/controls.d/strip_look.py` and two re-aimed (`strip_wait_not_yellow`,
+  `p19_client_sota_word_red_mod_strip`), each reddening its test alone; every `spaces_` control rerun alone (one,
+  `spaces_rect_short`, named the renamed test and was re-aimed); dry run 1132 to 1138.
+  **If you remove this:** each agent takes two rows again, and the strip reads in one grey.
+
 ## alpha 0.33.1: the plain Claude Code look
 
 - **Changed:** the "Nirvana" Windows Terminal profile sets no font, colour scheme, padding or cursor, so the window

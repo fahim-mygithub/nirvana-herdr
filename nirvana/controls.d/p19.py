@@ -132,8 +132,8 @@ CONTROLS = (
     Control(
         'p19_client_sota_word_red_mod_strip',
         'src/client/shell/nirvana_mods.rs',
-        '        if seats.and_then(|s| s.mode) == Some(crate::nirvana_seat::Mode::Sota) {\n',
-        '        if false && seats.and_then(|s| s.mode) == Some(crate::nirvana_seat::Mode::Sota) {\n',
+        '        crate::nirvana_seat::Mode::Sota => Tone::Bad,\n',
+        '        crate::nirvana_seat::Mode::Sota => Tone::Info,\n',
         'sota_word_is_red_in_title_and_mode_row_when_sota_is_on_not_otherwise',
         'rust',
     ),

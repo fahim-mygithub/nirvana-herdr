@@ -144,7 +144,151 @@ pub(super) struct StripHits {
     pub(super) git: Rect,
 }
 
-/// One square: a bold label and a value on a raised background, as old Nirvana draws its squares.
+/// How a part of a square's value reads. The owner, 2026-10-21: "improve the readbility maybe include bg color or
+/// text color for this top module toolbar. SO I can tell quickly were runing eficient mode or the git is several
+/// commits behind". Bold text in herdr's own status colours, so it reads the same in every theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Tone {
+    /// Idle, passed, Efficient.
+    Good,
+    /// Working, running, files changed, an order that asks.
+    Busy,
+    /// Waits on you, failed, behind, SOTA.
+    Bad,
+    /// Ahead, Balanced.
+    Info,
+    /// The branch name.
+    Branch,
+}
+
+impl Tone {
+    fn style(self, palette: &Palette) -> (Color, bool) {
+        match self {
+            Self::Good => (palette.green, true),
+            Self::Busy => (palette.yellow, true),
+            Self::Bad => (palette.red, true),
+            Self::Info => (palette.blue, true),
+            Self::Branch => (palette.mauve, false),
+        }
+    }
+}
+
+/// A part of a square's value and its tone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Mark {
+    pub(super) text: String,
+    pub(super) tone: Tone,
+}
+
+fn mark(text: impl Into<String>, tone: Tone) -> Mark {
+    Mark {
+        text: text.into(),
+        tone,
+    }
+}
+
+/// The Running square's tone, herdr's status colours: working yellow, waits on you red, idle green.
+pub(super) fn running_tone(status: AgentStatus) -> Option<Tone> {
+    match status {
+        AgentStatus::Blocked => Some(Tone::Bad),
+        AgentStatus::Working => Some(Tone::Busy),
+        AgentStatus::Idle | AgentStatus::Done => Some(Tone::Good),
+        AgentStatus::Unknown => None,
+    }
+}
+
+/// The seat mode's tone: Efficient green, Balanced blue, SOTA red (plan 19 draws SOTA in red).
+pub(super) fn mode_tone(mode: crate::nirvana_seat::Mode) -> Tone {
+    match mode {
+        crate::nirvana_seat::Mode::Efficient => Tone::Good,
+        crate::nirvana_seat::Mode::Balanced => Tone::Info,
+        crate::nirvana_seat::Mode::Sota => Tone::Bad,
+    }
+}
+
+/// The Git square's marks: the branch, `↑N` ahead, `↓N` behind, the changed count and the CI mark, each in the
+/// words `git_label` writes.
+pub(super) fn git_marks(
+    status: &crate::nirvana_git::GitStatus,
+    ci: Option<&crate::nirvana_git::CiRun>,
+    narrow: bool,
+) -> Vec<Mark> {
+    let mut marks = Vec::new();
+    if !status.branch.is_empty() {
+        marks.push(mark(status.branch.clone(), Tone::Branch));
+    }
+    if status.ahead > 0 {
+        marks.push(mark(format!("\u{2191}{}", status.ahead), Tone::Info));
+    }
+    if status.behind > 0 {
+        marks.push(mark(format!("\u{2193}{}", status.behind), Tone::Bad));
+    }
+    if status.dirty > 0 && !narrow {
+        marks.push(mark(format!("{} changed", status.dirty), Tone::Busy));
+    }
+    if let Some(ci) = ci {
+        let tone = match ci.state {
+            crate::nirvana_git::CiState::Passed => Tone::Good,
+            crate::nirvana_git::CiState::Failed => Tone::Bad,
+            crate::nirvana_git::CiState::Running => Tone::Busy,
+        };
+        marks.push(mark(ci.state.mark(), tone));
+    }
+    marks
+}
+
+/// The Jobs square's marks, in the words `jobs_value` writes.
+pub(super) fn jobs_marks(view: &crate::nirvana_job::JobsView, narrow: bool) -> Vec<Mark> {
+    let (running, failed, passed) = if narrow {
+        ("run", "fail", "pass")
+    } else {
+        ("running", "failed", "passed")
+    };
+    let mut marks = Vec::new();
+    if view.running_count > 0 {
+        marks.push(mark(
+            format!("{} {running}", view.running_count),
+            Tone::Busy,
+        ));
+    }
+    if view.failed_count > 0 {
+        marks.push(mark(format!("{} {failed}", view.failed_count), Tone::Bad));
+    }
+    if view.running_count == 0 && view.failed_count == 0 && view.passed_count > 0 {
+        marks.push(mark(format!("{} {passed}", view.passed_count), Tone::Good));
+    }
+    marks
+}
+
+/// Colours the first place each mark's text stands in the cells from `from` to `to` on row `y`.
+fn tint(buffer: &mut Buffer, y: u16, from: u16, to: u16, marks: &[Mark], palette: &Palette) {
+    let cells: Vec<String> = (from..to)
+        .map(|x| buffer[(x, y)].symbol().to_string())
+        .collect();
+    for mark in marks {
+        let needle: Vec<String> = mark.text.chars().map(String::from).collect();
+        if needle.is_empty() || needle.len() > cells.len() {
+            continue;
+        }
+        let Some(start) =
+            (0..=cells.len() - needle.len()).find(|&i| cells[i..i + needle.len()] == needle[..])
+        else {
+            continue;
+        };
+        let (fg, bold) = mark.tone.style(palette);
+        for i in 0..needle.len() {
+            let cell = &mut buffer[(from + (start + i) as u16, y)];
+            cell.set_fg(fg);
+            if bold {
+                cell.modifier.insert(Modifier::BOLD);
+            }
+        }
+    }
+}
+
+/// One square: a bold label and a value on a raised background, as old Nirvana draws its squares. `marks` colour
+/// parts of the value by what they say.
+#[allow(clippy::too_many_arguments)]
 fn draw_square(
     buffer: &mut Buffer,
     x: u16,
@@ -153,6 +297,7 @@ fn draw_square(
     label: &str,
     value: &str,
     value_colour: Color,
+    marks: &[Mark],
     open: bool,
     palette: &Palette,
 ) -> Rect {
@@ -194,6 +339,7 @@ fn draw_square(
         &value,
         raised.fg(value_colour),
     );
+    tint(buffer, y, after, square.right(), marks, palette);
     square
 }
 
@@ -236,7 +382,11 @@ pub(super) fn render_strip(
     x += 2;
     put_text(buffer, x, area.y, right.saturating_sub(x), "Claude", base);
     x += 6 + 2;
-    let (running, yours) = running_value(agent, activity);
+    let (running, _yours) = running_value(agent, activity);
+    let running_marks: Vec<Mark> = running_tone(agent.status)
+        .map(|tone| mark(running.clone(), tone))
+        .into_iter()
+        .collect();
     hits.running = draw_square(
         buffer,
         x,
@@ -244,11 +394,8 @@ pub(super) fn render_strip(
         right,
         "Running",
         &running,
-        if yours {
-            palette.yellow
-        } else {
-            palette.subtext0
-        },
+        palette.subtext0,
+        &running_marks,
         open == OpenPanel::Running,
         palette,
     );
@@ -256,6 +403,13 @@ pub(super) fn render_strip(
     if let Some(seats) = seats {
         let narrow = area.width < super::nirvana_seats::NARROW_STRIP;
         let (value, asks) = super::nirvana_seats::seats_value(seats, narrow);
+        let mut seats_marks = Vec::new();
+        if let Some(mode) = seats.and_then(|s| s.mode) {
+            seats_marks.push(mark(
+                super::nirvana_seats::mode_label(mode, narrow),
+                mode_tone(mode),
+            ));
+        }
         hits.seats = draw_square(
             buffer,
             x,
@@ -268,24 +422,10 @@ pub(super) fn render_strip(
             } else {
                 palette.subtext0
             },
+            &seats_marks,
             open == OpenPanel::Seats,
             palette,
         );
-        if seats.and_then(|s| s.mode) == Some(crate::nirvana_seat::Mode::Sota) {
-            for col in hits.seats.x..hits.seats.right().saturating_sub(3) {
-                if buffer[(col, area.y)].symbol() == "S"
-                    && buffer[(col + 1, area.y)].symbol() == "O"
-                    && buffer[(col + 2, area.y)].symbol() == "T"
-                    && buffer[(col + 3, area.y)].symbol() == "A"
-                {
-                    buffer[(col, area.y)].set_fg(palette.red);
-                    buffer[(col + 1, area.y)].set_fg(palette.red);
-                    buffer[(col + 2, area.y)].set_fg(palette.red);
-                    buffer[(col + 3, area.y)].set_fg(palette.red);
-                    break;
-                }
-            }
-        }
         x = hits.seats.right() + 1;
     }
     let narrow = area.width < super::nirvana_jobs::NARROW_STRIP;
@@ -293,6 +433,9 @@ pub(super) fn render_strip(
         Some(j_view) => super::nirvana_jobs::jobs_value(j_view, narrow),
         None => (String::new(), false),
     };
+    let jobs_tints = jobs
+        .map(|j_view| jobs_marks(j_view, narrow))
+        .unwrap_or_default();
     hits.jobs = draw_square(
         buffer,
         x,
@@ -305,6 +448,7 @@ pub(super) fn render_strip(
         } else {
             palette.subtext0
         },
+        &jobs_tints,
         open == OpenPanel::Jobs,
         palette,
     );
@@ -321,6 +465,7 @@ pub(super) fn render_strip(
         } else {
             palette.subtext0
         },
+        &[],
         open == OpenPanel::Preload,
         palette,
     );
@@ -338,6 +483,7 @@ pub(super) fn render_strip(
             } else {
                 palette.subtext0
             },
+            &[],
             open == OpenPanel::Memory,
             palette,
         );
@@ -351,13 +497,7 @@ pub(super) fn render_strip(
             } else {
                 hits.preload.right() + 1
             };
-            let active = git_view.status.ahead > 0
-                || git_view.status.behind > 0
-                || git_view.status.dirty > 0
-                || git_view
-                    .ci
-                    .as_ref()
-                    .is_some_and(|c| c.state == crate::nirvana_git::CiState::Failed);
+            let git_tints = git_marks(&git_view.status, git_view.ci.as_ref(), narrow);
             hits.git = draw_square(
                 buffer,
                 x,
@@ -365,11 +505,8 @@ pub(super) fn render_strip(
                 right,
                 "Git",
                 &value,
-                if active {
-                    palette.yellow
-                } else {
-                    palette.subtext0
-                },
+                palette.subtext0,
+                &git_tints,
                 open == OpenPanel::Git,
                 palette,
             );
