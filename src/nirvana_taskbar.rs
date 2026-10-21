@@ -52,7 +52,7 @@ pub enum Step {
     Overlay(Option<char>),
 }
 
-/// What a Nirvana window shows.
+/// What a Nirvana window shows (plan 21 §5: one identity for the window).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Identity {
     pub app_id: String,
@@ -63,41 +63,26 @@ pub struct Identity {
 }
 
 impl Identity {
-    pub fn for_folder(folder: &Path, herdr: &Path) -> Self {
+    pub fn window(home: &Path, herdr: &Path, letter: char) -> Self {
         Self {
-            app_id: crate::nirvana_launch::window_app_id(folder),
+            app_id: crate::nirvana_launch::WINDOW_APP_ID.to_owned(),
             icon_resource: format!("{},0", herdr.display()),
-            relaunch_command: relaunch_command(herdr, folder),
+            relaunch_command: relaunch_command(home),
             display_name: crate::nirvana_launch::DISPLAY_NAME.to_owned(),
-            letter: crate::nirvana_launch::folder_letter(folder),
+            letter,
         }
     }
 }
 
 /// The longest `RelaunchCommand` the window property store takes. Measured 2026-10-17 on this machine (Windows 11
 /// 26200) by `IPropertyStore::SetValue` on a Terminal window: 255 characters set, 256 to 259 gave E_INVALIDARG, 260
-/// and more ERROR_INSUFFICIENT_BUFFER. The first live run used the verb's own line, 487 characters, and the button
-/// never split: only the icon property took.
+/// and more ERROR_INSUFFICIENT_BUFFER.
 pub const RELAUNCH_MAX: usize = 255;
 
-/// What a pinned Nirvana button starts: the verb's window on the same folder, `wt.exe` by its app alias (on the
-/// PATH) rather than its full path, to stay inside `RELAUNCH_MAX`. A folder too long even for that relaunches the
-/// "Nirvana" profile, which opens the nirvana session; the button still splits and carries the mark.
-pub fn relaunch_command(herdr: &Path, folder: &Path) -> String {
-    let full = format!(
-        "wt.exe -w new -p \"{}\" \"{}\" --session {} nirvana window \"{}\"",
-        crate::nirvana_launch::DISPLAY_NAME,
-        herdr.display(),
-        crate::nirvana_launch::SESSION,
-        folder.display()
-    );
-    if full.chars().count() <= RELAUNCH_MAX {
-        return full;
-    }
-    format!(
-        "wt.exe -w new -p \"{}\"",
-        crate::nirvana_launch::DISPLAY_NAME
-    )
+/// What a pinned Nirvana button starts: `"<home>\bin\nirvana-open.exe"`, which focuses or opens the one window (plan 21 §5).
+pub fn relaunch_command(home: &Path) -> String {
+    let path = home.join("bin").join("nirvana-open.exe");
+    format!("\"{}\"", path.display())
 }
 
 /// P7's order: the three relaunch properties, the id last, one commit, then the badge.
@@ -254,7 +239,8 @@ pub fn toast_logo_path(letter: char) -> PathBuf {
 // The menu's claim runs only outside tests (client/shell/nirvana_new_menu.rs), and terminal_window is used in step 2.
 #[allow(unused_imports)]
 pub use windows_impl::{
-    claim_menu_window, claim_window, letter_coverage, release_window, terminal_window,
+    claim_menu_window, claim_window, is_window_claimed, letter_coverage, release_window,
+    set_badge, terminal_window,
 };
 
 #[cfg(not(windows))]
@@ -265,6 +251,14 @@ pub fn claim_window(_folder: Option<&Path>) -> std::io::Result<()> {
 pub fn claim_menu_window(_folder: &Path) {}
 #[cfg(not(windows))]
 pub fn release_window() {}
+#[cfg(not(windows))]
+pub fn is_window_claimed() -> bool {
+    false
+}
+#[cfg(not(windows))]
+pub fn set_badge(_letter: char) -> std::io::Result<()> {
+    Ok(())
+}
 #[cfg(not(windows))]
 pub fn letter_coverage(_letter: char, _size: u32) -> Option<Vec<u8>> {
     None
@@ -494,12 +488,28 @@ mod windows_impl {
             .map_err(|_| std::io::Error::other("the taskbar thread panicked"))?
     }
 
-    /// Makes this process's Terminal window a Nirvana window for `folder`: its own button with the mark, the letter.
+    pub fn is_window_claimed() -> bool {
+        std::env::var_os(crate::nirvana_launch::WINDOW_FOLDER_ENV).is_some()
+            || CLAIMED.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
+
+    pub fn set_badge(letter: char) -> std::io::Result<()> {
+        let window = terminal_window().ok_or_else(|| std::io::Error::other("no console window"))?;
+        on_com_thread(move || {
+            let mut shell = Shell::open(window)?;
+            shell.overlay(Some(letter))
+        })
+    }
+
+    /// Makes this process's Terminal window a Nirvana window: its own button with the mark, the letter.
     pub fn claim_window(folder: Option<&Path>) -> std::io::Result<()> {
         let window = terminal_window().ok_or_else(|| std::io::Error::other("no console window"))?;
         let dummy = std::path::PathBuf::from("");
         let folder = folder.unwrap_or(&dummy);
-        let identity = Identity::for_folder(folder, &super::herdr_exe());
+        let letter = crate::nirvana_launch::folder_letter(folder);
+        let home = crate::nirvana::home().ok_or_else(|| std::io::Error::other("no nirvana home"))?;
+        let herdr = super::herdr_exe();
+        let identity = Identity::window(&home, &herdr, letter);
         let steps = set_steps(&identity);
         on_com_thread(move || {
             let mut shell = Shell::open(window)?;
@@ -703,10 +713,9 @@ mod tests {
     }
 
     fn identity() -> Identity {
-        Identity::for_folder(
-            Path::new(r"C:\Users\o\Desktop\Pojects"),
-            Path::new(r"C:\Users\o\AppData\Local\Programs\Nirvana-Herdr\bin\herdr.exe"),
-        )
+        let home = Path::new(r"C:\Users\o\AppData\Local\Programs\Nirvana-Herdr");
+        let herdr = home.join("bin").join("herdr.exe");
+        Identity::window(home, &herdr, 'P')
     }
 
     #[test]
@@ -745,9 +754,7 @@ mod tests {
             shell.steps[3],
             Step::Set(
                 Prop::AppUserModelId,
-                Some(crate::nirvana_launch::window_app_id(Path::new(
-                    r"C:\Users\o\Desktop\Pojects"
-                )))
+                Some(crate::nirvana_launch::WINDOW_APP_ID.to_owned())
             )
         );
         assert_eq!(
@@ -792,27 +799,53 @@ mod tests {
     }
 
     #[test]
-    fn the_relaunch_command_reopens_the_same_folder_and_fits_the_property() {
-        let command = identity().relaunch_command;
+    fn the_relaunch_command_names_nirvana_open_and_fits_the_property() {
+        let home = Path::new(r"C:\Users\o\AppData\Local\Programs\Nirvana-Herdr");
+        let command = relaunch_command(home);
         assert_eq!(
             command,
-            r#"wt.exe -w new -p "Nirvana" "C:\Users\o\AppData\Local\Programs\Nirvana-Herdr\bin\herdr.exe" --session nirvana nirvana window "C:\Users\o\Desktop\Pojects""#
+            r#""C:\Users\o\AppData\Local\Programs\Nirvana-Herdr\bin\nirvana-open.exe""#
         );
         assert!(command.chars().count() <= RELAUNCH_MAX);
-        // The owner's own install and project paths fit; a folder past the limit relaunches the profile.
-        let herdr = Path::new(r"C:\Users\fahim\AppData\Local\Programs\Nirvana-Herdr\bin\herdr.exe");
-        let fits = relaunch_command(
-            herdr,
-            Path::new(r"C:\Users\fahim\Desktop\Pojects\MotoProject"),
-        );
-        assert!(
-            fits.contains("nirvana window") && fits.chars().count() <= RELAUNCH_MAX,
-            "{fits}"
-        );
-        let deep = format!(r"C:\{}", "d".repeat(200));
+    }
+
+    #[test]
+    fn the_window_identity_names_no_folder_and_relaunch_command_names_nirvana_open() {
+        let home = Path::new(r"C:\Users\o\AppData\Local\Programs\Nirvana-Herdr");
+        let herdr = home.join("bin").join("herdr.exe");
+        let id = Identity::window(home, &herdr, 'P');
+        assert_eq!(id.app_id, crate::nirvana_launch::WINDOW_APP_ID);
+        assert_eq!(id.app_id, "Nirvana.Herdr.Window");
+        assert_eq!(id.display_name, "Nirvana");
         assert_eq!(
-            relaunch_command(herdr, Path::new(&deep)),
-            r#"wt.exe -w new -p "Nirvana""#
+            id.relaunch_command,
+            r#""C:\Users\o\AppData\Local\Programs\Nirvana-Herdr\bin\nirvana-open.exe""#
+        );
+        assert!(id.relaunch_command.contains("nirvana-open.exe"));
+        assert_eq!(id.letter, 'P');
+    }
+
+    #[test]
+    fn the_badge_letter_follows_the_current_spaces_folder() {
+        let mut shell = Recorder::default();
+        let home = Path::new(r"C:\Users\o\AppData\Local\Programs\Nirvana-Herdr");
+        let herdr = home.join("bin").join("herdr.exe");
+        let id = Identity::window(home, &herdr, 'P');
+        apply(&mut shell, &set_steps(&id), false).unwrap();
+        assert_eq!(shell.steps.last(), Some(&Step::Overlay(Some('P'))));
+
+        // When switching space to a folder whose letter is 'M':
+        shell.overlay(Some('M')).unwrap();
+        assert_eq!(shell.steps.last(), Some(&Step::Overlay(Some('M'))));
+
+        // When switching to a space with no folder, the last letter is kept:
+        assert_eq!(
+            shell
+                .steps
+                .iter()
+                .filter(|s| matches!(s, Step::Overlay(_)))
+                .count(),
+            2
         );
     }
 

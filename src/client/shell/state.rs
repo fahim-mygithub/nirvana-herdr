@@ -1019,6 +1019,8 @@ pub(crate) struct ClientShellState {
     pub(super) nirvana_jobs: Option<super::nirvana_jobs::JobsPanel>,
     /// Plan 16: the Git panel, while open.
     pub(super) nirvana_git: Option<super::nirvana_git::GitPanel>,
+    /// Plan 21 §5: The last letter badge set on the window's taskbar button.
+    pub(super) last_badge_letter: Option<char>,
 }
 
 pub(super) fn product_announcement_state(
@@ -1194,6 +1196,7 @@ impl ClientShellState {
             nirvana_jobs: None,
             nirvana_git: None,
             nirvana_accounts: None,
+            last_badge_letter: None,
         }
     }
 
@@ -1654,6 +1657,7 @@ impl ClientShellState {
             }
         }
         self.snapshot = Some(snapshot);
+        self.update_taskbar_badge();
         self.reconcile_pending_workspace_highlight();
         let pending_surface = self.pending_pane_surface.take();
         if let Some(surface) = pending_surface {
@@ -1705,6 +1709,32 @@ impl ClientShellState {
         // not rendered until its matching snapshot arrives. Retain it monotonically so delayed
         // intermediate surfaces cannot replace it.
         self.install_pane_surface(surface, true);
+    }
+
+    /// Plan 21 §5: The letter badge follows the current space's folder.
+    /// Re-sets the overlay when the current space's folder letter changes.
+    /// A space with no folder keeps the last letter.
+    fn update_taskbar_badge(&mut self) {
+        if !crate::nirvana_taskbar::is_window_claimed() {
+            return;
+        }
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return;
+        };
+        let focused_ws_id = snapshot.focused_workspace_id.as_deref();
+        let folder = snapshot
+            .panes
+            .iter()
+            .find(|p| Some(p.workspace_id.as_str()) == focused_ws_id)
+            .and_then(|p| p.cwd.as_deref().or(p.foreground_cwd.as_deref()));
+
+        if let Some(folder_str) = folder {
+            let letter = crate::nirvana_launch::folder_letter(std::path::Path::new(folder_str));
+            if self.last_badge_letter != Some(letter) {
+                self.last_badge_letter = Some(letter);
+                let _ = crate::nirvana_taskbar::set_badge(letter);
+            }
+        }
     }
 
     fn install_pane_surface(&mut self, mut surface: PaneSurfaceFrame, retain_future: bool) {

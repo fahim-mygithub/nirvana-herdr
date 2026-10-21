@@ -101,4 +101,31 @@ CONTROLS = (
         'open_with_new_space_flag_and_unfocused_terminal_leaves_root_pane_unseen',
         'rust',
     ),
+    # Step 4 (§5): Window identity names no folder and has one app id
+    Control(
+        'p21_taskbar_one_identity',
+        'src/nirvana_taskbar.rs',
+        '            app_id: crate::nirvana_launch::WINDOW_APP_ID.to_owned(),\n',
+        '            app_id: "Nirvana.Herdr.Folder".to_owned(),\n',
+        'the_window_identity_names_no_folder_and_relaunch_command_names_nirvana_open',
+        'rust',
+    ),
+    # Step 4 (§5): Relaunch command names nirvana-open.exe
+    Control(
+        'p21_taskbar_relaunch_nirvana_open',
+        'src/nirvana_taskbar.rs',
+        '    let path = home.join("bin").join("nirvana-open.exe");\n',
+        '    let path = home.join("bin").join("herdr.exe");\n',
+        'the_window_identity_names_no_folder_and_relaunch_command_names_nirvana_open',
+        'rust',
+    ),
+    # Step 4 (§5): Badge letter follows the current space
+    Control(
+        'p21_taskbar_badge_follows_space',
+        'src/nirvana_taskbar.rs',
+        '        shell.overlay(Some(\'M\')).unwrap();\n',
+        '        shell.overlay(Some(\'P\')).unwrap();\n',
+        'the_badge_letter_follows_the_current_spaces_folder',
+        'rust',
+    ),
 )

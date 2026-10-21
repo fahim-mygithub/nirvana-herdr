@@ -59,6 +59,8 @@ pub const OPEN_NEW: &str = "new:";
 /// The fork's own toast app id, registered by `install.py` and by the toast code. One id for every toast, so the
 /// header always reads "Nirvana" with the mark.
 pub const TOAST_APP_ID: &str = "Nirvana.Herdr";
+/// The fork's one taskbar app id (plan 21 §5: "One identity for the window: app id Nirvana.Herdr.Window").
+pub const WINDOW_APP_ID: &str = "Nirvana.Herdr.Window";
 /// The taskbar id's prefix; each folder gets its own (P7: "Two windows with one id combine into one button showing
 /// only the last badge").
 pub const WINDOW_APP_ID_PREFIX: &str = "Nirvana.Herdr.";
