@@ -162,6 +162,9 @@ pub struct TerminalState {
     agent_process_acquisition_pending: bool,
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
     pub restore_error: Option<String>,
+    /// Nirvana fork: the Nirvana Claude name this restored pane ran under, until the server starts Nirvana Claude
+    /// in it again (`app/nirvana_relaunch.rs`).
+    pub nirvana_relaunch: Option<String>,
 }
 
 impl TerminalState {
@@ -202,6 +205,7 @@ impl TerminalState {
             agent_process_acquisition_pending: false,
             pending_agent_resume_plan: None,
             restore_error: None,
+            nirvana_relaunch: None,
         }
     }
 

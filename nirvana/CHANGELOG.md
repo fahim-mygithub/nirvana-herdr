@@ -3,6 +3,26 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.34.0: Nirvana Claude comes back after a reload, and the agents panel follows the space
+
+- **Changed:** after the reload badge restarts the server, each pane that ran Nirvana Claude gets it again, typed the
+  way the "Open Nirvana here" verb types it: the plugin argv, the folder's generated settings, the folder's last
+  session when it is recent, and the name the pane ran under (`nirvana`, `nirvana-2`). The restore marks those panes
+  (`TerminalState::nirvana_relaunch`); the server's scheduled tasks start them, retrying every 250 ms while a shell
+  is still starting and giving up after 30 s. herdr's own `claude --resume` is never used for a Nirvana pane, since it
+  drops the plugin argv and the seat. `resume_agents_on_restore = false` turns both off. The agents panel lists the
+  selected space's agents only, and says "no agents in this space" when it has none.
+  **Because:** the owner, 2026-10-21: "when you click restart we can resume the the process as if we right clicked
+  the folder and clicked open nirvana here. Basical yon restart when an new update is released auto type the
+  commands on the directories", and "I sitll see both spaces have both agents listed on the agents panal". The
+  0.33.2 reload restored both panes as bare shells: herdr types an agent back only from a session id the agent
+  reported, Nirvana Claude reports none, and the server log shows the owner opening both folders again by hand
+  within a minute of the restore.
+  **Measured:** six controls in `nirvana/controls.d/relaunch.py`, each reddening its test alone. The server's tick
+  calling the relaunch has no test of its own; the live reload is its check.
+  **If you remove this:** a reload leaves every space a bare shell again, and the agents panel lists every space's
+  agents.
+
 ## alpha 0.33.2: one row per agent in a space, and a strip that reads at a glance
 
 - **Changed:** under each space an agent takes one row, `✻ Nirvana - Claude Sonnet 5.5`: its icon in its status

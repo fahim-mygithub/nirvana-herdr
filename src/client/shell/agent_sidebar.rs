@@ -91,15 +91,16 @@ pub(super) fn render_agent_panel(
         return;
     }
 
-    let rows = agent_rows(snapshot, config, None);
+    let rows = space_agent_rows(snapshot, agent_rows(snapshot, config, None));
     render_agent_list(
         buffer,
         area,
         &rows,
-        snapshot
-            .agent_view_label
-            .as_ref()
-            .map(|_| " no matching agents"),
+        Some(if snapshot.agent_view_label.is_some() {
+            " no matching agents"
+        } else {
+            " no agents in this space"
+        }),
         config,
         agent_scroll,
         hits,
@@ -108,6 +109,31 @@ pub(super) fn render_agent_panel(
             render_agent_row(buffer, rect, row, config, Some(hits));
         },
     );
+}
+
+/// Nirvana fork: the agents panel lists the selected space's agents only. The owner, 2026-10-21: "ensure the agents
+/// correponses to ehs pace. I t right now listes everything the workout app refactor and 3d print have it only list
+/// based on what space is seletted." Every agent when no space is focused.
+pub(super) fn space_agent_rows(
+    snapshot: &ClientShellSnapshot,
+    rows: Vec<AgentRow>,
+) -> Vec<AgentRow> {
+    let Some(space) = snapshot
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.focused)
+        .map(|workspace| workspace.workspace_id.as_str())
+    else {
+        return rows;
+    };
+    rows.into_iter()
+        .filter(|row| {
+            snapshot
+                .agents
+                .iter()
+                .any(|agent| agent.pane_id == row.pane_id && agent.workspace_id == space)
+        })
+        .collect()
 }
 
 pub(super) fn render_agent_panel_header(

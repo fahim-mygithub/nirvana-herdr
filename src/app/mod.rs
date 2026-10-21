@@ -32,6 +32,7 @@ mod worktrees;
 // Nirvana fork: Restart Claude from the tab menu.
 mod nirvana_edit;
 mod nirvana_new;
+mod nirvana_relaunch;
 mod nirvana_restart;
 
 use std::collections::HashMap;
@@ -144,6 +145,9 @@ pub struct App {
     pub(crate) loaded_host_cursor: crate::config::HostCursorModeConfig,
     pub(crate) agent_metadata_deadline: Option<Instant>,
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
+    /// Nirvana fork: the next try at starting Nirvana Claude again in restored panes, and the last one.
+    pub(crate) nirvana_relaunch_at: Option<Instant>,
+    nirvana_relaunch_until: Option<Instant>,
     startup_per_agent_delay: Duration,
     next_agent_resume_at: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
@@ -655,6 +659,8 @@ impl App {
             loaded_host_cursor: config.ui.host_cursor,
             agent_metadata_deadline: None,
             pending_agent_resume_deadline: None,
+            nirvana_relaunch_at: None,
+            nirvana_relaunch_until: None,
             startup_per_agent_delay: Duration::from_millis(
                 config.session.startup_per_agent_delay_ms.into(),
             ),

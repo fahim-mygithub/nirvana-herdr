@@ -538,8 +538,21 @@ fn restore_tab(
             .and_then(|pane| pane.managed_agent_kind.as_deref())
             .and_then(crate::detect::parse_canonical_agent_label);
         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
-        let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
-        let saved_agent_resume = saved_pane.and_then(saved_reported_resume);
+        // Nirvana fork: a pane that ran Nirvana Claude gets Nirvana Claude again, as the verb starts it, never
+        // herdr's plain `claude --resume`, which would drop the plugin argv and the seat.
+        let nirvana_relaunch = saved_agent_name
+            .clone()
+            .filter(|name| crate::nirvana_launch::is_nirvana_agent_name(name))
+            .filter(|_| {
+                runtime_context.resume_agents_on_restore
+                    && saved_managed_agent == Some(crate::detect::Agent::Claude)
+            });
+        let saved_agent_session = saved_pane
+            .and_then(|p| p.agent_session.as_ref())
+            .filter(|_| nirvana_relaunch.is_none());
+        let saved_agent_resume = saved_pane
+            .and_then(saved_reported_resume)
+            .filter(|_| nirvana_relaunch.is_none());
         let saved_history =
             old_id.and_then(|old_id| history.and_then(|history| history.panes.get(old_id)));
         let startup = {
@@ -706,7 +719,7 @@ fn restore_tab(
                     (Some(agent_name), Some(agent)) if was_imported => {
                         terminal.restore_managed_agent(agent_name, agent)
                     }
-                    (Some(_), Some(_)) => {}
+                    (Some(_), Some(_)) => terminal.nirvana_relaunch = nirvana_relaunch,
                     (Some(agent_name), None) if was_imported => terminal.set_agent_name(agent_name),
                     (Some(_), None) => {}
                     (None, _) => {}
@@ -1601,6 +1614,94 @@ mod tests {
         assert_eq!(session.source, "herdr:opencode");
         assert_eq!(session.agent, "opencode");
         assert_eq!(session.session_ref.value, "opencode-session");
+    }
+
+    /// Nirvana fork: one pane that ran `name` as a managed Claude, with the session herdr saved for it.
+    fn restore_one_claude_pane(
+        name: &str,
+        resume_agents_on_restore: bool,
+    ) -> HashMap<TerminalId, TerminalState> {
+        let cwd = std::env::current_dir().unwrap();
+        let snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("workspace".into()),
+                custom_name: None,
+                identity_cwd: cwd.clone(),
+                worktree_space: None,
+                public_pane_numbers: HashMap::new(),
+                next_public_pane_number: 0,
+                public_tab_numbers: Vec::new(),
+                next_public_tab_number: 0,
+                tabs: vec![TabSnapshot {
+                    custom_name: None,
+                    layout: LayoutSnapshot::Pane(0),
+                    panes: HashMap::from([(
+                        0,
+                        super::super::snapshot::PaneSnapshot {
+                            cwd,
+                            label: None,
+                            agent_name: Some(name.into()),
+                            managed_agent_kind: Some("claude".into()),
+                            agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
+                                source: "herdr:claude".into(),
+                                agent: "claude".into(),
+                                kind: crate::agent_resume::AgentSessionRefKind::Id,
+                                value: "claude-session".into(),
+                            }),
+                            agent_resume: None,
+                            launch_argv: None,
+                        },
+                    )]),
+                    zoomed: false,
+                    focused: Some(0),
+                    root_pane: Some(0),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+        };
+        let (events, _event_rx) = mpsc::channel(4);
+        let (_workspaces, terminals, _runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            resume_agents_on_restore,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+        terminals
+    }
+
+    // The owner, 2026-10-21: "when you click restart we can resume the the process as if we right clicked the folder
+    // and clicked open nirvana here".
+    #[tokio::test]
+    async fn a_nirvana_pane_is_marked_for_nirvana_claude_and_never_gets_plain_claude_resume() {
+        let terminals = restore_one_claude_pane("nirvana-2", true);
+        let terminal = terminals.values().next().expect("restored terminal");
+        assert_eq!(terminal.nirvana_relaunch.as_deref(), Some("nirvana-2"));
+        // herdr's own `claude --resume` would drop the plugin argv and the seat.
+        assert!(terminal.pending_agent_resume_plan.is_none());
+
+        // resume_agents_on_restore = false turns it off, as it turns off herdr's own resume.
+        let terminals = restore_one_claude_pane("nirvana-2", false);
+        let terminal = terminals.values().next().expect("restored terminal");
+        assert_eq!(terminal.nirvana_relaunch, None);
+
+        // A plain Claude keeps herdr's own resume.
+        let terminals = restore_one_claude_pane("reviewer", true);
+        let terminal = terminals.values().next().expect("restored terminal");
+        assert_eq!(terminal.nirvana_relaunch, None);
+        assert!(terminal.pending_agent_resume_plan.is_some());
     }
 
     #[tokio::test]

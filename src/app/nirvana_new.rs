@@ -24,6 +24,14 @@ use std::path::{Path, PathBuf};
 use super::App;
 use crate::nirvana_launch::NewKind;
 
+/// Why the verb's start did not type the agent.
+pub(super) enum NirvanaStartError {
+    /// Before herdr's start: no pane, or no Nirvana home. The response's code and message.
+    Refused(&'static str, String),
+    /// herdr's own `agent start` refused it.
+    Start(super::agents::AgentStartError),
+}
+
 impl App {
     pub(crate) fn nirvana_new_space(
         &mut self,
@@ -115,28 +123,60 @@ impl App {
     ) -> String {
         use crate::app::api::responses::{encode_error, encode_success};
 
+        match self.nirvana_start_agent(ws_idx, pane_id, kind, folder, None) {
+            Ok((agent, argv)) => {
+                tracing::info!(kind = kind.key(), agent = ?agent.name, "nirvana: started from the new menu or the verb");
+                encode_success(
+                    id,
+                    crate::api::schema::ResponseResult::AgentStarted { agent, argv },
+                )
+            }
+            Err(NirvanaStartError::Refused(code, message)) => encode_error(id, code, message),
+            Err(NirvanaStartError::Start(err)) => {
+                let body = self.agent_start_error_body(err);
+                encode_error(id, &body.code, body.message)
+            }
+        }
+    }
+
+    /// The verb's start: the kind's agent typed into the pane's shell under `name` when it is free, else the
+    /// first free name from the kind's stem. A restored pane passes the name it ran under (`nirvana_relaunch.rs`).
+    pub(super) fn nirvana_start_agent(
+        &mut self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        kind: NewKind,
+        folder: &Path,
+        name: Option<&str>,
+    ) -> Result<(crate::api::schema::AgentInfo, Vec<String>), NirvanaStartError> {
         let Some(pane) = self.public_pane_id(ws_idx, pane_id) else {
-            return encode_error(id, "agent_pane_not_found", "the new space has no pane");
+            return Err(NirvanaStartError::Refused(
+                "agent_pane_not_found",
+                "the new space has no pane".into(),
+            ));
         };
         let home = match kind {
             kind if kind.is_nirvana() => match crate::nirvana::home() {
                 Some(home) => home,
                 None => {
-                    return encode_error(
-                        id,
+                    return Err(NirvanaStartError::Refused(
                         "no_nirvana_home",
-                        "neither NIRVANA_HERDR_HOME nor LOCALAPPDATA is set",
-                    )
+                        "neither NIRVANA_HERDR_HOME nor LOCALAPPDATA is set".into(),
+                    ))
                 }
             },
             _ => PathBuf::new(),
         };
-        let name = crate::nirvana_launch::free_agent_name(kind.name_stem(), |name| {
+        let taken = |name: &str| {
             self.state
                 .terminals
                 .values()
                 .any(|terminal| terminal.agent_name.as_deref() == Some(name))
-        });
+        };
+        let name = match name.filter(|name| !taken(name)) {
+            Some(name) => name.to_owned(),
+            None => crate::nirvana_launch::free_agent_name(kind.name_stem(), taken),
+        };
         let params = crate::api::schema::AgentStartParams {
             name,
             kind: kind.agent_label().into(),
@@ -161,19 +201,7 @@ impl App {
             Some(args) => crate::api::schema::AgentStartParams { args, ..params },
             None => params,
         };
-        match self.start_agent(params) {
-            Ok((agent, argv)) => {
-                tracing::info!(kind = kind.key(), agent = ?agent.name, "nirvana: started from the new menu or the verb");
-                encode_success(
-                    id,
-                    crate::api::schema::ResponseResult::AgentStarted { agent, argv },
-                )
-            }
-            Err(err) => {
-                let body = self.agent_start_error_body(err);
-                encode_error(id, &body.code, body.message)
-            }
-        }
+        self.start_agent(params).map_err(NirvanaStartError::Start)
     }
 
     /// The folder's last session to resume, unless a Nirvana Claude already runs on the folder: two Claudes on one

@@ -233,3 +233,46 @@ fn the_row_drops_the_provider_word_before_it_cuts() {
         ("Nirvana - S\u{2026}".to_string(), 7)
     );
 }
+
+// The owner, 2026-10-21: "ensure the agents correponses to ehs pace. I t right now listes everything the workout app
+// refactor and 3d print have it only list based on what space is seletted."
+#[test]
+fn the_agents_panel_lists_the_selected_space_only() {
+    use crate::client::shell::agent_sidebar::{agent_rows, space_agent_rows};
+    let mut snap = snapshot();
+    let mut other = snap.workspaces[0].clone();
+    other.workspace_id = "ws_2".into();
+    other.label = "workout".into();
+    other.number = 2;
+    other.focused = false;
+    snap.workspaces[0].focused = true;
+    snap.workspaces.push(other);
+    let mut theirs = agent("pane_2", Some("claude"), &[]);
+    theirs.workspace_id = "ws_2".into();
+    snap.agents = vec![agent("pane_1", Some("claude"), &[]), theirs];
+    let config = ClientShellConfig::from_config(&Config::default());
+
+    let rows = space_agent_rows(&snap, agent_rows(&snap, &config, None));
+    let panes: Vec<_> = rows.iter().map(|row| row.pane_id.as_str()).collect();
+    assert_eq!(panes, ["pane_1"]);
+
+    // Selecting the other space lists its agent instead.
+    snap.workspaces[0].focused = false;
+    snap.workspaces[1].focused = true;
+    let rows = space_agent_rows(&snap, agent_rows(&snap, &config, None));
+    let panes: Vec<_> = rows.iter().map(|row| row.pane_id.as_str()).collect();
+    assert_eq!(panes, ["pane_2"]);
+
+    // The drawn panel says so when the selected space has none.
+    snap.agents.retain(|agent| agent.workspace_id == "ws_1");
+    let mut state = ClientShellState::new(config);
+    state.set_snapshot(Box::new(snap));
+    state.set_pane_surface(surface());
+    let frame = state.compose(106, 30).expect("composed frame").frame;
+    let text: String = frame
+        .cells
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect();
+    assert!(text.contains("no agents in this space"));
+}
