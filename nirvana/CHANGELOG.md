@@ -3,6 +3,24 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.35.0: a worker's tab reads like Claude Code
+
+- **Changed:** a headless worker's tab draws its stream the way Claude Code draws a turn: `⏺ Read(src/pages/x.tsx)`
+  for a call, with the path from the worker's folder; `⎿` under it for the answer (a line count, the first lines of a
+  command's output and its exit code when it failed, a task's status, an edit's error in red); agy's JSON report as
+  "Report: done", its summary, files and tests; a header naming the order, CLI, model, effort and class, and a footer
+  with the outcome, the time and the tokens. agy's tool names are mapped to Claude Code's (`read_file` is Read,
+  `run_command` is Bash, `manage_task` is Task). `herdr seat read`, which Nirvana Claude reads, gets the same lines
+  without colour. The worker still runs headless, so the checked report, the live tokens and the sure end stay.
+  **Because:** the owner, 2026-10-22, on a tab that showed `· read_file` two dozen times with no file: "why does agy
+  look like that a bunch of read file manage task run command", "I htought agy was similar to claude code in its shell
+  reporting", then "go ahead with option 1". The old printer looked for lower-case `path` and agy sends `Path`, and it
+  never showed what a tool gave back.
+  **Measured:** ten controls in `nirvana/controls.d/worker_view.py`, each reddening its test alone; the recorded flash
+  and haiku streams and the owner's `list-mode` stream replayed through the view. The supervisor writing these lines
+  to the pane has no test of its own, as before; the next worker tab is its check.
+  **If you remove this:** the tab goes back to bare tool names with no file and no result.
+
 ## alpha 0.34.1: herdr's upstream fixes to 2026-10-21
 
 - **Changed:** merged herdr's `master` at a2008661, three commits past the fork's base b431a063: Windows SSH output

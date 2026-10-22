@@ -281,7 +281,14 @@ pub enum Note {
     Session(String),
     Usage,
     Text(String),
+    /// A call, as Claude Code names it: `Read(src/a.ts)`.
     Tool(String),
+    /// What a call gave back. `label` names the call when it is not the one shown just before.
+    ToolOut {
+        label: Option<String>,
+        ok: bool,
+        lines: Vec<String>,
+    },
     RateLimited(RateLimit),
     Result,
 }
@@ -302,6 +309,12 @@ pub struct Stream {
     /// claude's last `rate_limit_info`, for an `api_retry` that carries no reset.
     last_limit: Option<(Option<String>, Option<u64>)>,
     pub lines: u64,
+    /// The worker's folder, dropped from the paths the view shows.
+    cwd: Option<String>,
+    /// Calls by id (claude's tool_use id, agy's step index): the raw tool name and the label shown.
+    calls: BTreeMap<String, (String, String)>,
+    /// The call shown last, so an answer right under it needs no label.
+    last_call: Option<String>,
 }
 
 fn claude_window(kind: &str) -> Option<String> {
@@ -349,35 +362,33 @@ fn sum(values: impl Iterator<Item = Tokens>) -> Tokens {
     })
 }
 
-fn tool_detail(input: &Value) -> String {
-    for key in [
-        "description",
-        "command",
-        "file_path",
-        "path",
-        "pattern",
-        "TargetFile",
-        "CommandLine",
-    ] {
-        if let Some(text) = input.get(key).and_then(Value::as_str) {
-            return text
-                .lines()
-                .next()
-                .unwrap_or("")
-                .chars()
-                .take(100)
-                .collect();
-        }
-    }
-    String::new()
-}
-
 impl Stream {
     pub fn new(cli: &str) -> Self {
         Self {
             cli: cli.to_owned(),
             ..Self::default()
         }
+    }
+
+    /// The same stream, showing paths from the worker's folder.
+    pub fn in_dir(mut self, cwd: &str) -> Self {
+        self.cwd = Some(cwd.to_owned());
+        self
+    }
+
+    fn call(&mut self, id: String, raw: &str, params: &Value) -> Note {
+        let label = view::call_label(&self.cli, raw, params, self.cwd.as_deref());
+        self.calls
+            .insert(id.clone(), (raw.to_owned(), label.clone()));
+        self.last_call = Some(id);
+        Note::Tool(label)
+    }
+
+    fn answer(&mut self, id: &str, answer: impl FnOnce(&str) -> (bool, Vec<String>)) -> Note {
+        let (raw, label) = self.calls.remove(id).unwrap_or_default();
+        let (ok, lines) = answer(&raw);
+        let label = (self.last_call.as_deref() != Some(id) && !label.is_empty()).then_some(label);
+        Note::ToolOut { label, ok, lines }
     }
 
     /// Reads one stdout line. A line that is not JSON is shown and otherwise ignored.
@@ -435,15 +446,28 @@ impl Stream {
                         }
                         Some("tool_use") => {
                             let name = block["name"].as_str().unwrap_or("tool");
-                            let detail = tool_detail(&block["input"]);
-                            notes.push(Note::Tool(if detail.is_empty() {
-                                name.to_owned()
-                            } else {
-                                format!("{name}: {detail}")
-                            }));
+                            let id = block["id"].as_str().unwrap_or("").to_owned();
+                            notes.push(self.call(id, name, &block["input"]));
                         }
                         _ => {}
                     }
+                }
+            }
+            ("user", _) => {
+                for block in value
+                    .pointer("/message/content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|block| {
+                        block.get("type").and_then(Value::as_str) == Some("tool_result")
+                    })
+                {
+                    let id = block["tool_use_id"].as_str().unwrap_or("");
+                    let is_error = block.get("is_error").and_then(Value::as_bool) == Some(true);
+                    notes.push(self.answer(id, |raw| {
+                        view::claude_result(raw, &block["content"], is_error)
+                    }));
                 }
             }
             ("rate_limit_event", _) => {
@@ -522,16 +546,23 @@ impl Stream {
                         }
                     }
                 }
-                if step.get("step_type").and_then(Value::as_str) == Some("tool")
-                    && step.get("state").and_then(Value::as_str) == Some("ACTIVE")
-                {
+                if step.get("step_type").and_then(Value::as_str) == Some("tool") {
+                    let id = index.to_string();
                     let name = step["tool_name"].as_str().unwrap_or("tool");
-                    let detail = tool_detail(&step["tool_info"]["parameters"]);
-                    notes.push(Note::Tool(if detail.is_empty() {
-                        name.to_owned()
-                    } else {
-                        format!("{name}: {detail}")
-                    }));
+                    match step.get("state").and_then(Value::as_str) {
+                        Some("ACTIVE") => {
+                            notes.push(self.call(id, name, &step["tool_info"]["parameters"]));
+                        }
+                        Some(state @ ("DONE" | "ERROR")) => {
+                            let info = &step["tool_info"];
+                            notes.push(
+                                self.answer(&id, |_| {
+                                    view::agy_result(name, info, state == "ERROR")
+                                }),
+                            );
+                        }
+                        _ => {}
+                    }
                 }
             }
             "result" => {
@@ -944,7 +975,7 @@ fn run_attempt(
         .create(true)
         .append(true)
         .open(stream_path)?;
-    let mut stream = Stream::new(&seated.cli);
+    let mut stream = Stream::new(&seated.cli).in_dir(&seated.cwd);
     let mut last_line = Instant::now();
     let mut usage_at: Option<Instant> = None;
     let mut usage_dirty = false;
@@ -967,11 +998,10 @@ fn run_attempt(
                 for note in stream.feed(&line) {
                     match note {
                         Note::Usage | Note::Session(_) => usage_dirty = true,
-                        Note::Text(text) => {
-                            let _ = writeln!(out, "{text}");
-                        }
-                        Note::Tool(tool) => {
-                            let _ = writeln!(out, "  · {tool}");
+                        Note::Text(_) | Note::Tool(_) | Note::ToolOut { .. } => {
+                            for shown in view::note_lines(&note, true) {
+                                let _ = writeln!(out, "{shown}");
+                            }
                         }
                         Note::Result => {}
                         Note::RateLimited(limit) => {
@@ -1169,12 +1199,18 @@ pub fn exec(
         };
         writeln!(
             out,
-            "{} · {} {} {} · attempt {attempt}",
-            seated.order,
-            seated.seat,
-            seated.model,
-            seated.effort.word()
+            "{}",
+            view::header(
+                &seated.order,
+                &seated.cli,
+                &seated.model,
+                seated.effort.word(),
+                &seated.class,
+                attempt,
+                true
+            )
         )?;
+        let attempt_started = Instant::now();
         let (end, stream) =
             match run_attempt(&journal, &stream_path, &seated, attempt, &argv, &stop, out) {
                 Ok(done) => done,
@@ -1215,7 +1251,17 @@ pub fn exec(
                         });
                         journal.transact(now(), |_| Ok((kinds, ())))?;
                         release_lease(order);
-                        writeln!(out, "delivered: {status}")?;
+                        writeln!(
+                            out,
+                            "{}",
+                            view::footer(
+                                &format!("delivered: {status}"),
+                                true,
+                                attempt_started.elapsed().as_secs(),
+                                stream.tokens,
+                                true
+                            )
+                        )?;
                         let _ = nirvana_run::wake(project, run, false);
                         Ok(0)
                     }
@@ -1231,7 +1277,17 @@ pub fn exec(
                             )
                         };
                         end_failed(project, &journal, run, &seated, &why, code)?;
-                        writeln!(out, "failed: {why}")?;
+                        writeln!(
+                            out,
+                            "{}",
+                            view::footer(
+                                &format!("failed: {why}"),
+                                false,
+                                attempt_started.elapsed().as_secs(),
+                                stream.tokens,
+                                true
+                            )
+                        )?;
                         Ok(1)
                     }
                 };
@@ -2661,15 +2717,11 @@ fn read_cli(args: &[String]) -> std::io::Result<()> {
         .join("streams")
         .join(format!("{order}.jsonl"));
     let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut stream = Stream::new(&known.seated.cli);
+    let mut stream = Stream::new(&known.seated.cli).in_dir(&known.seated.cwd);
     let mut shown = Vec::new();
     for line in text.lines() {
         for note in stream.feed(line) {
-            match note {
-                Note::Text(text) => shown.extend(text.lines().map(str::to_owned)),
-                Note::Tool(tool) => shown.push(format!("  · {tool}")),
-                _ => {}
-            }
+            shown.extend(view::note_lines(&note, false));
         }
     }
     let start = shown.len().saturating_sub(tail);
@@ -2789,6 +2841,8 @@ fn cleanup_cli(args: &[String]) -> std::io::Result<()> {
     );
     Ok(())
 }
+
+mod view;
 
 #[cfg(test)]
 mod tests;

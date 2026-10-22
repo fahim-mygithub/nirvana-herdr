@@ -692,3 +692,57 @@ fn a_stop_ends_the_workers_whole_process_tree() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// ---- the tab's view (0.35.0) ----
+
+// The owner, 2026-10-22: "I htought agy was similar to claude code in its shell reporting".
+#[test]
+fn a_recorded_stream_draws_like_claude_code() {
+    let draw = |cli: &str, cwd: &str, text: &str| {
+        let mut stream = Stream::new(cli).in_dir(cwd);
+        text.lines()
+            .flat_map(|line| stream.feed(line))
+            .flat_map(|note| view::note_lines(&note, false))
+            .collect::<Vec<_>>()
+    };
+    let agy = draw(
+        "agy",
+        r"C:\Users\fahim\Desktop\Pojects\Nirvana-Herdr-o3\target\o3-live\proj\.nirvana\worktrees\mul",
+        LIVE_FLASH,
+    );
+    let has = |lines: &[String], line: &str| lines.iter().any(|shown| shown == line);
+    for line in [
+        "⏺ Read(.nirvana/orders/mul.md)",
+        "  ⎿  9 lines",
+        "⏺ Edit(calc.py)",
+        "⏺ Write(test_mul.py)",
+        "⏺ Bash(python test_mul.py)",
+        "  ⎿  ok",
+        "⏺ Report: done",
+    ] {
+        assert!(has(&agy, line), "agy view lacks {line:?}: {agy:#?}");
+    }
+    // No bare agy tool name is left.
+    assert!(!agy
+        .iter()
+        .any(|line| line.contains("view_file") || line.contains("run_command")));
+
+    let claude = draw(
+        "claude",
+        r"C:\Users\fahim\Desktop\Pojects\Nirvana-Herdr-o3\target\o3-live\proj\.nirvana\worktrees\sub",
+        LIVE_HAIKU,
+    );
+    // Haiku sent Edit and Write together: the answer that is not under its own call names it.
+    for line in [
+        "⏺ Edit(calc.py)",
+        "⏺ Write(test_calc.py)",
+        "  ⎿  Edit(calc.py): done",
+        "  ⎿  done",
+        "  - Status: done",
+    ] {
+        assert!(
+            has(&claude, line),
+            "claude view lacks {line:?}: {claude:#?}"
+        );
+    }
+}
