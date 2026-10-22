@@ -1603,21 +1603,51 @@ pub fn folder_runs_with(input: &str, event: &str, tail: &str, config: Option<&Pa
 
 // ---- log-usage (Stop, SessionStart resume) ----
 
-/// Sums assistant token usage from a Claude Code JSON transcript from byte `offset`.
-pub fn read_transcript_usage(path: &Path, offset: u64) -> std::io::Result<(Tokens, u64)> {
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct UsageOffsetState {
+    pub offset: u64,
+    #[serde(default)]
+    pub seen_ids: Vec<String>,
+}
+
+/// Sums assistant token usage from a Claude Code JSON transcript from byte `offset`,
+/// advancing only to the last newline, skipping sidechain lines, and deduplicating by message id.
+pub fn read_transcript_usage(
+    path: &Path,
+    offset: u64,
+    prior_seen_ids: &[String],
+) -> std::io::Result<(Tokens, u64, Vec<String>)> {
     let mut file = std::fs::File::open(path)?;
     let len = file.metadata()?.len();
     let seek_pos = if offset <= len { offset } else { 0 };
     file.seek(std::io::SeekFrom::Start(seek_pos))?;
     let mut text = String::new();
     file.read_to_string(&mut text)?;
-    let new_offset = seek_pos + text.len() as u64;
+
+    // Advance the offset only to the last \n read.
+    let (to_process, new_offset) = match text.rfind('\n') {
+        Some(idx) => (&text[..=idx], seek_pos + (idx + 1) as u64),
+        None => ("", seek_pos),
+    };
+
+    let prior_set: std::collections::HashSet<&str> =
+        prior_seen_ids.iter().map(String::as_str).collect();
 
     let mut seen: std::collections::HashMap<String, [u64; 4]> = std::collections::HashMap::new();
-    for line in text.lines() {
-        let Ok(entry) = serde_json::from_str::<Value>(line.trim()) else {
+    let mut newly_seen_ids = Vec::new();
+
+    for line in to_process.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<Value>(trimmed) else {
             continue;
         };
+        // Skip lines with "isSidechain": true
+        if entry.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
         if entry.get("type").and_then(Value::as_str) == Some("assistant") {
             let message = &entry["message"];
             let id = message
@@ -1625,6 +1655,12 @@ pub fn read_transcript_usage(path: &Path, offset: u64) -> std::io::Result<(Token
                 .and_then(Value::as_str)
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("line-{}", seen.len()));
+
+            // Remember the ids counted at the end of each read, so a later read never counts the same id again.
+            if prior_set.contains(id.as_str()) {
+                continue;
+            }
+
             let Some(usage) = message.get("usage") else {
                 continue;
             };
@@ -1635,6 +1671,9 @@ pub fn read_transcript_usage(path: &Path, offset: u64) -> std::io::Result<(Token
                 n("cache_read_input_tokens"),
                 n("output_tokens"),
             ];
+            if !seen.contains_key(&id) {
+                newly_seen_ids.push(id.clone());
+            }
             let usage_slot = seen.entry(id).or_insert([0; 4]);
             for (saved, cur) in usage_slot.iter_mut().zip(row) {
                 *saved = (*saved).max(cur);
@@ -1648,49 +1687,76 @@ pub fn read_transcript_usage(path: &Path, offset: u64) -> std::io::Result<(Token
         tokens.cache_read += cache_read;
         tokens.output += output;
     }
-    Ok((tokens, new_offset))
+
+    let mut combined_ids = prior_seen_ids.to_vec();
+    for id in newly_seen_ids {
+        if !combined_ids.contains(&id) {
+            combined_ids.push(id);
+        }
+    }
+    if combined_ids.len() > 200 {
+        let keep_from = combined_ids.len() - 200;
+        combined_ids = combined_ids.split_off(keep_from);
+    }
+
+    Ok((tokens, new_offset, combined_ids))
 }
 
-fn log_usage_cli() -> std::io::Result<()> {
-    let hook = read_stdin();
-    if should_skip_orchestrator_hook(&hook, None) {
-        return Ok(());
+pub fn log_usage_from(hook: &Value) -> std::io::Result<Option<Tokens>> {
+    if should_skip_orchestrator_hook(hook, None) {
+        return Ok(None);
     }
-    if let Some(event) = hook.get("hook_event_name").and_then(Value::as_str) {
-        if event == "SessionStart" && hook.get("source").and_then(Value::as_str) != Some("resume") {
-            return Ok(());
-        }
-    } else if let Some(source) = hook.get("source").and_then(Value::as_str) {
-        if source != "resume" {
-            return Ok(());
-        }
+    let is_session_start =
+        hook.get("hook_event_name").and_then(Value::as_str) == Some("SessionStart");
+    if is_session_start && hook.get("source").and_then(Value::as_str) != Some("resume") {
+        return Ok(None);
     }
     let Some(transcript_path) = hook
         .get("transcript_path")
         .and_then(Value::as_str)
         .map(PathBuf::from)
     else {
-        return Ok(());
+        return Ok(None);
     };
     let Some(session_id) = hook.get("session_id").and_then(Value::as_str) else {
-        return Ok(());
+        return Ok(None);
     };
 
-    let offset_path = home_dir()
-        .join(nirvana_seat::DIR)
-        .join("usage-offsets.json");
-    let mut offsets: BTreeMap<String, u64> = std::fs::read_to_string(&offset_path)
+    let dir = home_dir().join(nirvana_seat::DIR).join("usage-offsets");
+    let offset_path = dir.join(format!("{session_id}.json"));
+    let stored_state: Option<UsageOffsetState> = std::fs::read_to_string(&offset_path)
         .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default();
-    let stored_offset = offsets.get(session_id).copied().unwrap_or(0);
+        .and_then(|text| serde_json::from_str(&text).ok());
 
-    let (tokens, new_offset) = match read_transcript_usage(&transcript_path, stored_offset) {
-        Ok(res) => res,
-        Err(_) => return Ok(()),
+    // S6: On SessionStart for a session with no stored offset, set the offset to the file's current length and count nothing.
+    if is_session_start && stored_state.is_none() {
+        let len = std::fs::metadata(&transcript_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let init_state = UsageOffsetState {
+            offset: len,
+            seen_ids: Vec::new(),
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = nirvana_seat::write_atomic(
+            &offset_path,
+            serde_json::to_string(&init_state)?.as_bytes(),
+        );
+        return Ok(None);
+    }
+
+    let (stored_offset, prior_seen_ids) = match &stored_state {
+        Some(s) => (s.offset, s.seen_ids.clone()),
+        None => (0, Vec::new()),
     };
 
-    let project = project_at(hook_cwd(&hook).as_deref());
+    let (tokens, new_offset, combined_ids) =
+        match read_transcript_usage(&transcript_path, stored_offset, &prior_seen_ids) {
+            Ok(res) => res,
+            Err(_) => return Ok(None),
+        };
+
+    let project = project_at(hook_cwd(hook).as_deref());
     if let Some(project) = project {
         let runs = open_runs(&project);
         let most_recent = runs.iter().max_by_key(|(_, state)| {
@@ -1713,8 +1779,17 @@ fn log_usage_cli() -> std::io::Result<()> {
         }
     }
 
-    offsets.insert(session_id.to_string(), new_offset);
-    let _ = nirvana_seat::write_atomic(&offset_path, serde_json::to_string(&offsets)?.as_bytes());
+    let new_state = UsageOffsetState {
+        offset: new_offset,
+        seen_ids: combined_ids,
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = nirvana_seat::write_atomic(&offset_path, serde_json::to_string(&new_state)?.as_bytes());
+    Ok(Some(tokens))
+}
+
+fn log_usage_cli() -> std::io::Result<()> {
+    log_usage_from(&read_stdin())?;
     Ok(())
 }
 
@@ -1740,11 +1815,40 @@ pub struct FileDelta {
     pub added: usize,
     pub deleted: usize,
     pub hash: Option<String>,
+    #[serde(default)]
+    pub is_tracked: bool,
+    #[serde(default)]
+    pub is_binary: bool,
+    #[serde(default)]
+    pub line_count: usize,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub mtime: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct EditState {
     pub files: BTreeMap<String, FileDelta>,
+    #[serde(default)]
+    pub fail_open: bool,
+}
+
+fn is_claude_project_memory(normalized: &str) -> bool {
+    let is_abs = normalized.starts_with('/')
+        || normalized.starts_with('~')
+        || (normalized.len() >= 2 && normalized.as_bytes()[1] == b':');
+    if is_abs {
+        let under_projects = normalized.contains("/.claude/projects/")
+            || normalized.starts_with("~/.claude/projects/");
+        let in_memory = normalized.contains("/memory/") || normalized.ends_with("/memory");
+        if under_projects && in_memory {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn is_out_of_scope(path: &str) -> bool {
@@ -1754,70 +1858,104 @@ pub fn is_out_of_scope(path: &str) -> bool {
         || normalized.starts_with(".claude/")
         || normalized == ".claude"
         || normalized == MEMORY_FILE
-        || normalized.starts_with("memory/")
         || normalized.starts_with("../")
-        || normalized.starts_with('/')
+        || is_claude_project_memory(&normalized)
     {
-        return true;
-    }
-    if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
         return true;
     }
     false
 }
 
+fn multiset_line_diff(base_content: &str, now_content: &str) -> usize {
+    let mut base_counts = std::collections::HashMap::new();
+    for line in base_content.lines() {
+        *base_counts.entry(line).or_insert(0usize) += 1;
+    }
+    let mut now_counts = std::collections::HashMap::new();
+    for line in now_content.lines() {
+        *now_counts.entry(line).or_insert(0usize) += 1;
+    }
+    let mut diff = 0;
+    let mut all_lines = std::collections::HashSet::new();
+    all_lines.extend(base_counts.keys().copied());
+    all_lines.extend(now_counts.keys().copied());
+    for line in all_lines {
+        let b = base_counts.get(line).copied().unwrap_or(0);
+        let n = now_counts.get(line).copied().unwrap_or(0);
+        diff += (n as isize - b as isize).unsigned_abs();
+    }
+    diff
+}
+
 pub fn edit_budget(baseline: &EditState, now: &EditState, limit: EditLimit) -> Option<String> {
-    let mut all_paths = std::collections::BTreeSet::new();
-    all_paths.extend(baseline.files.keys().cloned());
-    all_paths.extend(now.files.keys().cloned());
+    if now.fail_open || baseline.fail_open {
+        return None;
+    }
 
     let mut changed_files = 0;
     let mut changed_lines = 0;
 
-    for path in all_paths {
-        if is_out_of_scope(&path) {
+    for (path, now_entry) in &now.files {
+        if is_out_of_scope(path) {
             continue;
         }
-        let b = baseline.files.get(&path);
-        let n = now.files.get(&path);
-        match (b, n) {
-            (None, Some(now_entry)) => {
+        let base_entry = baseline.files.get(path);
+        match base_entry {
+            None => {
                 changed_files += 1;
-                changed_lines += now_entry.added + now_entry.deleted;
-            }
-            (Some(base_entry), None) => {
-                changed_files += 1;
-                changed_lines += base_entry.added + base_entry.deleted;
-            }
-            (Some(base_entry), Some(now_entry)) => {
-                if base_entry != now_entry {
-                    changed_files += 1;
-                    if base_entry.hash.is_some() || now_entry.hash.is_some() {
-                        let line_diff =
-                            (now_entry.added as isize - base_entry.added as isize).unsigned_abs();
-                        changed_lines += line_diff.max(if base_entry.hash != now_entry.hash {
-                            1
-                        } else {
-                            0
-                        });
+                if now_entry.is_binary {
+                    // Binary files count as 1 file and 0 lines
+                } else if now_entry.is_tracked {
+                    changed_lines += now_entry.added + now_entry.deleted;
+                } else {
+                    let lines = if now_entry.line_count > 0 {
+                        now_entry.line_count
                     } else {
-                        let added_diff =
-                            (now_entry.added as isize - base_entry.added as isize).unsigned_abs();
-                        let deleted_diff = (now_entry.deleted as isize
-                            - base_entry.deleted as isize)
+                        now_entry.added
+                    };
+                    changed_lines += lines;
+                }
+            }
+            Some(base_entry) => {
+                if now_entry.is_binary || base_entry.is_binary {
+                    if now_entry.hash != base_entry.hash {
+                        changed_files += 1;
+                    }
+                } else if let (Some(base_content), Some(now_content)) =
+                    (&base_entry.content, &now_entry.content)
+                {
+                    let diff = multiset_line_diff(base_content, now_content);
+                    if diff > 0 {
+                        changed_files += 1;
+                        changed_lines += diff;
+                    }
+                } else if base_entry.hash.is_some() || now_entry.hash.is_some() {
+                    if base_entry.hash != now_entry.hash {
+                        changed_files += 1;
+                        let line_diff = (now_entry.line_count as isize
+                            - base_entry.line_count as isize)
                             .unsigned_abs();
+                        changed_lines += line_diff;
+                    }
+                } else if base_entry != now_entry {
+                    let added_diff =
+                        (now_entry.added as isize - base_entry.added as isize).unsigned_abs();
+                    let deleted_diff =
+                        (now_entry.deleted as isize - base_entry.deleted as isize).unsigned_abs();
+                    if added_diff + deleted_diff > 0 {
+                        changed_files += 1;
                         changed_lines += added_diff + deleted_diff;
                     }
                 }
             }
-            (None, None) => {}
         }
     }
 
     if changed_files > limit.files || changed_lines > limit.lines {
+        let file_word = if changed_files == 1 { "file" } else { "files" };
         Some(format!(
-            "Nirvana Claude edits at most {} file and {} lines itself (R2). This change is {} files, {} lines. Hand it to a worker: `herdr seat pick --book`, then an order.",
-            limit.files, limit.lines, changed_files, changed_lines
+            "Nirvana Claude edits at most {} file and {} lines itself (R2). This change is {} {}, {} lines. Hand it to a worker: `herdr seat pick --book`, then an order.",
+            limit.files, limit.lines, changed_files, file_word, changed_lines
         ))
     } else {
         None
@@ -1825,10 +1963,27 @@ pub fn edit_budget(baseline: &EditState, now: &EditState, limit: EditLimit) -> O
 }
 
 pub fn capture_edit_state(root: &Path) -> EditState {
+    capture_edit_state_cached(root, None)
+}
+
+pub fn capture_edit_state_cached(root: &Path, prev: Option<&EditState>) -> EditState {
+    const MAX_PATHS: usize = 2000;
+    const MAX_FILE_SIZE: u64 = 256 * 1024;
+    const MAX_TOTAL_BYTES: usize = 4 * 1024 * 1024;
+
     let mut files = BTreeMap::new();
+    let mut total_bytes: usize = 0;
 
     let numstat_out = std::process::Command::new("git")
-        .args(["diff", "HEAD", "--numstat", "--no-color"])
+        .args([
+            "diff",
+            "HEAD",
+            "--numstat",
+            "--relative",
+            "--no-color",
+            "--",
+            ".",
+        ])
         .current_dir(root)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1837,7 +1992,7 @@ pub fn capture_edit_state(root: &Path) -> EditState {
         .filter(|out| out.status.success())
         .or_else(|| {
             std::process::Command::new("git")
-                .args(["diff", "--numstat", "--no-color"])
+                .args(["diff", "--numstat", "--relative", "--no-color", "--", "."])
                 .current_dir(root)
                 .stdin(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
@@ -1846,30 +2001,26 @@ pub fn capture_edit_state(root: &Path) -> EditState {
                 .filter(|out| out.status.success())
         });
 
+    let mut tracked_paths: Vec<(String, usize, usize, bool)> = Vec::new();
     if let Some(out) = numstat_out {
         let text = String::from_utf8_lossy(&out.stdout);
         for line in text.lines() {
             let parts: Vec<&str> = line.split('\t').collect();
             if parts.len() >= 3 {
+                let is_bin = parts[0] == "-" || parts[1] == "-";
                 let added = parts[0].parse::<usize>().unwrap_or(0);
                 let deleted = parts[1].parse::<usize>().unwrap_or(0);
                 let path = parts[2].trim().trim_matches('"');
-                if !is_out_of_scope(path) {
-                    files.insert(
-                        path.replace('\\', "/"),
-                        FileDelta {
-                            added,
-                            deleted,
-                            hash: None,
-                        },
-                    );
+                let norm = path.replace('\\', "/");
+                if !is_out_of_scope(&norm) {
+                    tracked_paths.push((norm, added, deleted, is_bin));
                 }
             }
         }
     }
 
-    let status_out = std::process::Command::new("git")
-        .args(["status", "--porcelain=v1", "-uall"])
+    let ls_out = std::process::Command::new("git")
+        .args(["ls-files", "-o", "--exclude-standard", "--", "."])
         .current_dir(root)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1877,36 +2028,225 @@ pub fn capture_edit_state(root: &Path) -> EditState {
         .ok()
         .filter(|out| out.status.success());
 
-    if let Some(out) = status_out {
+    let mut untracked_paths = Vec::new();
+    if let Some(out) = ls_out {
         let text = String::from_utf8_lossy(&out.stdout);
         for line in text.lines() {
-            if let Some(rest) = line.strip_prefix("?? ") {
-                let rel = rest.trim().trim_matches('"');
-                let normalized = rel.replace('\\', "/");
-                if is_out_of_scope(&normalized) {
-                    continue;
-                }
-                let full = root.join(rel);
-                if full.is_file() {
-                    if let Ok(bytes) = std::fs::read(&full) {
-                        use sha2::{Digest, Sha256};
-                        let hash = format!("{:x}", Sha256::digest(&bytes));
-                        let line_count = String::from_utf8_lossy(&bytes).lines().count();
-                        files.insert(
-                            normalized,
-                            FileDelta {
-                                added: line_count,
-                                deleted: 0,
-                                hash: Some(hash),
-                            },
-                        );
-                    }
-                }
+            let path = line.trim().trim_matches('"');
+            if path.is_empty() {
+                continue;
+            }
+            let norm = path.replace('\\', "/");
+            if !is_out_of_scope(&norm) {
+                untracked_paths.push(norm);
             }
         }
     }
 
-    EditState { files }
+    if tracked_paths.len() + untracked_paths.len() > MAX_PATHS {
+        return EditState {
+            files: BTreeMap::new(),
+            fail_open: true,
+        };
+    }
+
+    for (norm, added, deleted, is_numstat_bin) in tracked_paths {
+        let full_path = root.join(&norm);
+        let meta = std::fs::metadata(&full_path).ok();
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let mtime = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        if is_numstat_bin {
+            files.insert(
+                norm,
+                FileDelta {
+                    is_tracked: true,
+                    is_binary: true,
+                    added: 0,
+                    deleted: 0,
+                    line_count: 0,
+                    hash: None,
+                    content: None,
+                    size,
+                    mtime,
+                },
+            );
+            continue;
+        }
+
+        let mut is_bin = false;
+        if let Ok(mut f) = std::fs::File::open(&full_path) {
+            let mut buf = [0u8; 8192];
+            if let Ok(n) = f.read(&mut buf) {
+                if buf[..n].contains(&0) {
+                    is_bin = true;
+                }
+            }
+        }
+
+        if is_bin {
+            files.insert(
+                norm,
+                FileDelta {
+                    is_tracked: true,
+                    is_binary: true,
+                    added: 0,
+                    deleted: 0,
+                    line_count: 0,
+                    hash: None,
+                    content: None,
+                    size,
+                    mtime,
+                },
+            );
+            continue;
+        }
+
+        if size <= MAX_FILE_SIZE && total_bytes + (size as usize) <= MAX_TOTAL_BYTES {
+            if let Ok(text) = std::fs::read_to_string(&full_path) {
+                use sha2::{Digest, Sha256};
+                let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
+                let line_count = text.lines().count();
+                total_bytes += text.len();
+                files.insert(
+                    norm,
+                    FileDelta {
+                        is_tracked: true,
+                        is_binary: false,
+                        added,
+                        deleted,
+                        line_count,
+                        hash: Some(hash),
+                        content: Some(text),
+                        size,
+                        mtime,
+                    },
+                );
+                continue;
+            }
+        }
+
+        if let Ok(bytes) = std::fs::read(&full_path) {
+            use sha2::{Digest, Sha256};
+            let hash = format!("{:x}", Sha256::digest(&bytes));
+            let line_count = bytes.iter().filter(|&&b| b == b'\n').count();
+            files.insert(
+                norm,
+                FileDelta {
+                    is_tracked: true,
+                    is_binary: false,
+                    added,
+                    deleted,
+                    line_count,
+                    hash: Some(hash),
+                    content: None,
+                    size,
+                    mtime,
+                },
+            );
+        }
+    }
+
+    for norm in untracked_paths {
+        let full_path = root.join(&norm);
+        let meta = std::fs::metadata(&full_path).ok();
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let mtime = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        if let Some(prev_entry) = prev.and_then(|p| p.files.get(&norm)) {
+            if prev_entry.size == size && prev_entry.mtime == mtime {
+                files.insert(norm, prev_entry.clone());
+                continue;
+            }
+        }
+
+        let mut is_bin = false;
+        if let Ok(mut f) = std::fs::File::open(&full_path) {
+            let mut buf = [0u8; 8192];
+            if let Ok(n) = f.read(&mut buf) {
+                if buf[..n].contains(&0) {
+                    is_bin = true;
+                }
+            }
+        }
+
+        if is_bin {
+            files.insert(
+                norm,
+                FileDelta {
+                    is_tracked: false,
+                    is_binary: true,
+                    added: 0,
+                    deleted: 0,
+                    line_count: 0,
+                    hash: None,
+                    content: None,
+                    size,
+                    mtime,
+                },
+            );
+            continue;
+        }
+
+        if size <= MAX_FILE_SIZE && total_bytes + (size as usize) <= MAX_TOTAL_BYTES {
+            if let Ok(text) = std::fs::read_to_string(&full_path) {
+                use sha2::{Digest, Sha256};
+                let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
+                let line_count = text.lines().count();
+                total_bytes += text.len();
+                files.insert(
+                    norm,
+                    FileDelta {
+                        is_tracked: false,
+                        is_binary: false,
+                        added: line_count,
+                        deleted: 0,
+                        line_count,
+                        hash: Some(hash),
+                        content: Some(text),
+                        size,
+                        mtime,
+                    },
+                );
+                continue;
+            }
+        }
+
+        if let Ok(bytes) = std::fs::read(&full_path) {
+            use sha2::{Digest, Sha256};
+            let hash = format!("{:x}", Sha256::digest(&bytes));
+            let line_count = bytes.iter().filter(|&&b| b == b'\n').count();
+            files.insert(
+                norm,
+                FileDelta {
+                    is_tracked: false,
+                    is_binary: false,
+                    added: line_count,
+                    deleted: 0,
+                    line_count,
+                    hash: Some(hash),
+                    content: None,
+                    size,
+                    mtime,
+                },
+            );
+        }
+    }
+
+    EditState {
+        files,
+        fail_open: false,
+    }
 }
 
 pub fn should_skip_orchestrator_hook(hook: &Value, cwd: Option<&Path>) -> bool {
@@ -1978,7 +2318,7 @@ pub fn guard_edit_decision(
     };
     if call_lines > limit.lines {
         let reason = format!(
-            "Nirvana Claude edits at most {} file and {} lines itself (R2). This change is 1 files, {} lines. Hand it to a worker: `herdr seat pick --book`, then an order.",
+            "Nirvana Claude edits at most {} file and {} lines itself (R2). This change is 1 file, {} lines. Hand it to a worker: `herdr seat pick --book`, then an order.",
             limit.files, limit.lines, call_lines
         );
         Some(json!({
@@ -2009,36 +2349,34 @@ pub fn check_edit_decision(
         json!({
             "decision": "block",
             "reason": reason,
-            "hookSpecificOutput": {
-                "hookEventName": "PostToolUse",
-                "decision": "block",
-                "reason": reason,
-            }
         })
     })
 }
 
-fn prompt_baseline_cli() -> std::io::Result<()> {
-    let hook = read_stdin();
-    let cwd = hook_cwd(&hook).or_else(|| std::env::current_dir().ok());
-    if should_skip_orchestrator_hook(&hook, cwd.as_deref()) {
+pub fn prompt_baseline_from(hook: &Value) -> std::io::Result<()> {
+    let cwd = hook_cwd(hook).or_else(|| std::env::current_dir().ok());
+    if should_skip_orchestrator_hook(hook, cwd.as_deref()) {
         return Ok(());
     }
+    let Some(session_id) = hook.get("session_id").and_then(Value::as_str) else {
+        return Ok(());
+    };
     let Some(project) = project_at(cwd.as_deref()) else {
         return Ok(());
     };
     let state = capture_edit_state(&project.root);
-    let path = home_dir()
-        .join(nirvana_seat::DIR)
-        .join("edit-baselines.json");
-    let mut all: BTreeMap<String, EditState> = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default();
-    let key = project.root.display().to_string();
-    all.insert(key, state);
-    let _ = nirvana_seat::write_atomic(&path, serde_json::to_string(&all)?.as_bytes());
+    if state.fail_open {
+        return Ok(());
+    }
+    let dir = home_dir().join(nirvana_seat::DIR).join("edit-baselines");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("{session_id}.json"));
+    let _ = nirvana_seat::write_atomic(&path, serde_json::to_string(&state)?.as_bytes());
     Ok(())
+}
+
+fn prompt_baseline_cli() -> std::io::Result<()> {
+    prompt_baseline_from(&read_stdin())
 }
 
 fn guard_edit_cli() -> std::io::Result<()> {
@@ -2056,32 +2394,51 @@ fn guard_edit_cli() -> std::io::Result<()> {
     Ok(())
 }
 
-fn check_edit_cli() -> std::io::Result<()> {
-    let hook = read_stdin();
-    let cwd = hook_cwd(&hook).or_else(|| std::env::current_dir().ok());
-    if should_skip_orchestrator_hook(&hook, cwd.as_deref()) {
-        return Ok(());
+pub fn check_edit_from(hook: &Value) -> std::io::Result<Option<Value>> {
+    let cwd = hook_cwd(hook).or_else(|| std::env::current_dir().ok());
+    if should_skip_orchestrator_hook(hook, cwd.as_deref()) {
+        return Ok(None);
     }
-    let Some(project) = project_at(cwd.as_deref()) else {
-        return Ok(());
+    let Some(session_id) = hook.get("session_id").and_then(Value::as_str) else {
+        return Ok(None);
     };
-    let path = home_dir()
-        .join(nirvana_seat::DIR)
-        .join("edit-baselines.json");
-    let all: BTreeMap<String, EditState> = std::fs::read_to_string(&path)
+    let Some(project) = project_at(cwd.as_deref()) else {
+        return Ok(None);
+    };
+    let dir = home_dir().join(nirvana_seat::DIR).join("edit-baselines");
+    let path = dir.join(format!("{session_id}.json"));
+    let baseline: Option<EditState> = std::fs::read_to_string(&path)
         .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default();
-    let key = project.root.display().to_string();
-    let baseline = all.get(&key).cloned().unwrap_or_default();
+        .and_then(|text| serde_json::from_str(&text).ok());
+
     let now_state = capture_edit_state(&project.root);
-    if let Some(decision) = check_edit_decision(
-        &hook,
+    if now_state.fail_open {
+        return Ok(None);
+    }
+
+    let baseline = match baseline {
+        Some(b) => b,
+        None => {
+            // B1: When check-edit finds no baseline for its session, it writes one
+            // from the current state and returns without blocking.
+            let _ = std::fs::create_dir_all(&dir);
+            let _ =
+                nirvana_seat::write_atomic(&path, serde_json::to_string(&now_state)?.as_bytes());
+            return Ok(None);
+        }
+    };
+
+    Ok(check_edit_decision(
+        hook,
         cwd.as_deref(),
         &baseline,
         &now_state,
         EditLimit::default(),
-    ) {
+    ))
+}
+
+fn check_edit_cli() -> std::io::Result<()> {
+    if let Some(decision) = check_edit_from(&read_stdin())? {
         println!("{decision}");
     }
     Ok(())

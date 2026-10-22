@@ -1513,10 +1513,7 @@ pub fn spent_world(
     world
 }
 
-pub fn rate_limited_override(
-    seated: &Seated,
-    limit_pool: &str,
-) -> (bool, bool, Option<String>) {
+pub fn rate_limited_override(seated: &Seated, limit_pool: &str) -> (bool, bool, Option<String>) {
     match &seated.override_reason {
         Some(_) => {
             if limit_pool == seated.pool.as_str() {
@@ -1586,8 +1583,7 @@ fn rate_limited(
     request.mode = seated.mode;
     request.order = Some(child.clone());
     let limit_pool = limit.pool.as_deref().unwrap_or(&pool);
-    let (override_dropped, inherited_override, target) =
-        rate_limited_override(seated, limit_pool);
+    let (override_dropped, inherited_override, target) = rate_limited_override(seated, limit_pool);
     if let (Some(target), Some(reason)) = (target, &seated.override_reason) {
         request.override_seat = Some((target, reason.clone()));
         request.inherited_override = true;
@@ -2676,18 +2672,13 @@ pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i3
         )
     })?;
     let spec = crate::nirvana_gate::spec(&text);
-    if request
-        .class
-        .as_deref()
-        .is_some_and(crate::nirvana_gate::requires_owns)
-        && spec.owns.is_empty()
-    {
+    let booked = book(project, request)?;
+    if crate::nirvana_gate::requires_owns(&booked.class) && spec.owns.is_empty() {
         return Err((
             2,
             "a build order needs an `owns:` line naming the files it may change".into(),
         ));
     }
-    let booked = book(project, request)?;
     let (cwd, worktree, branch) = if request.worktree {
         let path = project.worktrees_dir().join(&request.order);
         let branch = format!("nirvana/{}", request.order);

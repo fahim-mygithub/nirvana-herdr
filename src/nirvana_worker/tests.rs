@@ -948,6 +948,34 @@ fn seat_order_refuses_empty_owns_for_build_fix_plan_and_permits_read_only() {
     let res = seat_order(&project, &make_request("plan"));
     assert_eq!(res.unwrap_err().0, 2);
 
+    // N4: an order with no --class whose booked class is build.* and no owns: is refused
+    let table = nirvana_seat::table_for(&project.root).unwrap();
+    let mut leases = nirvana_seat::Leases::default();
+    let pick = nirvana_seat::pick(
+        &table,
+        &nirvana_seat::live_world(&table),
+        &nirvana_seat::Request::new("build.bounded"),
+    )
+    .unwrap();
+    let now = crate::nirvana_usage::unix(std::time::SystemTime::now());
+    nirvana_seat::book_pick(
+        &mut leases,
+        &table,
+        &pick,
+        Some("booked-no-class"),
+        Some("r1"),
+        now,
+    );
+    let leases_path = nirvana_seat::dir().join(nirvana_seat::LEASES_FILE);
+    std::fs::write(&leases_path, serde_json::to_string(&leases).unwrap()).unwrap();
+
+    let mut no_class_req = make_request("build.bounded");
+    no_class_req.order = "booked-no-class".into();
+    no_class_req.class = None;
+    no_class_req.seat = pick.seat.clone();
+    let res = seat_order(&project, &no_class_req);
+    assert_eq!(res.unwrap_err().0, 2);
+
     // Rule 7: read-only classes never refused for empty owns
     // research.web has no owns:, but requires_owns is false
     assert!(!crate::nirvana_gate::requires_owns("research.web"));

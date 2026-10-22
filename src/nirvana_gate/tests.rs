@@ -994,10 +994,101 @@ fn sources_axis_checks_citations_in_worker_stream() {
     assert_eq!(axis.mark, Mark::Fail);
     assert!(axis.why.contains("not fetched"));
 
-    // 4. Fetched URL passes (with fragment and trailing slash trimmed)
-    let stream_with = "Calling fetch with url: https://example.com/docs/ ...";
-    let axis = sources_axis("research.web", Some(&report_with_url), stream_with).expect("axis");
+    // 4. Fetched URL passes (with fragment and trailing slash trimmed) via JSON tool use
+    let stream_with = serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "content": [{
+                "type": "tool_use",
+                "name": "WebFetch",
+                "input": {"url": "https://example.com/docs/"}
+            }]
+        }
+    })
+    .to_string();
+    let axis = sources_axis("research.web", Some(&report_with_url), &stream_with).expect("axis");
     assert_eq!(axis.mark, Mark::Pass);
+}
+
+#[test]
+fn sources_axis_b2_real_fetch_calls_and_url_normalization() {
+    let target_url = "https://example.com/a";
+    let report = serde_json::json!({
+        "sources": [
+            {"url": target_url, "used_for": "spec verification"}
+        ]
+    });
+
+    // 1. Claude stream whose assistant text cites the URL, with cache_read_input_tokens in usage, and no WebFetch: fails!
+    let claude_assistant_text_stream = serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "id": "msg-cite",
+            "content": [
+                {
+                    "type": "text",
+                    "text": format!("I read the docs at {target_url} and found the answer.")
+                }
+            ],
+            "usage": {
+                "input_tokens": 100,
+                "cache_read_input_tokens": 500,
+                "output_tokens": 50
+            }
+        }
+    })
+    .to_string();
+
+    let axis1 =
+        sources_axis("research.web", Some(&report), &claude_assistant_text_stream).expect("axis");
+    assert_eq!(axis1.mark, Mark::Fail);
+
+    // 2. The same stream with a WebFetch tool_use of that URL: passes!
+    let claude_web_fetch_stream = format!(
+        "{}\n{}",
+        claude_assistant_text_stream,
+        serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "id": "msg-fetch",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "WebFetch",
+                        "input": {
+                            "url": "http://www.example.com/a/"
+                        }
+                    }
+                ]
+            }
+        })
+    );
+    let axis2 =
+        sources_axis("research.web", Some(&report), &claude_web_fetch_stream).expect("axis");
+    assert_eq!(axis2.mark, Mark::Pass);
+
+    // 3. An agy stream with read_url_content: passes!
+    let agy_stream = serde_json::json!({
+        "event": "step_update",
+        "step_update": {
+            "step_type": "tool",
+            "tool_name": "read_url_content",
+            "tool_info": {
+                "parameters": {
+                    "url": target_url
+                }
+            }
+        }
+    })
+    .to_string();
+    let axis3 = sources_axis("research.web", Some(&report), &agy_stream).expect("axis");
+    assert_eq!(axis3.mark, Mark::Pass);
+
+    // 4. http://www.x.com/a/ matches https://x.com/a
+    assert_eq!(
+        normalize_url("http://www.x.com/a/"),
+        normalize_url("https://x.com/a")
+    );
 }
 
 // ---- Plan 24 §4: send-back override tests ----
@@ -1032,6 +1123,22 @@ fn send_back_inherits_override_and_does_not_count_against_run_overrides() {
         .append(2, Kind::Seated(Box::new(seated_order.clone())))
         .expect("append");
 
+    // Pre-load 3 overrides used in run r1 to verify inherited override is exempt from the cap
+    let mut init_leases = nirvana_seat::Leases::default();
+    let now_ts = crate::nirvana_run::now();
+    init_leases.runs.insert(
+        run.to_string(),
+        nirvana_seat::RunCount {
+            overrides: 3,
+            at: now_ts,
+        },
+    );
+    nirvana_seat::write_leases(
+        &nirvana_seat::dir().join(nirvana_seat::LEASES_FILE),
+        &init_leases,
+    )
+    .expect("write leases");
+
     // Delivered order
     let mut state = replay(&journal.read().0);
     let known = state.order("build-1").expect("order").clone();
@@ -1064,9 +1171,116 @@ fn send_back_inherits_override_and_does_not_count_against_run_overrides() {
         Some("owner insisted on sonnet".into())
     );
 
-    // Run overrides in leases is 0 because child was an inherited override!
+    // Run overrides in leases is still 3 because child was an inherited override and did not increment!
     let leases =
         crate::nirvana_seat::load_leases(&nirvana_seat::dir().join(nirvana_seat::LEASES_FILE))
             .expect("leases");
-    assert_eq!(leases.overrides(run), 0);
+    assert_eq!(leases.overrides(run), 3);
+}
+
+#[test]
+fn send_back_retries_with_rule_pick_when_inherited_model_is_refused() {
+    let _guard = crate::nirvana::with_test_home("send-back-refused-fallback");
+    let root = repo("send-back-refused-fallback");
+    let project = Project::at(&root);
+    let run = "r-fallback";
+    let journal = project.journal(run);
+
+    // Turn sonnet off in table
+    let mut table = nirvana_seat::parse(nirvana_seat::DEFAULT).expect("table");
+    if let Some(seat) = table.seats.iter_mut().find(|s| s.id == "sonnet") {
+        seat.enabled = false;
+    }
+
+    let mut seated_order = seated("build-fb", None);
+    seated_order.seat = "sonnet".into();
+    seated_order.override_reason = Some("owner insisted on sonnet".into());
+    seated_order.cwd = worktree(&root, "build-fb").display().to_string();
+
+    journal
+        .append(
+            1,
+            Kind::Opened {
+                project: "p".into(),
+                orchestrator_pane: None,
+                auto: false,
+                pools: vec![],
+                pools_basis: None,
+            },
+        )
+        .expect("append");
+    journal
+        .append(2, Kind::Seated(Box::new(seated_order.clone())))
+        .expect("append");
+
+    let mut state = replay(&journal.read().0);
+    let known = state.order("build-fb").expect("order").clone();
+
+    let failing_axes = vec![Axis::new("tests", Mark::Fail, "test failed")];
+
+    // Ruling should be sent_back (fallback to rule's pick), NOT asked!
+    let ruling = send_back(
+        &project,
+        run,
+        &journal,
+        &state,
+        &known,
+        "build-fb",
+        "the order\n",
+        failing_axes,
+        Some(&table),
+    )
+    .expect("send_back");
+
+    assert_eq!(ruling.verdict, "sent_back");
+    let child_order = "build-fb-s1";
+
+    state = replay(&journal.read().0);
+    let child = state.order(child_order).expect("child");
+    // Child picked by normal rule, not sonnet
+    assert_ne!(child.seated.seat, "sonnet");
+    assert_eq!(child.seated.override_reason, None);
+    assert!(child
+        .seated
+        .reason
+        .contains("inherited override sonnet refused"));
+}
+
+#[test]
+fn deterministic_includes_sources_axis_for_research_and_media() {
+    let root = repo("det-sources");
+    let spec = Spec::default();
+    let report = serde_json::json!({
+        "sources": [{"url": "https://example.com/test", "used_for": "spec"}]
+    });
+    let stream = serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "content": [{
+                "type": "tool_use",
+                "name": "WebFetch",
+                "input": {"url": "https://example.com/test"}
+            }]
+        }
+    })
+    .to_string();
+    let stream_file = root.join(".nirvana/runs/r1/worker-res.stream.jsonl");
+    std::fs::create_dir_all(stream_file.parent().unwrap()).unwrap();
+    std::fs::write(&stream_file, &stream).unwrap();
+
+    let det = deterministic(
+        &Subject {
+            root: &root,
+            cwd: &root,
+            run: "r1",
+            order: "res",
+            branch: None,
+            class: "research.web",
+            report: Some(&report),
+            spec: &spec,
+            ports: &no_ports,
+        },
+        None,
+    );
+    assert!(det.axes.iter().any(|a| a.axis == "sources"));
 }

@@ -1136,3 +1136,54 @@ fn run_end_refuses_delivered_ungated_orders_and_abandon_allows_end() {
         Some("abandoned")
     );
 }
+
+#[test]
+fn end_decision_refusal_and_abandon() {
+    let events = vec![
+        ev(1, T0, opened(Some("w1:p2"))),
+        ev(2, T0, Kind::Seated(Box::new(seated("order-1")))),
+        ev(
+            3,
+            T0 + 1,
+            Kind::Delivered {
+                order: "order-1".into(),
+                report: report("done"),
+            },
+        ),
+    ];
+    let state = replay(&events);
+
+    // 1. Without abandon, delivered ungated order returns Err
+    let err = end_decision(&state, &[]).unwrap_err();
+    assert!(err.contains("delivered order(s) not gated: order-1"));
+
+    // 2. --abandon without --why returns Err
+    let err_why = end_decision(&state, &["--abandon".into(), "order-1".into()]).unwrap_err();
+    assert!(err_why.contains("--abandon requires --why <text>"));
+
+    // 3. With --abandon and --why, returns Ok(kinds) containing Gated abandoned
+    let kinds = end_decision(
+        &state,
+        &[
+            "--abandon".into(),
+            "order-1".into(),
+            "--why".into(),
+            "dropping it".into(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(kinds.len(), 1);
+    match &kinds[0] {
+        Kind::Gated {
+            order,
+            verdict,
+            reason,
+            ..
+        } => {
+            assert_eq!(order, "order-1");
+            assert_eq!(verdict, "abandoned");
+            assert_eq!(reason.as_deref(), Some("dropping it"));
+        }
+        _ => panic!("expected Kind::Gated"),
+    }
+}

@@ -469,10 +469,49 @@ fn join_ports(ports: &[u16]) -> String {
         .join(", ")
 }
 
-/// Trims fragment and trailing slash from a URL for comparison (§5).
-pub fn normalize_url(url: &str) -> &str {
-    let without_fragment = url.split('#').next().unwrap_or(url);
-    without_fragment.trim_end_matches('/')
+/// Trims fragment and trailing slash from a URL, lowercases scheme and host, drops www., and treats http and https as equal.
+pub fn normalize_url(url: &str) -> String {
+    let without_fragment = url.split('#').next().unwrap_or(url).trim();
+    if without_fragment.is_empty() {
+        return String::new();
+    }
+    let (scheme, rest) = if let Some(idx) = without_fragment.find("://") {
+        let rest = &without_fragment[idx + 3..];
+        ("http://", rest)
+    } else {
+        ("", without_fragment)
+    };
+    let (host, path_and_query) = match rest.find(['/', '?']) {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => (rest, ""),
+    };
+    let mut host = host.to_ascii_lowercase();
+    if host.starts_with("www.") {
+        host = host[4..].to_string();
+    }
+    let (path, query) = match path_and_query.find('?') {
+        Some(q_idx) => (&path_and_query[..q_idx], &path_and_query[q_idx..]),
+        None => (path_and_query, ""),
+    };
+    let trimmed_path = path.trim_end_matches('/');
+    format!("{scheme}{host}{trimmed_path}{query}")
+}
+
+fn collect_json_strings(val: &Value, out: &mut Vec<String>) {
+    match val {
+        Value::String(s) => out.push(s.clone()),
+        Value::Array(arr) => {
+            for v in arr {
+                collect_json_strings(v, out);
+            }
+        }
+        Value::Object(map) => {
+            for v in map.values() {
+                collect_json_strings(v, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Checks if a normalized URL was fetched, read or browsed in the worker stream.
@@ -485,56 +524,57 @@ fn url_in_stream(norm_url: &str, stream: &str) -> bool {
         if trimmed.is_empty() {
             continue;
         }
-        // If line is JSON, check tool_use / tool_call
-        if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
-            // Check tool_use in message content (Claude)
-            if let Some(content) = val.pointer("/message/content").and_then(Value::as_array) {
-                for block in content {
-                    if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                        let name = block
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_lowercase();
-                        let is_fetch = name.contains("fetch")
-                            || name.contains("read")
-                            || name.contains("browser")
-                            || name.contains("browse")
-                            || name.contains("web")
-                            || name.contains("get")
-                            || name.contains("curl");
-                        if is_fetch {
-                            let input_str = block
-                                .get("input")
-                                .map(|v| v.to_string())
-                                .unwrap_or_default();
-                            if input_str.contains(norm_url) {
-                                return true;
+        let Ok(val) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+
+        // Claude: message.content[] items with type == "tool_use"
+        if let Some(content) = val.pointer("/message/content").and_then(Value::as_array) {
+            for block in content {
+                if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+                    let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+                    let is_fetch = name == "WebFetch"
+                        || (name.starts_with("mcp__")
+                            && (name.contains("browser") || name.contains("bladebro")));
+                    if is_fetch {
+                        if let Some(input) = block.get("input") {
+                            let mut strings = Vec::new();
+                            collect_json_strings(input, &mut strings);
+                            for s in strings {
+                                if normalize_url(&s) == norm_url {
+                                    return true;
+                                }
                             }
                         }
                     }
                 }
             }
-            // Check tool calls in step_update or toolAction (agy)
-            let lower_line = trimmed.to_lowercase();
-            let is_fetch_call = lower_line.contains("fetch")
-                || lower_line.contains("read")
-                || lower_line.contains("browser")
-                || lower_line.contains("browse")
-                || lower_line.contains("web")
-                || lower_line.contains("curl");
-            if is_fetch_call && trimmed.contains(norm_url) {
-                return true;
-            }
-        } else {
-            // Non-JSON line
-            let lower = trimmed.to_lowercase();
-            let is_fetch = lower.contains("fetch")
-                || lower.contains("read")
-                || lower.contains("browser")
-                || lower.contains("browse");
-            if is_fetch && trimmed.contains(norm_url) {
-                return true;
+        }
+
+        // agy: step_update tool steps
+        let step = val.get("step_update").unwrap_or(&val);
+        if step.get("step_type").and_then(Value::as_str) == Some("tool") {
+            let tool_name = step.get("tool_name").and_then(Value::as_str).unwrap_or("");
+            let params = &step["tool_info"]["parameters"];
+            let is_browser_mcp = tool_name == "call_mcp_tool" && {
+                let mut p_strings = Vec::new();
+                collect_json_strings(params, &mut p_strings);
+                p_strings
+                    .iter()
+                    .any(|s| s.to_ascii_lowercase().contains("browser"))
+            };
+            let is_agy_fetch = tool_name == "read_url_content"
+                || tool_name == "view_content_chunk"
+                || tool_name.starts_with("browser_")
+                || is_browser_mcp;
+            if is_agy_fetch {
+                let mut strings = Vec::new();
+                collect_json_strings(params, &mut strings);
+                for s in strings {
+                    if normalize_url(&s) == norm_url {
+                        return true;
+                    }
+                }
             }
         }
     }
@@ -572,7 +612,7 @@ pub fn sources_axis(class: &str, report: Option<&Value>, stream: &str) -> Option
             continue;
         };
         let norm = normalize_url(url);
-        if !url_in_stream(norm, stream) {
+        if !url_in_stream(&norm, stream) {
             missing.push(url.to_owned());
         }
     }
@@ -1971,19 +2011,46 @@ fn send_back(
         ));
         request.inherited_override = true;
     }
-    let world = nirvana_seat::live_world(table);
-    let pick = match nirvana_seat::pick(table, &world, &request) {
-        Ok(pick) => pick,
-        Err(no_seat) => {
-            return ask(
-                format!(
-                    "{order} must go back, and no seat is left: {}",
-                    no_seat.reason
-                ),
-                axes,
-            )
-        }
-    };
+    let mut world = nirvana_seat::live_world(table);
+    let leases_path = nirvana_seat::dir().join(nirvana_seat::LEASES_FILE);
+    if let Ok(leases) = nirvana_seat::load_leases(&leases_path) {
+        world.leases = leases.leases.clone();
+        world.overrides_used = leases.overrides(run);
+    }
+    let (pick, why_seated, child_override_reason) =
+        match nirvana_seat::pick(table, &world, &request) {
+            Ok(pick) => (pick, None, seated.override_reason.clone()),
+            Err(no_seat) if request.inherited_override => {
+                let mut fallback_request = request.clone();
+                fallback_request.override_seat = None;
+                fallback_request.inherited_override = false;
+                match nirvana_seat::pick(table, &world, &fallback_request) {
+                    Ok(pick) => {
+                        let seat_name = &seated.seat;
+                        let why = format!(
+                            "inherited override {} refused: {}; the rule picked",
+                            seat_name, no_seat.reason
+                        );
+                        (pick, Some(why), None)
+                    }
+                    Err(err) => {
+                        return ask(
+                            format!("{order} must go back, and no seat is left: {}", err.reason),
+                            axes,
+                        );
+                    }
+                }
+            }
+            Err(no_seat) => {
+                return ask(
+                    format!(
+                        "{order} must go back, and no seat is left: {}",
+                        no_seat.reason
+                    ),
+                    axes,
+                )
+            }
+        };
     book(table, &pick, &id, run).map_err(|err| err.to_string())?;
     let cwd = PathBuf::from(&seated.cwd);
     let order_file = crate::nirvana_worker::write_order(project, &cwd, &id, &brief)
@@ -2001,8 +2068,8 @@ fn send_back(
         mode: seated.mode,
         needs: seated.needs.clone(),
         not_family: seated.not_family.clone(),
-        reason: pick.reason.clone(),
-        override_reason: seated.override_reason.clone(),
+        reason: why_seated.unwrap_or_else(|| pick.reason.clone()),
+        override_reason: child_override_reason,
         order_file,
         cwd: seated.cwd.clone(),
         worktree: seated.worktree.clone(),

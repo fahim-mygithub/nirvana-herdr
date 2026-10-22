@@ -1491,7 +1491,8 @@ fn evaluate(
             None => (override_target.trim(), None),
         };
         let _ = override_effort;
-        #[allow(clippy::collapsible_if)] // preserves the target line of the seat_override_cap control
+        #[allow(clippy::collapsible_if)]
+        // preserves the target line of the seat_override_cap control
         if !request.inherited_override {
             if world.overrides_used >= constants.overrides_per_run {
                 return Err(fail(

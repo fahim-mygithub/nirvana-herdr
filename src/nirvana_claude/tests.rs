@@ -1260,7 +1260,7 @@ fn log_usage_fixture_transcript_deduplicates_repeated_message_id_across_calls() 
     std::fs::write(&transcript_path, &content).expect("transcript");
 
     // Read usage helper
-    let (tokens, offset) = read_transcript_usage(&transcript_path, 0).expect("read");
+    let (tokens, offset, ids) = read_transcript_usage(&transcript_path, 0, &[]).expect("read");
     // De-duplicated sum: msg1 (100 in, 10 cw, 5 cr, 50 out) + msg2 (200 in, 20 cw, 10 cr, 80 out)
     assert_eq!(tokens.input, 300);
     assert_eq!(tokens.cache_write, 30);
@@ -1268,7 +1268,8 @@ fn log_usage_fixture_transcript_deduplicates_repeated_message_id_across_calls() 
     assert_eq!(tokens.output, 130);
 
     // Second call from offset: 0 new tokens
-    let (tokens2, offset2) = read_transcript_usage(&transcript_path, offset).expect("read 2");
+    let (tokens2, offset2, _) =
+        read_transcript_usage(&transcript_path, offset, &ids).expect("read 2");
     assert_eq!(tokens2, Tokens::default());
     assert_eq!(offset2, offset);
 
@@ -1327,6 +1328,7 @@ fn edit_budget_counts_files_and_lines_within_and_past_limit() {
             added: 5,
             deleted: 0,
             hash: None,
+            ..Default::default()
         },
     );
     assert_eq!(edit_budget(&baseline, &now1, limit), None);
@@ -1339,6 +1341,7 @@ fn edit_budget_counts_files_and_lines_within_and_past_limit() {
             added: 1,
             deleted: 0,
             hash: None,
+            ..Default::default()
         },
     );
     now3.files.insert(
@@ -1347,6 +1350,7 @@ fn edit_budget_counts_files_and_lines_within_and_past_limit() {
             added: 1,
             deleted: 0,
             hash: None,
+            ..Default::default()
         },
     );
     now3.files.insert(
@@ -1355,6 +1359,7 @@ fn edit_budget_counts_files_and_lines_within_and_past_limit() {
             added: 1,
             deleted: 0,
             hash: None,
+            ..Default::default()
         },
     );
     let reason3 = edit_budget(&baseline, &now3, limit).expect("3 files fails");
@@ -1369,11 +1374,12 @@ fn edit_budget_counts_files_and_lines_within_and_past_limit() {
             added: 31,
             deleted: 0,
             hash: None,
+            ..Default::default()
         },
     );
     let reason_31 = edit_budget(&baseline, &now_31, limit).expect("31 lines fails");
     assert!(reason_31.contains("Nirvana Claude edits at most 1 file and 30 lines itself (R2)"));
-    assert!(reason_31.contains("This change is 1 files, 31 lines"));
+    assert!(reason_31.contains("This change is 1 file, 31 lines"));
 }
 
 #[test]
@@ -1389,6 +1395,7 @@ fn edit_budget_out_of_scope_paths_and_baseline_with_existing_changes() {
             added: 50,
             deleted: 0,
             hash: None,
+            ..Default::default()
         },
     );
     now.files.insert(
@@ -1397,6 +1404,7 @@ fn edit_budget_out_of_scope_paths_and_baseline_with_existing_changes() {
             added: 40,
             deleted: 0,
             hash: None,
+            ..Default::default()
         },
     );
     now.files.insert(
@@ -1405,6 +1413,7 @@ fn edit_budget_out_of_scope_paths_and_baseline_with_existing_changes() {
             added: 20,
             deleted: 0,
             hash: None,
+            ..Default::default()
         },
     );
     // Only in-scope change: 1 file, 10 lines
@@ -1414,6 +1423,7 @@ fn edit_budget_out_of_scope_paths_and_baseline_with_existing_changes() {
             added: 10,
             deleted: 0,
             hash: None,
+            ..Default::default()
         },
     );
     assert_eq!(edit_budget(&baseline, &now, limit), None);
@@ -1426,6 +1436,7 @@ fn edit_budget_out_of_scope_paths_and_baseline_with_existing_changes() {
             added: 100,
             deleted: 50,
             hash: None,
+            ..Default::default()
         },
     );
     baseline_with_changes.files.insert(
@@ -1434,6 +1445,7 @@ fn edit_budget_out_of_scope_paths_and_baseline_with_existing_changes() {
             added: 20,
             deleted: 10,
             hash: None,
+            ..Default::default()
         },
     );
 
@@ -1445,6 +1457,7 @@ fn edit_budget_out_of_scope_paths_and_baseline_with_existing_changes() {
             added: 5,
             deleted: 0,
             hash: None,
+            ..Default::default()
         },
     );
     assert_eq!(
@@ -1460,10 +1473,11 @@ fn edit_budget_out_of_scope_paths_and_baseline_with_existing_changes() {
             added: 51,
             deleted: 10,
             hash: None,
+            ..Default::default()
         },
     );
     let reason = edit_budget(&baseline_with_changes, &now_exceeded, limit).expect("fails");
-    assert!(reason.contains("This change is 1 files, 31 lines"));
+    assert!(reason.contains("This change is 1 file, 31 lines"));
 }
 
 #[test]
@@ -1493,6 +1507,7 @@ fn guard_edit_and_check_edit_never_block_subagent_or_worker() {
             added: 100,
             deleted: 0,
             hash: None,
+            ..Default::default()
         },
     );
     assert_eq!(
@@ -1553,4 +1568,530 @@ fn guard_edit_and_check_edit_never_block_subagent_or_worker() {
         EditLimit::default(),
     );
     assert!(blocked_check.is_some());
+}
+
+#[test]
+fn missing_baseline_never_blocks_and_writes_baseline_and_sessions_keep_separate_baselines() {
+    let _guard = crate::nirvana::with_test_home("b1-missing-baseline");
+    std::env::set_var(crate::nirvana_launch::ORCHESTRATOR_ENV, "1");
+    let proj = scratch("b1-proj");
+    let _ = std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(&proj)
+        .output();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.name", "Tester"])
+        .current_dir(&proj)
+        .output();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.email", "tester@test.com"])
+        .current_dir(&proj)
+        .output();
+    std::fs::write(proj.join("tracked.txt"), "init\n").expect("write");
+    let _ = std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(&proj)
+        .output();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(&proj)
+        .output();
+
+    // Dirty tree: 50 lines in tracked.txt
+    std::fs::write(proj.join("tracked.txt"), "line\n".repeat(50)).expect("dirty");
+
+    let hook_s1 = serde_json::json!({
+        "session_id": "session-1",
+        "cwd": proj.display().to_string(),
+        "tool_name": "Edit",
+    });
+
+    let dir = home_dir().join(nirvana_seat::DIR).join("edit-baselines");
+    let path_s1 = dir.join("session-1.json");
+    assert!(!path_s1.exists());
+
+    // When check-edit finds no baseline for session-1, it writes one and returns without blocking!
+    let dec1 = check_edit_from(&hook_s1).expect("check_edit_from");
+    assert_eq!(dec1, None);
+    assert!(path_s1.exists());
+
+    // Two sessions keep separate baselines: session-2 writes its own file
+    let hook_s2 = serde_json::json!({
+        "session_id": "session-2",
+        "cwd": proj.display().to_string(),
+        "tool_name": "Edit",
+    });
+    let path_s2 = dir.join("session-2.json");
+    assert!(!path_s2.exists());
+    let dec2 = check_edit_from(&hook_s2).expect("check_edit_from s2");
+    assert_eq!(dec2, None);
+    assert!(path_s2.exists());
+}
+
+#[test]
+fn already_dirty_file_same_size_replacement_and_new_untracked_file_rewritten_fails() {
+    let limit = EditLimit::default(); // 1 file, 30 lines
+
+    // 1. An already-dirty file edited with a same-size replacement of 40 lines
+    let mut baseline = EditState::default();
+    let base_lines_40 = (0..40)
+        .map(|i| format!("old line {i}\n"))
+        .collect::<String>();
+    baseline.files.insert(
+        "src/dirty.rs".into(),
+        FileDelta {
+            is_tracked: true,
+            added: 40,
+            deleted: 0,
+            line_count: 40,
+            hash: Some("old_hash".into()),
+            content: Some(base_lines_40),
+            ..Default::default()
+        },
+    );
+
+    let new_lines_40 = (0..40)
+        .map(|i| format!("new line {i}\n"))
+        .collect::<String>();
+    let mut now_same_size = EditState::default();
+    now_same_size.files.insert(
+        "src/dirty.rs".into(),
+        FileDelta {
+            is_tracked: true,
+            added: 40,
+            deleted: 0,
+            line_count: 40,
+            hash: Some("new_hash".into()),
+            content: Some(new_lines_40),
+            ..Default::default()
+        },
+    );
+
+    let reason1 = edit_budget(&baseline, &now_same_size, limit).expect("fails 30-line limit");
+    assert!(reason1.contains("Nirvana Claude edits at most 1 file and 30 lines itself (R2)"));
+    assert!(reason1.contains("1 file, 80 lines"));
+
+    // 2. A new untracked file rewritten from 100 lines to 100 different lines fails
+    let mut baseline_untracked = EditState::default();
+    let base_untracked_100 = (0..100)
+        .map(|i| format!("untracked old {i}\n"))
+        .collect::<String>();
+    baseline_untracked.files.insert(
+        "untracked.txt".into(),
+        FileDelta {
+            is_tracked: false,
+            added: 100,
+            deleted: 0,
+            line_count: 100,
+            hash: Some("u_old".into()),
+            content: Some(base_untracked_100),
+            ..Default::default()
+        },
+    );
+
+    let mut now_untracked_rewritten = EditState::default();
+    let new_untracked_100 = (0..100)
+        .map(|i| format!("untracked new {i}\n"))
+        .collect::<String>();
+    now_untracked_rewritten.files.insert(
+        "untracked.txt".into(),
+        FileDelta {
+            is_tracked: false,
+            added: 100,
+            deleted: 0,
+            line_count: 100,
+            hash: Some("u_new".into()),
+            content: Some(new_untracked_100),
+            ..Default::default()
+        },
+    );
+
+    let reason2 = edit_budget(&baseline_untracked, &now_untracked_rewritten, limit).expect("fails");
+    assert!(reason2.contains("1 file, 200 lines"));
+}
+
+#[test]
+fn baseline_dirty_file_that_is_clean_now_contributes_nothing() {
+    let limit = EditLimit::default();
+    let mut baseline = EditState::default();
+    baseline.files.insert(
+        "src/reverted.rs".into(),
+        FileDelta {
+            is_tracked: true,
+            added: 100,
+            deleted: 50,
+            line_count: 100,
+            hash: Some("h1".into()),
+            content: Some("dirty content\n".into()),
+            ..Default::default()
+        },
+    );
+    // Now it is clean (not present in now)
+    let now_clean = EditState::default();
+    assert_eq!(edit_budget(&baseline, &now_clean, limit), None);
+}
+
+#[test]
+fn relative_paths_subfolder_project_root_sees_untracked_and_ignores_outside() {
+    let top = scratch("s3-repo");
+    let _ = std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(&top)
+        .output();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.name", "Tester"])
+        .current_dir(&top)
+        .output();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.email", "tester@test.com"])
+        .current_dir(&top)
+        .output();
+
+    let sub = top.join("subproject");
+    std::fs::create_dir_all(&sub).expect("create sub");
+
+    // Commit a file inside sub and outside sub
+    std::fs::write(top.join("outside.txt"), "outside init\n").expect("write");
+    std::fs::write(sub.join("inside.txt"), "inside init\n").expect("write");
+    let _ = std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(&top)
+        .output();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(&top)
+        .output();
+
+    // Now change outside.txt and add untracked outside
+    std::fs::write(top.join("outside.txt"), "outside modified\n").expect("write");
+    std::fs::write(top.join("outside_untracked.txt"), "outside un\n").expect("write");
+
+    // In subfolder: add an untracked file inside
+    std::fs::write(sub.join("sub_untracked.txt"), "sub un 1\nsub un 2\n").expect("write");
+
+    // capture_edit_state from subproject root
+    let state = capture_edit_state(&sub);
+    assert!(state.files.contains_key("sub_untracked.txt"));
+    assert!(!state.files.contains_key("outside.txt"));
+    assert!(!state.files.contains_key("outside_untracked.txt"));
+}
+
+#[test]
+fn numstat_dash_binary_line_parses_and_counts_as_one_file_zero_lines() {
+    let limit = EditLimit::default();
+    let baseline = EditState::default();
+
+    let mut now = EditState::default();
+    now.files.insert(
+        "image.png".into(),
+        FileDelta {
+            is_tracked: true,
+            is_binary: true,
+            added: 0,
+            deleted: 0,
+            line_count: 0,
+            hash: Some("binhash".into()),
+            content: None,
+            ..Default::default()
+        },
+    );
+
+    // Binary file counts as 1 file and 0 lines, which passes the limit of 1 file, 30 lines
+    assert_eq!(edit_budget(&baseline, &now, limit), None);
+
+    // If 2 binary files are added, it fails the 1 file limit
+    now.files.insert(
+        "audio.mp3".into(),
+        FileDelta {
+            is_tracked: true,
+            is_binary: true,
+            added: 0,
+            deleted: 0,
+            line_count: 0,
+            hash: Some("audiohash".into()),
+            content: None,
+            ..Default::default()
+        },
+    );
+    let reason = edit_budget(&baseline, &now, limit).expect("fails 1 file limit");
+    assert!(reason.contains("This change is 2 files, 0 lines"));
+}
+
+#[test]
+fn usage_offsets_partial_line_split_id_and_sidechain() {
+    let dir = scratch("usage-s5");
+    let transcript = dir.join("transcript.jsonl");
+
+    let line1 = serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "id": "msg-split",
+            "usage": {
+                "input_tokens": 100,
+                "cache_creation_input_tokens": 10,
+                "cache_read_input_tokens": 5,
+                "output_tokens": 50
+            }
+        }
+    });
+
+    let sidechain_line = serde_json::json!({
+        "type": "assistant",
+        "isSidechain": true,
+        "message": {
+            "id": "msg-sidechain",
+            "usage": {
+                "input_tokens": 999,
+                "output_tokens": 999
+            }
+        }
+    });
+
+    let line2 = serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "id": "msg-2",
+            "usage": {
+                "input_tokens": 50,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 20
+            }
+        }
+    });
+
+    // Write line1, sidechain line, and an incomplete line2 (no trailing \n)
+    let l1_str = format!("{line1}\n");
+    let sc_str = format!("{sidechain_line}\n");
+    let l2_partial = line2.to_string(); // no newline!
+
+    std::fs::write(&transcript, format!("{l1_str}{sc_str}{l2_partial}")).expect("write");
+
+    // Read 1: line1 is counted; sidechain line is skipped; incomplete line2 is NOT counted yet
+    let (t1, offset1, ids1) = read_transcript_usage(&transcript, 0, &[]).expect("read 1");
+    assert_eq!(t1.input, 100);
+    assert_eq!(t1.output, 50);
+    assert_eq!(ids1, vec!["msg-split"]);
+    // Offset advanced only to end of sidechain line (last \n)
+    assert_eq!(offset1 as usize, l1_str.len() + sc_str.len());
+
+    // Now complete line2 with a trailing \n, plus another line repeating msg-split (split id across two reads)
+    let split_line_repeat = serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "id": "msg-split",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 50
+            }
+        }
+    });
+    let append = format!("\n{split_line_repeat}\n");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .expect("open");
+    std::io::Write::write_all(&mut file, append.as_bytes()).expect("append");
+
+    // Read 2: completes line2 and counts it; msg-split is remembered in ids1 so it is skipped (split id counted once)
+    let (t2, offset2, ids2) = read_transcript_usage(&transcript, offset1, &ids1).expect("read 2");
+    assert_eq!(t2.input, 50);
+    assert_eq!(t2.output, 20);
+    assert!(ids2.contains(&"msg-2".to_string()));
+    assert!(offset2 > offset1);
+}
+
+#[test]
+fn resume_with_existing_transcript_appends_no_usage() {
+    let _guard = crate::nirvana::with_test_home("resume-no-usage");
+    std::env::set_var(crate::nirvana_launch::ORCHESTRATOR_ENV, "1");
+    let proj = scratch("resume-proj");
+    let project = Project::at(&proj);
+    let run = "r-resume";
+    let journal = project.journal(run);
+    journal
+        .append(
+            1,
+            crate::nirvana_run::Kind::Opened {
+                project: "p".into(),
+                orchestrator_pane: None,
+                auto: false,
+                pools: vec![],
+                pools_basis: None,
+            },
+        )
+        .expect("opened");
+
+    let transcript = proj.join("transcript.jsonl");
+    let line = serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "id": "msg-1",
+            "usage": {"input_tokens": 500, "output_tokens": 200}
+        }
+    });
+    std::fs::write(&transcript, format!("{line}\n{line}\n{line}\n")).expect("write");
+
+    let hook_start = serde_json::json!({
+        "hook_event_name": "SessionStart",
+        "source": "resume",
+        "session_id": "sess-resume-1",
+        "transcript_path": transcript.display().to_string(),
+        "cwd": proj.display().to_string(),
+    });
+
+    let res = log_usage_from(&hook_start).expect("log_usage_from");
+    assert_eq!(res, None);
+
+    // Verify journal has NO usage events appended
+    let (events, _) = journal.read();
+    assert!(!events
+        .iter()
+        .any(|e| matches!(&e.kind, crate::nirvana_run::Kind::Usage { .. })));
+
+    // Verify offset file was created with offset == transcript length
+    let offset_path = home_dir()
+        .join(nirvana_seat::DIR)
+        .join("usage-offsets")
+        .join("sess-resume-1.json");
+    assert!(offset_path.exists());
+    let state: UsageOffsetState =
+        serde_json::from_str(&std::fs::read_to_string(&offset_path).unwrap()).unwrap();
+    assert_eq!(state.offset, std::fs::metadata(&transcript).unwrap().len());
+}
+
+#[test]
+fn post_tool_use_output_has_exactly_keys_decision_and_reason() {
+    std::env::set_var(crate::nirvana_launch::ORCHESTRATOR_ENV, "1");
+    let hook = serde_json::json!({
+        "tool_name": "Edit",
+    });
+    let baseline = EditState::default();
+    let mut now = EditState::default();
+    now.files.insert(
+        "src/main.rs".into(),
+        FileDelta {
+            is_tracked: true,
+            added: 50,
+            deleted: 0,
+            line_count: 50,
+            ..Default::default()
+        },
+    );
+    let decision =
+        check_edit_decision(&hook, None, &baseline, &now, EditLimit::default()).expect("decision");
+    let obj = decision.as_object().expect("object");
+    let mut keys: Vec<String> = obj.keys().cloned().collect();
+    keys.sort();
+    assert_eq!(keys, vec!["decision", "reason"]);
+}
+
+#[test]
+fn test_is_out_of_scope_memory_and_nirvana() {
+    // Project's own memory folder is NOT exempt
+    assert!(!is_out_of_scope("memory/notes.md"));
+    assert!(!is_out_of_scope("src/memory/store.rs"));
+
+    // User's Claude memory folder by absolute path IS exempt
+    assert!(is_out_of_scope(
+        "/home/user/.claude/projects/proj-123/memory/scratch.md"
+    ));
+    assert!(is_out_of_scope(
+        "~/.claude/projects/proj-123/memory/scratch.md"
+    ));
+    assert!(is_out_of_scope(
+        "C:/Users/fahim/.claude/projects/proj-123/memory/scratch.md"
+    ));
+
+    // .nirvana/ and .claude/ and NIRVANA.md are exempt
+    assert!(is_out_of_scope(".nirvana/state.json"));
+    assert!(is_out_of_scope(".nirvana"));
+    assert!(is_out_of_scope(".claude/settings.json"));
+    assert!(is_out_of_scope("NIRVANA.md"));
+}
+
+#[test]
+fn guard_edit_decision_blocks_past_limit() {
+    std::env::set_var(crate::nirvana_launch::ORCHESTRATOR_ENV, "1");
+    let hook = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": "src/main.rs",
+            "content": "line\n".repeat(31)
+        }
+    });
+    let dec = guard_edit_decision(&hook, None, None, EditLimit::default());
+    assert!(dec.is_some());
+}
+
+#[test]
+fn check_edit_decision_block_output() {
+    std::env::set_var(crate::nirvana_launch::ORCHESTRATOR_ENV, "1");
+    let hook = serde_json::json!({
+        "tool_name": "Edit",
+    });
+    let baseline = EditState::default();
+    let mut now = EditState::default();
+    now.files.insert(
+        "src/main.rs".into(),
+        FileDelta {
+            is_tracked: true,
+            added: 35,
+            ..Default::default()
+        },
+    );
+    let dec = check_edit_decision(&hook, None, &baseline, &now, EditLimit::default());
+    assert_eq!(dec.unwrap()["decision"], "block");
+}
+
+#[test]
+fn log_usage_session_start_gating_and_write_offset() {
+    let _guard = crate::nirvana::with_test_home("log-usage-write-offset");
+    std::env::set_var(crate::nirvana_launch::ORCHESTRATOR_ENV, "1");
+    let proj = scratch("proj-usage-offset");
+    let project = Project::at(&proj);
+    let run = "r-off";
+    let journal = project.journal(run);
+    journal
+        .append(
+            1,
+            crate::nirvana_run::Kind::Opened {
+                project: "p".into(),
+                orchestrator_pane: None,
+                auto: false,
+                pools: vec![],
+                pools_basis: None,
+            },
+        )
+        .expect("opened");
+
+    let transcript = proj.join("t.jsonl");
+    let line = serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "id": "msg-1",
+            "usage": {"input_tokens": 100, "output_tokens": 50}
+        }
+    });
+    std::fs::write(&transcript, format!("{line}\n")).expect("write");
+
+    let hook_stop = serde_json::json!({
+        "hook_event_name": "Stop",
+        "session_id": "sess-offset-test",
+        "transcript_path": transcript.display().to_string(),
+        "cwd": proj.display().to_string(),
+    });
+
+    let res = log_usage_from(&hook_stop).expect("log_usage_from");
+    assert!(res.is_some());
+
+    // Verify offset was written to file
+    let offset_path = home_dir()
+        .join(nirvana_seat::DIR)
+        .join("usage-offsets")
+        .join("sess-offset-test.json");
+    assert!(offset_path.exists());
+    let state: UsageOffsetState =
+        serde_json::from_str(&std::fs::read_to_string(&offset_path).unwrap()).unwrap();
+    assert_eq!(state.offset, std::fs::metadata(&transcript).unwrap().len());
 }
