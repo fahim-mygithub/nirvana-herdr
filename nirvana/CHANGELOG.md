@@ -3,6 +3,31 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.35.1: a run's tab stays readable with many workers
+
+- **Changed:**
+  - **Where a new worker goes.** A run's next worker pane no longer always splits the last one to the right.
+    - It splits whichever pane leaves the roomiest halves, side by side or one above the other.
+    - Each half must keep at least 80 columns and 16 rows.
+    - When no split can do that, it takes over the pane of the run's oldest finished worker: one whose order ended,
+      with only a shell left running. The old lines stay in that pane's scrollback and in `herdr seat read`.
+  - **The call mark is `●`.** `⏺` drew as a blue box in the owner's font.
+  - **Lines wrap to the pane's width,** with each wrapped row indented under its text.
+  - **Two noise sources are gone:**
+    - agy's own `cd "<worktree>" &&` no longer opens every command;
+    - the `finish` and `StructuredOutput` calls that only carry the report no longer show.
+  **Because:** the owner, 2026-10-22, with a screenshot of a `plan-ahead` run tab: "Can you also fix the view this".
+  The tab showed five columns, the last two about ten letters wide, three of their workers long finished, and `⏺`
+  drawn as boxes.
+  **Measured:**
+  - 14 new controls: `wv_dot`, `wv_drop_cd`, `wv_cd_elsewhere`, `wv_hidden_call`, `wv_hidden_answer`, `wv_fit_hang`,
+    `wv_fit_space`, `wv_fit_codes`, `pl_min_size`, `pl_look`, `pl_reuse_finished`, `pl_oldest`, `pl_only_shells` and
+    `pl_finished_phases`. Each reddens its test alone.
+  - The placement rule and the shell check are pure functions with unit tests.
+  - Three steps have no test of their own and need a live run with herdr: reading the tab's layout from herdr, the
+    takeover of a real pane, and the wrap at a live pane's width.
+  **If you remove this:** each worker squeezes the last one again, and a busy run's panes shrink to unreadable strips.
+
 ## alpha 0.35.0: a worker's tab reads like Claude Code
 
 - **Changed:** a headless worker's tab draws its stream the way Claude Code draws a turn: `⏺ Read(src/pages/x.tsx)`

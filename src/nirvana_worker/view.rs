@@ -2,8 +2,12 @@
 //!
 //! The owner, 2026-10-22: "I htought agy was similar to claude code in its shell reporting", on a tab that showed
 //! `· read_file` two dozen times with no file. A worker runs headless (`--print`, stream-json) so Nirvana gets a
-//! checked report, live tokens and a sure end; this module only changes how that stream looks: `⏺ Read(path)` for a
+//! checked report, live tokens and a sure end; this module only changes how that stream looks: `● Read(path)` for a
 //! call, `⎿` under it for what came back, and the agy report as a few lines instead of raw JSON.
+//!
+//! 0.35.1, from the owner's screenshot of a five-worker tab ("Can you also fix the view this"): `⏺` drew as a blue
+//! box in the owner's font, long lines wrapped to the pane's left edge, every agy command began with the worktree's
+//! own `cd`, and the `finish` and `StructuredOutput` calls that carry the report showed as tools.
 
 use serde_json::Value;
 
@@ -11,6 +15,56 @@ use super::{Note, Tokens};
 
 const RESULT_LINES: usize = 3;
 const LINE_CHARS: usize = 120;
+
+/// The call mark. Claude Code draws `●` on Windows; `⏺` fell back to an emoji box in the owner's terminal font.
+pub const DOT: &str = "●";
+
+/// A call that only carries the worker's report, which the report's own lines show: agy's `finish`, Claude's
+/// `StructuredOutput` (`--json-schema`).
+pub fn hidden(cli: &str, raw: &str) -> bool {
+    if cli == "agy" {
+        raw == "finish"
+    } else {
+        raw == "StructuredOutput"
+    }
+}
+
+/// A command as the worker's folder sees it: agy opens most commands with `cd "<its own folder>" &&`, which says
+/// nothing in the folder's own tab.
+fn drop_cd(command: &str, cwd: Option<&str>) -> String {
+    let Some(cwd) = cwd else {
+        return command.to_owned();
+    };
+    let Some(rest) = command.strip_prefix("cd ") else {
+        return command.to_owned();
+    };
+    let rest = rest.trim_start();
+    let (target, after) = match rest.strip_prefix('"') {
+        Some(quoted) => match quoted.split_once('"') {
+            Some((target, after)) => (target, after),
+            None => return command.to_owned(),
+        },
+        None => match rest.find([' ', ';']) {
+            Some(at) => (&rest[..at], &rest[at..]),
+            None => (rest, ""),
+        },
+    };
+    let after = after.trim_start();
+    let Some(after) = after
+        .strip_prefix("&&")
+        .or_else(|| after.strip_prefix(';'))
+        .map(str::trim_start)
+        .filter(|after| !after.is_empty())
+    else {
+        return command.to_owned();
+    };
+    let unify = |text: &str| text.replace('\\', "/").trim_end_matches('/').to_lowercase();
+    if unify(target) == unify(cwd) {
+        after.to_owned()
+    } else {
+        command.to_owned()
+    }
+}
 
 /// The Claude Code name for a tool. Claude's own names are already Claude Code's; agy's are mapped.
 pub fn tool_name(cli: &str, raw: &str) -> String {
@@ -97,7 +151,7 @@ pub fn call_label(cli: &str, raw: &str, params: &Value, cwd: Option<&str>) -> St
             .map_or(0, Vec::len);
         format!("{count} todo{}", if count == 1 { "" } else { "s" })
     } else if let Some(command) = str_of(params, &["command", "CommandLine"]) {
-        clip(command)
+        clip(&drop_cd(command, cwd))
     } else if let Some(pattern) = str_of(params, &["pattern", "Pattern", "Query", "query"]) {
         match str_of(params, &path_keys)
             .or_else(|| str_of(params, &["SearchPath", "SearchDirectory"]))
@@ -282,7 +336,7 @@ fn report_lines(text: &str, paint: &Paint) -> Option<Vec<String>> {
     let status = value.get("status")?.as_str()?;
     let mut lines = vec![format!(
         "{} {}",
-        paint.wrap("32", "⏺"),
+        paint.wrap("32", DOT),
         paint.wrap("1", &format!("Report: {status}"))
     )];
     if let Some(summary) = value.get("summary").and_then(Value::as_str) {
@@ -317,7 +371,7 @@ pub fn note_lines(note: &Note, paint: bool) -> Vec<String> {
                 });
             vec![format!(
                 "{} {}{rest}",
-                paint.wrap("32", "⏺"),
+                paint.wrap("32", DOT),
                 paint.wrap("1", name)
             )]
         }
@@ -351,7 +405,7 @@ pub fn note_lines(note: &Note, paint: bool) -> Vec<String> {
                     // The tab is not a markdown view: bold markers are noise in it.
                     let line = line.replace("**", "");
                     if at == 0 {
-                        format!("{} {line}", paint.wrap("37", "⏺"))
+                        format!("{} {line}", paint.wrap("37", DOT))
                     } else {
                         format!("  {line}")
                     }
@@ -360,6 +414,105 @@ pub fn note_lines(note: &Note, paint: bool) -> Vec<String> {
         }),
         _ => Vec::new(),
     }
+}
+
+/// The pane's width, when the worker writes to a terminal.
+pub fn width() -> Option<usize> {
+    crossterm::terminal::size()
+        .ok()
+        .map(|(cols, _)| usize::from(cols))
+        .filter(|cols| *cols >= 20)
+}
+
+/// How far a wrapped line's next rows are indented: under the text, as Claude Code does.
+fn hang(visible: &str) -> usize {
+    if visible.starts_with("  ⎿  ") || visible.starts_with("     ") {
+        5
+    } else if visible.starts_with(DOT)
+        || visible.starts_with("✻ ")
+        || visible.starts_with("✗ ")
+        || visible.starts_with("  ")
+    {
+        2
+    } else {
+        0
+    }
+}
+
+/// Lines fitted to `width` columns: broken at a space where one is, with each row after the first indented by
+/// `hang`. Colour codes take no columns and stay where they are; a terminal keeps a colour across the break.
+pub fn fit(lines: &[String], width: Option<usize>) -> Vec<String> {
+    let Some(width) = width else {
+        return lines.to_vec();
+    };
+    let mut fitted = Vec::new();
+    for line in lines {
+        let visible = strip_codes(line);
+        if unicode_width::UnicodeWidthStr::width(visible.as_str()) <= width {
+            fitted.push(line.clone());
+            continue;
+        }
+        let indent = hang(&visible).min(width / 2);
+        let mut row = String::new();
+        let mut used = 0;
+        // The byte in `row` of the last space after the indent, and the columns used up to it.
+        let mut space: Option<(usize, usize)> = None;
+        let mut chars = line.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' {
+                row.push(ch);
+                for code in chars.by_ref() {
+                    row.push(code);
+                    if code.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                continue;
+            }
+            let cols = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + cols > width {
+                match space {
+                    Some((at, upto)) => {
+                        let tail = row.split_off(at + 1);
+                        row.truncate(at);
+                        fitted.push(std::mem::take(&mut row));
+                        row = " ".repeat(indent) + &tail;
+                        used = indent + used - upto - 1;
+                    }
+                    None => {
+                        fitted.push(std::mem::take(&mut row));
+                        row = " ".repeat(indent);
+                        used = indent;
+                    }
+                }
+                space = None;
+            }
+            if ch == ' ' && used >= indent && used > 0 {
+                space = Some((row.len(), used));
+            }
+            row.push(ch);
+            used += cols;
+        }
+        fitted.push(row);
+    }
+    fitted
+}
+
+fn strip_codes(line: &str) -> String {
+    let mut plain = String::new();
+    let mut chars = line.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            for code in chars.by_ref() {
+                if code.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            plain.push(ch);
+        }
+    }
+    plain
 }
 
 fn amount(count: u64) -> String {
@@ -507,7 +660,7 @@ mod tests {
     #[test]
     fn notes_draw_like_claude_code_and_paint_only_when_asked() {
         let call = Note::Tool("Read(src/a.ts)".into());
-        assert_eq!(note_lines(&call, false), ["⏺ Read(src/a.ts)"]);
+        assert_eq!(note_lines(&call, false), ["● Read(src/a.ts)"]);
         let out = Note::ToolOut {
             label: None,
             ok: false,
@@ -527,12 +680,62 @@ mod tests {
         assert_eq!(
             note_lines(&report, false),
             [
-                "⏺ Report: done",
+                "● Report: done",
                 "  Added list mode.",
                 "  2 files changed",
                 "  tests: vitest 12 passed"
             ]
         );
+    }
+
+    #[test]
+    fn a_command_drops_the_workers_own_cd() {
+        let cwd = Some(r"C:\Users\me\App\.nirvana\worktrees\plan-ahead");
+        let params = json!({"CommandLine": r#"cd "C:/Users/me/App/.nirvana/worktrees/plan-ahead" && git status --short"#});
+        assert_eq!(
+            call_label("agy", "run_command", &params, cwd),
+            "Bash(git status --short)"
+        );
+        // A cd elsewhere says something, so it stays.
+        let params = json!({"command": "cd /tmp && ls"});
+        assert_eq!(
+            call_label("claude", "Bash", &params, cwd),
+            "Bash(cd /tmp && ls)"
+        );
+        // A bare cd with nothing after it stays too.
+        let params = json!({"command": r#"cd "C:/Users/me/App/.nirvana/worktrees/plan-ahead""#});
+        assert!(call_label("claude", "Bash", &params, cwd).starts_with("Bash(cd "));
+        assert!(hidden("agy", "finish") && hidden("claude", "StructuredOutput"));
+        assert!(!hidden("claude", "finish") && !hidden("agy", "read_file"));
+    }
+
+    #[test]
+    fn long_lines_wrap_under_their_text() {
+        let lines = vec![
+            "  ⎿  one two three four five".to_owned(),
+            "● Bash(npm run build)".to_owned(),
+        ];
+        assert_eq!(
+            fit(&lines, Some(16)),
+            [
+                "  ⎿  one two",
+                "     three four",
+                "     five",
+                "● Bash(npm run",
+                "  build)"
+            ]
+        );
+        // Colour codes take no columns, and the indent is read past them.
+        let painted = vec!["\x1b[31mab cd\x1b[0m".to_owned()];
+        assert_eq!(fit(&painted, Some(5)), painted);
+        assert_eq!(
+            fit(&["\x1b[2m  ⎿  one two\x1b[0m".to_owned()], Some(11)),
+            ["\x1b[2m  ⎿  one", "     two\x1b[0m"]
+        );
+        // A word longer than the row breaks inside it.
+        assert_eq!(fit(&["abcdefgh".to_owned()], Some(5)), ["abcde", "fgh"]);
+        // No terminal, no wrap.
+        assert_eq!(fit(&lines, None), lines);
     }
 
     #[test]

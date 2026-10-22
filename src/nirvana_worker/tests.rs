@@ -628,7 +628,14 @@ fn an_attempt_tees_the_stream_and_journals_its_start_and_its_usage() {
     ));
     // The journal names the order it was given; replay keeps only orders it saw seated.
     assert!(state.orders.is_empty());
-    assert!(String::from_utf8_lossy(&view).contains("StructuredOutput"));
+    // The pane gets the calls; the call that only carries the report does not show.
+    let view = String::from_utf8_lossy(&view);
+    assert!(
+        view.contains("Edit(") && view.contains("calc.py)"),
+        "{view}"
+    );
+    assert!(!view.contains("StructuredOutput"), "{view}");
+    assert!(!view.contains("Structured output provided"), "{view}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -712,13 +719,13 @@ fn a_recorded_stream_draws_like_claude_code() {
     );
     let has = |lines: &[String], line: &str| lines.iter().any(|shown| shown == line);
     for line in [
-        "⏺ Read(.nirvana/orders/mul.md)",
+        "● Read(.nirvana/orders/mul.md)",
         "  ⎿  9 lines",
-        "⏺ Edit(calc.py)",
-        "⏺ Write(test_mul.py)",
-        "⏺ Bash(python test_mul.py)",
+        "● Edit(calc.py)",
+        "● Write(test_mul.py)",
+        "● Bash(python test_mul.py)",
         "  ⎿  ok",
-        "⏺ Report: done",
+        "● Report: done",
     ] {
         assert!(has(&agy, line), "agy view lacks {line:?}: {agy:#?}");
     }
@@ -734,8 +741,8 @@ fn a_recorded_stream_draws_like_claude_code() {
     );
     // Haiku sent Edit and Write together: the answer that is not under its own call names it.
     for line in [
-        "⏺ Edit(calc.py)",
-        "⏺ Write(test_calc.py)",
+        "● Edit(calc.py)",
+        "● Write(test_calc.py)",
         "  ⎿  Edit(calc.py): done",
         "  ⎿  done",
         "  - Status: done",
@@ -744,5 +751,27 @@ fn a_recorded_stream_draws_like_claude_code() {
             has(&claude, line),
             "claude view lacks {line:?}: {claude:#?}"
         );
+    }
+}
+
+#[test]
+fn a_pane_is_taken_over_only_when_its_worker_ended_and_a_shell_alone_runs() {
+    use crate::nirvana_run::Phase;
+    let named = |names: &[&str]| -> Vec<Value> {
+        names
+            .iter()
+            .map(|name| serde_json::json!({"pid": 1, "name": name}))
+            .collect()
+    };
+    assert!(only_shells(&named(&["pwsh.exe"])));
+    assert!(only_shells(&named(&["bash"])));
+    assert!(!only_shells(&named(&["pwsh.exe", "herdr.exe"])));
+    assert!(!only_shells(&named(&["node.exe"])));
+    for phase in [Phase::Delivered, Phase::Gated, Phase::Merged, Phase::Failed] {
+        assert!(finished(phase), "{phase:?}");
+    }
+    // A deferred worker starts again in its own pane; an asked one waits there for its answer.
+    for phase in [Phase::Seated, Phase::Running, Phase::Deferred, Phase::Asked] {
+        assert!(!finished(phase), "{phase:?}");
     }
 }

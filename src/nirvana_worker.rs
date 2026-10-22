@@ -376,19 +376,31 @@ impl Stream {
         self
     }
 
-    fn call(&mut self, id: String, raw: &str, params: &Value) -> Note {
+    fn call(&mut self, id: String, raw: &str, params: &Value) -> Option<Note> {
+        if view::hidden(&self.cli, raw) {
+            // Kept so that its answer is known, and hidden too.
+            self.calls.insert(id, (raw.to_owned(), String::new()));
+            return None;
+        }
         let label = view::call_label(&self.cli, raw, params, self.cwd.as_deref());
         self.calls
             .insert(id.clone(), (raw.to_owned(), label.clone()));
         self.last_call = Some(id);
-        Note::Tool(label)
+        Some(Note::Tool(label))
     }
 
-    fn answer(&mut self, id: &str, answer: impl FnOnce(&str) -> (bool, Vec<String>)) -> Note {
+    fn answer(
+        &mut self,
+        id: &str,
+        answer: impl FnOnce(&str) -> (bool, Vec<String>),
+    ) -> Option<Note> {
         let (raw, label) = self.calls.remove(id).unwrap_or_default();
+        if view::hidden(&self.cli, &raw) {
+            return None;
+        }
         let (ok, lines) = answer(&raw);
         let label = (self.last_call.as_deref() != Some(id) && !label.is_empty()).then_some(label);
-        Note::ToolOut { label, ok, lines }
+        Some(Note::ToolOut { label, ok, lines })
     }
 
     /// Reads one stdout line. A line that is not JSON is shown and otherwise ignored.
@@ -447,7 +459,7 @@ impl Stream {
                         Some("tool_use") => {
                             let name = block["name"].as_str().unwrap_or("tool");
                             let id = block["id"].as_str().unwrap_or("").to_owned();
-                            notes.push(self.call(id, name, &block["input"]));
+                            notes.extend(self.call(id, name, &block["input"]));
                         }
                         _ => {}
                     }
@@ -465,7 +477,7 @@ impl Stream {
                 {
                     let id = block["tool_use_id"].as_str().unwrap_or("");
                     let is_error = block.get("is_error").and_then(Value::as_bool) == Some(true);
-                    notes.push(self.answer(id, |raw| {
+                    notes.extend(self.answer(id, |raw| {
                         view::claude_result(raw, &block["content"], is_error)
                     }));
                 }
@@ -551,11 +563,11 @@ impl Stream {
                     let name = step["tool_name"].as_str().unwrap_or("tool");
                     match step.get("state").and_then(Value::as_str) {
                         Some("ACTIVE") => {
-                            notes.push(self.call(id, name, &step["tool_info"]["parameters"]));
+                            notes.extend(self.call(id, name, &step["tool_info"]["parameters"]));
                         }
                         Some(state @ ("DONE" | "ERROR")) => {
                             let info = &step["tool_info"];
-                            notes.push(
+                            notes.extend(
                                 self.answer(&id, |_| {
                                     view::agy_result(name, info, state == "ERROR")
                                 }),
@@ -999,7 +1011,8 @@ fn run_attempt(
                     match note {
                         Note::Usage | Note::Session(_) => usage_dirty = true,
                         Note::Text(_) | Note::Tool(_) | Note::ToolOut { .. } => {
-                            for shown in view::note_lines(&note, true) {
+                            // Fitted to the pane as it is now: a row that wraps on its own starts at the left edge.
+                            for shown in view::fit(&view::note_lines(&note, true), view::width()) {
                                 let _ = writeln!(out, "{shown}");
                             }
                         }
@@ -1953,23 +1966,32 @@ fn open_pane(project: &Project, run: &str, seated: &Seated) -> Result<String, St
         .filter_map(|order| order.pane.clone())
         .find(|pane| herdr_json(&["pane", "get", pane]).is_ok());
     let pane = match known_pane {
-        Some(neighbour) => {
-            let mut args = vec![
-                "pane",
-                "split",
-                neighbour.as_str(),
-                "--direction",
-                "right",
-                "--cwd",
-                &seated.cwd,
-                "--no-focus",
-            ];
-            args.extend(env_args.iter().copied());
-            let value = herdr_json(&args)?;
-            find_str(&value, &["/result/pane/pane_id", "/pane/pane_id"])
-                .ok_or("pane split gave no pane id")?
-                .to_owned()
-        }
+        Some(neighbour) => match place::place(&tab_slots(&state, &neighbour)) {
+            Some(place::Placement::Reuse(pane)) => pane,
+            placement => {
+                let (target, direction) = match placement {
+                    Some(place::Placement::Split { pane, right }) => {
+                        (pane, if right { "right" } else { "down" })
+                    }
+                    _ => (neighbour, "right"),
+                };
+                let mut args = vec![
+                    "pane",
+                    "split",
+                    target.as_str(),
+                    "--direction",
+                    direction,
+                    "--cwd",
+                    &seated.cwd,
+                    "--no-focus",
+                ];
+                args.extend(env_args.iter().copied());
+                let value = herdr_json(&args)?;
+                find_str(&value, &["/result/pane/pane_id", "/pane/pane_id"])
+                    .ok_or("pane split gave no pane id")?
+                    .to_owned()
+            }
+        },
         None => {
             let label = format!("run {run}");
             let workspace = std::env::var("HERDR_WORKSPACE_ID").ok();
@@ -2016,6 +2038,94 @@ fn open_pane(project: &Project, run: &str, seated: &Seated) -> Result<String, St
         &format!("herdr seat exec {} --run {run}", seated.order),
     ])?;
     Ok(format!("pane {pane}"))
+}
+
+/// The panes of the tab `neighbour` is in, measured, with which of them a finished worker of this run left idle.
+fn tab_slots(state: &nirvana_run::RunState, neighbour: &str) -> Vec<place::Slot> {
+    let Ok(layout) = herdr_json(&["pane", "layout", "--pane", neighbour]) else {
+        return Vec::new();
+    };
+    let panes = ["/result/layout/panes", "/layout/panes"]
+        .iter()
+        .find_map(|pointer| layout.pointer(pointer))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    panes
+        .iter()
+        .filter_map(|pane| {
+            let id = pane.get("pane_id")?.as_str()?.to_owned();
+            let size = |key: &str| {
+                pane.pointer(&format!("/rect/{key}"))
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u16::try_from(value).ok())
+            };
+            // The pane's latest worker of this run says whether it is done with it.
+            let latest = state
+                .orders
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, order)| order.pane.as_deref() == Some(id.as_str()));
+            let ended = latest.is_some_and(|(_, order)| finished(order.phase));
+            Some(place::Slot {
+                finished: ended && idle_shell(&id),
+                age: latest.map(|(at, _)| at),
+                cols: size("width")?,
+                rows: size("height")?,
+                pane: id,
+            })
+        })
+        .collect()
+}
+
+/// A worker's supervisor has exited by these phases; a deferred one starts again in its own pane, an asked one
+/// waits on an answer there.
+fn finished(phase: nirvana_run::Phase) -> bool {
+    use nirvana_run::Phase;
+    matches!(
+        phase,
+        Phase::Delivered
+            | Phase::Interrupted
+            | Phase::Gated
+            | Phase::Merged
+            | Phase::Reseated
+            | Phase::Failed
+    )
+}
+
+/// Only a shell runs in the pane, so a typed command reaches nobody's program. Any doubt reads as busy.
+fn idle_shell(pane: &str) -> bool {
+    let Ok(process) = herdr_json(&["pane", "process-info", "--pane", pane]) else {
+        return false;
+    };
+    let processes = [
+        "/result/process_info/foreground_processes",
+        "/process_info/foreground_processes",
+    ]
+    .iter()
+    .find_map(|pointer| process.pointer(pointer))
+    .and_then(Value::as_array)
+    .cloned()
+    .unwrap_or_default();
+    only_shells(&processes)
+}
+
+/// Every foreground process is a shell. The journal has already said the worker ended; this catches its
+/// supervisor still drawing the footer, or the owner running something in the pane since.
+fn only_shells(processes: &[Value]) -> bool {
+    processes.iter().all(|process| {
+        let name = process
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase();
+        let name = name.strip_suffix(".exe").unwrap_or(&name);
+        matches!(
+            name,
+            "pwsh" | "powershell" | "cmd" | "bash" | "zsh" | "sh" | "fish" | "nu"
+        )
+    })
 }
 
 /// Starts `seat exec` with no pane: its view goes to `streams/<order>.log`.
@@ -2842,6 +2952,7 @@ fn cleanup_cli(args: &[String]) -> std::io::Result<()> {
     Ok(())
 }
 
+mod place;
 mod view;
 
 #[cfg(test)]
