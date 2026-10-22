@@ -309,10 +309,16 @@ fn the_mode_key_moves_the_mode_in_seats_toml_logs_it_and_shows_it() {
     let _ = open(&mut state, 200);
     let outcome = key(&mut state, KeyCode::Char('m'));
     assert!(outcome.requests.is_empty(), "the key stays out of the pane");
-    let table = std::fs::read_to_string(home.join("seats.toml")).unwrap();
+    let project_file = root.join(".nirvana/seats.toml");
+    let table = std::fs::read_to_string(&project_file).unwrap();
     assert_eq!(
-        crate::nirvana_seat::parse(&table).unwrap().mode,
+        crate::nirvana_seat::parse_project_seats(&project_file, &table).unwrap(),
         crate::nirvana_seat::Mode::Sota
+    );
+    let machine_table = std::fs::read_to_string(home.join("seats.toml")).unwrap();
+    assert_eq!(
+        crate::nirvana_seat::parse(&machine_table).unwrap().mode,
+        crate::nirvana_seat::Mode::Balanced
     );
     let journal = std::fs::read_to_string(root.join(".nirvana/runs/rec1/journal.jsonl")).unwrap();
     let last: serde_json::Value = serde_json::from_str(journal.lines().last().unwrap()).unwrap();
@@ -347,10 +353,36 @@ fn the_mode_key_moves_the_mode_in_seats_toml_logs_it_and_shows_it() {
     // A click on the mode row moves it on: SOTA to Efficient.
     let mode = state.hits.nirvana_seats_panel.mode;
     let _ = click(&mut state, mode.x + 1, mode.y);
-    let table = std::fs::read_to_string(home.join("seats.toml")).unwrap();
+    let table = std::fs::read_to_string(&project_file).unwrap();
     assert_eq!(
-        crate::nirvana_seat::parse(&table).unwrap().mode,
+        crate::nirvana_seat::parse_project_seats(&project_file, &table).unwrap(),
         crate::nirvana_seat::Mode::Efficient
+    );
+    let machine_table = std::fs::read_to_string(home.join("seats.toml")).unwrap();
+    assert_eq!(
+        crate::nirvana_seat::parse(&machine_table).unwrap().mode,
+        crate::nirvana_seat::Mode::Balanced
+    );
+    done(root, home);
+}
+
+#[test]
+fn the_seats_square_mode_row_shows_the_source_word() {
+    let (mut state, root, home) = state_for("source-word", "nirvana");
+    let rows = open(&mut state, 200);
+    let text = rows.join("\n");
+    assert!(
+        line(&rows, "Mode").contains("\u{b7} machine"),
+        "expected machine source word in mode row: {text}"
+    );
+
+    let outcome = key(&mut state, KeyCode::Char('m'));
+    assert!(outcome.requests.is_empty(), "the key stays out of the pane");
+    let rows = rows_of(&mut state, 200, 40);
+    let text = rows.join("\n");
+    assert!(
+        line(&rows, "Mode").contains("\u{b7} this project"),
+        "expected project source word in mode row: {text}"
     );
     done(root, home);
 }

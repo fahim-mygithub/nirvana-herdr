@@ -1470,7 +1470,7 @@ pub fn gate(project: &Project, run: &str, order: &str) -> Result<Ruling, String>
         .ok_or(format!("no order {order} in run {run}"))?
         .clone();
     let sidecar = read_sidecar(project, run, order);
-    let table = nirvana_seat::table().ok();
+    let table = nirvana_seat::table_for(&project.root).ok();
     match sidecar.helps.clone() {
         Some((kind, subject)) if kind == "author" => {
             return gate_author(project, run, &journal, &known, &subject, table.as_ref())
@@ -2411,7 +2411,7 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
                 project.orders_dir().join(format!("{order}.request.md")),
                 &text,
             )?;
-            let table = nirvana_seat::table().ok();
+            let table = nirvana_seat::table_for(&project.root).ok();
             match author(&project, &run, &order, "", table.as_ref()) {
                 Ok(line) => {
                     println!("{line}");

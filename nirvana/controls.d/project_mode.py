@@ -1,0 +1,122 @@
+# Plan 23: each project keeps its own seat mode (package `project_mode`)
+# Controls starting with p23_.
+
+CONTROLS = (
+    # Plan 23 §7 (1): project_mode: no file gives the machine's mode and Machine
+    Control(
+        'p23_project_mode_no_file_gives_machine',
+        'src/nirvana_seat.rs',
+        '    let path = project_seats_path(root);\n    if !path.exists() {\n        return Ok((table.mode, ModeSource::Machine));\n    }\n',
+        '    let path = project_seats_path(root);\n    if !path.exists() {\n        return Ok((Mode::Sota, ModeSource::Project));\n    }\n',
+        'test_p23_project_mode_no_file_gives_machine',
+        'rust',
+    ),
+    # Plan 23 §7 (2): project_mode: a file gives its mode and Project
+    Control(
+        'p23_project_mode_file_gives_project',
+        'src/nirvana_seat.rs',
+        '    let mode = parse_project_seats(&path, &text)?;\n    Ok((mode, ModeSource::Project))\n',
+        '    let mode = parse_project_seats(&path, &text)?;\n    Ok((table.mode, ModeSource::Machine))\n',
+        'test_p23_project_mode_file_gives_project',
+        'rust',
+    ),
+    # Plan 23 §7 (3): project_mode: a file with another key is refused
+    Control(
+        'p23_project_mode_refuses_other_key',
+        'src/nirvana_seat.rs',
+        '        let key = key_raw.trim();\n        if key != "mode" {\n',
+        '        let key = key_raw.trim();\n        if false && key != "mode" {\n',
+        'test_p23_project_mode_refuses_other_key',
+        'rust',
+    ),
+    # Plan 23 §7 (4): project_mode: a file with a bad value is refused
+    Control(
+        'p23_project_mode_refuses_bad_value',
+        'src/nirvana_seat.rs',
+        '        let Some(mode) = Mode::parse(mode_str) else {\n',
+        '        let Some(mode) = Mode::parse(mode_str).or(Some(Mode::Balanced)) else {\n',
+        'test_p23_project_mode_refuses_bad_value',
+        'rust',
+    ),
+    # Plan 23 §7 (5): Two projects, one machine table, each with its own file, give two different modes from table_for
+    Control(
+        'p23_two_projects_different_modes',
+        'src/nirvana_seat.rs',
+        'pub fn table_for(root: &Path) -> Result<Table, String> {\n    let mut table = table()?;\n    let (mode, _source) = project_mode(root, &table)?;\n    table.mode = mode;\n    Ok(table)\n}\n',
+        'pub fn table_for(_root: &Path) -> Result<Table, String> {\n    let table = table()?;\n    Ok(table)\n}\n',
+        'test_p23_two_projects_different_modes',
+        'rust',
+    ),
+    # Plan 23 §7 (6): --mode beats the project\'s file in herdr seat pick\'s request
+    Control(
+        'p23_pick_mode_flag_beats_project_file',
+        'src/nirvana_seat.rs',
+        '            if arg.as_str() == "--mode" {\n                req.mode = Mode::parse(&value()).unwrap_or_else(|| usage_exit());\n',
+        '            if arg.as_str() == "--mode" {\n                let _ = value();\n',
+        'test_p23_pick_mode_flag_beats_project_file',
+        'rust',
+    ),
+    # Plan 23 §7 (7): The worker supervisor\'s pick uses the project\'s mode when the order names none
+    Control(
+        'p23_worker_supervisor_uses_project_mode',
+        'src/nirvana_worker.rs',
+        '    pick_request.mode = request.mode.unwrap_or(table.mode);\n',
+        '    pick_request.mode = request.mode.unwrap_or(nirvana_seat::Mode::Balanced);\n',
+        'worker_supervisor_uses_project_mode_when_order_names_none',
+        'rust',
+    ),
+    # Plan 23 §7 (8): orchestrator_seat through table_for: Efficient in one project gives Sonnet medium while SOTA in another gives Opus high
+    Control(
+        'p23_orchestrator_seat_table_for',
+        'src/nirvana_launch.rs',
+        '    match crate::nirvana_seat::project_mode(&root, &table) {\n        Ok((mode, _)) => table.mode = mode,\n',
+        '    match crate::nirvana_seat::project_mode(&root, &table) {\n        Ok((_mode, _)) => table.mode = crate::nirvana_seat::Mode::Balanced,\n',
+        'test_p23_orchestrator_seat_table_for',
+        'rust',
+    ),
+    # Plan 23 §7 (9): herdr seat mode <m> writes only the project\'s file and leaves the global line\'s bytes unchanged
+    Control(
+        'p23_seat_mode_writes_only_project_file',
+        'src/nirvana_seats_square.rs',
+        '    let _ = nirvana_seat::set_project_mode(root, to)?;\n',
+        '    let _ = nirvana_seat::set_mode_in(&seats_dir(), to)?;\n',
+        'seat_mode_writes_only_project_file',
+        'rust',
+    ),
+    # Plan 23 §7 (10): herdr seat mode --machine <m> writes only the global line
+    Control(
+        'p23_seat_mode_machine_writes_only_global_line',
+        'src/nirvana_seats_square.rs',
+        'pub fn change_machine_mode(root: &Path, to: Mode, by: &str) -> Result<String, String> {\n    let previous = nirvana_seat::set_mode_in(&seats_dir(), to)?;\n',
+        'pub fn change_machine_mode(root: &Path, to: Mode, by: &str) -> Result<String, String> {\n    let _ = nirvana_seat::set_project_mode(root, to);\n    let previous = nirvana_seat::set_mode_in(&seats_dir(), to)?;\n',
+        'seat_mode_machine_writes_only_global_line',
+        'rust',
+    ),
+    # Plan 23 §7 (11): herdr seat mode --clear removes the project\'s file
+    Control(
+        'p23_seat_mode_clear_removes_project_file',
+        'src/nirvana_seats_square.rs',
+        '    let file = root.join(nirvana_run::DIR).join(nirvana_seat::SEATS_FILE);\n    if file.exists() {\n        std::fs::remove_file(&file).map_err(|err| format!("{}: {err}", file.display()))?;\n    }\n',
+        '    let file = root.join(nirvana_run::DIR).join(nirvana_seat::SEATS_FILE);\n    if false && file.exists() {\n        std::fs::remove_file(&file).map_err(|err| format!("{}: {err}", file.display()))?;\n    }\n',
+        'seat_mode_clear_removes_project_file',
+        'rust',
+    ),
+    # Plan 23 §7 (12): The restart notice for project A does not fire when project B\'s mode changes
+    Control(
+        'p23_restart_notice_isolation',
+        'src/nirvana_board.rs',
+        '        Some(r) => crate::nirvana_seat::table_for(r).ok()?,\n',
+        '        Some(_) => crate::nirvana_seat::table().ok()?,\n',
+        'restart_notice_for_project_a_does_not_fire_when_project_b_mode_changes',
+        'rust',
+    ),
+    # Plan 23 §7 (13): The Seats square\'s mode row shows the source word
+    Control(
+        'p23_seats_square_mode_row_shows_source_word',
+        'src/client/shell/nirvana_seats.rs',
+        '                if let Some(source) = shown.mode_source {\n                    let source_text = format!("\\u{b7} {}", source.word());\n                    put_text(\n                        buffer,\n                        at,\n                        y,\n                        (x + width).saturating_sub(at),\n                        &source_text,\n                        muted,\n                    );\n                    at += unicode_width::UnicodeWidthStr::width(source_text.as_str()) as u16 + 1;\n                }\n',
+        '                if false {\n                    if let Some(source) = shown.mode_source {\n                        let source_text = format!("\\u{b7} {}", source.word());\n                        put_text(\n                            buffer,\n                            at,\n                            y,\n                            (x + width).saturating_sub(at),\n                            &source_text,\n                            muted,\n                        );\n                        at += unicode_width::UnicodeWidthStr::width(source_text.as_str()) as u16 + 1;\n                    }\n                }\n',
+        'the_seats_square_mode_row_shows_the_source_word',
+        'rust',
+    ),
+)

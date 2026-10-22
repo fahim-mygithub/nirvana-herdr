@@ -727,10 +727,13 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
     }
 }
 
-fn check_seat_notice(session: &str) -> Option<String> {
+pub(crate) fn check_seat_notice(session: &str, root: Option<&Path>) -> Option<String> {
     let home = crate::nirvana::home().unwrap_or_else(|| std::env::temp_dir().join("nirvana-herdr"));
     let mut record = crate::nirvana_claude::read_session_seat(&home, session)?;
-    let table = crate::nirvana_seat::table().ok()?;
+    let table = match root {
+        Some(r) => crate::nirvana_seat::table_for(r).ok()?,
+        None => crate::nirvana_seat::table().ok()?,
+    };
     // The cache alone: a stale reading must not run `claude /usage` inside the prompt hook (cached_world).
     let now = crate::nirvana_usage::unix(std::time::SystemTime::now());
     let world = crate::nirvana_seat::cached_world(&home.join(crate::nirvana_seat::DIR), now);
@@ -767,17 +770,18 @@ fn run_notice(input: &str) {
         .get("session_id")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !session.is_empty() {
-        if let Some(line) = check_seat_notice(session) {
-            println!("{line}");
-        }
-    }
     let cwd = hook
         .get("cwd")
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok());
-    let Some(root) = cwd.as_deref().and_then(root) else {
+    let root = cwd.as_deref().and_then(root);
+    if !session.is_empty() {
+        if let Some(line) = check_seat_notice(session, root.as_deref()) {
+            println!("{line}");
+        }
+    }
+    let Some(root) = root else {
         return;
     };
     let board = read(&root).unwrap_or_default();
@@ -1040,5 +1044,68 @@ mod tests {
             ..shared
         };
         assert_eq!(square_value(&empty, None), ("board empty".into(), false));
+    }
+
+    #[test]
+    fn restart_notice_for_project_a_does_not_fire_when_project_b_mode_changes() {
+        let guard = crate::nirvana::with_test_home("p23-notice-proj");
+        let home_seats = guard
+            .path
+            .join("nirvana")
+            .join(crate::nirvana_seat::SEATS_FILE);
+        std::fs::create_dir_all(home_seats.parent().unwrap()).unwrap();
+        std::fs::write(&home_seats, crate::nirvana_seat::DEFAULT).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("nirvana-p23-notice-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let proj_a = dir.join("proj_a");
+        let proj_b = dir.join("proj_b");
+        std::fs::create_dir_all(proj_a.join(".nirvana")).unwrap();
+        std::fs::create_dir_all(proj_b.join(".nirvana")).unwrap();
+
+        std::fs::write(
+            proj_a
+                .join(".nirvana")
+                .join(crate::nirvana_seat::SEATS_FILE),
+            "mode = \"sota\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            proj_b
+                .join(".nirvana")
+                .join(crate::nirvana_seat::SEATS_FILE),
+            "mode = \"efficient\"\n",
+        )
+        .unwrap();
+
+        let _ = crate::nirvana_claude::record_session_seat(
+            &guard.path,
+            "sess-a",
+            "claude-opus-5-5",
+            "high",
+        );
+
+        assert_eq!(
+            check_seat_notice("sess-a", Some(&proj_a)),
+            None,
+            "project A running on SOTA does not notice when in SOTA mode"
+        );
+
+        // Change project B's mode
+        std::fs::write(
+            proj_b
+                .join(".nirvana")
+                .join(crate::nirvana_seat::SEATS_FILE),
+            "mode = \"balanced\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            check_seat_notice("sess-a", Some(&proj_a)),
+            None,
+            "project A notice must not fire when project B changes mode"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

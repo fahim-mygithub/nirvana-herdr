@@ -565,7 +565,12 @@ fn digest_cli() -> std::io::Result<()> {
             .get("model")
             .and_then(Value::as_str)
             .unwrap_or(crate::nirvana_launch::MODEL);
-        let (_launch_model, launch_effort) = crate::nirvana_launch::orchestrator_launch_seat(&home);
+        let folder = project
+            .as_ref()
+            .map(|p| p.root.as_path())
+            .unwrap_or(Path::new("."));
+        let (_launch_model, launch_effort) =
+            crate::nirvana_launch::orchestrator_launch_seat_for(&home, folder);
         let _ = record_session_seat(&home, session_id, model, &launch_effort);
     }
     println!("{}", digest_text(&digest));

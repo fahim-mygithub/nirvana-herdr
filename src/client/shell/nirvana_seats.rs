@@ -413,6 +413,18 @@ pub(super) fn render_seats_panel(
                     put_text(buffer, at, y, (x + width).saturating_sub(at), &text, style);
                     at += unicode_width::UnicodeWidthStr::width(text.as_str()) as u16 + 1;
                 }
+                if let Some(source) = shown.mode_source {
+                    let source_text = format!("\u{b7} {}", source.word());
+                    put_text(
+                        buffer,
+                        at,
+                        y,
+                        (x + width).saturating_sub(at),
+                        &source_text,
+                        muted,
+                    );
+                    at += unicode_width::UnicodeWidthStr::width(source_text.as_str()) as u16 + 1;
+                }
                 let key = "m changes it";
                 let key_x = (x + width).saturating_sub(key.len() as u16);
                 if key_x > at {

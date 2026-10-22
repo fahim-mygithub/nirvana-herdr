@@ -168,22 +168,32 @@ pub const ROLE_FILE: &str = "ROLE.md";
 pub const MODEL: &str = "claude-opus-5-5";
 pub const EFFORT: &str = "medium";
 
-/// The orchestrator's seat at launch (plan 20 §3.2): from the seat rule, or today's seat (opus medium)
-/// when the table or the readings fail to load.
-pub fn orchestrator_launch_seat(home: &Path) -> (String, String) {
+/// The orchestrator's seat at launch for a specific folder/project (plan 20 §3.2, plan 23 §5).
+pub fn orchestrator_launch_seat_for(home: &Path, folder: &Path) -> (String, String) {
     let nirvana_dir = home.join(crate::nirvana_seat::DIR);
     let seats_path = nirvana_dir.join(crate::nirvana_seat::SEATS_FILE);
-    let table = match std::fs::read_to_string(&seats_path)
+    let mut table = match std::fs::read_to_string(&seats_path)
         .ok()
         .and_then(|text| crate::nirvana_seat::parse(&text).ok())
     {
         Some(t) => t,
         None => return (MODEL.to_owned(), EFFORT.to_owned()),
     };
+    let root = crate::nirvana_seats_square::project_root(folder);
+    match crate::nirvana_seat::project_mode(&root, &table) {
+        Ok((mode, _)) => table.mode = mode,
+        Err(_) => return (MODEL.to_owned(), EFFORT.to_owned()),
+    }
     let now = crate::nirvana_usage::unix(std::time::SystemTime::now());
     let world = crate::nirvana_seat::cached_world(&nirvana_dir, now);
     let seat = crate::nirvana_seat::orchestrator_seat(&table, &world);
     (seat.model, seat.effort.word().to_owned())
+}
+
+/// The orchestrator's seat at launch (plan 20 §3.2): from the seat rule, or today's seat (opus medium)
+/// when the table or the readings fail to load.
+pub fn orchestrator_launch_seat(home: &Path) -> (String, String) {
+    orchestrator_launch_seat_for(home, Path::new("."))
 }
 
 /// The arguments after `claude` (plan 12 §6, O4b), in its order.
@@ -217,6 +227,13 @@ pub fn nirvana_claude_args(home: &Path) -> Vec<String> {
 /// written, and `--resume <id>` last when `resume` names a session.
 pub fn launch_args(home: &Path, folder: &Path, resume: Option<&str>) -> Vec<String> {
     let mut args = nirvana_claude_args(home);
+    let (model, effort) = orchestrator_launch_seat_for(home, folder);
+    if let Some(at) = args.iter().position(|arg| arg == "--model") {
+        args[at + 1] = model;
+    }
+    if let Some(at) = args.iter().position(|arg| arg == "--effort") {
+        args[at + 1] = effort;
+    }
     let generated =
         crate::nirvana_preset::settings_path(&home.join(crate::nirvana_seat::DIR), folder);
     if generated.is_file() {

@@ -775,3 +775,47 @@ fn a_pane_is_taken_over_only_when_its_worker_ended_and_a_shell_alone_runs() {
         assert!(!finished(phase), "{phase:?}");
     }
 }
+
+#[test]
+fn worker_supervisor_uses_project_mode_when_order_names_none() {
+    let guard = crate::nirvana::with_test_home("p23-worker-proj-mode");
+    let home_seats = guard
+        .path
+        .join("nirvana")
+        .join(crate::nirvana_seat::SEATS_FILE);
+    std::fs::create_dir_all(home_seats.parent().unwrap()).unwrap();
+    std::fs::write(&home_seats, crate::nirvana_seat::DEFAULT).unwrap();
+
+    let dir = std::env::temp_dir().join(format!("nirvana-p23-worker-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let project = Project::at(&dir);
+    project.ensure().unwrap();
+
+    let proj_seats = dir.join(".nirvana").join(crate::nirvana_seat::SEATS_FILE);
+    std::fs::write(&proj_seats, "mode = \"sota\"\n").unwrap();
+
+    let order_file = dir.join(".nirvana/orders/test-order.md");
+    std::fs::create_dir_all(order_file.parent().unwrap()).unwrap();
+    std::fs::write(&order_file, "# Test Order\n").unwrap();
+
+    let request = SeatRequest {
+        seat: "flash".into(),
+        order_file,
+        order: "test-order".into(),
+        run: "r1".into(),
+        class: Some("sweep.mechanical".into()),
+        size: None,
+        needs: Vec::new(),
+        not_family: Vec::new(),
+        mode: None,
+        effort: None,
+        reason: None,
+        worktree: false,
+        auto: false,
+    };
+
+    let booked = book(&project, &request).expect("book succeeds");
+    assert_eq!(booked.mode, Mode::Sota);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

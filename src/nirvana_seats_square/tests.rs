@@ -293,8 +293,14 @@ fn the_mode_key_writes_seats_toml_and_logs_mode_changed_in_each_open_run() {
         message,
         "mode SOTA: the next seat pick uses it; logged in run rec1"
     );
+    let project_file = nirvana_seat::project_seats_path(&root);
+    let project_table = std::fs::read_to_string(&project_file).unwrap();
+    assert_eq!(
+        nirvana_seat::parse_project_seats(&project_file, &project_table).unwrap(),
+        Mode::Sota
+    );
     let table = std::fs::read_to_string(home.join(nirvana_seat::SEATS_FILE)).unwrap();
-    assert_eq!(nirvana_seat::parse(&table).unwrap().mode, Mode::Sota);
+    assert_eq!(nirvana_seat::parse(&table).unwrap().mode, Mode::Balanced);
     let journal = Project::at(&root).journal("rec1");
     let (events, bad) = journal.read();
     assert_eq!(bad, 0);
@@ -318,6 +324,7 @@ fn the_mode_key_writes_seats_toml_and_logs_mode_changed_in_each_open_run() {
     );
     let view = load(&root, &home);
     assert_eq!(view.mode, Some(Mode::Sota));
+    assert_eq!(view.mode_source, Some(nirvana_seat::ModeSource::Project));
     assert_eq!(view.runs[0].mode_changed, Some((NOW, Mode::Sota)));
     // The same mode again writes nothing.
     let lines = events.len();
@@ -326,6 +333,84 @@ fn the_mode_key_writes_seats_toml_and_logs_mode_changed_in_each_open_run() {
         "mode SOTA already"
     );
     assert_eq!(journal.read().0.len(), lines);
+    set_home_for_test(None, None);
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn seat_mode_writes_only_project_file() {
+    let (root, home) = project("cli-project", None);
+    set_home_for_test(Some(home.clone()), Some(NOW));
+    let home_file = home.join(nirvana_seat::SEATS_FILE);
+    let home_before = std::fs::read(&home_file).unwrap();
+
+    let out = mode_cli_for(&root, &["sota".to_string()]).unwrap();
+    assert!(out.contains("mode SOTA"));
+
+    let project_file = nirvana_seat::project_seats_path(&root);
+    assert!(project_file.exists());
+    let project_content = std::fs::read_to_string(&project_file).unwrap();
+    assert_eq!(
+        nirvana_seat::parse_project_seats(&project_file, &project_content).unwrap(),
+        Mode::Sota
+    );
+
+    let home_after = std::fs::read(&home_file).unwrap();
+    assert_eq!(home_before, home_after, "global line bytes unchanged");
+
+    let query = mode_cli_for(&root, &[]).unwrap();
+    assert_eq!(query, "sota (this project)");
+
+    set_home_for_test(None, None);
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn seat_mode_machine_writes_only_global_line() {
+    let (root, home) = project("cli-machine", None);
+    set_home_for_test(Some(home.clone()), Some(NOW));
+    nirvana_seat::set_project_mode(&root, Mode::Sota).unwrap();
+    let project_file = nirvana_seat::project_seats_path(&root);
+    let project_before = std::fs::read(&project_file).unwrap();
+
+    let out = mode_cli_for(&root, &["--machine".to_string(), "efficient".to_string()]).unwrap();
+    assert!(out.contains("mode Efficient"));
+
+    let home_file = home.join(nirvana_seat::SEATS_FILE);
+    let home_table = nirvana_seat::parse(&std::fs::read_to_string(&home_file).unwrap()).unwrap();
+    assert_eq!(home_table.mode, Mode::Efficient);
+
+    let project_after = std::fs::read(&project_file).unwrap();
+    assert_eq!(
+        project_before, project_after,
+        "project file bytes unchanged"
+    );
+
+    let query = mode_cli_for(&root, &[]).unwrap();
+    assert_eq!(query, "sota (this project)");
+
+    set_home_for_test(None, None);
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn seat_mode_clear_removes_project_file() {
+    let (root, home) = project("cli-clear", None);
+    set_home_for_test(Some(home.clone()), Some(NOW));
+    nirvana_seat::set_project_mode(&root, Mode::Sota).unwrap();
+    let project_file = nirvana_seat::project_seats_path(&root);
+    assert!(project_file.exists());
+
+    let out = mode_cli_for(&root, &["--clear".to_string()]).unwrap();
+    assert!(out.contains("cleared project mode: now following machine (balanced)"));
+    assert!(!project_file.exists(), "project file was removed");
+
+    let query = mode_cli_for(&root, &[]).unwrap();
+    assert_eq!(query, "balanced (machine)");
+
     set_home_for_test(None, None);
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&home);

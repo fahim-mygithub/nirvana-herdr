@@ -1525,7 +1525,7 @@ fn rate_limited(
             (),
         ))
     })?;
-    let table = nirvana_seat::table().map_err(std::io::Error::other)?;
+    let table = nirvana_seat::table_for(&project.root).map_err(std::io::Error::other)?;
     let child = child_id(&state, order);
     let mut request = nirvana_seat::Request::new(&seated.class);
     request.size = seated.size;
@@ -2423,8 +2423,8 @@ pub fn seating(
 }
 
 /// Books the order on the seat (the rule must agree, or the caller gives a reason: an override, 3 a run).
-fn book(request: &SeatRequest) -> Result<Booked, (i32, String)> {
-    let table = nirvana_seat::table().map_err(|why| (2, why))?;
+fn book(project: &Project, request: &SeatRequest) -> Result<Booked, (i32, String)> {
+    let table = nirvana_seat::table_for(&project.root).map_err(|why| (2, why))?;
     let Some(seat) = table.seat(&request.seat) else {
         return Err((2, format!("no seat {} in seats.toml", request.seat)));
     };
@@ -2591,7 +2591,7 @@ pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i3
             ),
         )
     })?;
-    let booked = book(request)?;
+    let booked = book(project, request)?;
     let (cwd, worktree, branch) = if request.worktree {
         let path = project.worktrees_dir().join(&request.order);
         let branch = format!("nirvana/{}", request.order);

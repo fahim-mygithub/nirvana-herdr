@@ -25,7 +25,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::nirvana_run::{self, Kind, Phase, Project, RunState};
-use crate::nirvana_seat::{self, Effort, Leases, Mode, Table};
+use crate::nirvana_seat::{self, Effort, Leases, Mode, ModeSource, Table};
 
 /// How often the window's copy is read again; Running's transcript is read as often (feature 6).
 pub const REREAD: Duration = Duration::from_secs(2);
@@ -99,6 +99,7 @@ pub struct OrchestratorRow {
 pub struct View {
     /// `seats.toml`'s mode; `None` when the table is refused, with why in `note`.
     pub mode: Option<Mode>,
+    pub mode_source: Option<ModeSource>,
     pub note: Option<String>,
     pub runs: Vec<RunLine>,
     pub rows: Vec<Row>,
@@ -345,7 +346,20 @@ fn read(root: &Path, seats_dir: &Path, replays: &mut Replays, now: u64) -> View 
         };
         runs.push((run, state));
     }
-    let (table, mut note) = read_table(seats_dir);
+    let (mut table, mut note) = read_table(seats_dir);
+    let mut mode_source = None;
+    if let Some(t) = table.as_mut() {
+        match nirvana_seat::project_mode(root, t) {
+            Ok((m, s)) => {
+                t.mode = m;
+                mode_source = Some(s);
+            }
+            Err(why) => {
+                note.get_or_insert(why);
+                table = None;
+            }
+        }
+    }
     let leases = match nirvana_seat::load_leases(&seats_dir.join(nirvana_seat::LEASES_FILE)) {
         Ok(leases) => leases,
         Err(_) => {
@@ -359,6 +373,7 @@ fn read(root: &Path, seats_dir: &Path, replays: &mut Replays, now: u64) -> View 
         }
     };
     let mut view = compose(table.as_ref(), note, &runs, &leases, now);
+    view.mode_source = mode_source;
     if let Some(table) = table.as_ref() {
         // The cache alone, never a CLI read from the square (nirvana_seat::cached_world).
         let mut world = nirvana_seat::cached_world(seats_dir, now);
@@ -505,7 +520,7 @@ pub fn take_changed() -> bool {
 
 /// After a mode change: the window's copy shows the new mode at once, not 2 s later, and is read again on the
 /// next tick.
-fn mode_written(root: &Path, mode: Mode) {
+fn mode_written(root: &Path, mode: Mode, source: ModeSource) {
     if let Some(entry) = entries()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -514,6 +529,7 @@ fn mode_written(root: &Path, mode: Mode) {
         entry.read_at = None;
         if let Some(view) = entry.view.as_mut() {
             view.mode = Some(mode);
+            view.mode_source = Some(source);
         }
     }
 }
@@ -567,10 +583,18 @@ pub fn log_mode(root: &Path, from: Mode, to: Mode, by: &str) -> std::io::Result<
     Ok(logged)
 }
 
-/// Sets the mode in `seats.toml` and logs it in the project's open runs; what to tell the owner.
+/// Sets the mode in `<project>/.nirvana/seats.toml` and logs it in the project's open runs; what to tell the owner.
 pub fn change_mode(root: &Path, to: Mode, by: &str) -> Result<String, String> {
-    let previous = nirvana_seat::set_mode_in(&seats_dir(), to)?;
-    mode_written(root, to);
+    let (machine_table, _) = read_table(&seats_dir());
+    let machine_table = machine_table.ok_or_else(|| {
+        format!(
+            "{} is refused: herdr seat pick says why",
+            nirvana_seat::SEATS_FILE
+        )
+    })?;
+    let (previous, _) = nirvana_seat::project_mode(root, &machine_table)?;
+    let _ = nirvana_seat::set_project_mode(root, to)?;
+    mode_written(root, to, ModeSource::Project);
     if previous == to {
         return Ok(format!("mode {} already", to.title()));
     }
@@ -585,42 +609,94 @@ pub fn change_mode(root: &Path, to: Mode, by: &str) -> Result<String, String> {
     })
 }
 
-const USAGE: &str = "usage: herdr seat mode [efficient|balanced|sota]
-Prints seats.toml's mode, the one `herdr seat pick` uses when --mode is not given, or sets it. A change is
-logged as mode_changed in each open run of this project ($NIRVANA_PROJECT, else the git top level).";
-
-/// `herdr seat mode [<mode>]`.
-pub fn mode_cli(args: &[String]) -> std::io::Result<()> {
-    match args {
-        [] => match nirvana_seat::table() {
-            Ok(table) => {
-                println!("{}", table.mode.word());
-                Ok(())
-            }
-            Err(err) => {
-                eprintln!("herdr seat mode: {err}");
-                std::process::exit(2);
-            }
-        },
-        [word] => {
-            let Some(mode) = Mode::parse(word) else {
-                eprintln!("{USAGE}");
-                std::process::exit(2);
-            };
-            let project = Project::from_env();
-            match change_mode(&project.root, mode, "herdr seat mode") {
-                Ok(message) => {
-                    println!("{message}");
-                    Ok(())
-                }
-                Err(err) => {
-                    eprintln!("herdr seat mode: {err}");
-                    std::process::exit(2);
-                }
-            }
+/// Sets the global machine mode in `seats.toml` and updates the project view if following machine.
+pub fn change_machine_mode(root: &Path, to: Mode, by: &str) -> Result<String, String> {
+    let previous = nirvana_seat::set_mode_in(&seats_dir(), to)?;
+    let (machine_table, _) = read_table(&seats_dir());
+    if let Some(table) = machine_table {
+        if let Ok((effective_mode, source)) = nirvana_seat::project_mode(root, &table) {
+            mode_written(root, effective_mode, source);
         }
-        _ => {
-            eprintln!("{USAGE}");
+    }
+    if previous == to {
+        return Ok(format!("machine mode {} already", to.title()));
+    }
+    let runs = log_mode(root, previous, to, by).map_err(|err| format!("journal: {err}"))?;
+    Ok(match runs.as_slice() {
+        [] => format!("machine mode {}: updated seats.toml", to.title()),
+        runs => format!(
+            "machine mode {}: updated seats.toml; logged in run {}",
+            to.title(),
+            runs.join(", ")
+        ),
+    })
+}
+
+/// Clears `<project>/.nirvana/seats.toml` so the project follows the machine mode again.
+pub fn clear_mode(root: &Path, by: &str) -> Result<String, String> {
+    let (machine_table, _) = read_table(&seats_dir());
+    let machine_table = machine_table.ok_or_else(|| {
+        format!(
+            "{} is refused: herdr seat pick says why",
+            nirvana_seat::SEATS_FILE
+        )
+    })?;
+    let (previous, source) = nirvana_seat::project_mode(root, &machine_table)?;
+    let file = root.join(nirvana_run::DIR).join(nirvana_seat::SEATS_FILE);
+    if file.exists() {
+        std::fs::remove_file(&file).map_err(|err| format!("{}: {err}", file.display()))?;
+    }
+    mode_written(root, machine_table.mode, ModeSource::Machine);
+    if source == ModeSource::Project && previous != machine_table.mode {
+        let _ = log_mode(root, previous, machine_table.mode, by);
+    }
+    Ok(format!(
+        "cleared project mode: now following machine ({})",
+        machine_table.mode.word()
+    ))
+}
+
+const USAGE: &str = "usage: herdr seat mode [<mode> | --machine <mode> | --clear]
+Prints seats.toml's mode and where it came from (this project or machine), or sets it.
+<mode> sets the current project's mode in .nirvana/seats.toml.
+--machine <mode> sets the global mode in seats.toml for projects without a file.
+--clear removes .nirvana/seats.toml so the project follows the machine again.
+A change is logged as mode_changed in each open run of this project ($NIRVANA_PROJECT, else the git top level).";
+
+pub fn mode_cli_for(root: &Path, args: &[String]) -> Result<String, String> {
+    match args {
+        [] => {
+            let table = nirvana_seat::table()?;
+            let (mode, source) = nirvana_seat::project_mode(root, &table)?;
+            Ok(format!("{} ({})", mode.word(), source.word()))
+        }
+        [flag] if flag == "--clear" => clear_mode(root, "herdr seat mode"),
+        [flag, word] if flag == "--machine" => {
+            let mode = Mode::parse(word).ok_or_else(|| USAGE.to_owned())?;
+            change_machine_mode(root, mode, "herdr seat mode")
+        }
+        [word] => {
+            let mode = Mode::parse(word).ok_or_else(|| USAGE.to_owned())?;
+            change_mode(root, mode, "herdr seat mode")
+        }
+        _ => Err(USAGE.to_owned()),
+    }
+}
+
+/// `herdr seat mode [<mode> | --machine <mode> | --clear]`.
+pub fn mode_cli(args: &[String]) -> std::io::Result<()> {
+    let project = Project::from_env();
+    match mode_cli_for(&project.root, args) {
+        Ok(message) => {
+            println!("{message}");
+            Ok(())
+        }
+        Err(err) => {
+            if err == USAGE {
+                eprintln!("{USAGE}");
+            } else {
+                eprintln!("herdr seat mode: {err}");
+            }
             std::process::exit(2);
         }
     }

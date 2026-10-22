@@ -3048,6 +3048,200 @@ pub fn table() -> Result<Table, String> {
     })
 }
 
+/// The mode source: whether it came from the project's file or the machine's seats.toml (plan 23 §3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ModeSource {
+    Project,
+    Machine,
+}
+
+impl ModeSource {
+    pub fn word(&self) -> &'static str {
+        match self {
+            Self::Project => "this project",
+            Self::Machine => "machine",
+        }
+    }
+}
+
+/// Where a project's own seats.toml lives: <project>/.nirvana/seats.toml (plan 23 §2).
+pub fn project_seats_path(root: &Path) -> PathBuf {
+    root.join(crate::nirvana_run::DIR).join(SEATS_FILE)
+}
+
+/// Parses a project's <project>/.nirvana/seats.toml file (plan 23 §2).
+/// Content: one key, `mode = "efficient" | "balanced" | "sota"`, and comments.
+/// Any other key, or a bad value, refuses the file, naming the path and line.
+pub fn parse_project_seats(path: &Path, text: &str) -> Result<Mode, String> {
+    let mut found_mode: Option<(Mode, usize)> = None;
+    for (idx, line) in text.lines().enumerate() {
+        let line_no = idx + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            return Err(format!(
+                "{}: line {line_no}: tables not allowed in project seats.toml",
+                path.display()
+            ));
+        }
+        let Some((key_raw, val_raw)) = trimmed.split_once('=') else {
+            return Err(format!(
+                "{}: line {line_no}: expected `key = value`",
+                path.display()
+            ));
+        };
+        let key = key_raw.trim();
+        if key != "mode" {
+            return Err(format!(
+                "{}: line {line_no}: unknown key `{key}` (only `mode` is allowed)",
+                path.display()
+            ));
+        }
+        if found_mode.is_some() {
+            return Err(format!(
+                "{}: line {line_no}: duplicate `mode` key",
+                path.display()
+            ));
+        }
+        let val_trimmed = val_raw.trim();
+        let mode_str = if let Some(after_quote) = val_trimmed.strip_prefix('"') {
+            let Some(end_quote) = after_quote.find('"') else {
+                return Err(format!(
+                    "{}: line {line_no}: unclosed string",
+                    path.display()
+                ));
+            };
+            let rest = after_quote[end_quote + 1..].trim();
+            if !rest.is_empty() && !rest.starts_with('#') {
+                return Err(format!(
+                    "{}: line {line_no}: unexpected tokens after value",
+                    path.display()
+                ));
+            }
+            &after_quote[..end_quote]
+        } else if let Some(after_quote) = val_trimmed.strip_prefix('\'') {
+            let Some(end_quote) = after_quote.find('\'') else {
+                return Err(format!(
+                    "{}: line {line_no}: unclosed string",
+                    path.display()
+                ));
+            };
+            let rest = after_quote[end_quote + 1..].trim();
+            if !rest.is_empty() && !rest.starts_with('#') {
+                return Err(format!(
+                    "{}: line {line_no}: unexpected tokens after value",
+                    path.display()
+                ));
+            }
+            &after_quote[..end_quote]
+        } else {
+            let unquoted = val_trimmed.split('#').next().unwrap_or("").trim();
+            unquoted
+        };
+        let Some(mode) = Mode::parse(mode_str) else {
+            return Err(format!(
+                "{}: line {line_no}: bad mode value `{mode_str}` (expected \"efficient\", \"balanced\", or \"sota\")",
+                path.display()
+            ));
+        };
+        found_mode = Some((mode, line_no));
+    }
+    match found_mode {
+        Some((mode, _)) => Ok(mode),
+        None => Err(format!("{}: missing `mode` key", path.display())),
+    }
+}
+
+/// Updates or creates the `mode = ...` line in a project seats file, preserving comments and formatting.
+pub fn with_project_mode(text: &str, mode: Mode) -> Result<String, String> {
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut done = false;
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\r', '\n']);
+        let trimmed = body.trim_start();
+        let is_mode = trimmed
+            .strip_prefix("mode")
+            .is_some_and(|rest| rest.trim_start().starts_with('='));
+        if is_mode && !done {
+            let indent = &body[..body.len() - trimmed.len()];
+            let after_val = if let Some((_, val_part)) = trimmed.split_once('=') {
+                if let Some(hash_pos) = val_part.find('#') {
+                    format!(" {}", &val_part[hash_pos..].trim_end())
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+            out.push_str(&format!("{indent}mode = \"{}\"{after_val}", mode.word()));
+            let ending = &line[body.len()..];
+            out.push_str(ending);
+            done = true;
+        } else {
+            out.push_str(line);
+        }
+    }
+    if !done {
+        if !out.ends_with('\n') && !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!("mode = \"{}\"\n", mode.word()));
+    }
+    Ok(out)
+}
+
+/// Sets the mode in <project>/.nirvana/seats.toml (plan 23 §2).
+/// Preserves comments if file already exists; creates it with `mode = "..."\n` if not.
+/// Refuses to touch a broken file. Returns previous mode.
+pub fn set_project_mode(root: &Path, mode: Mode) -> Result<Mode, String> {
+    let path = project_seats_path(root);
+    if path.exists() {
+        let text =
+            std::fs::read_to_string(&path).map_err(|err| format!("{}: {err}", path.display()))?;
+        let previous = parse_project_seats(&path, &text)?;
+        if previous != mode {
+            let updated = with_project_mode(&text, mode)?;
+            parse_project_seats(&path, &updated)?;
+            write_atomic(&path, updated.as_bytes())
+                .map_err(|err| format!("{}: {err}", path.display()))?;
+        }
+        Ok(previous)
+    } else {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let content = format!("mode = \"{}\"\n", mode.word());
+        write_atomic(&path, content.as_bytes())
+            .map_err(|err| format!("{}: {err}", path.display()))?;
+        let global_table = table()?;
+        Ok(global_table.mode)
+    }
+}
+
+/// Determines the mode for a project (plan 23 §3):
+/// 1. Project's file `<project>/.nirvana/seats.toml` if it exists;
+/// 2. Else global `table.mode`.
+pub fn project_mode(root: &Path, table: &Table) -> Result<(Mode, ModeSource), String> {
+    let path = project_seats_path(root);
+    if !path.exists() {
+        return Ok((table.mode, ModeSource::Machine));
+    }
+    let text =
+        std::fs::read_to_string(&path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let mode = parse_project_seats(&path, &text)?;
+    Ok((mode, ModeSource::Project))
+}
+
+/// Returns the global table with its mode replaced by the project's mode (plan 23 §3).
+pub fn table_for(root: &Path) -> Result<Table, String> {
+    let mut table = table()?;
+    let (mode, _source) = project_mode(root, &table)?;
+    table.mode = mode;
+    Ok(table)
+}
+
 fn load_table() -> Table {
     let path = dir().join(SEATS_FILE);
     match parse(&read_or_create(&path)) {
@@ -3227,7 +3421,14 @@ fn orchestrator_cli(args: &[String]) -> std::io::Result<()> {
         [flag] if flag == "--json" => true,
         _ => usage_exit(),
     };
-    let table = load_table();
+    let project = crate::nirvana_run::Project::from_env();
+    let table = match table_for(&project.root) {
+        Ok(t) => t,
+        Err(err) => {
+            eprintln!("herdr seat orchestrator: {err}");
+            std::process::exit(2);
+        }
+    };
     let mut world = live_world(&table);
     let dir = dir();
     world.leases = leases_or_exit(&dir.join(LEASES_FILE)).leases;
@@ -3246,7 +3447,14 @@ fn list_cli(args: &[String]) -> std::io::Result<()> {
         [flag] if flag == "--json" => true,
         _ => usage_exit(),
     };
-    let table = load_table();
+    let project = crate::nirvana_run::Project::from_env();
+    let table = match table_for(&project.root) {
+        Ok(t) => t,
+        Err(err) => {
+            eprintln!("herdr seat list: {err}");
+            std::process::exit(2);
+        }
+    };
     let mut world = live_world(&table);
     let dir = dir();
     world.leases = leases_or_exit(&dir.join(LEASES_FILE)).leases;
@@ -3461,7 +3669,14 @@ fn list_arg(value: &str) -> Vec<String> {
 }
 
 fn pick_cli(args: &[String]) -> std::io::Result<()> {
-    let table = load_table();
+    let project = crate::nirvana_run::Project::from_env();
+    let table = match table_for(&project.root) {
+        Ok(t) => t,
+        Err(err) => {
+            eprintln!("herdr seat pick: {err}");
+            std::process::exit(2);
+        }
+    };
     let mut request = default_request(&table);
     let mut json = false;
     let mut book: Option<String> = None;
@@ -5941,5 +6156,178 @@ mod tests {
             seat.line,
             "nirvana claude -> opus medium: Balanced, readings missing"
         );
+    }
+
+    fn temp_project(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("nirvana-p23-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_p23_project_mode_no_file_gives_machine() {
+        let _guard = crate::nirvana::with_test_home("p23-no-file");
+        let proj = temp_project("no-file");
+        let table = parse(DEFAULT).unwrap();
+        let (mode, source) = project_mode(&proj, &table).unwrap();
+        assert_eq!(mode, table.mode);
+        assert_eq!(source, ModeSource::Machine);
+        let _ = std::fs::remove_dir_all(&proj);
+    }
+
+    #[test]
+    fn test_p23_project_mode_file_gives_project() {
+        let _guard = crate::nirvana::with_test_home("p23-file");
+        let proj = temp_project("file");
+        let nirvana_dir = proj.join(".nirvana");
+        std::fs::create_dir_all(&nirvana_dir).unwrap();
+        std::fs::write(nirvana_dir.join(SEATS_FILE), "mode = \"sota\"\n").unwrap();
+        let table = parse(DEFAULT).unwrap();
+        let (mode, source) = project_mode(&proj, &table).unwrap();
+        assert_eq!(mode, Mode::Sota);
+        assert_eq!(source, ModeSource::Project);
+        let _ = std::fs::remove_dir_all(&proj);
+    }
+
+    #[test]
+    fn test_p23_project_mode_refuses_other_key() {
+        let _guard = crate::nirvana::with_test_home("p23-other-key");
+        let proj = temp_project("other-key");
+        let nirvana_dir = proj.join(".nirvana");
+        std::fs::create_dir_all(&nirvana_dir).unwrap();
+        let file = nirvana_dir.join(SEATS_FILE);
+        std::fs::write(&file, "# comment\nother = 123\nmode = \"sota\"\n").unwrap();
+        let table = parse(DEFAULT).unwrap();
+        let err = project_mode(&proj, &table).unwrap_err();
+        assert!(
+            err.contains(&file.display().to_string()),
+            "must name path: {err}"
+        );
+        assert!(err.contains("line 2"), "must name line: {err}");
+        assert!(
+            err.contains("only `mode` is allowed"),
+            "must name reason: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&proj);
+    }
+
+    #[test]
+    fn test_p23_project_mode_refuses_bad_value() {
+        let _guard = crate::nirvana::with_test_home("p23-bad-val");
+        let proj = temp_project("bad-val");
+        let nirvana_dir = proj.join(".nirvana");
+        std::fs::create_dir_all(&nirvana_dir).unwrap();
+        let file = nirvana_dir.join(SEATS_FILE);
+        std::fs::write(&file, "mode = \"unknown_mode\"\n").unwrap();
+        let table = parse(DEFAULT).unwrap();
+        let err = project_mode(&proj, &table).unwrap_err();
+        assert!(
+            err.contains(&file.display().to_string()),
+            "must name path: {err}"
+        );
+        assert!(err.contains("line 1"), "must name line: {err}");
+        let _ = std::fs::remove_dir_all(&proj);
+    }
+
+    #[test]
+    fn test_p23_two_projects_different_modes() {
+        let guard = crate::nirvana::with_test_home("p23-two-proj");
+        let home_seats = guard.path.join("nirvana").join(SEATS_FILE);
+        std::fs::create_dir_all(home_seats.parent().unwrap()).unwrap();
+        std::fs::write(&home_seats, DEFAULT).unwrap();
+
+        let proj_a = temp_project("proj-a");
+        let proj_b = temp_project("proj-b");
+        std::fs::create_dir_all(proj_a.join(".nirvana")).unwrap();
+        std::fs::create_dir_all(proj_b.join(".nirvana")).unwrap();
+        std::fs::write(
+            proj_a.join(".nirvana").join(SEATS_FILE),
+            "mode = \"efficient\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            proj_b.join(".nirvana").join(SEATS_FILE),
+            "mode = \"sota\"\n",
+        )
+        .unwrap();
+
+        let table_a = table_for(&proj_a).unwrap();
+        let table_b = table_for(&proj_b).unwrap();
+        assert_eq!(table_a.mode, Mode::Efficient);
+        assert_eq!(table_b.mode, Mode::Sota);
+        assert_ne!(table_a.mode, table_b.mode);
+
+        let _ = std::fs::remove_dir_all(&proj_a);
+        let _ = std::fs::remove_dir_all(&proj_b);
+    }
+
+    #[test]
+    fn test_p23_pick_mode_flag_beats_project_file() {
+        let guard = crate::nirvana::with_test_home("p23-pick-mode");
+        let home_seats = guard.path.join("nirvana").join(SEATS_FILE);
+        std::fs::create_dir_all(home_seats.parent().unwrap()).unwrap();
+        std::fs::write(&home_seats, DEFAULT).unwrap();
+
+        let proj = temp_project("pick-mode");
+        std::fs::create_dir_all(proj.join(".nirvana")).unwrap();
+        std::fs::write(
+            proj.join(".nirvana").join(SEATS_FILE),
+            "mode = \"efficient\"\n",
+        )
+        .unwrap();
+
+        let table = table_for(&proj).unwrap();
+        assert_eq!(table.mode, Mode::Efficient);
+        let mut req = default_request(&table);
+        assert_eq!(req.mode, Mode::Efficient);
+
+        let args = ["--mode".to_string(), "sota".to_string()];
+        let mut iter = args.iter();
+        while let Some(arg) = iter.next() {
+            let mut value = || iter.next().cloned().unwrap_or_else(|| usage_exit());
+            if arg.as_str() == "--mode" {
+                req.mode = Mode::parse(&value()).unwrap_or_else(|| usage_exit());
+            }
+        }
+        assert_eq!(req.mode, Mode::Sota);
+        let _ = std::fs::remove_dir_all(&proj);
+    }
+
+    #[test]
+    fn test_p23_orchestrator_seat_table_for() {
+        let guard = crate::nirvana::with_test_home("p23-orch-table-for");
+        let home_seats = guard.path.join("nirvana").join(SEATS_FILE);
+        std::fs::create_dir_all(home_seats.parent().unwrap()).unwrap();
+        std::fs::write(&home_seats, DEFAULT).unwrap();
+
+        let proj_eff = temp_project("orch-eff");
+        let proj_sota = temp_project("orch-sota");
+        std::fs::create_dir_all(proj_eff.join(".nirvana")).unwrap();
+        std::fs::create_dir_all(proj_sota.join(".nirvana")).unwrap();
+        std::fs::write(
+            proj_eff.join(".nirvana").join(SEATS_FILE),
+            "mode = \"efficient\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            proj_sota.join(".nirvana").join(SEATS_FILE),
+            "mode = \"sota\"\n",
+        )
+        .unwrap();
+
+        let (model_eff, effort_eff) =
+            crate::nirvana_launch::orchestrator_launch_seat_for(&guard.path, &proj_eff);
+        let (model_sota, effort_sota) =
+            crate::nirvana_launch::orchestrator_launch_seat_for(&guard.path, &proj_sota);
+
+        assert!(model_eff.contains("sonnet"));
+        assert_eq!(effort_eff, "medium");
+        assert!(model_sota.contains("opus"));
+        assert_eq!(effort_sota, "high");
+
+        let _ = std::fs::remove_dir_all(&proj_eff);
+        let _ = std::fs::remove_dir_all(&proj_sota);
     }
 }
