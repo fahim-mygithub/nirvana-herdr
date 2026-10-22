@@ -982,7 +982,8 @@ fn seat_order_refuses_empty_owns_for_build_fix_plan_and_permits_read_only() {
     );
 
     let leases_after = nirvana_seat::load_leases(&leases_path).unwrap();
-    assert!(leases_after.live("booked-no-class", now).is_none());
+    // The refusal keeps the booking it did not make.
+    assert!(leases_after.live("booked-no-class", now).is_some());
     assert!(leases_after.live("test-order", now).is_none());
 
     // Rule 7: read-only classes never refused for empty owns

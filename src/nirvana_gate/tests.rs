@@ -1392,3 +1392,86 @@ fn deterministic_includes_sources_axis_for_research_and_media() {
     );
     assert!(det.axes.iter().any(|a| a.axis == "sources"));
 }
+
+fn claude_bash(command: &str, description: &str) -> String {
+    serde_json::json!({
+        "type": "assistant",
+        "message": {"id": "msg-r4", "content": [{
+            "type": "tool_use",
+            "name": "Bash",
+            "input": {"command": command, "description": description}
+        }]}
+    })
+    .to_string()
+}
+
+fn agy_run(command: &str) -> String {
+    serde_json::json!({
+        "event": "step_update",
+        "step_update": {
+            "step_type": "tool",
+            "tool_name": "run_command",
+            "tool_info": {"parameters": {"CommandLine": command, "Cwd": "https://example.com/target"}}
+        }
+    })
+    .to_string()
+}
+
+#[test]
+fn shell_fetch_counts_only_the_segment_that_fetches_and_only_the_command() {
+    let url = "https://example.com/target";
+    let report = serde_json::json!({"sources": [{"url": url, "used_for": "spec"}]});
+    let mark = |stream: String| {
+        sources_axis("research.web", Some(&report), &stream)
+            .unwrap()
+            .mark
+    };
+
+    // A fetch in one segment does not vouch for a URL another segment only prints.
+    assert_eq!(
+        mark(claude_bash(
+            &format!("curl https://other.org/a; echo {url}"),
+            ""
+        )),
+        Mark::Fail
+    );
+    assert_eq!(
+        mark(claude_bash(
+            &format!("curl https://other.org/a && echo {url}"),
+            ""
+        )),
+        Mark::Fail
+    );
+    // A fetch word inside a URL is not a fetch.
+    assert_eq!(
+        mark(claude_bash(&format!("echo https://curl.se/ {url}"), "")),
+        Mark::Fail
+    );
+    // The description is not the command.
+    assert_eq!(mark(claude_bash("ls", &format!("curl {url}"))), Mark::Fail);
+    // agy: only CommandLine is the command.
+    assert_eq!(mark(agy_run("dir")), Mark::Fail);
+
+    // Honest fetches still pass, with shell punctuation after the URL.
+    assert_eq!(
+        mark(claude_bash(&format!("curl -s {url}; echo done"), "")),
+        Mark::Pass
+    );
+    assert_eq!(mark(claude_bash(&format!("(curl {url})"), "")), Mark::Pass);
+    assert_eq!(
+        mark(claude_bash(
+            &format!("echo start && agent-browser open {url}, then"),
+            ""
+        )),
+        Mark::Pass
+    );
+    assert_eq!(mark(agy_run(&format!("curl.exe -L {url}"))), Mark::Pass);
+}
+
+#[test]
+fn url_tail_keeps_a_paren_the_url_opened() {
+    assert_eq!(
+        crate::nirvana_gate::extract_url_tokens("see (https://en.wikipedia.org/wiki/Foo_(bar))."),
+        vec!["https://en.wikipedia.org/wiki/Foo_(bar)".to_owned()]
+    );
+}

@@ -2681,16 +2681,9 @@ pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i3
         }
     }
     let booked = book(project, request)?;
+    // With no --class, `book` only reuses a booking made by `herdr seat pick --book` and writes nothing, so the
+    // refusal keeps that booking: the retry, once `owns:` is added, must not have to book again.
     if crate::nirvana_gate::requires_owns(&booked.class) && spec.owns.is_empty() {
-        let dir = nirvana_seat::dir();
-        let leases_path = dir.join(nirvana_seat::LEASES_FILE);
-        if let Ok(_lock) = nirvana_seat::Lock::take(&dir) {
-            if let Ok(mut leases) = nirvana_seat::load_leases(&leases_path) {
-                if leases.release(&request.order, nirvana_run::now()) {
-                    let _ = nirvana_seat::write_leases(&leases_path, &leases);
-                }
-            }
-        }
         return Err((
             2,
             "a build order needs an `owns:` line naming the files it may change".into(),

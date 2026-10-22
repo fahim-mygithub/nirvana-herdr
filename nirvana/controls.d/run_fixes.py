@@ -335,12 +335,12 @@ CONTROLS = (
         'guard_edit_outside_project_ignored_and_mixed_case_windows_path',
         'rust',
     ),
-    # Plan 24 R5: seat_order releases lease if post-book check refuses empty owns
+    # Plan 24 R5, round 4: the post-book owns check refuses a booked build order and keeps the booking it did not make
     Control(
-        'p24_seat_order_refusal_releases_lease',
+        'p24_seat_order_post_book_owns',
         'src/nirvana_worker.rs',
-        '                if leases.release(&request.order, nirvana_run::now()) {\n',
-        '                if false && leases.release(&request.order, nirvana_run::now()) {\n',
+        '    if crate::nirvana_gate::requires_owns(&booked.class) && spec.owns.is_empty() {\n',
+        '    if false && crate::nirvana_gate::requires_owns(&booked.class) && spec.owns.is_empty() {\n',
         'seat_order_refuses_empty_owns_for_build_fix_plan_and_permits_read_only',
         'rust',
     ),
@@ -351,6 +351,87 @@ CONTROLS = (
         '    if state.fail_open {\n        let _ = std::fs::remove_file(&path);\n',
         '    if state.fail_open {\n        // let _ = std::fs::remove_file(&path);\n',
         'prompt_baseline_fail_open_removes_session_baseline',
+        'rust',
+    ),
+    # Plan 24 round 4: without it, a fetch in one segment vouches for a URL another segment only prints
+    Control(
+        'p24_shell_fetch_per_segment',
+        'src/nirvana_gate.rs',
+        '    for segment in cmd.split([\'\\n\', \';\', \'|\']).flat_map(|s| s.split("&&")) {\n',
+        '    for segment in [cmd] {\n',
+        'shell_fetch_counts_only_the_segment_that_fetches_and_only_the_command',
+        'rust',
+    ),
+    # Plan 24 round 4: without it, a fetch word inside a URL reads as a fetch
+    Control(
+        'p24_shell_fetch_word_outside_urls',
+        'src/nirvana_gate.rs',
+        '        if command_is_shell_fetch(&rest) {\n',
+        '        if command_is_shell_fetch(segment) {\n',
+        'shell_fetch_counts_only_the_segment_that_fetches_and_only_the_command',
+        'rust',
+    ),
+    # Plan 24 round 4: without it, the Bash description is read as the command
+    Control(
+        'p24_bash_command_only',
+        'src/nirvana_gate.rs',
+        '                            .pointer("/input/command")\n',
+        '                            .pointer("/input/description")\n',
+        'shell_fetch_counts_only_the_segment_that_fetches_and_only_the_command',
+        'rust',
+    ),
+    # Plan 24 round 4: without it, an agy parameter other than CommandLine is read as the command
+    Control(
+        'p24_agy_command_line_only',
+        'src/nirvana_gate.rs',
+        '                    .get("CommandLine")\n',
+        '                    .get("Cwd")\n',
+        'shell_fetch_counts_only_the_segment_that_fetches_and_only_the_command',
+        'rust',
+    ),
+    # Plan 24 round 4: without it, a URL keeps the shell punctuation after it
+    Control(
+        'p24_url_tail_trim',
+        'src/nirvana_gate.rs',
+        '        let token = trim_url_tail(&url_part[..len]);\n',
+        '        let token = &url_part[..len];\n',
+        'url_tail_keeps_a_paren_the_url_opened',
+        'rust',
+    ),
+    # Plan 24 round 4: without it, a file too big to read counts 0 lines
+    Control(
+        'p24_untracked_size_estimate',
+        'src/nirvana_claude.rs',
+        '            let estimate = (size / 40).max(1) as usize;\n',
+        '            let estimate = 0usize;\n',
+        'an_untracked_file_over_the_read_cap_counts_its_estimated_lines',
+        'rust',
+    ),
+    # Plan 24 round 4: without it, a repository with no commit hides its staged files
+    Control(
+        'p24_no_head_fallback',
+        'src/nirvana_claude.rs',
+        '        .or_else(|| no_head_numstat(root));\n',
+        '        .or(None);\n',
+        'a_repository_with_no_commit_still_sees_its_staged_files',
+        'rust',
+    ),
+    # Plan 24 round 4: without it, a non-ASCII untracked name is git's quoted escape, not the file
+    Control(
+        'p24_ls_files_z',
+        'src/nirvana_claude.rs',
+        '        .args(["ls-files", "-z", "-o", "--exclude-standard", "--", "."])\n',
+        '        .args(["ls-files", "-o", "--exclude-standard", "--", "."])\n',
+        'a_non_ascii_untracked_name_is_the_file_on_disk',
+        'rust',
+    ),
+    # Plan 24 round 4: without it, a Windows path in another case reads as outside the project
+    Control(
+        'p24_windows_case_fold',
+        'src/nirvana_claude.rs',
+        '            s.to_ascii_lowercase()\n',
+        '            s.to_owned()\n',
+        'a_windows_path_in_another_case_is_inside_the_project',
         'rust',
     ),
 )

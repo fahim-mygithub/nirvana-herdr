@@ -2072,6 +2072,29 @@ pub fn capture_edit_state(root: &Path) -> EditState {
     capture_edit_state_cached(root, None)
 }
 
+/// A repository with no commit has no HEAD, so `git diff HEAD` fails; its changes are the staged files and the
+/// unstaged edits on top of them.
+fn no_head_numstat(root: &Path) -> Option<Vec<u8>> {
+    let mut raw = Vec::new();
+    for staged in [true, false] {
+        let mut args = vec!["diff"];
+        if staged {
+            args.push("--cached");
+        }
+        args.extend(["--numstat", "-z", "--relative", "--no-color", "--", "."]);
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(root)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|out| out.status.success())?;
+        raw.extend(out.stdout);
+    }
+    Some(raw)
+}
+
 pub fn capture_edit_state_cached(root: &Path, prev: Option<&EditState>) -> EditState {
     const MAX_PATHS: usize = 2000;
     const MAX_FILE_SIZE: u64 = 256 * 1024;
@@ -2096,11 +2119,13 @@ pub fn capture_edit_state_cached(root: &Path, prev: Option<&EditState>) -> EditS
         .stderr(std::process::Stdio::null())
         .output()
         .ok()
-        .filter(|out| out.status.success());
+        .filter(|out| out.status.success())
+        .map(|out| out.stdout)
+        .or_else(|| no_head_numstat(root));
 
     let mut tracked_paths: Vec<(String, usize, usize, bool)> = Vec::new();
     if let Some(out) = numstat_out {
-        for entry in parse_numstat_z(&out.stdout) {
+        for entry in parse_numstat_z(&out) {
             let norm = entry.path.replace('\\', "/");
             if !is_out_of_scope(&norm) {
                 tracked_paths.push((norm, entry.added, entry.deleted, entry.is_binary));
@@ -2109,7 +2134,7 @@ pub fn capture_edit_state_cached(root: &Path, prev: Option<&EditState>) -> EditS
     }
 
     let ls_out = std::process::Command::new("git")
-        .args(["ls-files", "-o", "--exclude-standard", "--", "."])
+        .args(["ls-files", "-z", "-o", "--exclude-standard", "--", "."])
         .current_dir(root)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -2120,8 +2145,8 @@ pub fn capture_edit_state_cached(root: &Path, prev: Option<&EditState>) -> EditS
     let mut untracked_paths = Vec::new();
     if let Some(out) = ls_out {
         let text = String::from_utf8_lossy(&out.stdout);
-        for line in text.lines() {
-            let path = line.trim().trim_matches('"');
+        // `-z`: NUL-separated and unquoted, so a non-ASCII name is the file on disk, not git's octal escape.
+        for path in text.split('\0') {
             if path.is_empty() {
                 continue;
             }
@@ -2262,14 +2287,17 @@ pub fn capture_edit_state_cached(root: &Path, prev: Option<&EditState>) -> EditS
         }
 
         if size > MAX_FILE_SIZE || total_bytes + (size as usize) > MAX_TOTAL_BYTES {
+            // Never read, so its lines are estimated from its size at 40 bytes a line: a generated 400 KiB file
+            // must not pass as 0 lines.
+            let estimate = (size / 40).max(1) as usize;
             files.insert(
                 norm,
                 FileDelta {
                     is_tracked: false,
                     is_binary: false,
-                    added: 0,
+                    added: estimate,
                     deleted: 0,
-                    line_count: 0,
+                    line_count: estimate,
                     hash: Some(format!("{size}:{mtime}")),
                     content: None,
                     size,
@@ -2359,7 +2387,16 @@ pub fn path_under_project(path_str: &str, project_root: &Path) -> Option<String>
         return Some(trimmed.to_string());
     }
 
-    if path_norm.starts_with(&root_norm) {
+    // Windows paths ignore case, so compare them folded; the remainder keeps the path's own case for the scope
+    // check (`NIRVANA.md` stays exempt). ASCII folding keeps byte lengths, so the slice below stays aligned.
+    let folded = |s: &str| {
+        if cfg!(windows) {
+            s.to_ascii_lowercase()
+        } else {
+            s.to_owned()
+        }
+    };
+    if folded(&path_norm).starts_with(&folded(&root_norm)) {
         let remainder = &path_norm[root_norm.len()..];
         if remainder.is_empty() {
             return Some(String::new());

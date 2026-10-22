@@ -535,11 +535,44 @@ pub fn extract_url_tokens(text: &str) -> Vec<String> {
         let len = url_part
             .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '<' | '>'))
             .unwrap_or(url_part.len());
-        let token = &url_part[..len];
+        let token = trim_url_tail(&url_part[..len]);
         tokens.push(token.to_string());
         cursor = start + len;
     }
     tokens
+}
+
+/// A URL in a shell line or in prose often ends at `;`, `,`, `.` or a closing `)`; a `)` stays when the URL opened
+/// one, as in Wikipedia's `Foo_(bar)`.
+fn trim_url_tail(token: &str) -> &str {
+    let mut t = token;
+    while let Some(last) = t.chars().last() {
+        let opened = last == ')' && t.matches('(').count() >= t.matches(')').count();
+        if matches!(last, ';' | ',' | '.' | ')' | '|' | '&') && !opened {
+            t = &t[..t.len() - 1];
+        } else {
+            break;
+        }
+    }
+    t
+}
+
+/// The URLs a shell command fetches. A command is cut at `;`, `|`, `&&` and newlines, and a segment's URLs count only
+/// when the segment itself runs a fetch tool, looked for outside its URLs: `curl a; echo <url>` and
+/// `echo https://curl.se/` fetch nothing.
+pub fn shell_fetch_urls(cmd: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    for segment in cmd.split(['\n', ';', '|']).flat_map(|s| s.split("&&")) {
+        let tokens = extract_url_tokens(segment);
+        let mut rest = segment.to_owned();
+        for token in &tokens {
+            rest = rest.replace(token.as_str(), " ");
+        }
+        if command_is_shell_fetch(&rest) {
+            urls.extend(tokens);
+        }
+    }
+    urls
 }
 
 pub const SHELL_FETCH_WORDS: &[&str] = &[
@@ -596,18 +629,16 @@ fn url_in_stream(norm_url: &str, stream: &str) -> bool {
                             }
                         }
                     } else if name == "Bash" {
-                        if let Some(input) = block.get("input") {
-                            let mut strings = Vec::new();
-                            collect_json_strings(input, &mut strings);
-                            for s in strings {
-                                if command_is_shell_fetch(&s) {
-                                    for tok in extract_url_tokens(&s) {
-                                        if normalize_url(&tok) == norm_url {
-                                            return true;
-                                        }
-                                    }
-                                }
-                            }
+                        // The command only: a `description` naming curl and a URL fetches nothing.
+                        let command = block
+                            .pointer("/input/command")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        if shell_fetch_urls(command)
+                            .iter()
+                            .any(|tok| normalize_url(tok) == norm_url)
+                        {
+                            return true;
                         }
                     }
                 }
@@ -646,16 +677,16 @@ fn url_in_stream(norm_url: &str, stream: &str) -> bool {
                     }
                 }
             } else if tool_name == "run_command" {
-                let mut strings = Vec::new();
-                collect_json_strings(params, &mut strings);
-                for s in strings {
-                    if command_is_shell_fetch(&s) {
-                        for tok in extract_url_tokens(&s) {
-                            if normalize_url(&tok) == norm_url {
-                                return true;
-                            }
-                        }
-                    }
+                // agy's command is `CommandLine` (the recorded fixtures); its other parameters are not the command.
+                let command = params
+                    .get("CommandLine")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if shell_fetch_urls(command)
+                    .iter()
+                    .any(|tok| normalize_url(tok) == norm_url)
+                {
+                    return true;
                 }
             }
         }

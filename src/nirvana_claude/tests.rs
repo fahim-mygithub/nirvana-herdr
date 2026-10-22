@@ -2431,3 +2431,85 @@ fn capture_edit_state_over_2000_untracked_fails_open() {
     assert!(state.fail_open);
     assert!(state.files.is_empty());
 }
+
+fn r4_repo(name: &str, commit: bool) -> PathBuf {
+    let top = scratch(name);
+    let git = |args: &[&str]| {
+        let _ = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&top)
+            .output();
+    };
+    git(&["init"]);
+    git(&["config", "user.name", "Tester"]);
+    git(&["config", "user.email", "tester@test.com"]);
+    if commit {
+        std::fs::write(top.join("seed.txt"), "seed\n").expect("write");
+        git(&["add", "."]);
+        git(&["commit", "-m", "init"]);
+    }
+    top
+}
+
+#[test]
+fn an_untracked_file_over_the_read_cap_counts_its_estimated_lines() {
+    let top = r4_repo("r4-big", true);
+    let baseline = capture_edit_state(&top);
+    // 300 KiB in 50-byte lines: about 6,000 lines, never read.
+    std::fs::write(
+        top.join("generated.txt"),
+        format!("{}\n", "x".repeat(49)).repeat(6144),
+    )
+    .expect("write");
+    let now = capture_edit_state(&top);
+    let entry = &now.files["generated.txt"];
+    assert!(entry.content.is_none());
+    assert!(
+        entry.line_count > 30,
+        "estimated {} lines",
+        entry.line_count
+    );
+    assert!(edit_budget(&baseline, &now, EditLimit::default()).is_some());
+}
+
+#[test]
+fn a_repository_with_no_commit_still_sees_its_staged_files() {
+    let top = r4_repo("r4-nohead", false);
+    let baseline = capture_edit_state(&top);
+    std::fs::write(top.join("staged.rs"), "fn a() {}\n".repeat(50)).expect("write");
+    let _ = std::process::Command::new("git")
+        .args(["add", "staged.rs"])
+        .current_dir(&top)
+        .output();
+    let now = capture_edit_state(&top);
+    assert!(
+        now.files.contains_key("staged.rs"),
+        "{:?}",
+        now.files.keys().collect::<Vec<_>>()
+    );
+    assert!(edit_budget(&baseline, &now, EditLimit::default()).is_some());
+}
+
+#[test]
+fn a_non_ascii_untracked_name_is_the_file_on_disk() {
+    let top = r4_repo("r4-utf8", true);
+    let baseline = capture_edit_state(&top);
+    std::fs::write(top.join("übung.txt"), "line\n".repeat(50)).expect("write");
+    let now = capture_edit_state(&top);
+    assert_eq!(now.files.get("übung.txt").map(|f| f.line_count), Some(50));
+    assert!(edit_budget(&baseline, &now, EditLimit::default()).is_some());
+}
+
+#[cfg(windows)]
+#[test]
+fn a_windows_path_in_another_case_is_inside_the_project() {
+    let root = Path::new(r"C:\Users\Someone\Proj");
+    assert_eq!(
+        path_under_project("c:/users/someone/proj/src/A.rs", root).as_deref(),
+        Some("src/A.rs")
+    );
+    assert_eq!(
+        path_under_project("c:/users/someone/proj2/a.rs", root),
+        None
+    );
+}
