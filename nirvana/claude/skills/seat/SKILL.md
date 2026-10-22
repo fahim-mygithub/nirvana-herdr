@@ -40,7 +40,8 @@ a run.
 
 ## 3. Start it
 
-Write the order to `.nirvana/orders/<order>.md`: the goal, the files it owns, the check that proves it, and the
+Write the order to `.nirvana/orders/<order>.md`: the goal, the files it owns (a `build.*`, `fix.*` or `plan` order
+must carry an `owns:` line; `herdr seat run` refuses without one), the check that proves it, and the
 owner's words where they matter. Then:
 
 - **A pane worker** (anything longer than a few minutes, and every agy or local order):

@@ -793,6 +793,8 @@ pub struct Request {
     pub order: Option<String>,
     /// The orchestrator's choice and its reason (§5.3 step 4).
     pub override_seat: Option<(String, String)>,
+    /// Plan 24 §4: an inherited override on retry/send-back does not count against overrides_per_run.
+    pub inherited_override: bool,
 }
 
 impl Request {
@@ -805,6 +807,7 @@ impl Request {
             mode: Mode::Balanced,
             order: None,
             override_seat: None,
+            inherited_override: false,
         }
     }
 }
@@ -1017,6 +1020,9 @@ pub struct Pick {
     pub step_down: bool,
     #[serde(rename = "override")]
     pub override_reason: Option<String>,
+    /// Plan 24 §4: an inherited override on retry/send-back.
+    #[serde(default)]
+    pub inherited_override: bool,
     /// What the rule would have picked, when an override chose instead.
     pub rule_pick: Option<String>,
     /// `--not-family` left no seat, so the class was seated on the excluded family, in a fresh session
@@ -1485,15 +1491,18 @@ fn evaluate(
             None => (override_target.trim(), None),
         };
         let _ = override_effort;
-        if world.overrides_used >= constants.overrides_per_run {
-            return Err(fail(
-                format!(
-                    "override {override_target} refused: {} of {} overrides already taken in this run; more is the owner's call",
-                    world.overrides_used, constants.overrides_per_run
-                ),
-                &candidates,
-                false,
-            ));
+        #[allow(clippy::collapsible_if)] // preserves the target line of the seat_override_cap control
+        if !request.inherited_override {
+            if world.overrides_used >= constants.overrides_per_run {
+                return Err(fail(
+                    format!(
+                        "override {override_target} refused: {} of {} overrides already taken in this run; more is the owner's call",
+                        world.overrides_used, constants.overrides_per_run
+                    ),
+                    &candidates,
+                    false,
+                ));
+            }
         }
         let Some(cand) = candidates
             .iter()
@@ -1545,6 +1554,7 @@ fn evaluate(
             None,
         );
         out.override_reason = Some(reason.clone());
+        out.inherited_override = request.inherited_override;
         out.rule_pick = rule_pick.clone();
         let under = if under {
             format!(
@@ -2194,6 +2204,7 @@ fn build_pick(
         effort_note: won.effort_note.clone(),
         step_down: stepped,
         override_reason: None,
+        inherited_override: request.inherited_override,
         rule_pick: None,
         same_family_fallback: false,
         runners_up,
@@ -2364,10 +2375,12 @@ pub fn book_pick(
         .retain(|_, count| now.saturating_sub(count.at) <= RUN_KEEP_S);
     let mut changed = leases.runs.len() != runs;
     if let (Some(_), Some(run)) = (&pick.override_reason, run) {
-        let count = leases.runs.entry(run.to_owned()).or_default();
-        count.overrides += 1;
-        count.at = now;
-        changed = true;
+        if !pick.inherited_override {
+            let count = leases.runs.entry(run.to_owned()).or_default();
+            count.overrides += 1;
+            count.at = now;
+            changed = true;
+        }
     }
     let lease = order.map(|order| leases.book(lease_for(table, pick, order, run, now), now));
     (lease.clone(), changed || lease.is_some())

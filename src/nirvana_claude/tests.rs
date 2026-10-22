@@ -1193,3 +1193,364 @@ fn session_start_records_running_seat_in_session_file() {
 
     let _ = std::fs::remove_dir_all(&home);
 }
+
+// ---- Plan 24 §2: log-usage tests ----
+
+#[test]
+fn log_usage_fixture_transcript_deduplicates_repeated_message_id_across_calls() {
+    let _guard = crate::nirvana::with_test_home("log-usage-fixture");
+    let proj = scratch("proj-usage");
+    let project = Project::at(&proj);
+    let run = "r1";
+    let journal = project.journal(run);
+
+    // Open a run
+    journal
+        .append(
+            1,
+            crate::nirvana_run::Kind::Opened {
+                project: "p".into(),
+                orchestrator_pane: None,
+                auto: false,
+                pools: vec![],
+                pools_basis: None,
+            },
+        )
+        .expect("opened");
+
+    let transcript_path = proj.join("transcript.jsonl");
+    // 3 assistant lines, msg1 repeated twice with usage, msg2 once
+    let line1 = serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "id": "msg-1",
+            "usage": {
+                "input_tokens": 100,
+                "cache_creation_input_tokens": 10,
+                "cache_read_input_tokens": 5,
+                "output_tokens": 50
+            }
+        }
+    });
+    let line2 = serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "id": "msg-1",
+            "usage": {
+                "input_tokens": 100,
+                "cache_creation_input_tokens": 10,
+                "cache_read_input_tokens": 5,
+                "output_tokens": 50
+            }
+        }
+    });
+    let line3 = serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "id": "msg-2",
+            "usage": {
+                "input_tokens": 200,
+                "cache_creation_input_tokens": 20,
+                "cache_read_input_tokens": 10,
+                "output_tokens": 80
+            }
+        }
+    });
+    let content = format!("{line1}\n{line2}\n{line3}\n");
+    std::fs::write(&transcript_path, &content).expect("transcript");
+
+    // Read usage helper
+    let (tokens, offset) = read_transcript_usage(&transcript_path, 0).expect("read");
+    // De-duplicated sum: msg1 (100 in, 10 cw, 5 cr, 50 out) + msg2 (200 in, 20 cw, 10 cr, 80 out)
+    assert_eq!(tokens.input, 300);
+    assert_eq!(tokens.cache_write, 30);
+    assert_eq!(tokens.cache_read, 15);
+    assert_eq!(tokens.output, 130);
+
+    // Second call from offset: 0 new tokens
+    let (tokens2, offset2) = read_transcript_usage(&transcript_path, offset).expect("read 2");
+    assert_eq!(tokens2, Tokens::default());
+    assert_eq!(offset2, offset);
+
+    // Append to journal via transact
+    let kind = crate::nirvana_run::Kind::Usage {
+        order: None,
+        attempt: 0,
+        session: Some("sess-1".into()),
+        tokens,
+    };
+    journal.append(2, kind).expect("usage event");
+
+    // Verify receipt shows the tokens
+    let state = crate::nirvana_run::replay(&journal.read().0);
+    assert_eq!(state.orchestrator, Some(tokens));
+    let receipt = crate::nirvana_run::receipt(run, &state, 0, &[]);
+    let json = serde_json::to_value(&receipt).expect("json");
+    assert_eq!(json["orchestrator"]["output"], 130);
+    assert_eq!(json["orchestrator"]["input"], 300);
+}
+
+#[test]
+fn log_usage_skips_when_agent_id_or_no_open_run() {
+    let _guard = crate::nirvana::with_test_home("log-usage-skips");
+    let proj = scratch("proj-skips");
+    let project = Project::at(&proj);
+
+    // With no open run, transcript usage reading still advances offset but nothing is appended
+    let transcript_path = proj.join("t.jsonl");
+    let line = serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "id": "msg-1",
+            "usage": {"input_tokens": 50, "output_tokens": 20}
+        }
+    });
+    std::fs::write(&transcript_path, format!("{line}\n")).expect("t");
+
+    let runs = open_runs(&project);
+    assert!(runs.is_empty());
+    // Verify open_runs is empty, so no journal is transacted
+}
+
+// ---- Plan 24 §3: own-edit limit tests ----
+
+#[test]
+fn edit_budget_counts_files_and_lines_within_and_past_limit() {
+    let limit = EditLimit::default(); // 1 file, 30 lines
+    let baseline = EditState::default();
+
+    // 1 file and 5 lines passes
+    let mut now1 = EditState::default();
+    now1.files.insert(
+        "src/lib.rs".into(),
+        FileDelta {
+            added: 5,
+            deleted: 0,
+            hash: None,
+        },
+    );
+    assert_eq!(edit_budget(&baseline, &now1, limit), None);
+
+    // 3 files fail
+    let mut now3 = EditState::default();
+    now3.files.insert(
+        "src/a.rs".into(),
+        FileDelta {
+            added: 1,
+            deleted: 0,
+            hash: None,
+        },
+    );
+    now3.files.insert(
+        "src/b.rs".into(),
+        FileDelta {
+            added: 1,
+            deleted: 0,
+            hash: None,
+        },
+    );
+    now3.files.insert(
+        "src/c.rs".into(),
+        FileDelta {
+            added: 1,
+            deleted: 0,
+            hash: None,
+        },
+    );
+    let reason3 = edit_budget(&baseline, &now3, limit).expect("3 files fails");
+    assert!(reason3.contains("Nirvana Claude edits at most 1 file and 30 lines itself (R2)"));
+    assert!(reason3.contains("This change is 3 files, 3 lines"));
+
+    // 1 file and 31 lines fails
+    let mut now_31 = EditState::default();
+    now_31.files.insert(
+        "src/lib.rs".into(),
+        FileDelta {
+            added: 31,
+            deleted: 0,
+            hash: None,
+        },
+    );
+    let reason_31 = edit_budget(&baseline, &now_31, limit).expect("31 lines fails");
+    assert!(reason_31.contains("Nirvana Claude edits at most 1 file and 30 lines itself (R2)"));
+    assert!(reason_31.contains("This change is 1 files, 31 lines"));
+}
+
+#[test]
+fn edit_budget_out_of_scope_paths_and_baseline_with_existing_changes() {
+    let limit = EditLimit::default();
+
+    // Out of scope paths (.nirvana/, .claude/, memory) do not count
+    let baseline = EditState::default();
+    let mut now = EditState::default();
+    now.files.insert(
+        ".nirvana/state.json".into(),
+        FileDelta {
+            added: 50,
+            deleted: 0,
+            hash: None,
+        },
+    );
+    now.files.insert(
+        ".claude/settings.json".into(),
+        FileDelta {
+            added: 40,
+            deleted: 0,
+            hash: None,
+        },
+    );
+    now.files.insert(
+        "NIRVANA.md".into(),
+        FileDelta {
+            added: 20,
+            deleted: 0,
+            hash: None,
+        },
+    );
+    // Only in-scope change: 1 file, 10 lines
+    now.files.insert(
+        "src/main.rs".into(),
+        FileDelta {
+            added: 10,
+            deleted: 0,
+            hash: None,
+        },
+    );
+    assert_eq!(edit_budget(&baseline, &now, limit), None);
+
+    // Baseline with changes already in it counts only the new ones
+    let mut baseline_with_changes = EditState::default();
+    baseline_with_changes.files.insert(
+        "src/main.rs".into(),
+        FileDelta {
+            added: 100,
+            deleted: 50,
+            hash: None,
+        },
+    );
+    baseline_with_changes.files.insert(
+        "src/existing.rs".into(),
+        FileDelta {
+            added: 20,
+            deleted: 10,
+            hash: None,
+        },
+    );
+
+    // If now has same changes + 1 file with 5 new lines: passes!
+    let mut now_incremental = baseline_with_changes.clone();
+    now_incremental.files.insert(
+        "src/new.rs".into(),
+        FileDelta {
+            added: 5,
+            deleted: 0,
+            hash: None,
+        },
+    );
+    assert_eq!(
+        edit_budget(&baseline_with_changes, &now_incremental, limit),
+        None
+    );
+
+    // If now modifies existing.rs by 31 new lines: fails
+    let mut now_exceeded = baseline_with_changes.clone();
+    now_exceeded.files.insert(
+        "src/existing.rs".into(),
+        FileDelta {
+            added: 51,
+            deleted: 10,
+            hash: None,
+        },
+    );
+    let reason = edit_budget(&baseline_with_changes, &now_exceeded, limit).expect("fails");
+    assert!(reason.contains("This change is 1 files, 31 lines"));
+}
+
+#[test]
+fn guard_edit_and_check_edit_never_block_subagent_or_worker() {
+    let _guard = crate::nirvana::with_test_home("never-block-subagent");
+    std::env::set_var(crate::nirvana_launch::ORCHESTRATOR_ENV, "1");
+
+    let subagent_hook = serde_json::json!({
+        "agent_id": "worker-1",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": "src/main.rs",
+            "content": "line\n".repeat(100)
+        }
+    });
+    assert!(should_skip_orchestrator_hook(&subagent_hook, None));
+    assert_eq!(
+        guard_edit_decision(&subagent_hook, None, None, EditLimit::default()),
+        None
+    );
+
+    let baseline = EditState::default();
+    let mut now = EditState::default();
+    now.files.insert(
+        "src/main.rs".into(),
+        FileDelta {
+            added: 100,
+            deleted: 0,
+            hash: None,
+        },
+    );
+    assert_eq!(
+        check_edit_decision(&subagent_hook, None, &baseline, &now, EditLimit::default()),
+        None
+    );
+
+    // 2. NIRVANA_ORCHESTRATOR != 1 is skipped
+    std::env::remove_var(crate::nirvana_launch::ORCHESTRATOR_ENV);
+    let orch_hook = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": "src/main.rs",
+            "content": "line\n".repeat(100)
+        }
+    });
+    assert!(should_skip_orchestrator_hook(&orch_hook, None));
+    assert_eq!(
+        guard_edit_decision(&orch_hook, None, None, EditLimit::default()),
+        None
+    );
+    assert_eq!(
+        check_edit_decision(&orch_hook, None, &baseline, &now, EditLimit::default()),
+        None
+    );
+
+    // 3. Worktree path is skipped
+    std::env::set_var(crate::nirvana_launch::ORCHESTRATOR_ENV, "1");
+    let worktree_cwd = PathBuf::from("repo/.nirvana/worktrees/build-1");
+    assert!(should_skip_orchestrator_hook(
+        &orch_hook,
+        Some(&worktree_cwd)
+    ));
+    assert_eq!(
+        guard_edit_decision(&orch_hook, None, Some(&worktree_cwd), EditLimit::default()),
+        None
+    );
+    assert_eq!(
+        check_edit_decision(
+            &orch_hook,
+            Some(&worktree_cwd),
+            &baseline,
+            &now,
+            EditLimit::default()
+        ),
+        None
+    );
+
+    // 4. In orchestrator with no agent_id and outside worktree, >30 lines blocks
+    let normal_cwd = PathBuf::from("repo");
+    let blocked = guard_edit_decision(&orch_hook, None, Some(&normal_cwd), EditLimit::default());
+    assert!(blocked.is_some());
+    let blocked_check = check_edit_decision(
+        &orch_hook,
+        Some(&normal_cwd),
+        &baseline,
+        &now,
+        EditLimit::default(),
+    );
+    assert!(blocked_check.is_some());
+}

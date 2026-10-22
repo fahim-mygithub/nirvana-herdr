@@ -1087,3 +1087,52 @@ fn racing_record_calls_write_one_line() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// ---- Plan 24 §5: run end ungated refusal & abandon tests ----
+
+#[test]
+fn run_end_refuses_delivered_ungated_orders_and_abandon_allows_end() {
+    let mut events = vec![
+        ev(1, T0, opened(Some("w1:p2"))),
+        ev(2, T0, Kind::Seated(Box::new(seated("order-1")))),
+        ev(
+            3,
+            T0 + 1,
+            Kind::Delivered {
+                order: "order-1".into(),
+                report: report("done"),
+            },
+        ),
+    ];
+    let state = replay(&events);
+    // Order is delivered and ungated
+    let ungated = delivered_ungated(&state);
+    assert_eq!(ungated, vec!["order-1"]);
+
+    // Abandoning the order journals Kind::Gated with verdict "abandoned"
+    events.push(ev(
+        4,
+        T0 + 2,
+        Kind::Gated {
+            order: "order-1".into(),
+            verdict: "abandoned".into(),
+            reason: Some("abandoned by user".into()),
+            axes: vec![],
+        },
+    ));
+    let state_after_abandon = replay(&events);
+    let ungated_after = delivered_ungated(&state_after_abandon);
+    assert!(ungated_after.is_empty());
+    assert_eq!(
+        state_after_abandon.order("order-1").unwrap().phase,
+        Phase::Gated
+    );
+    assert_eq!(
+        state_after_abandon
+            .order("order-1")
+            .unwrap()
+            .verdict
+            .as_deref(),
+        Some("abandoned")
+    );
+}

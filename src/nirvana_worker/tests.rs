@@ -819,3 +819,139 @@ fn worker_supervisor_uses_project_mode_when_order_names_none() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn rate_limited_reseat_drops_override_on_same_pool_and_keeps_on_other() {
+    let seated = Seated {
+        order: "order-1".into(),
+        seat: "sonnet".into(),
+        cli: "claude".into(),
+        model: "claude-sonnet-5-5".into(),
+        effort: Effort::Medium,
+        pool: "max".into(),
+        class: "build.bounded".into(),
+        chain: Some("build.bounded".into()),
+        size: SizeName::Small,
+        mode: Mode::Balanced,
+        needs: Vec::new(),
+        not_family: Vec::new(),
+        reason: "reason".into(),
+        override_reason: Some("forced sonnet".into()),
+        order_file: "o.md".into(),
+        cwd: "C:/p".into(),
+        worktree: None,
+        branch: None,
+        parent: None,
+        why: None,
+        rule_pick: None,
+        bar_dropped: None,
+        step_down: None,
+        use_basis: None,
+        expected: BTreeMap::new(),
+        jev_pick: None,
+    };
+
+    // Case 1: rate limit on "max" (the override seat's own pool) -> override dropped
+    let (dropped, inherited, target) = rate_limited_override(&seated, "max");
+    assert!(dropped);
+    assert!(!inherited);
+    assert_eq!(target, None);
+
+    // Case 2: rate limit on another pool (e.g. "gemini") -> override kept
+    let (dropped2, inherited2, target2) = rate_limited_override(&seated, "gemini");
+    assert!(!dropped2);
+    assert!(inherited2);
+    assert_eq!(target2.as_deref(), Some("sonnet:medium"));
+}
+
+// ---- Plan 24 §5, §6: worker report sources & seat_order owns tests ----
+
+#[test]
+fn worker_report_schema_sources_validation() {
+    // Valid report with sources array
+    let valid = serde_json::json!({
+        "status": "done",
+        "summary": "researched web",
+        "files": [],
+        "tests": [],
+        "gotchas": [],
+        "sources": [
+            {"url": "https://example.com/spec", "used_for": "spec info"}
+        ]
+    });
+    assert!(check_report(&valid).is_ok());
+
+    // Sources not an array fails
+    let not_array = serde_json::json!({
+        "status": "done",
+        "summary": "researched web",
+        "files": [],
+        "tests": [],
+        "gotchas": [],
+        "sources": "https://example.com"
+    });
+    assert!(check_report(&not_array).is_err());
+
+    // Source item without url fails
+    let no_url = serde_json::json!({
+        "status": "done",
+        "summary": "researched web",
+        "files": [],
+        "tests": [],
+        "gotchas": [],
+        "sources": [{"used_for": "spec"}]
+    });
+    assert!(check_report(&no_url).is_err());
+}
+
+#[test]
+fn seat_order_refuses_empty_owns_for_build_fix_plan_and_permits_read_only() {
+    let _guard = crate::nirvana::with_test_home("seat-order-owns");
+    let dir = std::env::temp_dir().join(format!("nirvana-p24-worker-owns-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let project = Project::at(&dir);
+    project.ensure().unwrap();
+
+    let order_file = dir.join(".nirvana/orders/test-order.md");
+    std::fs::create_dir_all(order_file.parent().unwrap()).unwrap();
+    // Order text without owns: line
+    std::fs::write(&order_file, "# Test Order\ntest: pytest\ncheck: pass\n").unwrap();
+
+    let make_request = |class: &str| SeatRequest {
+        seat: "flash".into(),
+        order_file: order_file.clone(),
+        order: "test-order".into(),
+        run: "r1".into(),
+        class: Some(class.into()),
+        size: None,
+        needs: Vec::new(),
+        not_family: Vec::new(),
+        mode: None,
+        effort: None,
+        reason: None,
+        worktree: false,
+        auto: false,
+    };
+
+    // build.* refuses with exit 2
+    let res = seat_order(&project, &make_request("build.bounded"));
+    assert_eq!(res.unwrap_err().0, 2);
+
+    let res = seat_order(&project, &make_request("build.load_bearing"));
+    assert_eq!(res.unwrap_err().0, 2);
+
+    // fix.* refuses with exit 2
+    let res = seat_order(&project, &make_request("fix.debug"));
+    assert_eq!(res.unwrap_err().0, 2);
+
+    // plan refuses with exit 2
+    let res = seat_order(&project, &make_request("plan"));
+    assert_eq!(res.unwrap_err().0, 2);
+
+    // Rule 7: read-only classes never refused for empty owns
+    // research.web has no owns:, but requires_owns is false
+    assert!(!crate::nirvana_gate::requires_owns("research.web"));
+    assert!(!crate::nirvana_gate::requires_owns("chore.script"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

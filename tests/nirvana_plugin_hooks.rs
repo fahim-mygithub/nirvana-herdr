@@ -126,6 +126,7 @@ fn every_hook_names_a_herdr_subcommand_that_runs_quiet_and_fast() {
     assert_eq!(
         names,
         [
+            "PostToolUse",
             "PreToolUse",
             "SessionStart",
             "Stop",
@@ -162,7 +163,7 @@ fn every_hook_names_a_herdr_subcommand_that_runs_quiet_and_fast() {
             }
         }
     }
-    assert_eq!(ran, 9, "nine hooks");
+    assert_eq!(ran, 14, "fourteen hooks");
 }
 
 /// A folder whose own settings run `herdr board notice` (Preload's shared board) hears the notice once: the plugin's

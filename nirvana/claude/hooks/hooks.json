@@ -17,6 +17,15 @@
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe",
             "args": [
+              "nirvana",
+              "log-usage"
+            ],
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe",
+            "args": [
               "memory",
               "record-session"
             ],
@@ -46,6 +55,15 @@
               "notice"
             ],
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe",
+            "args": [
+              "nirvana",
+              "prompt-baseline"
+            ],
+            "timeout": 10
           }
         ]
       }
@@ -60,6 +78,36 @@
             "args": [
               "nirvana",
               "guard-spawn"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe",
+            "args": [
+              "nirvana",
+              "guard-edit"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe",
+            "args": [
+              "nirvana",
+              "check-edit"
             ],
             "timeout": 10
           }
@@ -93,6 +141,15 @@
               "--plugin"
             ],
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe",
+            "args": [
+              "nirvana",
+              "log-usage"
+            ],
+            "timeout": 15
           },
           {
             "type": "command",

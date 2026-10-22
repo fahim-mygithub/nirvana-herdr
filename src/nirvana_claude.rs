@@ -20,7 +20,7 @@
 //! Every hook stays quiet and fast when it has nothing to say, and never fails the turn: a problem prints nothing.
 
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -1601,17 +1601,507 @@ pub fn folder_runs_with(input: &str, event: &str, tail: &str, config: Option<&Pa
         .any(|settings| crate::nirvana_jev_install::has_hook(&settings, event, tail))
 }
 
+// ---- log-usage (Stop, SessionStart resume) ----
+
+/// Sums assistant token usage from a Claude Code JSON transcript from byte `offset`.
+pub fn read_transcript_usage(path: &Path, offset: u64) -> std::io::Result<(Tokens, u64)> {
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let seek_pos = if offset <= len { offset } else { 0 };
+    file.seek(std::io::SeekFrom::Start(seek_pos))?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    let new_offset = seek_pos + text.len() as u64;
+
+    let mut seen: std::collections::HashMap<String, [u64; 4]> = std::collections::HashMap::new();
+    for line in text.lines() {
+        let Ok(entry) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if entry.get("type").and_then(Value::as_str) == Some("assistant") {
+            let message = &entry["message"];
+            let id = message
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("line-{}", seen.len()));
+            let Some(usage) = message.get("usage") else {
+                continue;
+            };
+            let n = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+            let row = [
+                n("input_tokens"),
+                n("cache_creation_input_tokens"),
+                n("cache_read_input_tokens"),
+                n("output_tokens"),
+            ];
+            let usage_slot = seen.entry(id).or_insert([0; 4]);
+            for (saved, cur) in usage_slot.iter_mut().zip(row) {
+                *saved = (*saved).max(cur);
+            }
+        }
+    }
+    let mut tokens = Tokens::default();
+    for [input, cache_write, cache_read, output] in seen.into_values() {
+        tokens.input += input;
+        tokens.cache_write += cache_write;
+        tokens.cache_read += cache_read;
+        tokens.output += output;
+    }
+    Ok((tokens, new_offset))
+}
+
+fn log_usage_cli() -> std::io::Result<()> {
+    let hook = read_stdin();
+    if should_skip_orchestrator_hook(&hook, None) {
+        return Ok(());
+    }
+    if let Some(event) = hook.get("hook_event_name").and_then(Value::as_str) {
+        if event == "SessionStart" && hook.get("source").and_then(Value::as_str) != Some("resume") {
+            return Ok(());
+        }
+    } else if let Some(source) = hook.get("source").and_then(Value::as_str) {
+        if source != "resume" {
+            return Ok(());
+        }
+    }
+    let Some(transcript_path) = hook
+        .get("transcript_path")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+    else {
+        return Ok(());
+    };
+    let Some(session_id) = hook.get("session_id").and_then(Value::as_str) else {
+        return Ok(());
+    };
+
+    let offset_path = home_dir()
+        .join(nirvana_seat::DIR)
+        .join("usage-offsets.json");
+    let mut offsets: BTreeMap<String, u64> = std::fs::read_to_string(&offset_path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    let stored_offset = offsets.get(session_id).copied().unwrap_or(0);
+
+    let (tokens, new_offset) = match read_transcript_usage(&transcript_path, stored_offset) {
+        Ok(res) => res,
+        Err(_) => return Ok(()),
+    };
+
+    let project = project_at(hook_cwd(&hook).as_deref());
+    if let Some(project) = project {
+        let runs = open_runs(&project);
+        let most_recent = runs.iter().max_by_key(|(_, state)| {
+            (
+                state.opened.as_ref().map(|o| o.at).unwrap_or(0),
+                state.last_seq,
+            )
+        });
+        if let Some((run_name, _)) = most_recent {
+            if tokens != Tokens::default() {
+                let journal = project.journal(run_name);
+                let kind = crate::nirvana_run::Kind::Usage {
+                    order: None,
+                    attempt: 0,
+                    session: Some(session_id.to_string()),
+                    tokens,
+                };
+                let _ = journal.transact(now(), |_| Ok((vec![kind], ())));
+            }
+        }
+    }
+
+    offsets.insert(session_id.to_string(), new_offset);
+    let _ = nirvana_seat::write_atomic(&offset_path, serde_json::to_string(&offsets)?.as_bytes());
+    Ok(())
+}
+
+// ---- own-edit limit (UserPromptSubmit, PreToolUse, PostToolUse) ----
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EditLimit {
+    pub files: usize,
+    pub lines: usize,
+}
+
+impl Default for EditLimit {
+    fn default() -> Self {
+        Self {
+            files: 1,
+            lines: 30,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FileDelta {
+    pub added: usize,
+    pub deleted: usize,
+    pub hash: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct EditState {
+    pub files: BTreeMap<String, FileDelta>,
+}
+
+pub fn is_out_of_scope(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    if normalized.starts_with(".nirvana/")
+        || normalized == ".nirvana"
+        || normalized.starts_with(".claude/")
+        || normalized == ".claude"
+        || normalized == MEMORY_FILE
+        || normalized.starts_with("memory/")
+        || normalized.starts_with("../")
+        || normalized.starts_with('/')
+    {
+        return true;
+    }
+    if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
+        return true;
+    }
+    false
+}
+
+pub fn edit_budget(baseline: &EditState, now: &EditState, limit: EditLimit) -> Option<String> {
+    let mut all_paths = std::collections::BTreeSet::new();
+    all_paths.extend(baseline.files.keys().cloned());
+    all_paths.extend(now.files.keys().cloned());
+
+    let mut changed_files = 0;
+    let mut changed_lines = 0;
+
+    for path in all_paths {
+        if is_out_of_scope(&path) {
+            continue;
+        }
+        let b = baseline.files.get(&path);
+        let n = now.files.get(&path);
+        match (b, n) {
+            (None, Some(now_entry)) => {
+                changed_files += 1;
+                changed_lines += now_entry.added + now_entry.deleted;
+            }
+            (Some(base_entry), None) => {
+                changed_files += 1;
+                changed_lines += base_entry.added + base_entry.deleted;
+            }
+            (Some(base_entry), Some(now_entry)) => {
+                if base_entry != now_entry {
+                    changed_files += 1;
+                    if base_entry.hash.is_some() || now_entry.hash.is_some() {
+                        let line_diff =
+                            (now_entry.added as isize - base_entry.added as isize).unsigned_abs();
+                        changed_lines += line_diff.max(if base_entry.hash != now_entry.hash {
+                            1
+                        } else {
+                            0
+                        });
+                    } else {
+                        let added_diff =
+                            (now_entry.added as isize - base_entry.added as isize).unsigned_abs();
+                        let deleted_diff = (now_entry.deleted as isize
+                            - base_entry.deleted as isize)
+                            .unsigned_abs();
+                        changed_lines += added_diff + deleted_diff;
+                    }
+                }
+            }
+            (None, None) => {}
+        }
+    }
+
+    if changed_files > limit.files || changed_lines > limit.lines {
+        Some(format!(
+            "Nirvana Claude edits at most {} file and {} lines itself (R2). This change is {} files, {} lines. Hand it to a worker: `herdr seat pick --book`, then an order.",
+            limit.files, limit.lines, changed_files, changed_lines
+        ))
+    } else {
+        None
+    }
+}
+
+pub fn capture_edit_state(root: &Path) -> EditState {
+    let mut files = BTreeMap::new();
+
+    let numstat_out = std::process::Command::new("git")
+        .args(["diff", "HEAD", "--numstat", "--no-color"])
+        .current_dir(root)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .or_else(|| {
+            std::process::Command::new("git")
+                .args(["diff", "--numstat", "--no-color"])
+                .current_dir(root)
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+        });
+
+    if let Some(out) = numstat_out {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() >= 3 {
+                let added = parts[0].parse::<usize>().unwrap_or(0);
+                let deleted = parts[1].parse::<usize>().unwrap_or(0);
+                let path = parts[2].trim().trim_matches('"');
+                if !is_out_of_scope(path) {
+                    files.insert(
+                        path.replace('\\', "/"),
+                        FileDelta {
+                            added,
+                            deleted,
+                            hash: None,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    let status_out = std::process::Command::new("git")
+        .args(["status", "--porcelain=v1", "-uall"])
+        .current_dir(root)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|out| out.status.success());
+
+    if let Some(out) = status_out {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("?? ") {
+                let rel = rest.trim().trim_matches('"');
+                let normalized = rel.replace('\\', "/");
+                if is_out_of_scope(&normalized) {
+                    continue;
+                }
+                let full = root.join(rel);
+                if full.is_file() {
+                    if let Ok(bytes) = std::fs::read(&full) {
+                        use sha2::{Digest, Sha256};
+                        let hash = format!("{:x}", Sha256::digest(&bytes));
+                        let line_count = String::from_utf8_lossy(&bytes).lines().count();
+                        files.insert(
+                            normalized,
+                            FileDelta {
+                                added: line_count,
+                                deleted: 0,
+                                hash: Some(hash),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    EditState { files }
+}
+
+pub fn should_skip_orchestrator_hook(hook: &Value, cwd: Option<&Path>) -> bool {
+    if hook.get("agent_id").is_some_and(|a| !a.is_null()) {
+        return true;
+    }
+    if std::env::var(crate::nirvana_launch::ORCHESTRATOR_ENV).as_deref() != Ok("1") {
+        return true;
+    }
+    if let Some(cwd) = cwd {
+        if cwd
+            .to_string_lossy()
+            .replace('\\', "/")
+            .contains(".nirvana/worktrees")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn guard_edit_decision(
+    hook: &Value,
+    project_root: Option<&Path>,
+    cwd: Option<&Path>,
+    limit: EditLimit,
+) -> Option<Value> {
+    if should_skip_orchestrator_hook(hook, cwd) {
+        return None;
+    }
+    let input = hook.get("tool_input").unwrap_or(&Value::Null);
+    let file_path = input.get("file_path").and_then(Value::as_str);
+    if let Some(path) = file_path {
+        let rel = if let Some(root) = project_root {
+            Path::new(path)
+                .strip_prefix(root)
+                .map(|p| p.to_str().unwrap_or(path))
+                .unwrap_or(path)
+        } else {
+            path
+        };
+        if is_out_of_scope(rel) {
+            return None;
+        }
+    }
+    let tool_name = hook.get("tool_name").and_then(Value::as_str).unwrap_or("");
+    let call_lines = match tool_name {
+        "Write" => input
+            .get("content")
+            .and_then(Value::as_str)
+            .map(|s| s.lines().count())
+            .unwrap_or(0),
+        "Edit" => input
+            .get("new_string")
+            .and_then(Value::as_str)
+            .map(|s| s.lines().count())
+            .unwrap_or(0),
+        "MultiEdit" => input
+            .get("edits")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|e| e.get("new_string").and_then(Value::as_str))
+                    .map(|s| s.lines().count())
+                    .sum()
+            })
+            .unwrap_or(0),
+        _ => 0,
+    };
+    if call_lines > limit.lines {
+        let reason = format!(
+            "Nirvana Claude edits at most {} file and {} lines itself (R2). This change is 1 files, {} lines. Hand it to a worker: `herdr seat pick --book`, then an order.",
+            limit.files, limit.lines, call_lines
+        );
+        Some(json!({
+            "decision": "block",
+            "reason": reason,
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        }))
+    } else {
+        None
+    }
+}
+
+pub fn check_edit_decision(
+    hook: &Value,
+    cwd: Option<&Path>,
+    baseline: &EditState,
+    now_state: &EditState,
+    limit: EditLimit,
+) -> Option<Value> {
+    if should_skip_orchestrator_hook(hook, cwd) {
+        return None;
+    }
+    edit_budget(baseline, now_state, limit).map(|reason| {
+        json!({
+            "decision": "block",
+            "reason": reason,
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "decision": "block",
+                "reason": reason,
+            }
+        })
+    })
+}
+
+fn prompt_baseline_cli() -> std::io::Result<()> {
+    let hook = read_stdin();
+    let cwd = hook_cwd(&hook).or_else(|| std::env::current_dir().ok());
+    if should_skip_orchestrator_hook(&hook, cwd.as_deref()) {
+        return Ok(());
+    }
+    let Some(project) = project_at(cwd.as_deref()) else {
+        return Ok(());
+    };
+    let state = capture_edit_state(&project.root);
+    let path = home_dir()
+        .join(nirvana_seat::DIR)
+        .join("edit-baselines.json");
+    let mut all: BTreeMap<String, EditState> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    let key = project.root.display().to_string();
+    all.insert(key, state);
+    let _ = nirvana_seat::write_atomic(&path, serde_json::to_string(&all)?.as_bytes());
+    Ok(())
+}
+
+fn guard_edit_cli() -> std::io::Result<()> {
+    let hook = read_stdin();
+    let cwd = hook_cwd(&hook).or_else(|| std::env::current_dir().ok());
+    let project = project_at(cwd.as_deref());
+    if let Some(decision) = guard_edit_decision(
+        &hook,
+        project.as_ref().map(|p| p.root.as_path()),
+        cwd.as_deref(),
+        EditLimit::default(),
+    ) {
+        println!("{decision}");
+    }
+    Ok(())
+}
+
+fn check_edit_cli() -> std::io::Result<()> {
+    let hook = read_stdin();
+    let cwd = hook_cwd(&hook).or_else(|| std::env::current_dir().ok());
+    if should_skip_orchestrator_hook(&hook, cwd.as_deref()) {
+        return Ok(());
+    }
+    let Some(project) = project_at(cwd.as_deref()) else {
+        return Ok(());
+    };
+    let path = home_dir()
+        .join(nirvana_seat::DIR)
+        .join("edit-baselines.json");
+    let all: BTreeMap<String, EditState> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    let key = project.root.display().to_string();
+    let baseline = all.get(&key).cloned().unwrap_or_default();
+    let now_state = capture_edit_state(&project.root);
+    if let Some(decision) = check_edit_decision(
+        &hook,
+        cwd.as_deref(),
+        &baseline,
+        &now_state,
+        EditLimit::default(),
+    ) {
+        println!("{decision}");
+    }
+    Ok(())
+}
+
 // ---- the CLI ----
 
-pub const SUBCOMMANDS: [&str; 5] = [
+pub const SUBCOMMANDS: [&str; 9] = [
     "digest",
     "guard-spawn",
     "subagent-stop",
     "stop",
     "statusline",
+    "log-usage",
+    "prompt-baseline",
+    "guard-edit",
+    "check-edit",
 ];
 
-/// `herdr nirvana <digest|guard-spawn|subagent-stop|stop|statusline>`, each reading Claude Code's JSON on stdin.
+/// `herdr nirvana <digest|guard-spawn|subagent-stop|stop|statusline|log-usage|prompt-baseline|guard-edit|check-edit>`, each reading Claude Code's JSON on stdin.
 /// `None` when `name` is not one of these.
 pub fn cli(name: &str) -> Option<std::io::Result<()>> {
     Some(match name {
@@ -1620,6 +2110,10 @@ pub fn cli(name: &str) -> Option<std::io::Result<()>> {
         "subagent-stop" => subagent_stop_cli(),
         "stop" => stop_cli(),
         "statusline" => statusline_cli(),
+        "log-usage" => log_usage_cli(),
+        "prompt-baseline" => prompt_baseline_cli(),
+        "guard-edit" => guard_edit_cli(),
+        "check-edit" => check_edit_cli(),
         _ => return None,
     })
 }

@@ -230,11 +230,24 @@ fn harness_path(path: &str) -> bool {
     path == nirvana_run::DIR || path.starts_with(&format!("{}/", nirvana_run::DIR))
 }
 
-/// Axis 4. An order that names no owned file is not held to an empty scope: old Nirvana measured that every path
-/// then read as out of scope and every auto ask went back (decision 0016 §8.8 point 4). Its paths are listed.
-pub fn owned_axis(changed: &[String], owns: &[String]) -> Axis {
+/// Plan 24 §6 (ledger L3): build.*, fix.*, and plan orders must name the files they own; with no owned files,
+/// the axis fails. Other classes (e.g. read-only) keep the Note from decision 0016 §8.8 point 4.
+pub fn requires_owns(class: &str) -> bool {
+    class.starts_with("build.") || class.starts_with("fix.") || class == "plan"
+}
+
+/// Axis 4. Plan 24 §6: build.*, fix.*, and plan orders must name the files they own.
+pub fn owned_axis(class: &str, changed: &[String], owns: &[String]) -> Axis {
     let changed: Vec<&String> = changed.iter().filter(|path| !harness_path(path)).collect();
     if owns.is_empty() {
+        if requires_owns(class) {
+            return Axis::new(
+                "owned",
+                Mark::Fail,
+                "unbounded: the order names no owned file",
+            )
+            .with(changed.iter().map(|path| (*path).clone()).collect());
+        }
         return Axis::new(
             "owned",
             Mark::Note,
@@ -454,6 +467,134 @@ fn join_ports(ports: &[u16]) -> String {
         .map(u16::to_string)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Trims fragment and trailing slash from a URL for comparison (§5).
+pub fn normalize_url(url: &str) -> &str {
+    let without_fragment = url.split('#').next().unwrap_or(url);
+    without_fragment.trim_end_matches('/')
+}
+
+/// Checks if a normalized URL was fetched, read or browsed in the worker stream.
+fn url_in_stream(norm_url: &str, stream: &str) -> bool {
+    if norm_url.is_empty() {
+        return false;
+    }
+    for line in stream.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // If line is JSON, check tool_use / tool_call
+        if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
+            // Check tool_use in message content (Claude)
+            if let Some(content) = val.pointer("/message/content").and_then(Value::as_array) {
+                for block in content {
+                    if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+                        let name = block
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_lowercase();
+                        let is_fetch = name.contains("fetch")
+                            || name.contains("read")
+                            || name.contains("browser")
+                            || name.contains("browse")
+                            || name.contains("web")
+                            || name.contains("get")
+                            || name.contains("curl");
+                        if is_fetch {
+                            let input_str = block
+                                .get("input")
+                                .map(|v| v.to_string())
+                                .unwrap_or_default();
+                            if input_str.contains(norm_url) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            // Check tool calls in step_update or toolAction (agy)
+            let lower_line = trimmed.to_lowercase();
+            let is_fetch_call = lower_line.contains("fetch")
+                || lower_line.contains("read")
+                || lower_line.contains("browser")
+                || lower_line.contains("browse")
+                || lower_line.contains("web")
+                || lower_line.contains("curl");
+            if is_fetch_call && trimmed.contains(norm_url) {
+                return true;
+            }
+        } else {
+            // Non-JSON line
+            let lower = trimmed.to_lowercase();
+            let is_fetch = lower.contains("fetch")
+                || lower.contains("read")
+                || lower.contains("browser")
+                || lower.contains("browse");
+            if is_fetch && trimmed.contains(norm_url) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Plan 24 §5: gate axis for `research.*` and `media.*` classes.
+/// Fails with no sources; fails for each source URL that does not appear in the order's stream
+/// as a fetch, read or browser call. URLs are compared after trimming a trailing `/` and the fragment.
+pub fn sources_axis(class: &str, report: Option<&Value>, stream: &str) -> Option<Axis> {
+    if !class.starts_with("research.") && !class.starts_with("media.") {
+        return None;
+    }
+    let Some(report) = report else {
+        return Some(Axis::new(
+            "sources",
+            Mark::Fail,
+            "no sources: no Work Report was delivered",
+        ));
+    };
+    let sources = match report.get("sources").and_then(Value::as_array) {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            return Some(Axis::new(
+                "sources",
+                Mark::Fail,
+                "no sources: the Work Report names no sources",
+            ))
+        }
+    };
+    let mut missing = Vec::new();
+    for item in sources {
+        let Some(url) = item.get("url").and_then(Value::as_str) else {
+            missing.push("item without url".to_owned());
+            continue;
+        };
+        let norm = normalize_url(url);
+        if !url_in_stream(norm, stream) {
+            missing.push(url.to_owned());
+        }
+    }
+    if missing.is_empty() {
+        Some(Axis::new(
+            "sources",
+            Mark::Pass,
+            format!("{} source(s) cited, each verified in stream", sources.len()),
+        ))
+    } else {
+        Some(
+            Axis::new(
+                "sources",
+                Mark::Fail,
+                format!(
+                    "{} source(s) cited that were not fetched, read or browsed",
+                    missing.len()
+                ),
+            )
+            .with(missing),
+        )
+    }
 }
 
 /// The ports listened on in the tree under the pane's shell, from one process table and one listener table:
@@ -1068,7 +1209,7 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
         _ => uncommitted(subject.cwd),
     };
     axes.push(match changed {
-        Ok(changed) => owned_axis(&changed, &subject.spec.owns),
+        Ok(changed) => owned_axis(subject.class, &changed, &subject.spec.owns),
         Err(why) => Axis::new("owned", Mark::Fail, why),
     });
     let listened = if subject.class == "ops.terminal" {
@@ -1077,6 +1218,10 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
         Ok(Vec::new())
     };
     axes.push(served_axis(subject.class, &subject.spec.serves, listened));
+    let stream = stream_text(&Project::at(subject.root), subject.run, subject.order);
+    if let Some(axis) = sources_axis(subject.class, subject.report, &stream) {
+        axes.push(axis);
+    }
     det.axes = axes;
     det
 }
@@ -1819,6 +1964,13 @@ fn send_back(
     request.not_family = seated.not_family.clone();
     request.mode = seated.mode;
     request.order = Some(id.clone());
+    if let Some(reason) = &seated.override_reason {
+        request.override_seat = Some((
+            format!("{}:{}", seated.seat, seated.effort.word()),
+            reason.clone(),
+        ));
+        request.inherited_override = true;
+    }
     let world = nirvana_seat::live_world(table);
     let pick = match nirvana_seat::pick(table, &world, &request) {
         Ok(pick) => pick,
@@ -1850,7 +2002,7 @@ fn send_back(
         needs: seated.needs.clone(),
         not_family: seated.not_family.clone(),
         reason: pick.reason.clone(),
-        override_reason: None,
+        override_reason: seated.override_reason.clone(),
         order_file,
         cwd: seated.cwd.clone(),
         worktree: seated.worktree.clone(),

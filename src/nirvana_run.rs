@@ -2207,9 +2207,78 @@ fn current_pools() -> (Vec<Reading>, Option<String>) {
     )
 }
 
+pub fn delivered_ungated(state: &RunState) -> Vec<String> {
+    state
+        .orders
+        .iter()
+        .filter(|order| order.phase == Phase::Delivered)
+        .map(|order| order.id().to_owned())
+        .collect()
+}
+
 fn end_cli(project: &Project, args: &[String]) -> std::io::Result<()> {
-    let run = run_arg(project, args.first());
-    let (journal, _, _, state) = load(project, &run);
+    let mut run_opt: Option<String> = None;
+    let mut abandon: Option<String> = None;
+    let mut why: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--abandon" => {
+                i += 1;
+                if i < args.len() {
+                    abandon = Some(args[i].clone());
+                } else {
+                    eprintln!("herdr run end: --abandon requires an order id");
+                    std::process::exit(2);
+                }
+            }
+            "--why" => {
+                i += 1;
+                if i < args.len() {
+                    why = Some(args[i].clone());
+                } else {
+                    eprintln!("herdr run end: --why requires text");
+                    std::process::exit(2);
+                }
+            }
+            other if !other.starts_with("--") && run_opt.is_none() => {
+                run_opt = Some(other.to_owned());
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let run = run_arg(project, run_opt.as_ref());
+    let (journal, _, _, _state) = load(project, &run);
+    if let Some(order) = abandon {
+        let reason = why.unwrap_or_else(|| {
+            eprintln!("herdr run end: --abandon requires --why <text>");
+            std::process::exit(2);
+        });
+        journal.transact(now(), |_| {
+            Ok((
+                vec![Kind::Gated {
+                    order: order.clone(),
+                    verdict: "abandoned".into(),
+                    reason: Some(reason.clone()),
+                    axes: Vec::new(),
+                }],
+                (),
+            ))
+        })?;
+    }
+    let (events, _) = journal.read();
+    let state = replay(&events);
+    if state.ended.is_none() {
+        let ungated = delivered_ungated(&state);
+        if !ungated.is_empty() {
+            eprintln!(
+                "herdr run end {run}: delivered order(s) not gated: {}; gate each one or abandon with --abandon <order> --why <text>",
+                ungated.join(", ")
+            );
+            std::process::exit(2);
+        }
+    }
     let (pools, basis) = if state.ended.is_none() {
         current_pools()
     } else {

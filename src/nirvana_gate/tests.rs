@@ -338,14 +338,15 @@ fn only_the_files_the_order_owns_may_change() {
     // herdr's own folder in the worktree is never the worker's change.
     assert_eq!(
         owned_axis(
+            "build.bounded",
             &[".nirvana/orders/mul.md".into(), "calc.py".into()],
             &["calc.py".into()]
         )
         .mark,
         Mark::Pass
     );
-    // An order that names no owned file is not held to an empty scope; its files are listed.
-    let none = owned_axis(&["calc.py".into()], &[]);
+    // An order that names no owned file is not held to an empty scope; its files are listed (read-only classes).
+    let none = owned_axis("research.web", &["calc.py".into()], &[]);
     assert_eq!(
         (none.mark, none.lines.clone()),
         (Mark::Note, vec!["calc.py".to_owned()])
@@ -921,4 +922,151 @@ fn a_gated_event_keeps_every_axis_through_the_journal() {
         .map(|v| serde_json::from_value(v.clone()).expect("axis"))
         .collect();
     assert_eq!(read, axes);
+}
+
+// ---- Plan 24 §6: owned axis and requires_owns tests ----
+
+#[test]
+fn owned_axis_empty_owns_fails_for_build_fix_plan_and_notes_for_read_only() {
+    let changed = vec!["src/main.rs".to_string()];
+    let empty_owns: Vec<String> = vec![];
+
+    // build.* fails
+    let axis = owned_axis("build.bounded", &changed, &empty_owns);
+    assert_eq!(axis.mark, Mark::Fail);
+    assert!(axis
+        .why
+        .contains("unbounded: the order names no owned file"));
+
+    let axis = owned_axis("build.load_bearing", &changed, &empty_owns);
+    assert_eq!(axis.mark, Mark::Fail);
+
+    // fix.* fails
+    let axis = owned_axis("fix.debug", &changed, &empty_owns);
+    assert_eq!(axis.mark, Mark::Fail);
+
+    // plan fails
+    let axis = owned_axis("plan", &changed, &empty_owns);
+    assert_eq!(axis.mark, Mark::Fail);
+
+    // read-only classes keep Note (Rule 7: never refuse a read-only class)
+    let axis = owned_axis("research.web", &changed, &empty_owns);
+    assert_eq!(axis.mark, Mark::Note);
+
+    let axis = owned_axis("research.read", &changed, &empty_owns);
+    assert_eq!(axis.mark, Mark::Note);
+
+    let axis = owned_axis("chore.script", &changed, &empty_owns);
+    assert_eq!(axis.mark, Mark::Note);
+
+    // requires_owns helper
+    assert!(requires_owns("build.bounded"));
+    assert!(requires_owns("fix.debug"));
+    assert!(requires_owns("plan"));
+    assert!(!requires_owns("research.web"));
+    assert!(!requires_owns("research.read"));
+}
+
+// ---- Plan 24 §5: sources axis tests ----
+
+#[test]
+fn sources_axis_checks_citations_in_worker_stream() {
+    // 1. Build class has no sources axis
+    assert_eq!(sources_axis("build.bounded", None, ""), None);
+
+    // 2. Empty sources array or missing report fails for research / media
+    let empty_report = serde_json::json!({"sources": []});
+    let axis = sources_axis("research.web", Some(&empty_report), "").expect("axis");
+    assert_eq!(axis.mark, Mark::Fail);
+    assert!(axis.why.contains("no sources"));
+
+    let no_report = sources_axis("media.video", None, "").expect("axis");
+    assert_eq!(no_report.mark, Mark::Fail);
+
+    // 3. Cited URL never fetched fails
+    let report_with_url = serde_json::json!({
+        "sources": [
+            {"url": "https://example.com/docs#intro", "used_for": "reading spec"}
+        ]
+    });
+    let stream_without = "I researched the web using other means.";
+    let axis = sources_axis("research.web", Some(&report_with_url), stream_without).expect("axis");
+    assert_eq!(axis.mark, Mark::Fail);
+    assert!(axis.why.contains("not fetched"));
+
+    // 4. Fetched URL passes (with fragment and trailing slash trimmed)
+    let stream_with = "Calling fetch with url: https://example.com/docs/ ...";
+    let axis = sources_axis("research.web", Some(&report_with_url), stream_with).expect("axis");
+    assert_eq!(axis.mark, Mark::Pass);
+}
+
+// ---- Plan 24 §4: send-back override tests ----
+
+#[test]
+fn send_back_inherits_override_and_does_not_count_against_run_overrides() {
+    let _guard = crate::nirvana::with_test_home("send-back-override");
+    let root = repo("send-back-override");
+    let project = Project::at(&root);
+    let run = "r1";
+    let journal = project.journal(run);
+
+    let table = nirvana_seat::parse(nirvana_seat::DEFAULT).expect("table");
+    let mut seated_order = seated("build-1", None);
+    seated_order.override_reason = Some("owner insisted on sonnet".into());
+    seated_order.cwd = worktree(&root, "build-1").display().to_string();
+
+    // Initialize journal with Opened and Seated
+    journal
+        .append(
+            1,
+            Kind::Opened {
+                project: "p".into(),
+                orchestrator_pane: None,
+                auto: false,
+                pools: vec![],
+                pools_basis: None,
+            },
+        )
+        .expect("append");
+    journal
+        .append(2, Kind::Seated(Box::new(seated_order.clone())))
+        .expect("append");
+
+    // Delivered order
+    let mut state = replay(&journal.read().0);
+    let known = state.order("build-1").expect("order").clone();
+
+    let failing_axes = vec![Axis::new("tests", Mark::Fail, "test failed")];
+
+    let ruling = send_back(
+        &project,
+        run,
+        &journal,
+        &state,
+        &known,
+        "build-1",
+        "the order\n",
+        failing_axes,
+        Some(&table),
+    )
+    .expect("send_back");
+
+    assert_eq!(ruling.verdict, "sent_back");
+    let child_order = "build-1-s1";
+
+    // Read replay state after send-back
+    state = replay(&journal.read().0);
+    let child = state.order(child_order).expect("child");
+    assert_eq!(child.seated.seat, "sonnet");
+    assert_eq!(child.seated.effort, Effort::Medium);
+    assert_eq!(
+        child.seated.override_reason,
+        Some("owner insisted on sonnet".into())
+    );
+
+    // Run overrides in leases is 0 because child was an inherited override!
+    let leases =
+        crate::nirvana_seat::load_leases(&nirvana_seat::dir().join(nirvana_seat::LEASES_FILE))
+            .expect("leases");
+    assert_eq!(leases.overrides(run), 0);
 }

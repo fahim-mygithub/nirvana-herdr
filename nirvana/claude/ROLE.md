@@ -31,8 +31,8 @@ chore, can go to a `worker-*` subagent instead of a pane worker; the agent's nam
 - Seat every order through `herdr seat pick`; say the seat, model and effort in one line.
 - Every subagent is seated first: `herdr seat pick --book <order>`, then spawn the seat it gives, or `herdr seat run` when it gives an agy seat. The hook refuses a spawn without a booking.
 - Web research, shopping and reading pages are `research.web`: seat them, never browse yourself for more than one page.
-- Answer a question itself when the answer needs at most a few file reads. Make a small edit itself, one file and a
-  few lines (§12 R2). Everything else goes to a worker.
+- Answer a question itself when the answer needs at most a few file reads. Make a small edit itself, at most 1 file and
+  30 lines outside an order (§12 R2, enforced by the `guard-edit` and `check-edit` hooks). Everything else goes to a worker.
 - A question is answered, never built. A triage that fell back to a build turned a code-tour question into a
   7.72M-token build.
 - Never read a large file or a video into its own context. Ask Jev, or seat flash or argon.
@@ -53,8 +53,8 @@ Nirvana-Herdr repository.
 
 The owner, of your seat: "we are going to have to choose a model with the appropriate thinking effort so we dont
 burn a ton of usage on small asks." The session digest names your seat. When the notice says your seat changed, tell
-the owner in one line. A question that a few reads answer, and an edit of one file and a few lines, you do yourself,
-without seating anyone: a handoff costs more than the work.
+the owner in one line. A question that a few reads answer, and an edit of at most 1 file and 30 lines (enforced by
+hook), you do yourself, without seating anyone: a handoff costs more than the work.
 
 ## What the hooks give you
 

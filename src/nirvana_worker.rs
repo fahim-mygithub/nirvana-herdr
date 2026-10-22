@@ -41,11 +41,11 @@ use crate::nirvana_usage::Reading;
 
 /// The Work Report every worker ends with, passed to both CLIs as `--json-schema` (P3: both take it).
 /// `lesson` is O5's: a worker's proposed lesson, which the gate checks before it is written.
-pub const REPORT_SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["status","summary","files","tests","gotchas"],"properties":{"status":{"type":"string","enum":["done","blocked","needs_answer"]},"summary":{"type":"string","minLength":1},"question":{"type":"string"},"files":{"type":"array","items":{"type":"string"}},"tests":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["name","result"],"properties":{"name":{"type":"string"},"result":{"type":"string","enum":["pass","fail","not_run"]}}}},"gotchas":{"type":"array","items":{"type":"string"}},"lesson":{"type":"object","additionalProperties":false,"required":["name","class","steps","evidence"],"properties":{"name":{"type":"string","minLength":1},"class":{"type":"string","minLength":1},"steps":{"type":"string","minLength":1},"evidence":{"type":"string","minLength":1}}}}}"#;
+pub const REPORT_SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["status","summary","files","tests","gotchas"],"properties":{"status":{"type":"string","enum":["done","blocked","needs_answer"]},"summary":{"type":"string","minLength":1},"question":{"type":"string"},"files":{"type":"array","items":{"type":"string"}},"tests":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["name","result"],"properties":{"name":{"type":"string"},"result":{"type":"string","enum":["pass","fail","not_run"]}}}},"gotchas":{"type":"array","items":{"type":"string"}},"lesson":{"type":"object","additionalProperties":false,"required":["name","class","steps","evidence"],"properties":{"name":{"type":"string","minLength":1},"class":{"type":"string","minLength":1},"steps":{"type":"string","minLength":1},"evidence":{"type":"string","minLength":1}}},"sources":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["url","used_for"],"properties":{"url":{"type":"string","minLength":1},"used_for":{"type":"string","minLength":1}}}}}}"#;
 
 /// The schema's properties, which the check below allows and nothing else.
-pub const REPORT_KEYS: [&str; 7] = [
-    "status", "summary", "question", "files", "tests", "gotchas", "lesson",
+pub const REPORT_KEYS: [&str; 8] = [
+    "status", "summary", "question", "files", "tests", "gotchas", "lesson", "sources",
 ];
 
 /// The keys agy adds to its structured answer (P3: "the response is the object, plus agy's own `toolAction`
@@ -132,6 +132,38 @@ pub fn check_report(report: &Value) -> Result<(), String> {
             return Err(format!(
                 "the lesson's steps run {lines} lines, over {LESSON_LINES}"
             ));
+        }
+    }
+    if let Some(sources) = object.get("sources") {
+        let Some(items) = sources.as_array() else {
+            return Err("the Work Report sources is not an array".into());
+        };
+        for (i, item) in items.iter().enumerate() {
+            let Some(obj) = item.as_object() else {
+                return Err(format!("the Work Report sources[{i}] is not an object"));
+            };
+            if let Some(key) = obj
+                .keys()
+                .find(|k| k.as_str() != "url" && k.as_str() != "used_for")
+            {
+                return Err(format!(
+                    "the Work Report sources[{i}] has an unknown key {key:?}"
+                ));
+            }
+            if obj
+                .get("url")
+                .and_then(Value::as_str)
+                .is_none_or(|s| s.is_empty())
+            {
+                return Err(format!("the Work Report sources[{i}] has no url"));
+            }
+            if obj
+                .get("used_for")
+                .and_then(Value::as_str)
+                .is_none_or(|s| s.is_empty())
+            {
+                return Err(format!("the Work Report sources[{i}] has no used_for"));
+            }
         }
     }
     Ok(())
@@ -1481,6 +1513,26 @@ pub fn spent_world(
     world
 }
 
+pub fn rate_limited_override(
+    seated: &Seated,
+    limit_pool: &str,
+) -> (bool, bool, Option<String>) {
+    match &seated.override_reason {
+        Some(_) => {
+            if limit_pool == seated.pool.as_str() {
+                (true, false, None)
+            } else {
+                (
+                    false,
+                    true,
+                    Some(format!("{}:{}", seated.seat, seated.effort.word())),
+                )
+            }
+        }
+        None => (false, false, None),
+    }
+}
+
 /// §5.6 for one order. Returns whether the supervisor goes on (a deferral it waits out itself).
 fn rate_limited(
     project: &Project,
@@ -1533,6 +1585,13 @@ fn rate_limited(
     request.not_family = seated.not_family.clone();
     request.mode = seated.mode;
     request.order = Some(child.clone());
+    let limit_pool = limit.pool.as_deref().unwrap_or(&pool);
+    let (override_dropped, inherited_override, target) =
+        rate_limited_override(seated, limit_pool);
+    if let (Some(target), Some(reason)) = (target, &seated.override_reason) {
+        request.override_seat = Some((target, reason.clone()));
+        request.inherited_override = true;
+    }
     let world = spent_world(&table, nirvana_seat::live_world(&table), limit, &pool);
     let picked = nirvana_seat::pick(&table, &world, &request);
     let reseat = match &picked {
@@ -1583,7 +1642,13 @@ fn rate_limited(
                 needs: seated.needs.clone(),
                 not_family: seated.not_family.clone(),
                 reason: booked.reason.clone(),
-                override_reason: None,
+                override_reason: if override_dropped {
+                    None
+                } else if inherited_override {
+                    seated.override_reason.clone()
+                } else {
+                    None
+                },
                 order_file: brief,
                 cwd: seated.cwd.clone(),
                 worktree: seated.worktree.clone(),
@@ -1597,12 +1662,31 @@ fn rate_limited(
                 expected: booked.expected(),
                 jev_pick: None,
             };
-            let why = format!(
-                "{} {} ran out ({}); a new session with a continuation brief",
-                seated.seat,
-                seated.effort.word(),
-                limit.signal
-            );
+            let why = if override_dropped {
+                format!(
+                    "{} {} ran out ({}); dropped override on {}; a new session with a continuation brief",
+                    seated.seat,
+                    seated.effort.word(),
+                    limit.signal,
+                    seated.pool
+                )
+            } else if inherited_override {
+                format!(
+                    "{} {} ran out ({}); kept override {}:{}; a new session with a continuation brief",
+                    seated.seat,
+                    seated.effort.word(),
+                    limit.signal,
+                    seated.seat,
+                    seated.effort.word()
+                )
+            } else {
+                format!(
+                    "{} {} ran out ({}); a new session with a continuation brief",
+                    seated.seat,
+                    seated.effort.word(),
+                    limit.signal
+                )
+            };
             journal.transact(now(), |_| {
                 Ok((
                     vec![
@@ -2591,6 +2675,18 @@ pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i3
             ),
         )
     })?;
+    let spec = crate::nirvana_gate::spec(&text);
+    if request
+        .class
+        .as_deref()
+        .is_some_and(crate::nirvana_gate::requires_owns)
+        && spec.owns.is_empty()
+    {
+        return Err((
+            2,
+            "a build order needs an `owns:` line naming the files it may change".into(),
+        ));
+    }
     let booked = book(project, request)?;
     let (cwd, worktree, branch) = if request.worktree {
         let path = project.worktrees_dir().join(&request.order);
@@ -2615,11 +2711,14 @@ pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i3
     };
     // Plan 12 O5 (§7.4.3): one line per live lesson of the class, the path and the description, never the body.
     let lessons = crate::nirvana_lessons::offer(&project.root, &cwd, &booked.class);
-    let text = if lessons.is_empty() {
+    let mut text = if lessons.is_empty() {
         text
     } else {
         format!("{}{lessons}", text.trim_end())
     };
+    if booked.class.starts_with("research.") || booked.class.starts_with("media.") {
+        text.push_str("\n\nYour Work Report must include the `sources` array of `{url, used_for}` for each source consulted.");
+    }
     let order_file = write_order(project, &cwd, &request.order, &text).map_err(io)?;
     let seated = Seated {
         order: request.order.clone(),
