@@ -514,6 +514,50 @@ fn collect_json_strings(val: &Value, out: &mut Vec<String>) {
     }
 }
 
+pub fn extract_url_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cursor = 0;
+    while cursor < text.len() {
+        let slice = &text[cursor..];
+        let next_http = slice.find("http://");
+        let next_https = slice.find("https://");
+        let next_pos = match (next_http, next_https) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        let Some(pos) = next_pos else {
+            break;
+        };
+        let start = cursor + pos;
+        let url_part = &text[start..];
+        let len = url_part
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '<' | '>'))
+            .unwrap_or(url_part.len());
+        let token = &url_part[..len];
+        tokens.push(token.to_string());
+        cursor = start + len;
+    }
+    tokens
+}
+
+pub const SHELL_FETCH_WORDS: &[&str] = &[
+    "agent-browser",
+    "bladebro",
+    "curl",
+    "wget",
+    "Invoke-WebRequest",
+    "iwr",
+];
+
+pub fn command_is_shell_fetch(cmd: &str) -> bool {
+    let lower = cmd.to_ascii_lowercase();
+    SHELL_FETCH_WORDS
+        .iter()
+        .any(|word| lower.contains(&word.to_ascii_lowercase()))
+}
+
 /// Checks if a normalized URL was fetched, read or browsed in the worker stream.
 fn url_in_stream(norm_url: &str, stream: &str) -> bool {
     if norm_url.is_empty() {
@@ -535,14 +579,33 @@ fn url_in_stream(norm_url: &str, stream: &str) -> bool {
                     let name = block.get("name").and_then(Value::as_str).unwrap_or("");
                     let is_fetch = name == "WebFetch"
                         || (name.starts_with("mcp__")
-                            && (name.contains("browser") || name.contains("bladebro")));
+                            && (name.contains("browser")
+                                || name.contains("bladebro")
+                                || name.contains("chrome")
+                                || name.contains("playwright")));
                     if is_fetch {
                         if let Some(input) = block.get("input") {
                             let mut strings = Vec::new();
                             collect_json_strings(input, &mut strings);
                             for s in strings {
-                                if normalize_url(&s) == norm_url {
-                                    return true;
+                                for tok in extract_url_tokens(&s) {
+                                    if normalize_url(&tok) == norm_url {
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    } else if name == "Bash" {
+                        if let Some(input) = block.get("input") {
+                            let mut strings = Vec::new();
+                            collect_json_strings(input, &mut strings);
+                            for s in strings {
+                                if command_is_shell_fetch(&s) {
+                                    for tok in extract_url_tokens(&s) {
+                                        if normalize_url(&tok) == norm_url {
+                                            return true;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -559,20 +622,39 @@ fn url_in_stream(norm_url: &str, stream: &str) -> bool {
             let is_browser_mcp = tool_name == "call_mcp_tool" && {
                 let mut p_strings = Vec::new();
                 collect_json_strings(params, &mut p_strings);
-                p_strings
-                    .iter()
-                    .any(|s| s.to_ascii_lowercase().contains("browser"))
+                p_strings.iter().any(|s| {
+                    let s_lower = s.to_ascii_lowercase();
+                    s_lower.contains("browser")
+                        || s_lower.contains("bladebro")
+                        || s_lower.contains("chrome")
+                        || s_lower.contains("playwright")
+                })
             };
             let is_agy_fetch = tool_name == "read_url_content"
-                || tool_name == "view_content_chunk"
+                || tool_name == "open_browser_url"
+                || tool_name == "read_browser_page"
                 || tool_name.starts_with("browser_")
                 || is_browser_mcp;
             if is_agy_fetch {
                 let mut strings = Vec::new();
                 collect_json_strings(params, &mut strings);
                 for s in strings {
-                    if normalize_url(&s) == norm_url {
-                        return true;
+                    for tok in extract_url_tokens(&s) {
+                        if normalize_url(&tok) == norm_url {
+                            return true;
+                        }
+                    }
+                }
+            } else if tool_name == "run_command" {
+                let mut strings = Vec::new();
+                collect_json_strings(params, &mut strings);
+                for s in strings {
+                    if command_is_shell_fetch(&s) {
+                        for tok in extract_url_tokens(&s) {
+                            if normalize_url(&tok) == norm_url {
+                                return true;
+                            }
+                        }
                     }
                 }
             }

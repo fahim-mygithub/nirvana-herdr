@@ -22,6 +22,7 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1650,9 +1651,8 @@ pub fn read_transcript_usage(
         }
         if entry.get("type").and_then(Value::as_str) == Some("assistant") {
             let message = &entry["message"];
-            let id = message
-                .get("id")
-                .and_then(Value::as_str)
+            let real_id = message.get("id").and_then(Value::as_str);
+            let id = real_id
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("line-{}", seen.len()));
 
@@ -1671,8 +1671,10 @@ pub fn read_transcript_usage(
                 n("cache_read_input_tokens"),
                 n("output_tokens"),
             ];
-            if !seen.contains_key(&id) {
-                newly_seen_ids.push(id.clone());
+            if let Some(r_id) = real_id {
+                if !seen.contains_key(r_id) {
+                    newly_seen_ids.push(r_id.to_string());
+                }
             }
             let usage_slot = seen.entry(id).or_insert([0; 4]);
             for (saved, cur) in usage_slot.iter_mut().zip(row) {
@@ -1702,8 +1704,28 @@ pub fn read_transcript_usage(
     Ok((tokens, new_offset, combined_ids))
 }
 
-pub fn log_usage_from(hook: &Value) -> std::io::Result<Option<Tokens>> {
-    if should_skip_orchestrator_hook(hook, None) {
+pub fn prune_files_older_than(dir: &Path, max_age_secs: u64) {
+    let now = SystemTime::now();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if let Ok(meta) = entry.metadata() {
+            if meta.is_file() {
+                if let Ok(mtime) = meta.modified() {
+                    if let Ok(age) = now.duration_since(mtime) {
+                        if age.as_secs() > max_age_secs {
+                            let _ = std::fs::remove_file(entry.path());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn log_usage_from(hook: &Value, is_orchestrator: bool) -> std::io::Result<Option<Tokens>> {
+    if should_skip_orchestrator_hook(hook, None, is_orchestrator) {
         return Ok(None);
     }
     let is_session_start =
@@ -1737,6 +1759,7 @@ pub fn log_usage_from(hook: &Value) -> std::io::Result<Option<Tokens>> {
             offset: len,
             seen_ids: Vec::new(),
         };
+        prune_files_older_than(&dir, 30 * 86400);
         let _ = std::fs::create_dir_all(&dir);
         let _ = nirvana_seat::write_atomic(
             &offset_path,
@@ -1783,13 +1806,14 @@ pub fn log_usage_from(hook: &Value) -> std::io::Result<Option<Tokens>> {
         offset: new_offset,
         seen_ids: combined_ids,
     };
+    prune_files_older_than(&dir, 30 * 86400);
     let _ = std::fs::create_dir_all(&dir);
     let _ = nirvana_seat::write_atomic(&offset_path, serde_json::to_string(&new_state)?.as_bytes());
     Ok(Some(tokens))
 }
 
 fn log_usage_cli() -> std::io::Result<()> {
-    log_usage_from(&read_stdin())?;
+    log_usage_from(&read_stdin(), is_orchestrator_env())?;
     Ok(())
 }
 
@@ -1962,6 +1986,88 @@ pub fn edit_budget(baseline: &EditState, now: &EditState, limit: EditLimit) -> O
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumstatEntry {
+    pub path: String,
+    pub added: usize,
+    pub deleted: usize,
+    pub is_binary: bool,
+}
+
+pub fn parse_numstat_z(mut raw: &[u8]) -> Vec<NumstatEntry> {
+    let mut entries = Vec::new();
+    while !raw.is_empty() {
+        while let Some(&b) = raw.first() {
+            if b == b'\n' || b == b'\r' {
+                raw = &raw[1..];
+            } else {
+                break;
+            }
+        }
+        if raw.is_empty() {
+            break;
+        }
+        let Some(tab1) = raw.iter().position(|&b| b == b'\t') else {
+            break;
+        };
+        let added_str = String::from_utf8_lossy(&raw[..tab1]);
+        let is_bin_added = added_str == "-";
+        let added = added_str.parse::<usize>().unwrap_or(0);
+        raw = &raw[tab1 + 1..];
+
+        let Some(tab2) = raw.iter().position(|&b| b == b'\t') else {
+            break;
+        };
+        let deleted_str = String::from_utf8_lossy(&raw[..tab2]);
+        let is_bin_deleted = deleted_str == "-";
+        let deleted = deleted_str.parse::<usize>().unwrap_or(0);
+        raw = &raw[tab2 + 1..];
+
+        let is_binary = is_bin_added || is_bin_deleted;
+
+        if raw.first() == Some(&0) {
+            raw = &raw[1..];
+            let Some(nul1) = raw.iter().position(|&b| b == 0) else {
+                break;
+            };
+            let _old_path = String::from_utf8_lossy(&raw[..nul1]).into_owned();
+            raw = &raw[nul1 + 1..];
+
+            let nul2 = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+            let new_path = String::from_utf8_lossy(&raw[..nul2]).into_owned();
+            raw = if nul2 < raw.len() {
+                &raw[nul2 + 1..]
+            } else {
+                &[]
+            };
+
+            entries.push(NumstatEntry {
+                path: new_path,
+                added,
+                deleted,
+                is_binary,
+            });
+        } else {
+            let nul = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+            let path = String::from_utf8_lossy(&raw[..nul]).into_owned();
+            raw = if nul < raw.len() {
+                &raw[nul + 1..]
+            } else {
+                &[]
+            };
+
+            entries.push(NumstatEntry {
+                path,
+                added,
+                deleted,
+                is_binary,
+            });
+        }
+    }
+    entries
+}
+
+#[allow(dead_code)] // Helper for callers or tests that do not pass cached previous state
 pub fn capture_edit_state(root: &Path) -> EditState {
     capture_edit_state_cached(root, None)
 }
@@ -1979,6 +2085,7 @@ pub fn capture_edit_state_cached(root: &Path, prev: Option<&EditState>) -> EditS
             "diff",
             "HEAD",
             "--numstat",
+            "-z",
             "--relative",
             "--no-color",
             "--",
@@ -1989,32 +2096,14 @@ pub fn capture_edit_state_cached(root: &Path, prev: Option<&EditState>) -> EditS
         .stderr(std::process::Stdio::null())
         .output()
         .ok()
-        .filter(|out| out.status.success())
-        .or_else(|| {
-            std::process::Command::new("git")
-                .args(["diff", "--numstat", "--relative", "--no-color", "--", "."])
-                .current_dir(root)
-                .stdin(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .output()
-                .ok()
-                .filter(|out| out.status.success())
-        });
+        .filter(|out| out.status.success());
 
     let mut tracked_paths: Vec<(String, usize, usize, bool)> = Vec::new();
     if let Some(out) = numstat_out {
-        let text = String::from_utf8_lossy(&out.stdout);
-        for line in text.lines() {
-            let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() >= 3 {
-                let is_bin = parts[0] == "-" || parts[1] == "-";
-                let added = parts[0].parse::<usize>().unwrap_or(0);
-                let deleted = parts[1].parse::<usize>().unwrap_or(0);
-                let path = parts[2].trim().trim_matches('"');
-                let norm = path.replace('\\', "/");
-                if !is_out_of_scope(&norm) {
-                    tracked_paths.push((norm, added, deleted, is_bin));
-                }
+        for entry in parse_numstat_z(&out.stdout) {
+            let norm = entry.path.replace('\\', "/");
+            if !is_out_of_scope(&norm) {
+                tracked_paths.push((norm, entry.added, entry.deleted, entry.is_binary));
             }
         }
     }
@@ -2061,6 +2150,13 @@ pub fn capture_edit_state_cached(root: &Path, prev: Option<&EditState>) -> EditS
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
+        if let Some(prev_entry) = prev.and_then(|p| p.files.get(&norm)) {
+            if prev_entry.size == size && prev_entry.mtime == mtime {
+                files.insert(norm, prev_entry.clone());
+                continue;
+            }
+        }
+
         if is_numstat_bin {
             files.insert(
                 norm,
@@ -2071,6 +2167,24 @@ pub fn capture_edit_state_cached(root: &Path, prev: Option<&EditState>) -> EditS
                     deleted: 0,
                     line_count: 0,
                     hash: None,
+                    content: None,
+                    size,
+                    mtime,
+                },
+            );
+            continue;
+        }
+
+        if size > MAX_FILE_SIZE || total_bytes + (size as usize) > MAX_TOTAL_BYTES {
+            files.insert(
+                norm,
+                FileDelta {
+                    is_tracked: true,
+                    is_binary: false,
+                    added,
+                    deleted,
+                    line_count: 0,
+                    hash: Some(format!("{size}:{mtime}")),
                     content: None,
                     size,
                     mtime,
@@ -2107,34 +2221,11 @@ pub fn capture_edit_state_cached(root: &Path, prev: Option<&EditState>) -> EditS
             continue;
         }
 
-        if size <= MAX_FILE_SIZE && total_bytes + (size as usize) <= MAX_TOTAL_BYTES {
-            if let Ok(text) = std::fs::read_to_string(&full_path) {
-                use sha2::{Digest, Sha256};
-                let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
-                let line_count = text.lines().count();
-                total_bytes += text.len();
-                files.insert(
-                    norm,
-                    FileDelta {
-                        is_tracked: true,
-                        is_binary: false,
-                        added,
-                        deleted,
-                        line_count,
-                        hash: Some(hash),
-                        content: Some(text),
-                        size,
-                        mtime,
-                    },
-                );
-                continue;
-            }
-        }
-
-        if let Ok(bytes) = std::fs::read(&full_path) {
+        if let Ok(text) = std::fs::read_to_string(&full_path) {
             use sha2::{Digest, Sha256};
-            let hash = format!("{:x}", Sha256::digest(&bytes));
-            let line_count = bytes.iter().filter(|&&b| b == b'\n').count();
+            let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
+            let line_count = text.lines().count();
+            total_bytes += text.len();
             files.insert(
                 norm,
                 FileDelta {
@@ -2144,7 +2235,7 @@ pub fn capture_edit_state_cached(root: &Path, prev: Option<&EditState>) -> EditS
                     deleted,
                     line_count,
                     hash: Some(hash),
-                    content: None,
+                    content: Some(text),
                     size,
                     mtime,
                 },
@@ -2170,6 +2261,24 @@ pub fn capture_edit_state_cached(root: &Path, prev: Option<&EditState>) -> EditS
             }
         }
 
+        if size > MAX_FILE_SIZE || total_bytes + (size as usize) > MAX_TOTAL_BYTES {
+            files.insert(
+                norm,
+                FileDelta {
+                    is_tracked: false,
+                    is_binary: false,
+                    added: 0,
+                    deleted: 0,
+                    line_count: 0,
+                    hash: Some(format!("{size}:{mtime}")),
+                    content: None,
+                    size,
+                    mtime,
+                },
+            );
+            continue;
+        }
+
         let mut is_bin = false;
         if let Ok(mut f) = std::fs::File::open(&full_path) {
             let mut buf = [0u8; 8192];
@@ -2198,34 +2307,11 @@ pub fn capture_edit_state_cached(root: &Path, prev: Option<&EditState>) -> EditS
             continue;
         }
 
-        if size <= MAX_FILE_SIZE && total_bytes + (size as usize) <= MAX_TOTAL_BYTES {
-            if let Ok(text) = std::fs::read_to_string(&full_path) {
-                use sha2::{Digest, Sha256};
-                let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
-                let line_count = text.lines().count();
-                total_bytes += text.len();
-                files.insert(
-                    norm,
-                    FileDelta {
-                        is_tracked: false,
-                        is_binary: false,
-                        added: line_count,
-                        deleted: 0,
-                        line_count,
-                        hash: Some(hash),
-                        content: Some(text),
-                        size,
-                        mtime,
-                    },
-                );
-                continue;
-            }
-        }
-
-        if let Ok(bytes) = std::fs::read(&full_path) {
+        if let Ok(text) = std::fs::read_to_string(&full_path) {
             use sha2::{Digest, Sha256};
-            let hash = format!("{:x}", Sha256::digest(&bytes));
-            let line_count = bytes.iter().filter(|&&b| b == b'\n').count();
+            let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
+            let line_count = text.lines().count();
+            total_bytes += text.len();
             files.insert(
                 norm,
                 FileDelta {
@@ -2235,7 +2321,7 @@ pub fn capture_edit_state_cached(root: &Path, prev: Option<&EditState>) -> EditS
                     deleted: 0,
                     line_count,
                     hash: Some(hash),
-                    content: None,
+                    content: Some(text),
                     size,
                     mtime,
                 },
@@ -2249,11 +2335,55 @@ pub fn capture_edit_state_cached(root: &Path, prev: Option<&EditState>) -> EditS
     }
 }
 
-pub fn should_skip_orchestrator_hook(hook: &Value, cwd: Option<&Path>) -> bool {
+pub fn normalize_path_for_compare(s: &str) -> String {
+    let mut norm = s.replace('\\', "/");
+    if norm.len() >= 2 && norm.as_bytes()[1] == b':' {
+        let first = (norm.as_bytes()[0] as char).to_ascii_lowercase();
+        norm.replace_range(0..1, &first.to_string());
+    }
+    norm.trim_end_matches('/').to_string()
+}
+
+pub fn path_under_project(path_str: &str, project_root: &Path) -> Option<String> {
+    let root_str = project_root.to_str()?;
+    let root_norm = normalize_path_for_compare(root_str);
+    let path_norm = normalize_path_for_compare(path_str);
+
+    let is_absolute =
+        path_norm.starts_with('/') || (path_norm.len() >= 2 && path_norm.as_bytes()[1] == b':');
+    if !is_absolute {
+        let trimmed = path_norm.trim_start_matches("./");
+        if trimmed.starts_with("../") || trimmed == ".." {
+            return None;
+        }
+        return Some(trimmed.to_string());
+    }
+
+    if path_norm.starts_with(&root_norm) {
+        let remainder = &path_norm[root_norm.len()..];
+        if remainder.is_empty() {
+            return Some(String::new());
+        }
+        if let Some(rel) = remainder.strip_prefix('/') {
+            return Some(rel.to_string());
+        }
+    }
+    None
+}
+
+pub fn is_orchestrator_env() -> bool {
+    std::env::var(crate::nirvana_launch::ORCHESTRATOR_ENV).as_deref() == Ok("1")
+}
+
+pub fn should_skip_orchestrator_hook(
+    hook: &Value,
+    cwd: Option<&Path>,
+    is_orchestrator: bool,
+) -> bool {
     if hook.get("agent_id").is_some_and(|a| !a.is_null()) {
         return true;
     }
-    if std::env::var(crate::nirvana_launch::ORCHESTRATOR_ENV).as_deref() != Ok("1") {
+    if !is_orchestrator {
         return true;
     }
     if let Some(cwd) = cwd {
@@ -2273,24 +2403,17 @@ pub fn guard_edit_decision(
     project_root: Option<&Path>,
     cwd: Option<&Path>,
     limit: EditLimit,
+    is_orchestrator: bool,
 ) -> Option<Value> {
-    if should_skip_orchestrator_hook(hook, cwd) {
+    if should_skip_orchestrator_hook(hook, cwd, is_orchestrator) {
         return None;
     }
+    let root = project_root?;
     let input = hook.get("tool_input").unwrap_or(&Value::Null);
-    let file_path = input.get("file_path").and_then(Value::as_str);
-    if let Some(path) = file_path {
-        let rel = if let Some(root) = project_root {
-            Path::new(path)
-                .strip_prefix(root)
-                .map(|p| p.to_str().unwrap_or(path))
-                .unwrap_or(path)
-        } else {
-            path
-        };
-        if is_out_of_scope(rel) {
-            return None;
-        }
+    let file_path = input.get("file_path").and_then(Value::as_str)?;
+    let rel = path_under_project(file_path, root)?;
+    if is_out_of_scope(&rel) {
+        return None;
     }
     let tool_name = hook.get("tool_name").and_then(Value::as_str).unwrap_or("");
     let call_lines = match tool_name {
@@ -2341,8 +2464,9 @@ pub fn check_edit_decision(
     baseline: &EditState,
     now_state: &EditState,
     limit: EditLimit,
+    is_orchestrator: bool,
 ) -> Option<Value> {
-    if should_skip_orchestrator_hook(hook, cwd) {
+    if should_skip_orchestrator_hook(hook, cwd, is_orchestrator) {
         return None;
     }
     edit_budget(baseline, now_state, limit).map(|reason| {
@@ -2353,9 +2477,9 @@ pub fn check_edit_decision(
     })
 }
 
-pub fn prompt_baseline_from(hook: &Value) -> std::io::Result<()> {
+pub fn prompt_baseline_from(hook: &Value, is_orchestrator: bool) -> std::io::Result<()> {
     let cwd = hook_cwd(hook).or_else(|| std::env::current_dir().ok());
-    if should_skip_orchestrator_hook(hook, cwd.as_deref()) {
+    if should_skip_orchestrator_hook(hook, cwd.as_deref(), is_orchestrator) {
         return Ok(());
     }
     let Some(session_id) = hook.get("session_id").and_then(Value::as_str) else {
@@ -2364,19 +2488,24 @@ pub fn prompt_baseline_from(hook: &Value) -> std::io::Result<()> {
     let Some(project) = project_at(cwd.as_deref()) else {
         return Ok(());
     };
-    let state = capture_edit_state(&project.root);
+    let dir = home_dir().join(nirvana_seat::DIR).join("edit-baselines");
+    let path = dir.join(format!("{session_id}.json"));
+    let prev_baseline: Option<EditState> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok());
+    let state = capture_edit_state_cached(&project.root, prev_baseline.as_ref());
     if state.fail_open {
+        let _ = std::fs::remove_file(&path);
         return Ok(());
     }
-    let dir = home_dir().join(nirvana_seat::DIR).join("edit-baselines");
+    prune_files_older_than(&dir, 7 * 86400);
     let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join(format!("{session_id}.json"));
     let _ = nirvana_seat::write_atomic(&path, serde_json::to_string(&state)?.as_bytes());
     Ok(())
 }
 
 fn prompt_baseline_cli() -> std::io::Result<()> {
-    prompt_baseline_from(&read_stdin())
+    prompt_baseline_from(&read_stdin(), is_orchestrator_env())
 }
 
 fn guard_edit_cli() -> std::io::Result<()> {
@@ -2388,15 +2517,16 @@ fn guard_edit_cli() -> std::io::Result<()> {
         project.as_ref().map(|p| p.root.as_path()),
         cwd.as_deref(),
         EditLimit::default(),
+        is_orchestrator_env(),
     ) {
         println!("{decision}");
     }
     Ok(())
 }
 
-pub fn check_edit_from(hook: &Value) -> std::io::Result<Option<Value>> {
+pub fn check_edit_from(hook: &Value, is_orchestrator: bool) -> std::io::Result<Option<Value>> {
     let cwd = hook_cwd(hook).or_else(|| std::env::current_dir().ok());
-    if should_skip_orchestrator_hook(hook, cwd.as_deref()) {
+    if should_skip_orchestrator_hook(hook, cwd.as_deref(), is_orchestrator) {
         return Ok(None);
     }
     let Some(session_id) = hook.get("session_id").and_then(Value::as_str) else {
@@ -2411,7 +2541,7 @@ pub fn check_edit_from(hook: &Value) -> std::io::Result<Option<Value>> {
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok());
 
-    let now_state = capture_edit_state(&project.root);
+    let now_state = capture_edit_state_cached(&project.root, baseline.as_ref());
     if now_state.fail_open {
         return Ok(None);
     }
@@ -2421,6 +2551,7 @@ pub fn check_edit_from(hook: &Value) -> std::io::Result<Option<Value>> {
         None => {
             // B1: When check-edit finds no baseline for its session, it writes one
             // from the current state and returns without blocking.
+            prune_files_older_than(&dir, 7 * 86400);
             let _ = std::fs::create_dir_all(&dir);
             let _ =
                 nirvana_seat::write_atomic(&path, serde_json::to_string(&now_state)?.as_bytes());
@@ -2434,11 +2565,12 @@ pub fn check_edit_from(hook: &Value) -> std::io::Result<Option<Value>> {
         &baseline,
         &now_state,
         EditLimit::default(),
+        is_orchestrator,
     ))
 }
 
 fn check_edit_cli() -> std::io::Result<()> {
-    if let Some(decision) = check_edit_from(&read_stdin())? {
+    if let Some(decision) = check_edit_from(&read_stdin(), is_orchestrator_env())? {
         println!("{decision}");
     }
     Ok(())

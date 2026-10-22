@@ -1091,6 +1091,114 @@ fn sources_axis_b2_real_fetch_calls_and_url_normalization() {
     );
 }
 
+#[test]
+fn sources_axis_r2_honest_browsing_and_shell_fetch() {
+    let target_url = "https://example.com/target";
+    let report = serde_json::json!({
+        "sources": [
+            {"url": target_url, "used_for": "spec research"}
+        ]
+    });
+
+    // 1. an agy open_browser_url stream passes
+    let agy_open_browser_stream = serde_json::json!({
+        "event": "step_update",
+        "step_update": {
+            "step_type": "tool",
+            "tool_name": "open_browser_url",
+            "tool_info": {
+                "parameters": {
+                    "url": target_url
+                }
+            }
+        }
+    })
+    .to_string();
+    let axis = sources_axis("research.web", Some(&report), &agy_open_browser_stream).expect("axis");
+    assert_eq!(axis.mark, Mark::Pass);
+
+    // 2. a Claude Bash tool_use running `agent-browser open <url>` passes
+    let claude_agent_browser_stream = serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "id": "msg-bash-ab",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "Bash",
+                    "input": {
+                        "command": format!("agent-browser open \"{target_url}\" --wait")
+                    }
+                }
+            ]
+        }
+    })
+    .to_string();
+    let axis =
+        sources_axis("research.web", Some(&report), &claude_agent_browser_stream).expect("axis");
+    assert_eq!(axis.mark, Mark::Pass);
+
+    // 3. a Claude Bash tool_use running `echo <url>` fails
+    let claude_echo_stream = serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "id": "msg-bash-echo",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "Bash",
+                    "input": {
+                        "command": format!("echo {target_url}")
+                    }
+                }
+            ]
+        }
+    })
+    .to_string();
+    let axis = sources_axis("research.web", Some(&report), &claude_echo_stream).expect("axis");
+    assert_eq!(axis.mark, Mark::Fail);
+
+    // 4. a browser_subagent whose task names the URL passes
+    let browser_subagent_stream = serde_json::json!({
+        "event": "step_update",
+        "step_update": {
+            "step_type": "tool",
+            "tool_name": "browser_subagent",
+            "tool_info": {
+                "parameters": {
+                    "task": format!("Visit {target_url} and extract the documentation details.")
+                }
+            }
+        }
+    })
+    .to_string();
+    let axis = sources_axis("research.web", Some(&report), &browser_subagent_stream).expect("axis");
+    assert_eq!(axis.mark, Mark::Pass);
+
+    // 5. the earlier cache_read_input_tokens case still fails
+    let claude_cache_tokens_stream = serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "id": "msg-cite-only",
+            "content": [
+                {
+                    "type": "text",
+                    "text": format!("I saw {target_url} in my knowledge base.")
+                }
+            ],
+            "usage": {
+                "input_tokens": 100,
+                "cache_read_input_tokens": 500,
+                "output_tokens": 50
+            }
+        }
+    })
+    .to_string();
+    let axis =
+        sources_axis("research.web", Some(&report), &claude_cache_tokens_stream).expect("axis");
+    assert_eq!(axis.mark, Mark::Fail);
+}
+
 // ---- Plan 24 §4: send-back override tests ----
 
 #[test]

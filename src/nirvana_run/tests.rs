@@ -1187,3 +1187,35 @@ fn end_decision_refusal_and_abandon() {
         _ => panic!("expected Kind::Gated"),
     }
 }
+
+#[test]
+fn run_arg_from_finds_run_with_leading_flags() {
+    assert_eq!(
+        run_arg_from(&["--abandon".into(), "o1".into(), "--why".into(), "x".into()]),
+        None
+    );
+    assert_eq!(
+        run_arg_from(&[
+            "r7".into(),
+            "--abandon".into(),
+            "o1".into(),
+            "--why".into(),
+            "x".into()
+        ]),
+        Some("r7".into())
+    );
+    assert_eq!(
+        run_arg_from(&[
+            "--abandon".into(),
+            "o1".into(),
+            "--why".into(),
+            "x".into(),
+            "r7".into()
+        ]),
+        Some("r7".into())
+    );
+    assert_eq!(
+        run_arg_from(&["--why".into(), "two words".into(), "r7".into()]),
+        Some("r7".into())
+    );
+}

@@ -51,8 +51,8 @@ CONTROLS = (
     Control(
         'p24_hook_skip_orchestrator_env',
         'src/nirvana_claude.rs',
-        '    if std::env::var(crate::nirvana_launch::ORCHESTRATOR_ENV).as_deref() != Ok("1") {\n        return true;\n    }\n',
-        '    if false && std::env::var(crate::nirvana_launch::ORCHESTRATOR_ENV).as_deref() != Ok("1") {\n        return true;\n    }\n',
+        '    if !is_orchestrator {\n        return true;\n    }\n',
+        '    if false && !is_orchestrator {\n        return true;\n    }\n',
         'guard_edit_and_check_edit_never_block_subagent_or_worker',
         'rust',
     ),
@@ -159,7 +159,7 @@ CONTROLS = (
     Control(
         'p24_gate_sources_tool_call_matcher',
         'src/nirvana_gate.rs',
-        '                    let is_fetch = name == "WebFetch"\n                        || (name.starts_with("mcp__")\n                            && (name.contains("browser") || name.contains("bladebro")));\n',
+        '                    let is_fetch = name == "WebFetch"\n                        || (name.starts_with("mcp__")\n                            && (name.contains("browser")\n                                || name.contains("bladebro")\n                                || name.contains("chrome")\n                                || name.contains("playwright")));\n',
         '                    let is_fetch = false;\n',
         'sources_axis_b2_real_fetch_calls_and_url_normalization',
         'rust',
@@ -225,6 +225,132 @@ CONTROLS = (
         '        if requires_owns(class) {\n            return Axis::new(\n                "owned",\n                Mark::Fail,\n                "unbounded: the order names no owned file",\n            )\n            .with(changed.iter().map(|path| (*path).clone()).collect());\n        }\n',
         '        if false && requires_owns(class) {\n            return Axis::new("owned", Mark::Fail, "unbounded").with(vec![]);\n        }\n',
         'owned_axis_empty_owns_fails_for_build_fix_plan_and_notes_for_read_only',
+        'rust',
+    ),
+    # Plan 24 B1: missing baseline writes baseline and never blocks
+    Control(
+        'p24_missing_baseline_never_blocks',
+        'src/nirvana_claude.rs',
+        '            let _ =\n                nirvana_seat::write_atomic(&path, serde_json::to_string(&now_state)?.as_bytes());\n            return Ok(None);\n',
+        '            return Ok(Some(json!({"decision": "block", "reason": "missing baseline"})));\n',
+        'missing_baseline_never_blocks_and_writes_baseline_and_sessions_keep_separate_baselines',
+        'rust',
+    ),
+    # Plan 24 S1: multiset line diff computes symmetric line difference
+    Control(
+        'p24_multiset_line_diff',
+        'src/nirvana_claude.rs',
+        '        diff += (n as isize - b as isize).unsigned_abs();\n',
+        '        diff += 0;\n',
+        'already_dirty_file_same_size_replacement_and_new_untracked_file_rewritten_fails',
+        'rust',
+    ),
+    # Plan 24 S3: git diff --numstat uses --relative so subfolder project roots ignore outside changes
+    Control(
+        'p24_numstat_relative',
+        'src/nirvana_claude.rs',
+        '            "--relative",\n',
+        '            "--no-color",\n',
+        'relative_paths_subfolder_project_root_sees_untracked_and_ignores_outside',
+        'rust',
+    ),
+    # Plan 24 S4: capture_edit_state fails open when total paths exceed 2000
+    Control(
+        'p24_fail_open_over_2000_paths',
+        'src/nirvana_claude.rs',
+        '    if tracked_paths.len() + untracked_paths.len() > MAX_PATHS {\n',
+        '    if false && tracked_paths.len() + untracked_paths.len() > MAX_PATHS {\n',
+        'capture_edit_state_over_2000_untracked_fails_open',
+        'rust',
+    ),
+    # Plan 24 S5.1: read_transcript_usage advances offset only to last newline
+    Control(
+        'p24_usage_offset_last_newline',
+        'src/nirvana_claude.rs',
+        '        Some(idx) => (&text[..=idx], seek_pos + (idx + 1) as u64),\n',
+        '        Some(idx) => (&text[..=idx], seek_pos + text.len() as u64),\n',
+        'usage_offsets_partial_line_split_id_and_sidechain',
+        'rust',
+    ),
+    # Plan 24 S5.2: read_transcript_usage skips messages whose id is in prior_seen_ids
+    Control(
+        'p24_usage_offset_seen_id_skip',
+        'src/nirvana_claude.rs',
+        '            if prior_set.contains(id.as_str()) {\n                continue;\n            }\n',
+        '            if false && prior_set.contains(id.as_str()) {\n                continue;\n            }\n',
+        'usage_offsets_partial_line_split_id_and_sidechain',
+        'rust',
+    ),
+    # Plan 24 S5.3: read_transcript_usage skips isSidechain entries
+    Control(
+        'p24_usage_offset_sidechain_skip',
+        'src/nirvana_claude.rs',
+        '        if entry.get("isSidechain").and_then(Value::as_bool) == Some(true) {\n            continue;\n        }\n',
+        '        if false && entry.get("isSidechain").and_then(Value::as_bool) == Some(true) {\n            continue;\n        }\n',
+        'usage_offsets_partial_line_split_id_and_sidechain',
+        'rust',
+    ),
+    # Plan 24 R1: run_arg_from skips --abandon and --why flags and their values
+    Control(
+        'p24_run_arg_from_skip_flags',
+        'src/nirvana_run.rs',
+        '        if args[i] == "--abandon" || args[i] == "--why" {\n            i += 2;\n',
+        '        if false {\n            i += 2;\n',
+        'run_arg_from_finds_run_with_leading_flags',
+        'rust',
+    ),
+    # Plan 24 R2.1: SHELL_FETCH_WORDS recognizes CLI download and browser commands
+    Control(
+        'p24_shell_fetch_words',
+        'src/nirvana_gate.rs',
+        'pub const SHELL_FETCH_WORDS: &[&str] = &[\n    "agent-browser",\n    "bladebro",\n    "curl",\n    "wget",\n    "Invoke-WebRequest",\n    "iwr",\n];\n',
+        'pub const SHELL_FETCH_WORDS: &[&str] = &[];\n',
+        'sources_axis_r2_honest_browsing_and_shell_fetch',
+        'rust',
+    ),
+    # Plan 24 R2.2: extract_url_tokens extracts URLs from shell commands and tool inputs
+    Control(
+        'p24_extract_url_tokens',
+        'src/nirvana_gate.rs',
+        '        tokens.push(token.to_string());\n',
+        '        let _ = token;\n',
+        'sources_axis_r2_honest_browsing_and_shell_fetch',
+        'rust',
+    ),
+    # Plan 24 R3: check_edit_from passes baseline cache to capture_edit_state_cached
+    Control(
+        'p24_check_edit_passes_baseline_cache',
+        'src/nirvana_claude.rs',
+        '    let now_state = capture_edit_state_cached(&project.root, baseline.as_ref());\n',
+        '    let now_state = capture_edit_state_cached(&project.root, None);\n',
+        'check_edit_from_passes_baseline_cache',
+        'rust',
+    ),
+    # Plan 24 R4: guard_edit_decision returns None for files outside project root
+    Control(
+        'p24_guard_edit_outside_project_return',
+        'src/nirvana_claude.rs',
+        '    let rel = path_under_project(file_path, root)?;\n',
+        '    let rel = path_under_project(file_path, root).unwrap_or_else(|| "outside.rs".into());\n',
+        'guard_edit_outside_project_ignored_and_mixed_case_windows_path',
+        'rust',
+    ),
+    # Plan 24 R5: seat_order releases lease if post-book check refuses empty owns
+    Control(
+        'p24_seat_order_refusal_releases_lease',
+        'src/nirvana_worker.rs',
+        '                if leases.release(&request.order, nirvana_run::now()) {\n',
+        '                if false && leases.release(&request.order, nirvana_run::now()) {\n',
+        'seat_order_refuses_empty_owns_for_build_fix_plan_and_permits_read_only',
+        'rust',
+    ),
+    # Plan 24 R6: prompt_baseline_from removes session baseline when state fails open
+    Control(
+        'p24_prompt_baseline_fail_open_removes_baseline',
+        'src/nirvana_claude.rs',
+        '    if state.fail_open {\n        let _ = std::fs::remove_file(&path);\n',
+        '    if state.fail_open {\n        // let _ = std::fs::remove_file(&path);\n',
+        'prompt_baseline_fail_open_removes_session_baseline',
         'rust',
     ),
 )

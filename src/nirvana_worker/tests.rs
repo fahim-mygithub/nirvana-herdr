@@ -974,7 +974,16 @@ fn seat_order_refuses_empty_owns_for_build_fix_plan_and_permits_read_only() {
     no_class_req.class = None;
     no_class_req.seat = pick.seat.clone();
     let res = seat_order(&project, &no_class_req);
-    assert_eq!(res.unwrap_err().0, 2);
+    let (code, msg) = res.unwrap_err();
+    assert_eq!(code, 2);
+    assert_eq!(
+        msg,
+        "a build order needs an `owns:` line naming the files it may change"
+    );
+
+    let leases_after = nirvana_seat::load_leases(&leases_path).unwrap();
+    assert!(leases_after.live("booked-no-class", now).is_none());
+    assert!(leases_after.live("test-order", now).is_none());
 
     // Rule 7: read-only classes never refused for empty owns
     // research.web has no owns:, but requires_owns is false

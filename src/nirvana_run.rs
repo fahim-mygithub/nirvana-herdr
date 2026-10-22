@@ -2271,13 +2271,22 @@ pub fn end_decision(state: &RunState, args: &[String]) -> Result<Vec<Kind>, Stri
     Ok(kinds)
 }
 
-fn end_cli(project: &Project, args: &[String]) -> std::io::Result<()> {
-    let mut run_opt: Option<String> = None;
-    for arg in args {
-        if !arg.starts_with("--") && run_opt.is_none() {
-            run_opt = Some(arg.to_owned());
+pub fn run_arg_from(args: &[String]) -> Option<String> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--abandon" || args[i] == "--why" {
+            i += 2;
+        } else if args[i].starts_with("--") {
+            i += 1;
+        } else {
+            return Some(args[i].clone());
         }
     }
+    None
+}
+
+fn end_cli(project: &Project, args: &[String]) -> std::io::Result<()> {
+    let run_opt = run_arg_from(args);
     let run = run_arg(project, run_opt.as_ref());
     let (journal, _, _, _) = load(project, &run);
     let (events, _) = journal.read();
