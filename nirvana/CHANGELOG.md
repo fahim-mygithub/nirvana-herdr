@@ -3,6 +3,54 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.37.0: five fixes from the audit of the first real runs
+
+- **Changed:**
+  - **Nirvana Claude's own usage reaches the run's receipt.** A new `herdr nirvana log-usage` hook runs at Stop. It
+    reads the session's transcript from where it last stopped, skips subagent lines, and counts each message id once.
+    On a resumed session it starts at the transcript's end, so it never recounts.
+  - **Nirvana Claude's own edits have a limit.** Outside a job it may change 1 file or 30 lines.
+    - A PreToolUse hook denies an Edit, Write or MultiEdit past the limit.
+    - A PostToolUse hook blocks after any tool, a script run through Bash included, when the project's tree moved
+      past the limit since the prompt's starting snapshot.
+    - The reason tells it to hand the work to a worker.
+    - Never checked: workers, subagents, `.nirvana/`, `.claude/`, `NIRVANA.md`, the Claude memory folder, and files
+      outside the project.
+    - It fails open: with no snapshot it takes one and never blocks; with more than 2,000 changed paths, or on any
+      error, it does nothing.
+  - **A retry keeps its model.**
+    - A sent-back order keeps its parent's override, and it does not count against the run's override cap. If that
+      seat is refused, the normal rule picks, and the journal says why.
+    - A worker re-seated after a rate limit keeps the override too, unless the limit hit that seat's own pool.
+  - **Research is checked.**
+    - The Work Report has a `sources` list.
+    - The gate gives `research.*` and `media.*` orders a `sources` verdict. It fails with no sources, and it fails
+      each source the worker's stream never fetched. A fetch is WebFetch, a browser tool, or a shell line that runs
+      `curl`, `wget`, `agent-browser` or bladebro on that URL.
+    - `herdr run end` refuses while a delivered order has no verdict. `--abandon <order> --why <text>` ends the run
+      anyway, with that order marked abandoned.
+  - **A build order names its files.** Build, fix and plan orders without an `owns:` line are refused before they
+    start, and the gate fails them. Read-only classes stay unchecked.
+  **Because:** the owner, 2026-10-22: "Sure lets fix that", answering the audit's five problems, with three rulings:
+  "Keep it (Recommended)", "Require the list (Recommended)" and "Block past limit (Recommended)". Plan
+  `nirvana/plans/2026-10-22-24-run-fixes.md`, built on agy (Gemini 3.8 Flash high).
+  **Measured:**
+  - 48 controls in `nirvana/controls.d/run_fixes.py`, each reddening its test alone.
+  - 4 older controls whose lines moved still redden theirs.
+  - Three review rounds (record `2026-10-22-24-records/p24.md`):
+    - A Sonnet reviewer found two blockers in the first build. With no starting snapshot the guard would have
+      blocked any dirty tree. The `sources` check passed every Claude stream, because every line holds
+      `cache_read_input_tokens`.
+    - A second reviewer found two more. `herdr run end --abandon` read the order as the run. The `sources` check
+      missed agy's real browser tools.
+    - A third found no blockers. The orchestrator fixed its should-fix items.
+  - Not live-checked yet (plan §8):
+    - the next receipt shows Nirvana Claude's tokens;
+    - a three-file change asked of Nirvana Claude goes to a worker;
+    - a research order's receipt shows a `sources` verdict.
+  **If you remove this:** receipts miss the orchestrator, Nirvana Claude builds features itself, a retry loses its
+  model, made-up sources pass, and a build order with no file list edits anything.
+
 ## alpha 0.36.0: each project keeps its own seat mode
 
 - **Changed:** the seat mode (Efficient, Balanced, SOTA) is now per project.
