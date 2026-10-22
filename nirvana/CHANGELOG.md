@@ -3,6 +3,32 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.36.0: each project keeps its own seat mode
+
+- **Changed:** the seat mode (Efficient, Balanced, SOTA) is now per project.
+  - **Where it lives:** `<project>/.nirvana/seats.toml`, with one key, `mode`. `.nirvana/` is local, so the file is
+    never committed.
+  - **Without the file, or with an empty one,** a project follows the machine's `mode =` line, as before.
+  - **What wins:** `--mode`, then the project's file, then the machine's line.
+  - **Who reads it:** every reader that knows its project. That is `herdr seat pick`, the worker's booking and its
+    re-seat, the gate and the spawn guard, each space's Nirvana Claude at launch (its model and effort), the restart
+    notice, and the Seats square, whose mode row now says "this project" or "machine".
+  - **The commands:**
+    - `herdr seat mode <mode>` sets the project's mode, and refuses a folder that is not a project.
+    - `--machine <mode>` sets the machine's line.
+    - `--clear` removes the project's file, a refused one included.
+  **Because:** the owner, 2026-10-22: "Make the seats attach to teh project folder. One project might want balanced or
+  SOTA while the other might want efficicent." Plan `nirvana/plans/2026-10-22-23-project-mode.md`, built on agy
+  (Gemini 3.8 Flash high).
+  **Measured:**
+  - 21 controls in `nirvana/controls.d/project_mode.py`, each reddening its test alone.
+  - 58 mode, launch and seat controls from earlier plans still redden theirs.
+  - The orchestrator found two defects and fixed them. A Sonnet reviewer found six should-fix items, all fixed (record
+    `2026-10-22-23-records/p23.md`).
+  - Not live-checked yet: two spaces on different modes, each Nirvana Claude restarted onto its own seat (plan §8).
+  - Known limit: the restart notice reads the project from the hook's folder.
+  **If you remove this:** one mode again for every project on the machine.
+
 ## alpha 0.35.1: a run's tab stays readable with many workers
 
 - **Changed:**
