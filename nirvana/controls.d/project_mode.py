@@ -119,4 +119,13 @@ CONTROLS = (
         'the_seats_square_mode_row_shows_the_source_word',
         'rust',
     ),
+    # Reviewer fix: a machine change is not logged in a project that keeps its own mode
+    Control(
+        'p23_machine_change_skips_own_mode_project',
+        'src/nirvana_seats_square.rs',
+        '    if !follows_machine {',
+        '    if false {',
+        'seat_mode_machine_writes_only_global_line',
+        'rust',
+    ),
 )

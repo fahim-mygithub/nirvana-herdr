@@ -170,6 +170,11 @@ pub const EFFORT: &str = "medium";
 
 /// The orchestrator's seat at launch for a specific folder/project (plan 20 §3.2, plan 23 §5).
 pub fn orchestrator_launch_seat_for(home: &Path, folder: &Path) -> (String, String) {
+    launch_seat(home, Some(folder))
+}
+
+/// The seat from the machine's table, with the folder's project mode over it when a folder is given.
+fn launch_seat(home: &Path, folder: Option<&Path>) -> (String, String) {
     let nirvana_dir = home.join(crate::nirvana_seat::DIR);
     let seats_path = nirvana_dir.join(crate::nirvana_seat::SEATS_FILE);
     let mut table = match std::fs::read_to_string(&seats_path)
@@ -179,10 +184,12 @@ pub fn orchestrator_launch_seat_for(home: &Path, folder: &Path) -> (String, Stri
         Some(t) => t,
         None => return (MODEL.to_owned(), EFFORT.to_owned()),
     };
-    let root = crate::nirvana_seats_square::project_root(folder);
-    match crate::nirvana_seat::project_mode(&root, &table) {
-        Ok((mode, _)) => table.mode = mode,
-        Err(_) => return (MODEL.to_owned(), EFFORT.to_owned()),
+    if let Some(folder) = folder {
+        let root = crate::nirvana_seats_square::project_root(folder);
+        match crate::nirvana_seat::project_mode(&root, &table) {
+            Ok((mode, _)) => table.mode = mode,
+            Err(_) => return (MODEL.to_owned(), EFFORT.to_owned()),
+        }
     }
     let now = crate::nirvana_usage::unix(std::time::SystemTime::now());
     let world = crate::nirvana_seat::cached_world(&nirvana_dir, now);
@@ -190,10 +197,11 @@ pub fn orchestrator_launch_seat_for(home: &Path, folder: &Path) -> (String, Stri
     (seat.model, seat.effort.word().to_owned())
 }
 
-/// The orchestrator's seat at launch (plan 20 §3.2): from the seat rule, or today's seat (opus medium)
-/// when the table or the readings fail to load.
+/// The orchestrator's seat at launch with no folder known (plan 20 §3.2): the machine's mode, or today's seat
+/// (opus medium) when the table or the readings fail to load. Not the process's own folder: herdr's server runs
+/// in whatever folder started it, which is no space's project. `launch_args` puts the folder's seat over it.
 pub fn orchestrator_launch_seat(home: &Path) -> (String, String) {
-    orchestrator_launch_seat_for(home, Path::new("."))
+    launch_seat(home, None)
 }
 
 /// The arguments after `claude` (plan 12 §6, O4b), in its order.

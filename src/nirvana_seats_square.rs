@@ -613,13 +613,22 @@ pub fn change_mode(root: &Path, to: Mode, by: &str) -> Result<String, String> {
 pub fn change_machine_mode(root: &Path, to: Mode, by: &str) -> Result<String, String> {
     let previous = nirvana_seat::set_mode_in(&seats_dir(), to)?;
     let (machine_table, _) = read_table(&seats_dir());
+    let mut follows_machine = true;
     if let Some(table) = machine_table {
         if let Ok((effective_mode, source)) = nirvana_seat::project_mode(root, &table) {
             mode_written(root, effective_mode, source);
+            follows_machine = source == ModeSource::Machine;
         }
     }
     if previous == to {
         return Ok(format!("machine mode {} already", to.title()));
+    }
+    // A project with its own mode did not change: its runs get no mode_changed line.
+    if !follows_machine {
+        return Ok(format!(
+            "machine mode {}: updated seats.toml; this project keeps its own mode",
+            to.title()
+        ));
     }
     let runs = log_mode(root, previous, to, by).map_err(|err| format!("journal: {err}"))?;
     Ok(match runs.as_slice() {

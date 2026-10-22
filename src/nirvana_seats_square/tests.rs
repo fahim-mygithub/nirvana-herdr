@@ -377,6 +377,21 @@ fn seat_mode_machine_writes_only_global_line() {
 
     let out = mode_cli_for(&root, &["--machine".to_string(), "efficient".to_string()]).unwrap();
     assert!(out.contains("mode Efficient"));
+    // This project keeps its own mode, so its open run logs no change.
+    let journal = nirvana_run::Journal::new(
+        root.join(nirvana_run::DIR)
+            .join("runs")
+            .join("rec1")
+            .join(nirvana_run::JOURNAL),
+    );
+    assert!(
+        !journal
+            .read()
+            .0
+            .iter()
+            .any(|event| matches!(event.kind, Kind::ModeChanged { .. })),
+        "a project with its own mode logged a machine change"
+    );
 
     let home_file = home.join(nirvana_seat::SEATS_FILE);
     let home_table = nirvana_seat::parse(&std::fs::read_to_string(&home_file).unwrap()).unwrap();
