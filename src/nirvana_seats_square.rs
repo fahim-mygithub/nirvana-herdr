@@ -592,11 +592,16 @@ pub fn change_mode(root: &Path, to: Mode, by: &str) -> Result<String, String> {
             nirvana_seat::SEATS_FILE
         )
     })?;
-    let (previous, _) = nirvana_seat::project_mode(root, &machine_table)?;
-    let _ = nirvana_seat::set_project_mode(root, to)?;
+    let (previous, source) = nirvana_seat::project_mode(root, &machine_table)
+        .map_err(|why| format!("{why}; {}", nirvana_seat::CLEAR_HINT))?;
+    nirvana_seat::set_project_mode(root, to)?;
     mode_written(root, to, ModeSource::Project);
     if previous == to {
-        return Ok(format!("mode {} already", to.title()));
+        // The same mode, but no longer the machine's: a later machine change leaves this project alone.
+        return Ok(match source {
+            ModeSource::Machine => format!("mode {}: pinned to this project", to.title()),
+            ModeSource::Project => format!("mode {} already", to.title()),
+        });
     }
     let runs = log_mode(root, previous, to, by).map_err(|err| format!("journal: {err}"))?;
     Ok(match runs.as_slice() {
@@ -650,14 +655,17 @@ pub fn clear_mode(root: &Path, by: &str) -> Result<String, String> {
             nirvana_seat::SEATS_FILE
         )
     })?;
-    let (previous, source) = nirvana_seat::project_mode(root, &machine_table)?;
+    // A refused file is removed too: --clear is the way out of one, and it had no mode to log.
+    let before = nirvana_seat::project_mode(root, &machine_table).ok();
     let file = root.join(nirvana_run::DIR).join(nirvana_seat::SEATS_FILE);
     if file.exists() {
         std::fs::remove_file(&file).map_err(|err| format!("{}: {err}", file.display()))?;
     }
     mode_written(root, machine_table.mode, ModeSource::Machine);
-    if source == ModeSource::Project && previous != machine_table.mode {
-        let _ = log_mode(root, previous, machine_table.mode, by);
+    if let Some((previous, ModeSource::Project)) = before {
+        if previous != machine_table.mode {
+            let _ = log_mode(root, previous, machine_table.mode, by);
+        }
     }
     Ok(format!(
         "cleared project mode: now following machine ({})",
@@ -686,10 +694,22 @@ pub fn mode_cli_for(root: &Path, args: &[String]) -> Result<String, String> {
         }
         [word] => {
             let mode = Mode::parse(word).ok_or_else(|| USAGE.to_owned())?;
+            // Outside git `Project::from_env` is the folder itself: a mode set from Downloads would leave a
+            // `.nirvana` there.
+            if !is_project(root) {
+                return Err(format!(
+                    "{} is not a project (no .git and no .nirvana): run it in the project's folder",
+                    root.display()
+                ));
+            }
             change_mode(root, mode, "herdr seat mode")
         }
         _ => Err(USAGE.to_owned()),
     }
+}
+
+fn is_project(root: &Path) -> bool {
+    root.join(".git").exists() || root.join(nirvana_run::DIR).is_dir()
 }
 
 /// `herdr seat mode [<mode> | --machine <mode> | --clear]`.

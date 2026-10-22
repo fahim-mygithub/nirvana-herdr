@@ -296,7 +296,9 @@ fn the_mode_key_writes_seats_toml_and_logs_mode_changed_in_each_open_run() {
     let project_file = nirvana_seat::project_seats_path(&root);
     let project_table = std::fs::read_to_string(&project_file).unwrap();
     assert_eq!(
-        nirvana_seat::parse_project_seats(&project_file, &project_table).unwrap(),
+        nirvana_seat::parse_project_seats(&project_file, &project_table)
+            .unwrap()
+            .unwrap(),
         Mode::Sota
     );
     let table = std::fs::read_to_string(home.join(nirvana_seat::SEATS_FILE)).unwrap();
@@ -352,7 +354,9 @@ fn seat_mode_writes_only_project_file() {
     assert!(project_file.exists());
     let project_content = std::fs::read_to_string(&project_file).unwrap();
     assert_eq!(
-        nirvana_seat::parse_project_seats(&project_file, &project_content).unwrap(),
+        nirvana_seat::parse_project_seats(&project_file, &project_content)
+            .unwrap()
+            .unwrap(),
         Mode::Sota
     );
 
@@ -409,6 +413,29 @@ fn seat_mode_machine_writes_only_global_line() {
     set_home_for_test(None, None);
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_refused_file_clears_and_a_folder_outside_a_project_is_left_alone() {
+    let (root, home) = project("cli-refused", None);
+    set_home_for_test(Some(home.clone()), Some(NOW));
+    let file = nirvana_seat::project_seats_path(&root);
+    std::fs::write(&file, "mode = \"fast\"\n").unwrap();
+    let err = mode_cli_for(&root, &["sota".to_string()]).unwrap_err();
+    assert!(err.contains("--clear"), "{err}");
+    mode_cli_for(&root, &["--clear".to_string()]).unwrap();
+    assert!(!file.exists(), "--clear removes a refused file");
+    assert_eq!(mode_cli_for(&root, &[]).unwrap(), "balanced (machine)");
+
+    let loose = folder("cli-loose");
+    let err = mode_cli_for(&loose, &["sota".to_string()]).unwrap_err();
+    assert!(err.contains("not a project"), "{err}");
+    assert!(!loose.join(nirvana_run::DIR).exists(), "nothing written");
+
+    set_home_for_test(None, None);
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&loose);
 }
 
 #[test]

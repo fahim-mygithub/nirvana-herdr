@@ -3071,8 +3071,12 @@ pub fn project_seats_path(root: &Path) -> PathBuf {
 
 /// Parses a project's <project>/.nirvana/seats.toml file (plan 23 §2).
 /// Content: one key, `mode = "efficient" | "balanced" | "sota"`, and comments.
-/// Any other key, or a bad value, refuses the file, naming the path and line.
-pub fn parse_project_seats(path: &Path, text: &str) -> Result<Mode, String> {
+/// Any other key, or a bad value, refuses the file, naming the path and line. A file with no `mode` line (empty,
+/// or its line commented out) gives `None`: the machine's mode, as with no file. Refusing it would stop every seat
+/// pick in the project over a file that breaks neither rule (plan 23 review S2).
+pub fn parse_project_seats(path: &Path, text: &str) -> Result<Option<Mode>, String> {
+    // An editor's byte-order mark would read as part of the key.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut found_mode: Option<(Mode, usize)> = None;
     for (idx, line) in text.lines().enumerate() {
         let line_no = idx + 1;
@@ -3148,10 +3152,7 @@ pub fn parse_project_seats(path: &Path, text: &str) -> Result<Mode, String> {
         };
         found_mode = Some((mode, line_no));
     }
-    match found_mode {
-        Some((mode, _)) => Ok(mode),
-        None => Err(format!("{}: missing `mode` key", path.display())),
-    }
+    Ok(found_mode.map(|(mode, _)| mode))
 }
 
 /// Updates or creates the `mode = ...` line in a project seats file, preserving comments and formatting.
@@ -3192,33 +3193,32 @@ pub fn with_project_mode(text: &str, mode: Mode) -> Result<String, String> {
     Ok(out)
 }
 
-/// Sets the mode in <project>/.nirvana/seats.toml (plan 23 §2).
-/// Preserves comments if file already exists; creates it with `mode = "..."\n` if not.
-/// Refuses to touch a broken file. Returns previous mode.
-pub fn set_project_mode(root: &Path, mode: Mode) -> Result<Mode, String> {
+/// Sets the mode in <project>/.nirvana/seats.toml (plan 23 §2), keeping the file's comments, or creating it.
+/// A refused file is never rewritten: it is the owner's to fix, and `herdr seat mode --clear` removes it. The caller
+/// already knows the mode before (`project_mode`), so nothing is read here that could fail after the write.
+pub fn set_project_mode(root: &Path, mode: Mode) -> Result<(), String> {
     let path = project_seats_path(root);
-    if path.exists() {
+    let text = if path.exists() {
         let text =
             std::fs::read_to_string(&path).map_err(|err| format!("{}: {err}", path.display()))?;
-        let previous = parse_project_seats(&path, &text)?;
-        if previous != mode {
-            let updated = with_project_mode(&text, mode)?;
-            parse_project_seats(&path, &updated)?;
-            write_atomic(&path, updated.as_bytes())
-                .map_err(|err| format!("{}: {err}", path.display()))?;
-        }
-        Ok(previous)
+        parse_project_seats(&path, &text).map_err(|why| format!("{why}; {CLEAR_HINT}"))?;
+        text
     } else {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let content = format!("mode = \"{}\"\n", mode.word());
-        write_atomic(&path, content.as_bytes())
-            .map_err(|err| format!("{}: {err}", path.display()))?;
-        let global_table = table()?;
-        Ok(global_table.mode)
+        String::new()
+    };
+    let updated = with_project_mode(&text, mode)?;
+    if updated == text {
+        return Ok(());
     }
+    parse_project_seats(&path, &updated)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| format!("{}: {err}", parent.display()))?;
+    }
+    write_atomic(&path, updated.as_bytes()).map_err(|err| format!("{}: {err}", path.display()))
 }
+
+/// What to do about a refused project file.
+pub const CLEAR_HINT: &str = "fix it, or `herdr seat mode --clear` removes it";
 
 /// Determines the mode for a project (plan 23 §3):
 /// 1. Project's file `<project>/.nirvana/seats.toml` if it exists;
@@ -3230,8 +3230,11 @@ pub fn project_mode(root: &Path, table: &Table) -> Result<(Mode, ModeSource), St
     }
     let text =
         std::fs::read_to_string(&path).map_err(|err| format!("{}: {err}", path.display()))?;
-    let mode = parse_project_seats(&path, &text)?;
-    Ok((mode, ModeSource::Project))
+    match parse_project_seats(&path, &text)? {
+        Some(mode) => Ok((mode, ModeSource::Project)),
+        // Empty, or comments only: the machine's mode, as with no file.
+        None => Ok((table.mode, ModeSource::Machine)),
+    }
 }
 
 /// Returns the global table with its mode replaced by the project's mode (plan 23 §3).
@@ -3668,21 +3671,30 @@ fn list_arg(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn pick_cli(args: &[String]) -> std::io::Result<()> {
-    let project = crate::nirvana_run::Project::from_env();
-    let table = match table_for(&project.root) {
-        Ok(t) => t,
-        Err(err) => {
-            eprintln!("herdr seat pick: {err}");
-            std::process::exit(2);
-        }
+/// `herdr seat pick`'s flags, read over the project's table.
+#[derive(Debug)]
+pub(crate) struct PickArgs {
+    pub request: Request,
+    pub json: bool,
+    pub book: Option<String>,
+    pub run: Option<String>,
+    pub over: Option<String>,
+    pub reason: Option<String>,
+}
+
+/// The table `herdr seat pick` reads in the project at `root`, and its flags over it: the project's mode stands
+/// unless `--mode` is given (plan 23 §3).
+pub(crate) fn pick_args_for(root: &Path, args: &[String]) -> Result<(Table, PickArgs), String> {
+    let table = table_for(root)?;
+    let mut picked = PickArgs {
+        request: default_request(&table),
+        json: false,
+        book: None,
+        run: None,
+        over: None,
+        reason: None,
     };
-    let mut request = default_request(&table);
-    let mut json = false;
-    let mut book: Option<String> = None;
-    let mut run: Option<String> = None;
-    let mut over: Option<String> = None;
-    let mut reason: Option<String> = None;
+    let request = &mut picked.request;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         let mut value = || iter.next().cloned().unwrap_or_else(|| usage_exit());
@@ -3692,14 +3704,36 @@ fn pick_cli(args: &[String]) -> std::io::Result<()> {
             "--needs" => request.needs = list_arg(&value()),
             "--not-family" => request.not_family = list_arg(&value()),
             "--mode" => request.mode = Mode::parse(&value()).unwrap_or_else(|| usage_exit()),
-            "--book" => book = Some(value()),
-            "--run" => run = Some(value()),
-            "--override" => over = Some(value()),
-            "--reason" => reason = Some(value()),
-            "--json" => json = true,
+            "--book" => picked.book = Some(value()),
+            "--run" => picked.run = Some(value()),
+            "--override" => picked.over = Some(value()),
+            "--reason" => picked.reason = Some(value()),
+            "--json" => picked.json = true,
             _ => usage_exit(),
         }
     }
+    Ok((table, picked))
+}
+
+fn pick_cli(args: &[String]) -> std::io::Result<()> {
+    let project = crate::nirvana_run::Project::from_env();
+    let (
+        table,
+        PickArgs {
+            mut request,
+            json,
+            book,
+            run,
+            over,
+            reason,
+        },
+    ) = match pick_args_for(&project.root, args) {
+        Ok(picked) => picked,
+        Err(err) => {
+            eprintln!("herdr seat pick: {err}");
+            std::process::exit(2);
+        }
+    };
     if table.class(&request.class).is_none() {
         let known: Vec<&str> = table
             .classes
@@ -6232,6 +6266,35 @@ mod tests {
     }
 
     #[test]
+    fn test_p23_an_empty_or_marked_file_reads_as_the_machine() {
+        let _guard = crate::nirvana::with_test_home("p23-empty");
+        let proj = temp_project("empty");
+        let file = proj.join(".nirvana").join(SEATS_FILE);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let table = parse(DEFAULT).unwrap();
+        for text in ["", "# mode = \"sota\"\n", "\n\n"] {
+            std::fs::write(&file, text).unwrap();
+            assert_eq!(
+                project_mode(&proj, &table).unwrap(),
+                (table.mode, ModeSource::Machine),
+                "{text:?}"
+            );
+        }
+        // An editor's byte-order mark and CRLF endings are still the one key.
+        std::fs::write(&file, "\u{feff}mode = \"sota\"\r\n").unwrap();
+        assert_eq!(
+            project_mode(&proj, &table).unwrap(),
+            (Mode::Sota, ModeSource::Project)
+        );
+        // A refused file is never rewritten by a set, and the refusal says the way out.
+        std::fs::write(&file, "mode = \"fast\"\n").unwrap();
+        let err = set_project_mode(&proj, Mode::Sota).unwrap_err();
+        assert!(err.contains("--clear"), "{err}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "mode = \"fast\"\n");
+        let _ = std::fs::remove_dir_all(&proj);
+    }
+
+    #[test]
     fn test_p23_two_projects_different_modes() {
         let guard = crate::nirvana::with_test_home("p23-two-proj");
         let home_seats = guard.path.join("nirvana").join(SEATS_FILE);
@@ -6278,20 +6341,13 @@ mod tests {
         )
         .unwrap();
 
-        let table = table_for(&proj).unwrap();
+        // `herdr seat pick`'s own reading: the project's mode with no flag, the flag's over it.
+        let (table, picked) = pick_args_for(&proj, &[]).unwrap();
         assert_eq!(table.mode, Mode::Efficient);
-        let mut req = default_request(&table);
-        assert_eq!(req.mode, Mode::Efficient);
-
+        assert_eq!(picked.request.mode, Mode::Efficient);
         let args = ["--mode".to_string(), "sota".to_string()];
-        let mut iter = args.iter();
-        while let Some(arg) = iter.next() {
-            let mut value = || iter.next().cloned().unwrap_or_else(|| usage_exit());
-            if arg.as_str() == "--mode" {
-                req.mode = Mode::parse(&value()).unwrap_or_else(|| usage_exit());
-            }
-        }
-        assert_eq!(req.mode, Mode::Sota);
+        let (_, picked) = pick_args_for(&proj, &args).unwrap();
+        assert_eq!(picked.request.mode, Mode::Sota);
         let _ = std::fs::remove_dir_all(&proj);
     }
 
@@ -6326,6 +6382,18 @@ mod tests {
         assert_eq!(effort_eff, "medium");
         assert!(model_sota.contains("opus"));
         assert_eq!(effort_sota, "high");
+
+        // The argv each space's Nirvana Claude is started with carries its own project's seat.
+        let flag = |args: &[String], name: &str| {
+            let at = args.iter().position(|arg| arg == name).expect(name);
+            args[at + 1].clone()
+        };
+        let eff = crate::nirvana_launch::launch_args(&guard.path, &proj_eff, None);
+        let sota = crate::nirvana_launch::launch_args(&guard.path, &proj_sota, None);
+        assert!(flag(&eff, "--model").contains("sonnet"), "{eff:?}");
+        assert_eq!(flag(&eff, "--effort"), "medium");
+        assert!(flag(&sota, "--model").contains("opus"), "{sota:?}");
+        assert_eq!(flag(&sota, "--effort"), "high");
 
         let _ = std::fs::remove_dir_all(&proj_eff);
         let _ = std::fs::remove_dir_all(&proj_sota);

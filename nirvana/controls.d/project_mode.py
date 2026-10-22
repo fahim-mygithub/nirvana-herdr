@@ -15,8 +15,8 @@ CONTROLS = (
     Control(
         'p23_project_mode_file_gives_project',
         'src/nirvana_seat.rs',
-        '    let mode = parse_project_seats(&path, &text)?;\n    Ok((mode, ModeSource::Project))\n',
-        '    let mode = parse_project_seats(&path, &text)?;\n    Ok((table.mode, ModeSource::Machine))\n',
+        '        Some(mode) => Ok((mode, ModeSource::Project)),\n',
+        '        Some(_mode) => Ok((table.mode, ModeSource::Machine)),\n',
         'test_p23_project_mode_file_gives_project',
         'rust',
     ),
@@ -51,8 +51,8 @@ CONTROLS = (
     Control(
         'p23_pick_mode_flag_beats_project_file',
         'src/nirvana_seat.rs',
-        '            if arg.as_str() == "--mode" {\n                req.mode = Mode::parse(&value()).unwrap_or_else(|| usage_exit());\n',
-        '            if arg.as_str() == "--mode" {\n                let _ = value();\n',
+        '            "--mode" => request.mode = Mode::parse(&value()).unwrap_or_else(|| usage_exit()),\n',
+        '            "--mode" => drop(value()),\n',
         'test_p23_pick_mode_flag_beats_project_file',
         'rust',
     ),
@@ -69,8 +69,8 @@ CONTROLS = (
     Control(
         'p23_orchestrator_seat_table_for',
         'src/nirvana_launch.rs',
-        '    match crate::nirvana_seat::project_mode(&root, &table) {\n        Ok((mode, _)) => table.mode = mode,\n',
-        '    match crate::nirvana_seat::project_mode(&root, &table) {\n        Ok((_mode, _)) => table.mode = crate::nirvana_seat::Mode::Balanced,\n',
+        '            Ok((mode, _)) => table.mode = mode,\n',
+        '            Ok((_mode, _)) => table.mode = crate::nirvana_seat::Mode::Balanced,\n',
         'test_p23_orchestrator_seat_table_for',
         'rust',
     ),
@@ -78,8 +78,8 @@ CONTROLS = (
     Control(
         'p23_seat_mode_writes_only_project_file',
         'src/nirvana_seats_square.rs',
-        '    let _ = nirvana_seat::set_project_mode(root, to)?;\n',
-        '    let _ = nirvana_seat::set_mode_in(&seats_dir(), to)?;\n',
+        '    nirvana_seat::set_project_mode(root, to)?;\n',
+        '    nirvana_seat::set_mode_in(&seats_dir(), to)?;\n',
         'seat_mode_writes_only_project_file',
         'rust',
     ),
@@ -126,6 +126,69 @@ CONTROLS = (
         '    if !follows_machine {',
         '    if false {',
         'seat_mode_machine_writes_only_global_line',
+        'rust',
+    ),
+    # Review S5: herdr seat pick reads the project's table, not the machine's
+    Control(
+        'p23_pick_reads_project_table',
+        'src/nirvana_seat.rs',
+        '    let table = table_for(root)?;\n    let mut picked = PickArgs {',
+        '    let table = table()?;\n    let mut picked = PickArgs {',
+        'test_p23_pick_mode_flag_beats_project_file',
+        'rust',
+    ),
+    # Review S2: an empty or comments-only file is the machine's mode
+    Control(
+        'p23_empty_file_is_machine',
+        'src/nirvana_seat.rs',
+        '        None => Ok((table.mode, ModeSource::Machine)),\n    }',
+        '        None => Err("no mode".into()),\n    }',
+        'test_p23_an_empty_or_marked_file_reads_as_the_machine',
+        'rust',
+    ),
+    # Review N3: an editor's byte-order mark is not part of the key
+    Control(
+        'p23_bom_stripped',
+        'src/nirvana_seat.rs',
+        "    let text = text.strip_prefix('\\u{feff}').unwrap_or(text);\n",
+        '',
+        'test_p23_an_empty_or_marked_file_reads_as_the_machine',
+        'rust',
+    ),
+    # Review S1: a refused file is never rewritten by a set
+    Control(
+        'p23_refused_file_untouched',
+        'src/nirvana_seat.rs',
+        '        parse_project_seats(&path, &text).map_err(|why| format!("{why}; {CLEAR_HINT}"))?;\n        text\n',
+        '        let _ = parse_project_seats(&path, &text);\n        text\n',
+        'test_p23_an_empty_or_marked_file_reads_as_the_machine',
+        'rust',
+    ),
+    # Review S1: --clear removes a refused file
+    Control(
+        'p23_clear_refused_file',
+        'src/nirvana_seats_square.rs',
+        '    let before = nirvana_seat::project_mode(root, &machine_table).ok();\n',
+        '    let before = Some(nirvana_seat::project_mode(root, &machine_table)?);\n',
+        'a_refused_file_clears_and_a_folder_outside_a_project_is_left_alone',
+        'rust',
+    ),
+    # Review S3: a folder outside a project is left alone
+    Control(
+        'p23_not_a_project',
+        'src/nirvana_seats_square.rs',
+        '            if !is_project(root) {\n',
+        '            if false {\n',
+        'a_refused_file_clears_and_a_folder_outside_a_project_is_left_alone',
+        'rust',
+    ),
+    # Review S6: launch_args carries the project's seat
+    Control(
+        'p23_launch_args_override',
+        'src/nirvana_launch.rs',
+        '    let (model, effort) = orchestrator_launch_seat_for(home, folder);\n',
+        '    let (model, effort) = orchestrator_launch_seat(home);\n',
+        'test_p23_orchestrator_seat_table_for',
         'rust',
     ),
 )

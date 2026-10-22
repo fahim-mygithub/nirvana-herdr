@@ -312,7 +312,9 @@ fn the_mode_key_moves_the_mode_in_seats_toml_logs_it_and_shows_it() {
     let project_file = root.join(".nirvana/seats.toml");
     let table = std::fs::read_to_string(&project_file).unwrap();
     assert_eq!(
-        crate::nirvana_seat::parse_project_seats(&project_file, &table).unwrap(),
+        crate::nirvana_seat::parse_project_seats(&project_file, &table)
+            .unwrap()
+            .unwrap(),
         crate::nirvana_seat::Mode::Sota
     );
     let machine_table = std::fs::read_to_string(home.join("seats.toml")).unwrap();
@@ -355,7 +357,9 @@ fn the_mode_key_moves_the_mode_in_seats_toml_logs_it_and_shows_it() {
     let _ = click(&mut state, mode.x + 1, mode.y);
     let table = std::fs::read_to_string(&project_file).unwrap();
     assert_eq!(
-        crate::nirvana_seat::parse_project_seats(&project_file, &table).unwrap(),
+        crate::nirvana_seat::parse_project_seats(&project_file, &table)
+            .unwrap()
+            .unwrap(),
         crate::nirvana_seat::Mode::Efficient
     );
     let machine_table = std::fs::read_to_string(home.join("seats.toml")).unwrap();
