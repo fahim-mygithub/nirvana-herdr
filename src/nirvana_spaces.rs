@@ -25,6 +25,8 @@ pub const MODEL_TOKEN: &str = "nirvana_model";
 pub const TRANSCRIPT_TOKEN: &str = "nirvana_transcript";
 /// The agent token holding the kind: "claude", "codex", "antigravity" or "local".
 pub const KIND_TOKEN: &str = "nirvana_kind";
+/// The agent token marking which Claude is the space's Nirvana Claude (plan 26 §4).
+pub const ROLE_TOKEN: &str = "nirvana_role";
 /// How old a cached model may get before the worker reads it again. A `/model` switch shows within this.
 pub const REFRESH: Duration = Duration::from_secs(3);
 /// An entry nobody asked for in this long belongs to a pane that closed.
@@ -103,6 +105,8 @@ pub struct AgentModel {
     pub label: String,
     /// Feature 6: a Claude's transcript, which the window's Running panel reads.
     pub transcript: Option<PathBuf>,
+    /// Plan 26 §4: marks which Claude is Nirvana Claude ("nirvana").
+    pub role: Option<String>,
 }
 
 impl AgentModel {
@@ -116,6 +120,9 @@ impl AgentModel {
                 TRANSCRIPT_TOKEN.to_string(),
                 transcript.display().to_string(),
             ));
+        }
+        if let Some(role) = &self.role {
+            tokens.push((ROLE_TOKEN.to_string(), role.clone()));
         }
         tokens
     }
@@ -174,25 +181,36 @@ pub fn claude_model(model: Option<&str>) -> AgentModel {
             kind: Kind::Claude,
             label: Kind::Claude.provider().into(),
             transcript: None,
+            role: None,
         },
         Some(model) if CLAUDE_GENERIC_ALIASES.contains(&model) => AgentModel {
             kind: Kind::Claude,
             label: Kind::Claude.provider().into(),
             transcript: None,
+            role: None,
         },
         Some(model) => match claude_label(model) {
             Some(label) => AgentModel {
                 kind: Kind::Claude,
                 label,
                 transcript: None,
+                role: None,
             },
             None => AgentModel {
                 kind: Kind::Local,
                 label: format!("Local {model}"),
                 transcript: None,
+                role: None,
             },
         },
     }
+}
+
+/// A Claude Code process with the Nirvana role token attached.
+pub fn claude_nirvana_model(model: Option<&str>) -> AgentModel {
+    let mut m = claude_model(model);
+    m.role = Some("nirvana".to_string());
+    m
 }
 
 /// "gpt-5-codex" -> "GPT-5 Codex"; "gpt-5.5" -> "Codex GPT-5.5"; none -> "Codex".
@@ -222,6 +240,7 @@ pub fn codex_model(model: Option<&str>) -> AgentModel {
         kind: Kind::Codex,
         label,
         transcript: None,
+        role: None,
     }
 }
 
@@ -235,6 +254,7 @@ pub fn antigravity_model(model: Option<&str>) -> AgentModel {
             .unwrap_or(Kind::Antigravity.provider())
             .to_string(),
         transcript: None,
+        role: None,
     }
 }
 
@@ -393,6 +413,72 @@ fn codex_config_model() -> Option<String> {
     value.get("model")?.as_str().map(str::to_string)
 }
 
+/// Whether an agent's process arguments indicate it is Nirvana Claude (plan 26 §4).
+///
+/// Nirvana Claude starts with `--agent nirvana` (or `nirvana:...`) and `--plugin-dir` naming Nirvana's
+/// plugin directory (`nirvana/claude`), distinct from plain Claude Code.
+pub fn is_nirvana_claude(args: &[String]) -> bool {
+    let mut is_agent = false;
+    let mut is_plugin = false;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--agent" {
+            if let Some(val) = iter.next() {
+                if val == "nirvana" || val.starts_with("nirvana:") {
+                    is_agent = true;
+                }
+            }
+        } else if let Some(val) = arg.strip_prefix("--agent=") {
+            if val == "nirvana" || val.starts_with("nirvana:") {
+                is_agent = true;
+            }
+        }
+        if arg == "--plugin-dir" {
+            if let Some(val) = iter.next() {
+                if val.to_lowercase().contains("nirvana") {
+                    is_plugin = true;
+                }
+            }
+        } else if let Some(val) = arg.strip_prefix("--plugin-dir=") {
+            if val.to_lowercase().contains("nirvana") {
+                is_plugin = true;
+            }
+        }
+    }
+    is_agent || is_plugin
+}
+
+/// The short model representation (plan 26 §4 & §5), e.g. "Sonnet", "Opus", "Flash", "Argon", "Codex".
+pub fn compact_model(model: &str) -> String {
+    let trimmed = model.trim();
+    let s = trimmed.strip_prefix("Claude ").unwrap_or(trimmed);
+    if let Some((family, _ver)) = s.split_once(' ') {
+        if matches!(family, "Sonnet" | "Opus" | "Haiku" | "Fable") {
+            return family.to_string();
+        }
+    }
+    if matches!(s, "Sonnet" | "Opus" | "Haiku" | "Fable") {
+        return s.to_string();
+    }
+    let lower = trimmed.to_lowercase();
+    if lower.contains("flash") {
+        return "Flash".to_string();
+    }
+    if lower.contains("pro") {
+        return "Pro".to_string();
+    }
+    if lower.contains("argon") {
+        return "Argon".to_string();
+    }
+    if lower.contains("codex") {
+        return "Codex".to_string();
+    }
+    if let Some(rest) = trimmed.strip_prefix("Local ") {
+        return rest.to_string();
+    }
+    crate::nirvana_subagents::short_model(trimmed)
+}
+
 /// The agent in a pane's shell and its model, read now. Runs on the worker thread only.
 fn probe(shell_pid: u32, pane_cwd: Option<&str>) -> Option<AgentModel> {
     let job = crate::detect::foreground_job(shell_pid)?;
@@ -421,7 +507,11 @@ fn probe(shell_pid: u32, pane_cwd: Option<&str>) -> Option<AgentModel> {
                 .as_deref()
                 .and_then(read_tail)
                 .and_then(|text| claude_transcript_model(&text));
-            let mut model = claude_model(transcript.or(from_args).as_deref());
+            let mut model = if is_nirvana_claude(&args) {
+                claude_nirvana_model(transcript.or(from_args).as_deref())
+            } else {
+                claude_model(transcript.or(from_args).as_deref())
+            };
             model.transcript = path;
             Some(model)
         }
@@ -637,6 +727,7 @@ mod tests {
                 kind: Kind::Local,
                 label: "Local qwen3.6:35b-a3b".into(),
                 transcript: None,
+                role: None,
             }
         );
         assert_eq!(claude_model(Some("claude-haiku-5-5")).kind, Kind::Claude);

@@ -23,9 +23,92 @@ pub(super) fn is_narrow_agent_panel(width: u16) -> bool {
     width < 34
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct SubagentRunGroup<'a> {
+    pub(crate) run_id: &'a str,
+    pub(crate) live: Vec<&'a crate::nirvana_subagents::Subagent>,
+    pub(crate) finished: Vec<&'a crate::nirvana_subagents::Subagent>,
+}
+
+pub(crate) fn is_live_subagent(state: crate::nirvana_subagents::SubagentState) -> bool {
+    matches!(
+        state,
+        crate::nirvana_subagents::SubagentState::Running
+            | crate::nirvana_subagents::SubagentState::Blocked
+    )
+}
+
+pub(crate) fn group_subagents_by_run<'a>(
+    subagents: &'a [crate::nirvana_subagents::Subagent],
+) -> Vec<SubagentRunGroup<'a>> {
+    let mut order_of_runs: Vec<&'a str> = Vec::new();
+    let mut groups: HashMap<
+        &'a str,
+        (
+            Vec<&'a crate::nirvana_subagents::Subagent>,
+            Vec<&'a crate::nirvana_subagents::Subagent>,
+        ),
+    > = HashMap::new();
+
+    for sub in subagents {
+        if let Some(run_id) = sub.run_id.as_deref() {
+            let entry = groups.entry(run_id).or_insert_with(|| {
+                order_of_runs.push(run_id);
+                (Vec::new(), Vec::new())
+            });
+            if is_live_subagent(sub.state) {
+                entry.0.push(sub);
+            } else {
+                entry.1.push(sub);
+            }
+        }
+    }
+
+    let mut result = Vec::new();
+    for run_id in order_of_runs {
+        if let Some((mut live, mut finished)) = groups.remove(run_id) {
+            // live workers first, newest first: smallest elapsed_secs first
+            live.sort_by_key(|s| s.elapsed_secs);
+            // finished workers after, most recently finished first: largest ended_at first
+            finished.sort_by_key(|s| std::cmp::Reverse(s.ended_at.unwrap_or(0)));
+            result.push(SubagentRunGroup {
+                run_id,
+                live,
+                finished,
+            });
+        }
+    }
+
+    // Sort runs:
+    // - runs with any live worker come first, newest run first
+    // - runs with only finished workers come after, newest first
+    result.sort_by(|a, b| {
+        let a_live = !a.live.is_empty();
+        let b_live = !b.live.is_empty();
+        match (a_live, b_live) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => b.run_id.cmp(a.run_id),
+        }
+    });
+
+    result
+}
+
 pub(super) fn agent_row_lines(row: &AgentRow, width: u16) -> usize {
     let base = row.rows.len().max(1);
     let narrow = is_narrow_agent_panel(width);
+    if row.subagents.iter().any(|s| s.run_id.is_some()) {
+        let groups = group_subagents_by_run(&row.subagents);
+        let mut lines = 0;
+        for g in &groups {
+            lines += 1;
+            lines += g.live.len() * 2;
+            lines += g.finished.len();
+        }
+        let overflow_line = if row.subagents_overflow > 0 { 1 } else { 0 };
+        return base + lines + overflow_line;
+    }
     let sub_lines: usize = row
         .subagents
         .iter()
@@ -379,10 +462,19 @@ pub(super) fn agent_row(
         None,
     );
 
-    let (subagents, subagents_overflow) = match crate::nirvana_subagents::cached(pane_id) {
+    let (mut subagents, subagents_overflow) = match crate::nirvana_subagents::cached(pane_id) {
         Some(view) => (view.subagents, view.overflow),
         None => (Vec::new(), 0),
     };
+    for sub in &mut subagents {
+        if sub.run_id.is_some() && !is_live_subagent(sub.state) {
+            if let Some(target) = &sub.target_pane_id {
+                if !snapshot.panes.iter().any(|p| p.pane_id == *target) {
+                    sub.target_pane_id = Some(pane_id.to_string());
+                }
+            }
+        }
+    }
 
     Some(AgentRow {
         pane_id: agent.pane_id.clone(),
@@ -459,6 +551,36 @@ pub(super) fn render_agent_row(
     }
 
     let mut current_y = rect.y + main_height;
+    if row.subagents.iter().any(|s| s.run_id.is_some()) {
+        render_grouped_subagents(
+            buffer,
+            rect,
+            row,
+            config,
+            hits.as_deref_mut(),
+            &mut current_y,
+        );
+        if row.subagents_overflow > 0 && current_y < rect.bottom() {
+            if let Some(hits) = hits.as_mut() {
+                hits.agents.push((
+                    Rect::new(rect.x, current_y, rect.width, 1),
+                    row.pane_id.clone(),
+                ));
+            }
+            let more_style = Style::default()
+                .fg(palette.overlay0)
+                .add_modifier(Modifier::DIM);
+            let more_label = format!("+{} more", row.subagents_overflow);
+            let more_spans = vec![
+                ratatui::text::Span::raw("   "),
+                ratatui::text::Span::styled(more_label, more_style),
+            ];
+            Paragraph::new(Line::from(more_spans))
+                .render(Rect::new(rect.x, current_y, rect.width, 1), buffer);
+        }
+        return;
+    }
+
     let narrow = is_narrow_agent_panel(rect.width);
     let drop_version = rect.width < 30;
     let drop_elapsed = rect.width < 25;
@@ -630,6 +752,134 @@ pub(super) fn render_agent_row(
         ];
         Paragraph::new(Line::from(more_spans))
             .render(Rect::new(rect.x, current_y, rect.width, 1), buffer);
+    }
+}
+
+fn render_grouped_subagents(
+    buffer: &mut Buffer,
+    rect: Rect,
+    row: &AgentRow,
+    config: &ClientShellConfig,
+    mut hits: Option<&mut ShellHitMap>,
+    current_y: &mut u16,
+) {
+    let palette = &config.palette;
+    let groups = group_subagents_by_run(&row.subagents);
+
+    for group in groups {
+        if *current_y >= rect.bottom() {
+            break;
+        }
+
+        // 1. Run Header
+        let run_rect = Rect::new(rect.x, *current_y, rect.width, 1);
+        if let Some(hits) = hits.as_deref_mut() {
+            hits.agents.push((run_rect, row.pane_id.clone()));
+        }
+        let header_style = Style::default()
+            .fg(palette.overlay1)
+            .add_modifier(Modifier::BOLD);
+        let header_spans = vec![
+            ratatui::text::Span::raw("  Run "),
+            ratatui::text::Span::styled(group.run_id, header_style),
+        ];
+        Paragraph::new(Line::from(header_spans)).render(run_rect, buffer);
+        *current_y += 1;
+
+        // 2. Live Workers (2 lines each)
+        for sub in group.live {
+            if *current_y >= rect.bottom() {
+                break;
+            }
+            let live_height = if *current_y + 1 < rect.bottom() { 2 } else { 1 };
+            if let Some(hits) = hits.as_deref_mut() {
+                let target = sub
+                    .target_pane_id
+                    .clone()
+                    .unwrap_or_else(|| row.pane_id.clone());
+                hits.agents.push((
+                    Rect::new(rect.x, *current_y, rect.width, live_height),
+                    target,
+                ));
+            }
+
+            // Line 1: 4 spaces <order-name>
+            let name_style = Style::default()
+                .fg(palette.text)
+                .add_modifier(Modifier::BOLD);
+            let line1_spans = vec![
+                ratatui::text::Span::raw("    "),
+                ratatui::text::Span::styled(&sub.name, name_style),
+            ];
+            Paragraph::new(Line::from(line1_spans))
+                .render(Rect::new(rect.x, *current_y, rect.width, 1), buffer);
+            *current_y += 1;
+
+            if *current_y >= rect.bottom() {
+                break;
+            }
+
+            // Line 2: 6 spaces <short-model>  <elapsed>
+            let short_m = crate::nirvana_spaces::compact_model(&sub.model);
+            let elapsed_str = crate::nirvana_subagents::format_elapsed(sub.elapsed_secs);
+            let line2_spans = vec![
+                ratatui::text::Span::raw("      "),
+                ratatui::text::Span::styled(short_m, Style::default().fg(palette.overlay1)),
+                ratatui::text::Span::raw("  "),
+                ratatui::text::Span::styled(elapsed_str, Style::default().fg(palette.overlay0)),
+            ];
+            Paragraph::new(Line::from(line2_spans))
+                .render(Rect::new(rect.x, *current_y, rect.width, 1), buffer);
+            *current_y += 1;
+        }
+
+        // 3. Finished Workers (1 line each)
+        for sub in group.finished {
+            if *current_y >= rect.bottom() {
+                break;
+            }
+            if let Some(hits) = hits.as_deref_mut() {
+                let target = sub
+                    .target_pane_id
+                    .clone()
+                    .unwrap_or_else(|| row.pane_id.clone());
+                hits.agents
+                    .push((Rect::new(rect.x, *current_y, rect.width, 1), target));
+            }
+
+            let (mark_char, mark_color, status_word) = match sub.state {
+                crate::nirvana_subagents::SubagentState::Done => {
+                    ('\u{2713}', palette.green, "done")
+                }
+                crate::nirvana_subagents::SubagentState::Failed => {
+                    ('\u{2717}', palette.red, "failed")
+                }
+                crate::nirvana_subagents::SubagentState::Stopped => {
+                    let word = if sub.description == "abandoned" {
+                        "abandoned"
+                    } else {
+                        "stopped"
+                    };
+                    ('\u{25A0}', palette.overlay1, word)
+                }
+                _ => ('\u{25A0}', palette.overlay1, "done"),
+            };
+
+            let mark_style = Style::default().fg(mark_color).add_modifier(Modifier::DIM);
+            let dim_style = Style::default()
+                .fg(palette.overlay0)
+                .add_modifier(Modifier::DIM);
+
+            let spans = vec![
+                ratatui::text::Span::raw("    "),
+                ratatui::text::Span::styled(format!("{mark_char} "), mark_style),
+                ratatui::text::Span::styled(format!("{}  ", sub.name), dim_style),
+                ratatui::text::Span::styled(status_word, dim_style),
+            ];
+            Paragraph::new(Line::from(spans))
+                .render(Rect::new(rect.x, *current_y, rect.width, 1), buffer);
+            *current_y += 1;
+        }
     }
 }
 

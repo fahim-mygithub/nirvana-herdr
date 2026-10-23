@@ -2086,6 +2086,7 @@ const USAGE: &str = "usage: herdr run status [<run>] [--json]
        herdr run tick [<run>]                start what a deferral holds once it is due; wake when idle
        herdr run receipt <run> [--json]
        herdr run end <run>                   end the run; write receipt.md and receipt.json beside the journal
+       herdr run tidy                        close the tabs of every ended run in this project
        herdr run log <run> --json '<event>'  append gated, merged, asked or usage (the orchestrator's turns)
        herdr run retro <run> | retro reject <id> [--why text] | retro propose --json '<proposal>' | retro list";
 
@@ -2167,6 +2168,7 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             Ok(())
         }
         Some("end") => end_cli(&project, rest),
+        Some("tidy") => tidy_cli(&project, rest),
         // Plan 12 O5: the retro (§7.4.2).
         Some("retro") => crate::nirvana_retro::cli(&project, rest),
         Some("log") => log_cli(&project, rest),
@@ -2348,6 +2350,145 @@ fn end_cli(project: &Project, args: &[String]) -> std::io::Result<()> {
         receipt_page(project, &receipt).as_bytes(),
     )?;
     println!("{}", dir.join("receipt.md").display());
+    close_run_tab(project, &run, &state)?;
+    Ok(())
+}
+
+/// Decision on closing a run's tab or worker panes (plan 26 §3).
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum CloseRunTabDecision {
+    /// Every pane in the tab belongs to this run's worker panes, so the whole tab is closed.
+    CloseTab { tab_id: String },
+    /// The tab contains other panes, so only this run's worker panes in the tab are closed.
+    ClosePanes { tab_id: String, panes: Vec<String> },
+    /// The tab could not be found or has no panes; closes nothing.
+    NotFound(String),
+}
+
+/// Pure decision on how to close a run's tab (plan 26 §3).
+pub fn close_run_tab_decision(
+    known_pane: Option<&str>,
+    layout_tab_id: Option<&str>,
+    tab_panes: &[String],
+    run_worker_panes: &[String],
+) -> CloseRunTabDecision {
+    if known_pane.is_none() {
+        return CloseRunTabDecision::NotFound("no worker pane found".into());
+    }
+    let Some(tab_id) = layout_tab_id else {
+        return CloseRunTabDecision::NotFound("no tab id found".into());
+    };
+    if tab_panes.is_empty() {
+        return CloseRunTabDecision::NotFound("tab has no panes".into());
+    }
+    let all_ours = tab_panes.iter().all(|pane| run_worker_panes.contains(pane));
+    if all_ours {
+        CloseRunTabDecision::CloseTab {
+            tab_id: tab_id.to_string(),
+        }
+    } else {
+        let to_close: Vec<String> = tab_panes
+            .iter()
+            .filter(|pane| run_worker_panes.contains(pane))
+            .cloned()
+            .collect();
+        CloseRunTabDecision::ClosePanes {
+            tab_id: tab_id.to_string(),
+            panes: to_close,
+        }
+    }
+}
+
+/// Closes the run's tab or its worker panes according to plan 26 §3.
+pub fn close_run_tab(_project: &Project, run: &str, state: &RunState) -> std::io::Result<()> {
+    if !crate::nirvana_worker::in_herdr() {
+        return Ok(());
+    }
+    let known_pane = state
+        .orders
+        .iter()
+        .rev()
+        .filter_map(|order| order.pane.clone())
+        .find(|pane| crate::nirvana_worker::herdr_json(&["pane", "get", pane]).is_ok());
+
+    let (layout_tab_id, tab_panes) = match &known_pane {
+        Some(pane) => {
+            match crate::nirvana_worker::herdr_json(&["pane", "layout", "--pane", pane]) {
+                Ok(layout) => {
+                    let tab_id = ["/result/layout/tab_id", "/layout/tab_id"]
+                        .iter()
+                        .find_map(|p| layout.pointer(p))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    let panes = ["/result/layout/panes", "/layout/panes"]
+                        .iter()
+                        .find_map(|p| layout.pointer(p))
+                        .and_then(Value::as_array)
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|p| {
+                                    p.get("pane_id").and_then(Value::as_str).map(str::to_owned)
+                                })
+                                .collect::<Vec<String>>()
+                        })
+                        .unwrap_or_default();
+                    (tab_id, panes)
+                }
+                Err(_) => (None, Vec::new()),
+            }
+        }
+        None => (None, Vec::new()),
+    };
+
+    let run_worker_panes: Vec<String> = state
+        .orders
+        .iter()
+        .filter_map(|order| order.pane.clone())
+        .collect();
+
+    let decision = close_run_tab_decision(
+        known_pane.as_deref(),
+        layout_tab_id.as_deref(),
+        &tab_panes,
+        &run_worker_panes,
+    );
+
+    match decision {
+        CloseRunTabDecision::CloseTab { tab_id } => {
+            match crate::nirvana_worker::herdr_ok(&["tab", "close", &tab_id]) {
+                Ok(()) => println!("run {run}: closed tab {tab_id}"),
+                Err(why) => println!("run {run}: tab {tab_id} stays: {why}"),
+            }
+        }
+        CloseRunTabDecision::ClosePanes { tab_id, panes } => {
+            let mut closed = 0;
+            for pane in &panes {
+                if crate::nirvana_worker::herdr_ok(&["pane", "close", pane]).is_ok() {
+                    closed += 1;
+                }
+            }
+            println!("run {run}: closed {closed} pane(s) in tab {tab_id}");
+        }
+        CloseRunTabDecision::NotFound(_) => {
+            println!("run {run}: no tab found");
+        }
+    }
+    Ok(())
+}
+
+fn tidy_cli(project: &Project, _args: &[String]) -> std::io::Result<()> {
+    if !crate::nirvana_worker::in_herdr() {
+        println!("not in herdr");
+        return Ok(());
+    }
+    for run in project.runs() {
+        let (journal, _, _, _) = load(project, &run);
+        let (events, _) = journal.read();
+        let state = replay(&events);
+        if state.ended.is_some() {
+            close_run_tab(project, &run, &state)?;
+        }
+    }
     Ok(())
 }
 

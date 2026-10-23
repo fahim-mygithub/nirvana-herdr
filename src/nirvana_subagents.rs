@@ -48,7 +48,9 @@ impl SubagentProvider {
 pub enum SubagentState {
     Running,
     Done,
+    Blocked,
     Failed,
+    Stopped,
 }
 
 /// A parsed subagent row.
@@ -66,6 +68,8 @@ pub struct Subagent {
     pub ended_at: Option<u64>,
     pub depth: usize,
     pub target_pane_id: Option<String>,
+    #[serde(default)]
+    pub run_id: Option<String>,
 }
 
 /// Cached view of subagents for a pane.
@@ -583,6 +587,7 @@ pub fn read_claude_subagents(
             },
             depth: 0,
             target_pane_id: Some(parent_pane_id.to_string()),
+            run_id: None,
         });
     }
 
@@ -854,6 +859,7 @@ pub fn find_agy_processes_under(
                     ended_at: None,
                     depth: 0,
                     target_pane_id: Some(parent_pane_id.to_string()),
+                    run_id: None,
                 });
             }
         }
@@ -922,6 +928,7 @@ pub fn read_agy_jobs(home: &Path, pane_id: &str, now_secs: u64) -> Vec<Subagent>
             ended_at,
             depth: 0,
             target_pane_id: Some(pane_id.to_string()),
+            run_id: None,
         });
     }
     subagents
@@ -965,28 +972,43 @@ pub fn read_seat_orders(
         }
 
         for order in run_state.orders {
-            let is_done = matches!(
+            if matches!(
                 order.phase,
                 crate::nirvana_run::Phase::Merged | crate::nirvana_run::Phase::Gated
-            );
-            let is_failed = order.phase == crate::nirvana_run::Phase::Failed;
-            let is_running = !order.phase.terminal();
-
-            let ended_at = if order.phase.terminal() {
-                Some(order.last_at)
-            } else {
-                None
-            };
-            if !is_running && ended_at.is_some_and(|ended| now_secs.saturating_sub(ended) > 600) {
+            ) || order.verdict.as_deref() == Some("abandoned")
+            {
                 continue;
             }
 
-            let state = if is_done {
-                SubagentState::Done
-            } else if is_failed {
-                SubagentState::Failed
-            } else {
+            let is_live =
+                !order.phase.terminal() && order.phase != crate::nirvana_run::Phase::Delivered;
+            let ended_at = if !is_live { Some(order.last_at) } else { None };
+
+            let state = if is_live {
                 SubagentState::Running
+            } else if order.phase == crate::nirvana_run::Phase::Delivered {
+                let report_status = order
+                    .report
+                    .as_ref()
+                    .and_then(|r| r.get("status"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("done");
+                if report_status == "done" {
+                    SubagentState::Done
+                } else if report_status == "blocked" {
+                    SubagentState::Blocked
+                } else {
+                    SubagentState::Failed
+                }
+            } else if order.phase == crate::nirvana_run::Phase::Failed {
+                SubagentState::Failed
+            } else if order.phase == crate::nirvana_run::Phase::Interrupted
+                || order.outcome.as_deref() == Some("stopped")
+                || order.outcome.as_deref() == Some("interrupted")
+            {
+                SubagentState::Stopped
+            } else {
+                SubagentState::Failed
             };
 
             let provider = if order.seated.cli == "agy" {
@@ -1024,6 +1046,8 @@ pub fn read_seat_orders(
                 order.seated.class.clone()
             };
 
+            let run_id = entry.file_name().to_string_lossy().to_string();
+
             subagents.push(Subagent {
                 id: format!("order-{}", order.seated.order),
                 parent_id: None,
@@ -1037,6 +1061,7 @@ pub fn read_seat_orders(
                 ended_at,
                 depth: 0,
                 target_pane_id: target_pane,
+                run_id: Some(run_id),
             });
         }
     }
@@ -1639,6 +1664,7 @@ mod tests {
             ended_at: None,
             depth: 0,
             target_pane_id: None,
+            run_id: None,
         };
         let child = Subagent {
             id: "a2".into(),
@@ -1653,6 +1679,7 @@ mod tests {
             ended_at: None,
             depth: 0,
             target_pane_id: None,
+            run_id: None,
         };
         let other = Subagent {
             id: "a3".into(),
@@ -1667,6 +1694,7 @@ mod tests {
             ended_at: None,
             depth: 0,
             target_pane_id: None,
+            run_id: None,
         };
 
         let nested = nest_subagents(vec![child, other, parent]);

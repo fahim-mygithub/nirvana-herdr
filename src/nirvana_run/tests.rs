@@ -1219,3 +1219,46 @@ fn run_arg_from_finds_run_with_leading_flags() {
         Some("r7".into())
     );
 }
+
+#[test]
+fn close_run_tab_decisions() {
+    let tab = "tab-1";
+    let w1 = "pane-w1".to_string();
+    let w2 = "pane-w2".to_string();
+    let worker_panes = vec![w1.clone(), w2.clone()];
+
+    // Case 1: tab has only the run's worker panes -> closes whole tab
+    let all_workers = vec![w1.clone(), w2.clone()];
+    assert_eq!(
+        close_run_tab_decision(Some(&w1), Some(tab), &all_workers, &worker_panes),
+        CloseRunTabDecision::CloseTab {
+            tab_id: tab.to_string()
+        }
+    );
+
+    // Case 2: tab has an orchestrator or other pane -> closes only worker panes
+    let mixed = vec![w1.clone(), "pane-orch".to_string(), w2.clone()];
+    assert_eq!(
+        close_run_tab_decision(Some(&w1), Some(tab), &mixed, &worker_panes),
+        CloseRunTabDecision::ClosePanes {
+            tab_id: tab.to_string(),
+            panes: vec![w1.clone(), w2.clone()],
+        }
+    );
+
+    // Case 3: tab has no worker panes -> ClosePanes with empty
+    let no_workers = vec!["pane-orch".to_string(), "pane-other".to_string()];
+    assert_eq!(
+        close_run_tab_decision(Some(&w1), Some(tab), &no_workers, &worker_panes),
+        CloseRunTabDecision::ClosePanes {
+            tab_id: tab.to_string(),
+            panes: Vec::new(),
+        }
+    );
+
+    // Case 4: no known pane -> NotFound
+    assert_eq!(
+        close_run_tab_decision(None, Some(tab), &all_workers, &worker_panes),
+        CloseRunTabDecision::NotFound("no worker pane found".into())
+    );
+}

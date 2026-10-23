@@ -993,3 +993,47 @@ fn seat_order_refuses_empty_owns_for_build_fix_plan_and_permits_read_only() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn worker_pane_closing_decisions() {
+    use crate::nirvana_run::Phase;
+
+    // Normal done worker: closes its pane when tab has other panes (>1)
+    assert!(worker_should_close_pane(
+        "done",
+        Phase::Delivered,
+        Some("pane-1"),
+        2
+    ));
+
+    // Kept panes stay: when not Delivered (or keeping pane for review)
+    assert!(!worker_should_close_pane(
+        "done",
+        Phase::Running,
+        Some("pane-1"),
+        2
+    ));
+    assert!(!worker_should_close_pane(
+        "failed",
+        Phase::Delivered,
+        Some("pane-1"),
+        2
+    ));
+
+    // Tab's last pane stays: when tab_panes_count <= 1
+    assert!(!worker_should_close_pane(
+        "done",
+        Phase::Delivered,
+        Some("pane-1"),
+        1
+    ));
+    assert!(!worker_should_close_pane(
+        "done",
+        Phase::Delivered,
+        Some("pane-1"),
+        0
+    ));
+
+    // No pane id
+    assert!(!worker_should_close_pane("done", Phase::Delivered, None, 2));
+}

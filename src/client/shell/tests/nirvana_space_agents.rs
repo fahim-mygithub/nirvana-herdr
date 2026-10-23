@@ -62,7 +62,10 @@ fn a_space_lists_its_agents_task_and_model_with_the_agent_icon() {
     let (state, frame, rows, space) = compose(vec![claude_sonnet()]);
     let agent_y = usize::from(space.bottom() - 1);
     assert!(
-        rows[agent_y].contains("\u{273B} Sort") && rows[agent_y].contains(" - Sonnet 5.5"),
+        rows[agent_y].contains("\u{273B}")
+            && rows[agent_y].contains("Claude")
+            && rows[agent_y].contains("Sonnet")
+            && rows[agent_y].contains("wo"),
         "agent row: {:?}",
         rows[agent_y]
     );
@@ -109,20 +112,21 @@ fn each_kind_draws_its_own_icon_and_others_keep_the_dot() {
         .map(|agents| compose(agents).2.join("\n"))
         .collect::<Vec<_>>()
         .join("\n");
-    // At the default width each row keeps its icon, the start of its task and its model without the provider.
-    for (icon, model) in [
-        ("\u{273B} Sort", " - Sonnet 5.5"),
-        ("\u{2756} No task", " - Codex"),
-        ("\u{25B2} No", " - 3.8 Flash"),
-        ("\u{2302} No", " - qwen3:8b"),
-        ("\u{25CB} No task yet", " - pi"),
+    // At the default width each row keeps its icon, who, model and state.
+    for (icon, who, model) in [
+        ("\u{273B}", "Claude", "Sonnet"),
+        ("\u{2756}", "Codex", "Codex"),
+        ("\u{25B2}", "agy", "Flash"),
+        ("\u{2302}", "Local", "qwen3:8b"),
+        ("\u{25CB}", "pi", "idle"),
     ] {
         assert!(
             text.lines()
-                .any(|row| row.contains(icon) && row.contains(model)),
-            "missing {icon:?} with {model:?} in\n{text}"
+                .any(|row| row.contains(icon) && row.contains(who) && row.contains(model)),
+            "missing {icon:?} with {who:?} {model:?} in\n{text}"
         );
     }
+    assert!(!text.contains("No task yet"));
 }
 
 #[test]
@@ -130,9 +134,10 @@ fn an_older_server_without_tokens_still_names_the_agent() {
     let (_, _, rows, space) = compose(vec![agent("pane_1", Some("claude"), &[])]);
     let row = &rows[usize::from(space.bottom() - 1)];
     assert!(
-        row.contains("\u{273B} No task") && row.contains(" - Claude"),
+        row.contains("\u{273B}") && row.contains("Claude") && row.contains("id"),
         "{row:?}"
     );
+    assert!(!row.contains("No task yet"));
 }
 
 #[test]
@@ -149,13 +154,14 @@ fn each_agent_adds_one_row_to_its_space() {
 #[test]
 fn a_long_title_is_cut_to_the_sidebar_with_an_ellipsis() {
     let mut claude = claude_sonnet();
+    claude.focused = true;
     claude.terminal_title_stripped =
         Some("Sort the clocked-in list by shift and then by name".into());
     let (_, _, rows, space) = compose(vec![claude]);
     let row = &rows[usize::from(space.bottom() - 1)];
     let text = row.split('\u{2502}').next().unwrap().trim();
-    assert!(text.starts_with("\u{273B} Sort"), "{text:?}");
-    assert!(text.contains("\u{2026} - Sonnet 5.5"), "{text:?}");
+    assert!(text.starts_with("\u{273B} Claude"), "{text:?}");
+    assert!(text.contains("\u{2026}"), "{text:?}");
 }
 
 #[test]
@@ -206,10 +212,70 @@ fn a_space_shows_three_agents_then_how_many_more() {
     assert!(last.contains("+2 more"), "{last:?}");
     let shown = rows[usize::from(space.y)..usize::from(space.bottom())]
         .iter()
-        .filter(|row| row.contains("\u{273B} Sort") && row.contains(" - Sonnet 5.5"))
+        .filter(|row| row.contains("\u{273B}") && row.contains("Sonnet"))
         .count();
     assert_eq!(shown, 3);
     drop(alone_rows);
+}
+
+#[test]
+fn nirvana_claude_shows_who_as_nirvana() {
+    let mut claude = agent(
+        "pane_1",
+        Some("claude"),
+        &[
+            ("nirvana_kind", "claude"),
+            ("nirvana_model", "Claude Sonnet 5.5"),
+            ("nirvana_role", "nirvana"),
+        ],
+    );
+    claude.agent_status = AgentStatus::Working;
+    let (_, _, rows, space) = compose(vec![claude]);
+    let row = &rows[usize::from(space.bottom() - 1)];
+    assert!(
+        row.contains("\u{273B}") && row.contains("Nirvana") && row.contains("Sonnet"),
+        "{row:?}"
+    );
+}
+
+#[test]
+fn fold_two_or_more_idle_panes_of_same_kind_without_task() {
+    let agy1 = agent(
+        "pane_1",
+        Some("agy"),
+        &[
+            ("nirvana_kind", "antigravity"),
+            ("nirvana_model", "Gemini 3.8 Flash"),
+        ],
+    );
+    let mut agy2 = agent(
+        "pane_2",
+        Some("agy"),
+        &[
+            ("nirvana_kind", "antigravity"),
+            ("nirvana_model", "Gemini 3.8 Flash"),
+        ],
+    );
+    agy2.agent_status = AgentStatus::Idle;
+    let (_, _, rows, space) = compose(vec![agy1, agy2]);
+    let row = &rows[usize::from(space.bottom() - 1)];
+    assert!(
+        row.contains("\u{25B2} 2 agy panes  idle"),
+        "folded row missing in {row:?}"
+    );
+}
+
+#[test]
+fn focused_pane_shows_chat_title_and_no_task_yet_never_shown() {
+    let mut claude = claude_sonnet();
+    claude.focused = true;
+    let (_, _, rows, space) = compose(vec![claude]);
+    let row = &rows[usize::from(space.bottom() - 1)];
+    assert!(row.contains("Sort cloc"), "{row:?}");
+    assert!(
+        !row.contains("No task yet"),
+        "must never show No task yet: {row:?}"
+    );
 }
 
 #[test]

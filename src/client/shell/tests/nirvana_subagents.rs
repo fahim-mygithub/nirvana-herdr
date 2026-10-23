@@ -76,6 +76,7 @@ fn subagent_rows_render_under_agent_in_flat_and_grouped_views() {
                     ended_at: None,
                     depth: 0,
                     target_pane_id: None,
+                    run_id: None,
                 },
                 Subagent {
                     id: "sub-2".into(),
@@ -90,6 +91,7 @@ fn subagent_rows_render_under_agent_in_flat_and_grouped_views() {
                     ended_at: None,
                     depth: 0,
                     target_pane_id: None,
+                    run_id: None,
                 },
             ],
             total_count: 2,
@@ -184,6 +186,7 @@ fn marks_and_colours_by_provider() {
                     ended_at: None,
                     depth: 0,
                     target_pane_id: None,
+                    run_id: None,
                 },
                 Subagent {
                     id: "sub-gemini".into(),
@@ -198,6 +201,7 @@ fn marks_and_colours_by_provider() {
                     ended_at: None,
                     depth: 0,
                     target_pane_id: None,
+                    run_id: None,
                 },
                 Subagent {
                     id: "sub-local".into(),
@@ -212,6 +216,7 @@ fn marks_and_colours_by_provider() {
                     ended_at: None,
                     depth: 0,
                     target_pane_id: None,
+                    run_id: None,
                 },
             ],
             total_count: 3,
@@ -302,6 +307,7 @@ fn narrow_and_wide_adaptive_formatting() {
                 ended_at: None,
                 depth: 0,
                 target_pane_id: None,
+                run_id: None,
             }],
             total_count: 1,
             overflow: 0,
@@ -395,6 +401,7 @@ fn overflow_shows_plus_n_more() {
                 ended_at: None,
                 depth: 0,
                 target_pane_id: None,
+                run_id: None,
             }],
             total_count: 8,
             overflow: 2,
@@ -455,6 +462,7 @@ fn finished_subagents_dimmed_and_ten_minute_filter() {
                     ended_at: Some(now - 100), // Ended 100s ago (within 10m)
                     depth: 0,
                     target_pane_id: None,
+                    run_id: None,
                 },
                 Subagent {
                     id: "sub-failed".into(),
@@ -469,6 +477,7 @@ fn finished_subagents_dimmed_and_ten_minute_filter() {
                     ended_at: Some(now - 200),
                     depth: 0,
                     target_pane_id: None,
+                    run_id: None,
                 },
             ],
             total_count: 2,
@@ -538,6 +547,7 @@ fn click_subagent_row_focuses_target_pane() {
                 ended_at: None,
                 depth: 0,
                 target_pane_id: Some("worker_pane_42".into()),
+                run_id: None,
             }],
             total_count: 1,
             overflow: 0,
@@ -611,6 +621,7 @@ fn row_lines_calculation() {
             ended_at: None,
             depth: 0,
             target_pane_id: None,
+            run_id: None,
         },
         Subagent {
             id: "s2".into(),
@@ -625,6 +636,7 @@ fn row_lines_calculation() {
             ended_at: None,
             depth: 0,
             target_pane_id: None,
+            run_id: None,
         },
     ];
 
@@ -830,4 +842,219 @@ fn codex_pane_in_claude_folder_shows_no_claude_subagents() {
     assert!(query.is_some());
     let (_folder, is_claude, _session) = query.unwrap();
     assert!(!is_claude, "Codex pane must have is_claude = false");
+}
+
+#[test]
+fn group_subagents_by_run_ordering() {
+    use crate::client::shell::agent_sidebar::group_subagents_by_run;
+
+    let sub_live_run1_slow = Subagent {
+        id: "1".into(),
+        parent_id: None,
+        name: "p26-01-slow".into(),
+        description: "".into(),
+        provider: SubagentProvider::Claude,
+        model: "Claude Sonnet 5.5".into(),
+        state: SubagentState::Running,
+        elapsed_secs: 240,
+        tokens: None,
+        ended_at: None,
+        depth: 0,
+        target_pane_id: None,
+        run_id: Some("run-1".into()),
+    };
+    let sub_live_run1_fast = Subagent {
+        id: "2".into(),
+        parent_id: None,
+        name: "p26-02-fast".into(),
+        description: "".into(),
+        provider: SubagentProvider::Gemini,
+        model: "Gemini 3.8 Flash".into(),
+        state: SubagentState::Running,
+        elapsed_secs: 60,
+        tokens: None,
+        ended_at: None,
+        depth: 0,
+        target_pane_id: None,
+        run_id: Some("run-1".into()),
+    };
+    let sub_done_run1 = Subagent {
+        id: "3".into(),
+        parent_id: None,
+        name: "p26-03-done".into(),
+        description: "".into(),
+        provider: SubagentProvider::Claude,
+        model: "Claude Sonnet 5.5".into(),
+        state: SubagentState::Done,
+        elapsed_secs: 100,
+        tokens: None,
+        ended_at: Some(1000),
+        depth: 0,
+        target_pane_id: None,
+        run_id: Some("run-1".into()),
+    };
+    let sub_done_run2 = Subagent {
+        id: "4".into(),
+        parent_id: None,
+        name: "p26-old-done".into(),
+        description: "".into(),
+        provider: SubagentProvider::Claude,
+        model: "Claude Sonnet 5.5".into(),
+        state: SubagentState::Done,
+        elapsed_secs: 100,
+        tokens: None,
+        ended_at: Some(500),
+        depth: 0,
+        target_pane_id: None,
+        run_id: Some("run-2".into()),
+    };
+
+    // run-1 has live workers, run-2 has only finished workers -> run-1 comes first
+    let subs = vec![
+        sub_done_run2.clone(),
+        sub_live_run1_slow.clone(),
+        sub_done_run1.clone(),
+        sub_live_run1_fast.clone(),
+    ];
+    let groups = group_subagents_by_run(&subs);
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0].run_id, "run-1");
+    assert_eq!(groups[1].run_id, "run-2");
+
+    // Inside run-1: live workers first, newest first (fast / 60s before slow / 240s)
+    assert_eq!(groups[0].live.len(), 2);
+    assert_eq!(groups[0].live[0].name, "p26-02-fast");
+    assert_eq!(groups[0].live[1].name, "p26-01-slow");
+
+    // Finished worker after
+    assert_eq!(groups[0].finished.len(), 1);
+    assert_eq!(groups[0].finished[0].name, "p26-03-done");
+}
+
+#[test]
+fn render_grouped_subagents_under_run_headers() {
+    let mut sub_map = HashMap::new();
+    sub_map.insert(
+        "pane_1".to_string(),
+        SubagentsView {
+            subagents: vec![
+                Subagent {
+                    id: "w1".into(),
+                    parent_id: None,
+                    name: "p26-01-close-pane".into(),
+                    description: "".into(),
+                    provider: SubagentProvider::Claude,
+                    model: "Claude Sonnet 5.5".into(),
+                    state: SubagentState::Running,
+                    elapsed_secs: 240,
+                    tokens: None,
+                    ended_at: None,
+                    depth: 0,
+                    target_pane_id: Some("worker_pane_1".into()),
+                    run_id: Some("p26-clear-sidebar".into()),
+                },
+                Subagent {
+                    id: "w2".into(),
+                    parent_id: None,
+                    name: "p26-02-done-task".into(),
+                    description: "".into(),
+                    provider: SubagentProvider::Claude,
+                    model: "Claude Sonnet 5.5".into(),
+                    state: SubagentState::Done,
+                    elapsed_secs: 120,
+                    tokens: None,
+                    ended_at: Some(100),
+                    depth: 0,
+                    target_pane_id: Some("worker_pane_closed".into()),
+                    run_id: Some("p26-clear-sidebar".into()),
+                },
+            ],
+            total_count: 2,
+            overflow: 0,
+        },
+    );
+    set_view_for_test(Some(sub_map));
+
+    let config = ClientShellConfig::from_config(&Config::default());
+    let mut snap = snapshot_with_agent("pane_1", "orch");
+    // Only worker_pane_1 is still open, worker_pane_closed has closed
+    snap.panes.push(ClientShellPane {
+        pane_id: "worker_pane_1".into(),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_1".into(),
+        label: None,
+        cwd: None,
+        foreground_cwd: None,
+        focused: false,
+        right_click_passthrough: false,
+    });
+
+    let row = crate::client::shell::agent_sidebar::agent_row(&snap, "pane_1", &config, None)
+        .expect("agent row");
+
+    // Lines count: base(row.rows.len()) + header(1) + live(2) + finished(1)
+    assert_eq!(
+        crate::client::shell::agent_sidebar::agent_row_lines(&row, 50),
+        row.rows.len() + 4
+    );
+
+    let mut hits = ShellHitMap::default();
+    let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 50, 10));
+    crate::client::shell::agent_sidebar::render_agent_row(
+        &mut buf,
+        Rect::new(0, 0, 50, 10),
+        &row,
+        &config,
+        Some(&mut hits),
+    );
+
+    let mut lines = Vec::new();
+    for y in 0..10 {
+        let mut line = String::new();
+        for x in 0..50 {
+            line.push_str(buf.cell((x, y)).unwrap().symbol());
+        }
+        lines.push(line);
+    }
+    let rendered = lines.join("\n");
+    assert!(
+        rendered.contains("Run p26-clear-sidebar"),
+        "output:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("p26-01-close-pane"),
+        "output:\n{rendered}"
+    );
+    assert!(rendered.contains("Sonnet"), "output:\n{rendered}");
+    assert!(rendered.contains("\u{2713}"), "output:\n{rendered}");
+    assert!(rendered.contains("p26-02-done-task"), "output:\n{rendered}");
+    assert!(rendered.contains("done"), "output:\n{rendered}");
+
+    // Closed worker pane click target falls back to orchestrator pane_1
+    let hits_for_closed: Vec<_> = hits
+        .agents
+        .iter()
+        .filter(|(_, pane)| pane == "pane_1")
+        .collect();
+    assert_eq!(
+        hits_for_closed.len(),
+        2,
+        "main agent row and closed worker hit target both target pane_1"
+    );
+    assert!(
+        hits.agents
+            .iter()
+            .all(|(_, pane)| pane != "worker_pane_closed"),
+        "closed worker pane must not be in hits"
+    );
+
+    // Open worker pane records target pane
+    let hits_for_open: Vec<_> = hits
+        .agents
+        .iter()
+        .filter(|(_, pane)| pane == "worker_pane_1")
+        .collect();
+    assert!(!hits_for_open.is_empty(), "open worker hit recorded");
+
+    set_view_for_test(None);
 }

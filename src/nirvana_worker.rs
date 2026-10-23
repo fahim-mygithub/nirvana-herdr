@@ -1308,6 +1308,39 @@ pub fn exec(
                             )
                         )?;
                         let _ = nirvana_run::wake(project, run, false);
+                        // Plan 26 §2: A worker that delivers done closes its own pane through herdr
+                        // as the last thing it does. The tab's last pane stays while the run is open.
+                        if in_herdr() {
+                            let state = replay(&journal.read().0);
+                            let phase = state
+                                .order(order)
+                                .map(|o| o.phase)
+                                .unwrap_or(crate::nirvana_run::Phase::Delivered);
+                            let my_pane = std::env::var("HERDR_PANE_ID")
+                                .ok()
+                                .or_else(|| state.order(order).and_then(|o| o.pane.clone()));
+                            if let Some(pane_id) = my_pane.as_deref() {
+                                let tab_panes_count =
+                                    herdr_json(&["pane", "layout", "--pane", pane_id])
+                                        .ok()
+                                        .and_then(|layout| {
+                                            ["/result/layout/panes", "/layout/panes"]
+                                                .iter()
+                                                .find_map(|p| layout.pointer(p))
+                                                .and_then(Value::as_array)
+                                                .map(|arr| arr.len())
+                                        })
+                                        .unwrap_or(0);
+                                if worker_should_close_pane(
+                                    &status,
+                                    phase,
+                                    Some(pane_id),
+                                    tab_panes_count,
+                                ) {
+                                    let _ = herdr_json(&["pane", "close", pane_id]);
+                                }
+                            }
+                        }
                         Ok(0)
                     }
                     Err(why) => {
@@ -1882,6 +1915,26 @@ pub fn write_order(
     Ok(path.display().to_string())
 }
 
+/// Whether a worker ending its attempt should close its own pane (plan 26 §2).
+///
+/// A worker closes its pane as soon as it delivers done and its order is Delivered.
+/// Kept panes:
+/// - A worker delivering blocked, failed or anything other than done keeps its pane.
+/// - So does a stopped or interrupted worker.
+/// - The tab's last pane stays while the run is open, so the tab stays open and the
+///   next worker can reuse that pane.
+pub fn worker_should_close_pane(
+    status: &str,
+    phase: crate::nirvana_run::Phase,
+    pane_id: Option<&str>,
+    tab_panes_count: usize,
+) -> bool {
+    status == "done"
+        && phase == crate::nirvana_run::Phase::Delivered
+        && pane_id.is_some()
+        && tab_panes_count > 1
+}
+
 // ---- herdr's own API, for panes and the orchestrator's state ----
 
 fn herdr_command(args: &[&str]) -> std::process::Command {
@@ -1897,7 +1950,7 @@ fn herdr_command(args: &[&str]) -> std::process::Command {
 }
 
 /// Runs this herdr with `args` against the server the caller's pane belongs to; the answer's JSON.
-fn herdr_json(args: &[&str]) -> Result<Value, String> {
+pub(crate) fn herdr_json(args: &[&str]) -> Result<Value, String> {
     let out = herdr_command(args)
         .output()
         .map_err(|err| format!("herdr {}: {err}", args.join(" ")))?;
@@ -1926,7 +1979,7 @@ fn herdr_json(args: &[&str]) -> Result<Value, String> {
 }
 
 /// For the verbs that answer with nothing on success (`pane run` printed no JSON, measured 2026-10-18).
-fn herdr_ok(args: &[&str]) -> Result<(), String> {
+pub(crate) fn herdr_ok(args: &[&str]) -> Result<(), String> {
     let out = herdr_command(args)
         .output()
         .map_err(|err| format!("herdr {}: {err}", args.join(" ")))?;
