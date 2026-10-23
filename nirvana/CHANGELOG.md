@@ -3,6 +3,63 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.38.0: a clearer sidebar, and finished work leaves the screen
+
+- **Changed:**
+  - **A worker that delivers done closes its own pane.**
+    - A blocked, failed, stopped or interrupted worker keeps its pane until its gate or merge, as before.
+    - The run's tab keeps its last pane while the run is open, so the next worker can reuse it.
+    - `herdr seat read <order>` still shows the whole view, from the stream file.
+    - The pane closes only when its title is still `<seat>·<order>`, the one `open_pane` gave it. The order's pane comes
+      only from the new `seat exec --pane <id>`, never from `HERDR_PANE_ID`, so a detached worker records no pane and
+      cannot close the orchestrator's or the owner's.
+  - **`herdr run end` closes the run's tab.**
+    - It closes the whole tab only when every pane in it is a finished worker pane of this run. Otherwise it closes only
+      those panes.
+    - A live worker's pane is never closed.
+    - New `herdr run tidy` clears the tabs of every ended run in the project, and prints only what it closed.
+  - **A space's agent rows read who, model, state**, as in `✻ Nirvana S5.5 work`.
+    - `Nirvana` marks the space's Nirvana Claude, by a new `nirvana_role` token. The server sends it only for
+      `--agent nirvana` together with a `--plugin-dir` that is this home's `nirvana/claude`.
+    - The short model is `S5.5`, `O5.5`, `H5.5`, `F5.1`, `Flash`, `Pro`, `Codex`, or a local model's name cut to 6.
+    - The row fits 26 cells by one ladder step for the whole space, so the rows line up and use the same words.
+    - Idle agents with no task fold into one row, as in `▲ 2 agy panes idle`.
+    - The chat title shows on the row under the mouse. `No task yet` is never shown.
+  - **The agents panel groups workers by run.**
+    - Runs with a live worker come first, then the newest.
+    - A live worker takes two lines: its name, then its model and elapsed time.
+    - A finished one takes one line: `✓ done`, `✗ blocked`, `✗ failed`, `■ stopped`.
+    - An ended run shows no finished rows. The agent's own subagents stay above the run groups.
+  **Because:** the owner, 2026-10-23: "Can we furthure improve the carity o the spaces and agents side bar." and "THis
+  to me also seems odd when I think the job was done or handded of but the window is not cleared". Four rulings:
+  - "Close done, keep problems (Recommended)";
+  - "Close it (Recommended)";
+  - "Who, model, state (Recommended)";
+  - "By run, live first (Recommended)".
+
+  Plan `nirvana/plans/2026-10-23-26-clear-sidebar.md`, built on agy (Gemini 3.8 Flash high).
+  **Measured:**
+  - 41 controls in `nirvana/controls.d/clear_sidebar.py`, each reddening its test alone.
+  - 8 older controls whose lines moved still redden theirs.
+  - Three review rounds (record `2026-10-23-26-records/p26.md`):
+    - A Sonnet reviewer found three blockers in the first build:
+      - a detached worker inherited the caller's `HERDR_PANE_ID` and would have closed that pane;
+      - blocked workers drew as live;
+      - a plain Claude in a folder named Nirvana read as Nirvana Claude.
+    - A second reviewer found no blocker. It found should-fix items:
+      - a flat cap that cut the newest run's live workers;
+      - a test that read every provider's usage;
+      - a ladder that ran per row.
+
+      The orchestrator fixed them.
+  - Not live-checked yet (plan §7):
+    - a done worker's pane closes and a blocked one stays;
+    - `run end` and `run tidy` clear the run tabs;
+    - the spaces list reads who, model, state;
+    - the panel groups by run.
+  **If you remove this:** done workers' idle panes and ended runs' tabs pile up, and the sidebar cuts every title to
+  four cells.
+
 ## alpha 0.37.0: five fixes from the audit of the first real runs
 
 - **Changed:**
