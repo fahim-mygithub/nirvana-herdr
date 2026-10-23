@@ -105,7 +105,7 @@ CONTROLS = (
     Control(
         'p27_rule4_resolve',
         'src/nirvana_idle_compact.rs',
-        '    let Some(age) = facts.transcript_age else {\n        return skip("the transcript did not resolve to one file".into());\n    };\n',
+        '    let Some(age) = facts.transcript_age else {\n        return skip("the pane\'s own transcript was not found".into());\n    };\n',
         '    let age = facts.transcript_age.unwrap_or(Duration::MAX);\n',
         'idle_compact_rule4_transcript_must_resolve',
         'rust',
@@ -137,12 +137,12 @@ CONTROLS = (
         'idle_compact_rule5_small_context_left_alone',
         'rust',
     ),
-    # Plan 27 §2 rule 6: no input line on the screen sends nothing
+    # Plan 27 §2 rule 6: an input line not provably empty sends nothing (review B1, B2)
     Control(
         'p27_rule6_no_line',
         'src/nirvana_idle_compact.rs',
-        '        None => skip("no input line on the screen".into()),\n',
-        '        None => Decision::Send,\n',
+        '        InputLine::Unsure(why) => skip(format!("the input line is not provably empty: {why}")),\n',
+        '        InputLine::Unsure(_) => Decision::Send,\n',
         'idle_compact_rule6_no_input_line_sends_nothing',
         'rust',
     ),
@@ -150,8 +150,8 @@ CONTROLS = (
     Control(
         'p27_rule6_typed_text',
         'src/nirvana_idle_compact.rs',
-        '        Some(text) if !text.is_empty() => skip("the input line holds text".into()),\n',
-        '        Some(text) if text.is_empty() && false => skip("the input line holds text".into()),\n',
+        '        InputLine::Text(_) => skip("the input line holds text".into()),\n',
+        '        InputLine::Text(_) => Decision::Send,\n',
         'idle_compact_rule6_typed_text_left_alone',
         'rust',
     ),
@@ -159,8 +159,8 @@ CONTROLS = (
     Control(
         'p27_send',
         'src/nirvana_idle_compact.rs',
-        '        Some(_) => Decision::Send,\n',
-        '        Some(_) => skip(String::new()),\n',
+        '        InputLine::Empty => Decision::Send,\n',
+        '        InputLine::Empty => skip(String::new()),\n',
         'idle_compact_sends_when_every_rule_holds',
         'rust',
     ),
@@ -195,8 +195,8 @@ CONTROLS = (
     Control(
         'p27_due_recheck',
         'src/nirvana_idle_compact.rs',
-        '            .map_or(first, |checked| first.max(checked + RECHECK));\n',
-        '            .map_or(first, |_checked| first);\n',
+        '            Some(checked) => first.max(checked.checked_add(RECHECK)?),\n',
+        '            Some(_checked) => first,\n',
         'idle_stretch_is_due_at_minutes_then_rechecks_until_the_cache_expires',
         'rust',
     ),
@@ -204,7 +204,7 @@ CONTROLS = (
     Control(
         'p27_due_cache_life',
         'src/nirvana_idle_compact.rs',
-        '        (at < since + CACHE_LIFE).then_some(at)\n',
+        '        (at < since.checked_add(CACHE_LIFE)?).then_some(at)\n',
         '        Some(at)\n',
         'idle_stretch_is_due_at_minutes_then_rechecks_until_the_cache_expires',
         'rust',
@@ -240,7 +240,7 @@ CONTROLS = (
     Control(
         'p27_context_tail_widens',
         'src/nirvana_idle_compact.rs',
-        '        if found.is_some() || window >= MAX_TAIL_WINDOW || len <= window {\n',
+        '        if found.is_some() || window >= MAX_TAIL || len <= window {\n',
         '        if true {\n',
         'transcript_facts_come_from_a_temporary_file',
         'rust',
@@ -488,12 +488,12 @@ CONTROLS = (
         'idle_compact_deadline_reaches_the_server_loop',
         'rust',
     ),
-    # Plan 27 §2 (deadline loop): only Claude panes set the deadline
+    # Plan 27 §2 (deadline loop): the deadline walks the same Claude terminals as the check (review S2)
     Control(
         'p27_deadline_claude_only',
         'src/app/nirvana_idle_compact.rs',
-        '            .filter(|terminal| terminal.effective_known_agent() == Some(Agent::Claude))\n',
-        '            .filter(|_terminal| true)\n',
+        '        self.idle_compact_terminals()\n            .filter_map(|(_, terminal)| terminal.idle_stretch.next_check_at(rule.minutes))\n',
+        '        self.state\n            .terminals\n            .iter()\n            .filter_map(|(_, terminal)| terminal.idle_stretch.next_check_at(rule.minutes))\n',
         'idle_compact_deadline_counts_only_claude',
         'rust',
     ),
@@ -515,12 +515,12 @@ CONTROLS = (
         'idle_compact_server_with_the_setting_off_sends_nothing',
         'rust',
     ),
-    # Plan 27 §2: the server reads only Claude panes
+    # Plan 27 §2: the server reads only Claude terminals; the stand-in records each read (review: hollow control)
     Control(
         'p27_server_claude_panes_only',
         'src/app/nirvana_idle_compact.rs',
-        '                    if terminal.effective_known_agent() != Some(Agent::Claude) {\n',
-        '                    if false && terminal.effective_known_agent() != Some(Agent::Claude) {\n',
+        '            .filter(|(_, terminal)| terminal.effective_known_agent() == Some(Agent::Claude))\n',
+        '            .filter(|(_, _terminal)| true)\n',
         'idle_compact_deadline_counts_only_claude',
         'rust',
     ),
@@ -528,8 +528,8 @@ CONTROLS = (
     Control(
         'p27_server_due_only',
         'src/app/nirvana_idle_compact.rs',
-        '                .is_none_or(|due| now < due)\n            {\n                continue;\n            }\n',
-        '                .is_none_or(|_due| false)\n            {\n                continue;\n            }\n',
+        '            .filter(|(due, _)| *due <= now)\n',
+        '            .filter(|(_due, _)| true)\n',
         'idle_compact_server_types_compact_once_into_an_idle_claude',
         'rust',
     ),
@@ -537,7 +537,7 @@ CONTROLS = (
     Control(
         'p27_server_marks_checked',
         'src/app/nirvana_idle_compact.rs',
-        '            terminal.idle_stretch.checked_at = Some(now);\n',
+        '        terminal.idle_stretch.checked_at = Some(now);\n',
         '',
         'idle_compact_server_leaves_a_typed_line_alone_and_rechecks_later',
         'rust',
@@ -546,8 +546,8 @@ CONTROLS = (
     Control(
         'p27_server_prompt_from_screen',
         'src/app/nirvana_idle_compact.rs',
-        '                .and_then(|runtime| crate::nirvana_run::prompt_line_text(&runtime.visible_ansi()));\n',
-        '                .and_then(|_runtime| Some(String::new()));\n',
+        '        let input_line = runtime.map_or_else(\n            || InputLine::Unsure("the pane has no runtime".into()),\n            input_line_of,\n        );\n',
+        '        let input_line = InputLine::Empty;\n',
         'idle_compact_server_leaves_a_typed_line_alone_and_rechecks_later',
         'rust',
     ),
@@ -555,8 +555,8 @@ CONTROLS = (
     Control(
         'p27_server_query_pane',
         'src/app/nirvana_idle_compact.rs',
-        '                pane_id: pane.public.clone(),\n',
-        '                pane_id: String::new(),\n',
+        '            pane_id: pane.public.clone(),\n',
+        '            pane_id: String::new(),\n',
         'idle_compact_server_passes_the_facts_it_holds',
         'rust',
     ),
@@ -564,8 +564,8 @@ CONTROLS = (
     Control(
         'p27_server_argv_fact',
         'src/app/nirvana_idle_compact.rs',
-        '                argv: outside.argv,\n',
-        '                argv: Some(Vec::new()),\n',
+        '            argv: outside.argv,\n',
+        '            argv: Some(Vec::new()),\n',
         'idle_compact_server_sends_nothing_when_one_fact_fails',
         'rust',
     ),
@@ -573,8 +573,8 @@ CONTROLS = (
     Control(
         'p27_server_transcript_fact',
         'src/app/nirvana_idle_compact.rs',
-        '                transcript_age: outside.transcript_age,\n',
-        '                transcript_age: Some(Duration::MAX),\n',
+        '            transcript_age: outside.transcript_age,\n',
+        '            transcript_age: Some(Duration::MAX),\n',
         'idle_compact_server_sends_nothing_when_one_fact_fails',
         'rust',
     ),
@@ -582,26 +582,26 @@ CONTROLS = (
     Control(
         'p27_server_tokens_fact',
         'src/app/nirvana_idle_compact.rs',
-        '                context_tokens: outside.context_tokens,\n',
-        '                context_tokens: Some(u64::MAX),\n',
+        '            context_tokens: outside.context_tokens,\n',
+        '            context_tokens: Some(u64::MAX),\n',
         'idle_compact_server_sends_nothing_when_one_fact_fails',
         'rust',
     ),
-    # Plan 27 §2 rule 3: the server passes the pane's state
+    # Plan 27 §2 rule 3: the server passes the pane's state, not its stretch (review: stale stretch)
     Control(
         'p27_server_state_fact',
         'src/app/nirvana_idle_compact.rs',
-        '            let state = terminal.state;\n',
-        '            let state = crate::detect::AgentState::Idle;\n',
-        'idle_compact_server_sends_nothing_when_one_fact_fails',
+        '        let state = terminal.state;\n',
+        '        let state = crate::detect::AgentState::Idle;\n',
+        'idle_compact_server_reads_the_state_not_a_stale_stretch',
         'rust',
     ),
     # Plan 27 §2 rule 2: the server asks whether the pane is a seat worker's
     Control(
         'p27_server_seat_worker_fact',
         'src/app/nirvana_idle_compact.rs',
-        '                seat_worker: crate::nirvana_subagents::is_seat_worker_pane(&pane.public),\n',
-        '                seat_worker: false,\n',
+        '            seat_worker: crate::nirvana_subagents::is_seat_worker_pane(&pane.public),\n',
+        '            seat_worker: false,\n',
         'idle_compact_server_sends_nothing_when_one_fact_fails',
         'rust',
     ),
@@ -609,9 +609,406 @@ CONTROLS = (
     Control(
         'p27_server_marks_sent',
         'src/app/nirvana_idle_compact.rs',
-        '                        terminal.idle_stretch.sent = true;\n',
+        '            terminal.idle_stretch.sent = true;\n',
         '',
         'idle_compact_server_types_compact_once_into_an_idle_claude',
+        'rust',
+    ),
+    # ---- Plan 27 review round ----
+    # Review: a stale stretch on a terminal whose state is no longer idle sends nothing, by rule 3 in decide
+    Control(
+        'p27_rule3_state_over_stretch',
+        'src/nirvana_idle_compact.rs',
+        '    if facts.state != AgentState::Idle {\n',
+        '    if false && facts.state != AgentState::Idle {\n',
+        'idle_compact_server_reads_the_state_not_a_stale_stretch',
+        'rust',
+    ),
+    # Review B1: only faint text is a placeholder; a grey colour is the owner's text
+    Control(
+        'p27_input_faint_only',
+        'src/nirvana_idle_compact.rs',
+        '                Some("2") => {\n                    groups.nth(2);\n                }\n',
+        '                Some("2") => {\n                    *faint = true;\n                    groups.nth(2);\n                }\n',
+        'idle_compact_input_line_grey_typed_text_is_not_empty',
+        'rust',
+    ),
+    # Review B1: an extended colour's arguments are skipped, so the 2 of 48;2 is not faint
+    Control(
+        'p27_input_sgr_colour_args',
+        'src/nirvana_idle_compact.rs',
+        '            38 | 48 | 58 => match groups.next() {\n',
+        '            38 | 58 => match groups.next() {\n',
+        'idle_compact_input_line_grey_typed_text_is_not_empty',
+        'rust',
+    ),
+    # Review B1: a [ chip is not empty (a pasted-text chip)
+    Control(
+        'p27_input_chip_pasted',
+        'src/nirvana_idle_compact.rs',
+        "    if rest.iter().any(|cell| cell.ch == '[') {\n",
+        "    if false && rest.iter().any(|cell| cell.ch == '[') {\n",
+        'idle_compact_input_line_pasted_chip_is_not_empty',
+        'rust',
+    ),
+    # Review B1: a [ chip is not empty (an image chip)
+    Control(
+        'p27_input_chip_image',
+        'src/nirvana_idle_compact.rs',
+        "    if rest.iter().any(|cell| cell.ch == '[') {\n",
+        "    if false && rest.iter().any(|cell| cell.ch == '[') {\n",
+        'idle_compact_input_line_image_chip_is_not_empty',
+        'rust',
+    ),
+    # Review B1: any non-faint character is the owner's text
+    Control(
+        'p27_input_owned_text',
+        'src/nirvana_idle_compact.rs',
+        '    if !owned.is_empty() {\n',
+        '    if false && !owned.is_empty() {\n',
+        'idle_compact_input_line_recorded_typed_reads_its_text',
+        'rust',
+    ),
+    # Review B1: a cursor drawn past the line's start is not empty
+    Control(
+        'p27_input_drawn_cursor',
+        'src/nirvana_idle_compact.rs',
+        '    if rest.iter().skip(1).any(|cell| cell.inverse) {\n',
+        '    if false && rest.iter().skip(1).any(|cell| cell.inverse) {\n',
+        'idle_compact_input_line_cursor_away_from_the_start_is_not_empty',
+        'rust',
+    ),
+    # Review B1: the terminal's cursor anywhere but the line's start is not empty
+    Control(
+        'p27_input_cursor_at_start',
+        'src/nirvana_idle_compact.rs',
+        '        Some(cursor) if cursor.visible && (cursor.row != row || cursor.col != 2) => {\n',
+        '        Some(cursor) if false && cursor.visible && (cursor.row != row || cursor.col != 2) => {\n',
+        'idle_compact_input_line_cursor_away_from_the_start_is_not_empty',
+        'rust',
+    ),
+    # Review B1: an unread cursor is a doubt
+    Control(
+        'p27_input_cursor_unread',
+        'src/nirvana_idle_compact.rs',
+        '        None => unsure("the cursor could not be read"),\n',
+        '        None => InputLine::Empty,\n',
+        'idle_compact_input_line_cursor_away_from_the_start_is_not_empty',
+        'rust',
+    ),
+    # Review B1: a draft of more than one line is not empty
+    Control(
+        'p27_input_one_line',
+        'src/nirvana_idle_compact.rs',
+        '    if bottom != top + 2 {\n',
+        '    if false && bottom != top + 2 {\n',
+        'idle_compact_input_line_multiline_draft_is_not_empty',
+        'rust',
+    ),
+    # Review B2: the real input box or nothing; no fallback to a ❯ line elsewhere
+    Control(
+        'p27_input_no_fallback',
+        'src/nirvana_idle_compact.rs',
+        '    let [.., top, bottom] = rules[..] else {\n        return unsure("no input box on the screen");\n    };\n',
+        '    let (top, bottom) = match rules[..] {\n        [.., top, bottom] => (top, bottom),\n        _ => {\n            let Some(at) = plain.iter().rposition(|line| line.starts_with(\'❯\')) else {\n                return unsure("no input box on the screen");\n            };\n            (at.saturating_sub(1), at + 1)\n        }\n    };\n',
+        'idle_compact_input_line_needs_the_box',
+        'rust',
+    ),
+    # Review B2: the box's line starts with ❯
+    Control(
+        'p27_input_marked',
+        'src/nirvana_idle_compact.rs',
+        '    if !marked {\n',
+        '    if false && !marked {\n',
+        'idle_compact_input_line_needs_the_box',
+        'rust',
+    ),
+    # Review B2: a box with more lines below it than a footer is not the live bottom
+    Control(
+        'p27_input_footer_bound',
+        'src/nirvana_idle_compact.rs',
+        '    if below > FOOTER_LINES {\n',
+        '    if false && below > FOOTER_LINES {\n',
+        'idle_compact_input_line_scrolled_screen_is_not_empty',
+        'rust',
+    ),
+    # Review B2: a pane scrolled back is not read
+    Control(
+        'p27_input_scrolled',
+        'src/nirvana_idle_compact.rs',
+        '    if scrolled {\n        return unsure("the pane is scrolled back");\n    }\n',
+        '',
+        'idle_compact_input_line_scrolled_screen_is_not_empty',
+        'rust',
+    ),
+    # Review B2: a screen with a claude.toml blocked or transcript-viewer marker, or vim mode, is not read
+    Control(
+        'p27_input_markers',
+        'src/nirvana_idle_compact.rs',
+        '    if let Some(marker) = NOT_THE_INPUT.iter().find(|marker| lower.contains(**marker)) {\n',
+        '    if let Some(marker) = NOT_THE_INPUT.iter().find(|_marker| false) {\n',
+        'idle_compact_input_line_vim_and_dialog_markers_are_not_empty',
+        'rust',
+    ),
+    # Review B2: a menu screen is not read
+    Control(
+        'p27_input_markers_menu',
+        'src/nirvana_idle_compact.rs',
+        '    if let Some(marker) = NOT_THE_INPUT.iter().find(|marker| lower.contains(**marker)) {\n',
+        '    if let Some(marker) = NOT_THE_INPUT.iter().find(|_marker| false) {\n',
+        'idle_compact_input_line_menu_is_not_empty',
+        'rust',
+    ),
+    # Review B2: vim mode's insert footer is one of the markers
+    Control(
+        'p27_input_vim_marker',
+        'src/nirvana_idle_compact.rs',
+        '    "-- normal --",\n    "-- insert --",\n];\n',
+        '    "-- normal --",\n];\n',
+        'idle_compact_input_line_vim_and_dialog_markers_are_not_empty',
+        'rust',
+    ),
+    # Review S1: the owner's key inside the quiet window skips
+    Control(
+        'p27_rule6_owner_quiet',
+        'src/nirvana_idle_compact.rs',
+        '    if let Some(why) = owner_quiet_breach(facts.owner_key_secs_ago) {\n        return skip(why);\n    }\n',
+        '',
+        'idle_compact_rule6_owner_keys_inside_the_quiet_window_skip',
+        'rust',
+    ),
+    # Review S1: the quiet window is OWNER_QUIET_S
+    Control(
+        'p27_owner_quiet_window',
+        'src/nirvana_idle_compact.rs',
+        '    (ago < crate::nirvana_run::OWNER_QUIET_S)\n',
+        '    (ago < 1)\n',
+        'idle_compact_rule6_owner_keys_inside_the_quiet_window_skip',
+        'rust',
+    ),
+    # Review S1: Enter only on exactly /compact
+    Control(
+        'p27_enter_exact',
+        'src/nirvana_idle_compact.rs',
+        '        InputLine::Text(text) if text == COMMAND => Ok(()),\n',
+        '        InputLine::Text(text) if text.starts_with(COMMAND) => Ok(()),\n',
+        'idle_compact_enter_only_on_exactly_compact',
+        'rust',
+    ),
+    # Review S1: no Enter while the owner types
+    Control(
+        'p27_enter_owner',
+        'src/nirvana_idle_compact.rs',
+        '    if let Some(why) = owner_quiet_breach(owner_key_secs_ago) {\n        return Err(why);\n    }\n',
+        '',
+        'idle_compact_enter_only_on_exactly_compact',
+        'rust',
+    ),
+    # Review S1: a pasted stretch is due its Enter
+    Control(
+        'p27_stretch_enter_due',
+        'src/nirvana_idle_compact.rs',
+        '        if let Some(enter_at) = self.enter_at {\n            return Some(enter_at);\n        }\n',
+        '',
+        'idle_stretch_is_due_its_enter_after_the_paste',
+        'rust',
+    ),
+    # Review S1: the server reads the owner's last key for the pane
+    Control(
+        'p27_server_owner_key_fact',
+        'src/app/nirvana_idle_compact.rs',
+        '            owner_key_secs_ago: owner_key_secs_ago(&pane.public),\n',
+        '            owner_key_secs_ago: None,\n',
+        'idle_compact_server_skips_while_the_owner_types',
+        'rust',
+    ),
+    # Review S1: the key's age is now less its second, as the wake path reads it
+    Control(
+        'p27_server_owner_key_age',
+        'src/app/nirvana_idle_compact.rs',
+        '    crate::nirvana_run::owner_key_at(public).map(|at| crate::nirvana_run::now().saturating_sub(at))\n',
+        '    crate::nirvana_run::owner_key_at(public).map(|_at| u64::MAX)\n',
+        'idle_compact_server_skips_while_the_owner_types',
+        'rust',
+    ),
+    # Review S1: the Enter re-reads the line
+    Control(
+        'p27_server_enter_rereads',
+        'src/app/nirvana_idle_compact.rs',
+        '        if let Err(why) = enter_gate(&input_line_of(runtime), owner_key_secs_ago(&public)) {\n',
+        '        if let Err(why) = enter_gate(&InputLine::Text("/compact".into()), owner_key_secs_ago(&public)) {\n',
+        'idle_compact_server_sends_no_enter_unless_the_line_reads_compact',
+        'rust',
+    ),
+    # Review S1: the Enter reads the owner's key again
+    Control(
+        'p27_server_enter_owner',
+        'src/app/nirvana_idle_compact.rs',
+        '        if let Err(why) = enter_gate(&input_line_of(runtime), owner_key_secs_ago(&public)) {\n',
+        '        if let Err(why) = enter_gate(&input_line_of(runtime), None) {\n',
+        'idle_compact_server_holds_the_enter_when_the_owner_types',
+        'rust',
+    ),
+    # Review S1: a pending Enter is taken on its pass
+    Control(
+        'p27_server_enter_pass',
+        'src/app/nirvana_idle_compact.rs',
+        '        if terminal.idle_stretch.enter_at.take().is_some() {\n',
+        '        if terminal.idle_stretch.enter_at.take().is_some() && false {\n',
+        'idle_compact_server_types_compact_once_into_an_idle_claude',
+        'rust',
+    ),
+    # Review S1: the paste sets the Enter's time
+    Control(
+        'p27_server_enter_at_set',
+        'src/app/nirvana_idle_compact.rs',
+        '            terminal.idle_stretch.enter_at = now.checked_add(SUBMIT_DELAY);\n',
+        '',
+        'idle_compact_server_types_compact_once_into_an_idle_claude',
+        'rust',
+    ),
+    # Review S1: the Enter's reply is waited on, and a failure is known
+    Control(
+        'p27_server_enter_reply',
+        'src/app/nirvana_idle_compact.rs',
+        '            .and_then(|reply| {\n                reply\n                    .recv_timeout(ENTER_REPLY_WAIT)\n                    .map_err(std::io::Error::other)?\n            });\n',
+        '            .map(|_reply| ());\n',
+        'idle_compact_server_reports_a_failed_enter',
+        'rust',
+    ),
+    # Review S6: the stretch is marked sent only once the paste is queued
+    Control(
+        'p27_server_sent_after_queue',
+        'src/app/nirvana_idle_compact.rs',
+        '        if let Err(err) = runtime.try_send_bytes(Bytes::from(text)) {\n',
+        '        if let Some(terminal) = self.state.terminals.get_mut(terminal_id) {\n            terminal.idle_stretch.sent = true;\n        }\n        if let Err(err) = runtime.try_send_bytes(Bytes::from(text)) {\n',
+        'idle_compact_server_unqueued_paste_stays_unsent',
+        'rust',
+    ),
+    # Review S2: a due terminal with no pane is stamped too
+    Control(
+        'p27_server_stamps_paneless',
+        'src/app/nirvana_idle_compact.rs',
+        '        terminal.idle_stretch.checked_at = Some(now);\n',
+        '',
+        'idle_compact_terminal_without_a_pane_gets_a_future_deadline',
+        'rust',
+    ),
+    # Review S2: the other panes for the shared-folder rule are Claude panes only
+    Control(
+        'p27_others_claude_only',
+        'src/app/nirvana_idle_compact.rs',
+        '                    if !claude.contains(&pane.attached_terminal_id) {\n',
+        '                    if false && !claude.contains(&pane.attached_terminal_id) {\n',
+        'idle_compact_others_are_only_claude_panes',
+        'rust',
+    ),
+    # Review S4: the due terminal checked first is the earliest; the rest wait for the next pass
+    Control(
+        'p27_server_earliest_first',
+        'src/app/nirvana_idle_compact.rs',
+        '            .min_by_key(|(due, _)| *due)\n',
+        '            .max_by_key(|(due, _)| *due)\n',
+        'idle_compact_checks_one_terminal_a_pass',
+        'rust',
+    ),
+    # Review S4: the transcript read stops at 1 MB
+    Control(
+        'p27_tail_bound',
+        'src/nirvana_idle_compact.rs',
+        'pub const MAX_TAIL: u64 = 1024 * 1024;\n',
+        'pub const MAX_TAIL: u64 = 8 * 1024 * 1024;\n',
+        'transcript_read_stops_at_one_megabyte',
+        'rust',
+    ),
+    # Review S3: the pane's foreground must be Claude
+    Control(
+        'p27_transcript_foreground',
+        'src/nirvana_idle_compact.rs',
+        '    if foreground != Some(Agent::Claude) {\n        return Err("the pane\'s foreground is not Claude".into());\n    }\n',
+        '',
+        'choose_transcript_needs_claude_in_the_foreground',
+        'rust',
+    ),
+    # Review S3: the sessions record beats the hook's id
+    Control(
+        'p27_transcript_record_first',
+        'src/nirvana_idle_compact.rs',
+        '        (Some(id), _) => (id, false),\n',
+        '        (_, Some(id)) => (id, true),\n        (Some(id), _) => (id, false),\n',
+        'choose_transcript_takes_the_sessions_record_over_the_hook',
+        'rust',
+    ),
+    # Review S3: a sessions record older than the process is not this Claude's
+    Control(
+        'p27_transcript_record_tied',
+        'src/nirvana_idle_compact.rs',
+        '        .filter(|record| record.written_secs.is_some_and(|at| at >= start))\n',
+        '        .filter(|_record| true)\n',
+        'choose_transcript_takes_the_sessions_record_over_the_hook',
+        'rust',
+    ),
+    # Review S3: no id, no transcript; never the folder's newest
+    Control(
+        'p27_transcript_no_id',
+        'src/nirvana_idle_compact.rs',
+        '        (None, None) => return Err("no session id names this Claude\'s conversation".into()),\n',
+        '        (None, None) => return Ok(claude_dir.join("projects").join(&encoded).join("newest.jsonl")),\n',
+        'choose_transcript_with_no_id_takes_nothing',
+        'rust',
+    ),
+    # Review S3: without the process start time nothing is tied
+    Control(
+        'p27_transcript_start_known',
+        'src/nirvana_idle_compact.rs',
+        '    let Some(start) = start_secs else {\n        return Err("the Claude process\'s start time is not known".into());\n    };\n',
+        '    let start = start_secs.unwrap_or(0);\n',
+        'choose_transcript_with_no_id_takes_nothing',
+        'rust',
+    ),
+    # Review S3: a hook id's transcript written before this Claude started is not its own
+    Control(
+        'p27_transcript_hook_tied',
+        'src/nirvana_idle_compact.rs',
+        '        Some(at) if from_hook && at < start => Err(format!(\n',
+        '        Some(at) if false && from_hook && at < start => Err(format!(\n',
+        'choose_transcript_with_no_id_takes_nothing',
+        'rust',
+    ),
+    # Review S3: an id with no transcript gives none
+    Control(
+        'p27_transcript_exists',
+        'src/nirvana_idle_compact.rs',
+        '        None => Err(format!("no transcript for session {id}")),\n',
+        '        None => Ok(path),\n',
+        'choose_transcript_with_no_id_takes_nothing',
+        'rust',
+    ),
+    # Review S3: a session value that is not an id gives none
+    Control(
+        'p27_transcript_id_valid',
+        'src/nirvana_idle_compact.rs',
+        '    if !valid {\n',
+        '    if false && !valid {\n',
+        'choose_transcript_with_no_id_takes_nothing',
+        'rust',
+    ),
+    # Review S3: two panes in one folder that nothing tells apart
+    Control(
+        'p27_transcript_shared_folder',
+        'src/nirvana_idle_compact.rs',
+        '            && other_id.is_none_or(|other| other == id)\n',
+        '            && other_id.is_some_and(|other| other == id)\n',
+        'choose_transcript_two_panes_in_one_folder',
+        'rust',
+    ),
+    # Review S3: only a pane in the same folder counts
+    Control(
+        'p27_transcript_same_folder_only',
+        'src/nirvana_idle_compact.rs',
+        '        crate::nirvana_subagents::encode_project_folder(other_folder) == encoded\n',
+        '        true\n',
+        'choose_transcript_two_panes_in_one_folder',
         'rust',
     ),
 )

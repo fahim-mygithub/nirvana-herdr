@@ -1,9 +1,10 @@
 //! Nirvana fork, plan 27: the server's half of an idle Claude's `/compact`.
 //!
 //! The rule lives in `nirvana_idle_compact::decide`; this file only gathers its facts and applies the answer. The
-//! server's deadline loop wakes at the earliest idle Claude pane's check (`idle_compact_deadline`, read by
-//! `next_headless_loop_deadline_with_git_refresh`), so nothing polls. The command is typed the way `herdr agent
-//! prompt` types a prompt: pasted, then Enter after a pause.
+//! server's deadline loop wakes at the earliest idle Claude terminal's check (`idle_compact_deadline`, read by
+//! `next_headless_loop_deadline_with_git_refresh`), so nothing polls. The command goes in two steps, each on its
+//! own pass: the paste, then, `SUBMIT_DELAY` later, Enter, only if the input line then reads exactly `/compact`
+//! (review S1). Each pass does the work of at most one terminal (review S4).
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
@@ -12,46 +13,79 @@ use bytes::Bytes;
 
 use super::App;
 use crate::detect::Agent;
-use crate::nirvana_idle_compact::{decide, read_outside, Decision, Facts, Outside, PaneQuery};
+use crate::nirvana_idle_compact::{
+    decide, enter_gate, read_input_line, read_outside, Cursor, Decision, Facts, InputLine, Outside,
+    PaneQuery,
+};
+use crate::terminal::{TerminalId, TerminalRuntime, TerminalState};
 
 /// The pause between the pasted command and its Enter, as `herdr agent prompt` uses
 /// (app/api/agents.rs AGENT_PROMPT_SUBMIT_DELAY).
 const SUBMIT_DELAY: Duration = Duration::from_millis(300);
+/// How long the server waits on the pane writer's reply for the Enter (review S1). The Enter goes with no delay, so
+/// the reply takes one write; the bound keeps a stuck pane from holding the server loop.
+const ENTER_REPLY_WAIT: Duration = Duration::from_millis(250);
 
 /// A pane herdr sees running Claude.
 struct ClaudePane {
-    terminal_id: crate::terminal::TerminalId,
+    terminal_id: TerminalId,
     public: String,
     folder: Option<PathBuf>,
     hook_session: Option<String>,
 }
 
+/// The strict reading of a pane's input line (`read_input_line`), from its screen with colours, its cursor and its
+/// scroll.
+fn input_line_of(runtime: &TerminalRuntime) -> InputLine {
+    let Some((cols, rows)) = runtime.terminal_dimensions() else {
+        return InputLine::Unsure("the pane's size could not be read".into());
+    };
+    let cursor = runtime
+        .cursor_state(ratatui::layout::Rect::new(0, 0, cols, rows), true)
+        .map(|cursor| Cursor {
+            row: usize::from(cursor.y),
+            col: usize::from(cursor.x),
+            visible: cursor.visible,
+        });
+    let scrolled = runtime
+        .scroll_metrics()
+        .is_none_or(|metrics| metrics.offset_from_bottom > 0);
+    read_input_line(&runtime.visible_ansi(), cursor, scrolled)
+}
+
+/// Seconds since the owner's last key in the pane, as the orchestrator's wake path reads it (`nirvana_worker`).
+fn owner_key_secs_ago(public: &str) -> Option<u64> {
+    crate::nirvana_run::owner_key_at(public).map(|at| crate::nirvana_run::now().saturating_sub(at))
+}
+
 impl App {
-    /// When the next idle Claude pane is due a check, for the server's deadline loop. `None` when the setting is off.
-    pub(crate) fn idle_compact_deadline(&self) -> Option<Instant> {
-        let rule = self.idle_compact.rule()?;
+    /// The terminals idle compact looks at, for both the deadline and the check (review S2): herdr sees Claude in
+    /// them. A terminal with no pane is still one of them, so its check is stamped and its deadline moves on.
+    fn idle_compact_terminals(&self) -> impl Iterator<Item = (&TerminalId, &TerminalState)> {
         self.state
             .terminals
-            .values()
-            .filter(|terminal| terminal.effective_known_agent() == Some(Agent::Claude))
-            .filter_map(|terminal| terminal.idle_stretch.next_check_at(rule.minutes))
+            .iter()
+            .filter(|(_, terminal)| terminal.effective_known_agent() == Some(Agent::Claude))
+    }
+
+    /// When the next idle Claude terminal is due a check, for the server's deadline loop. `None` when the setting is
+    /// off.
+    pub(crate) fn idle_compact_deadline(&self) -> Option<Instant> {
+        let rule = self.idle_compact.rule()?;
+        self.idle_compact_terminals()
+            .filter_map(|(_, terminal)| terminal.idle_stretch.next_check_at(rule.minutes))
             .min()
     }
 
-    /// Checks the idle Claude panes that are due, and types `/compact` where `decide` says to. True when one was sent.
+    /// Checks the idle Claude terminal that is due first, and types `/compact` where `decide` says to. True when a
+    /// key was typed.
     pub(crate) fn nirvana_idle_compact(&mut self, now: Instant) -> bool {
         if self.idle_compact_deadline().is_none_or(|due| now < due) {
             return false;
         }
         let claude_dir = crate::nirvana_subagents::claude_config_dir();
-        let home = crate::nirvana::home();
         self.nirvana_idle_compact_with(now, |query| {
-            read_outside(
-                query,
-                claude_dir.as_deref(),
-                home.as_deref(),
-                SystemTime::now(),
-            )
+            read_outside(query, claude_dir.as_deref(), SystemTime::now())
         })
     }
 
@@ -64,112 +98,183 @@ impl App {
         let Some(rule) = self.idle_compact.rule() else {
             return false;
         };
-        let panes = self.claude_panes();
-        let mut sent = false;
-        for pane in &panes {
-            let Some(terminal) = self.state.terminals.get_mut(&pane.terminal_id) else {
-                continue;
-            };
-            let stretch = terminal.idle_stretch;
-            if stretch
-                .next_check_at(rule.minutes)
-                .is_none_or(|due| now < due)
-            {
-                continue;
-            }
-            // Marked before any read, so a check that fails waits RECHECK instead of running again at once.
-            terminal.idle_stretch.checked_at = Some(now);
-            let state = terminal.state;
-            let agent = terminal.effective_known_agent();
-            let runtime = self.terminal_runtimes.get(&pane.terminal_id);
-            let prompt_line = runtime
-                .and_then(|runtime| crate::nirvana_run::prompt_line_text(&runtime.visible_ansi()));
-            let query = PaneQuery {
-                pane_id: pane.public.clone(),
-                shell_pid: runtime.and_then(crate::terminal::TerminalRuntime::child_pid),
-                folder: pane.folder.clone(),
-                hook_session: pane.hook_session.clone(),
-                others: panes
-                    .iter()
-                    .filter(|other| other.terminal_id != pane.terminal_id)
-                    .filter_map(|other| {
-                        Some((
-                            other.public.clone(),
-                            other.folder.clone()?,
-                            other.hook_session.clone(),
-                        ))
-                    })
-                    .collect(),
-            };
-            let outside = read(&query);
-            let idle_for = stretch
-                .since
-                .map(|since| now.saturating_duration_since(since));
-            let facts = Facts {
-                rule: Some(rule),
-                agent,
-                seat_worker: crate::nirvana_subagents::is_seat_worker_pane(&pane.public),
-                argv: outside.argv,
-                state,
-                idle_for,
-                sent_in_stretch: stretch.sent,
-                transcript_age: outside.transcript_age,
-                context_tokens: outside.context_tokens,
-                prompt_line,
-            };
-            let reason = match decide(&facts) {
-                Decision::Skip(reason) => reason,
-                Decision::Send => {
-                    // Marked sent before typing: whatever the send does, it is never typed twice in a stretch.
-                    if let Some(terminal) = self.state.terminals.get_mut(&pane.terminal_id) {
-                        terminal.idle_stretch.sent = true;
-                    }
-                    let Some(runtime) = runtime else {
-                        continue;
-                    };
-                    let (text, enter) = super::api_helpers::encode_api_submission_parts(
-                        runtime,
-                        crate::nirvana_idle_compact::COMMAND,
-                    );
-                    match runtime.queue_user_input_submission(
-                        Bytes::from(text),
-                        Bytes::from(enter),
-                        SUBMIT_DELAY,
-                        None,
-                    ) {
-                        Ok(_) => {
-                            tracing::info!(
-                                pane = %pane.public,
-                                idle_minutes = idle_for.map_or(0, |idle| idle.as_secs() / 60),
-                                tokens = facts.context_tokens.unwrap_or(0),
-                                "nirvana: idle Claude sent /compact"
-                            );
-                            sent = true;
-                        }
-                        Err(err) => {
-                            tracing::warn!(pane = %pane.public, err = %err, "nirvana: idle compact not typed");
-                        }
-                    }
-                    continue;
-                }
-            };
-            tracing::debug!(pane = %pane.public, reason, "nirvana: idle compact left the pane alone");
+        // Review S4: the one due first; the rest stay due, so the loop comes straight back for them.
+        let Some(terminal_id) = self
+            .idle_compact_terminals()
+            .filter_map(|(id, terminal)| {
+                Some((terminal.idle_stretch.next_check_at(rule.minutes)?, id))
+            })
+            .filter(|(due, _)| *due <= now)
+            .min_by_key(|(due, _)| *due)
+            .map(|(_, id)| id.clone())
+        else {
+            return false;
+        };
+        let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
+            return false;
+        };
+        if terminal.idle_stretch.enter_at.take().is_some() {
+            return self.idle_compact_enter(&terminal_id);
         }
-        sent
+        // Review S2: stamped first, pane or not, so a check that finds nothing waits RECHECK.
+        terminal.idle_stretch.checked_at = Some(now);
+        let stretch = terminal.idle_stretch;
+        let state = terminal.state;
+        let agent = terminal.effective_known_agent();
+        let panes = self.claude_panes();
+        let Some(pane) = panes.iter().find(|pane| pane.terminal_id == terminal_id) else {
+            tracing::debug!("nirvana: idle compact found no pane for an idle Claude terminal");
+            return false;
+        };
+        let runtime = self.terminal_runtimes.get(&terminal_id);
+        let input_line = runtime.map_or_else(
+            || InputLine::Unsure("the pane has no runtime".into()),
+            input_line_of,
+        );
+        let query = PaneQuery {
+            pane_id: pane.public.clone(),
+            shell_pid: runtime.and_then(TerminalRuntime::child_pid),
+            folder: pane.folder.clone(),
+            hook_session: pane.hook_session.clone(),
+            others: panes
+                .iter()
+                .filter(|other| other.terminal_id != pane.terminal_id)
+                .filter_map(|other| {
+                    Some((
+                        other.public.clone(),
+                        other.folder.clone()?,
+                        other.hook_session.clone(),
+                    ))
+                })
+                .collect(),
+        };
+        let outside = read(&query);
+        let idle_for = stretch
+            .since
+            .map(|since| now.saturating_duration_since(since));
+        let facts = Facts {
+            rule: Some(rule),
+            agent,
+            seat_worker: crate::nirvana_subagents::is_seat_worker_pane(&pane.public),
+            argv: outside.argv,
+            state,
+            idle_for,
+            sent_in_stretch: stretch.sent,
+            transcript_age: outside.transcript_age,
+            context_tokens: outside.context_tokens,
+            owner_key_secs_ago: owner_key_secs_ago(&pane.public),
+            input_line,
+        };
+        match decide(&facts) {
+            Decision::Skip(reason) => {
+                tracing::debug!(pane = %pane.public, reason, "nirvana: idle compact left the pane alone");
+                false
+            }
+            Decision::Send => self.idle_compact_paste(
+                &terminal_id,
+                &pane.public,
+                now,
+                idle_for,
+                facts.context_tokens,
+            ),
+        }
     }
 
+    /// The paste. Review S6: the stretch is marked sent once the paste is queued, and not before, so a paste that
+    /// fails to queue leaves the stretch unsent for the next check.
+    fn idle_compact_paste(
+        &mut self,
+        terminal_id: &TerminalId,
+        public: &str,
+        now: Instant,
+        idle_for: Option<Duration>,
+        tokens: Option<u64>,
+    ) -> bool {
+        let Some(runtime) = self.terminal_runtimes.get(terminal_id) else {
+            return false;
+        };
+        let (text, _) = super::api_helpers::encode_api_submission_parts(
+            runtime,
+            crate::nirvana_idle_compact::COMMAND,
+        );
+        if let Err(err) = runtime.try_send_bytes(Bytes::from(text)) {
+            tracing::warn!(pane = %public, err = %err, "nirvana: idle compact could not queue /compact; the stretch stays unsent");
+            return false;
+        }
+        if let Some(terminal) = self.state.terminals.get_mut(terminal_id) {
+            terminal.idle_stretch.sent = true;
+            terminal.idle_stretch.enter_at = now.checked_add(SUBMIT_DELAY);
+        }
+        let tokens = tokens.unwrap_or(0);
+        match idle_for {
+            Some(idle) => tracing::info!(
+                pane = %public,
+                idle_minutes = idle.as_secs() / 60,
+                tokens,
+                "nirvana: idle Claude pasted /compact"
+            ),
+            None => tracing::info!(pane = %public, tokens, "nirvana: idle Claude pasted /compact"),
+        }
+        true
+    }
+
+    /// The Enter, on the pass after the paste (review S1): only if the line reads exactly `/compact` and the owner
+    /// has not typed since, and the writer's reply is waited on.
+    fn idle_compact_enter(&mut self, terminal_id: &TerminalId) -> bool {
+        let public = self
+            .claude_panes()
+            .into_iter()
+            .find(|pane| &pane.terminal_id == terminal_id)
+            .map(|pane| pane.public);
+        let (Some(public), Some(runtime)) = (public, self.terminal_runtimes.get(terminal_id))
+        else {
+            tracing::warn!(
+                "nirvana: idle compact lost the pane before its Enter; /compact was left unsent"
+            );
+            return false;
+        };
+        if let Err(why) = enter_gate(&input_line_of(runtime), owner_key_secs_ago(&public)) {
+            tracing::warn!(pane = %public, why, "nirvana: idle compact left /compact unsent in the input line");
+            return false;
+        }
+        let (_, enter) = super::api_helpers::encode_api_submission_parts(
+            runtime,
+            crate::nirvana_idle_compact::COMMAND,
+        );
+        let written = runtime
+            .queue_user_input_submission(Bytes::new(), Bytes::from(enter), Duration::ZERO, None)
+            .and_then(|reply| {
+                reply
+                    .recv_timeout(ENTER_REPLY_WAIT)
+                    .map_err(std::io::Error::other)?
+            });
+        match written {
+            Ok(()) => {
+                tracing::info!(pane = %public, "nirvana: idle Claude sent /compact");
+                true
+            }
+            Err(err) => {
+                tracing::warn!(pane = %public, err = %err, "nirvana: idle compact's Enter failed");
+                false
+            }
+        }
+    }
+
+    /// The panes whose terminals idle compact looks at (`idle_compact_terminals`), with their public ids and folders.
     fn claude_panes(&self) -> Vec<ClaudePane> {
+        let claude: std::collections::HashSet<&TerminalId> =
+            self.idle_compact_terminals().map(|(id, _)| id).collect();
         let mut panes = Vec::new();
         for (ws_idx, ws) in self.state.workspaces.iter().enumerate() {
             for tab in &ws.tabs {
                 for (pane_id, pane) in &tab.panes {
+                    if !claude.contains(&pane.attached_terminal_id) {
+                        continue;
+                    }
                     let Some(terminal) = self.state.terminals.get(&pane.attached_terminal_id)
                     else {
                         continue;
                     };
-                    if terminal.effective_known_agent() != Some(Agent::Claude) {
-                        continue;
-                    }
                     let Some(public) = self.public_pane_id(ws_idx, *pane_id) else {
                         continue;
                     };
@@ -209,9 +314,18 @@ mod tests {
     use crate::nirvana_idle_compact::IdleStretch;
 
     const MIN: Duration = Duration::from_secs(60);
-    const RULE: &str = "──────────────────────────────";
+    const RECORDED_EMPTY: &str = include_str!("../nirvana_run/fixtures/claude-2.1.302-empty.ansi");
+    const RECORDED_TYPED: &str = include_str!("../nirvana_run/fixtures/claude-2.1.302-typed.ansi");
+    /// Wide enough that no recorded line wraps, so screen rows are the recording's lines.
+    const COLS: u16 = 200;
+    /// The `❯` line's place in the recorded screens, as a cursor move: row 9, the column after the mark.
+    const AT_LINE_START: &str = "\x1b[9;3H";
 
     fn test_app() -> App {
+        test_app_with(|_| {})
+    }
+
+    fn test_app_with(shape: impl FnOnce(&mut crate::workspace::Workspace)) -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &crate::config::Config::default(),
@@ -220,23 +334,35 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         );
-        app.state.workspaces = vec![crate::workspace::Workspace::test_new("work")];
+        let mut workspace = crate::workspace::Workspace::test_new("work");
+        shape(&mut workspace);
+        app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.ensure_test_terminals();
         app
     }
 
-    fn root_terminal_id(app: &App) -> crate::terminal::TerminalId {
+    fn root_terminal_id(app: &App) -> TerminalId {
         let tab = &app.state.workspaces[0].tabs[0];
         tab.panes[&tab.root_pane].attached_terminal_id.clone()
     }
 
-    /// The pane runs Claude, idle since `since`, with `screen` on it; what is typed lands in the receiver.
+    fn root_public(app: &App) -> String {
+        app.public_pane_id(0, app.state.workspaces[0].tabs[0].root_pane)
+            .unwrap()
+    }
+
+    /// A recorded screen as the pane's terminal shows it, the cursor where Claude leaves it on an empty line.
+    fn screen_bytes(recorded: &str) -> Vec<u8> {
+        format!("{}{AT_LINE_START}", recorded.replace('\n', "\r\n")).into_bytes()
+    }
+
+    /// The pane runs Claude, idle since `since`, with `recorded` on its screen; what is typed lands in the receiver.
     fn idle_claude(
         app: &mut App,
         since: Instant,
-        screen: &str,
+        recorded: &str,
     ) -> tokio::sync::mpsc::Receiver<Bytes> {
         let terminal_id = root_terminal_id(app);
         let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
@@ -246,26 +372,23 @@ mod tests {
             since: Some(since),
             ..IdleStretch::default()
         };
-        let (runtime, receiver) =
-            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
-                80,
-                24,
-                0,
-                screen.as_bytes(),
-                8,
-            );
+        let (runtime, receiver) = TerminalRuntime::test_with_channel_and_scrollback_bytes(
+            COLS,
+            24,
+            0,
+            &screen_bytes(recorded),
+            8,
+        );
         app.terminal_runtimes.insert(terminal_id, runtime);
         receiver
     }
 
-    fn empty_prompt() -> String {
-        // Claude Code 2.1.302's empty prompt: `❯`, a no-break space, its placeholder drawn faint
-        // (nirvana_run/fixtures/claude-2.1.302-empty.ansi).
-        format!("{RULE}\r\n❯\u{a0}\x1b[2mTry \"fix lint errors\"\x1b[0m\r\n{RULE}\r\n  ? for shortcuts\r\n")
-    }
-
-    fn typed_prompt() -> String {
-        format!("{RULE}\r\n❯\u{a0}half a thought\r\n{RULE}\r\n  ? for shortcuts\r\n")
+    /// Claude has taken the paste: its line now reads `text`.
+    fn line_now_reads(app: &App, text: &str) {
+        let runtime = app.terminal_runtimes.get(&root_terminal_id(app)).unwrap();
+        runtime.test_process_pty_bytes(
+            format!("\x1b[9;1H\x1b[0m❯\u{a0}{text}\x1b[K{AT_LINE_START}").as_bytes(),
+        );
     }
 
     /// A long-idle interactive Claude with a big context, as `read_outside` would find it.
@@ -277,44 +400,37 @@ mod tests {
         }
     }
 
+    /// What reached the pane. The paste is queued on the channel before the call returns, and the Enter's reply is
+    /// waited on before it returns, so the channel holds everything typed: no wait is needed here.
     fn typed(receiver: &mut tokio::sync::mpsc::Receiver<Bytes>) -> String {
-        // The Enter follows the paste after SUBMIT_DELAY, on the runtime's own writer.
-        let until = Instant::now() + Duration::from_secs(1);
         let mut out = Vec::new();
-        while Instant::now() < until {
-            while let Ok(bytes) = receiver.try_recv() {
-                out.extend_from_slice(&bytes);
-            }
-            if out.ends_with(b"\r") {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        while let Ok(bytes) = receiver.try_recv() {
+            out.extend_from_slice(&bytes);
         }
         String::from_utf8_lossy(&out).into_owned()
     }
 
     /// §2 rule 6, measured: the screens recorded from Claude Code 2.1.302 in a herdr pane, played into a pane
-    /// runtime and read back the way the server reads a pane (`visible_ansi`).
+    /// runtime and read back the way the server reads a pane (screen, cursor, scroll).
     #[tokio::test]
     async fn idle_compact_reads_the_recorded_claude_input_line() {
         let read = |recorded: &str| {
-            let bytes = recorded.replace('\n', "\r\n");
             let runtime =
-                crate::terminal::TerminalRuntime::test_with_screen_bytes(140, 24, bytes.as_bytes());
-            crate::nirvana_run::prompt_line_text(&runtime.visible_ansi())
+                TerminalRuntime::test_with_screen_bytes(COLS, 24, &screen_bytes(recorded));
+            input_line_of(&runtime)
         };
+        assert_eq!(read(RECORDED_EMPTY), InputLine::Empty);
         assert_eq!(
-            read(include_str!(
-                "../nirvana_run/fixtures/claude-2.1.302-empty.ansi"
-            )),
-            Some(String::new())
+            read(RECORDED_TYPED),
+            InputLine::Text("hello owner draft".to_owned())
         );
-        assert_eq!(
-            read(include_str!(
-                "../nirvana_run/fixtures/claude-2.1.302-typed.ansi"
-            )),
-            Some("hello owner draft".to_owned())
+        // Played as recorded, the terminal's cursor is left after the last line, not at the line's start.
+        let runtime = TerminalRuntime::test_with_screen_bytes(
+            COLS,
+            24,
+            RECORDED_EMPTY.replace('\n', "\r\n").as_bytes(),
         );
+        assert!(matches!(input_line_of(&runtime), InputLine::Unsure(_)));
     }
 
     #[tokio::test]
@@ -322,17 +438,106 @@ mod tests {
         let _guard = crate::nirvana::with_test_home("idle-compact-send");
         let mut app = test_app();
         let t0 = Instant::now();
-        let mut receiver = idle_claude(&mut app, t0, &empty_prompt());
+        let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
         assert_eq!(app.idle_compact_deadline(), Some(t0 + 50 * MIN));
         // Before the minutes are up nothing is due, and nothing is read.
-        assert!(!app.nirvana_idle_compact_with(t0 + 49 * MIN, |_| panic!("read too early")));
+        let asked = std::cell::Cell::new(0);
+        assert!(!app.nirvana_idle_compact_with(t0 + 49 * MIN, |query| {
+            asked.set(asked.get() + 1);
+            long_idle(query)
+        }));
+        assert_eq!(asked.get(), 0);
+        // The paste: the command, no Enter yet.
         assert!(app.nirvana_idle_compact_with(t0 + 51 * MIN, long_idle));
-        assert_eq!(typed(&mut receiver), "/compact\r");
+        assert_eq!(typed(&mut receiver), "/compact");
         let terminal_id = root_terminal_id(&app);
         assert!(app.state.terminals[&terminal_id].idle_stretch.sent);
+        let enter_at = t0 + 51 * MIN + SUBMIT_DELAY;
+        assert_eq!(app.idle_compact_deadline(), Some(enter_at));
+        // The Enter, once the line reads exactly /compact.
+        line_now_reads(&app, "/compact");
+        assert!(app.nirvana_idle_compact_with(enter_at, long_idle));
+        assert_eq!(typed(&mut receiver), "\r");
         // Once per stretch: no deadline, and a later pass types nothing.
         assert_eq!(app.idle_compact_deadline(), None);
         assert!(!app.nirvana_idle_compact_with(t0 + 55 * MIN, long_idle));
+        assert_eq!(typed(&mut receiver), "");
+    }
+
+    /// Review S1: a line that is not exactly `/compact` when the Enter is due gets no Enter, and no second try.
+    #[tokio::test]
+    async fn idle_compact_server_sends_no_enter_unless_the_line_reads_compact() {
+        let _guard = crate::nirvana::with_test_home("idle-compact-no-enter");
+        for line in ["/compact and more", "", "hello"] {
+            let mut app = test_app();
+            let t0 = Instant::now();
+            let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+            assert!(app.nirvana_idle_compact_with(t0 + 51 * MIN, long_idle));
+            assert_eq!(typed(&mut receiver), "/compact");
+            line_now_reads(&app, line);
+            assert!(!app.nirvana_idle_compact_with(t0 + 51 * MIN + SUBMIT_DELAY, long_idle));
+            assert_eq!(typed(&mut receiver), "", "{line:?}");
+            assert_eq!(app.idle_compact_deadline(), None, "{line:?}");
+        }
+    }
+
+    /// Review S6: a paste that fails to queue (the pane's writer is gone) leaves the stretch unsent.
+    #[tokio::test]
+    async fn idle_compact_server_unqueued_paste_stays_unsent() {
+        let _guard = crate::nirvana::with_test_home("idle-compact-unqueued");
+        let mut app = test_app();
+        let t0 = Instant::now();
+        drop(idle_claude(&mut app, t0, RECORDED_EMPTY));
+        assert!(!app.nirvana_idle_compact_with(t0 + 51 * MIN, long_idle));
+        let stretch = app.state.terminals[&root_terminal_id(&app)].idle_stretch;
+        assert!(!stretch.sent);
+        assert_eq!(stretch.enter_at, None);
+        assert_eq!(app.idle_compact_deadline(), Some(t0 + 52 * MIN));
+    }
+
+    /// Review S1: the Enter's reply is waited on, so an Enter that fails is known and reported.
+    #[tokio::test]
+    async fn idle_compact_server_reports_a_failed_enter() {
+        let _guard = crate::nirvana::with_test_home("idle-compact-enter-fails");
+        let mut app = test_app();
+        let t0 = Instant::now();
+        let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+        assert!(app.nirvana_idle_compact_with(t0 + 51 * MIN, long_idle));
+        assert_eq!(typed(&mut receiver), "/compact");
+        line_now_reads(&app, "/compact");
+        drop(receiver);
+        assert!(!app.nirvana_idle_compact_with(t0 + 51 * MIN + SUBMIT_DELAY, long_idle));
+    }
+
+    /// Review S1: the owner's key inside `OWNER_QUIET_S`, written the way the server writes it, skips the paste.
+    #[tokio::test]
+    async fn idle_compact_server_skips_while_the_owner_types() {
+        let _guard = crate::nirvana::with_test_home("idle-compact-owner");
+        let mut app = test_app();
+        let t0 = Instant::now();
+        let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+        crate::nirvana_run::note_owner_key(&root_public(&app));
+        assert!(!app.nirvana_idle_compact_with(t0 + 51 * MIN, long_idle));
+        assert_eq!(typed(&mut receiver), "");
+        assert!(
+            !app.state.terminals[&root_terminal_id(&app)]
+                .idle_stretch
+                .sent
+        );
+    }
+
+    /// Review S1: a key after the paste holds the Enter back.
+    #[tokio::test]
+    async fn idle_compact_server_holds_the_enter_when_the_owner_types() {
+        let _guard = crate::nirvana::with_test_home("idle-compact-owner-enter");
+        let mut app = test_app();
+        let t0 = Instant::now();
+        let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+        assert!(app.nirvana_idle_compact_with(t0 + 51 * MIN, long_idle));
+        assert_eq!(typed(&mut receiver), "/compact");
+        line_now_reads(&app, "/compact");
+        crate::nirvana_run::note_owner_key(&root_public(&app));
+        assert!(!app.nirvana_idle_compact_with(t0 + 51 * MIN + SUBMIT_DELAY, long_idle));
         assert_eq!(typed(&mut receiver), "");
     }
 
@@ -341,7 +546,7 @@ mod tests {
         let _guard = crate::nirvana::with_test_home("idle-compact-typed");
         let mut app = test_app();
         let t0 = Instant::now();
-        let mut receiver = idle_claude(&mut app, t0, &typed_prompt());
+        let mut receiver = idle_claude(&mut app, t0, RECORDED_TYPED);
         assert!(!app.nirvana_idle_compact_with(t0 + 51 * MIN, long_idle));
         assert_eq!(typed(&mut receiver), "");
         // Checked and skipped: due again a minute on, not at once.
@@ -354,7 +559,7 @@ mod tests {
         let mut app = test_app();
         app.idle_compact.enabled = false;
         let t0 = Instant::now();
-        let mut receiver = idle_claude(&mut app, t0, &empty_prompt());
+        let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
         assert_eq!(app.idle_compact_deadline(), None);
         assert!(!app.nirvana_idle_compact_with(t0 + 51 * MIN, long_idle));
         assert_eq!(typed(&mut receiver), "");
@@ -365,16 +570,13 @@ mod tests {
         let _guard = crate::nirvana::with_test_home("idle-compact-query");
         let mut app = test_app();
         let t0 = Instant::now();
-        let _receiver = idle_claude(&mut app, t0, &empty_prompt());
+        let _receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
         let asked = std::cell::RefCell::new(Vec::new());
         app.nirvana_idle_compact_with(t0 + 51 * MIN, |query| {
             asked.borrow_mut().push(query.pane_id.clone());
             Outside::default()
         });
-        let public = app
-            .public_pane_id(0, app.state.workspaces[0].tabs[0].root_pane)
-            .unwrap();
-        assert_eq!(asked.into_inner(), vec![public]);
+        assert_eq!(asked.into_inner(), vec![root_public(&app)]);
     }
 
     /// Each fact the server reads goes to `decide`: with any one missing or wrong, nothing is sent.
@@ -407,7 +609,7 @@ mod tests {
         for (case, outside) in cases {
             let mut app = test_app();
             let t0 = Instant::now();
-            let _receiver = idle_claude(&mut app, t0, &empty_prompt());
+            let _receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
             assert!(
                 !app.nirvana_idle_compact_with(t0 + 51 * MIN, |_| outside.clone()),
                 "{case}"
@@ -420,24 +622,35 @@ mod tests {
             // Left alone, and checked again a minute later.
             assert_eq!(app.idle_compact_deadline(), Some(t0 + 52 * MIN), "{case}");
         }
-        // Waiting on a permission prompt: blocked, not idle.
-        let mut app = test_app();
-        let t0 = Instant::now();
-        let _receiver = idle_claude(&mut app, t0, &empty_prompt());
-        let terminal_id = root_terminal_id(&app);
-        app.state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Blocked;
-        assert!(!app.nirvana_idle_compact_with(t0 + 51 * MIN, long_idle));
         // A seat worker's pane.
         let mut app = test_app();
         let t0 = Instant::now();
-        let _receiver = idle_claude(&mut app, t0, &empty_prompt());
-        let public = app
-            .public_pane_id(0, app.state.workspaces[0].tabs[0].root_pane)
-            .unwrap();
-        crate::nirvana_subagents::set_worker_panes_for_test(Some([public].into_iter().collect()));
+        let _receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+        crate::nirvana_subagents::set_worker_panes_for_test(Some(
+            [root_public(&app)].into_iter().collect(),
+        ));
         let sent = app.nirvana_idle_compact_with(t0 + 51 * MIN, long_idle);
         crate::nirvana_subagents::set_worker_panes_for_test(None);
         assert!(!sent);
+    }
+
+    /// The pane's state now, not the stretch, says whether it is idle: a stretch the state recompute has not yet
+    /// ended (here, a pane gone to a permission prompt) sends nothing.
+    #[tokio::test]
+    async fn idle_compact_server_reads_the_state_not_a_stale_stretch() {
+        let _guard = crate::nirvana::with_test_home("idle-compact-stale");
+        for state in [AgentState::Blocked, AgentState::Working] {
+            let mut app = test_app();
+            let t0 = Instant::now();
+            let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+            let terminal_id = root_terminal_id(&app);
+            app.state.terminals.get_mut(&terminal_id).unwrap().state = state;
+            assert!(
+                !app.nirvana_idle_compact_with(t0 + 51 * MIN, long_idle),
+                "{state:?}"
+            );
+            assert_eq!(typed(&mut receiver), "", "{state:?}");
+        }
     }
 
     #[tokio::test]
@@ -446,8 +659,10 @@ mod tests {
         let mut app = test_app();
         let now = Instant::now();
         // Idle since 49 minutes 59 seconds ago: due in one second, before any of the loop's other deadlines.
-        let since = now - (50 * MIN - Duration::from_secs(1));
-        let _receiver = idle_claude(&mut app, since, &empty_prompt());
+        let since = now
+            .checked_sub(50 * MIN - Duration::from_secs(1))
+            .expect("this machine's clock started over 50 minutes ago");
+        let _receiver = idle_claude(&mut app, since, RECORDED_EMPTY);
         assert_eq!(
             app.next_headless_loop_deadline_with_git_refresh(now, false, false),
             Some(since + 50 * MIN)
@@ -459,16 +674,115 @@ mod tests {
         let _guard = crate::nirvana::with_test_home("idle-compact-claude");
         let mut app = test_app();
         let t0 = Instant::now();
-        let _receiver = idle_claude(&mut app, t0, &empty_prompt());
+        let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
         let terminal_id = root_terminal_id(&app);
         app.state
             .terminals
             .get_mut(&terminal_id)
             .unwrap()
             .detected_agent = Some(Agent::Codex);
+        // Never read, let alone typed into: the stand-in records each call.
+        let asked = std::cell::RefCell::new(Vec::new());
+        let typed_any = app.nirvana_idle_compact_with(t0 + 51 * MIN, |query| {
+            asked.borrow_mut().push(query.pane_id.clone());
+            long_idle(query)
+        });
+        assert_eq!(asked.into_inner(), Vec::<String>::new());
+        assert!(!typed_any);
+        assert_eq!(typed(&mut receiver), "");
         assert_eq!(app.idle_compact_deadline(), None);
-        // Never read, let alone typed into.
-        assert!(!app.nirvana_idle_compact_with(t0 + 51 * MIN, |_| panic!("read a Codex pane")));
+    }
+
+    /// The other panes passed for the shared-folder rule (`choose_transcript`) are the Claude ones only: a shell
+    /// beside Claude in the same folder is not another Claude.
+    #[tokio::test]
+    async fn idle_compact_others_are_only_claude_panes() {
+        let _guard = crate::nirvana::with_test_home("idle-compact-others");
+        let mut second = None;
+        let mut app = test_app_with(|workspace| {
+            second = Some(workspace.test_split(ratatui::layout::Direction::Horizontal));
+        });
+        let second = second.unwrap();
+        let t0 = Instant::now();
+        let _receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+        let others = |app: &mut App| {
+            let asked = std::cell::RefCell::new(Vec::new());
+            app.nirvana_idle_compact_with(t0 + 51 * MIN, |query| {
+                asked
+                    .borrow_mut()
+                    .extend(query.others.iter().map(|(id, _, _)| id.clone()));
+                Outside::default()
+            });
+            asked.into_inner()
+        };
+        assert_eq!(others(&mut app), Vec::<String>::new());
+        // The second pane runs Claude too (not idle, so never due itself): now it is one of the others.
+        let tab = &app.state.workspaces[0].tabs[0];
+        let second_terminal = tab.panes[&second].attached_terminal_id.clone();
+        let second_public = app.public_pane_id(0, second).unwrap();
+        app.state
+            .terminals
+            .get_mut(&second_terminal)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+        let root = root_terminal_id(&app);
+        app.state.terminals.get_mut(&root).unwrap().idle_stretch = IdleStretch {
+            since: Some(t0),
+            ..IdleStretch::default()
+        };
+        assert_eq!(others(&mut app), vec![second_public]);
+    }
+
+    /// Review S2: a Claude terminal with no pane is stamped, so its deadline moves on instead of staying past.
+    #[tokio::test]
+    async fn idle_compact_terminal_without_a_pane_gets_a_future_deadline() {
+        let _guard = crate::nirvana::with_test_home("idle-compact-paneless");
+        let mut app = test_app();
+        let t0 = Instant::now();
+        let mut terminal = TerminalState::new(TerminalId::alloc(), std::env::temp_dir());
+        terminal.detected_agent = Some(Agent::Claude);
+        terminal.state = AgentState::Idle;
+        terminal.idle_stretch = IdleStretch {
+            since: Some(t0),
+            ..IdleStretch::default()
+        };
+        app.state.terminals.insert(terminal.id.clone(), terminal);
+        assert_eq!(app.idle_compact_deadline(), Some(t0 + 50 * MIN));
+        assert!(!app.nirvana_idle_compact_with(t0 + 51 * MIN, |_| panic!("no pane to read")));
+        assert_eq!(app.idle_compact_deadline(), Some(t0 + 52 * MIN));
+    }
+
+    /// Review S4: two due terminals, one checked per pass; the other stays due for the next.
+    #[tokio::test]
+    async fn idle_compact_checks_one_terminal_a_pass() {
+        let _guard = crate::nirvana::with_test_home("idle-compact-one");
+        let mut app = test_app();
+        let t0 = Instant::now();
+        let _receiver = idle_claude(&mut app, t0, RECORDED_TYPED);
+        let mut other = TerminalState::new(TerminalId::alloc(), std::env::temp_dir());
+        other.detected_agent = Some(Agent::Claude);
+        other.state = AgentState::Idle;
+        other.idle_stretch = IdleStretch {
+            since: Some(t0 + MIN),
+            ..IdleStretch::default()
+        };
+        let other_id = other.id.clone();
+        app.state.terminals.insert(other_id.clone(), other);
+        let root = root_terminal_id(&app);
+        let now = t0 + 55 * MIN;
+        app.nirvana_idle_compact_with(now, long_idle);
+        // The one due first was checked; the other was not touched.
+        assert_eq!(
+            app.state.terminals[&root].idle_stretch.checked_at,
+            Some(now)
+        );
+        assert_eq!(app.state.terminals[&other_id].idle_stretch.checked_at, None);
+        assert_eq!(app.idle_compact_deadline(), Some(t0 + 51 * MIN));
+        app.nirvana_idle_compact_with(now, long_idle);
+        assert_eq!(
+            app.state.terminals[&other_id].idle_stretch.checked_at,
+            Some(now)
+        );
     }
 
     #[test]
@@ -492,10 +806,7 @@ mod tests {
 
     #[test]
     fn idle_stretch_follows_the_terminal_state() {
-        let mut terminal = crate::terminal::TerminalState::new(
-            crate::terminal::TerminalId::alloc(),
-            std::env::temp_dir(),
-        );
+        let mut terminal = TerminalState::new(TerminalId::alloc(), std::env::temp_dir());
         let t0 = Instant::now();
         terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Claude),

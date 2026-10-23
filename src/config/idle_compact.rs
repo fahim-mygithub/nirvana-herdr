@@ -7,6 +7,8 @@ use std::time::Duration;
 use serde::Deserialize;
 
 /// Claude Code's prompt cache lives an hour, so a compact at 60 minutes or later no longer reads from it.
+/// `minutes = 59` leaves one check before the hour ends: the first, at 59 minutes; a pane left alone then is checked
+/// again a minute later (`nirvana_idle_compact::RECHECK`), at the hour, and no check is due at or after the hour.
 const MAX_MINUTES: i64 = 59;
 
 /// Signed so a negative number reaches `diagnostics` as a clear message, not a parse error for the whole config.
