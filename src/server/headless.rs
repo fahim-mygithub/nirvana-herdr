@@ -3382,6 +3382,7 @@ impl HeadlessServer {
                 .start_pending_agent_resumes(now, self.app.pending_agent_resume_due(now));
         }
         changed |= self.app.nirvana_relaunch_restored(now);
+        changed |= self.app.nirvana_idle_compact(now);
         changed
     }
 }

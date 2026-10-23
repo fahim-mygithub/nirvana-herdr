@@ -38,6 +38,7 @@ mod nirvana_board;
 mod nirvana_claude;
 mod nirvana_gate;
 pub mod nirvana_git;
+mod nirvana_idle_compact;
 mod nirvana_jev;
 mod nirvana_jev_compact;
 mod nirvana_jev_install;

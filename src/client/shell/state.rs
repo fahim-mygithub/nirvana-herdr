@@ -26,6 +26,8 @@ pub(crate) struct ClientShellConfig {
     pub(super) agent_panel_sort: crate::config::AgentPanelSortConfig,
     pub(super) status_indicators: crate::config::StatusIndicatorStyle,
     pub(super) sound_enabled: bool,
+    /// Nirvana fork, plan 27 §3: the idle compact switch, for the settings section.
+    pub(super) idle_compact_enabled: bool,
     pub(super) toast_delivery: crate::config::ToastDelivery,
     pub(super) toast_delay_seconds: u64,
     pub(super) toast_position: crate::config::ToastHerdrPosition,
@@ -423,6 +425,7 @@ pub(super) enum ClientSettingsSection {
     Indicators,
     Sound,
     Toast,
+    IdleCompact,
     Integrations,
 }
 
@@ -432,6 +435,7 @@ impl ClientSettingsSection {
         Self::Indicators,
         Self::Sound,
         Self::Toast,
+        Self::IdleCompact,
         Self::Integrations,
     ];
 
@@ -441,6 +445,7 @@ impl ClientSettingsSection {
             Self::Indicators => "indicators",
             Self::Sound => "sound",
             Self::Toast => "toasts",
+            Self::IdleCompact => "idle compact",
             Self::Integrations => "integrations",
         }
     }

@@ -1007,6 +1007,8 @@ pub struct UiConfig {
     pub toast: ToastConfig,
     /// Play sounds when agents change state in background workspaces.
     pub sound: SoundConfig,
+    /// Nirvana fork, plan 27: send `/compact` to an idle interactive Claude before its prompt cache goes stale.
+    pub idle_compact: super::IdleCompactConfig,
 }
 
 /// Cursor shape (DECSCUSR) used for the forced IME anchor.
@@ -1230,6 +1232,7 @@ impl Default for UiConfig {
             accent: "cyan".into(),
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
+            idle_compact: super::IdleCompactConfig::default(),
         }
     }
 }

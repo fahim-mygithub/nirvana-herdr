@@ -26,6 +26,11 @@ fn toast_index(delivery: crate::config::ToastDelivery) -> usize {
     }
 }
 
+/// Plan 27 §3: the idle compact section's choices are on (0) and off (1).
+fn idle_compact_edit(selected: usize) -> crate::config::ConfigEdit<'static> {
+    crate::config::ConfigEdit::IdleCompact(selected == 0)
+}
+
 pub(super) fn integration_needs_install(info: &crate::api::schema::IntegrationInfo) -> bool {
     info.state == crate::api::schema::IntegrationState::Outdated
         || info.available && info.state == crate::api::schema::IntegrationState::NotInstalled
@@ -51,6 +56,7 @@ impl ClientShellState {
             ClientSettingsSection::Indicators => indicator_index(self.config.status_indicators),
             ClientSettingsSection::Sound => usize::from(!self.config.sound_enabled),
             ClientSettingsSection::Toast => toast_index(self.config.toast_delivery),
+            ClientSettingsSection::IdleCompact => usize::from(!self.config.idle_compact_enabled),
             ClientSettingsSection::Integrations => 0,
         }
     }
@@ -97,7 +103,9 @@ impl ClientShellState {
         match self.overlay.as_ref() {
             Some(ClientShellOverlay::Settings(settings)) => match settings.section {
                 ClientSettingsSection::Theme => crate::config::THEME_NAMES.len(),
-                ClientSettingsSection::Indicators | ClientSettingsSection::Sound => 2,
+                ClientSettingsSection::Indicators
+                | ClientSettingsSection::Sound
+                | ClientSettingsSection::IdleCompact => 2,
                 ClientSettingsSection::Toast => 4,
                 ClientSettingsSection::Integrations => settings.integrations.len(),
             },
@@ -221,6 +229,9 @@ impl ClientShellState {
                     crate::config::ConfigEdit::ToastDelivery(delivery),
                     outcome,
                 );
+            }
+            ClientSettingsSection::IdleCompact => {
+                self.save_settings_edit(idle_compact_edit(selected), outcome);
             }
             ClientSettingsSection::Integrations => self.install_recommended_integrations(outcome),
         }
@@ -396,5 +407,64 @@ impl ClientShellState {
             return true;
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod idle_compact_tests {
+    use super::*;
+
+    fn state_with(enabled: bool) -> ClientShellState {
+        let config: crate::config::Config =
+            toml::from_str(&format!("[ui.idle_compact]\nenabled = {enabled}\n")).unwrap();
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+        state.open_settings_overlay();
+        state
+    }
+
+    fn selected(state: &ClientShellState) -> (ClientSettingsSection, usize) {
+        match state.overlay.as_ref() {
+            Some(ClientShellOverlay::Settings(settings)) => (settings.section, settings.selected),
+            _ => panic!("settings overlay not open"),
+        }
+    }
+
+    #[test]
+    fn idle_compact_section_shows_the_current_switch() {
+        assert!(ClientSettingsSection::ALL.contains(&ClientSettingsSection::IdleCompact));
+        for (enabled, index) in [(true, 0), (false, 1)] {
+            let mut state = state_with(enabled);
+            let mut outcome = ClientShellInput::default();
+            state.select_settings_section(ClientSettingsSection::IdleCompact, &mut outcome);
+            assert_eq!(
+                selected(&state),
+                (ClientSettingsSection::IdleCompact, index)
+            );
+            // Two choices: on and off.
+            assert_eq!(state.settings_choice_count(), 2);
+        }
+    }
+
+    #[test]
+    fn idle_compact_choice_writes_on_or_off() {
+        let read = |content: &str| {
+            toml::from_str::<crate::config::Config>(content)
+                .unwrap()
+                .ui
+                .idle_compact
+                .enabled
+        };
+        assert!(read(&idle_compact_edit(0).apply("")));
+        assert!(!read(&idle_compact_edit(1).apply("")));
+    }
+
+    #[test]
+    fn idle_compact_switch_follows_a_config_reload() {
+        let mut config = ClientShellConfig::from_config(&crate::config::Config::default());
+        assert!(config.idle_compact_enabled);
+        let off: crate::config::Config =
+            toml::from_str("[ui.idle_compact]\nenabled = false\n").unwrap();
+        config.apply_live_config(&off, &[], &[]);
+        assert!(!config.idle_compact_enabled);
     }
 }

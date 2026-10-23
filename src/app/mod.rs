@@ -31,6 +31,7 @@ mod window_title;
 mod worktrees;
 // Nirvana fork: Restart Claude from the tab menu.
 mod nirvana_edit;
+mod nirvana_idle_compact;
 mod nirvana_new;
 mod nirvana_relaunch;
 mod nirvana_restart;
@@ -148,6 +149,8 @@ pub struct App {
     /// Nirvana fork: the next try at starting Nirvana Claude again in restored panes, and the last one.
     pub(crate) nirvana_relaunch_at: Option<Instant>,
     nirvana_relaunch_until: Option<Instant>,
+    /// Nirvana fork, plan 27: `[ui.idle_compact]`, kept current by a config reload (`apply_live_config`).
+    pub(crate) idle_compact: crate::config::IdleCompactConfig,
     startup_per_agent_delay: Duration,
     next_agent_resume_at: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
@@ -661,6 +664,7 @@ impl App {
             pending_agent_resume_deadline: None,
             nirvana_relaunch_at: None,
             nirvana_relaunch_until: None,
+            idle_compact: config.ui.idle_compact,
             startup_per_agent_delay: Duration::from_millis(
                 config.session.startup_per_agent_delay_ms.into(),
             ),
@@ -901,6 +905,7 @@ impl App {
                 diagnostics.push(format!("{diagnostic}; keeping previous [ui] settings"));
             } else {
                 diagnostics.extend(config.ui.sound.diagnostics());
+                diagnostics.extend(config.ui.idle_compact.diagnostics());
                 diagnostics.extend(crate::config::tab_bar_right_diagnostics(
                     &config.ui.tab_bar_right,
                 ));
@@ -926,6 +931,7 @@ impl App {
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
                 self.state.sound = config.ui.sound.clone();
+                self.idle_compact = config.ui.idle_compact;
                 self.state.toast_config = config.ui.toast.clone();
             }
         }

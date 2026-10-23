@@ -165,6 +165,9 @@ pub struct TerminalState {
     /// Nirvana fork: the Nirvana Claude name this restored pane ran under, until the server starts Nirvana Claude
     /// in it again (`app/nirvana_relaunch.rs`).
     pub nirvana_relaunch: Option<String>,
+    /// Nirvana fork, plan 27 §2 rules 3 and 7: the pane's unbroken idle stretch, and whether `/compact` went in it
+    /// (`app/nirvana_idle_compact.rs`).
+    pub idle_stretch: crate::nirvana_idle_compact::IdleStretch,
 }
 
 impl TerminalState {
@@ -206,6 +209,7 @@ impl TerminalState {
             pending_agent_resume_plan: None,
             restore_error: None,
             nirvana_relaunch: None,
+            idle_stretch: crate::nirvana_idle_compact::IdleStretch::default(),
         }
     }
 
@@ -2340,6 +2344,7 @@ impl TerminalState {
         self.suppressed_full_lifecycle_hook_reports.clear();
         self.stale_full_lifecycle_hook_sessions.clear();
         self.state = AgentState::Unknown;
+        self.idle_stretch = crate::nirvana_idle_compact::IdleStretch::default();
         self.last_agent_state_change_seq = None;
         self.last_agent_completion_seq = None;
         self.launch_argv = None;
@@ -2427,6 +2432,8 @@ impl TerminalState {
 
         let presentation = self.effective_presentation_for_state_at(state, now);
         self.clear_expiry_pending_for_hidden_metadata();
+        // Nirvana fork, plan 27: every effective state passes here, so this is where an idle stretch starts and ends.
+        self.idle_stretch = self.idle_stretch.after(state, now);
 
         if previous_agent_label == agent_label
             && previous_state == state

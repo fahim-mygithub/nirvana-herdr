@@ -4,6 +4,8 @@ pub(crate) enum ConfigEdit<'a> {
     StatusIndicators(super::StatusIndicatorStyle),
     Sound(bool),
     ToastDelivery(super::ToastDelivery),
+    /// Nirvana fork, plan 27 §3: the idle compact switch; its two numbers are config-only.
+    IdleCompact(bool),
 }
 
 impl ConfigEdit<'_> {
@@ -13,6 +15,7 @@ impl ConfigEdit<'_> {
             Self::StatusIndicators(_) => "status indicators",
             Self::Sound(_) => "sound setting",
             Self::ToastDelivery(_) => "toast setting",
+            Self::IdleCompact(_) => "idle compact setting",
         }
     }
 
@@ -41,6 +44,9 @@ impl ConfigEdit<'_> {
                 };
                 let content = super::upsert_section_value(content, "ui.toast", "delivery", value);
                 super::remove_section_key(&content, "ui.toast", "enabled")
+            }
+            Self::IdleCompact(enabled) => {
+                super::upsert_section_bool(content, "ui.idle_compact", "enabled", enabled)
             }
         }
     }

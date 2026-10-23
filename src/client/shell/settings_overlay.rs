@@ -194,6 +194,18 @@ pub(super) fn render_settings_overlay(
                 &mut choice_hits,
             );
         }
+        ClientSettingsSection::IdleCompact => {
+            render_choice_section(
+                buffer,
+                content,
+                "idle compact",
+                "send /compact to an idle Claude before its 1-hour cache expires",
+                &["on", "off"],
+                settings.selected,
+                palette,
+                &mut choice_hits,
+            );
+        }
         ClientSettingsSection::Integrations => {
             render_integrations(buffer, content, settings, palette);
         }
@@ -411,5 +423,46 @@ fn render_integrations(
             " installing…",
             Style::default().fg(palette.overlay1).bg(palette.panel_bg),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idle_compact_section_renders_its_tab_and_choices() {
+        let palette = ClientShellConfig::from_config(&crate::config::Config::default()).palette;
+        let settings = ClientSettingsOverlay {
+            section: ClientSettingsSection::IdleCompact,
+            selected: 0,
+            original_theme_name: String::new(),
+            original_palette: palette.clone(),
+            integrations: Vec::new(),
+            integration_messages: Vec::new(),
+            loading_integrations: false,
+            installing_integrations: false,
+        };
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 100, 30));
+        let rendered = render_settings_overlay(&mut buffer, &settings, false, &palette)
+            .expect("settings overlay renders");
+        let text: String = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        assert!(text.contains(" idle compact "), "{text}");
+        assert!(text.contains("send /compact to an idle Claude"), "{text}");
+        assert!(text.contains("\u{25b8} on"), "{text}");
+        assert!(text.contains("   off"), "{text}");
+        // The new tab fits the row beside the others and is clickable.
+        assert!(rendered
+            .settings_tabs
+            .iter()
+            .any(|(_, section)| *section == ClientSettingsSection::IdleCompact));
+        assert_eq!(rendered.settings_choices.len(), 2);
     }
 }
