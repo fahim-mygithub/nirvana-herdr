@@ -50,7 +50,7 @@ pub(super) struct SpaceAgent {
 pub(super) fn fold_space_agents(agents: Vec<SpaceAgent>) -> Vec<SpaceAgent> {
     let mut idle_counts: HashMap<String, usize> = HashMap::new();
     for a in &agents {
-        if a.status == crate::api::schema::AgentStatus::Idle && a.task == "No task yet" {
+        if a.status == crate::api::schema::AgentStatus::Idle && a.task.is_empty() {
             *idle_counts.entry(a.who.clone()).or_default() += 1;
         }
     }
@@ -60,7 +60,7 @@ pub(super) fn fold_space_agents(agents: Vec<SpaceAgent>) -> Vec<SpaceAgent> {
 
     for a in agents {
         let is_idle_no_task =
-            a.status == crate::api::schema::AgentStatus::Idle && a.task == "No task yet";
+            a.status == crate::api::schema::AgentStatus::Idle && a.task.is_empty();
         let count = idle_counts.get(&a.who).copied().unwrap_or(0);
         if is_idle_no_task && count >= 2 {
             if !folded_seen.contains(&a.who) {
@@ -130,7 +130,14 @@ pub(super) fn space_agents(
                 pane_id: agent.pane_id.clone(),
                 icon: kind.map_or_else(|| status_icon(agent.agent_status, indicators), Kind::icon),
                 who,
-                task: task_title(agent.terminal_title_stripped.as_deref()),
+                task: {
+                    let t = task_title(agent.terminal_title_stripped.as_deref());
+                    if t == "No task yet" {
+                        String::new()
+                    } else {
+                        t
+                    }
+                },
                 model,
                 status: agent.agent_status,
                 focused: agent.focused,
@@ -204,7 +211,17 @@ pub(super) fn status_word(status: crate::api::schema::AgentStatus) -> &'static s
         crate::api::schema::AgentStatus::Working => "working",
         crate::api::schema::AgentStatus::Blocked => "blocked",
         crate::api::schema::AgentStatus::Done => "done",
-        crate::api::schema::AgentStatus::Unknown => "idle",
+        crate::api::schema::AgentStatus::Unknown => "",
+    }
+}
+
+pub(super) fn short_status_word(status: crate::api::schema::AgentStatus) -> &'static str {
+    match status {
+        crate::api::schema::AgentStatus::Idle => "idle",
+        crate::api::schema::AgentStatus::Working => "work",
+        crate::api::schema::AgentStatus::Blocked => "wait",
+        crate::api::schema::AgentStatus::Done => "done",
+        crate::api::schema::AgentStatus::Unknown => "",
     }
 }
 
@@ -217,10 +234,16 @@ pub(super) fn render_space_agents(
     indented: bool,
     last_child: bool,
     highlighted: bool,
+    hovered_pane: Option<&str>,
+    mut hits: Option<&mut super::state::ShellHitMap>,
     palette: &Palette,
 ) {
     let x = area.x.saturating_add(if indented { 8 } else { 3 });
-    let right = area.right().saturating_sub(2);
+    let right = if area.width == 25 {
+        area.right().saturating_sub(1)
+    } else {
+        area.right().saturating_sub(2)
+    };
     let width = usize::from(right.saturating_sub(x));
     let task_style = Style::default().fg(if highlighted {
         palette.text
@@ -258,6 +281,12 @@ pub(super) fn render_space_agents(
         if y >= area.bottom() || width == 0 {
             break;
         }
+
+        let row_rect = Rect::new(x, y, (width as u16).max(1), 1);
+        if let Some(h) = hits.as_deref_mut() {
+            h.space_agents.push((row_rect, agent.pane_id.clone()));
+        }
+
         put_text(
             buffer,
             x,
@@ -270,43 +299,157 @@ pub(super) fn render_space_agents(
         );
         if width > 2 {
             let w = (width - 2) as u16;
+            let w_avail = width - 2;
             let status_col = status_color(agent.status, palette);
             let state_style = Style::default().fg(status_col);
             if agent.is_folded {
                 let full = format!("{}  {}", agent.who, status_word(agent.status));
-                let line = fit(&full, width - 2);
+                let line = fit(&full, w_avail);
                 let who_len = unicode_width::UnicodeWidthStr::width(agent.who.as_str())
                     .min(unicode_width::UnicodeWidthStr::width(line.as_str()));
                 put_text(buffer, x + 2, y, w, &line, state_style);
                 put_text(buffer, x + 2, y, who_len as u16, &line, model_style);
-            } else if agent.focused && agent.task != "No task yet" && !agent.task.is_empty() {
+            } else if hovered_pane == Some(agent.pane_id.as_str())
+                && !agent.task.is_empty()
+                && agent.task != "No task yet"
+            {
+                // S2: The chat title shows on hover, as the owner chose.
                 let who_part = format!("{:<max_who$}", agent.who);
                 let full = format!("{who_part}  {}", agent.task);
-                let line = fit(&full, width - 2);
+                let line = fit(&full, w_avail);
                 let who_cells =
                     (max_who + 2).min(unicode_width::UnicodeWidthStr::width(line.as_str()));
                 put_text(buffer, x + 2, y, w, &line, task_style);
                 put_text(buffer, x + 2, y, who_cells as u16, &line, model_style);
             } else {
-                let who_part = format!("{:<max_who$}", agent.who);
+                // S1: The ladder, applied in order until the row fits:
+                // 1. who, then short model, then full state word, single spaces, with who padded to max_who;
+                // 2. the same with no padding;
+                // 3. state words shortened: working to work, blocked to wait;
+                // 4. the model dropped;
+                // 5. the state word dropped. Its colour then goes on who.
+                let who_padded = format!("{:<max_who$}", agent.who);
                 let word = status_word(agent.status);
-                let full = if agent.model.is_empty() {
-                    format!("{who_part}  {word}")
+                let short_w = short_status_word(agent.status);
+                let m = agent.model.as_str();
+
+                let step1 = if m.is_empty() {
+                    if word.is_empty() {
+                        who_padded.clone()
+                    } else {
+                        format!("{who_padded} {word}")
+                    }
+                } else if word.is_empty() {
+                    format!("{who_padded} {m}")
                 } else {
-                    format!("{who_part}  {} {word}", agent.model)
+                    format!("{who_padded} {m} {word}")
                 };
-                let line = fit(&full, width - 2);
-                let who_cells =
-                    (max_who + 2).min(unicode_width::UnicodeWidthStr::width(line.as_str()));
-                let model_end = if agent.model.is_empty() {
-                    who_cells
+
+                let step2 = if m.is_empty() {
+                    if word.is_empty() {
+                        agent.who.clone()
+                    } else {
+                        format!("{} {word}", agent.who)
+                    }
+                } else if word.is_empty() {
+                    format!("{} {m}", agent.who)
                 } else {
-                    (max_who + 2 + unicode_width::UnicodeWidthStr::width(agent.model.as_str()) + 1)
-                        .min(unicode_width::UnicodeWidthStr::width(line.as_str()))
+                    format!("{} {m} {word}", agent.who)
                 };
-                put_text(buffer, x + 2, y, w, &line, state_style);
-                put_text(buffer, x + 2, y, model_end as u16, &line, model_style);
-                put_text(buffer, x + 2, y, who_cells as u16, &line, model_style);
+
+                let step3 = if m.is_empty() {
+                    if short_w.is_empty() {
+                        agent.who.clone()
+                    } else {
+                        format!("{} {short_w}", agent.who)
+                    }
+                } else if short_w.is_empty() {
+                    format!("{} {m}", agent.who)
+                } else {
+                    format!("{} {m} {short_w}", agent.who)
+                };
+
+                let step4 = if !word.is_empty()
+                    && unicode_width::UnicodeWidthStr::width(
+                        format!("{} {word}", agent.who).as_str(),
+                    ) <= w_avail
+                {
+                    format!("{} {word}", agent.who)
+                } else if !short_w.is_empty() {
+                    format!("{} {short_w}", agent.who)
+                } else {
+                    agent.who.clone()
+                };
+
+                let cells = |s: &str| unicode_width::UnicodeWidthStr::width(s);
+
+                if cells(&step1) <= w_avail {
+                    let who_cells = max_who;
+                    let model_end = if m.is_empty() {
+                        who_cells
+                    } else {
+                        who_cells + 1 + cells(m)
+                    };
+                    put_text(buffer, x + 2, y, w, &step1, state_style);
+                    put_text(buffer, x + 2, y, model_end as u16, &step1, model_style);
+                    put_text(
+                        buffer,
+                        x + 2,
+                        y,
+                        who_cells as u16,
+                        &step1,
+                        if highlighted { task_style } else { model_style },
+                    );
+                } else if cells(&step2) <= w_avail {
+                    let who_cells = cells(&agent.who);
+                    let model_end = if m.is_empty() {
+                        who_cells
+                    } else {
+                        who_cells + 1 + cells(m)
+                    };
+                    put_text(buffer, x + 2, y, w, &step2, state_style);
+                    put_text(buffer, x + 2, y, model_end as u16, &step2, model_style);
+                    put_text(
+                        buffer,
+                        x + 2,
+                        y,
+                        who_cells as u16,
+                        &step2,
+                        if highlighted { task_style } else { model_style },
+                    );
+                } else if cells(&step3) <= w_avail {
+                    let who_cells = cells(&agent.who);
+                    let model_end = if m.is_empty() {
+                        who_cells
+                    } else {
+                        who_cells + 1 + cells(m)
+                    };
+                    put_text(buffer, x + 2, y, w, &step3, state_style);
+                    put_text(buffer, x + 2, y, model_end as u16, &step3, model_style);
+                    put_text(
+                        buffer,
+                        x + 2,
+                        y,
+                        who_cells as u16,
+                        &step3,
+                        if highlighted { task_style } else { model_style },
+                    );
+                } else if cells(&step4) <= w_avail {
+                    let who_cells = cells(&agent.who);
+                    put_text(buffer, x + 2, y, w, &step4, state_style);
+                    put_text(
+                        buffer,
+                        x + 2,
+                        y,
+                        who_cells as u16,
+                        &step4,
+                        if highlighted { task_style } else { model_style },
+                    );
+                } else {
+                    // Step 5: state word dropped, colour goes on who
+                    let line = fit(&agent.who, w_avail);
+                    put_text(buffer, x + 2, y, w, &line, state_style);
+                }
             }
         }
     }

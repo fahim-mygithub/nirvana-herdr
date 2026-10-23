@@ -603,6 +603,7 @@ fn an_attempt_tees_the_stream_and_journals_its_start_and_its_usage() {
         1,
         &argv,
         &stop,
+        None,
         &mut view,
     )
     .expect("attempt");
@@ -657,6 +658,7 @@ fn a_rejected_limit_stops_the_worker_at_once() {
         1,
         &argv,
         &stop,
+        None,
         &mut Vec::new(),
     )
     .expect("attempt");
@@ -688,6 +690,7 @@ fn a_stop_ends_the_workers_whole_process_tree() {
         1,
         &argv,
         &stop,
+        None,
         &mut Vec::new(),
     )
     .expect("attempt");
@@ -998,11 +1001,33 @@ fn seat_order_refuses_empty_owns_for_build_fix_plan_and_permits_read_only() {
 fn worker_pane_closing_decisions() {
     use crate::nirvana_run::Phase;
 
-    // Normal done worker: closes its pane when tab has other panes (>1)
+    let expected = "seat1\u{b7}order1";
+
+    // Normal done worker: closes its pane when tab has other panes (>1) and title matches
     assert!(worker_should_close_pane(
         "done",
         Phase::Delivered,
         Some("pane-1"),
+        Some(expected),
+        expected,
+        2
+    ));
+
+    // B1: Title mismatch refuses pane close
+    assert!(!worker_should_close_pane(
+        "done",
+        Phase::Delivered,
+        Some("pane-1"),
+        Some("other·title"),
+        expected,
+        2
+    ));
+    assert!(!worker_should_close_pane(
+        "done",
+        Phase::Delivered,
+        Some("pane-1"),
+        None,
+        expected,
         2
     ));
 
@@ -1011,29 +1036,168 @@ fn worker_pane_closing_decisions() {
         "done",
         Phase::Running,
         Some("pane-1"),
+        Some(expected),
+        expected,
         2
     ));
     assert!(!worker_should_close_pane(
         "failed",
         Phase::Delivered,
         Some("pane-1"),
+        Some(expected),
+        expected,
         2
     ));
 
-    // Tab's last pane stays: when tab_panes_count <= 1
+    // S3: Tab's last pane stays: when tab_panes_count <= 1
+    // (even if there are other foreign panes in the tab, tab_panes_count from this run only is 1)
+    let run_panes = vec!["pane-1".to_string()];
+    let tab_panes = ["pane-1", "foreign-pane"];
+    let count = count_run_tab_panes(&tab_panes, &run_panes);
+    assert_eq!(count, 1);
     assert!(!worker_should_close_pane(
         "done",
         Phase::Delivered,
         Some("pane-1"),
+        Some(expected),
+        expected,
+        count
+    ));
+    assert!(!worker_should_close_pane(
+        "done",
+        Phase::Delivered,
+        Some("pane-1"),
+        Some(expected),
+        expected,
         1
     ));
     assert!(!worker_should_close_pane(
         "done",
         Phase::Delivered,
         Some("pane-1"),
+        Some(expected),
+        expected,
         0
     ));
 
     // No pane id
-    assert!(!worker_should_close_pane("done", Phase::Delivered, None, 2));
+    assert!(!worker_should_close_pane(
+        "done",
+        Phase::Delivered,
+        None,
+        Some(expected),
+        expected,
+        2
+    ));
+}
+
+#[test]
+fn worker_expected_pane_title_format() {
+    assert_eq!(
+        expected_pane_title("seat-a", "p26-01"),
+        "seat-a\u{b7}p26-01"
+    );
+}
+
+#[test]
+fn detached_worker_records_no_pane_and_pane_arg_records_pane() {
+    let dir = temp_dir("pane_record");
+    std::fs::write(dir.join("recorded.jsonl"), LIVE_HAIKU).expect("fixture");
+    let (journal, stream_path, stop, argv) = stand_in(&dir, "type recorded.jsonl");
+
+    // Case 1: detached worker (pane: None) records None in Kind::Started
+    let _ = run_attempt(
+        &journal,
+        &stream_path,
+        &in_dir(&dir, "claude"),
+        1,
+        &argv,
+        &stop,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("attempt");
+    let events = journal.read().0;
+    assert!(matches!(&events[0].kind, Kind::Started { pane: None, .. }));
+
+    // Case 2: worker with --pane (pane: Some("pane-42")) records Some("pane-42") in Kind::Started
+    let dir2 = temp_dir("pane_record2");
+    std::fs::write(dir2.join("recorded.jsonl"), LIVE_HAIKU).expect("fixture");
+    let (journal2, stream_path2, stop2, argv2) = stand_in(&dir2, "type recorded.jsonl");
+    let _ = run_attempt(
+        &journal2,
+        &stream_path2,
+        &in_dir(&dir2, "claude"),
+        1,
+        &argv2,
+        &stop2,
+        Some("pane-42"),
+        &mut Vec::new(),
+    )
+    .expect("attempt");
+    let events2 = journal2.read().0;
+    assert!(matches!(&events2[0].kind, Kind::Started { pane: Some(p), .. } if p == "pane-42"));
+
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir2);
+}
+
+#[test]
+fn exec_closes_pane_after_delivered() {
+    let dir = temp_dir("exec_close_delivered");
+    let journal = Journal::new(dir.join("journal.jsonl"));
+    let mut s = seated("seat-1");
+    s.order = "order-1".into();
+    journal.append(now(), Kind::Seated(Box::new(s))).unwrap();
+    journal
+        .append(
+            now(),
+            Kind::Started {
+                order: "order-1".into(),
+                attempt: 1,
+                pane: Some("pane-1".into()),
+                pid: Some(100),
+                tab: None,
+                resume: None,
+                argv: vec!["claude".into()],
+            },
+        )
+        .unwrap();
+
+    let expected = "seat-1\u{b7}order-1";
+
+    // 1. Before Delivered is written: phase is Running, so exec refuses to close
+    let state_running = replay(&journal.read().0);
+    assert!(!exec_should_close_pane_after_delivered(
+        &state_running,
+        "order-1",
+        "done",
+        Some("pane-1"),
+        Some(expected),
+        expected,
+        2
+    ));
+
+    // 2. After Delivered is written: phase is Delivered, exec closes
+    journal
+        .append(
+            now(),
+            Kind::Delivered {
+                order: "order-1".into(),
+                report: serde_json::json!({"status": "done"}),
+            },
+        )
+        .unwrap();
+    let state_delivered = replay(&journal.read().0);
+    assert!(exec_should_close_pane_after_delivered(
+        &state_delivered,
+        "order-1",
+        "done",
+        Some("pane-1"),
+        Some(expected),
+        expected,
+        2
+    ));
+
+    let _ = std::fs::remove_dir_all(dir);
 }

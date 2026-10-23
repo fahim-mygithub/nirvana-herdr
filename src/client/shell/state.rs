@@ -137,6 +137,8 @@ pub(super) struct ShellHitMap {
     pub(super) nirvana_git: Rect,
     /// Plan 16: the open Git panel's buttons and close box.
     pub(super) nirvana_git_panel: super::nirvana_git::GitHits,
+    /// Agent rows rendered in the spaces list (plan 26 S2)
+    pub(super) space_agents: Vec<(Rect, String)>,
     pub(super) new_workspace: Rect,
     pub(super) new_tab: Rect,
     pub(super) tab_scroll_left: Rect,
@@ -953,6 +955,7 @@ pub(crate) struct ClientShellState {
     pub(super) previous_pane_id: Option<String>,
     pub(super) pane_mouse_gesture: Option<ClientPaneMouseGesture>,
     pub(super) link_hover: Option<super::link_hover::LinkHover>,
+    pub(super) hovered_space_agent_pane: Option<String>,
     pub(super) url_click_consumes_until_up: bool,
     /// The host terminal reports key releases (Kitty event types), so text
     /// presses can be tracked until their release arrives.
@@ -1143,6 +1146,7 @@ impl ClientShellState {
             previous_pane_id: None,
             pane_mouse_gesture: None,
             link_hover: None,
+            hovered_space_agent_pane: None,
             url_click_consumes_until_up: false,
             host_reports_key_releases: false,
             host_erase_is_ctrl_h: false,

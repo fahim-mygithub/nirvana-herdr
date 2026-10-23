@@ -77,6 +77,7 @@ impl ClientShellState {
             reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
             dragged_workspace_id: None,
             workspace_drop_indicator_row: None,
+            hovered_space_agent_pane: self.hovered_space_agent_pane.as_deref(),
         };
         if let Some(snapshot) = local_snapshot {
             render::render_sidebar(
@@ -233,6 +234,7 @@ impl ClientShellState {
                 reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
                 dragged_workspace_id,
                 workspace_drop_indicator_row,
+                hovered_space_agent_pane: self.hovered_space_agent_pane.as_deref(),
             },
         );
         // Nirvana fork, features 5 and 6: the mod strip under the tab bar.

@@ -1225,31 +1225,60 @@ fn close_run_tab_decisions() {
     let tab = "tab-1";
     let w1 = "pane-w1".to_string();
     let w2 = "pane-w2".to_string();
-    let worker_panes = vec![w1.clone(), w2.clone()];
+    let eligible_finished = vec![w1.clone(), w2.clone()];
+    let no_live: Vec<String> = Vec::new();
 
-    // Case 1: tab has only the run's worker panes -> closes whole tab
+    // Case 1: tab has only the run's finished worker panes and no live workers -> closes whole tab
     let all_workers = vec![w1.clone(), w2.clone()];
     assert_eq!(
-        close_run_tab_decision(Some(&w1), Some(tab), &all_workers, &worker_panes),
+        close_run_tab_decision(
+            Some(&w1),
+            Some(tab),
+            &all_workers,
+            &eligible_finished,
+            &no_live
+        ),
         CloseRunTabDecision::CloseTab {
             tab_id: tab.to_string()
         }
     );
 
-    // Case 2: tab has an orchestrator or other pane -> closes only worker panes
+    // Case 2: tab has an orchestrator or other pane -> closes only eligible finished worker panes
     let mixed = vec![w1.clone(), "pane-orch".to_string(), w2.clone()];
     assert_eq!(
-        close_run_tab_decision(Some(&w1), Some(tab), &mixed, &worker_panes),
+        close_run_tab_decision(Some(&w1), Some(tab), &mixed, &eligible_finished, &no_live),
         CloseRunTabDecision::ClosePanes {
             tab_id: tab.to_string(),
             panes: vec![w1.clone(), w2.clone()],
         }
     );
 
-    // Case 3: tab has no worker panes -> ClosePanes with empty
+    // S4: Live worker in tab keeps tab open even if all tab panes are this run's panes
+    let live_w2 = vec![w2.clone()];
+    assert_eq!(
+        close_run_tab_decision(
+            Some(&w1),
+            Some(tab),
+            &all_workers,
+            &eligible_finished,
+            &live_w2
+        ),
+        CloseRunTabDecision::ClosePanes {
+            tab_id: tab.to_string(),
+            panes: vec![w1.clone()],
+        }
+    );
+
+    // Case 3: tab has no eligible finished worker panes -> ClosePanes with empty
     let no_workers = vec!["pane-orch".to_string(), "pane-other".to_string()];
     assert_eq!(
-        close_run_tab_decision(Some(&w1), Some(tab), &no_workers, &worker_panes),
+        close_run_tab_decision(
+            Some(&w1),
+            Some(tab),
+            &no_workers,
+            &eligible_finished,
+            &no_live
+        ),
         CloseRunTabDecision::ClosePanes {
             tab_id: tab.to_string(),
             panes: Vec::new(),
@@ -1258,7 +1287,95 @@ fn close_run_tab_decisions() {
 
     // Case 4: no known pane -> NotFound
     assert_eq!(
-        close_run_tab_decision(None, Some(tab), &all_workers, &worker_panes),
+        close_run_tab_decision(None, Some(tab), &all_workers, &eligible_finished, &no_live),
         CloseRunTabDecision::NotFound("no worker pane found".into())
     );
+}
+
+#[test]
+fn is_nirvana_claude_argv_tests() {
+    let home = std::path::Path::new("C:/test_home");
+    let plugin_dir = crate::nirvana_launch::plugin_dir(home);
+
+    // 1. A real launch argv from nirvana_claude_args is marked
+    let args = crate::nirvana_launch::nirvana_claude_args(home);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    assert!(is_nirvana_claude_argv(&arg_refs, Some(&plugin_dir)));
+
+    // 2. --plugin-dir C:\x\Nirvana\y without the agent is not
+    let fake_plugin = ["--plugin-dir", "C:\\x\\Nirvana\\y"];
+    assert!(!is_nirvana_claude_argv(&fake_plugin, Some(&plugin_dir)));
+
+    // 3. The agent with another plugin dir is not
+    let other_plugin = ["--agent", "nirvana", "--plugin-dir", "C:\\other\\plugin"];
+    assert!(!is_nirvana_claude_argv(&other_plugin, Some(&plugin_dir)));
+}
+
+#[test]
+fn tidy_only_acts_on_ended_runs() {
+    let mut events = delivered_run();
+    // Case 1: live run (order delivered, but run has not ended yet) with pane -> should NOT tidy
+    let live_state = replay(&events);
+    assert!(!crate::nirvana_run::should_tidy_run(&live_state));
+
+    // Case 2: ended run with pane -> should tidy
+    events.push(ev(
+        8,
+        T0 + 20,
+        Kind::Ended {
+            order: None,
+            outcome: "ended".into(),
+            why: None,
+            exit: None,
+            pools: Vec::new(),
+            pools_basis: None,
+        },
+    ));
+    let ended_state = replay(&events);
+    assert!(crate::nirvana_run::should_tidy_run(&ended_state));
+
+    // Case 3: ended run without panes -> should NOT tidy
+    let no_pane_events = vec![ev(
+        1,
+        T0 + 20,
+        Kind::Ended {
+            order: None,
+            outcome: "ended".into(),
+            why: None,
+            exit: None,
+            pools: Vec::new(),
+            pools_basis: None,
+        },
+    )];
+    let no_pane_state = replay(&no_pane_events);
+    assert!(!crate::nirvana_run::should_tidy_run(&no_pane_state));
+}
+
+#[test]
+fn run_end_calls_close_run_tab() {
+    let dir = temp_dir("run_end_close_tab");
+    let project = Project::at(&dir);
+    project.ensure().expect("ensure");
+    let run = "test-run";
+    std::fs::create_dir_all(project.run_dir(run)).unwrap();
+    let journal = project.journal(run);
+    for event in delivered_run() {
+        journal.append(event.at, event.kind).unwrap();
+    }
+    journal
+        .append(
+            T0 + 19,
+            Kind::Gated {
+                order: "sub".into(),
+                verdict: "accept".into(),
+                reason: None,
+                axes: Vec::new(),
+            },
+        )
+        .unwrap();
+
+    crate::nirvana_run::CLOSE_RUN_TAB_CALLED.store(false, std::sync::atomic::Ordering::SeqCst);
+    let _ = crate::nirvana_run::end_cli(&project, &[run.to_string()]);
+    assert!(crate::nirvana_run::CLOSE_RUN_TAB_CALLED.load(std::sync::atomic::Ordering::SeqCst));
+    let _ = std::fs::remove_dir_all(dir);
 }

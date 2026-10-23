@@ -371,6 +371,8 @@ pub(crate) fn render_sidebar(
             entry.indented,
             entry.last_child,
             workspace.focused || dragged,
+            state.hovered_space_agent_pane,
+            Some(&mut *hits),
             palette,
         );
         let group_toggle = render_parent_group_toggle(

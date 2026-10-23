@@ -77,6 +77,7 @@ fn subagent_rows_render_under_agent_in_flat_and_grouped_views() {
                     depth: 0,
                     target_pane_id: None,
                     run_id: None,
+                    run_event_time: None,
                 },
                 Subagent {
                     id: "sub-2".into(),
@@ -92,6 +93,7 @@ fn subagent_rows_render_under_agent_in_flat_and_grouped_views() {
                     depth: 0,
                     target_pane_id: None,
                     run_id: None,
+                    run_event_time: None,
                 },
             ],
             total_count: 2,
@@ -187,6 +189,7 @@ fn marks_and_colours_by_provider() {
                     depth: 0,
                     target_pane_id: None,
                     run_id: None,
+                    run_event_time: None,
                 },
                 Subagent {
                     id: "sub-gemini".into(),
@@ -202,6 +205,7 @@ fn marks_and_colours_by_provider() {
                     depth: 0,
                     target_pane_id: None,
                     run_id: None,
+                    run_event_time: None,
                 },
                 Subagent {
                     id: "sub-local".into(),
@@ -217,6 +221,7 @@ fn marks_and_colours_by_provider() {
                     depth: 0,
                     target_pane_id: None,
                     run_id: None,
+                    run_event_time: None,
                 },
             ],
             total_count: 3,
@@ -308,6 +313,7 @@ fn narrow_and_wide_adaptive_formatting() {
                 depth: 0,
                 target_pane_id: None,
                 run_id: None,
+                run_event_time: None,
             }],
             total_count: 1,
             overflow: 0,
@@ -402,6 +408,7 @@ fn overflow_shows_plus_n_more() {
                 depth: 0,
                 target_pane_id: None,
                 run_id: None,
+                run_event_time: None,
             }],
             total_count: 8,
             overflow: 2,
@@ -463,6 +470,7 @@ fn finished_subagents_dimmed_and_ten_minute_filter() {
                     depth: 0,
                     target_pane_id: None,
                     run_id: None,
+                    run_event_time: None,
                 },
                 Subagent {
                     id: "sub-failed".into(),
@@ -478,6 +486,7 @@ fn finished_subagents_dimmed_and_ten_minute_filter() {
                     depth: 0,
                     target_pane_id: None,
                     run_id: None,
+                    run_event_time: None,
                 },
             ],
             total_count: 2,
@@ -548,6 +557,7 @@ fn click_subagent_row_focuses_target_pane() {
                 depth: 0,
                 target_pane_id: Some("worker_pane_42".into()),
                 run_id: None,
+                run_event_time: None,
             }],
             total_count: 1,
             overflow: 0,
@@ -622,6 +632,7 @@ fn row_lines_calculation() {
             depth: 0,
             target_pane_id: None,
             run_id: None,
+            run_event_time: None,
         },
         Subagent {
             id: "s2".into(),
@@ -637,6 +648,7 @@ fn row_lines_calculation() {
             depth: 0,
             target_pane_id: None,
             run_id: None,
+            run_event_time: None,
         },
     ];
 
@@ -862,6 +874,7 @@ fn group_subagents_by_run_ordering() {
         depth: 0,
         target_pane_id: None,
         run_id: Some("run-1".into()),
+        run_event_time: Some(2000),
     };
     let sub_live_run1_fast = Subagent {
         id: "2".into(),
@@ -877,6 +890,7 @@ fn group_subagents_by_run_ordering() {
         depth: 0,
         target_pane_id: None,
         run_id: Some("run-1".into()),
+        run_event_time: Some(2000),
     };
     let sub_done_run1 = Subagent {
         id: "3".into(),
@@ -892,6 +906,7 @@ fn group_subagents_by_run_ordering() {
         depth: 0,
         target_pane_id: None,
         run_id: Some("run-1".into()),
+        run_event_time: Some(2000),
     };
     let sub_done_run2 = Subagent {
         id: "4".into(),
@@ -907,9 +922,10 @@ fn group_subagents_by_run_ordering() {
         depth: 0,
         target_pane_id: None,
         run_id: Some("run-2".into()),
+        run_event_time: Some(1000),
     };
 
-    // run-1 has live workers, run-2 has only finished workers -> run-1 comes first
+    // run-1 has event time 2000, run-2 has event time 1000 -> run-1 comes first
     let subs = vec![
         sub_done_run2.clone(),
         sub_live_run1_slow.clone(),
@@ -921,10 +937,10 @@ fn group_subagents_by_run_ordering() {
     assert_eq!(groups[0].run_id, "run-1");
     assert_eq!(groups[1].run_id, "run-2");
 
-    // Inside run-1: live workers first, newest first (fast / 60s before slow / 240s)
+    // Inside run-1: live workers first, longest running first (slow / 240s before fast / 60s)
     assert_eq!(groups[0].live.len(), 2);
-    assert_eq!(groups[0].live[0].name, "p26-02-fast");
-    assert_eq!(groups[0].live[1].name, "p26-01-slow");
+    assert_eq!(groups[0].live[0].name, "p26-01-slow");
+    assert_eq!(groups[0].live[1].name, "p26-02-fast");
 
     // Finished worker after
     assert_eq!(groups[0].finished.len(), 1);
@@ -952,6 +968,7 @@ fn render_grouped_subagents_under_run_headers() {
                     depth: 0,
                     target_pane_id: Some("worker_pane_1".into()),
                     run_id: Some("p26-clear-sidebar".into()),
+                    run_event_time: Some(2000),
                 },
                 Subagent {
                     id: "w2".into(),
@@ -967,6 +984,7 @@ fn render_grouped_subagents_under_run_headers() {
                     depth: 0,
                     target_pane_id: Some("worker_pane_closed".into()),
                     run_id: Some("p26-clear-sidebar".into()),
+                    run_event_time: Some(2000),
                 },
             ],
             total_count: 2,
@@ -1025,7 +1043,7 @@ fn render_grouped_subagents_under_run_headers() {
         rendered.contains("p26-01-close-pane"),
         "output:\n{rendered}"
     );
-    assert!(rendered.contains("Sonnet"), "output:\n{rendered}");
+    assert!(rendered.contains("S5.5"), "output:\n{rendered}");
     assert!(rendered.contains("\u{2713}"), "output:\n{rendered}");
     assert!(rendered.contains("p26-02-done-task"), "output:\n{rendered}");
     assert!(rendered.contains("done"), "output:\n{rendered}");
@@ -1055,6 +1073,175 @@ fn render_grouped_subagents_under_run_headers() {
         .filter(|(_, pane)| pane == "worker_pane_1")
         .collect();
     assert!(!hits_for_open.is_empty(), "open worker hit recorded");
+
+    set_view_for_test(None);
+}
+
+#[test]
+fn compact_model_table_test() {
+    use crate::nirvana_spaces::compact_model;
+
+    // Claude: family initial and version (with and without Claude prefix)
+    assert_eq!(compact_model("Claude Sonnet 5.5"), "S5.5");
+    assert_eq!(compact_model("Claude Opus 5.5"), "O5.5");
+    assert_eq!(compact_model("Claude Haiku 5.5"), "H5.5");
+    assert_eq!(compact_model("Claude Flash 5.1"), "F5.1");
+    assert_eq!(compact_model("Sonnet 5.5"), "S5.5");
+    assert_eq!(compact_model("Opus 5.5"), "O5.5");
+    assert_eq!(compact_model("Haiku 5.5"), "H5.5");
+    assert_eq!(compact_model("Fable 5.1"), "F5.1");
+
+    // Gemini: Flash or Pro
+    assert_eq!(compact_model("Gemini 3.8 Flash"), "Flash");
+    assert_eq!(compact_model("Gemini 3.8 Pro"), "Pro");
+
+    // Codex: Codex
+    assert_eq!(compact_model("GPT-5 Codex"), "Codex");
+    assert_eq!(compact_model("Codex"), "Codex");
+
+    // Local model: name cut to 6 cells
+    assert_eq!(compact_model("Local llama3.1"), "llama3");
+    assert_eq!(compact_model("Local deepseek"), "deepse");
+}
+
+#[test]
+fn subagents_capping_keeps_live_and_counts_cut() {
+    use crate::client::shell::agent_sidebar::group_sort_and_cap_subagents;
+
+    let live1 = Subagent {
+        id: "l1".into(),
+        parent_id: None,
+        name: "w-live-1".into(),
+        description: "".into(),
+        provider: SubagentProvider::Claude,
+        model: "Claude Sonnet 5.5".into(),
+        state: SubagentState::Running,
+        elapsed_secs: 100,
+        tokens: None,
+        ended_at: None,
+        depth: 0,
+        target_pane_id: None,
+        run_id: Some("run-1".into()),
+        run_event_time: Some(2000),
+    };
+    let live2 = Subagent {
+        id: "l2".into(),
+        parent_id: None,
+        name: "w-live-2".into(),
+        description: "".into(),
+        provider: SubagentProvider::Claude,
+        model: "Claude Sonnet 5.5".into(),
+        state: SubagentState::Running,
+        elapsed_secs: 50,
+        tokens: None,
+        ended_at: None,
+        depth: 0,
+        target_pane_id: None,
+        run_id: Some("run-1".into()),
+        run_event_time: Some(2000),
+    };
+    let fin1 = Subagent {
+        id: "f1".into(),
+        parent_id: None,
+        name: "w-fin-1".into(),
+        description: "".into(),
+        provider: SubagentProvider::Claude,
+        model: "Claude Sonnet 5.5".into(),
+        state: SubagentState::Done,
+        elapsed_secs: 50,
+        tokens: None,
+        ended_at: Some(1500),
+        depth: 0,
+        target_pane_id: None,
+        run_id: Some("run-1".into()),
+        run_event_time: Some(2000),
+    };
+    let fin2 = Subagent {
+        id: "f2".into(),
+        parent_id: None,
+        name: "w-fin-2".into(),
+        description: "".into(),
+        provider: SubagentProvider::Claude,
+        model: "Claude Sonnet 5.5".into(),
+        state: SubagentState::Done,
+        elapsed_secs: 50,
+        tokens: None,
+        ended_at: Some(1400),
+        depth: 0,
+        target_pane_id: None,
+        run_id: Some("run-1".into()),
+        run_event_time: Some(2000),
+    };
+
+    let all_subs = vec![live1, live2, fin1, fin2];
+    // Total lines would be: 1 header + 2*2 live + 2*1 finished = 7 lines.
+    // If available_lines is 4: budget is 3 (reserving 1 line for "+N more").
+    // Live worker 1 takes header (1) + live (2) = 3 lines.
+    // Kept workers: 1 live worker. Cut workers: 3 workers.
+    let capped = group_sort_and_cap_subagents(&all_subs, 4);
+    assert_eq!(capped.groups.len(), 1);
+    assert_eq!(capped.groups[0].live.len(), 1);
+    assert_eq!(capped.groups[0].finished.len(), 0);
+    assert_eq!(capped.cut_count, 3);
+}
+
+#[test]
+fn worker_row_cut_to_fit_at_26_cells_with_studio_gui_mcp_v2() {
+    let mut sub_map = HashMap::new();
+    sub_map.insert(
+        "pane_1".to_string(),
+        SubagentsView {
+            subagents: vec![Subagent {
+                id: "w-long".into(),
+                parent_id: None,
+                name: "studio-gui-mcp-v2".into(),
+                description: "".into(),
+                provider: SubagentProvider::Claude,
+                model: "Claude Sonnet 5.5".into(),
+                state: SubagentState::Done,
+                elapsed_secs: 120,
+                tokens: None,
+                ended_at: Some(100),
+                depth: 0,
+                target_pane_id: None,
+                run_id: Some("run-long".into()),
+                run_event_time: Some(2000),
+            }],
+            total_count: 1,
+            overflow: 0,
+        },
+    );
+    set_view_for_test(Some(sub_map));
+
+    let config = ClientShellConfig::from_config(&Config::default());
+    let snap = snapshot_with_agent("pane_1", "orch");
+    let row = crate::client::shell::agent_sidebar::agent_row(&snap, "pane_1", &config, None)
+        .expect("agent row");
+
+    let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 26, 5));
+    crate::client::shell::agent_sidebar::render_agent_row(
+        &mut buf,
+        Rect::new(0, 0, 26, 5),
+        &row,
+        &config,
+        None,
+    );
+
+    let mut lines = Vec::new();
+    for y in 0..5 {
+        let mut line = String::new();
+        for x in 0..26 {
+            line.push_str(buf.cell((x, y)).unwrap().symbol());
+        }
+        lines.push(line);
+    }
+    let rendered = lines.join("\n");
+    // Row 0 is orchestrator
+    // Row 1 is Run header
+    // Row 2 is finished worker: mark ✓ and word done must always show!
+    assert!(rendered.contains("\u{2713}"), "rendered:\n{rendered}");
+    assert!(rendered.contains("done"), "rendered:\n{rendered}");
+    assert!(rendered.contains("studio-gui"), "rendered:\n{rendered}");
 
     set_view_for_test(None);
 }

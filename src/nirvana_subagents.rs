@@ -70,6 +70,8 @@ pub struct Subagent {
     pub target_pane_id: Option<String>,
     #[serde(default)]
     pub run_id: Option<String>,
+    #[serde(default)]
+    pub run_event_time: Option<u64>,
 }
 
 /// Cached view of subagents for a pane.
@@ -588,6 +590,7 @@ pub fn read_claude_subagents(
             depth: 0,
             target_pane_id: Some(parent_pane_id.to_string()),
             run_id: None,
+            run_event_time: None,
         });
     }
 
@@ -860,6 +863,7 @@ pub fn find_agy_processes_under(
                     depth: 0,
                     target_pane_id: Some(parent_pane_id.to_string()),
                     run_id: None,
+                    run_event_time: None,
                 });
             }
         }
@@ -929,6 +933,7 @@ pub fn read_agy_jobs(home: &Path, pane_id: &str, now_secs: u64) -> Vec<Subagent>
             depth: 0,
             target_pane_id: Some(pane_id.to_string()),
             run_id: None,
+            run_event_time: None,
         });
     }
     subagents
@@ -971,17 +976,31 @@ pub fn read_seat_orders(
             continue;
         }
 
+        let run_ended = run_state.ended.is_some();
+        let run_event_time = run_state.last_at;
+
         for order in run_state.orders {
             if matches!(
                 order.phase,
-                crate::nirvana_run::Phase::Merged | crate::nirvana_run::Phase::Gated
+                crate::nirvana_run::Phase::Merged
+                    | crate::nirvana_run::Phase::Gated
+                    | crate::nirvana_run::Phase::Reseated
             ) || order.verdict.as_deref() == Some("abandoned")
             {
                 continue;
             }
 
-            let is_live =
-                !order.phase.terminal() && order.phase != crate::nirvana_run::Phase::Delivered;
+            let is_live = matches!(
+                order.phase,
+                crate::nirvana_run::Phase::Seated
+                    | crate::nirvana_run::Phase::Running
+                    | crate::nirvana_run::Phase::Asked
+                    | crate::nirvana_run::Phase::Deferred
+            );
+            if run_ended && !is_live {
+                continue;
+            }
+
             let ended_at = if !is_live { Some(order.last_at) } else { None };
 
             let state = if is_live {
@@ -993,15 +1012,13 @@ pub fn read_seat_orders(
                     .and_then(|r| r.get("status"))
                     .and_then(Value::as_str)
                     .unwrap_or("done");
-                if report_status == "done" {
-                    SubagentState::Done
-                } else if report_status == "blocked" {
+                if report_status == "blocked" {
                     SubagentState::Blocked
+                } else if report_status == "done" {
+                    SubagentState::Done
                 } else {
                     SubagentState::Failed
                 }
-            } else if order.phase == crate::nirvana_run::Phase::Failed {
-                SubagentState::Failed
             } else if order.phase == crate::nirvana_run::Phase::Interrupted
                 || order.outcome.as_deref() == Some("stopped")
                 || order.outcome.as_deref() == Some("interrupted")
@@ -1062,6 +1079,7 @@ pub fn read_seat_orders(
                 depth: 0,
                 target_pane_id: target_pane,
                 run_id: Some(run_id),
+                run_event_time,
             });
         }
     }
@@ -1665,6 +1683,7 @@ mod tests {
             depth: 0,
             target_pane_id: None,
             run_id: None,
+            run_event_time: None,
         };
         let child = Subagent {
             id: "a2".into(),
@@ -1680,6 +1699,7 @@ mod tests {
             depth: 0,
             target_pane_id: None,
             run_id: None,
+            run_event_time: None,
         };
         let other = Subagent {
             id: "a3".into(),
@@ -1695,6 +1715,7 @@ mod tests {
             depth: 0,
             target_pane_id: None,
             run_id: None,
+            run_event_time: None,
         };
 
         let nested = nest_subagents(vec![child, other, parent]);
@@ -2175,5 +2196,280 @@ mod tests {
             1,
             "Failed shell pid query must not be repeated within 60s"
         );
+    }
+
+    #[test]
+    fn read_seat_orders_phases_and_ended_runs() {
+        let temp = std::env::temp_dir().join(format!(
+            "nirvana_test_phases_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let run_dir = temp.join(".nirvana").join("runs").join("run-1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+
+        let make_seated = |order: &str| -> crate::nirvana_run::Seated {
+            crate::nirvana_run::Seated {
+                order: order.to_string(),
+                seat: "s1".to_string(),
+                cli: "claude".to_string(),
+                model: "Sonnet 5.5".to_string(),
+                effort: crate::nirvana_seat::Effort::Low,
+                pool: "p".to_string(),
+                class: "c".to_string(),
+                chain: None,
+                size: crate::nirvana_seat::SizeName::Medium,
+                mode: crate::nirvana_seat::Mode::Balanced,
+                needs: Vec::new(),
+                not_family: Vec::new(),
+                reason: "r".to_string(),
+                override_reason: None,
+                order_file: "f".to_string(),
+                cwd: "cwd".to_string(),
+                worktree: None,
+                branch: None,
+                parent: None,
+                why: None,
+                rule_pick: None,
+                bar_dropped: None,
+                step_down: None,
+                use_basis: None,
+                expected: std::collections::BTreeMap::new(),
+                jev_pick: None,
+            }
+        };
+
+        let mut events: Vec<crate::nirvana_run::Event> = Vec::new();
+        let mut seq = 0;
+        let mut make_ev = |kind: crate::nirvana_run::Kind| -> crate::nirvana_run::Event {
+            seq += 1;
+            crate::nirvana_run::Event {
+                v: 1,
+                seq,
+                at: 1000 + seq,
+                kind,
+            }
+        };
+
+        events.push(make_ev(crate::nirvana_run::Kind::Opened {
+            project: "proj".into(),
+            orchestrator_pane: Some("orch-1".into()),
+            auto: true,
+            pools: Vec::new(),
+            pools_basis: None,
+        }));
+
+        // 1. Seated only -> Running
+        events.push(make_ev(crate::nirvana_run::Kind::Seated(Box::new(
+            make_seated("o-seated"),
+        ))));
+
+        // 2. Running (Started) -> Running
+        events.push(make_ev(crate::nirvana_run::Kind::Seated(Box::new(
+            make_seated("o-running"),
+        ))));
+        events.push(make_ev(crate::nirvana_run::Kind::Started {
+            order: "o-running".into(),
+            attempt: 1,
+            pid: Some(10),
+            pane: Some("p-running".into()),
+            tab: None,
+            resume: None,
+            argv: Vec::new(),
+        }));
+
+        // 3. Asked -> Running
+        events.push(make_ev(crate::nirvana_run::Kind::Seated(Box::new(
+            make_seated("o-asked"),
+        ))));
+        events.push(make_ev(crate::nirvana_run::Kind::Started {
+            order: "o-asked".into(),
+            attempt: 1,
+            pid: Some(11),
+            pane: Some("p-asked".into()),
+            tab: None,
+            resume: None,
+            argv: Vec::new(),
+        }));
+        events.push(make_ev(crate::nirvana_run::Kind::Asked {
+            order: Some("o-asked".into()),
+            question: "Why?".into(),
+        }));
+
+        // 4. Deferred -> Running
+        events.push(make_ev(crate::nirvana_run::Kind::Seated(Box::new(
+            make_seated("o-deferred"),
+        ))));
+        events.push(make_ev(crate::nirvana_run::Kind::Started {
+            order: "o-deferred".into(),
+            attempt: 1,
+            pid: Some(12),
+            pane: Some("p-deferred".into()),
+            tab: None,
+            resume: None,
+            argv: Vec::new(),
+        }));
+        events.push(make_ev(crate::nirvana_run::Kind::Deferred {
+            order: "o-deferred".into(),
+            until: 2000,
+            why: "rate limit".into(),
+        }));
+
+        // 5. Delivered done -> Done
+        events.push(make_ev(crate::nirvana_run::Kind::Seated(Box::new(
+            make_seated("o-del-done"),
+        ))));
+        events.push(make_ev(crate::nirvana_run::Kind::Started {
+            order: "o-del-done".into(),
+            attempt: 1,
+            pid: Some(13),
+            pane: Some("p-del-done".into()),
+            tab: None,
+            resume: None,
+            argv: Vec::new(),
+        }));
+        events.push(make_ev(crate::nirvana_run::Kind::Delivered {
+            order: "o-del-done".into(),
+            report: serde_json::json!({ "status": "done" }),
+        }));
+
+        // 6. Delivered blocked -> Blocked
+        events.push(make_ev(crate::nirvana_run::Kind::Seated(Box::new(
+            make_seated("o-del-blocked"),
+        ))));
+        events.push(make_ev(crate::nirvana_run::Kind::Started {
+            order: "o-del-blocked".into(),
+            attempt: 1,
+            pid: Some(14),
+            pane: Some("p-del-blocked".into()),
+            tab: None,
+            resume: None,
+            argv: Vec::new(),
+        }));
+        events.push(make_ev(crate::nirvana_run::Kind::Delivered {
+            order: "o-del-blocked".into(),
+            report: serde_json::json!({ "status": "blocked" }),
+        }));
+
+        // 7. Delivered failed -> Failed
+        events.push(make_ev(crate::nirvana_run::Kind::Seated(Box::new(
+            make_seated("o-del-failed"),
+        ))));
+        events.push(make_ev(crate::nirvana_run::Kind::Started {
+            order: "o-del-failed".into(),
+            attempt: 1,
+            pid: Some(15),
+            pane: Some("p-del-failed".into()),
+            tab: None,
+            resume: None,
+            argv: Vec::new(),
+        }));
+        events.push(make_ev(crate::nirvana_run::Kind::Delivered {
+            order: "o-del-failed".into(),
+            report: serde_json::json!({ "status": "failed" }),
+        }));
+
+        // 8. Interrupted -> Stopped
+        events.push(make_ev(crate::nirvana_run::Kind::Seated(Box::new(
+            make_seated("o-interrupted"),
+        ))));
+        events.push(make_ev(crate::nirvana_run::Kind::Started {
+            order: "o-interrupted".into(),
+            attempt: 1,
+            pid: Some(16),
+            pane: Some("p-interrupted".into()),
+            tab: None,
+            resume: None,
+            argv: Vec::new(),
+        }));
+        events.push(make_ev(crate::nirvana_run::Kind::Interrupted {
+            order: "o-interrupted".into(),
+            why: "user canceled".into(),
+        }));
+
+        // 9. Failed -> Failed
+        events.push(make_ev(crate::nirvana_run::Kind::Seated(Box::new(
+            make_seated("o-failed"),
+        ))));
+        events.push(make_ev(crate::nirvana_run::Kind::Started {
+            order: "o-failed".into(),
+            attempt: 1,
+            pid: Some(17),
+            pane: Some("p-failed".into()),
+            tab: None,
+            resume: None,
+            argv: Vec::new(),
+        }));
+        events.push(make_ev(crate::nirvana_run::Kind::Ended {
+            order: Some("o-failed".into()),
+            outcome: "failed".into(),
+            why: Some("crash".into()),
+            exit: Some(1),
+            pools: Vec::new(),
+            pools_basis: None,
+        }));
+
+        // 10. Reseated -> Skipped!
+        events.push(make_ev(crate::nirvana_run::Kind::Seated(Box::new(
+            make_seated("o-reseated"),
+        ))));
+        events.push(make_ev(crate::nirvana_run::Kind::Reseated {
+            order: "o-reseated".into(),
+            child: "o-child".into(),
+            seat: "s2".into(),
+            why: "switch seat".into(),
+        }));
+
+        let mut lines = String::new();
+        for ev in &events {
+            lines.push_str(&serde_json::to_string(ev).unwrap());
+            lines.push('\n');
+        }
+        std::fs::write(run_dir.join("journal.jsonl"), &lines).unwrap();
+
+        let subs = read_seat_orders(&temp, "orch-1", 2000);
+        let find_state = |name: &str| -> Option<SubagentState> {
+            subs.iter().find(|s| s.name == name).map(|s| s.state)
+        };
+
+        // Assert all phases
+        assert_eq!(find_state("o-seated"), Some(SubagentState::Running));
+        assert_eq!(find_state("o-running"), Some(SubagentState::Running));
+        assert_eq!(find_state("o-asked"), Some(SubagentState::Running));
+        assert_eq!(find_state("o-deferred"), Some(SubagentState::Running));
+        assert_eq!(find_state("o-del-done"), Some(SubagentState::Done));
+        assert_eq!(find_state("o-del-blocked"), Some(SubagentState::Blocked));
+        assert_eq!(find_state("o-del-failed"), Some(SubagentState::Failed));
+        assert_eq!(find_state("o-interrupted"), Some(SubagentState::Stopped));
+        assert_eq!(find_state("o-failed"), Some(SubagentState::Failed));
+        // Reseated is skipped!
+        assert_eq!(find_state("o-reseated"), None);
+
+        // Now test Ended run: finished rows are hidden!
+        events.push(make_ev(crate::nirvana_run::Kind::Ended {
+            order: None,
+            outcome: "done".into(),
+            why: None,
+            exit: None,
+            pools: Vec::new(),
+            pools_basis: None,
+        }));
+        let mut lines_ended = String::new();
+        for ev in &events {
+            lines_ended.push_str(&serde_json::to_string(ev).unwrap());
+            lines_ended.push('\n');
+        }
+        std::fs::write(run_dir.join("journal.jsonl"), &lines_ended).unwrap();
+
+        let subs_ended = read_seat_orders(&temp, "orch-1", 2000);
+        let finished_count = subs_ended
+            .iter()
+            .filter(|s| s.state != SubagentState::Running)
+            .count();
+        assert_eq!(finished_count, 0, "ended run hides all finished rows");
+
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }

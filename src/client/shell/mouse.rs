@@ -2394,6 +2394,16 @@ impl ClientShellState {
             MouseEventKind::Up(MouseButton::Left | MouseButton::Middle)
             | MouseEventKind::Drag(MouseButton::Left | MouseButton::Middle) => {}
             MouseEventKind::Moved => {
+                let hovered = self
+                    .hits
+                    .space_agents
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .map(|(_, pane)| pane.clone());
+                if hovered != self.hovered_space_agent_pane {
+                    self.hovered_space_agent_pane = hovered;
+                    outcome.repaint = true;
+                }
                 if let Some(hit) = self
                     .hits
                     .panes

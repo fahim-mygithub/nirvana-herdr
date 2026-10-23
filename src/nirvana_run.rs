@@ -1272,7 +1272,6 @@ pub fn pane_program(pane: &Value, process: &Value, plugin_dir: Option<&Path>) ->
     .and_then(Value::as_array) else {
         return PaneProgram::Unknown;
     };
-    let wanted = crate::nirvana_launch::folder_key(plugin_dir);
     let nirvana = processes.iter().any(|process| {
         let argv: Vec<&str> = match process.get("argv").and_then(Value::as_array) {
             Some(argv) => argv.iter().filter_map(Value::as_str).collect(),
@@ -1282,10 +1281,7 @@ pub fn pane_program(pane: &Value, process: &Value, plugin_dir: Option<&Path>) ->
                 .map(|line| line.split_whitespace().collect())
                 .unwrap_or_default(),
         };
-        let agent = flag_value(&argv, "--agent");
-        let plugin = flag_value(&argv, "--plugin-dir");
-        matches!(agent, Some("nirvana" | "nirvana:nirvana"))
-            && plugin.is_some_and(|dir| crate::nirvana_launch::folder_key(Path::new(dir)) == wanted)
+        is_nirvana_claude_argv(&argv, Some(plugin_dir))
     });
     if nirvana {
         PaneProgram::NirvanaClaude
@@ -1295,6 +1291,19 @@ pub fn pane_program(pane: &Value, process: &Value, plugin_dir: Option<&Path>) ->
             plugin_dir.display()
         ))
     }
+}
+
+/// Whether an argv indicates it is Nirvana Claude (plan 26 B3):
+/// `--agent nirvana` or `nirvana:nirvana` AND `--plugin-dir` equal, by `folder_key`, to this home's `nirvana/claude`.
+pub fn is_nirvana_claude_argv(argv: &[&str], plugin_dir: Option<&Path>) -> bool {
+    let Some(plugin_dir) = plugin_dir else {
+        return false;
+    };
+    let wanted = crate::nirvana_launch::folder_key(plugin_dir);
+    let agent = flag_value(argv, "--agent");
+    let plugin = flag_value(argv, "--plugin-dir");
+    matches!(agent, Some("nirvana" | "nirvana:nirvana"))
+        && plugin.is_some_and(|dir| crate::nirvana_launch::folder_key(Path::new(dir)) == wanted)
 }
 
 /// A flag's value in an argv: `--flag value` or `--flag=value`.
@@ -2365,12 +2374,13 @@ pub enum CloseRunTabDecision {
     NotFound(String),
 }
 
-/// Pure decision on how to close a run's tab (plan 26 §3).
+/// Pure decision on how to close a run's tab (plan 26 §3, B1, S4).
 pub fn close_run_tab_decision(
     known_pane: Option<&str>,
     layout_tab_id: Option<&str>,
     tab_panes: &[String],
-    run_worker_panes: &[String],
+    eligible_finished_panes: &[String],
+    live_panes: &[String],
 ) -> CloseRunTabDecision {
     if known_pane.is_none() {
         return CloseRunTabDecision::NotFound("no worker pane found".into());
@@ -2381,15 +2391,19 @@ pub fn close_run_tab_decision(
     if tab_panes.is_empty() {
         return CloseRunTabDecision::NotFound("tab has no panes".into());
     }
-    let all_ours = tab_panes.iter().all(|pane| run_worker_panes.contains(pane));
-    if all_ours {
+    let has_live = tab_panes.iter().any(|pane| live_panes.contains(pane));
+    let all_eligible_finished = !has_live
+        && tab_panes
+            .iter()
+            .all(|pane| eligible_finished_panes.contains(pane));
+    if all_eligible_finished {
         CloseRunTabDecision::CloseTab {
             tab_id: tab_id.to_string(),
         }
     } else {
         let to_close: Vec<String> = tab_panes
             .iter()
-            .filter(|pane| run_worker_panes.contains(pane))
+            .filter(|pane| eligible_finished_panes.contains(pane) && !live_panes.contains(pane))
             .cloned()
             .collect();
         CloseRunTabDecision::ClosePanes {
@@ -2399,11 +2413,18 @@ pub fn close_run_tab_decision(
     }
 }
 
+#[cfg(test)]
+pub static CLOSE_RUN_TAB_CALLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Closes the run's tab or its worker panes according to plan 26 §3.
 pub fn close_run_tab(_project: &Project, run: &str, state: &RunState) -> std::io::Result<()> {
+    #[cfg(test)]
+    CLOSE_RUN_TAB_CALLED.store(true, std::sync::atomic::Ordering::SeqCst);
     if !crate::nirvana_worker::in_herdr() {
         return Ok(());
     }
+    let _lock = crate::nirvana_seat::Lock::take(&_project.run_dir(run));
     let known_pane = state
         .orders
         .iter()
@@ -2440,24 +2461,42 @@ pub fn close_run_tab(_project: &Project, run: &str, state: &RunState) -> std::io
         None => (None, Vec::new()),
     };
 
-    let run_worker_panes: Vec<String> = state
-        .orders
-        .iter()
-        .filter_map(|order| order.pane.clone())
-        .collect();
+    let mut eligible_finished_panes: Vec<String> = Vec::new();
+    let mut live_panes: Vec<String> = Vec::new();
+    for order in &state.orders {
+        let is_live = matches!(
+            order.phase,
+            Phase::Seated | Phase::Running | Phase::Asked | Phase::Deferred
+        );
+        if is_live {
+            if let Some(pane) = &order.pane {
+                live_panes.push(pane.clone());
+            }
+        } else if let Some(pane) = &order.pane {
+            let expected =
+                crate::nirvana_worker::expected_pane_title(&order.seated.seat, order.id());
+            let actual = crate::nirvana_worker::pane_title(pane);
+            if actual.as_deref() == Some(&expected) {
+                eligible_finished_panes.push(pane.clone());
+            } else {
+                println!("run {run}: pane {pane} stays: title is not {expected}");
+            }
+        }
+    }
 
     let decision = close_run_tab_decision(
         known_pane.as_deref(),
         layout_tab_id.as_deref(),
         &tab_panes,
-        &run_worker_panes,
+        &eligible_finished_panes,
+        &live_panes,
     );
 
     match decision {
         CloseRunTabDecision::CloseTab { tab_id } => {
             match crate::nirvana_worker::herdr_ok(&["tab", "close", &tab_id]) {
                 Ok(()) => println!("run {run}: closed tab {tab_id}"),
-                Err(why) => println!("run {run}: tab {tab_id} stays: {why}"),
+                Err(why) => eprintln!("run {run}: failed to close tab {tab_id}: {why}"),
             }
         }
         CloseRunTabDecision::ClosePanes { tab_id, panes } => {
@@ -2465,6 +2504,8 @@ pub fn close_run_tab(_project: &Project, run: &str, state: &RunState) -> std::io
             for pane in &panes {
                 if crate::nirvana_worker::herdr_ok(&["pane", "close", pane]).is_ok() {
                     closed += 1;
+                } else {
+                    eprintln!("run {run}: failed to close pane {pane}");
                 }
             }
             println!("run {run}: closed {closed} pane(s) in tab {tab_id}");
@@ -2476,6 +2517,10 @@ pub fn close_run_tab(_project: &Project, run: &str, state: &RunState) -> std::io
     Ok(())
 }
 
+pub fn should_tidy_run(state: &RunState) -> bool {
+    state.ended.is_some() && state.orders.iter().any(|o| o.pane.is_some())
+}
+
 fn tidy_cli(project: &Project, _args: &[String]) -> std::io::Result<()> {
     if !crate::nirvana_worker::in_herdr() {
         println!("not in herdr");
@@ -2485,7 +2530,7 @@ fn tidy_cli(project: &Project, _args: &[String]) -> std::io::Result<()> {
         let (journal, _, _, _) = load(project, &run);
         let (events, _) = journal.read();
         let state = replay(&events);
-        if state.ended.is_some() {
+        if should_tidy_run(&state) {
             close_run_tab(project, &run, &state)?;
         }
     }

@@ -942,6 +942,7 @@ fn run_attempt(
     attempt: u32,
     argv: &[String],
     stop: &Path,
+    pane: Option<&str>,
     out: &mut dyn Write,
 ) -> std::io::Result<(AttemptEnd, Stream)> {
     let mut command = std::process::Command::new(&argv[0]);
@@ -978,7 +979,7 @@ fn run_attempt(
             order: seated.order.clone(),
             attempt,
             pid: Some(child.id()),
-            pane: std::env::var("HERDR_PANE_ID").ok(),
+            pane: pane.map(str::to_string),
             tab: std::env::var("HERDR_TAB_ID").ok(),
             resume: argv
                 .iter()
@@ -1171,11 +1172,12 @@ fn print_timeout_s(seated: &Seated) -> u64 {
         .unwrap_or(0)
 }
 
-/// `herdr seat exec <order> --run <run>`: the worker's supervisor, in its pane.
+/// `herdr seat exec <order> --run <run> [--pane <pane>]`: the worker's supervisor, in its pane.
 pub fn exec(
     project: &Project,
     run: &str,
     order: &str,
+    pane: Option<&str>,
     out: &mut dyn Write,
 ) -> std::io::Result<i32> {
     let journal = project.journal(run);
@@ -1256,16 +1258,24 @@ pub fn exec(
             )
         )?;
         let attempt_started = Instant::now();
-        let (end, stream) =
-            match run_attempt(&journal, &stream_path, &seated, attempt, &argv, &stop, out) {
-                Ok(done) => done,
-                Err(err) => {
-                    let why = format!("the worker could not start: {err}");
-                    end_failed(project, &journal, run, &seated, &why, None)?;
-                    writeln!(out, "{why}")?;
-                    return Ok(1);
-                }
-            };
+        let (end, stream) = match run_attempt(
+            &journal,
+            &stream_path,
+            &seated,
+            attempt,
+            &argv,
+            &stop,
+            pane,
+            out,
+        ) {
+            Ok(done) => done,
+            Err(err) => {
+                let why = format!("the worker could not start: {err}");
+                end_failed(project, &journal, run, &seated, &why, None)?;
+                writeln!(out, "{why}")?;
+                return Ok(1);
+            }
+        };
         match end {
             AttemptEnd::Exited { code, stderr } => {
                 return match stream.report() {
@@ -1311,15 +1321,15 @@ pub fn exec(
                         // Plan 26 §2: A worker that delivers done closes its own pane through herdr
                         // as the last thing it does. The tab's last pane stays while the run is open.
                         if in_herdr() {
+                            let _lock = crate::nirvana_seat::Lock::take(&project.run_dir(run));
                             let state = replay(&journal.read().0);
-                            let phase = state
-                                .order(order)
-                                .map(|o| o.phase)
-                                .unwrap_or(crate::nirvana_run::Phase::Delivered);
-                            let my_pane = std::env::var("HERDR_PANE_ID")
-                                .ok()
-                                .or_else(|| state.order(order).and_then(|o| o.pane.clone()));
-                            if let Some(pane_id) = my_pane.as_deref() {
+                            let my_pane =
+                                pane.or_else(|| state.order(order).and_then(|o| o.pane.as_deref()));
+                            if let Some(pane_id) = my_pane {
+                                let expected_title = expected_pane_title(&seated.seat, order);
+                                let actual_title = pane_title(pane_id);
+                                let run_panes: Vec<String> =
+                                    state.orders.iter().filter_map(|o| o.pane.clone()).collect();
                                 let tab_panes_count =
                                     herdr_json(&["pane", "layout", "--pane", pane_id])
                                         .ok()
@@ -1328,16 +1338,31 @@ pub fn exec(
                                                 .iter()
                                                 .find_map(|p| layout.pointer(p))
                                                 .and_then(Value::as_array)
-                                                .map(|arr| arr.len())
+                                                .map(|arr| {
+                                                    let ids: Vec<&str> = arr
+                                                        .iter()
+                                                        .filter_map(|p| {
+                                                            p.get("pane_id").and_then(Value::as_str)
+                                                        })
+                                                        .collect();
+                                                    count_run_tab_panes(&ids, &run_panes)
+                                                })
                                         })
                                         .unwrap_or(0);
-                                if worker_should_close_pane(
+                                if exec_should_close_pane_after_delivered(
+                                    &state,
+                                    order,
                                     &status,
-                                    phase,
                                     Some(pane_id),
+                                    actual_title.as_deref(),
+                                    &expected_title,
                                     tab_panes_count,
                                 ) {
-                                    let _ = herdr_json(&["pane", "close", pane_id]);
+                                    if let Err(why) = herdr_json(&["pane", "close", pane_id]) {
+                                        eprintln!("failed to close pane {pane_id}: {why}");
+                                    }
+                                } else if actual_title.as_deref() != Some(&expected_title) {
+                                    eprintln!("pane {pane_id} title is not {expected_title}; keeping pane");
                                 }
                             }
                         }
@@ -1915,24 +1940,80 @@ pub fn write_order(
     Ok(path.display().to_string())
 }
 
-/// Whether a worker ending its attempt should close its own pane (plan 26 §2).
+/// Whether a worker ending its attempt should close its own pane (plan 26 §2, B1, S3).
 ///
+/// Decision on closing pane in exec: only after Delivered has been journaled (plan 26 §2).
+pub fn exec_should_close_pane_after_delivered(
+    state: &crate::nirvana_run::RunState,
+    order: &str,
+    status: &str,
+    pane: Option<&str>,
+    actual_title: Option<&str>,
+    expected_title: &str,
+    tab_panes_count: usize,
+) -> bool {
+    let phase = state
+        .order(order)
+        .map(|o| o.phase)
+        .unwrap_or(crate::nirvana_run::Phase::Delivered);
+    worker_should_close_pane(
+        status,
+        phase,
+        pane,
+        actual_title,
+        expected_title,
+        tab_panes_count,
+    )
+}
+
 /// A worker closes its pane as soon as it delivers done and its order is Delivered.
 /// Kept panes:
 /// - A worker delivering blocked, failed or anything other than done keeps its pane.
 /// - So does a stopped or interrupted worker.
 /// - The tab's last pane stays while the run is open, so the tab stays open and the
-///   next worker can reuse that pane.
+///   next worker can reuse that pane (tab_panes_count from this run only).
+/// - The pane's title must equal the title `open_pane` gave it (<seat>·<order>).
 pub fn worker_should_close_pane(
     status: &str,
     phase: crate::nirvana_run::Phase,
     pane_id: Option<&str>,
+    actual_title: Option<&str>,
+    expected_title: &str,
     tab_panes_count: usize,
 ) -> bool {
     status == "done"
         && phase == crate::nirvana_run::Phase::Delivered
         && pane_id.is_some()
+        && actual_title == Some(expected_title)
         && tab_panes_count > 1
+}
+
+/// Counts how many panes in `tab_panes` belong to the current run (`run_panes`) (plan 26 S3).
+pub fn count_run_tab_panes(tab_panes: &[&str], run_panes: &[String]) -> usize {
+    tab_panes
+        .iter()
+        .filter(|id| run_panes.iter().any(|rp| rp == **id))
+        .count()
+}
+
+/// The title `open_pane` assigns to a worker's pane: `<seat>·<order>` (plan 26 B1).
+pub fn expected_pane_title(seat: &str, order: &str) -> String {
+    format!("{}\u{b7}{}", seat, order)
+}
+
+/// Reads the title or manual label of a pane via `herdr pane get` (plan 26 B1).
+pub fn pane_title(pane: &str) -> Option<String> {
+    let info = herdr_json(&["pane", "get", pane]).ok()?;
+    find_str(
+        &info,
+        &[
+            "/result/pane/label",
+            "/pane/label",
+            "/result/pane/title",
+            "/pane/title",
+        ],
+    )
+    .map(str::to_owned)
 }
 
 // ---- herdr's own API, for panes and the orchestrator's state ----
@@ -2168,7 +2249,7 @@ fn open_pane(project: &Project, run: &str, seated: &Seated) -> Result<String, St
         "pane",
         "run",
         &pane,
-        &format!("herdr seat exec {} --run {run}", seated.order),
+        &format!("herdr seat exec {} --run {run} --pane {pane}", seated.order),
     ])?;
     Ok(format!("pane {pane}"))
 }
@@ -2340,15 +2421,29 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
     match args.first().map(String::as_str) {
         Some("run") => run_cli(rest),
         Some("exec") => {
-            let [order, flag, run] = rest else {
-                usage_exit()
+            let mut order: Option<String> = None;
+            let mut run: Option<String> = None;
+            let mut pane: Option<String> = None;
+            let mut iter = rest.iter();
+            while let Some(arg) = iter.next() {
+                match arg.as_str() {
+                    "--run" => run = iter.next().cloned(),
+                    "--pane" => pane = iter.next().cloned(),
+                    other if !other.starts_with("--") && order.is_none() => {
+                        order = Some(other.to_string());
+                    }
+                    _ => usage_exit(),
+                }
+            }
+            let (Some(order), Some(run)) = (order, run) else {
+                usage_exit();
             };
-            if flag != "--run" || !valid_id(order) || !valid_id(run) {
+            if !valid_id(&order) || !valid_id(&run) {
                 usage_exit();
             }
             let project = Project::from_env();
             let mut out = std::io::stdout();
-            let code = exec(&project, run, order, &mut out)?;
+            let code = exec(&project, &run, &order, pane.as_deref(), &mut out)?;
             out.flush()?;
             std::process::exit(code);
         }
@@ -3086,9 +3181,15 @@ fn cleanup_cli(args: &[String]) -> std::io::Result<()> {
     // The pane first: its shell's folder is the worktree, and Windows will not delete a folder a process has
     // as its current directory (the live run of 2026-10-18: "failed to delete ... Permission denied").
     if let Some(pane) = known.pane.as_deref().filter(|_| in_herdr()) {
-        match herdr_json(&["pane", "close", pane]) {
-            Ok(_) => println!("closed the pane {pane}"),
-            Err(why) => println!("the pane {pane} stays: {why}"),
+        let expected = expected_pane_title(&known.seated.seat, order);
+        let actual = pane_title(pane);
+        if actual.as_deref() == Some(&expected) {
+            match herdr_json(&["pane", "close", pane]) {
+                Ok(_) => println!("closed the pane {pane}"),
+                Err(why) => println!("the pane {pane} stays: {why}"),
+            }
+        } else {
+            println!("the pane {pane} stays: title is not {expected}");
         }
     }
     if let Some(worktree) = known.seated.worktree.as_deref().filter(|_| !shared) {

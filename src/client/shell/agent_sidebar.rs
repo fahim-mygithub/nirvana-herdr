@@ -23,7 +23,7 @@ pub(super) fn is_narrow_agent_panel(width: u16) -> bool {
     width < 34
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SubagentRunGroup<'a> {
     pub(crate) run_id: &'a str,
     pub(crate) live: Vec<&'a crate::nirvana_subagents::Subagent>,
@@ -31,11 +31,7 @@ pub(crate) struct SubagentRunGroup<'a> {
 }
 
 pub(crate) fn is_live_subagent(state: crate::nirvana_subagents::SubagentState) -> bool {
-    matches!(
-        state,
-        crate::nirvana_subagents::SubagentState::Running
-            | crate::nirvana_subagents::SubagentState::Blocked
-    )
+    state == crate::nirvana_subagents::SubagentState::Running
 }
 
 pub(crate) fn group_subagents_by_run<'a>(
@@ -67,8 +63,8 @@ pub(crate) fn group_subagents_by_run<'a>(
     let mut result = Vec::new();
     for run_id in order_of_runs {
         if let Some((mut live, mut finished)) = groups.remove(run_id) {
-            // live workers first, newest first: smallest elapsed_secs first
-            live.sort_by_key(|s| s.elapsed_secs);
+            // live workers first, longest running first: largest elapsed_secs first
+            live.sort_by_key(|s| std::cmp::Reverse(s.elapsed_secs));
             // finished workers after, most recently finished first: largest ended_at first
             finished.sort_by_key(|s| std::cmp::Reverse(s.ended_at.unwrap_or(0)));
             result.push(SubagentRunGroup {
@@ -80,33 +76,146 @@ pub(crate) fn group_subagents_by_run<'a>(
     }
 
     // Sort runs:
-    // - runs with any live worker come first, newest run first
-    // - runs with only finished workers come after, newest first
-    result.sort_by(|a, b| {
-        let a_live = !a.live.is_empty();
-        let b_live = !b.live.is_empty();
-        match (a_live, b_live) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => b.run_id.cmp(a.run_id),
-        }
-    });
+    // Runs sort by their newest event time, newest first, never by name.
+    let run_event_time = |g: &SubagentRunGroup| -> u64 {
+        let from_live = g
+            .live
+            .iter()
+            .filter_map(|s| s.run_event_time)
+            .max()
+            .unwrap_or(0);
+        let from_fin = g
+            .finished
+            .iter()
+            .map(|s| s.run_event_time.or(s.ended_at).unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        from_live.max(from_fin)
+    };
+
+    result.sort_by_key(|b| std::cmp::Reverse(run_event_time(b)));
 
     result
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CappedRunGroups<'a> {
+    pub(crate) groups: Vec<SubagentRunGroup<'a>>,
+    pub(crate) cut_count: usize,
+}
+
+/// Groups, sorts and caps subagents for the agents panel (plan 26 S6).
+/// Keeps live workers first, and returns how many worker rows were cut.
+pub(crate) fn group_sort_and_cap_subagents<'a>(
+    subagents: &'a [crate::nirvana_subagents::Subagent],
+    max_lines: usize,
+) -> CappedRunGroups<'a> {
+    let sorted_groups = group_subagents_by_run(subagents);
+    let total_workers: usize = sorted_groups
+        .iter()
+        .map(|g| g.live.len() + g.finished.len())
+        .sum();
+    let total_lines: usize = sorted_groups
+        .iter()
+        .map(|g| 1 + g.live.len() * 2 + g.finished.len())
+        .sum();
+
+    if total_lines <= max_lines {
+        return CappedRunGroups {
+            groups: sorted_groups,
+            cut_count: 0,
+        };
+    }
+
+    let budget = max_lines.saturating_sub(1); // reserve 1 line for "+N more"
+    let mut groups: Vec<SubagentRunGroup<'a>> = Vec::new();
+    let mut remaining = budget;
+    let mut kept_workers = 0;
+
+    // First pass: live workers take priority
+    for group in &sorted_groups {
+        if remaining == 0 {
+            break;
+        }
+        if !group.live.is_empty() && remaining >= 3 {
+            remaining -= 1; // 1 line for run header
+            let mut group_live = Vec::new();
+            for live_w in &group.live {
+                if remaining >= 2 {
+                    group_live.push(*live_w);
+                    remaining -= 2;
+                    kept_workers += 1;
+                } else {
+                    break;
+                }
+            }
+            if !group_live.is_empty() {
+                groups.push(SubagentRunGroup {
+                    run_id: group.run_id,
+                    live: group_live,
+                    finished: Vec::new(),
+                });
+            }
+        }
+    }
+
+    // Second pass: fill remaining budget with finished workers
+    for group in &sorted_groups {
+        if remaining == 0 {
+            break;
+        }
+        if let Some(existing) = groups.iter_mut().find(|g| g.run_id == group.run_id) {
+            for fin_w in &group.finished {
+                if remaining >= 1 {
+                    existing.finished.push(*fin_w);
+                    remaining -= 1;
+                    kept_workers += 1;
+                } else {
+                    break;
+                }
+            }
+        } else if remaining >= 2 && !group.finished.is_empty() {
+            remaining -= 1; // 1 line for run header
+            let mut group_fin = Vec::new();
+            for fin_w in &group.finished {
+                if remaining >= 1 {
+                    group_fin.push(*fin_w);
+                    remaining -= 1;
+                    kept_workers += 1;
+                } else {
+                    break;
+                }
+            }
+            if !group_fin.is_empty() {
+                groups.push(SubagentRunGroup {
+                    run_id: group.run_id,
+                    live: Vec::new(),
+                    finished: group_fin,
+                });
+            }
+        }
+    }
+
+    let cut_count = total_workers.saturating_sub(kept_workers);
+    CappedRunGroups { groups, cut_count }
 }
 
 pub(super) fn agent_row_lines(row: &AgentRow, width: u16) -> usize {
     let base = row.rows.len().max(1);
     let narrow = is_narrow_agent_panel(width);
     if row.subagents.iter().any(|s| s.run_id.is_some()) {
-        let groups = group_subagents_by_run(&row.subagents);
+        let capped = group_sort_and_cap_subagents(&row.subagents, usize::MAX);
         let mut lines = 0;
-        for g in &groups {
+        for g in &capped.groups {
             lines += 1;
             lines += g.live.len() * 2;
             lines += g.finished.len();
         }
-        let overflow_line = if row.subagents_overflow > 0 { 1 } else { 0 };
+        let overflow_line = if capped.cut_count > 0 || row.subagents_overflow > 0 {
+            1
+        } else {
+            0
+        };
         return base + lines + overflow_line;
     }
     let sub_lines: usize = row
@@ -764,18 +873,16 @@ fn render_grouped_subagents(
     current_y: &mut u16,
 ) {
     let palette = &config.palette;
-    let groups = group_subagents_by_run(&row.subagents);
+    let available_lines = rect.bottom().saturating_sub(*current_y) as usize;
+    let capped = group_sort_and_cap_subagents(&row.subagents, available_lines);
 
-    for group in groups {
+    for group in capped.groups {
         if *current_y >= rect.bottom() {
             break;
         }
 
-        // 1. Run Header
+        // 1. Run Header (header itself is not clickable to focus a pane)
         let run_rect = Rect::new(rect.x, *current_y, rect.width, 1);
-        if let Some(hits) = hits.as_deref_mut() {
-            hits.agents.push((run_rect, row.pane_id.clone()));
-        }
         let header_style = Style::default()
             .fg(palette.overlay1)
             .add_modifier(Modifier::BOLD);
@@ -803,13 +910,15 @@ fn render_grouped_subagents(
                 ));
             }
 
-            // Line 1: 4 spaces <order-name>
+            // Line 1: 4 spaces <order-name> cut to fit
             let name_style = Style::default()
                 .fg(palette.text)
                 .add_modifier(Modifier::BOLD);
+            let name_budget = (rect.width as usize).saturating_sub(4);
+            let fitted_name = crate::client::shell::nirvana_spaces::fit(&sub.name, name_budget);
             let line1_spans = vec![
                 ratatui::text::Span::raw("    "),
-                ratatui::text::Span::styled(&sub.name, name_style),
+                ratatui::text::Span::styled(fitted_name, name_style),
             ];
             Paragraph::new(Line::from(line1_spans))
                 .render(Rect::new(rect.x, *current_y, rect.width, 1), buffer);
@@ -851,18 +960,16 @@ fn render_grouped_subagents(
                 crate::nirvana_subagents::SubagentState::Done => {
                     ('\u{2713}', palette.green, "done")
                 }
+                crate::nirvana_subagents::SubagentState::Blocked => {
+                    ('\u{2717}', palette.peach, "blocked")
+                }
                 crate::nirvana_subagents::SubagentState::Failed => {
                     ('\u{2717}', palette.red, "failed")
                 }
                 crate::nirvana_subagents::SubagentState::Stopped => {
-                    let word = if sub.description == "abandoned" {
-                        "abandoned"
-                    } else {
-                        "stopped"
-                    };
-                    ('\u{25A0}', palette.overlay1, word)
+                    ('\u{25A0}', palette.overlay1, "stopped")
                 }
-                _ => ('\u{25A0}', palette.overlay1, "done"),
+                crate::nirvana_subagents::SubagentState::Running => unreachable!(),
             };
 
             let mark_style = Style::default().fg(mark_color).add_modifier(Modifier::DIM);
@@ -870,16 +977,34 @@ fn render_grouped_subagents(
                 .fg(palette.overlay0)
                 .add_modifier(Modifier::DIM);
 
+            // S7: fit the name so the mark and the word always show
+            let prefix_cells = 6; // "    {mark} " is 4 + 1 + 1 = 6 cells
+            let suffix_cells = 1 + status_word.len(); // " {word}"
+            let name_budget = (rect.width as usize).saturating_sub(prefix_cells + suffix_cells);
+            let fitted_name = crate::client::shell::nirvana_spaces::fit(&sub.name, name_budget);
+
             let spans = vec![
                 ratatui::text::Span::raw("    "),
                 ratatui::text::Span::styled(format!("{mark_char} "), mark_style),
-                ratatui::text::Span::styled(format!("{}  ", sub.name), dim_style),
+                ratatui::text::Span::styled(fitted_name, dim_style),
+                ratatui::text::Span::raw(" "),
                 ratatui::text::Span::styled(status_word, dim_style),
             ];
             Paragraph::new(Line::from(spans))
                 .render(Rect::new(rect.x, *current_y, rect.width, 1), buffer);
             *current_y += 1;
         }
+    }
+
+    if capped.cut_count > 0 && *current_y < rect.bottom() {
+        let more_style = Style::default().fg(palette.overlay0);
+        let more_spans = vec![
+            ratatui::text::Span::raw("    "),
+            ratatui::text::Span::styled(format!("+{} more", capped.cut_count), more_style),
+        ];
+        Paragraph::new(Line::from(more_spans))
+            .render(Rect::new(rect.x, *current_y, rect.width, 1), buffer);
+        *current_y += 1;
     }
 }
 

@@ -413,70 +413,78 @@ fn codex_config_model() -> Option<String> {
     value.get("model")?.as_str().map(str::to_string)
 }
 
-/// Whether an agent's process arguments indicate it is Nirvana Claude (plan 26 §4).
-///
-/// Nirvana Claude starts with `--agent nirvana` (or `nirvana:...`) and `--plugin-dir` naming Nirvana's
-/// plugin directory (`nirvana/claude`), distinct from plain Claude Code.
+/// Whether an agent's process arguments indicate it is Nirvana Claude (plan 26 B3).
 pub fn is_nirvana_claude(args: &[String]) -> bool {
-    let mut is_agent = false;
-    let mut is_plugin = false;
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        if arg == "--agent" {
-            if let Some(val) = iter.next() {
-                if val == "nirvana" || val.starts_with("nirvana:") {
-                    is_agent = true;
-                }
-            }
-        } else if let Some(val) = arg.strip_prefix("--agent=") {
-            if val == "nirvana" || val.starts_with("nirvana:") {
-                is_agent = true;
-            }
-        }
-        if arg == "--plugin-dir" {
-            if let Some(val) = iter.next() {
-                if val.to_lowercase().contains("nirvana") {
-                    is_plugin = true;
-                }
-            }
-        } else if let Some(val) = arg.strip_prefix("--plugin-dir=") {
-            if val.to_lowercase().contains("nirvana") {
-                is_plugin = true;
-            }
-        }
-    }
-    is_agent || is_plugin
+    let plugin_dir = crate::nirvana::home().map(|h| crate::nirvana_launch::plugin_dir(&h));
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    crate::nirvana_run::is_nirvana_claude_argv(&refs, plugin_dir.as_deref())
 }
 
-/// The short model representation (plan 26 §4 & §5), e.g. "Sonnet", "Opus", "Flash", "Argon", "Codex".
+/// The short model representation (plan 26 S1).
+/// - Claude: family initial and version, `S5.5`, `O5.5`, `H5.5`, `F5.1`.
+/// - Gemini: `Flash` or `Pro`.
+/// - Codex: `Codex`.
+/// - A local model: its name, cut to 6 cells.
 pub fn compact_model(model: &str) -> String {
     let trimmed = model.trim();
-    let s = trimmed.strip_prefix("Claude ").unwrap_or(trimmed);
-    if let Some((family, _ver)) = s.split_once(' ') {
-        if matches!(family, "Sonnet" | "Opus" | "Haiku" | "Fable") {
-            return family.to_string();
-        }
-    }
-    if matches!(s, "Sonnet" | "Opus" | "Haiku" | "Fable") {
-        return s.to_string();
-    }
     let lower = trimmed.to_lowercase();
+
+    // 1. Claude: family initial and version (e.g. S5.5, O5.5, H5.5, F5.1)
+    if lower.contains("sonnet")
+        || lower.contains("opus")
+        || lower.contains("haiku")
+        || lower.contains("fable")
+        || trimmed.starts_with("Claude")
+    {
+        let family_initial = if lower.contains("sonnet") {
+            'S'
+        } else if lower.contains("opus") {
+            'O'
+        } else if lower.contains("haiku") {
+            'H'
+        } else if lower.contains("fable")
+            || (trimmed.starts_with("Claude") && lower.contains("flash"))
+        {
+            'F'
+        } else {
+            'C'
+        };
+        // Extract version: e.g. "5.5", "3.5", "5.1", "3.7"
+        let ver = trimmed
+            .split(|c: char| !c.is_ascii_digit() && c != '.')
+            .find(|s| !s.is_empty() && s.chars().any(|c| c.is_ascii_digit()));
+        return match ver {
+            Some(v) => format!("{family_initial}{v}"),
+            None => family_initial.to_string(),
+        };
+    }
+
+    // 2. Gemini: Flash or Pro
     if lower.contains("flash") {
         return "Flash".to_string();
     }
     if lower.contains("pro") {
         return "Pro".to_string();
     }
-    if lower.contains("argon") {
-        return "Argon".to_string();
-    }
+
+    // 3. Codex: Codex
     if lower.contains("codex") {
         return "Codex".to_string();
     }
-    if let Some(rest) = trimmed.strip_prefix("Local ") {
-        return rest.to_string();
+
+    // 4. Local model: its name, cut to 6 cells
+    let name = trimmed.strip_prefix("Local ").unwrap_or(trimmed);
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in name.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + w > 6 {
+            break;
+        }
+        out.push(ch);
+        width += w;
     }
-    crate::nirvana_subagents::short_model(trimmed)
+    out
 }
 
 /// The agent in a pane's shell and its model, read now. Runs on the worker thread only.
