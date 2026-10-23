@@ -2171,11 +2171,6 @@ pub fn worker_settings_in(dir: &Path, start: &Path, root: &Path) -> Option<PathB
     None
 }
 
-/// The generated file a pane worker for `project` starts with, searching from `start` up to `root`.
-pub fn worker_settings_for(start: &Path, root: &Path) -> Option<PathBuf> {
-    worker_settings_in(&crate::nirvana_seat::dir(), start, root)
-}
-
 // ---- the interface the Preload panel calls (P2, §8) ---------------------------------------------------------
 
 /// What the panel's header and its `[p]` rows show.

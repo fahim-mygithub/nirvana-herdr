@@ -411,7 +411,7 @@ mod tests {
         let folder = std::env::temp_dir();
         let generated = crate::nirvana_preset::settings_path(&home.join("nirvana"), &folder);
         std::fs::create_dir_all(generated.parent().unwrap()).unwrap();
-        std::fs::write(&generated, "{}").unwrap();
+        std::fs::write(&generated, r#"{"skillOverrides":{"docx":"off"}}"#).unwrap();
         let encoded_folder = crate::nirvana_launch::encode_project_folder(&folder);
         let transcript_dir = home.join(encoded_folder);
         std::fs::create_dir_all(&transcript_dir).unwrap();
@@ -450,12 +450,22 @@ mod tests {
             let at = argv.iter().position(|a| a == "--settings").unwrap();
             argv[at + 1].clone()
         };
-        assert_eq!(settings_of(&resumed), generated.display().to_string());
+        // Plan 28: the test home's seat is Opus, so the generated file reaches Claude as the launch file built from
+        // it, with superpowers off.
+        let launch = crate::nirvana_superpowers::launch_settings_path(
+            &home.join("nirvana"),
+            &folder,
+            crate::nirvana_superpowers::Family::Opus,
+        );
+        assert_eq!(settings_of(&resumed), launch.display().to_string());
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&launch).unwrap()).unwrap();
+        assert_eq!(written["skillOverrides"]["docx"], "off", "{written}");
         assert_eq!(
             resumed[resumed.len() - 2..],
             ["--resume", "0c0ffee0-1111-4222-8333-444455556666"]
         );
-        assert_eq!(settings_of(&fresh), generated.display().to_string());
+        assert_eq!(settings_of(&fresh), launch.display().to_string());
         assert!(!fresh.iter().any(|a| a == "--resume"), "{fresh:?}");
         assert_eq!(second, None);
     }

@@ -294,6 +294,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    #[test]
+    fn restart_claude_picks_up_the_superpowers_rule_from_the_mode_it_reads_now() {
+        // Plan 28 §3: Restart Claude goes through launch_args, so Opus gets the launch file and Sonnet today's.
+        let home = std::env::temp_dir().join(format!("test-restart-p28-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let plugin = crate::nirvana_launch::plugin_dir(&home);
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(plugin.join("settings.json"), "{}").unwrap();
+        let cwd = std::path::Path::new(r"C:\work\repo");
+        let settings = |argv: &[String]| {
+            let at = argv.iter().position(|a| a == "--settings").unwrap();
+            argv[at + 1].clone()
+        };
+        let old_args = ["--agent".to_string(), "nirvana".to_string()];
+        let restart = || restart_argv(Some("nirvana"), &old_args, Some("s-1"), false, &home, cwd);
+        assert_eq!(
+            settings(&restart()),
+            crate::nirvana_superpowers::launch_settings_path(
+                &home.join("nirvana"),
+                cwd,
+                crate::nirvana_superpowers::Family::Opus
+            )
+            .display()
+            .to_string()
+        );
+        std::fs::write(
+            home.join("nirvana").join("seats.toml"),
+            crate::nirvana_seat::DEFAULT.replace("mode = \"balanced\"", "mode = \"efficient\""),
+        )
+        .unwrap();
+        assert_eq!(
+            settings(&restart()),
+            plugin.join("settings.json").display().to_string()
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     fn app_with_a_tab() -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(

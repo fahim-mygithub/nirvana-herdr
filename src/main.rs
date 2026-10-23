@@ -59,6 +59,7 @@ mod nirvana_servers;
 mod nirvana_session_record;
 mod nirvana_spaces;
 pub mod nirvana_subagents;
+mod nirvana_superpowers;
 mod nirvana_taskbar;
 mod nirvana_usage;
 mod nirvana_worker;

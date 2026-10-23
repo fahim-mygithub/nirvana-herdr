@@ -274,6 +274,54 @@ pub fn with_preset_settings(mut argv: Vec<String>, settings: Option<&Path>) -> V
     argv
 }
 
+/// Plan 28 §3: the file `with_preset_settings` adds for this worker. On an Opus Claude worker it is the folder's
+/// preset with every superpowers plugin off, or those entries alone when the folder has no preset; on any other it is
+/// the preset, as before. An error keeps the preset and says so in the worker's view, one line: a worker never fails
+/// to start because of this rule.
+pub fn worker_settings(
+    dir: &Path,
+    spec: &LaunchSpec,
+    folder: &Path,
+    preset: Option<PathBuf>,
+    claude_dir: Option<&Path>,
+    out: &mut dyn Write,
+) -> Option<PathBuf> {
+    match crate::nirvana_superpowers::worker_settings_in(
+        dir,
+        &spec.cli,
+        &spec.model,
+        folder,
+        preset.as_deref(),
+        claude_dir,
+    ) {
+        Ok(settings) => settings,
+        Err(why) => {
+            let _ = writeln!(
+                out,
+                "superpowers stay as the settings say for {}: {why}",
+                spec.model
+            );
+            preset
+        }
+    }
+}
+
+/// The worker's argv with its settings file: the folder's worker preset (plan 13), with the superpowers rule over it
+/// (plan 28). `dir` is `<home>/nirvana`, given so a test never reaches the installed home.
+pub fn worker_argv(
+    dir: &Path,
+    spec: &LaunchSpec,
+    cwd: &Path,
+    root: &Path,
+    claude_dir: Option<&Path>,
+    out: &mut dyn Write,
+) -> Result<Vec<String>, String> {
+    let argv = argv(spec)?;
+    let preset = crate::nirvana_preset::worker_settings_in(dir, cwd, root);
+    let settings = worker_settings(dir, spec, cwd, preset, claude_dir, out);
+    Ok(with_preset_settings(argv, settings.as_deref()))
+}
+
 /// The one line a worker is started with (§4).
 pub fn first_line(order_file: &str) -> String {
     format!(
@@ -1232,12 +1280,15 @@ pub fn exec(
             resume,
             print_timeout_s: print_timeout_s(&seated),
         };
-        let argv = match argv(&spec) {
-            Ok(argv) => with_preset_settings(
-                argv,
-                crate::nirvana_preset::worker_settings_for(Path::new(&seated.cwd), &project.root)
-                    .as_deref(),
-            ),
+        let argv = match worker_argv(
+            &nirvana_seat::dir(),
+            &spec,
+            Path::new(&seated.cwd),
+            &project.root,
+            crate::nirvana_superpowers::claude_dir().as_deref(),
+            out,
+        ) {
+            Ok(argv) => argv,
             Err(why) => {
                 end_failed(project, &journal, run, &seated, &why, None)?;
                 writeln!(out, "{why}")?;
@@ -3239,5 +3290,137 @@ mod preset_tests {
         assert_eq!(with_preset_settings(claude.clone(), None), claude);
         let agy = vec!["agy".to_owned(), "--print=go".to_owned()];
         assert_eq!(with_preset_settings(agy.clone(), Some(file)), agy);
+    }
+
+    fn spec(cli: &str, model: &str) -> LaunchSpec {
+        LaunchSpec {
+            cli: cli.into(),
+            model: model.into(),
+            effort: Effort::Medium,
+            prompt: "go".into(),
+            resume: None,
+            print_timeout_s: 0,
+        }
+    }
+
+    #[test]
+    fn an_opus_claude_worker_starts_with_superpowers_off_and_an_error_keeps_the_preset() {
+        // Plan 28 §3.
+        let root = std::env::temp_dir().join(format!("nirvana-p28-worker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("nirvana");
+        let folder = root.join("project");
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut out = Vec::new();
+        let opus = spec("claude", "claude-opus-5-5");
+        // No preset: a file of the rule's entries alone, added to the argv.
+        let settings = worker_settings(&dir, &opus, &folder, None, None, &mut out).expect("a file");
+        assert_eq!(
+            settings,
+            crate::nirvana_superpowers::worker_settings_path(
+                &dir,
+                &folder,
+                crate::nirvana_superpowers::Family::Opus
+            )
+        );
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(
+            written,
+            serde_json::json!({"enabledPlugins": {"superpowers@superpowers-marketplace": false}})
+        );
+        let claude = argv(&opus).unwrap();
+        let with = with_preset_settings(claude.clone(), Some(&settings));
+        assert_eq!(with.iter().filter(|a| *a == "--settings").count(), 1);
+        assert_eq!(with.last(), Some(&settings.display().to_string()));
+        // Sonnet with no preset: today's argv, no file.
+        let sonnet = spec("claude", "claude-sonnet-5-5");
+        assert_eq!(
+            worker_settings(&dir, &sonnet, &folder, None, None, &mut out),
+            None
+        );
+        // agy on an Opus model reads no Claude settings: no file.
+        let agy = spec("agy", "claude-opus-5-5-high");
+        assert_eq!(
+            worker_settings(&dir, &agy, &folder, None, None, &mut out),
+            None
+        );
+        assert!(out.is_empty());
+        // A preset that cannot be read: the preset kept, one line in the view.
+        let broken = root.join("broken.worker.settings.json");
+        std::fs::write(&broken, "{not json").unwrap();
+        assert_eq!(
+            worker_settings(&dir, &opus, &folder, Some(broken.clone()), None, &mut out),
+            Some(broken)
+        );
+        let said = String::from_utf8(out).unwrap();
+        assert_eq!(said.lines().count(), 1, "{said:?}");
+        assert!(said.starts_with("superpowers stay as the settings say for claude-opus-5-5"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_workers_argv_carries_the_preset_under_the_rule_for_its_own_model() {
+        // Plan 28 §3: what `seat exec` starts, from the folder's worker preset and `spec.model`.
+        let root = std::env::temp_dir().join(format!("nirvana-p28-argv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("nirvana");
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let preset = crate::nirvana_preset::worker_settings_path(&dir, &project);
+        std::fs::create_dir_all(preset.parent().unwrap()).unwrap();
+        std::fs::write(&preset, r#"{"skillOverrides":{"docx":"off"}}"#).unwrap();
+        let settings_of = |argv: &[String]| -> Option<String> {
+            assert!(argv.iter().filter(|a| *a == "--settings").count() <= 1);
+            let at = argv.iter().position(|a| a == "--settings")?;
+            Some(argv[at + 1].clone())
+        };
+        let mut out = Vec::new();
+        let opus = worker_argv(
+            &dir,
+            &spec("claude", "claude-opus-5-5"),
+            &project,
+            &project,
+            None,
+            &mut out,
+        )
+        .unwrap();
+        let launch = crate::nirvana_superpowers::worker_settings_path(
+            &dir,
+            &project,
+            crate::nirvana_superpowers::Family::Opus,
+        );
+        assert_eq!(settings_of(&opus), Some(launch.display().to_string()));
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&launch).unwrap()).unwrap();
+        assert_eq!(
+            written,
+            serde_json::json!({
+                "skillOverrides": {"docx": "off"},
+                "enabledPlugins": {"superpowers@superpowers-marketplace": false},
+            })
+        );
+        let sonnet = worker_argv(
+            &dir,
+            &spec("claude", "claude-sonnet-5-5"),
+            &project,
+            &project,
+            None,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(settings_of(&sonnet), Some(preset.display().to_string()));
+        let agy = worker_argv(
+            &dir,
+            &spec("agy", "claude-opus-5-5-high"),
+            &project,
+            &project,
+            None,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(settings_of(&agy), None);
+        assert!(out.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
