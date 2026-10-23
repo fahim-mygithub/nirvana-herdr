@@ -1351,8 +1351,28 @@ fn tidy_only_acts_on_ended_runs() {
     assert!(!crate::nirvana_run::should_tidy_run(&no_pane_state));
 }
 
+thread_local! {
+    static CLOSED_RUNS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn no_pools() -> (Vec<Reading>, Option<String>) {
+    (Vec::new(), None)
+}
+
+fn record_close(_: &Project, run: &str, state: &RunState) -> std::io::Result<()> {
+    assert!(
+        state.ended.is_some(),
+        "the tab closes after the run's end is written"
+    );
+    CLOSED_RUNS.with(|runs| runs.borrow_mut().push(run.to_owned()));
+    Ok(())
+}
+
+/// Plan 26 §3: `run end` closes the run's tab, after its end is written. The usage reading and the close are stand-ins,
+/// so the test reads no provider and drives no herdr (plan 26 review R2).
 #[test]
 fn run_end_calls_close_run_tab() {
+    let _home = crate::nirvana::with_test_home("run_end_close_tab");
     let dir = temp_dir("run_end_close_tab");
     let project = Project::at(&dir);
     project.ensure().expect("ensure");
@@ -1374,8 +1394,11 @@ fn run_end_calls_close_run_tab() {
         )
         .unwrap();
 
-    crate::nirvana_run::CLOSE_RUN_TAB_CALLED.store(false, std::sync::atomic::Ordering::SeqCst);
-    let _ = crate::nirvana_run::end_cli(&project, &[run.to_string()]);
-    assert!(crate::nirvana_run::CLOSE_RUN_TAB_CALLED.load(std::sync::atomic::Ordering::SeqCst));
+    let outcome = end_run(&project, run, &[run.to_string()], no_pools, record_close).expect("end");
+    assert_eq!(outcome, Ok(()));
+    assert_eq!(
+        CLOSED_RUNS.with(|runs| runs.borrow().clone()),
+        [run.to_string()]
+    );
     let _ = std::fs::remove_dir_all(dir);
 }

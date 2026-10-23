@@ -1245,3 +1245,87 @@ fn worker_row_cut_to_fit_at_26_cells_with_studio_gui_mcp_v2() {
 
     set_view_for_test(None);
 }
+
+fn worker(id: &str, run: Option<&str>, state: SubagentState, at: u64) -> Subagent {
+    Subagent {
+        id: id.into(),
+        parent_id: None,
+        name: id.into(),
+        description: String::new(),
+        provider: SubagentProvider::Claude,
+        model: "Claude Sonnet 5.5".into(),
+        state,
+        elapsed_secs: 30,
+        tokens: None,
+        ended_at: (state != SubagentState::Running).then_some(at),
+        depth: 0,
+        target_pane_id: None,
+        run_id: run.map(str::to_owned),
+        run_event_time: Some(at),
+    }
+}
+
+/// Plan 26 §5: the run with a live worker comes first, even when a run holding only finished rows is newer; the
+/// finished runs follow, newest first.
+#[test]
+fn a_live_run_sorts_above_a_newer_finished_run() {
+    use crate::client::shell::agent_sidebar::group_subagents_by_run;
+    let rows = [
+        worker("oldest-done", Some("run-oldest"), SubagentState::Done, 500),
+        worker("new-blocked", Some("run-new"), SubagentState::Blocked, 9000),
+        worker("old-live", Some("run-old"), SubagentState::Running, 1000),
+    ];
+    let runs: Vec<&str> = group_subagents_by_run(&rows)
+        .iter()
+        .map(|g| g.run_id)
+        .collect();
+    assert_eq!(runs, ["run-old", "run-new", "run-oldest"]);
+}
+
+/// Plan 26 review R1: the agent's own subagents stay beside the run groups, with their own "+N more", and the run's
+/// rows are counted in the row's height.
+#[test]
+fn own_subagents_stay_beside_run_groups() {
+    let config = ClientShellConfig::from_config(&Config::default());
+    let mut row = crate::client::shell::agent_sidebar::agent_row(
+        &snapshot_with_agent("pane_1", "test-agent"),
+        "pane_1",
+        &config,
+        None,
+    )
+    .expect("agent row");
+    row.subagents = vec![
+        worker("explore-1", None, SubagentState::Running, 100),
+        worker("p26-live", Some("run-a"), SubagentState::Running, 200),
+        worker("p26-done", Some("run-a"), SubagentState::Done, 150),
+    ];
+    row.subagents_overflow = 2;
+    // base, one flat row, "+2 more", the run header, two lines for the live worker, one for the done one.
+    let lines = crate::client::shell::agent_sidebar::agent_row_lines(&row, 26);
+    assert_eq!(lines, row.rows.len().max(1) + 1 + 1 + 1 + 2 + 1);
+
+    let height = lines as u16;
+    let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 26, height));
+    crate::client::shell::agent_sidebar::render_agent_row(
+        &mut buf,
+        Rect::new(0, 0, 26, height),
+        &row,
+        &config,
+        None,
+    );
+    let text: Vec<String> = (0..height)
+        .map(|y| {
+            (0..26)
+                .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect();
+    let base = row.rows.len().max(1);
+    assert!(text[base].contains("explore-1"), "{text:?}");
+    assert_eq!(text[base + 1], "   +2 more", "{text:?}");
+    assert_eq!(text[base + 2], "  Run run-a", "{text:?}");
+    assert_eq!(text[base + 3], "    p26-live", "{text:?}");
+    assert_eq!(text[base + 5], "    \u{2713} p26-done done", "{text:?}");
+}

@@ -940,6 +940,26 @@ pub fn read_agy_jobs(home: &Path, pane_id: &str, now_secs: u64) -> Vec<Subagent>
 }
 
 /// Reads seat orders (`herdr seat run`) nesting under `orchestrator_pane_id`.
+/// The agent's own subagents keep plan 17's cap of six rows; seat-order workers (`run_id`) all pass, because the
+/// agents panel groups, sorts and caps them by run itself (plan 26 §5). A flat cap before that cut the newest run's
+/// live workers in `read_dir` order (plan 26 review R1).
+pub(crate) fn cap_flat_rows(rows: Vec<Subagent>) -> (Vec<Subagent>, usize) {
+    const FLAT_SHOWN: usize = 6;
+    let flat = rows.iter().filter(|s| s.run_id.is_none()).count();
+    let mut kept = 0;
+    let shown = rows
+        .into_iter()
+        .filter(|s| {
+            if s.run_id.is_some() {
+                return true;
+            }
+            kept += 1;
+            kept <= FLAT_SHOWN
+        })
+        .collect();
+    (shown, flat.saturating_sub(FLAT_SHOWN))
+}
+
 pub fn read_seat_orders(
     project_folder: &Path,
     orchestrator_pane_id: &str,
@@ -1466,8 +1486,7 @@ pub fn poll_with<F>(
 
             let nested = nest_subagents(all_subagents);
             let total_count = nested.len();
-            let overflow = total_count.saturating_sub(6);
-            let shown = nested.into_iter().take(6).collect();
+            let (shown, overflow) = cap_flat_rows(nested);
 
             let view = Some(SubagentsView {
                 subagents: shown,
@@ -2196,6 +2215,34 @@ mod tests {
             1,
             "Failed shell pid query must not be repeated within 60s"
         );
+    }
+
+    #[test]
+    fn the_flat_cap_never_cuts_a_seat_order_row() {
+        let row = |id: &str, run: Option<&str>| Subagent {
+            id: id.into(),
+            parent_id: None,
+            name: id.into(),
+            description: String::new(),
+            provider: SubagentProvider::Claude,
+            model: "Claude Sonnet 5.5".into(),
+            state: SubagentState::Running,
+            elapsed_secs: 1,
+            tokens: None,
+            ended_at: None,
+            depth: 0,
+            target_pane_id: None,
+            run_id: run.map(str::to_owned),
+            run_event_time: None,
+        };
+        let mut rows: Vec<Subagent> = (0..3)
+            .map(|i| row(&format!("w{i}"), Some("run-new")))
+            .collect();
+        rows.extend((0..8).map(|i| row(&format!("s{i}"), None)));
+        let (shown, overflow) = cap_flat_rows(rows);
+        let workers = shown.iter().filter(|s| s.run_id.is_some()).count();
+        let flat = shown.iter().filter(|s| s.run_id.is_none()).count();
+        assert_eq!((workers, flat, overflow), (3, 6, 2));
     }
 
     #[test]

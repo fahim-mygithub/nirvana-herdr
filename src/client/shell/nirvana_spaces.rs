@@ -225,6 +225,77 @@ pub(super) fn short_status_word(status: crate::api::schema::AgentStatus) -> &'st
     }
 }
 
+/// The ladder a space row is fitted by (plan 26 S1), widest first: whether `who` is padded to the space's longest,
+/// whether the short model shows, and whether the state word is the full one (`working`) or the short one (`work`).
+/// Past the last step a row is `who` alone, in the state's colour.
+pub(super) const LADDER: [(bool, bool, bool); 6] = [
+    (true, true, true),
+    (true, true, false),
+    (false, true, false),
+    (true, false, true),
+    (true, false, false),
+    (false, false, false),
+];
+
+/// One agent's row at one ladder step: its text, and the cells its `who` and its model end at, for the colours.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LadderRow {
+    pub(super) line: String,
+    pub(super) who_end: usize,
+    pub(super) model_end: usize,
+}
+
+pub(super) fn ladder_row(agent: &SpaceAgent, step: usize, max_who: usize) -> LadderRow {
+    let cells = |s: &str| unicode_width::UnicodeWidthStr::width(s);
+    let Some(&(pad, model, full)) = LADDER.get(step) else {
+        let end = cells(&agent.who);
+        return LadderRow {
+            line: agent.who.clone(),
+            who_end: end,
+            model_end: end,
+        };
+    };
+    let mut line = if pad {
+        format!("{:<max_who$}", agent.who)
+    } else {
+        agent.who.clone()
+    };
+    let who_end = cells(&line);
+    if model && !agent.model.is_empty() {
+        line.push(' ');
+        line.push_str(&agent.model);
+    }
+    let model_end = cells(&line);
+    let word = if full {
+        status_word(agent.status)
+    } else {
+        short_status_word(agent.status)
+    };
+    if !word.is_empty() {
+        line.push(' ');
+        line.push_str(word);
+    }
+    LadderRow {
+        line,
+        who_end,
+        model_end,
+    }
+}
+
+/// The first ladder step at which every one of the space's rows fits `width`, or `LADDER.len()` when none does. One
+/// step per space, not per row: a row that fits earlier would otherwise read `working` beside its neighbour's `work`
+/// and lose the padding that lines the columns up (plan 26 review R4).
+pub(super) fn ladder_step(agents: &[SpaceAgent], max_who: usize, width: usize) -> usize {
+    (0..LADDER.len())
+        .find(|&step| {
+            agents.iter().filter(|a| !a.is_folded).all(|a| {
+                unicode_width::UnicodeWidthStr::width(ladder_row(a, step, max_who).line.as_str())
+                    <= width
+            })
+        })
+        .unwrap_or(LADDER.len())
+}
+
 /// Draws the agents' rows from `area.y` down, inside `area`. `indented` is a worktree space under its
 /// parent, whose rows carry the parent's tree line on the left unless it is the last child.
 pub(super) fn render_space_agents(
@@ -239,11 +310,9 @@ pub(super) fn render_space_agents(
     palette: &Palette,
 ) {
     let x = area.x.saturating_add(if indented { 8 } else { 3 });
-    let right = if area.width == 25 {
-        area.right().saturating_sub(1)
-    } else {
-        area.right().saturating_sub(2)
-    };
+    // Rows stop one cell short of the area's edge. At the default `sidebar_width: 26` the list's area is 25 cells,
+    // which leaves 19 cells after the icon, and 14 on an indented worktree row.
+    let right = area.right().saturating_sub(1);
     let width = usize::from(right.saturating_sub(x));
     let task_style = Style::default().fg(if highlighted {
         palette.text
@@ -267,10 +336,13 @@ pub(super) fn render_space_agents(
     }
     let max_who = agents
         .iter()
+        .take(shown)
         .filter(|a| !a.is_folded)
         .map(|a| a.who.chars().count())
         .max()
         .unwrap_or(0);
+    // S1: one ladder step for the whole space, so its rows use the same words and line up.
+    let step = ladder_step(&agents[..shown], max_who, width.saturating_sub(2));
     for (index, agent) in agents.iter().take(shown).enumerate() {
         let y = area.y.saturating_add((index * ROWS_PER_AGENT) as u16);
         for row in 0..ROWS_PER_AGENT as u16 {
@@ -309,10 +381,7 @@ pub(super) fn render_space_agents(
                     .min(unicode_width::UnicodeWidthStr::width(line.as_str()));
                 put_text(buffer, x + 2, y, w, &line, state_style);
                 put_text(buffer, x + 2, y, who_len as u16, &line, model_style);
-            } else if hovered_pane == Some(agent.pane_id.as_str())
-                && !agent.task.is_empty()
-                && agent.task != "No task yet"
-            {
+            } else if hovered_pane == Some(agent.pane_id.as_str()) && !agent.task.is_empty() {
                 // S2: The chat title shows on hover, as the owner chose.
                 let who_part = format!("{:<max_who$}", agent.who);
                 let full = format!("{who_part}  {}", agent.task);
@@ -322,133 +391,28 @@ pub(super) fn render_space_agents(
                 put_text(buffer, x + 2, y, w, &line, task_style);
                 put_text(buffer, x + 2, y, who_cells as u16, &line, model_style);
             } else {
-                // S1: The ladder, applied in order until the row fits:
-                // 1. who, then short model, then full state word, single spaces, with who padded to max_who;
-                // 2. the same with no padding;
-                // 3. state words shortened: working to work, blocked to wait;
-                // 4. the model dropped;
-                // 5. the state word dropped. Its colour then goes on who.
-                let who_padded = format!("{:<max_who$}", agent.who);
-                let word = status_word(agent.status);
-                let short_w = short_status_word(agent.status);
-                let m = agent.model.as_str();
-
-                let step1 = if m.is_empty() {
-                    if word.is_empty() {
-                        who_padded.clone()
-                    } else {
-                        format!("{who_padded} {word}")
-                    }
-                } else if word.is_empty() {
-                    format!("{who_padded} {m}")
+                let row = ladder_row(agent, step, max_who);
+                if step >= LADDER.len() {
+                    // Past the ladder: who alone, in the state's colour.
+                    put_text(buffer, x + 2, y, w, &fit(&row.line, w_avail), state_style);
                 } else {
-                    format!("{who_padded} {m} {word}")
-                };
-
-                let step2 = if m.is_empty() {
-                    if word.is_empty() {
-                        agent.who.clone()
-                    } else {
-                        format!("{} {word}", agent.who)
-                    }
-                } else if word.is_empty() {
-                    format!("{} {m}", agent.who)
-                } else {
-                    format!("{} {m} {word}", agent.who)
-                };
-
-                let step3 = if m.is_empty() {
-                    if short_w.is_empty() {
-                        agent.who.clone()
-                    } else {
-                        format!("{} {short_w}", agent.who)
-                    }
-                } else if short_w.is_empty() {
-                    format!("{} {m}", agent.who)
-                } else {
-                    format!("{} {m} {short_w}", agent.who)
-                };
-
-                let step4 = if !word.is_empty()
-                    && unicode_width::UnicodeWidthStr::width(
-                        format!("{} {word}", agent.who).as_str(),
-                    ) <= w_avail
-                {
-                    format!("{} {word}", agent.who)
-                } else if !short_w.is_empty() {
-                    format!("{} {short_w}", agent.who)
-                } else {
-                    agent.who.clone()
-                };
-
-                let cells = |s: &str| unicode_width::UnicodeWidthStr::width(s);
-
-                if cells(&step1) <= w_avail {
-                    let who_cells = max_who;
-                    let model_end = if m.is_empty() {
-                        who_cells
-                    } else {
-                        who_cells + 1 + cells(m)
-                    };
-                    put_text(buffer, x + 2, y, w, &step1, state_style);
-                    put_text(buffer, x + 2, y, model_end as u16, &step1, model_style);
+                    put_text(buffer, x + 2, y, w, &row.line, state_style);
                     put_text(
                         buffer,
                         x + 2,
                         y,
-                        who_cells as u16,
-                        &step1,
-                        if highlighted { task_style } else { model_style },
+                        row.model_end as u16,
+                        &row.line,
+                        model_style,
                     );
-                } else if cells(&step2) <= w_avail {
-                    let who_cells = cells(&agent.who);
-                    let model_end = if m.is_empty() {
-                        who_cells
-                    } else {
-                        who_cells + 1 + cells(m)
-                    };
-                    put_text(buffer, x + 2, y, w, &step2, state_style);
-                    put_text(buffer, x + 2, y, model_end as u16, &step2, model_style);
                     put_text(
                         buffer,
                         x + 2,
                         y,
-                        who_cells as u16,
-                        &step2,
+                        row.who_end as u16,
+                        &row.line,
                         if highlighted { task_style } else { model_style },
                     );
-                } else if cells(&step3) <= w_avail {
-                    let who_cells = cells(&agent.who);
-                    let model_end = if m.is_empty() {
-                        who_cells
-                    } else {
-                        who_cells + 1 + cells(m)
-                    };
-                    put_text(buffer, x + 2, y, w, &step3, state_style);
-                    put_text(buffer, x + 2, y, model_end as u16, &step3, model_style);
-                    put_text(
-                        buffer,
-                        x + 2,
-                        y,
-                        who_cells as u16,
-                        &step3,
-                        if highlighted { task_style } else { model_style },
-                    );
-                } else if cells(&step4) <= w_avail {
-                    let who_cells = cells(&agent.who);
-                    put_text(buffer, x + 2, y, w, &step4, state_style);
-                    put_text(
-                        buffer,
-                        x + 2,
-                        y,
-                        who_cells as u16,
-                        &step4,
-                        if highlighted { task_style } else { model_style },
-                    );
-                } else {
-                    // Step 5: state word dropped, colour goes on who
-                    let line = fit(&agent.who, w_avail);
-                    put_text(buffer, x + 2, y, w, &line, state_style);
                 }
             }
         }

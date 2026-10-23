@@ -93,7 +93,13 @@ pub(crate) fn group_subagents_by_run<'a>(
         from_live.max(from_fin)
     };
 
-    result.sort_by_key(|b| std::cmp::Reverse(run_event_time(b)));
+    // Plan 26 §5: the runs with a live worker first, then the others; newest first within each.
+    result.sort_by_key(|g| {
+        (
+            std::cmp::Reverse(!g.live.is_empty()),
+            std::cmp::Reverse(run_event_time(g)),
+        )
+    });
 
     result
 }
@@ -203,24 +209,10 @@ pub(crate) fn group_sort_and_cap_subagents<'a>(
 pub(super) fn agent_row_lines(row: &AgentRow, width: u16) -> usize {
     let base = row.rows.len().max(1);
     let narrow = is_narrow_agent_panel(width);
-    if row.subagents.iter().any(|s| s.run_id.is_some()) {
-        let capped = group_sort_and_cap_subagents(&row.subagents, usize::MAX);
-        let mut lines = 0;
-        for g in &capped.groups {
-            lines += 1;
-            lines += g.live.len() * 2;
-            lines += g.finished.len();
-        }
-        let overflow_line = if capped.cut_count > 0 || row.subagents_overflow > 0 {
-            1
-        } else {
-            0
-        };
-        return base + lines + overflow_line;
-    }
     let sub_lines: usize = row
         .subagents
         .iter()
+        .filter(|s| s.run_id.is_none())
         .map(|s| {
             if !narrow && !s.description.trim().is_empty() {
                 2
@@ -229,8 +221,13 @@ pub(super) fn agent_row_lines(row: &AgentRow, width: u16) -> usize {
             }
         })
         .sum();
-    let overflow_line = if row.subagents_overflow > 0 { 1 } else { 0 };
-    base + sub_lines + overflow_line
+    let overflow_line = usize::from(row.subagents_overflow > 0);
+    // Seat-order workers under their run headers: a header, two lines per live worker, one per finished one.
+    let run_lines: usize = group_subagents_by_run(&row.subagents)
+        .iter()
+        .map(|g| 1 + g.live.len() * 2 + g.finished.len())
+        .sum();
+    base + sub_lines + overflow_line + run_lines
 }
 
 pub(super) fn ordered_agent_pane_ids(
@@ -660,41 +657,13 @@ pub(super) fn render_agent_row(
     }
 
     let mut current_y = rect.y + main_height;
-    if row.subagents.iter().any(|s| s.run_id.is_some()) {
-        render_grouped_subagents(
-            buffer,
-            rect,
-            row,
-            config,
-            hits.as_deref_mut(),
-            &mut current_y,
-        );
-        if row.subagents_overflow > 0 && current_y < rect.bottom() {
-            if let Some(hits) = hits.as_mut() {
-                hits.agents.push((
-                    Rect::new(rect.x, current_y, rect.width, 1),
-                    row.pane_id.clone(),
-                ));
-            }
-            let more_style = Style::default()
-                .fg(palette.overlay0)
-                .add_modifier(Modifier::DIM);
-            let more_label = format!("+{} more", row.subagents_overflow);
-            let more_spans = vec![
-                ratatui::text::Span::raw("   "),
-                ratatui::text::Span::styled(more_label, more_style),
-            ];
-            Paragraph::new(Line::from(more_spans))
-                .render(Rect::new(rect.x, current_y, rect.width, 1), buffer);
-        }
-        return;
-    }
-
     let narrow = is_narrow_agent_panel(rect.width);
     let drop_version = rect.width < 30;
     let drop_elapsed = rect.width < 25;
 
-    for sub in &row.subagents {
+    // Plan 26 review: the agent's own subagents keep plan 17's flat rows and their cap of six; the seat-order
+    // workers follow, grouped under their runs.
+    for sub in row.subagents.iter().filter(|s| s.run_id.is_none()) {
         if current_y >= rect.bottom() {
             break;
         }
@@ -861,6 +830,11 @@ pub(super) fn render_agent_row(
         ];
         Paragraph::new(Line::from(more_spans))
             .render(Rect::new(rect.x, current_y, rect.width, 1), buffer);
+        current_y += 1;
+    }
+
+    if row.subagents.iter().any(|s| s.run_id.is_some()) {
+        render_grouped_subagents(buffer, rect, row, config, hits, &mut current_y);
     }
 }
 

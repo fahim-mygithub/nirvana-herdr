@@ -2299,16 +2299,31 @@ pub fn run_arg_from(args: &[String]) -> Option<String> {
 fn end_cli(project: &Project, args: &[String]) -> std::io::Result<()> {
     let run_opt = run_arg_from(args);
     let run = run_arg(project, run_opt.as_ref());
-    let (journal, _, _, _) = load(project, &run);
+    if let Err(err) = end_run(project, &run, args, current_pools, |project, run, state| {
+        close_run_tab(project, run, state, true)
+    })? {
+        eprintln!("herdr run end {run}: {err}");
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
+/// `run end`'s work, with the usage reading and the tab close passed in. The real ones read every provider's usage
+/// and drive herdr, so a test of the wiring stands in for both (plan 26 review R2). `Ok(Err(..))` is a refusal.
+fn end_run(
+    project: &Project,
+    run: &str,
+    args: &[String],
+    pools: fn() -> (Vec<Reading>, Option<String>),
+    close: fn(&Project, &str, &RunState) -> std::io::Result<()>,
+) -> std::io::Result<Result<(), String>> {
+    let (journal, _, _, _) = load(project, run);
     let (events, _) = journal.read();
     let state = replay(&events);
 
     let kinds = match end_decision(&state, args) {
         Ok(k) => k,
-        Err(err) => {
-            eprintln!("herdr run end {run}: {err}");
-            std::process::exit(2);
-        }
+        Err(err) => return Ok(Err(err)),
     };
 
     for kind in kinds {
@@ -2318,7 +2333,7 @@ fn end_cli(project: &Project, args: &[String]) -> std::io::Result<()> {
     let (events, _) = journal.read();
     let state = replay(&events);
     let (pools, basis) = if state.ended.is_none() {
-        current_pools()
+        pools()
     } else {
         (Vec::new(), None)
     };
@@ -2339,16 +2354,16 @@ fn end_cli(project: &Project, args: &[String]) -> std::io::Result<()> {
     let state = replay(&events);
     for order in &state.orders {
         if order.phase.terminal() || !order.phase.wants_worker() {
-            write_record(&run, order, journal_ref(&journal, &state))?;
+            write_record(run, order, journal_ref(&journal, &state))?;
         }
     }
     // Plan 12 O5: the retro reads the ended journal, before the receipt that names its open proposals.
-    match crate::nirvana_retro::retro(project, &run) {
+    match crate::nirvana_retro::retro(project, run) {
         Ok(summary) => eprintln!("{summary}"),
         Err(err) => eprintln!("herdr run retro {run}: {err}"),
     }
     let record = nirvana_seat::read_record(&nirvana_seat::dir().join(nirvana_seat::RECORD_FILE));
-    let receipt = receipt(&run, &state, bad, &record);
+    let receipt = receipt(run, &state, bad, &record);
     let dir = journal.dir();
     nirvana_seat::write_atomic(
         &dir.join("receipt.json"),
@@ -2359,8 +2374,8 @@ fn end_cli(project: &Project, args: &[String]) -> std::io::Result<()> {
         receipt_page(project, &receipt).as_bytes(),
     )?;
     println!("{}", dir.join("receipt.md").display());
-    close_run_tab(project, &run, &state)?;
-    Ok(())
+    close(project, run, &state)?;
+    Ok(Ok(()))
 }
 
 /// Decision on closing a run's tab or worker panes (plan 26 §3).
@@ -2413,18 +2428,22 @@ pub fn close_run_tab_decision(
     }
 }
 
-#[cfg(test)]
-pub static CLOSE_RUN_TAB_CALLED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// Closes the run's tab or its worker panes according to plan 26 §3.
-pub fn close_run_tab(_project: &Project, run: &str, state: &RunState) -> std::io::Result<()> {
-    #[cfg(test)]
-    CLOSE_RUN_TAB_CALLED.store(true, std::sync::atomic::Ordering::SeqCst);
+/// Closes the run's tab or its worker panes according to plan 26 §3. `report` prints the one line for a run with
+/// nothing to close; `run tidy` passes false, so it prints only what it closed.
+pub fn close_run_tab(
+    project: &Project,
+    run: &str,
+    state: &RunState,
+    report: bool,
+) -> std::io::Result<()> {
     if !crate::nirvana_worker::in_herdr() {
         return Ok(());
     }
-    let _lock = crate::nirvana_seat::Lock::take(&_project.run_dir(run));
+    // S3: the decision and the closes happen under the run's lock; without it, close nothing.
+    let Ok(_lock) = crate::nirvana_seat::Lock::take(&project.run_dir(run)) else {
+        eprintln!("run {run}: closed nothing: the run's lock was not taken");
+        return Ok(());
+    };
     let known_pane = state
         .orders
         .iter()
@@ -2475,11 +2494,11 @@ pub fn close_run_tab(_project: &Project, run: &str, state: &RunState) -> std::io
         } else if let Some(pane) = &order.pane {
             let expected =
                 crate::nirvana_worker::expected_pane_title(&order.seated.seat, order.id());
-            let actual = crate::nirvana_worker::pane_title(pane);
-            if actual.as_deref() == Some(&expected) {
-                eligible_finished_panes.push(pane.clone());
-            } else {
-                println!("run {run}: pane {pane} stays: title is not {expected}");
+            // A pane that is gone says nothing; one that now holds something else stays, and says so.
+            match crate::nirvana_worker::pane_title(pane) {
+                Some(actual) if actual == expected => eligible_finished_panes.push(pane.clone()),
+                Some(_) => println!("run {run}: pane {pane} stays: title is not {expected}"),
+                None => {}
             }
         }
     }
@@ -2508,10 +2527,14 @@ pub fn close_run_tab(_project: &Project, run: &str, state: &RunState) -> std::io
                     eprintln!("run {run}: failed to close pane {pane}");
                 }
             }
-            println!("run {run}: closed {closed} pane(s) in tab {tab_id}");
+            if report || closed > 0 {
+                println!("run {run}: closed {closed} pane(s) in tab {tab_id}");
+            }
         }
-        CloseRunTabDecision::NotFound(_) => {
-            println!("run {run}: no tab found");
+        CloseRunTabDecision::NotFound(why) => {
+            if report {
+                println!("run {run}: no tab found: {why}");
+            }
         }
     }
     Ok(())
@@ -2531,7 +2554,7 @@ fn tidy_cli(project: &Project, _args: &[String]) -> std::io::Result<()> {
         let (events, _) = journal.read();
         let state = replay(&events);
         if should_tidy_run(&state) {
-            close_run_tab(project, &run, &state)?;
+            close_run_tab(project, &run, &state, false)?;
         }
     }
     Ok(())

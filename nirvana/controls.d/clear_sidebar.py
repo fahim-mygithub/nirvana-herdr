@@ -110,24 +110,6 @@ CONTROLS = (
         'compact_model_table_test',
         'rust',
     ),
-    # Plan 26 S1: ladder step 3 shortens status words
-    Control(
-        'p26_space_row_ladder_step3',
-        'src/client/shell/nirvana_spaces.rs',
-        '        crate::api::schema::AgentStatus::Working => "work",\n',
-        '        crate::api::schema::AgentStatus::Working => "working",\n',
-        'space_row_whole_row_equality_at_26_cells',
-        'rust',
-    ),
-    # Plan 26 S1: ladder step 1 pads who to max_who
-    Control(
-        'p26_space_row_ladder_padding',
-        'src/client/shell/nirvana_spaces.rs',
-        '                let who_padded = format!("{:<max_who$}", agent.who);\n',
-        '                let who_padded = agent.who.clone();\n',
-        'space_row_whole_row_equality_at_26_cells',
-        'rust',
-    ),
     # Plan 26 S2: MouseEventKind::Moved sets hovered space agent pane
     Control(
         'p26_mouse_moved_sets_hover',
@@ -135,24 +117,6 @@ CONTROLS = (
         '                if hovered != self.hovered_space_agent_pane {\n                    self.hovered_space_agent_pane = hovered;\n',
         '                if false && hovered != self.hovered_space_agent_pane {\n                    self.hovered_space_agent_pane = hovered;\n',
         'mouse_moved_sets_hover_and_moved_away_clears_it',
-        'rust',
-    ),
-    # Plan 26 S2: hovered row draws chat title
-    Control(
-        'p26_hovered_row_draws_chat_title',
-        'src/client/shell/nirvana_spaces.rs',
-        '            } else if hovered_pane == Some(agent.pane_id.as_str())\n                && !agent.task.is_empty()\n                && agent.task != "No task yet"\n            {\n',
-        '            } else if false && hovered_pane == Some(agent.pane_id.as_str()) {\n',
-        'a_long_title_is_cut_to_the_sidebar_with_an_ellipsis',
-        'rust',
-    ),
-    # Plan 26 S2 & Review: No task yet string is never shown
-    Control(
-        'p26_no_task_yet_never_shown',
-        'src/client/shell/nirvana_spaces.rs',
-        '                let word = status_word(agent.status);\n',
-        '                let word = "No task yet";\n',
-        'space_row_whole_row_equality_at_26_cells',
         'rust',
     ),
     # Plan 26 S3: tab_panes_count counts only panes from this run
@@ -171,15 +135,6 @@ CONTROLS = (
         '    let has_live = tab_panes.iter().any(|pane| live_panes.contains(pane));\n',
         '    let has_live = false;\n',
         'close_run_tab_decisions',
-        'rust',
-    ),
-    # Plan 26 S6: runs sorted by newest event time first
-    Control(
-        'p26_runs_sorted_by_recency',
-        'src/client/shell/agent_sidebar.rs',
-        '    result.sort_by_key(|b| std::cmp::Reverse(run_event_time(b)));\n',
-        '    result.sort_by_key(|b| run_event_time(b));\n',
-        'group_subagents_by_run_ordering',
         'rust',
     ),
     # Plan 26 S6: ended run hides finished rows
@@ -272,33 +227,6 @@ CONTROLS = (
         'render_grouped_subagents_under_run_headers',
         'rust',
     ),
-    # Plan 26 §5: agent row lines accounts for run header and grouped workers
-    Control(
-        'p26_subagents_run_lines_calculation',
-        'src/client/shell/agent_sidebar.rs',
-        '    if row.subagents.iter().any(|s| s.run_id.is_some()) {\n        let capped = group_sort_and_cap_subagents(&row.subagents, usize::MAX);\n        let mut lines = 0;\n        for g in &capped.groups {\n            lines += 1;\n            lines += g.live.len() * 2;\n            lines += g.finished.len();\n        }\n        let overflow_line = if capped.cut_count > 0 || row.subagents_overflow > 0 {\n            1\n        } else {\n            0\n        };\n        return base + lines + overflow_line;\n    }\n',
-        '    if row.subagents.iter().any(|s| s.run_id.is_some()) {\n        return 0;\n    }\n',
-        'render_grouped_subagents_under_run_headers',
-        'rust',
-    ),
-    # Review: exec closes pane only after Delivered is journaled
-    Control(
-        'p26_exec_closes_pane_after_delivered',
-        'src/nirvana_worker.rs',
-        '    let phase = state\n        .order(order)\n        .map(|o| o.phase)\n        .unwrap_or(crate::nirvana_run::Phase::Delivered);\n',
-        '    let phase = crate::nirvana_run::Phase::Delivered;\n',
-        'exec_closes_pane_after_delivered',
-        'rust',
-    ),
-    # Review: run end calls close_run_tab
-    Control(
-        'p26_run_end_calls_close_run_tab',
-        'src/nirvana_run.rs',
-        '    println!("{}", dir.join("receipt.md").display());\n    close_run_tab(project, &run, &state)?;\n',
-        '    println!("{}", dir.join("receipt.md").display());\n    // close_run_tab(project, &run, &state)?;\n',
-        'run_end_calls_close_run_tab',
-        'rust',
-    ),
     # Review: tidy_cli acts only on ended runs
     Control(
         'p26_tidy_only_ended_runs',
@@ -306,6 +234,141 @@ CONTROLS = (
         '    state.ended.is_some() && state.orders.iter().any(|o| o.pane.is_some())\n',
         '    true && state.orders.iter().any(|o| o.pane.is_some())\n',
         'tidy_only_acts_on_ended_runs',
+        'rust',
+    ),
+    # Plan 26 S6: runs sort newest first within live and finished
+    Control(
+        'p26_runs_sorted_by_recency',
+        'src/client/shell/agent_sidebar.rs',
+        '            std::cmp::Reverse(run_event_time(g)),\n',
+        '            run_event_time(g),\n',
+        'a_live_run_sorts_above_a_newer_finished_run',
+        'rust',
+    ),
+    # Plan 26 §5, round 3: the run with a live worker comes first
+    Control(
+        'p26_runs_live_first',
+        'src/client/shell/agent_sidebar.rs',
+        '            std::cmp::Reverse(!g.live.is_empty()),\n',
+        '            !g.live.is_empty(),\n',
+        'a_live_run_sorts_above_a_newer_finished_run',
+        'rust',
+    ),
+    # Plan 26 round 3: the row's height counts its run groups
+    Control(
+        'p26_subagents_run_lines_calculation',
+        'src/client/shell/agent_sidebar.rs',
+        '    base + sub_lines + overflow_line + run_lines\n',
+        '    base + sub_lines + overflow_line\n',
+        'own_subagents_stay_beside_run_groups',
+        'rust',
+    ),
+    # Plan 26 round 3 (R1): the run groups draw after the agent's own subagents
+    Control(
+        'p26_runs_drawn_after_own_subagents',
+        'src/client/shell/agent_sidebar.rs',
+        '    if row.subagents.iter().any(|s| s.run_id.is_some()) {\n        render_grouped_subagents(',
+        '    if false {\n        render_grouped_subagents(',
+        'own_subagents_stay_beside_run_groups',
+        'rust',
+    ),
+    # Plan 26 round 3 (R1): the flat cap of six never cuts a seat-order row
+    Control(
+        'p26_flat_cap_skips_seat_rows',
+        'src/nirvana_subagents.rs',
+        '            if s.run_id.is_some() {\n                return true;\n            }\n',
+        '',
+        'the_flat_cap_never_cuts_a_seat_order_row',
+        'rust',
+    ),
+    # Plan 26 S1: who is padded to the space's longest
+    Control(
+        'p26_space_row_ladder_padding',
+        'src/client/shell/nirvana_spaces.rs',
+        '    let mut line = if pad {\n',
+        '    let mut line = if false {\n',
+        'space_row_whole_row_equality_at_26_cells',
+        'rust',
+    ),
+    # Plan 26 S1: the ladder's short state words
+    Control(
+        'p26_space_row_ladder_step3',
+        'src/client/shell/nirvana_spaces.rs',
+        '    let word = if full {\n',
+        '    let word = if true {\n',
+        'space_row_whole_row_equality_at_26_cells',
+        'rust',
+    ),
+    # Plan 26 round 3 (R4): one ladder step for the whole space
+    Control(
+        'p26_space_row_one_step_per_space',
+        'src/client/shell/nirvana_spaces.rs',
+        '            agents.iter().filter(|a| !a.is_folded).all(|a| {\n',
+        '            agents.iter().filter(|a| !a.is_folded).any(|a| {\n',
+        'space_row_whole_row_equality_at_26_cells',
+        'rust',
+    ),
+    # Plan 26 S1: the ladder drops the model
+    Control(
+        'p26_space_row_model_drop',
+        'src/client/shell/nirvana_spaces.rs',
+        '    if model && !agent.model.is_empty() {\n',
+        '    if !agent.model.is_empty() {\n',
+        'space_row_whole_row_equality_at_26_cells',
+        'rust',
+    ),
+    # Plan 26 §4 (R10): `No task yet` becomes no task, the one guard
+    Control(
+        'p26_no_task_yet_never_shown',
+        'src/client/shell/nirvana_spaces.rs',
+        '                    if t == "No task yet" {\n',
+        '                    if false {\n',
+        'focused_pane_keeps_model_and_state_and_no_task_yet_never_shown',
+        'rust',
+    ),
+    # Plan 26 S2: the hovered row draws the chat title
+    Control(
+        'p26_hovered_row_draws_chat_title',
+        'src/client/shell/nirvana_spaces.rs',
+        '            } else if hovered_pane == Some(agent.pane_id.as_str()) && !agent.task.is_empty() {\n',
+        '            } else if false && hovered_pane == Some(agent.pane_id.as_str()) {\n',
+        'a_long_title_is_cut_to_the_sidebar_with_an_ellipsis',
+        'rust',
+    ),
+    # Plan 26 S2: a row with no task shows nothing extra on hover
+    Control(
+        'p26_hover_needs_a_task',
+        'src/client/shell/nirvana_spaces.rs',
+        '            } else if hovered_pane == Some(agent.pane_id.as_str()) && !agent.task.is_empty() {\n',
+        '            } else if hovered_pane == Some(agent.pane_id.as_str()) {\n',
+        'focused_pane_keeps_model_and_state_and_no_task_yet_never_shown',
+        'rust',
+    ),
+    # Plan 26 §2: exec closes only after Delivered is journaled
+    Control(
+        'p26_exec_closes_pane_after_delivered',
+        'src/nirvana_worker.rs',
+        '    let Some(phase) = state.order(order).map(|o| o.phase) else {\n        return false;\n    };\n',
+        '    let phase = crate::nirvana_run::Phase::Delivered;\n',
+        'exec_closes_pane_after_delivered',
+        'rust',
+    ),
+    # Plan 26 round 3 (R6): an order the journal does not hold closes nothing
+    Control(
+        'p26_exec_unknown_order_closes_nothing',
+        'src/nirvana_worker.rs',
+        '    let Some(phase) = state.order(order).map(|o| o.phase) else {\n        return false;\n    };\n',
+        '    let phase = state\n        .order(order)\n        .map(|o| o.phase)\n        .unwrap_or(crate::nirvana_run::Phase::Delivered);\n',
+        'exec_close_refuses_an_order_the_journal_does_not_hold',
+        'rust',
+    ),
+    # Plan 26 §3 (R2): run end closes the run's tab
+    Control(
+        'p26_run_end_calls_close_run_tab',
+        'src/nirvana_run.rs',
+        '    close(project, run, &state)?;\n',
+        '    let _ = close;\n',
+        'run_end_calls_close_run_tab',
         'rust',
     ),
 )

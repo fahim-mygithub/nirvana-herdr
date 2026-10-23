@@ -1321,10 +1321,15 @@ pub fn exec(
                         // Plan 26 §2: A worker that delivers done closes its own pane through herdr
                         // as the last thing it does. The tab's last pane stays while the run is open.
                         if in_herdr() {
-                            let _lock = crate::nirvana_seat::Lock::take(&project.run_dir(run));
+                            // S3: the count and the close happen under the run's lock; without it, close nothing.
+                            let lock = crate::nirvana_seat::Lock::take(&project.run_dir(run));
+                            if let Err(why) = &lock {
+                                eprintln!("pane kept: the run's lock was not taken: {why}");
+                            }
                             let state = replay(&journal.read().0);
-                            let my_pane =
-                                pane.or_else(|| state.order(order).and_then(|o| o.pane.as_deref()));
+                            let my_pane = pane
+                                .or_else(|| state.order(order).and_then(|o| o.pane.as_deref()))
+                                .filter(|_| lock.is_ok());
                             if let Some(pane_id) = my_pane {
                                 let expected_title = expected_pane_title(&seated.seat, order);
                                 let actual_title = pane_title(pane_id);
@@ -1952,10 +1957,10 @@ pub fn exec_should_close_pane_after_delivered(
     expected_title: &str,
     tab_panes_count: usize,
 ) -> bool {
-    let phase = state
-        .order(order)
-        .map(|o| o.phase)
-        .unwrap_or(crate::nirvana_run::Phase::Delivered);
+    // An order the journal does not hold closes nothing (plan 26 review R6).
+    let Some(phase) = state.order(order).map(|o| o.phase) else {
+        return false;
+    };
     worker_should_close_pane(
         status,
         phase,
@@ -2405,7 +2410,7 @@ pub fn launch_worker(project: &Project, run: &str, seated: &Seated) -> Result<St
 const USAGE: &str = "usage: herdr seat run <seat> --order <file> [--order-id id] [--run id] [--class c] [--size s]
                       [--needs a,b] [--not-family f] [--mode m] [--effort e] [--reason \"why\"] [--worktree] [--no-pane]
                       [--no-auto] [--json]
-       herdr seat exec <order> --run <run>        the worker's supervisor (a pane runs it)
+       herdr seat exec <order> --run <run> [--pane <pane>]   the worker's supervisor (a pane runs it)
        herdr seat status [<order>|--run <run>] [--json]
        herdr seat read <order> [--tail n]
        herdr seat stop <order>

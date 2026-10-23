@@ -140,7 +140,7 @@ CONTROLS = (
     Control(
         'p17_row_lines_accounts_for_subagents',
         'src/client/shell/agent_sidebar.rs',
-        "    let sub_lines: usize = row\n        .subagents\n        .iter()\n        .map(|s| {\n            if !narrow && !s.description.trim().is_empty() {\n                2\n            } else {\n                1\n            }\n        })\n        .sum();",
+        "    let sub_lines: usize = row\n        .subagents\n        .iter()\n        .filter(|s| s.run_id.is_none())\n        .map(|s| {\n            if !narrow && !s.description.trim().is_empty() {\n                2\n            } else {\n                1\n            }\n        })\n        .sum();",
         "    let sub_lines: usize = 0;",
         'row_lines_calculation',
         'rust',
@@ -149,8 +149,8 @@ CONTROLS = (
     Control(
         'p17_subagents_rendered_under_agent_in_both_views',
         'src/client/shell/agent_sidebar.rs',
-        "    for sub in &row.subagents {\n        if current_y >= rect.bottom() {\n            break;\n        }",
-        "    for sub in &row.subagents[..0] {\n        if current_y >= rect.bottom() {\n            break;\n        }",
+        "    for sub in row.subagents.iter().filter(|s| s.run_id.is_none()) {\n        if current_y >= rect.bottom() {\n            break;\n        }",
+        "    for sub in row.subagents[..0].iter().filter(|s| s.run_id.is_none()) {\n        if current_y >= rect.bottom() {\n            break;\n        }",
         'subagent_rows_render_under_agent_in_flat_and_grouped_views',
         'rust',
     ),

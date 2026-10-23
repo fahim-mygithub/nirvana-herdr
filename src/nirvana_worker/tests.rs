@@ -1201,3 +1201,21 @@ fn exec_closes_pane_after_delivered() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Plan 26 review R6: an order the journal does not hold never closes a pane, whatever else agrees.
+#[test]
+fn exec_close_refuses_an_order_the_journal_does_not_hold() {
+    let dir = temp_dir("exec_close_unknown");
+    let journal = Journal::new(dir.join("journal.jsonl"));
+    let state = replay(&journal.read().0);
+    let expected = "seat-1\u{b7}order-x";
+    assert!(!exec_should_close_pane_after_delivered(
+        &state,
+        "order-x",
+        "done",
+        Some("pane-1"),
+        Some(expected),
+        expected,
+        2
+    ));
+}

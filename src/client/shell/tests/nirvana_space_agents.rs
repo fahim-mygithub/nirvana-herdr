@@ -353,6 +353,8 @@ fn mouse_moved_sets_hover_and_moved_away_clears_it() {
     assert_eq!(state.hovered_space_agent_pane, None);
 }
 
+/// Plan 26 S1: whole rows, never substrings, at the list's real width. `sidebar_width: 26` gives the spaces list a
+/// 25-cell area (the compose test above draws the divider in the 26th column), so these draw into 25.
 #[test]
 fn space_row_whole_row_equality_at_26_cells() {
     use crate::client::shell::nirvana_spaces::{render_space_agents, SpaceAgent};
@@ -361,171 +363,94 @@ fn space_row_whole_row_equality_at_26_cells() {
     use ratatui::layout::Rect;
 
     let palette = Palette::catppuccin();
-    let area = Rect::new(0, 0, 26, 1);
-
-    let row_text = |buf: &Buffer| -> String {
-        let mut s = String::new();
-        for x in 0..26 {
-            s.push_str(buf.cell((x, 0)).unwrap().symbol());
-        }
-        s
+    let draw = |agents: &[SpaceAgent], indented: bool| -> Vec<String> {
+        let area = Rect::new(0, 0, 25, agents.len() as u16);
+        let mut buf = Buffer::empty(area);
+        render_space_agents(
+            &mut buf, area, agents, indented, true, false, None, None, &palette,
+        );
+        (0..area.height)
+            .map(|y| {
+                (0..25)
+                    .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                    .collect()
+            })
+            .collect()
     };
-
-    // 1. An unindented space: Claude Sonnet 5.5 working
-    // w_avail = 19. step1: "Claude S5.5 working" (19 chars) fits!
-    let mut buf1 = Buffer::empty(area);
-    let agent_claude = SpaceAgent {
-        pane_id: "pane_1".into(),
-        icon: "\u{273B}",
-        who: "Claude".into(),
-        model: "S5.5".into(),
-        status: AgentStatus::Working,
+    let row = |pane: &str, icon: &'static str, who: &str, model: &str, status| SpaceAgent {
+        pane_id: pane.into(),
+        icon,
+        who: who.into(),
+        model: model.into(),
         task: "task".into(),
-        is_folded: false,
+        status,
         focused: false,
-    };
-    render_space_agents(
-        &mut buf1,
-        area,
-        std::slice::from_ref(&agent_claude),
-        false, // unindented
-        false,
-        false,
-        None,
-        None,
-        &palette,
-    );
-    assert_eq!(row_text(&buf1), "   \u{273B} Claude S5.5 working  ");
-
-    // 2. An indented worktree row: Claude Sonnet 5.5 working
-    // w_avail = 14. step1 (19) > 14, step2 (19) > 14, step3 (16) > 14.
-    // step4: model dropped, full word: "Claude working" (14 chars) fits!
-    let mut buf2 = Buffer::empty(area);
-    render_space_agents(
-        &mut buf2,
-        area,
-        std::slice::from_ref(&agent_claude),
-        true, // indented
-        true,
-        false,
-        None,
-        None,
-        &palette,
-    );
-    assert_eq!(row_text(&buf2), "        \u{273B} Claude working  ");
-
-    // 3. A space with Nirvana and Claude:
-    // max_who = 7. w_avail = 19.
-    // Nirvana: model empty -> "Nirvana working"
-    // Claude: who_padded (7) + 1 + S5.5 (4) + 1 + working (7) = 20 > 19.
-    // step2 unpadded who: "Claude S5.5 working" (19 chars) fits!
-    let mut buf3 = Buffer::empty(Rect::new(0, 0, 26, 2));
-    let agent_nirvana = SpaceAgent {
-        pane_id: "pane_0".into(),
-        icon: "\u{273B}",
-        who: "Nirvana".into(),
-        model: "".into(),
-        status: AgentStatus::Working,
-        task: "task".into(),
         is_folded: false,
-        focused: false,
     };
-    render_space_agents(
-        &mut buf3,
-        Rect::new(0, 0, 26, 2),
-        &[agent_nirvana, agent_claude.clone()],
-        false,
-        false,
-        false,
-        None,
-        None,
-        &palette,
+    let claude = row("pane_1", "\u{273B}", "Claude", "S5.5", AgentStatus::Working);
+    let nirvana = row(
+        "pane_0",
+        "\u{273B}",
+        "Nirvana",
+        "S5.5",
+        AgentStatus::Working,
     );
-    let mut s0 = String::new();
-    let mut s1 = String::new();
-    for x in 0..26 {
-        s0.push_str(buf3.cell((x, 0)).unwrap().symbol());
-        s1.push_str(buf3.cell((x, 1)).unwrap().symbol());
-    }
-    assert_eq!(s0, "   \u{273B} Nirvana working      ");
-    assert_eq!(s1, "   \u{273B} Claude S5.5 working  ");
+    let flash = crate::nirvana_spaces::compact_model("Gemini 3.8 Flash");
+    let agy = row("pane_3", "\u{25B2}", "agy", &flash, AgentStatus::Working);
+    let agy_idle = row("pane_4", "\u{25B2}", "agy", &flash, AgentStatus::Idle);
 
-    // 4. An agy space: who = "agy", model = "Flash", status = Working
-    // w_avail = 19. step1: "agy Flash working" (17 chars) fits!
-    let mut buf4 = Buffer::empty(area);
-    let agent_agy = SpaceAgent {
-        pane_id: "pane_3".into(),
-        icon: "\u{25B2}",
-        who: "agy".into(),
-        model: crate::nirvana_spaces::compact_model("Gemini 3.8 Flash"),
-        status: AgentStatus::Working,
-        task: "task".into(),
-        is_folded: false,
-        focused: false,
-    };
-    render_space_agents(
-        &mut buf4,
-        area,
-        std::slice::from_ref(&agent_agy),
-        false,
-        false,
-        false,
-        None,
-        None,
-        &palette,
+    // 1. Unindented, 19 cells: the widest step fits.
+    assert_eq!(
+        draw(std::slice::from_ref(&claude), false),
+        ["   \u{273B} Claude S5.5 working "]
     );
-    assert_eq!(row_text(&buf4), "   \u{25B2} agy Flash working    ");
-
-    // 5. Padding test: Claude (6) + agy (3) -> max_who = 6.
-    // agy padded to 6 cells: "agy   " + " " + "Flash" + " " + "idle" = 17 <= 19.
-    let mut buf5 = Buffer::empty(Rect::new(0, 0, 26, 2));
-    let mut agy_idle = agent_agy;
-    agy_idle.status = AgentStatus::Idle;
-    render_space_agents(
-        &mut buf5,
-        Rect::new(0, 0, 26, 2),
-        &[agent_claude, agy_idle],
-        false,
-        false,
-        false,
-        None,
-        None,
-        &palette,
+    // 2. Indented, 14 cells: the model goes before the full word does.
+    assert_eq!(
+        draw(std::slice::from_ref(&claude), true),
+        ["        \u{273B} Claude working "]
     );
-    let mut p0 = String::new();
-    let mut p1 = String::new();
-    for x in 0..26 {
-        p0.push_str(buf5.cell((x, 0)).unwrap().symbol());
-        p1.push_str(buf5.cell((x, 1)).unwrap().symbol());
-    }
-    assert_eq!(p0, "   \u{273B} Claude S5.5 working  ");
-    assert_eq!(p1, "   \u{25B2} agy    Flash idle    ");
-
-    // 6. Step 3 test: who = "Nirvana" (7), model = "Flash" (5), status = Working (7 -> 4)
-    // w_avail = 19. step1 (21) > 19, step2 (21) > 19, step3 "Nirvana Flash work" (18) <= 19 fits!
-    let mut buf6 = Buffer::empty(area);
-    let agent_step3 = SpaceAgent {
-        pane_id: "pane_s3".into(),
-        icon: "\u{273B}",
-        who: "Nirvana".into(),
-        model: "Flash".into(),
-        status: AgentStatus::Working,
-        task: "task".into(),
-        is_folded: false,
-        focused: false,
-    };
-    render_space_agents(
-        &mut buf6,
-        area,
-        std::slice::from_ref(&agent_step3),
-        false,
-        false,
-        false,
-        None,
-        None,
-        &palette,
+    // 3. Nirvana and Claude on S5.5, both working: "Nirvana S5.5 working" is 20 cells, so the space shortens the
+    //    word on both rows and keeps them lined up.
+    assert_eq!(
+        draw(&[nirvana.clone(), claude.clone()], false),
+        [
+            "   \u{273B} Nirvana S5.5 work   ",
+            "   \u{273B} Claude  S5.5 work   "
+        ]
     );
-    assert_eq!(row_text(&buf6), "   \u{273B} Nirvana Flash work   ");
+    // 4. An agy space.
+    assert_eq!(
+        draw(std::slice::from_ref(&agy), false),
+        ["   \u{25B2} agy Flash working   "]
+    );
+    // 5. Padding: agy is padded to Claude's six cells.
+    assert_eq!(
+        draw(&[claude.clone(), agy_idle.clone()], false),
+        [
+            "   \u{273B} Claude S5.5 working ",
+            "   \u{25B2} agy    Flash idle   "
+        ]
+    );
+    // 6. One step for the space: agy's row fits the widest step, Nirvana's does not, so both take the next.
+    assert_eq!(
+        draw(&[nirvana, agy_idle], false),
+        [
+            "   \u{273B} Nirvana S5.5 work   ",
+            "   \u{25B2} agy     Flash idle  "
+        ]
+    );
+    // 7. Nothing but who fits: who alone.
+    let long = row(
+        "pane_5",
+        "\u{2022}",
+        "opencode-xyz",
+        "S5.5",
+        AgentStatus::Working,
+    );
+    assert_eq!(
+        draw(std::slice::from_ref(&long), true),
+        ["        \u{2022} opencode-xyz   "]
+    );
 }
 
 #[test]
