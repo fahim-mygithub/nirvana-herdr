@@ -138,4 +138,9 @@ CONTROLS = (
     Control("p28_worker_error_silent", WORKER,
             '                "superpowers stay as the settings say for {}: {why}",\n',
             '                "{}{why}",\n', T_W_SETTINGS, "rust"),
+    # Plan 28 review: a temporary name per write, not per process
+    Control("p28_temp_name_per_write", RULE,
+            '    path.with_extension(format!("tmp-{}-{n}", std::process::id()))\n',
+            '    let _ = n;\n    path.with_extension(format!("tmp-{}", std::process::id()))\n',
+            "two_writes_in_one_process_never_share_a_temporary_name", "rust"),
 )

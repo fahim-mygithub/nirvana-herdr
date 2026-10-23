@@ -179,12 +179,21 @@ pub fn ids_for(claude_dir: Option<&Path>, folder: &Path, base: &Value) -> Vec<St
     superpowers_ids(names.iter().map(String::as_str))
 }
 
-/// Through a temporary file, so a Claude starting never reads half of it.
+/// A temporary name no other write in this process shares.
+fn temp_path(path: &Path) -> PathBuf {
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    path.with_extension(format!("tmp-{}-{n}", std::process::id()))
+}
+
+/// Through a temporary file, so a Claude starting never reads half of it. The temporary name is unique per write, not
+/// per process: the herdr server can launch two Claudes for one folder at once (New Nirvana and a restored pane), and a
+/// shared name would let one launch lose its rename and start Opus with superpowers on (plan 28 review).
 fn write_json(path: &Path, value: &Value) -> Result<(), String> {
     let parent = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent).map_err(|err| format!("{}: {err}", parent.display()))?;
     let text = serde_json::to_string_pretty(value).map_err(|err| err.to_string())?;
-    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let tmp = temp_path(path);
     std::fs::write(&tmp, text).map_err(|err| format!("{}: {err}", tmp.display()))?;
     std::fs::rename(&tmp, path).map_err(|err| {
         let _ = std::fs::remove_file(&tmp);
@@ -501,5 +510,12 @@ mod tests {
         std::fs::write(&preset, "[").unwrap();
         assert!(worker_settings_in(&dir, "claude", "opus", &folder, Some(&preset), None).is_err());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Plan 28 review: two writes in one process never share a temporary name.
+    #[test]
+    fn two_writes_in_one_process_never_share_a_temporary_name() {
+        let path = Path::new("x/launch.opus.settings.json");
+        assert_ne!(temp_path(path), temp_path(path));
     }
 }
