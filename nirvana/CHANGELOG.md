@@ -3,6 +3,40 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.39.0: superpowers only on Sonnet
+
+- **Changed:** a Claude that Nirvana starts on an Opus model gets every `superpowers` plugin turned off. On Sonnet, and on
+  every other model, nothing changes.
+  - This covers Nirvana Claude (New Nirvana, the space launch, Restart Claude) and Claude workers.
+  - The rule goes into the one `--settings` file the launch already passes, merged so every other key stays.
+    - Nirvana Claude: `<home>/nirvana/launch/<hash>.opus.settings.json`.
+    - Workers: `<hash>.opus.worker.settings.json`.
+  - The plugin ids are every installed or enabled plugin named `superpowers` before the `@`. On this machine there are
+    two marketplaces.
+  - Any error keeps today's argv and logs one line. A launch never fails because of the rule.
+  - The owner's own Claude panes and the Preload panel are unchanged.
+  **Because:** the owner, 2026-10-23: "agents perform poorer with superpowers attached to opus. Given the preload cost of
+  enabling superpowers if you are using opus level model for planning and building features, do not preload
+  supoerpowers. ... If were constrained on tokens and have to start planning and building with a sonnet levle model,
+  superpowers seems to provide osme improvements. Create this rule / login on Nirvana." Plan
+  `nirvana/plans/2026-10-23-28-superpowers-by-model.md`, built on Opus high.
+  **Measured:**
+  - Nirvana Claude starts on Opus medium in Balanced mode when usage readings are missing or stale. With fresh readings
+    Balanced can seat Sonnet, and then superpowers stays.
+  - The 19 Claude worker streams on this machine are all Sonnet, and none loaded superpowers. Workers run with
+    `--setting-sources project`, which skips the user's settings. So today the rule changes Nirvana Claude and any
+    future Opus worker whose project enables the plugin.
+  - Cost, from plan 25's estimate: about 1.1k tokens of hook text plus superpowers' share of the skill listing.
+  - 44 controls in `nirvana/controls.d/superpowers_by_model.py`, each reddening its test alone. 10 older controls whose
+    tests or lines moved still redden theirs.
+  - A Sonnet reviewer found no blockers. The orchestrator fixed its should-fix item: the temporary file name is now
+    unique per write, so two launches for one folder cannot both rename onto one file.
+  - Not live-checked yet (plan §5):
+    - Nirvana's `/context` lists no superpowers skills on Opus;
+    - they come back on Sonnet after Restart Claude.
+  **If you remove this:** every Opus Nirvana loads superpowers, which the owner found makes it worse and costs context
+  on every start.
+
 ## alpha 0.38.0: a clearer sidebar, and finished work leaves the screen
 
 - **Changed:**
