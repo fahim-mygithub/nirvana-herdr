@@ -9,8 +9,10 @@
 //! The rule is one pure function, `decide`, over the facts in `Facts`. The server (`app/nirvana_idle_compact.rs`)
 //! gathers the facts it holds itself (state, idle time, the screen, the owner's last key) and the ones outside herdr
 //! (`read_outside`: the Claude process, its transcript), then pastes `/compact` only on `Decision::Send`, and presses
-//! Enter only if the line then reads exactly `/compact` (`enter_gate`). Any fact it cannot read is a reason not to
-//! send: this types into the owner's own panes, and typing into a pane the owner is using is the worst outcome.
+//! Enter only if the line then reads exactly `/compact` (`after_paste`). Any fact it cannot read is a reason not to
+//! send: this types into the owner's own panes, and typing into a pane the owner is using is the worst outcome. And
+//! (third round) the owner's input box is never left in a state they did not make: a paste whose Enter never went is
+//! erased, but only while the line holds nothing but that paste.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
@@ -32,26 +34,75 @@ pub const COMMAND: &str = "/compact";
 /// assistant line further back than this from the end gives no reading, so nothing is sent.
 pub const MAX_TAIL: u64 = 1024 * 1024;
 
+/// Third round F1: after the paste the line is read at these offsets from it, and Enter goes at the first read that
+/// shows exactly `/compact`. A slow echo still reads `Empty` at the first; one read at 300 ms refused it and left
+/// the paste in the box.
+pub const ENTER_TRIES: [Duration; 3] = [
+    Duration::from_millis(300),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+];
+/// Third round F1: a second after the last try, a line that now holds only the paste (an echo later than the last
+/// try) is erased rather than left for the owner's next keys to run into (`/compactfoo`).
+pub const ERASE_AT: Duration = Duration::from_secs(3);
+/// The read after the erase, a second on: the erase's echo is no more synchronous than the paste's.
+pub const ERASED_AT: Duration = Duration::from_secs(4);
+/// One Backspace per character the paste added, and no more: a key past them could reach text the owner typed.
+pub const ERASE_KEYS: usize = COMMAND.len();
+
 /// One unbroken idle stretch of a pane: when it began, when it was last checked, whether `/compact` was pasted in it,
-/// and when its Enter is due.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// and what is still due after the paste.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IdleStretch {
     pub since: Option<Instant>,
     pub checked_at: Option<Instant>,
     pub sent: bool,
-    /// Review S1: the paste went; at this instant the line is read again and Enter goes only if it reads `/compact`.
-    pub enter_at: Option<Instant>,
+    /// Review S1, third round F1: the paste went; the reads after it are due.
+    pub pending: Option<Pending>,
+}
+
+/// A pasted `/compact` whose Enter has not gone: the pane it went to, when, and which read is next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pending {
+    /// The public pane id the paste's pass found (third round nit: the later passes reuse it, and do not walk the
+    /// panes' folders again).
+    pub pane: String,
+    pub pasted_at: Instant,
+    pub step: Step,
+}
+
+/// The reads after a paste (third round F1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// The try at `ENTER_TRIES[n]`.
+    Try(usize),
+    /// The read at `ERASE_AT`, after the last try.
+    Erase,
+    /// The read at `ERASED_AT`, after the erase's keys went.
+    Erased,
+}
+
+impl Pending {
+    /// When this read is due; `None` when the sum would overflow (review S5), so it never comes.
+    pub fn due(&self) -> Option<Instant> {
+        let after = match self.step {
+            Step::Try(n) => *ENTER_TRIES.get(n)?,
+            Step::Erase => ERASE_AT,
+            Step::Erased => ERASED_AT,
+        };
+        self.pasted_at.checked_add(after)
+    }
 }
 
 impl IdleStretch {
     /// The stretch after the pane's state is recomputed (plan 27 §2 rules 3 and 7). `Idle` keeps the stretch it is
     /// in, or starts one now; any other state ends it, so the next `Idle` starts afresh with nothing sent.
-    pub fn after(self, state: AgentState, now: Instant) -> Self {
+    pub fn after(&self, state: AgentState, now: Instant) -> Self {
         if state != AgentState::Idle {
             return Self::default();
         }
         if self.since.is_some() {
-            return self;
+            return self.clone();
         }
         Self {
             since: Some(now),
@@ -59,12 +110,12 @@ impl IdleStretch {
         }
     }
 
-    /// When the stretch is next due a check, or `None` once `/compact` went or the cache has expired. A pending
-    /// Enter comes first. A check that left the pane alone waits `RECHECK`, so a skipped pane never makes the server
-    /// loop spin. No `Instant` sum can overflow here: one that would is no check (review S5).
-    pub fn next_check_at(self, minutes: Duration) -> Option<Instant> {
-        if let Some(enter_at) = self.enter_at {
-            return Some(enter_at);
+    /// When the stretch is next due a check, or `None` once `/compact` went or the cache has expired. A read after
+    /// the paste comes first. A check that left the pane alone waits `RECHECK`, so a skipped pane never makes the
+    /// server loop spin. No `Instant` sum can overflow here: one that would is no check (review S5).
+    pub fn next_check_at(&self, minutes: Duration) -> Option<Instant> {
+        if let Some(pending) = &self.pending {
+            return pending.due();
         }
         let since = self.since?;
         if self.sent {
@@ -119,8 +170,8 @@ pub struct Facts {
     pub transcript_age: Option<Duration>,
     /// The last assistant turn's context (`context_tokens`).
     pub context_tokens: Option<u64>,
-    /// Seconds since the owner's last key in this pane (`nirvana_run::owner_key_at`); `None` when none is recorded.
-    pub owner_key_secs_ago: Option<u64>,
+    /// The owner's last key in this pane (`owner_key`).
+    pub owner_key: OwnerKey,
     /// The strict reading of the input line (`read_input_line`).
     pub input_line: InputLine,
 }
@@ -180,7 +231,7 @@ pub fn decide(facts: &Facts) -> Decision {
         return skip(format!("context {tokens} is under {}", rule.min_tokens));
     }
     // 6. The owner is not at the pane (review S1), and nothing is on the input line.
-    if let Some(why) = owner_quiet_breach(facts.owner_key_secs_ago) {
+    if let Some(why) = owner_quiet_breach(&facts.owner_key) {
         return skip(why);
     }
     match &facts.input_line {
@@ -190,22 +241,86 @@ pub fn decide(facts: &Facts) -> Decision {
     }
 }
 
-/// Why the owner's last key is too recent, as the orchestrator's wake path reads it (`nirvana_run`, `OWNER_QUIET_S`).
-fn owner_quiet_breach(owner_key_secs_ago: Option<u64>) -> Option<String> {
-    let ago = owner_key_secs_ago?;
-    (ago < crate::nirvana_run::OWNER_QUIET_S)
-        .then(|| format!("the owner typed in the pane {ago} s ago"))
+/// The owner's last key in a pane, as the server records it (`nirvana_run::note_owner_key`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerKey {
+    /// No key was ever recorded for the pane: the owner has been quiet in it.
+    Never,
+    /// The last key, this many seconds ago.
+    SecsAgo(u64),
+    /// Not known (third round nit): the Nirvana home is unavailable, or the key's file cannot be read. A doubt.
+    Unknown(String),
 }
 
-/// Review S1: the Enter after the paste goes only when the line reads exactly `/compact` and the owner has not
-/// typed since. `Err` is why it was left unsent.
-pub fn enter_gate(line: &InputLine, owner_key_secs_ago: Option<u64>) -> Result<(), String> {
-    if let Some(why) = owner_quiet_breach(owner_key_secs_ago) {
-        return Err(why);
+/// The owner's last key in `pane` under the Nirvana home `home`, at Unix second `now`. Pure over its arguments, so a
+/// test passes a temporary home. `nirvana_run::owner_key_at`, which the wake path reads, folds an unavailable home
+/// into "no key"; here it is a doubt.
+pub fn owner_key(home: Option<&Path>, pane: &str, now: u64) -> OwnerKey {
+    let Some(home) = home else {
+        return OwnerKey::Unknown("the Nirvana home is not known".into());
+    };
+    match crate::nirvana_run::owner_key_in(home, pane) {
+        Ok(None) => OwnerKey::Never,
+        Ok(Some(at)) => OwnerKey::SecsAgo(now.saturating_sub(at)),
+        Err(why) => OwnerKey::Unknown(why),
     }
-    match line {
-        InputLine::Text(text) if text == COMMAND => Ok(()),
-        other => Err(format!("the input line reads {other:?}, not {COMMAND}")),
+}
+
+/// Why the owner's last key is too recent, as the orchestrator's wake path reads it (`nirvana_run`, `OWNER_QUIET_S`),
+/// or why it is not known.
+fn owner_quiet_breach(owner_key: &OwnerKey) -> Option<String> {
+    match owner_key {
+        OwnerKey::Never => None,
+        OwnerKey::SecsAgo(ago) => (*ago < crate::nirvana_run::OWNER_QUIET_S)
+            .then(|| format!("the owner typed in the pane {ago} s ago")),
+        OwnerKey::Unknown(why) => Some(format!("the owner's last key is not known: {why}")),
+    }
+}
+
+/// What the server does at one read after the paste (third round F1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AfterPaste {
+    /// Press Enter: the line reads exactly `/compact` and the owner is quiet.
+    Enter,
+    /// Nothing yet; read again at this step.
+    Next(Step),
+    /// Send `ERASE_KEYS` Backspaces, then read at `Step::Erased`.
+    Erase,
+    /// The erase left the line empty.
+    Erased,
+    /// Stop with the line as it is, and why.
+    Leave(String),
+}
+
+/// Third round F1, one read after the paste. Pure over the step, the line and the owner's last key.
+///
+/// - A try sends Enter at a line of exactly `/compact`; an `Empty` line (the echo not back yet) waits for the next
+///   try, and after the last try for the erase read.
+/// - The erase read erases only a line of exactly `/compact`.
+/// - The owner's key since the paste, or any other line, ends it at once, with nothing erased: what is in the box is
+///   then partly the owner's, and a Backspace could reach it.
+/// - After the erase, a line that is not `Empty` is left, with a warning.
+pub fn after_paste(step: Step, line: &InputLine, owner_key: &OwnerKey) -> AfterPaste {
+    let leave = |why: String| AfterPaste::Leave(why);
+    if step == Step::Erased {
+        return match line {
+            InputLine::Empty => AfterPaste::Erased,
+            other => leave(format!("the input line reads {other:?} after the erase")),
+        };
+    }
+    if let Some(why) = owner_quiet_breach(owner_key) {
+        return leave(why);
+    }
+    let compact = matches!(line, InputLine::Text(text) if text == COMMAND);
+    match (step, line) {
+        (Step::Try(_), _) if compact => AfterPaste::Enter,
+        (Step::Try(n), InputLine::Empty) if n + 1 < ENTER_TRIES.len() => {
+            AfterPaste::Next(Step::Try(n + 1))
+        }
+        (Step::Try(_), InputLine::Empty) => AfterPaste::Next(Step::Erase),
+        (Step::Erase, _) if compact => AfterPaste::Erase,
+        (Step::Erase, InputLine::Empty) => leave("the paste never showed in the input line".into()),
+        (_, other) => leave(format!("the input line reads {other:?}, not {COMMAND}")),
     }
 }
 
@@ -219,9 +334,8 @@ pub fn is_headless(argv: &[String]) -> bool {
 /// Screens on which Enter would answer something other than the input line, lower case: the markers of the blocked
 /// and transcript-viewer rules in `detect/manifests/claude.toml` (`transcript_viewer`, `live_blocked_form`,
 /// `dynamic_workflow_prompt`, `mcp_elicitation_prompt`, `model_picker_menu`, `bash_permission_prompt`,
-/// `generic_permission_prompt`, `legacy_no_prompt_blocker`), then vim mode's footer. The legacy rule's loose
-/// phrases ("do you want to", "would you like to") are kept too, though Claude's own replies use them: a doubt sends
-/// nothing.
+/// `generic_permission_prompt`, `legacy_no_prompt_blocker`), then vim mode's footer. These are read screen-wide. The
+/// legacy rule's loose phrases are `BOX_PHRASES`.
 const NOT_THE_INPUT: &[&str] = &[
     "showing detailed transcript",
     "esc to cancel",
@@ -243,11 +357,14 @@ const NOT_THE_INPUT: &[&str] = &[
     "ctrl+e to explain",
     "review your answers",
     "skip interview and plan immediately",
-    "do you want to",
-    "would you like to",
     "-- normal --",
     "-- insert --",
 ];
+
+/// The `legacy_no_prompt_blocker` rule's loose phrases, read only from the input box's top rule down (third round
+/// F2). Claude's own replies use them ("Would you like me to…?"); read screen-wide, an idle Claude whose last reply
+/// asked one read `Unsure` for good and was never compacted.
+const BOX_PHRASES: &[&str] = &["do you want to", "would you like to"];
 
 /// The most non-empty lines Claude draws under its input box (its footer, a short command menu). More, and the box
 /// is not the live bottom of the screen: a viewport off the bottom shows an older frame's box with newer lines below.
@@ -269,7 +386,8 @@ struct Cell {
 /// rules near the bottom, its one line starts `❯`, everything after the mark is faint (SGR 2; a grey colour does not
 /// count), no `[` chip is on it, no cursor is drawn past its start, and the terminal's cursor, when shown, sits at
 /// its start. The line is never looked for anywhere else (no fallback to a `❯` or `>` line in a menu or a picker),
-/// and a screen with a dialog, the transcript viewer or vim mode is not read at all. `nirvana_run::prompt_line_text`
+/// and a screen with a dialog, the transcript viewer or vim mode is not read at all; the loose phrases count only from
+/// the box's top rule down, so a reply above it that asks "Would you like…" is not a dialog. `nirvana_run::prompt_line_text`
 /// stays as the wake path's own reading.
 pub fn read_input_line(screen: &str, cursor: Option<Cursor>, scrolled: bool) -> InputLine {
     let unsure = |why: &str| InputLine::Unsure(why.to_owned());
@@ -294,6 +412,10 @@ pub fn read_input_line(screen: &str, cursor: Option<Cursor>, scrolled: bool) -> 
     let [.., top, bottom] = rules[..] else {
         return unsure("no input box on the screen");
     };
+    let boxed = plain[top..].join("\n").to_lowercase();
+    if let Some(phrase) = BOX_PHRASES.iter().find(|phrase| boxed.contains(**phrase)) {
+        return InputLine::Unsure(format!("the input box's area shows {phrase:?}"));
+    }
     let below = plain[bottom + 1..]
         .iter()
         .filter(|line| !line.trim().is_empty())
@@ -494,7 +616,9 @@ pub struct SessionsRecord {
 ///   nothing is sent.
 /// - No id: nothing. The folder's newest transcript is never taken here (the agents panel still takes it,
 ///   `nirvana_subagents::resolve_claude_session`), because it may be another conversation's.
-/// - Another Claude pane in the same folder with the same id, or with none, means the two cannot be told apart.
+/// - An id from the hook, with another Claude pane in the same folder that has the same id or none, means the two
+///   cannot be told apart. An id from the sessions record is keyed by this process's pid, so it is this pane's own
+///   whoever shares the folder (third round F3).
 #[allow(clippy::too_many_arguments)]
 pub fn choose_transcript(
     foreground: Option<Agent>,
@@ -521,10 +645,12 @@ pub fn choose_transcript(
         (None, Some(id)) => (id, true),
         (None, None) => return Err("no session id names this Claude's conversation".into()),
     };
-    if others.iter().any(|(_, other_folder, other_id)| {
-        crate::nirvana_subagents::encode_project_folder(other_folder) == encoded
-            && other_id.is_none_or(|other| other == id)
-    }) {
+    if from_hook
+        && others.iter().any(|(_, other_folder, other_id)| {
+            crate::nirvana_subagents::encode_project_folder(other_folder) == encoded
+                && other_id.is_none_or(|other| other == id)
+        })
+    {
         return Err("another Claude pane in the folder cannot be told apart".into());
     }
     let valid = !id.is_empty()
@@ -651,7 +777,7 @@ mod tests {
             sent_in_stretch: false,
             transcript_age: Some(51 * MIN),
             context_tokens: Some(80_000),
-            owner_key_secs_ago: None,
+            owner_key: OwnerKey::Never,
             input_line: InputLine::Empty,
         }
     }
@@ -671,7 +797,7 @@ mod tests {
             idle_for: Some(50 * MIN),
             transcript_age: Some(50 * MIN),
             context_tokens: Some(50_000),
-            owner_key_secs_ago: Some(crate::nirvana_run::OWNER_QUIET_S),
+            owner_key: OwnerKey::SecsAgo(crate::nirvana_run::OWNER_QUIET_S),
             ..sending()
         };
         assert_eq!(decide(&facts), Decision::Send);
@@ -827,7 +953,7 @@ mod tests {
         for ago in [0, crate::nirvana_run::OWNER_QUIET_S - 1] {
             skipped(
                 &Facts {
-                    owner_key_secs_ago: Some(ago),
+                    owner_key: OwnerKey::SecsAgo(ago),
                     ..sending()
                 },
                 "the owner typed",
@@ -846,24 +972,160 @@ mod tests {
         );
     }
 
-    /// Review S1: Enter goes only on a line that reads exactly `/compact`, with the owner away.
+    /// Third round nit: an owner key that cannot be read is a doubt, not quiet; a pane with no key ever is quiet.
+    #[test]
+    fn idle_compact_rule6_unknown_owner_key_skips() {
+        skipped(
+            &Facts {
+                owner_key: OwnerKey::Unknown("the Nirvana home is not known".into()),
+                ..sending()
+            },
+            "not known",
+        );
+        assert_eq!(
+            decide(&Facts {
+                owner_key: OwnerKey::Never,
+                ..sending()
+            }),
+            Decision::Send
+        );
+    }
+
+    /// Third round nit: the owner's key read from a temporary home passed in, never the process's.
+    #[test]
+    fn idle_compact_owner_key_tells_no_home_from_no_key() {
+        assert!(matches!(
+            owner_key(None, "w1:p1", 1_000),
+            OwnerKey::Unknown(why) if why.contains("Nirvana home")
+        ));
+        let home = temp_dir("owner-key");
+        assert_eq!(owner_key(Some(&home), "w1:p1", 1_000), OwnerKey::Never);
+        let keys = home.join(crate::nirvana_seat::DIR).join("keys");
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(keys.join("w1_p1"), "990").unwrap();
+        assert_eq!(
+            owner_key(Some(&home), "w1:p1", 1_000),
+            OwnerKey::SecsAgo(10)
+        );
+        std::fs::write(keys.join("w1_p1"), "not a second").unwrap();
+        assert!(matches!(
+            owner_key(Some(&home), "w1:p1", 1_000),
+            OwnerKey::Unknown(_)
+        ));
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    fn compact_line() -> InputLine {
+        InputLine::Text(COMMAND.into())
+    }
+
+    /// Review S1, third round F1: a try presses Enter only on a line of exactly `/compact`, with the owner quiet.
     #[test]
     fn idle_compact_enter_only_on_exactly_compact() {
-        assert_eq!(
-            enter_gate(&InputLine::Text("/compact".into()), None),
-            Ok(())
-        );
+        for step in [Step::Try(0), Step::Try(1), Step::Try(2)] {
+            assert_eq!(
+                after_paste(step, &compact_line(), &OwnerKey::Never),
+                AfterPaste::Enter
+            );
+        }
         for line in [
             InputLine::Text("/compact hello".into()),
             InputLine::Text("/compac".into()),
             InputLine::Text("hello/compact".into()),
-            InputLine::Empty,
             InputLine::Unsure("no input box on the screen".into()),
         ] {
-            assert!(enter_gate(&line, None).is_err(), "{line:?}");
+            assert!(
+                matches!(
+                    after_paste(Step::Try(0), &line, &OwnerKey::Never),
+                    AfterPaste::Leave(_)
+                ),
+                "{line:?}"
+            );
         }
-        assert!(enter_gate(&InputLine::Text("/compact".into()), Some(0))
-            .is_err_and(|why| why.contains("the owner typed")));
+        assert!(matches!(
+            after_paste(Step::Try(0), &compact_line(), &OwnerKey::SecsAgo(0)),
+            AfterPaste::Leave(why) if why.contains("the owner typed")
+        ));
+    }
+
+    /// Third round F1: an `Empty` line (the echo not back) waits for the next try, then for the erase read.
+    #[test]
+    fn idle_compact_after_paste_tries_then_erase_read() {
+        let empty = |step| after_paste(step, &InputLine::Empty, &OwnerKey::Never);
+        assert_eq!(empty(Step::Try(0)), AfterPaste::Next(Step::Try(1)));
+        assert_eq!(empty(Step::Try(1)), AfterPaste::Next(Step::Try(2)));
+        assert_eq!(empty(Step::Try(2)), AfterPaste::Next(Step::Erase));
+        assert!(
+            matches!(empty(Step::Erase), AfterPaste::Leave(why) if why.contains("never showed"))
+        );
+        // The schedule: 300 ms, 1 s, 2 s, then the erase read and the read after it.
+        let t0 = Instant::now();
+        let due = |step| {
+            Pending {
+                pane: "w1:p1".into(),
+                pasted_at: t0,
+                step,
+            }
+            .due()
+        };
+        assert_eq!(due(Step::Try(0)), Some(t0 + Duration::from_millis(300)));
+        assert_eq!(due(Step::Try(1)), Some(t0 + Duration::from_secs(1)));
+        assert_eq!(due(Step::Try(2)), Some(t0 + Duration::from_secs(2)));
+        assert_eq!(due(Step::Erase), Some(t0 + Duration::from_secs(3)));
+        assert_eq!(due(Step::Erased), Some(t0 + Duration::from_secs(4)));
+        assert_eq!(due(Step::Try(3)), None);
+    }
+
+    /// Third round F1: the owner's key between tries ends them, with no erase, at every step before the erase.
+    #[test]
+    fn idle_compact_after_paste_owner_keys_end_the_tries() {
+        for step in [Step::Try(0), Step::Try(1), Step::Try(2), Step::Erase] {
+            for owner in [
+                OwnerKey::SecsAgo(0),
+                OwnerKey::Unknown("the Nirvana home is not known".into()),
+            ] {
+                for line in [InputLine::Empty, compact_line()] {
+                    assert!(
+                        matches!(after_paste(step, &line, &owner), AfterPaste::Leave(_)),
+                        "{step:?} {owner:?} {line:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Third round F1: the erase read erases a line of exactly `/compact`, and never one with the owner's text in it.
+    #[test]
+    fn idle_compact_after_paste_erases_only_the_paste() {
+        assert_eq!(
+            after_paste(Step::Erase, &compact_line(), &OwnerKey::Never),
+            AfterPaste::Erase
+        );
+        for line in [
+            InputLine::Text("/compactfoo".into()),
+            InputLine::Text("foo/compact".into()),
+            InputLine::Text("/compact foo".into()),
+            InputLine::Unsure("the screen shows \"esc to cancel\"".into()),
+        ] {
+            assert!(
+                matches!(
+                    after_paste(Step::Erase, &line, &OwnerKey::Never),
+                    AfterPaste::Leave(_)
+                ),
+                "{line:?}"
+            );
+        }
+        // One Backspace per character of `/compact`.
+        assert_eq!(ERASE_KEYS, 8);
+        // After the erase: empty is erased; anything else is left, to warn.
+        assert_eq!(
+            after_paste(Step::Erased, &InputLine::Empty, &OwnerKey::Never),
+            AfterPaste::Erased
+        );
+        assert!(matches!(
+            after_paste(Step::Erased, &compact_line(), &OwnerKey::Never),
+            AfterPaste::Leave(why) if why.contains("after the erase")
+        ));
     }
 
     // ---- the strict input line, on the recorded screens and ones built from them ----
@@ -1043,6 +1305,109 @@ mod tests {
         );
     }
 
+    /// The recorded empty screen with `line` put in at `at` (a screen line index).
+    fn with_line(at: usize, line: &str) -> String {
+        let mut lines: Vec<&str> = RECORDED_EMPTY.lines().collect();
+        lines.insert(at, line);
+        lines.join("\n")
+    }
+
+    /// The index of the recorded screen's top rule: a line put in there sits just above the box.
+    fn top_rule() -> usize {
+        RECORDED_EMPTY
+            .lines()
+            .position(|line| line.contains('─'))
+            .unwrap()
+    }
+
+    /// Third round F2: a reply above the box that asks the owner something is Claude's text, not a dialog.
+    #[test]
+    fn idle_compact_input_line_reply_above_the_box_still_reads_the_box() {
+        for reply in [
+            "\u{25cf} Would you like me to run the tests too?",
+            "\u{25cf} Would you like to see the diff? Do you want to keep both?",
+        ] {
+            assert_eq!(
+                read(&with_line(top_rule(), reply)),
+                InputLine::Empty,
+                "{reply}"
+            );
+        }
+        // In the box's area the same phrase is a doubt.
+        let footer = RECORDED_EMPTY.lines().count();
+        not_empty(
+            &with_line(footer, "  Would you like to save these settings?"),
+            "the input box's area shows",
+        );
+    }
+
+    /// Third round F2: a dialog's marker above the box still reads `Unsure`, wherever it is.
+    #[test]
+    fn idle_compact_input_line_dialog_marker_anywhere_is_not_empty() {
+        for at in [0, top_rule()] {
+            not_empty(
+                &with_line(at, " Enter to confirm · Esc to cancel"),
+                "esc to cancel",
+            );
+        }
+        not_empty(
+            &with_line(RECORDED_EMPTY.lines().count(), " Esc to cancel"),
+            "esc to cancel",
+        );
+    }
+
+    /// Third round nit: one row per marker, written out here and not read from the product's lists, so a marker taken
+    /// out of either list reddens its row. A screen-wide marker goes above the box; a box phrase goes under it, in
+    /// the footer. The row counts must match the lists, so a marker added without a row reddens too.
+    #[test]
+    fn idle_compact_input_line_every_marker_is_read() {
+        const SCREEN_ROWS: [&str; 22] = [
+            "showing detailed transcript",
+            "esc to cancel",
+            "enter to confirm",
+            "enter to select",
+            "arrow keys to navigate",
+            "arrows to navigate",
+            "↑/↓ to navigate",
+            "↑↓ to navigate",
+            "↑↓ scroll",
+            "run a dynamic workflow?",
+            "requests your input",
+            "select model",
+            "enter to set as default",
+            "do you want to proceed?",
+            "waiting for permission",
+            "do you want to allow this connection?",
+            "tab to amend",
+            "ctrl+e to explain",
+            "review your answers",
+            "skip interview and plan immediately",
+            "-- normal --",
+            "-- insert --",
+        ];
+        const BOX_ROWS: [&str; 2] = ["do you want to", "would you like to"];
+        for marker in SCREEN_ROWS {
+            let screen = with_line(top_rule(), &format!(" {}", marker.to_uppercase()));
+            assert!(
+                matches!(read(&screen), InputLine::Unsure(why) if why.contains(marker)),
+                "{marker:?}"
+            );
+        }
+        for phrase in BOX_ROWS {
+            let screen = with_line(
+                RECORDED_EMPTY.lines().count(),
+                &format!("  {phrase} go on?"),
+            );
+            assert!(
+                matches!(read(&screen), InputLine::Unsure(why) if why.contains(phrase)),
+                "{phrase:?}"
+            );
+        }
+        // After the rows, so a marker taken out reddens on its own row first.
+        assert_eq!(NOT_THE_INPUT.len(), SCREEN_ROWS.len());
+        assert_eq!(BOX_PHRASES.len(), BOX_ROWS.len());
+    }
+
     #[test]
     fn idle_compact_input_line_reads_compact_for_the_enter() {
         let screen = RECORDED_TYPED.replace("hello owner draft", "/compact");
@@ -1072,7 +1437,11 @@ mod tests {
             since: Some(t0),
             checked_at: Some(t0 + 50 * MIN),
             sent: true,
-            enter_at: Some(t0 + 50 * MIN),
+            pending: Some(Pending {
+                pane: "w1:p1".into(),
+                pasted_at: t0 + 50 * MIN,
+                step: Step::Try(0),
+            }),
         };
         for state in [
             AgentState::Working,
@@ -1100,19 +1469,19 @@ mod tests {
         // Checked and left alone: a minute later, not at once (no spinning).
         let checked = IdleStretch {
             checked_at: Some(t0 + 50 * MIN),
-            ..stretch
+            ..stretch.clone()
         };
         assert_eq!(checked.next_check_at(50 * MIN), Some(t0 + 51 * MIN));
         // A check due at or past the cache's hour never comes.
         let late = IdleStretch {
             checked_at: Some(t0 + 59 * MIN),
-            ..stretch
+            ..stretch.clone()
         };
         assert_eq!(late.next_check_at(50 * MIN), None);
         // Once sent, never again in the stretch.
         let sent = IdleStretch {
             sent: true,
-            ..stretch
+            ..stretch.clone()
         };
         assert_eq!(sent.next_check_at(50 * MIN), None);
         // Not idle: never due.
@@ -1127,7 +1496,11 @@ mod tests {
             since: Some(t0),
             checked_at: Some(t0 + 50 * MIN),
             sent: true,
-            enter_at: Some(t0 + 50 * MIN + Duration::from_millis(300)),
+            pending: Some(Pending {
+                pane: "w1:p1".into(),
+                pasted_at: t0 + 50 * MIN,
+                step: Step::Try(0),
+            }),
         };
         assert_eq!(
             pasted.next_check_at(50 * MIN),
@@ -1375,31 +1748,53 @@ mod tests {
 
     #[test]
     fn choose_transcript_two_panes_in_one_folder() {
-        let fresh = record(START + 5);
         let here = folder();
-        // The other pane names no session, or the same one: the two cannot be told apart.
-        for other in [None, Some(ID_RECORD)] {
+        // A hook id, and the other pane names no session or the same one: the two cannot be told apart.
+        for other in [None, Some(ID_HOOK)] {
             assert!(choose(
                 Some(Agent::Claude),
-                Some(&fresh),
-                Some(START),
                 None,
+                Some(START),
+                Some(ID_HOOK),
                 &[("w1:p2", here.as_path(), other)],
             )
             .is_err_and(|why| why.contains("cannot be told apart")));
         }
         // Another session in the folder, or another folder: this pane's own.
         let elsewhere = here.join("other");
-        for (folder, other) in [(here.as_path(), Some(ID_HOOK)), (elsewhere.as_path(), None)] {
+        for (folder, other) in [
+            (here.as_path(), Some(ID_RECORD)),
+            (elsewhere.as_path(), None),
+        ] {
+            assert_eq!(
+                choose(
+                    Some(Agent::Claude),
+                    None,
+                    Some(START),
+                    Some(ID_HOOK),
+                    &[("w1:p2", folder, other)],
+                ),
+                Ok(transcript(ID_HOOK))
+            );
+        }
+    }
+
+    /// Third round F3: the sessions record is keyed by this Claude's pid, so a shared folder does not block it.
+    #[test]
+    fn choose_transcript_sessions_record_in_a_shared_folder_resolves() {
+        let fresh = record(START + 5);
+        let here = folder();
+        for other in [None, Some(ID_RECORD)] {
             assert_eq!(
                 choose(
                     Some(Agent::Claude),
                     Some(&fresh),
                     Some(START),
                     None,
-                    &[("w1:p2", folder, other)],
+                    &[("w1:p2", here.as_path(), other)],
                 ),
-                Ok(transcript(ID_RECORD))
+                Ok(transcript(ID_RECORD)),
+                "{other:?}"
             );
         }
     }

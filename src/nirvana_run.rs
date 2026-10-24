@@ -2870,6 +2870,21 @@ pub fn note_owner_key(pane: &str) {
     }
 }
 
+/// Nirvana fork, plan 27 (third round nit): the owner's last key in `pane` under `home`, telling "no key was ever
+/// recorded" (`Ok(None)`) from "the record cannot be read" (`Err`), which `owner_key_at` folds together.
+pub fn owner_key_in(home: &Path, pane: &str) -> Result<Option<u64>, String> {
+    let path = key_file(home, pane);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("{} could not be read: {err}", path.display())),
+    };
+    text.trim()
+        .parse()
+        .map(Some)
+        .map_err(|_| format!("{} holds {:?}, not a second", path.display(), text.trim()))
+}
+
 pub fn owner_key_at(pane: &str) -> Option<u64> {
     let home = crate::nirvana::home()?;
     std::fs::read_to_string(key_file(&home, pane))

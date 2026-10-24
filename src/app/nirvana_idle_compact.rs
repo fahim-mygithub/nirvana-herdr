@@ -3,8 +3,9 @@
 //! The rule lives in `nirvana_idle_compact::decide`; this file only gathers its facts and applies the answer. The
 //! server's deadline loop wakes at the earliest idle Claude terminal's check (`idle_compact_deadline`, read by
 //! `next_headless_loop_deadline_with_git_refresh`), so nothing polls. The command goes in two steps, each on its
-//! own pass: the paste, then, `SUBMIT_DELAY` later, Enter, only if the input line then reads exactly `/compact`
-//! (review S1). Each pass does the work of at most one terminal (review S4).
+//! own pass: the paste, then the reads after it (`ENTER_TRIES`), Enter at the first that reads exactly `/compact`
+//! (review S1), and, when none did, the erase of a paste that echoed late (third round F1). Each pass does the work of
+//! at most one terminal (review S4).
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
@@ -14,17 +15,14 @@ use bytes::Bytes;
 use super::App;
 use crate::detect::Agent;
 use crate::nirvana_idle_compact::{
-    decide, enter_gate, read_input_line, read_outside, Cursor, Decision, Facts, InputLine, Outside,
-    PaneQuery,
+    after_paste, decide, read_input_line, read_outside, AfterPaste, Cursor, Decision, Facts,
+    InputLine, Outside, OwnerKey, PaneQuery, Pending, Step, ERASE_KEYS,
 };
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalState};
 
-/// The pause between the pasted command and its Enter, as `herdr agent prompt` uses
-/// (app/api/agents.rs AGENT_PROMPT_SUBMIT_DELAY).
-const SUBMIT_DELAY: Duration = Duration::from_millis(300);
-/// How long the server waits on the pane writer's reply for the Enter (review S1). The Enter goes with no delay, so
-/// the reply takes one write; the bound keeps a stuck pane from holding the server loop.
-const ENTER_REPLY_WAIT: Duration = Duration::from_millis(250);
+/// How long the server waits on the pane writer's reply for the Enter or the erase (review S1). The keys go with no
+/// delay, so the reply takes one write; the bound keeps a stuck pane from holding the server loop.
+const KEYS_REPLY_WAIT: Duration = Duration::from_millis(250);
 
 /// A pane herdr sees running Claude.
 struct ClaudePane {
@@ -53,9 +51,36 @@ fn input_line_of(runtime: &TerminalRuntime) -> InputLine {
     read_input_line(&runtime.visible_ansi(), cursor, scrolled)
 }
 
-/// Seconds since the owner's last key in the pane, as the orchestrator's wake path reads it (`nirvana_worker`).
-fn owner_key_secs_ago(public: &str) -> Option<u64> {
-    crate::nirvana_run::owner_key_at(public).map(|at| crate::nirvana_run::now().saturating_sub(at))
+/// The owner's last key in the pane, from the file the server writes for the orchestrator's wake path
+/// (`nirvana_run::note_owner_key`). No Nirvana home is a doubt, not quiet (third round nit).
+fn owner_key_of(public: &str) -> OwnerKey {
+    crate::nirvana_idle_compact::owner_key(
+        crate::nirvana::home().as_deref(),
+        public,
+        crate::nirvana_run::now(),
+    )
+}
+
+/// Writes `keys` to the pane and waits on the writer's reply, so a failed write is known (review S1).
+fn write_keys(runtime: &TerminalRuntime, keys: Vec<u8>) -> std::io::Result<()> {
+    runtime
+        .queue_user_input_submission(Bytes::new(), Bytes::from(keys), Duration::ZERO, None)
+        .and_then(|reply| {
+            reply
+                .recv_timeout(KEYS_REPLY_WAIT)
+                .map_err(std::io::Error::other)?
+        })
+}
+
+/// One Backspace per character the paste added, in the key encoding the pane's terminal uses (third round F1).
+fn erase_keys(runtime: &TerminalRuntime) -> Vec<u8> {
+    let backspace = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Backspace,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    runtime
+        .encode_terminal_key(backspace.into())
+        .repeat(ERASE_KEYS)
 }
 
 impl App {
@@ -113,12 +138,12 @@ impl App {
         let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
             return false;
         };
-        if terminal.idle_stretch.enter_at.take().is_some() {
-            return self.idle_compact_enter(&terminal_id);
+        if let Some(pending) = terminal.idle_stretch.pending.take() {
+            return self.idle_compact_after_paste(&terminal_id, pending);
         }
         // Review S2: stamped first, pane or not, so a check that finds nothing waits RECHECK.
         terminal.idle_stretch.checked_at = Some(now);
-        let stretch = terminal.idle_stretch;
+        let stretch = terminal.idle_stretch.clone();
         let state = terminal.state;
         let agent = terminal.effective_known_agent();
         let panes = self.claude_panes();
@@ -162,7 +187,7 @@ impl App {
             sent_in_stretch: stretch.sent,
             transcript_age: outside.transcript_age,
             context_tokens: outside.context_tokens,
-            owner_key_secs_ago: owner_key_secs_ago(&pane.public),
+            owner_key: owner_key_of(&pane.public),
             input_line,
         };
         match decide(&facts) {
@@ -203,7 +228,11 @@ impl App {
         }
         if let Some(terminal) = self.state.terminals.get_mut(terminal_id) {
             terminal.idle_stretch.sent = true;
-            terminal.idle_stretch.enter_at = now.checked_add(SUBMIT_DELAY);
+            terminal.idle_stretch.pending = Some(Pending {
+                pane: public.to_owned(),
+                pasted_at: now,
+                step: Step::Try(0),
+            });
         }
         let tokens = tokens.unwrap_or(0);
         match idle_for {
@@ -218,43 +247,59 @@ impl App {
         true
     }
 
-    /// The Enter, on the pass after the paste (review S1): only if the line reads exactly `/compact` and the owner
-    /// has not typed since, and the writer's reply is waited on.
-    fn idle_compact_enter(&mut self, terminal_id: &TerminalId) -> bool {
-        let public = self
-            .claude_panes()
-            .into_iter()
-            .find(|pane| &pane.terminal_id == terminal_id)
-            .map(|pane| pane.public);
-        let (Some(public), Some(runtime)) = (public, self.terminal_runtimes.get(terminal_id))
-        else {
-            tracing::warn!(
-                "nirvana: idle compact lost the pane before its Enter; /compact was left unsent"
-            );
+    /// One read after the paste (review S1, third round F1), on the pane id the paste's pass found. Each outcome
+    /// logs one line: sent, erased, or left with the reason. True when a key was typed.
+    fn idle_compact_after_paste(&mut self, terminal_id: &TerminalId, pending: Pending) -> bool {
+        let public = pending.pane.clone();
+        let Some(runtime) = self.terminal_runtimes.get(terminal_id) else {
+            tracing::warn!(pane = %public, "nirvana: idle compact lost the pane after the paste; /compact was left unsent");
             return false;
         };
-        if let Err(why) = enter_gate(&input_line_of(runtime), owner_key_secs_ago(&public)) {
-            tracing::warn!(pane = %public, why, "nirvana: idle compact left /compact unsent in the input line");
-            return false;
-        }
-        let (_, enter) = super::api_helpers::encode_api_submission_parts(
-            runtime,
-            crate::nirvana_idle_compact::COMMAND,
-        );
-        let written = runtime
-            .queue_user_input_submission(Bytes::new(), Bytes::from(enter), Duration::ZERO, None)
-            .and_then(|reply| {
-                reply
-                    .recv_timeout(ENTER_REPLY_WAIT)
-                    .map_err(std::io::Error::other)?
-            });
-        match written {
-            Ok(()) => {
-                tracing::info!(pane = %public, "nirvana: idle Claude sent /compact");
-                true
+        let line = input_line_of(runtime);
+        match after_paste(pending.step, &line, &owner_key_of(&public)) {
+            AfterPaste::Enter => {
+                let (_, enter) = super::api_helpers::encode_api_submission_parts(
+                    runtime,
+                    crate::nirvana_idle_compact::COMMAND,
+                );
+                match write_keys(runtime, enter) {
+                    Ok(()) => {
+                        tracing::info!(pane = %public, "nirvana: idle Claude sent /compact");
+                        true
+                    }
+                    Err(err) => {
+                        tracing::warn!(pane = %public, err = %err, "nirvana: idle compact's Enter failed; /compact was left unsent");
+                        false
+                    }
+                }
             }
-            Err(err) => {
-                tracing::warn!(pane = %public, err = %err, "nirvana: idle compact's Enter failed");
+            AfterPaste::Next(step) => {
+                if let Some(terminal) = self.state.terminals.get_mut(terminal_id) {
+                    terminal.idle_stretch.pending = Some(Pending { step, ..pending });
+                }
+                false
+            }
+            AfterPaste::Erase => match write_keys(runtime, erase_keys(runtime)) {
+                Ok(()) => {
+                    if let Some(terminal) = self.state.terminals.get_mut(terminal_id) {
+                        terminal.idle_stretch.pending = Some(Pending {
+                            step: Step::Erased,
+                            ..pending
+                        });
+                    }
+                    true
+                }
+                Err(err) => {
+                    tracing::warn!(pane = %public, err = %err, "nirvana: idle compact could not erase the unsent /compact; it was left in the input line");
+                    false
+                }
+            },
+            AfterPaste::Erased => {
+                tracing::info!(pane = %public, "nirvana: idle compact erased the unsent /compact");
+                false
+            }
+            AfterPaste::Leave(why) => {
+                tracing::warn!(pane = %public, why, "nirvana: idle compact left the input line as it was");
                 false
             }
         }
@@ -311,7 +356,7 @@ impl App {
 mod tests {
     use super::*;
     use crate::detect::AgentState;
-    use crate::nirvana_idle_compact::IdleStretch;
+    use crate::nirvana_idle_compact::{IdleStretch, ENTER_TRIES, ERASED_AT, ERASE_AT};
 
     const MIN: Duration = Duration::from_secs(60);
     const RECORDED_EMPTY: &str = include_str!("../nirvana_run/fixtures/claude-2.1.302-empty.ansi");
@@ -433,6 +478,20 @@ mod tests {
         assert!(matches!(input_line_of(&runtime), InputLine::Unsure(_)));
     }
 
+    /// The instant of the read `step` after a paste at `pasted`.
+    fn read_at(pasted: Instant, step: Step) -> Instant {
+        Pending {
+            pane: String::new(),
+            pasted_at: pasted,
+            step,
+        }
+        .due()
+        .unwrap()
+    }
+
+    /// The test pane's runtime takes Backspace as DEL, the encoding the terminal runtime gives it.
+    const BACKSPACE: &str = "\x7f";
+
     #[tokio::test]
     async fn idle_compact_server_types_compact_once_into_an_idle_claude() {
         let _guard = crate::nirvana::with_test_home("idle-compact-send");
@@ -448,11 +507,12 @@ mod tests {
         }));
         assert_eq!(asked.get(), 0);
         // The paste: the command, no Enter yet.
-        assert!(app.nirvana_idle_compact_with(t0 + 51 * MIN, long_idle));
+        let pasted = t0 + 51 * MIN;
+        assert!(app.nirvana_idle_compact_with(pasted, long_idle));
         assert_eq!(typed(&mut receiver), "/compact");
         let terminal_id = root_terminal_id(&app);
         assert!(app.state.terminals[&terminal_id].idle_stretch.sent);
-        let enter_at = t0 + 51 * MIN + SUBMIT_DELAY;
+        let enter_at = pasted + ENTER_TRIES[0];
         assert_eq!(app.idle_compact_deadline(), Some(enter_at));
         // The Enter, once the line reads exactly /compact.
         line_now_reads(&app, "/compact");
@@ -464,18 +524,119 @@ mod tests {
         assert_eq!(typed(&mut receiver), "");
     }
 
-    /// Review S1: a line that is not exactly `/compact` when the Enter is due gets no Enter, and no second try.
+    /// Third round F1: a slow echo reads `Empty` at the first try and `/compact` at the second, which sends Enter.
     #[tokio::test]
-    async fn idle_compact_server_sends_no_enter_unless_the_line_reads_compact() {
-        let _guard = crate::nirvana::with_test_home("idle-compact-no-enter");
-        for line in ["/compact and more", "", "hello"] {
+    async fn idle_compact_server_slow_echo_sends_enter_at_a_later_try() {
+        let _guard = crate::nirvana::with_test_home("idle-compact-slow-echo");
+        let mut app = test_app();
+        let t0 = Instant::now();
+        let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+        let pasted = t0 + 51 * MIN;
+        assert!(app.nirvana_idle_compact_with(pasted, long_idle));
+        assert_eq!(typed(&mut receiver), "/compact");
+        line_now_reads(&app, "");
+        assert!(!app.nirvana_idle_compact_with(read_at(pasted, Step::Try(0)), long_idle));
+        assert_eq!(typed(&mut receiver), "");
+        assert_eq!(
+            app.idle_compact_deadline(),
+            Some(read_at(pasted, Step::Try(1)))
+        );
+        line_now_reads(&app, "/compact");
+        assert!(app.nirvana_idle_compact_with(read_at(pasted, Step::Try(1)), long_idle));
+        assert_eq!(typed(&mut receiver), "\r");
+        assert_eq!(app.idle_compact_deadline(), None);
+    }
+
+    /// Third round F1: the owner's key between tries ends them, and nothing is erased.
+    #[tokio::test]
+    async fn idle_compact_server_owner_keys_between_tries_end_them() {
+        let _guard = crate::nirvana::with_test_home("idle-compact-owner-between");
+        let mut app = test_app();
+        let t0 = Instant::now();
+        let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+        let pasted = t0 + 51 * MIN;
+        assert!(app.nirvana_idle_compact_with(pasted, long_idle));
+        assert_eq!(typed(&mut receiver), "/compact");
+        line_now_reads(&app, "");
+        assert!(!app.nirvana_idle_compact_with(read_at(pasted, Step::Try(0)), long_idle));
+        crate::nirvana_run::note_owner_key(&root_public(&app));
+        line_now_reads(&app, "/compact");
+        assert!(!app.nirvana_idle_compact_with(read_at(pasted, Step::Try(1)), long_idle));
+        assert_eq!(typed(&mut receiver), "");
+        // Ended: no read is due, and the erase's time types nothing.
+        assert_eq!(app.idle_compact_deadline(), None);
+        assert!(!app.nirvana_idle_compact_with(pasted + ERASE_AT, long_idle));
+        assert_eq!(typed(&mut receiver), "");
+    }
+
+    /// Third round F1: three tries that read `Empty`, then a line of only the paste: exactly 8 Backspaces, then one
+    /// more read, and nothing more.
+    #[tokio::test]
+    async fn idle_compact_server_erases_a_paste_left_after_the_last_try() {
+        let _guard = crate::nirvana::with_test_home("idle-compact-erase");
+        let mut app = test_app();
+        let t0 = Instant::now();
+        let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+        let pasted = t0 + 51 * MIN;
+        assert!(app.nirvana_idle_compact_with(pasted, long_idle));
+        assert_eq!(typed(&mut receiver), "/compact");
+        line_now_reads(&app, "");
+        for n in 0..ENTER_TRIES.len() {
+            assert!(!app.nirvana_idle_compact_with(read_at(pasted, Step::Try(n)), long_idle));
+        }
+        assert_eq!(typed(&mut receiver), "");
+        assert_eq!(app.idle_compact_deadline(), Some(pasted + ERASE_AT));
+        line_now_reads(&app, "/compact");
+        assert!(app.nirvana_idle_compact_with(pasted + ERASE_AT, long_idle));
+        assert_eq!(typed(&mut receiver), BACKSPACE.repeat(8));
+        // The read after the erase.
+        assert_eq!(app.idle_compact_deadline(), Some(pasted + ERASED_AT));
+        line_now_reads(&app, "");
+        assert!(!app.nirvana_idle_compact_with(pasted + ERASED_AT, long_idle));
+        assert_eq!(typed(&mut receiver), "");
+        assert_eq!(app.idle_compact_deadline(), None);
+    }
+
+    /// Third round F1: a line holding the owner's text after the paste is never erased, at a try or after the last.
+    #[tokio::test]
+    async fn idle_compact_server_never_erases_the_owners_text() {
+        let _guard = crate::nirvana::with_test_home("idle-compact-no-erase");
+        for at_try in [true, false] {
             let mut app = test_app();
             let t0 = Instant::now();
             let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
-            assert!(app.nirvana_idle_compact_with(t0 + 51 * MIN, long_idle));
+            let pasted = t0 + 51 * MIN;
+            assert!(app.nirvana_idle_compact_with(pasted, long_idle));
+            assert_eq!(typed(&mut receiver), "/compact");
+            if !at_try {
+                line_now_reads(&app, "");
+                for n in 0..ENTER_TRIES.len() {
+                    app.nirvana_idle_compact_with(read_at(pasted, Step::Try(n)), long_idle);
+                }
+                assert_eq!(app.idle_compact_deadline(), Some(pasted + ERASE_AT));
+            }
+            line_now_reads(&app, "/compactfoo");
+            let due = app.idle_compact_deadline().unwrap();
+            assert!(!app.nirvana_idle_compact_with(due, long_idle));
+            assert_eq!(typed(&mut receiver), "", "at a try: {at_try}");
+            assert_eq!(app.idle_compact_deadline(), None, "at a try: {at_try}");
+        }
+    }
+
+    /// Review S1: a line that is neither empty nor exactly `/compact` when the Enter is due gets no Enter, no second
+    /// try, and no erase.
+    #[tokio::test]
+    async fn idle_compact_server_sends_no_enter_unless_the_line_reads_compact() {
+        let _guard = crate::nirvana::with_test_home("idle-compact-no-enter");
+        for line in ["/compact and more", "hello"] {
+            let mut app = test_app();
+            let t0 = Instant::now();
+            let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+            let pasted = t0 + 51 * MIN;
+            assert!(app.nirvana_idle_compact_with(pasted, long_idle));
             assert_eq!(typed(&mut receiver), "/compact");
             line_now_reads(&app, line);
-            assert!(!app.nirvana_idle_compact_with(t0 + 51 * MIN + SUBMIT_DELAY, long_idle));
+            assert!(!app.nirvana_idle_compact_with(pasted + ENTER_TRIES[0], long_idle));
             assert_eq!(typed(&mut receiver), "", "{line:?}");
             assert_eq!(app.idle_compact_deadline(), None, "{line:?}");
         }
@@ -489,9 +650,11 @@ mod tests {
         let t0 = Instant::now();
         drop(idle_claude(&mut app, t0, RECORDED_EMPTY));
         assert!(!app.nirvana_idle_compact_with(t0 + 51 * MIN, long_idle));
-        let stretch = app.state.terminals[&root_terminal_id(&app)].idle_stretch;
+        let stretch = app.state.terminals[&root_terminal_id(&app)]
+            .idle_stretch
+            .clone();
         assert!(!stretch.sent);
-        assert_eq!(stretch.enter_at, None);
+        assert_eq!(stretch.pending, None);
         assert_eq!(app.idle_compact_deadline(), Some(t0 + 52 * MIN));
     }
 
@@ -506,7 +669,7 @@ mod tests {
         assert_eq!(typed(&mut receiver), "/compact");
         line_now_reads(&app, "/compact");
         drop(receiver);
-        assert!(!app.nirvana_idle_compact_with(t0 + 51 * MIN + SUBMIT_DELAY, long_idle));
+        assert!(!app.nirvana_idle_compact_with(t0 + 51 * MIN + ENTER_TRIES[0], long_idle));
     }
 
     /// Review S1: the owner's key inside `OWNER_QUIET_S`, written the way the server writes it, skips the paste.
@@ -537,7 +700,31 @@ mod tests {
         assert_eq!(typed(&mut receiver), "/compact");
         line_now_reads(&app, "/compact");
         crate::nirvana_run::note_owner_key(&root_public(&app));
-        assert!(!app.nirvana_idle_compact_with(t0 + 51 * MIN + SUBMIT_DELAY, long_idle));
+        assert!(!app.nirvana_idle_compact_with(t0 + 51 * MIN + ENTER_TRIES[0], long_idle));
+        assert_eq!(typed(&mut receiver), "");
+    }
+
+    /// Third round nit: the paste's pass keeps the public pane id it found for the reads after it, so they do not
+    /// walk the panes' folders again.
+    #[tokio::test]
+    async fn idle_compact_server_reuses_the_pasted_pane_id() {
+        let _guard = crate::nirvana::with_test_home("idle-compact-reuse-id");
+        let mut app = test_app();
+        let t0 = Instant::now();
+        let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+        assert!(app.nirvana_idle_compact_with(t0 + 51 * MIN, long_idle));
+        assert_eq!(typed(&mut receiver), "/compact");
+        let pending = app.state.terminals[&root_terminal_id(&app)]
+            .idle_stretch
+            .pending
+            .clone()
+            .unwrap();
+        assert_eq!(pending.pane, root_public(&app));
+        assert_eq!(pending.step, Step::Try(0));
+        // The Enter's pass goes by that id: a key noted under it holds the Enter.
+        line_now_reads(&app, "/compact");
+        crate::nirvana_run::note_owner_key(&pending.pane);
+        assert!(!app.nirvana_idle_compact_with(t0 + 51 * MIN + ENTER_TRIES[0], long_idle));
         assert_eq!(typed(&mut receiver), "");
     }
 
@@ -657,11 +844,10 @@ mod tests {
     async fn idle_compact_deadline_reaches_the_server_loop() {
         let _guard = crate::nirvana::with_test_home("idle-compact-loop");
         let mut app = test_app();
-        let now = Instant::now();
-        // Idle since 49 minutes 59 seconds ago: due in one second, before any of the loop's other deadlines.
-        let since = now
-            .checked_sub(50 * MIN - Duration::from_secs(1))
-            .expect("this machine's clock started over 50 minutes ago");
+        // Idle since 49 minutes 59 seconds before `now`: due in one second, before any of the loop's other deadlines.
+        // Built forward from `since`, so no `Instant` is ever subtracted.
+        let since = Instant::now();
+        let now = since + (50 * MIN - Duration::from_secs(1));
         let _receiver = idle_claude(&mut app, since, RECORDED_EMPTY);
         assert_eq!(
             app.next_headless_loop_deadline_with_git_refresh(now, false, false),

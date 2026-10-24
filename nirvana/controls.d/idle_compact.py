@@ -177,8 +177,8 @@ CONTROLS = (
     Control(
         'p27_stretch_keeps_start',
         'src/nirvana_idle_compact.rs',
-        '        if self.since.is_some() {\n            return self;\n        }\n',
-        '        if false && self.since.is_some() {\n            return self;\n        }\n',
+        '        if self.since.is_some() {\n            return self.clone();\n        }\n',
+        '        if false && self.since.is_some() {\n            return self.clone();\n        }\n',
         'idle_stretch_starts_on_idle_and_keeps_its_start',
         'rust',
     ),
@@ -772,7 +772,7 @@ CONTROLS = (
     Control(
         'p27_rule6_owner_quiet',
         'src/nirvana_idle_compact.rs',
-        '    if let Some(why) = owner_quiet_breach(facts.owner_key_secs_ago) {\n        return skip(why);\n    }\n',
+        '    if let Some(why) = owner_quiet_breach(&facts.owner_key) {\n        return skip(why);\n    }\n',
         '',
         'idle_compact_rule6_owner_keys_inside_the_quiet_window_skip',
         'rust',
@@ -781,34 +781,34 @@ CONTROLS = (
     Control(
         'p27_owner_quiet_window',
         'src/nirvana_idle_compact.rs',
-        '    (ago < crate::nirvana_run::OWNER_QUIET_S)\n',
-        '    (ago < 1)\n',
+        '        OwnerKey::SecsAgo(ago) => (*ago < crate::nirvana_run::OWNER_QUIET_S)\n',
+        '        OwnerKey::SecsAgo(ago) => (*ago < 1)\n',
         'idle_compact_rule6_owner_keys_inside_the_quiet_window_skip',
         'rust',
     ),
-    # Review S1: Enter only on exactly /compact
+    # Review S1: Enter only on exactly /compact (third round: in after_paste)
     Control(
         'p27_enter_exact',
         'src/nirvana_idle_compact.rs',
-        '        InputLine::Text(text) if text == COMMAND => Ok(()),\n',
-        '        InputLine::Text(text) if text.starts_with(COMMAND) => Ok(()),\n',
+        '    let compact = matches!(line, InputLine::Text(text) if text == COMMAND);\n',
+        '    let compact = matches!(line, InputLine::Text(text) if text.starts_with(COMMAND));\n',
         'idle_compact_enter_only_on_exactly_compact',
         'rust',
     ),
-    # Review S1: no Enter while the owner types
+    # Review S1: no Enter while the owner types (third round: in after_paste)
     Control(
         'p27_enter_owner',
         'src/nirvana_idle_compact.rs',
-        '    if let Some(why) = owner_quiet_breach(owner_key_secs_ago) {\n        return Err(why);\n    }\n',
+        '    if let Some(why) = owner_quiet_breach(owner_key) {\n        return leave(why);\n    }\n',
         '',
         'idle_compact_enter_only_on_exactly_compact',
         'rust',
     ),
-    # Review S1: a pasted stretch is due its Enter
+    # Review S1: a pasted stretch is due its next read
     Control(
         'p27_stretch_enter_due',
         'src/nirvana_idle_compact.rs',
-        '        if let Some(enter_at) = self.enter_at {\n            return Some(enter_at);\n        }\n',
+        '        if let Some(pending) = &self.pending {\n            return pending.due();\n        }\n',
         '',
         'idle_stretch_is_due_its_enter_after_the_paste',
         'rust',
@@ -817,62 +817,62 @@ CONTROLS = (
     Control(
         'p27_server_owner_key_fact',
         'src/app/nirvana_idle_compact.rs',
-        '            owner_key_secs_ago: owner_key_secs_ago(&pane.public),\n',
-        '            owner_key_secs_ago: None,\n',
+        '            owner_key: owner_key_of(&pane.public),\n',
+        '            owner_key: OwnerKey::Never,\n',
         'idle_compact_server_skips_while_the_owner_types',
         'rust',
     ),
     # Review S1: the key's age is now less its second, as the wake path reads it
     Control(
         'p27_server_owner_key_age',
-        'src/app/nirvana_idle_compact.rs',
-        '    crate::nirvana_run::owner_key_at(public).map(|at| crate::nirvana_run::now().saturating_sub(at))\n',
-        '    crate::nirvana_run::owner_key_at(public).map(|_at| u64::MAX)\n',
+        'src/nirvana_idle_compact.rs',
+        '        Ok(Some(at)) => OwnerKey::SecsAgo(now.saturating_sub(at)),\n',
+        '        Ok(Some(_at)) => OwnerKey::SecsAgo(u64::MAX),\n',
         'idle_compact_server_skips_while_the_owner_types',
         'rust',
     ),
-    # Review S1: the Enter re-reads the line
+    # Review S1: the read after the paste reads the line again
     Control(
         'p27_server_enter_rereads',
         'src/app/nirvana_idle_compact.rs',
-        '        if let Err(why) = enter_gate(&input_line_of(runtime), owner_key_secs_ago(&public)) {\n',
-        '        if let Err(why) = enter_gate(&InputLine::Text("/compact".into()), owner_key_secs_ago(&public)) {\n',
+        '        let line = input_line_of(runtime);\n',
+        '        let line = InputLine::Text("/compact".into());\n',
         'idle_compact_server_sends_no_enter_unless_the_line_reads_compact',
         'rust',
     ),
-    # Review S1: the Enter reads the owner's key again
+    # Review S1: the read after the paste reads the owner's key again
     Control(
         'p27_server_enter_owner',
         'src/app/nirvana_idle_compact.rs',
-        '        if let Err(why) = enter_gate(&input_line_of(runtime), owner_key_secs_ago(&public)) {\n',
-        '        if let Err(why) = enter_gate(&input_line_of(runtime), None) {\n',
+        '        match after_paste(pending.step, &line, &owner_key_of(&public)) {\n',
+        '        match after_paste(pending.step, &line, &OwnerKey::Never) {\n',
         'idle_compact_server_holds_the_enter_when_the_owner_types',
         'rust',
     ),
-    # Review S1: a pending Enter is taken on its pass
+    # Review S1: a pending read is taken on its pass
     Control(
         'p27_server_enter_pass',
         'src/app/nirvana_idle_compact.rs',
-        '        if terminal.idle_stretch.enter_at.take().is_some() {\n',
-        '        if terminal.idle_stretch.enter_at.take().is_some() && false {\n',
+        '        if let Some(pending) = terminal.idle_stretch.pending.take() {\n',
+        '        if let Some(pending) = terminal.idle_stretch.pending.take().filter(|_| false) {\n',
         'idle_compact_server_types_compact_once_into_an_idle_claude',
         'rust',
     ),
-    # Review S1: the paste sets the Enter's time
+    # Review S1: the paste sets the reads after it
     Control(
         'p27_server_enter_at_set',
         'src/app/nirvana_idle_compact.rs',
-        '            terminal.idle_stretch.enter_at = now.checked_add(SUBMIT_DELAY);\n',
+        '            terminal.idle_stretch.pending = Some(Pending {\n                pane: public.to_owned(),\n                pasted_at: now,\n                step: Step::Try(0),\n            });\n',
         '',
         'idle_compact_server_types_compact_once_into_an_idle_claude',
         'rust',
     ),
-    # Review S1: the Enter's reply is waited on, and a failure is known
+    # Review S1: the keys' reply is waited on, and a failure is known
     Control(
         'p27_server_enter_reply',
         'src/app/nirvana_idle_compact.rs',
-        '            .and_then(|reply| {\n                reply\n                    .recv_timeout(ENTER_REPLY_WAIT)\n                    .map_err(std::io::Error::other)?\n            });\n',
-        '            .map(|_reply| ());\n',
+        '        .and_then(|reply| {\n            reply\n                .recv_timeout(KEYS_REPLY_WAIT)\n                .map_err(std::io::Error::other)?\n        })\n',
+        '        .map(|_reply| ())\n',
         'idle_compact_server_reports_a_failed_enter',
         'rust',
     ),
@@ -1009,6 +1009,214 @@ CONTROLS = (
         '        crate::nirvana_subagents::encode_project_folder(other_folder) == encoded\n',
         '        true\n',
         'choose_transcript_two_panes_in_one_folder',
+        'rust',
+    ),
+    # ---- Plan 27 third round ----
+    # F1: the tries are at 300 ms, 1 s and 2 s, not one read at 300 ms
+    Control(
+        'p27_try_schedule',
+        'src/nirvana_idle_compact.rs',
+        'pub const ENTER_TRIES: [Duration; 3] = [\n    Duration::from_millis(300),\n    Duration::from_secs(1),\n    Duration::from_secs(2),\n];\n',
+        'pub const ENTER_TRIES: [Duration; 1] = [Duration::from_millis(300)];\n',
+        'idle_compact_server_slow_echo_sends_enter_at_a_later_try',
+        'rust',
+    ),
+    # F1: an empty line at a try waits for the next try
+    Control(
+        'p27_try_next_on_empty',
+        'src/nirvana_idle_compact.rs',
+        '        (Step::Try(n), InputLine::Empty) if n + 1 < ENTER_TRIES.len() => {\n',
+        '        (Step::Try(n), InputLine::Empty) if false && n + 1 < ENTER_TRIES.len() => {\n',
+        'idle_compact_server_slow_echo_sends_enter_at_a_later_try',
+        'rust',
+    ),
+    # F1: an empty line at the last try waits for the erase read
+    Control(
+        'p27_try_last_goes_to_erase',
+        'src/nirvana_idle_compact.rs',
+        '        (Step::Try(_), InputLine::Empty) => AfterPaste::Next(Step::Erase),\n',
+        '        (Step::Try(_), InputLine::Empty) => leave(String::new()),\n',
+        'idle_compact_server_erases_a_paste_left_after_the_last_try',
+        'rust',
+    ),
+    # F1: the erase read is due at ERASE_AT, after the last try
+    Control(
+        'p27_erase_at',
+        'src/nirvana_idle_compact.rs',
+        '            Step::Erase => ERASE_AT,\n',
+        '            Step::Erase => ERASED_AT,\n',
+        'idle_compact_after_paste_tries_then_erase_read',
+        'rust',
+    ),
+    # F1: the owner's key between tries ends them, with no Enter and no erase
+    Control(
+        'p27_tries_end_on_owner_keys',
+        'src/nirvana_idle_compact.rs',
+        '    if let Some(why) = owner_quiet_breach(owner_key) {\n        return leave(why);\n    }\n',
+        '',
+        'idle_compact_server_owner_keys_between_tries_end_them',
+        'rust',
+    ),
+    # F1: exactly one Backspace per character of /compact
+    Control(
+        'p27_erase_count',
+        'src/nirvana_idle_compact.rs',
+        'pub const ERASE_KEYS: usize = COMMAND.len();\n',
+        'pub const ERASE_KEYS: usize = COMMAND.len() + 1;\n',
+        'idle_compact_server_erases_a_paste_left_after_the_last_try',
+        'rust',
+    ),
+    # F1: the server sends ERASE_KEYS Backspaces, not one
+    Control(
+        'p27_erase_keys_repeat',
+        'src/app/nirvana_idle_compact.rs',
+        '        .repeat(ERASE_KEYS)\n',
+        '        .repeat(1)\n',
+        'idle_compact_server_erases_a_paste_left_after_the_last_try',
+        'rust',
+    ),
+    # F1: the erase key is Backspace, in the terminal runtime's encoding
+    Control(
+        'p27_erase_backspace_key',
+        'src/app/nirvana_idle_compact.rs',
+        '        crossterm::event::KeyCode::Backspace,\n',
+        '        crossterm::event::KeyCode::Delete,\n',
+        'idle_compact_server_erases_a_paste_left_after_the_last_try',
+        'rust',
+    ),
+    # F1: the erase read erases only a line of exactly /compact, never one with the owner's text
+    Control(
+        'p27_no_erase_on_owner_text',
+        'src/nirvana_idle_compact.rs',
+        '        (Step::Erase, _) if compact => AfterPaste::Erase,\n',
+        '        (Step::Erase, InputLine::Text(_)) => AfterPaste::Erase,\n',
+        'idle_compact_server_never_erases_the_owners_text',
+        'rust',
+    ),
+    # F1: an erase read that finds the paste never showed sends nothing
+    Control(
+        'p27_erase_never_showed',
+        'src/nirvana_idle_compact.rs',
+        '        (Step::Erase, InputLine::Empty) => leave("the paste never showed in the input line".into()),\n',
+        '        (Step::Erase, InputLine::Empty) => AfterPaste::Erase,\n',
+        'idle_compact_after_paste_tries_then_erase_read',
+        'rust',
+    ),
+    # F1: after the erase the line is read once more
+    Control(
+        'p27_erase_reads_after',
+        'src/app/nirvana_idle_compact.rs',
+        '                        terminal.idle_stretch.pending = Some(Pending {\n                            step: Step::Erased,\n                            ..pending\n                        });\n',
+        '',
+        'idle_compact_server_erases_a_paste_left_after_the_last_try',
+        'rust',
+    ),
+    # F1: the read after the erase counts only an empty line as erased
+    Control(
+        'p27_erased_only_when_empty',
+        'src/nirvana_idle_compact.rs',
+        '            InputLine::Empty => AfterPaste::Erased,\n',
+        '            InputLine::Empty | InputLine::Text(_) => AfterPaste::Erased,\n',
+        'idle_compact_after_paste_erases_only_the_paste',
+        'rust',
+    ),
+    # F2: the loose phrases are read only from the box's top rule down
+    Control(
+        'p27_box_phrases_box_only',
+        'src/nirvana_idle_compact.rs',
+        '    let boxed = plain[top..].join("\\n").to_lowercase();\n',
+        '    let boxed = lower.clone();\n',
+        'idle_compact_input_line_reply_above_the_box_still_reads_the_box',
+        'rust',
+    ),
+    # F2: the loose phrases in the box's area are a doubt
+    Control(
+        'p27_box_phrases_read',
+        'src/nirvana_idle_compact.rs',
+        '    if let Some(phrase) = BOX_PHRASES.iter().find(|phrase| boxed.contains(**phrase)) {\n',
+        '    if let Some(phrase) = BOX_PHRASES.iter().find(|_phrase| false) {\n',
+        'idle_compact_input_line_reply_above_the_box_still_reads_the_box',
+        'rust',
+    ),
+    # F2: a dialog marker anywhere on screen still reads Unsure
+    Control(
+        'p27_marker_anywhere',
+        'src/nirvana_idle_compact.rs',
+        '    if let Some(marker) = NOT_THE_INPUT.iter().find(|marker| lower.contains(**marker)) {\n',
+        '    if let Some(marker) = NOT_THE_INPUT.iter().find(|_marker| false) {\n',
+        'idle_compact_input_line_dialog_marker_anywhere_is_not_empty',
+        'rust',
+    ),
+    # Nit: the marker table has one row per marker; one row taken out reddens it
+    Control(
+        'p27_marker_table_row',
+        'src/nirvana_idle_compact.rs',
+        '    "requests your input",\n    "select model",\n',
+        '    "requests your input",\n',
+        'idle_compact_input_line_every_marker_is_read',
+        'rust',
+    ),
+    # F3: only a hook id is blocked by another Claude pane in the folder
+    Control(
+        'p27_transcript_shared_hook_only',
+        'src/nirvana_idle_compact.rs',
+        '    if from_hook\n        && others.iter().any(',
+        '    if true\n        && others.iter().any(',
+        'choose_transcript_sessions_record_in_a_shared_folder_resolves',
+        'rust',
+    ),
+    # Nit: no Nirvana home is a doubt, not quiet
+    Control(
+        'p27_owner_key_no_home',
+        'src/nirvana_idle_compact.rs',
+        '        return OwnerKey::Unknown("the Nirvana home is not known".into());\n',
+        '        return OwnerKey::Never;\n',
+        'idle_compact_owner_key_tells_no_home_from_no_key',
+        'rust',
+    ),
+    # Nit: an owner key that is not known skips
+    Control(
+        'p27_owner_unknown_skips',
+        'src/nirvana_idle_compact.rs',
+        '        OwnerKey::Unknown(why) => Some(format!("the owner\'s last key is not known: {why}")),\n',
+        '        OwnerKey::Unknown(_why) => None,\n',
+        'idle_compact_rule6_unknown_owner_key_skips',
+        'rust',
+    ),
+    # Nit: a pane that never had a key is quiet
+    Control(
+        'p27_owner_key_never',
+        'src/nirvana_idle_compact.rs',
+        '        Ok(None) => OwnerKey::Never,\n',
+        '        Ok(None) => OwnerKey::Unknown(String::new()),\n',
+        'idle_compact_owner_key_tells_no_home_from_no_key',
+        'rust',
+    ),
+    # Nit: no key file is "never", not a read error
+    Control(
+        'p27_owner_key_file_missing',
+        'src/nirvana_run.rs',
+        '        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),\n',
+        '',
+        'idle_compact_owner_key_tells_no_home_from_no_key',
+        'rust',
+    ),
+    # Nit: the paste keeps the public pane id it found
+    Control(
+        'p27_server_pending_pane',
+        'src/app/nirvana_idle_compact.rs',
+        '                pane: public.to_owned(),\n',
+        '                pane: String::new(),\n',
+        'idle_compact_server_reuses_the_pasted_pane_id',
+        'rust',
+    ),
+    # Nit: the reads after the paste go by that id
+    Control(
+        'p27_server_reuses_pane_id',
+        'src/app/nirvana_idle_compact.rs',
+        '        let public = pending.pane.clone();\n',
+        '        let public = String::from("w0:p0");\n',
+        'idle_compact_server_reuses_the_pasted_pane_id',
         'rust',
     ),
 )
