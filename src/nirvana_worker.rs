@@ -2924,6 +2924,8 @@ pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i3
     if booked.class.starts_with("research.") || booked.class.starts_with("media.") {
         text.push_str("\n\nYour Work Report must include the `sources` array of `{url, used_for}` for each source consulted.");
     }
+    // Plan 25 §5: a browser order's worker batches its steps, so only the result reaches the model.
+    let text = crate::nirvana_lean::with_browser_line(text, &booked.class, &request.needs);
     let order_file = write_order(project, &cwd, &request.order, &text).map_err(io)?;
     let seated = Seated {
         order: request.order.clone(),

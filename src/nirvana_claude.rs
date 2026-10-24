@@ -575,6 +575,10 @@ fn digest_cli() -> std::io::Result<()> {
         let _ = record_session_seat(&home, session_id, model, &launch_effort);
     }
     println!("{}", digest_text(&digest));
+    // Plan 25 §2: after a `/clear` herdr typed, the fresh session starts from the handoff note.
+    if let Some(note) = crate::nirvana_fresh::session_start_hook(&hook) {
+        println!("\n{note}");
+    }
     Ok(())
 }
 
@@ -1400,6 +1404,9 @@ fn stop_cli() -> std::io::Result<()> {
     let Some(project) = project_at(hook_cwd(&hook).as_deref()) else {
         return Ok(());
     };
+    // Plan 25 §2: a run this pane ended since the session's last clear, and a context above `fresh_above`, record a
+    // pending fresh start for herdr's server to type.
+    crate::nirvana_fresh::stop_hook(&hook, &project);
     let dead_ends: Vec<(String, String, u64)> = run_steps(&project, now())
         .into_iter()
         .filter_map(|(run, step, seq)| step.err().map(|why| (run, why, seq)))

@@ -363,7 +363,12 @@ mod tests {
         let (name, argv) = started(&response);
         assert_eq!(name.as_deref(), Some("nirvana"));
         assert_eq!(argv[0], "claude");
-        assert_eq!(argv[1..], NewKind::Nirvana.args(&home)[..]);
+        // Plan 25 §3: the launch adds the probe's cut list to O4a's argv.
+        let launched = crate::nirvana_lean::with_cuts(
+            NewKind::Nirvana.args(&home),
+            &crate::nirvana_lean::DISALLOWED,
+        );
+        assert_eq!(argv[1..], launched[..]);
         let line = typed();
         // O4b: `--append-system-prompt-file` carries the role; the `--agent` file has no prompt of its own.
         for flag in [

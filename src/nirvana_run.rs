@@ -395,6 +395,16 @@ pub enum Kind {
         #[serde(default)]
         pools_basis: Option<String>,
     },
+    /// Plan 25 §2: Nirvana Claude's pane was cleared after this run ended, and started from herdr's handoff note.
+    /// `context` is the session's context before the clear; `note_tokens` the note's size, characters / 4.
+    Fresh {
+        pane: String,
+        /// "stop" (the Stop hook's trigger) or "owner" (`herdr nirvana fresh`).
+        by: String,
+        #[serde(default)]
+        context: Option<u64>,
+        note_tokens: u64,
+    },
     /// A kind a later herdr wrote: kept in the file, skipped by this replay.
     #[serde(other)]
     Unknown,
@@ -418,9 +428,11 @@ impl Kind {
             Self::Usage { order, .. } | Self::Asked { order, .. } | Self::Ended { order, .. } => {
                 order.as_deref()
             }
-            Self::Opened { .. } | Self::Woken { .. } | Self::ModeChanged { .. } | Self::Unknown => {
-                None
-            }
+            Self::Opened { .. }
+            | Self::Woken { .. }
+            | Self::ModeChanged { .. }
+            | Self::Fresh { .. }
+            | Self::Unknown => None,
         }
     }
 
@@ -1032,7 +1044,8 @@ pub fn replay(events: &[Event]) -> RunState {
                 }
             },
             // Shadow or on, it moves no order: the line below is all a yes does, and only when it acted.
-            Kind::JevWatch { .. } | Kind::Unknown => {}
+            // Plan 25: a fresh session moves no order; the receipt was written at the end, before it.
+            Kind::JevWatch { .. } | Kind::Fresh { .. } | Kind::Unknown => {}
         }
         if let Some(line) = queue_line(&event.kind) {
             state.queue.push(QueueItem {

@@ -31,6 +31,7 @@ mod window_title;
 mod worktrees;
 // Nirvana fork: Restart Claude from the tab menu.
 mod nirvana_edit;
+mod nirvana_fresh;
 mod nirvana_idle_compact;
 mod nirvana_new;
 mod nirvana_relaunch;

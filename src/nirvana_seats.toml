@@ -48,6 +48,9 @@ record_shrink = 5.0
 # Plan 19 §6.2: Balanced mode climb thresholds. Hypotheses (plan 19 §6.2).
 climb_start = 0.70
 climb_full = 1.00
+# Plan 25 §2: Nirvana Claude starts a fresh session after a run ends only when its context is above this: twice
+# the first turn measured in plan 25 §1 (60.7k), a hypothesis.
+fresh_above = 120000
 
 # An order's size scales its expected use and its lease. `use` is a multiple of probe P4's order (one
 # `slugify` function and its tests, about 45k tokens read and 1.3k written): small is that order.

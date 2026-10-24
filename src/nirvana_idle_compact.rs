@@ -59,6 +59,9 @@ pub struct IdleStretch {
     pub sent: bool,
     /// Review S1, third round F1: the paste went; the reads after it are due.
     pub pending: Option<Pending>,
+    /// Plan 25 §2: the fresh start's own checks and paste in this stretch (`nirvana_fresh`). On the stretch, so any
+    /// state but `Idle` ends it too.
+    pub fresh: crate::nirvana_fresh::FreshStretch,
 }
 
 /// A pasted `/compact` whose Enter has not gone: the pane it went to, when, and which read is next.
@@ -268,7 +271,7 @@ pub fn owner_key(home: Option<&Path>, pane: &str, now: u64) -> OwnerKey {
 
 /// Why the owner's last key is too recent, as the orchestrator's wake path reads it (`nirvana_run`, `OWNER_QUIET_S`),
 /// or why it is not known.
-fn owner_quiet_breach(owner_key: &OwnerKey) -> Option<String> {
+pub(crate) fn owner_quiet_breach(owner_key: &OwnerKey) -> Option<String> {
     match owner_key {
         OwnerKey::Never => None,
         OwnerKey::SecsAgo(ago) => (*ago < crate::nirvana_run::OWNER_QUIET_S)
@@ -1442,6 +1445,7 @@ mod tests {
                 pasted_at: t0 + 50 * MIN,
                 step: Step::Try(0),
             }),
+            ..IdleStretch::default()
         };
         for state in [
             AgentState::Working,
@@ -1501,6 +1505,7 @@ mod tests {
                 pasted_at: t0 + 50 * MIN,
                 step: Step::Try(0),
             }),
+            ..IdleStretch::default()
         };
         assert_eq!(
             pasted.next_check_at(50 * MIN),

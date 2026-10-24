@@ -282,6 +282,9 @@ pub fn launch_args_in(
             ),
         }
     }
+    // Plan 25 §3: the built-in tools the probe showed cost 500 tokens or more of the first turn and orchestration
+    // does not use. Before `--resume`, so the flag's list never meets the session id.
+    let mut args = crate::nirvana_lean::with_cuts(args, &crate::nirvana_lean::DISALLOWED);
     if let Some(id) = resume {
         args.extend(["--resume".to_owned(), id.to_owned()]);
     }
@@ -796,6 +799,9 @@ const USAGE: &str = "usage: herdr --session nirvana nirvana window [<folder>]
   otherwise starts a window.
        herdr nirvana digest|guard-spawn|subagent-stop|stop|statusline
   The Nirvana Claude plugin's hooks and statusline (plan 12 O4b); each reads Claude Code's JSON on stdin.
+       herdr nirvana fresh [<pane>]
+  A fresh session for Nirvana Claude in <pane>, this pane when none is named (plan 25 §2): herdr types /clear once
+  it is idle and its input line empty, and the next session starts from a handoff note.
   Before Claude starts, the window applies the folder's preset (plan 13; `herdr preload why <folder>`).";
 
 /// `herdr nirvana <subcommand>`.
@@ -817,6 +823,8 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             let code = open(None)?;
             std::process::exit(code);
         }
+        // Plan 25 §2: the owner's fresh start.
+        Some("fresh") if args.len() <= 2 => crate::nirvana_fresh::cli(&args[1..]),
         // Plan 12 O4b: the plugin's hooks and statusline.
         Some(name) if args.len() == 1 && crate::nirvana_claude::SUBCOMMANDS.contains(&name) => {
             crate::nirvana_claude::cli(name).expect("a listed subcommand")
@@ -1064,6 +1072,30 @@ mod tests {
         assert!(!NewKind::ClaudeCode.is_nirvana() && !NewKind::Antigravity.is_nirvana());
     }
 
+    /// O4b's argv with plan 25's cut list after it, as `launch_args_in` adds it.
+    fn cut(args: Vec<String>) -> Vec<String> {
+        crate::nirvana_lean::with_cuts(args, &crate::nirvana_lean::DISALLOWED)
+    }
+
+    /// Plan 25 §3 test: "`launch_args` carries the chosen `--disallowedTools` list", once, before the resume.
+    #[test]
+    fn the_launch_carries_the_probes_cut_list_before_the_resume() {
+        let home = scratch_home("p25-cuts");
+        let folder = Path::new(r"C:\work\print");
+        let args = launch_args(&home, folder, Some("abc-123"));
+        let at = args.iter().position(|a| a == "--disallowedTools").unwrap();
+        assert_eq!(args[at + 1], "Workflow,ScheduleWakeup,ReportFindings");
+        assert_eq!(args.iter().filter(|a| *a == "--disallowedTools").count(), 1);
+        assert_eq!(args[at + 2..], ["--resume", "abc-123"]);
+        // The wake guard still reads the argv as Nirvana Claude's.
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        assert!(crate::nirvana_run::is_nirvana_claude_argv(
+            &argv,
+            Some(&plugin_dir(&home))
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     fn scratch_home(name: &str) -> PathBuf {
         let home =
             std::env::temp_dir().join(format!("nirvana-p13a-launch-{}-{name}", std::process::id()));
@@ -1076,8 +1108,11 @@ mod tests {
     fn the_launch_names_the_folders_generated_settings_when_one_was_written() {
         let home = scratch_home("settings");
         let folder = Path::new(r"C:\work\print");
-        // None written: the plugin's own file, exactly O4b's argv.
-        assert_eq!(launch_args(&home, folder, None), nirvana_claude_args(&home));
+        // None written: the plugin's own file, exactly O4b's argv with plan 25's cuts.
+        assert_eq!(
+            launch_args(&home, folder, None),
+            cut(nirvana_claude_args(&home))
+        );
         let generated = crate::nirvana_preset::settings_path(&home.join("nirvana"), folder);
         std::fs::create_dir_all(generated.parent().unwrap()).unwrap();
         std::fs::write(&generated, r#"{"skillOverrides":{"docx":"off"}}"#).unwrap();
@@ -1097,11 +1132,11 @@ mod tests {
         // Everything else is O4b's, so the wake guard still knows it (`--agent`, `--plugin-dir`).
         let mut base = nirvana_claude_args(&home);
         base[at + 1] = launch.display().to_string();
-        assert_eq!(args, base);
+        assert_eq!(args, cut(base));
         // Another folder has its own file, or none.
         assert_eq!(
             launch_args(&home, Path::new(r"C:\work\other"), None),
-            nirvana_claude_args(&home)
+            cut(nirvana_claude_args(&home))
         );
         let resumed = launch_args(&home, folder, Some("abc-123"));
         assert_eq!(resumed[resumed.len() - 2..], ["--resume", "abc-123"]);
@@ -1501,10 +1536,11 @@ mod tests {
                 },
             })
         );
-        // Only the settings value moved; the resume is still last.
+        // Only the settings value moved; plan 25's cuts, then the resume last.
         let mut base = nirvana_claude_args(&home);
         let at = base.iter().position(|a| a == "--settings").unwrap();
         base[at + 1] = launch.display().to_string();
+        let mut base = cut(base);
         base.extend(["--resume".to_owned(), "abc-123".to_owned()]);
         assert_eq!(args, base);
         let _ = std::fs::remove_dir_all(&home);
@@ -1538,7 +1574,7 @@ mod tests {
         let folder = Path::new(r"C:\work\print");
         std::fs::write(plugin_dir(&home).join("settings.json"), "{not json").unwrap();
         let args = launch_args_in(&home, folder, None, Some(&claude));
-        assert_eq!(args, nirvana_claude_args(&home));
+        assert_eq!(args, cut(nirvana_claude_args(&home)));
         let _ = std::fs::remove_dir_all(&home);
     }
 }

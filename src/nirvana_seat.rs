@@ -44,6 +44,7 @@ pub const HISTORICAL_DEFAULTS: &[&str] = &[
     include_str!("nirvana_seats_v1.toml"),
     include_str!("nirvana_seats_v2.toml"),
     include_str!("nirvana_seats_v3.toml"),
+    include_str!("nirvana_seats_v4.toml"),
 ];
 pub const DIR: &str = "nirvana";
 pub const SEATS_FILE: &str = "seats.toml";
@@ -212,6 +213,11 @@ fn default_climb_full() -> f32 {
     1.00
 }
 
+/// Plan 25 §2's `fresh_above` when a table written before it leaves the line out.
+fn default_fresh_above() -> u64 {
+    crate::nirvana_fresh::FRESH_ABOVE
+}
+
 /// The rule's numbers (plan 12 §5.3). Each is commented with its source in the default file.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -239,6 +245,9 @@ pub struct Constants {
     pub climb_start: f32,
     #[serde(default = "default_climb_full")]
     pub climb_full: f32,
+    /// Plan 25 §2: a fresh session after a run ends only above this context (`nirvana_fresh::trigger`).
+    #[serde(default = "default_fresh_above")]
+    pub fresh_above: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

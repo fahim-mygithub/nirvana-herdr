@@ -163,6 +163,7 @@ impl App {
             self.pending_agent_resume_deadline,
             self.nirvana_relaunch_at,
             self.idle_compact_deadline(),
+            self.fresh_deadline(),
             self.session_save_deadline,
             self.next_tab_bar_status_deadline(),
             render_deadline,

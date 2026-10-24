@@ -25,16 +25,16 @@ use crate::terminal::{TerminalId, TerminalRuntime, TerminalState};
 const KEYS_REPLY_WAIT: Duration = Duration::from_millis(250);
 
 /// A pane herdr sees running Claude.
-struct ClaudePane {
-    terminal_id: TerminalId,
-    public: String,
-    folder: Option<PathBuf>,
-    hook_session: Option<String>,
+pub(super) struct ClaudePane {
+    pub(super) terminal_id: TerminalId,
+    pub(super) public: String,
+    pub(super) folder: Option<PathBuf>,
+    pub(super) hook_session: Option<String>,
 }
 
 /// The strict reading of a pane's input line (`read_input_line`), from its screen with colours, its cursor and its
 /// scroll.
-fn input_line_of(runtime: &TerminalRuntime) -> InputLine {
+pub(super) fn input_line_of(runtime: &TerminalRuntime) -> InputLine {
     let Some((cols, rows)) = runtime.terminal_dimensions() else {
         return InputLine::Unsure("the pane's size could not be read".into());
     };
@@ -53,7 +53,7 @@ fn input_line_of(runtime: &TerminalRuntime) -> InputLine {
 
 /// The owner's last key in the pane, from the file the server writes for the orchestrator's wake path
 /// (`nirvana_run::note_owner_key`). No Nirvana home is a doubt, not quiet (third round nit).
-fn owner_key_of(public: &str) -> OwnerKey {
+pub(super) fn owner_key_of(public: &str) -> OwnerKey {
     crate::nirvana_idle_compact::owner_key(
         crate::nirvana::home().as_deref(),
         public,
@@ -62,7 +62,7 @@ fn owner_key_of(public: &str) -> OwnerKey {
 }
 
 /// Writes `keys` to the pane and waits on the writer's reply, so a failed write is known (review S1).
-fn write_keys(runtime: &TerminalRuntime, keys: Vec<u8>) -> std::io::Result<()> {
+pub(super) fn write_keys(runtime: &TerminalRuntime, keys: Vec<u8>) -> std::io::Result<()> {
     runtime
         .queue_user_input_submission(Bytes::new(), Bytes::from(keys), Duration::ZERO, None)
         .and_then(|reply| {
@@ -86,7 +86,9 @@ fn erase_keys(runtime: &TerminalRuntime) -> Vec<u8> {
 impl App {
     /// The terminals idle compact looks at, for both the deadline and the check (review S2): herdr sees Claude in
     /// them. A terminal with no pane is still one of them, so its check is stamped and its deadline moves on.
-    fn idle_compact_terminals(&self) -> impl Iterator<Item = (&TerminalId, &TerminalState)> {
+    pub(super) fn idle_compact_terminals(
+        &self,
+    ) -> impl Iterator<Item = (&TerminalId, &TerminalState)> {
         self.state
             .terminals
             .iter()
@@ -115,7 +117,7 @@ impl App {
     }
 
     /// `read` gives the facts outside herdr (the Claude process, its transcript), so a test passes stand-ins.
-    fn nirvana_idle_compact_with(
+    pub(super) fn nirvana_idle_compact_with(
         &mut self,
         now: Instant,
         read: impl Fn(&PaneQuery) -> Outside,
@@ -140,6 +142,12 @@ impl App {
         };
         if let Some(pending) = terminal.idle_stretch.pending.take() {
             return self.idle_compact_after_paste(&terminal_id, pending);
+        }
+        // Plan 25 §2: a fresh start's `/clear` is in flight on this pane, so the compact waits its RECHECK (and the
+        // fresh start waits for a compact's paste, `nirvana_fresh::decide`): the two never share a pass or a box.
+        if terminal.idle_stretch.fresh.busy() {
+            terminal.idle_stretch.checked_at.replace(now);
+            return false;
         }
         // Review S2: stamped first, pane or not, so a check that finds nothing waits RECHECK.
         terminal.idle_stretch.checked_at = Some(now);
@@ -306,7 +314,7 @@ impl App {
     }
 
     /// The panes whose terminals idle compact looks at (`idle_compact_terminals`), with their public ids and folders.
-    fn claude_panes(&self) -> Vec<ClaudePane> {
+    pub(super) fn claude_panes(&self) -> Vec<ClaudePane> {
         let claude: std::collections::HashSet<&TerminalId> =
             self.idle_compact_terminals().map(|(id, _)| id).collect();
         let mut panes = Vec::new();

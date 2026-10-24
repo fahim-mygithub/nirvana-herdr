@@ -3383,6 +3383,8 @@ impl HeadlessServer {
         }
         changed |= self.app.nirvana_relaunch_restored(now);
         changed |= self.app.nirvana_idle_compact(now);
+        // Plan 25 §2: after the compact, so a compact pasted in this pass holds the fresh start off its pane.
+        changed |= self.app.nirvana_fresh(now);
         changed
     }
 }
