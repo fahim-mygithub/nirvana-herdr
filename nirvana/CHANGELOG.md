@@ -3,6 +3,34 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.40.0: an idle Claude compacts before its cache goes stale
+
+- **Changed:** an interactive Claude pane that has sat idle for 50 minutes gets `/compact` typed into it once, before
+  its prompt cache expires at the hour.
+  - All seven rules must hold: the setting is on; the pane is Claude and not a worker; it has been idle at least the
+    set minutes; its one transcript is older than that; its context is at least the set tokens; its input line is
+    empty; and it has not been compacted in this idle stretch.
+  - The setting is `[ui.idle_compact]`: `enabled = true`, `minutes = 50` (1 to 59), `min_tokens = 50000`. It has its
+    own "Idle compact" section in settings and applies on reload.
+  - Every doubt sends nothing: an unreadable screen, a dialog, a viewer, any text in the box, more than one candidate
+    transcript, or an owner key that cannot be read.
+  - Enter goes only after a read shows exactly `/compact` and the owner pressed nothing since the paste. The line is
+    read at 0.3 s, 1 s and 2 s. If it still reads `/compact` at 3 s, the paste is erased with 8 Backspaces and checked
+    at 4 s. Text the owner typed is never erased.
+  **Because:** the owner, 2026-10-23: "Ensusre idle agents compact when cache is about to get stale. This should be a
+  setting for claude code." The owner's choices: all interactive Claude, at 50 min idle, skip under 50k tokens, a
+  settings toggle on by default. Plan `nirvana/plans/2026-10-23-27-idle-compact.md`, built on Opus high.
+  **Measured:**
+  - Claude Code writes its cache at a 1 hour lifetime on this machine: no non-zero `ephemeral_5m_input_tokens` write
+    in the transcripts read.
+  - 135 controls in `nirvana/controls.d/idle_compact.py`, each reddening its test alone.
+  - Two Sonnet reviews. The first found two blockers, both fixed; the second found none. Its should-fix items were fixed
+    in a third round.
+  - Not live-checked yet (plan §5): a real idle Claude gets `/compact` once at 50 minutes. Whether Claude's slash menu
+    makes the typed line unreadable is unmeasured. If it does, no Enter goes and `/compact` stays typed in the box.
+  **If you remove this:** an idle Claude's first turn after the hour re-writes its whole context to the cache at full
+  cost.
+
 ## alpha 0.39.0: superpowers only on Sonnet
 
 - **Changed:** a Claude that Nirvana starts on an Opus model gets every `superpowers` plugin turned off. On Sonnet, and on
