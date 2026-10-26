@@ -322,6 +322,29 @@ pub fn worker_argv(
     Ok(with_preset_settings(argv, settings.as_deref()))
 }
 
+/// Plan 29 §5.1: a claude worker's argv with the MCP servers its order needs, from the project's `.mcp.json`.
+fn with_order_servers(
+    argv: Vec<String>,
+    project: &Project,
+    run: &str,
+    seated: &Seated,
+    out: &mut dyn Write,
+) -> Vec<String> {
+    let table = nirvana_seat::table();
+    crate::nirvana_gui_tools::order_argv(
+        argv,
+        &project.root,
+        &project.run_dir(run),
+        &seated.order,
+        &seated.needs,
+        table
+            .as_ref()
+            .map(crate::nirvana_gui_tools::capabilities)
+            .map_err(Clone::clone),
+        out,
+    )
+}
+
 /// The one line a worker is started with (§4).
 pub fn first_line(order_file: &str) -> String {
     format!(
@@ -1288,7 +1311,7 @@ pub fn exec(
             crate::nirvana_superpowers::claude_dir().as_deref(),
             out,
         ) {
-            Ok(argv) => argv,
+            Ok(argv) => with_order_servers(argv, project, run, &seated, out),
             Err(why) => {
                 end_failed(project, &journal, run, &seated, &why, None)?;
                 writeln!(out, "{why}")?;
@@ -1692,7 +1715,8 @@ fn rate_limited(
     let child = child_id(&state, order);
     let mut request = nirvana_seat::Request::new(&seated.class);
     request.size = seated.size;
-    request.needs = seated.needs.clone();
+    (request.needs, request.claude_only) =
+        crate::nirvana_gui_tools::seat_needs(&table, &project.root, &seated.needs);
     request.not_family = seated.not_family.clone();
     request.mode = seated.mode;
     request.order = Some(child.clone());
@@ -2715,7 +2739,10 @@ fn book(project: &Project, request: &SeatRequest) -> Result<Booked, (i32, String
     let dir = nirvana_seat::dir();
     let leases_path = dir.join(nirvana_seat::LEASES_FILE);
     let mut world = nirvana_seat::live_world(&table);
-    let words = nirvana_seat::unknown_words(&table, &request.needs, &request.not_family);
+    // Plan 29 §5.1: a need naming one of the project's MCP servers is no seat capability.
+    let (needs, claude_only) =
+        crate::nirvana_gui_tools::seat_needs(&table, &project.root, &request.needs);
+    let words = nirvana_seat::unknown_words(&table, &needs, &request.not_family);
     if !words.is_empty() {
         return Err((2, words.join("; ")));
     }
@@ -2744,7 +2771,8 @@ fn book(project: &Project, request: &SeatRequest) -> Result<Booked, (i32, String
         if let Some(size) = request.size {
             pick_request.size = size;
         }
-        pick_request.needs = request.needs.clone();
+        pick_request.needs = needs;
+        pick_request.claude_only = claude_only;
         pick_request.not_family = request.not_family.clone();
         pick_request.order = Some(request.order.clone());
         world.leases = leases.leases.clone();
@@ -2921,6 +2949,8 @@ pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i3
     } else {
         format!("{}{lessons}", text.trim_end())
     };
+    // Plan 29 §5.3: an order that drives a desktop app is told to batch and read crops.
+    text = crate::nirvana_gui_tools::with_desktop_line(text, &request.needs);
     if booked.class.starts_with("research.") || booked.class.starts_with("media.") {
         text.push_str("\n\nYour Work Report must include the `sources` array of `{url, used_for}` for each source consulted.");
     }

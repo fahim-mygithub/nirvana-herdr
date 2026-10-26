@@ -2113,7 +2113,8 @@ fn send_back(
     let brief = send_back_brief(&order, root, n, &axes, root_text, &integration_branch(run));
     let mut request = Request::new(&seated.class);
     request.size = seated.size;
-    request.needs = seated.needs.clone();
+    (request.needs, request.claude_only) =
+        crate::nirvana_gui_tools::seat_needs(table, &project.root, &seated.needs);
     request.not_family = seated.not_family.clone();
     request.mode = seated.mode;
     request.order = Some(id.clone());

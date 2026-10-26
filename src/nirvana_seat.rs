@@ -804,6 +804,8 @@ pub struct Request {
     pub override_seat: Option<(String, String)>,
     /// Plan 24 §4: an inherited override on retry/send-back does not count against overrides_per_run.
     pub inherited_override: bool,
+    /// Plan 29 §5.2: why only a claude seat may take the order (it needs a project MCP server); `None` for any seat.
+    pub claude_only: Option<String>,
 }
 
 impl Request {
@@ -817,6 +819,7 @@ impl Request {
             order: None,
             override_seat: None,
             inherited_override: false,
+            claude_only: None,
         }
     }
 }
@@ -1824,6 +1827,14 @@ fn candidate(
     }
     if let Some(need) = needs.iter().find(|need| !seat.capabilities.contains(need)) {
         cand.skip = skip(SkipKind::Need, format!("lacks {need}"));
+        return cand;
+    }
+    if let Some(why) = request
+        .claude_only
+        .as_ref()
+        .filter(|_| seat.cli != "claude")
+    {
+        cand.skip = skip(SkipKind::Need, why.clone());
         return cand;
     }
     let Some(entry) = entry else {
@@ -3770,6 +3781,9 @@ fn pick_cli(args: &[String]) -> std::io::Result<()> {
         );
         std::process::exit(2);
     }
+    // Plan 29 §5.1: a need naming one of the project's MCP servers is no seat capability.
+    (request.needs, request.claude_only) =
+        crate::nirvana_gui_tools::seat_needs(&table, &project.root, &request.needs);
     let words = unknown_words(&table, &request.needs, &request.not_family);
     if !words.is_empty() {
         for word in words {
