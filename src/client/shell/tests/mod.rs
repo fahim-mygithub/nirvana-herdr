@@ -269,6 +269,7 @@ mod nirvana_new_menu;
 mod nirvana_restart_menu;
 mod nirvana_seats;
 mod nirvana_space_agents;
+mod nirvana_space_workers;
 mod nirvana_subagents;
 mod popup_focus_projection;
 mod startup_overlays;

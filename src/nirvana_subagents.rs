@@ -1304,6 +1304,21 @@ pub fn cached(pane_id: &str) -> Option<SubagentsView> {
     entry.view.clone()
 }
 
+/// The cached view for `pane_id`, read only. Unlike `cached` it neither creates the entry nor keeps it asked for,
+/// so a second reader of the agents panel's data (the spaces view, plan 30 §2: "no new reads, no new polling")
+/// never keeps a pane polled that the panel has stopped asking for.
+pub fn peek(pane_id: &str) -> Option<SubagentsView> {
+    #[cfg(test)]
+    {
+        if let Some(map) = TEST_VIEW.with_borrow(Clone::clone) {
+            return map.get(pane_id).cloned();
+        }
+    }
+
+    let guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref()?.get(pane_id)?.view.clone()
+}
+
 /// Updates the metadata query parameters for a pane in the cache.
 pub fn update_pane_query(
     pane_id: &str,
@@ -2518,5 +2533,28 @@ mod tests {
         assert_eq!(finished_count, 0, "ended run hides all finished rows");
 
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Plan 30: the spaces view reads the panel's cache with `peek`, which never makes an entry of its own and so never
+    /// asks for a pane to be polled; `cached`, the panel's reader, does.
+    #[test]
+    fn peek_reads_the_cache_without_asking_for_a_pane() {
+        assert_eq!(peek("p30-peek"), None);
+        assert!(get_pane_query_for_test("p30-peek").is_none());
+        assert_eq!(cached("p30-peek"), None);
+        assert!(get_pane_query_for_test("p30-peek").is_some());
+        let view = SubagentsView {
+            total_count: 1,
+            ..SubagentsView::default()
+        };
+        ENTRIES
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .get_mut("p30-peek")
+            .unwrap()
+            .view = Some(view.clone());
+        assert_eq!(peek("p30-peek"), Some(view));
     }
 }

@@ -259,6 +259,12 @@ pub(crate) fn render_sidebar(
                         &workspace.workspace_id,
                         config.status_indicators,
                     );
+                    // Plan 30: and its live workers' rows.
+                    let workers = super::nirvana_spaces::space_workers(
+                        snapshot,
+                        &workspace.workspace_id,
+                        crate::nirvana_subagents::peek,
+                    );
                     (workspace_rows(
                         workspace,
                         displayed_workspace_status(snapshot, workspace, state.collapsed_groups),
@@ -267,6 +273,7 @@ pub(crate) fn render_sidebar(
                     )
                     .len()
                     .max(1)
+                        + super::nirvana_spaces::workers_height(workers.len())
                         + super::nirvana_spaces::agents_height(agents.len()))
                     .min(u16::MAX as usize) as u16
                 })
@@ -331,6 +338,15 @@ pub(crate) fn render_sidebar(
         let row_height = ((space_rows + super::nirvana_spaces::agents_height(agents.len()))
             .min(u16::MAX as usize) as u16)
             .min(body.height);
+        let workers = super::nirvana_spaces::space_workers(
+            snapshot,
+            &workspace.workspace_id,
+            crate::nirvana_subagents::peek,
+        );
+        let agents_rows = super::nirvana_spaces::agents_height(agents.len()) as u16;
+        let row_height = row_height
+            .saturating_add(super::nirvana_spaces::workers_height(workers.len()) as u16)
+            .min(body.height);
         if y.saturating_add(row_height) > body.bottom() {
             break;
         }
@@ -373,6 +389,23 @@ pub(crate) fn render_sidebar(
             workspace.focused || dragged,
             state.hovered_space_agent_pane,
             Some(&mut *hits),
+            palette,
+        );
+        let workers_y = rect
+            .y
+            .saturating_add(space_rows as u16)
+            .saturating_add(agents_rows);
+        super::nirvana_spaces::render_space_workers(
+            buffer,
+            Rect::new(
+                rect.x,
+                workers_y,
+                rect.width,
+                rect.bottom().saturating_sub(workers_y),
+            ),
+            &workers,
+            entry.indented,
+            entry.last_child,
             palette,
         );
         let group_toggle = render_parent_group_toggle(

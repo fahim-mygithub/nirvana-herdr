@@ -104,6 +104,17 @@ pub(crate) fn group_subagents_by_run<'a>(
     result
 }
 
+/// A live worker's short model and elapsed time. The agents panel draws them under the order's name; the spaces view
+/// draws them after it (plan 30 §2: "the same words and format the agents panel uses for a live row").
+pub(crate) fn live_worker_model_and_elapsed(
+    sub: &crate::nirvana_subagents::Subagent,
+) -> (String, String) {
+    (
+        crate::nirvana_spaces::compact_model(&sub.model),
+        crate::nirvana_subagents::format_elapsed(sub.elapsed_secs),
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CappedRunGroups<'a> {
     pub(crate) groups: Vec<SubagentRunGroup<'a>>,
@@ -903,8 +914,7 @@ fn render_grouped_subagents(
             }
 
             // Line 2: 6 spaces <short-model>  <elapsed>
-            let short_m = crate::nirvana_spaces::compact_model(&sub.model);
-            let elapsed_str = crate::nirvana_subagents::format_elapsed(sub.elapsed_secs);
+            let (short_m, elapsed_str) = live_worker_model_and_elapsed(sub);
             let line2_spans = vec![
                 ratatui::text::Span::raw("      "),
                 ratatui::text::Span::styled(short_m, Style::default().fg(palette.overlay1)),

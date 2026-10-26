@@ -418,3 +418,132 @@ pub(super) fn render_space_agents(
         }
     }
 }
+
+/// Plan 30: a space shows all its live workers up to this many; past it, `WORKERS_CUT_TO` rows and "+N more".
+pub(super) const WORKERS_SHOWN: usize = 4;
+pub(super) const WORKERS_CUT_TO: usize = 3;
+
+/// How many of a space's live workers get a row.
+pub(super) fn workers_shown(count: usize) -> usize {
+    if count > WORKERS_SHOWN {
+        WORKERS_CUT_TO
+    } else {
+        count
+    }
+}
+
+/// The rows a space's live workers take: one per worker shown, and the "+N more" row.
+pub(super) fn workers_height(count: usize) -> usize {
+    workers_shown(count) + usize::from(count > WORKERS_SHOWN)
+}
+
+/// One live worker under its space (plan 30): the order's name, the short model and the elapsed time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SpaceWorker {
+    pub(super) name: String,
+    pub(super) model: String,
+    pub(super) elapsed: String,
+}
+
+/// The live workers of the space's agents, in the agents panel's own order. `view` is the panel's cached data for a
+/// pane, so the spaces view reads nothing new. Live is the panel's live group, so a finished, blocked, stopped or
+/// failed worker never shows here (plan 30 §2).
+pub(super) fn space_workers(
+    snapshot: &ClientShellSnapshot,
+    workspace_id: &str,
+    view: impl Fn(&str) -> Option<crate::nirvana_subagents::SubagentsView>,
+) -> Vec<SpaceWorker> {
+    let subagents: Vec<crate::nirvana_subagents::Subagent> = snapshot
+        .agents
+        .iter()
+        .filter(|agent| agent.workspace_id == workspace_id)
+        .filter_map(|agent| view(&agent.pane_id))
+        .flat_map(|view| view.subagents)
+        .collect();
+    super::agent_sidebar::group_subagents_by_run(&subagents)
+        .iter()
+        .flat_map(|group| group.live.iter())
+        .map(|sub| {
+            let (model, elapsed) = super::agent_sidebar::live_worker_model_and_elapsed(sub);
+            SpaceWorker {
+                name: sub.name.clone(),
+                model,
+                elapsed,
+            }
+        })
+        .collect()
+}
+
+/// A worker's row text fitted to `width` cells: `<name> <model> <elapsed>`. The name is cut as the agents panel cuts
+/// it, by `fit`, so the model and the time stay whole.
+pub(super) fn worker_line(worker: &SpaceWorker, width: usize) -> String {
+    let tail = format!(" {} {}", worker.model, worker.elapsed);
+    let budget = width.saturating_sub(unicode_width::UnicodeWidthStr::width(tail.as_str()));
+    fit(&format!("{}{tail}", fit(&worker.name, budget)), width)
+}
+
+/// Draws the space's live workers from `area.y` down, under its agents: a dim tree marker in the agents' icon column,
+/// then the row, so they read as that space's workers.
+pub(super) fn render_space_workers(
+    buffer: &mut Buffer,
+    area: Rect,
+    workers: &[SpaceWorker],
+    indented: bool,
+    last_child: bool,
+    palette: &Palette,
+) {
+    let x = area.x.saturating_add(if indented { 8 } else { 3 });
+    // The agents' rule: rows stop one cell short of the area's edge.
+    let right = area.right().saturating_sub(1);
+    let width = usize::from(right.saturating_sub(x));
+    if width <= 2 {
+        return;
+    }
+    let text_width = width - 2;
+    let dim = Style::default()
+        .fg(palette.overlay0)
+        .add_modifier(Modifier::DIM);
+    let name_style = Style::default().fg(palette.subtext0);
+    let model_style = Style::default().fg(palette.overlay1);
+    let elapsed_style = Style::default().fg(palette.overlay0);
+    let shown = workers_shown(workers.len());
+    let rows = workers_height(workers.len());
+    for index in 0..rows {
+        let y = area.y.saturating_add(index as u16);
+        if y >= area.bottom() {
+            break;
+        }
+        if indented && !last_child {
+            put_text(
+                buffer,
+                area.x,
+                y,
+                4,
+                "   │",
+                Style::default().fg(palette.overlay0),
+            );
+        }
+        let marker = if index + 1 == rows { "└" } else { "├" };
+        put_text(buffer, x, y, 1, marker, dim);
+        let Some(worker) = workers.get(index).filter(|_| index < shown) else {
+            let more = format!("+{} more", workers.len() - shown);
+            put_text(
+                buffer,
+                x + 2,
+                y,
+                text_width as u16,
+                &fit(&more, text_width),
+                elapsed_style,
+            );
+            continue;
+        };
+        let line = worker_line(worker, text_width);
+        let cells = |s: &str| unicode_width::UnicodeWidthStr::width(s);
+        let elapsed_from = cells(&line).saturating_sub(cells(&worker.elapsed));
+        let model_from = elapsed_from.saturating_sub(1 + cells(&worker.model));
+        // Layered as the agents' rows are: the whole line, then the model and the name over it in their colours.
+        put_text(buffer, x + 2, y, text_width as u16, &line, elapsed_style);
+        put_text(buffer, x + 2, y, elapsed_from as u16, &line, model_style);
+        put_text(buffer, x + 2, y, model_from as u16, &line, name_style);
+    }
+}
