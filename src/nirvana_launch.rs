@@ -282,8 +282,9 @@ pub fn launch_args_in(
             ),
         }
     }
-    // Plan 25 §3: the built-in tools the probe showed cost 500 tokens or more of the first turn and orchestration
-    // does not use. Before `--resume`, so the flag's list never meets the session id.
+    // Plan 25 §3: the built-in tools the probe showed cost 500 tokens or more of the first turn, as many as the owner
+    // ruled cut on 2026-10-26 (`nirvana_lean::DISALLOWED`). Before `--resume`, so the flag's list never meets the
+    // session id.
     let mut args = crate::nirvana_lean::with_cuts(args, &crate::nirvana_lean::DISALLOWED);
     if let Some(id) = resume {
         args.extend(["--resume".to_owned(), id.to_owned()]);
@@ -1084,7 +1085,8 @@ mod tests {
         let folder = Path::new(r"C:\work\print");
         let args = launch_args(&home, folder, Some("abc-123"));
         let at = args.iter().position(|a| a == "--disallowedTools").unwrap();
-        assert_eq!(args[at + 1], "Workflow,ScheduleWakeup,ReportFindings");
+        // The owner, 2026-10-26: "Keep only ReportFindings cut".
+        assert_eq!(args[at + 1], "ReportFindings");
         assert_eq!(args.iter().filter(|a| *a == "--disallowedTools").count(), 1);
         assert_eq!(args[at + 2..], ["--resume", "abc-123"]);
         // The wake guard still reads the argv as Nirvana Claude's.

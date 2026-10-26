@@ -576,7 +576,7 @@ fn digest_cli() -> std::io::Result<()> {
     }
     println!("{}", digest_text(&digest));
     // Plan 25 §2: after a `/clear` herdr typed, the fresh session starts from the handoff note.
-    if let Some(note) = crate::nirvana_fresh::session_start_hook(&hook) {
+    if let Some(note) = crate::nirvana_fresh::session_start_hook(&hook, project.as_ref()) {
         println!("\n{note}");
     }
     Ok(())

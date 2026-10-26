@@ -10,7 +10,7 @@
 //! (`FreshStretch::busy`). The server's loop runs the compact first, so a compact pasted in a pass holds the fresh
 //! start off in the same pass.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
 use bytes::Bytes;
@@ -19,7 +19,7 @@ use super::nirvana_idle_compact::{input_line_of, owner_key_of, write_keys};
 use super::App;
 use crate::nirvana_fresh::{after_clear_paste, decide, Decision, Facts, CLEAR, CLEAR_ERASE_KEYS};
 use crate::nirvana_idle_compact::{
-    read_outside, AfterPaste, InputLine, Outside, PaneQuery, Pending, Step,
+    read_outside_and_transcript, AfterPaste, InputLine, Outside, PaneQuery, Pending, Step,
 };
 use crate::terminal::{TerminalId, TerminalRuntime};
 
@@ -78,18 +78,19 @@ impl App {
         let Some(home) = crate::nirvana::home() else {
             return false;
         };
-        // The argv alone: no Claude config folder is passed, so no transcript is read.
+        // Review S1: the argv and the pane's own transcript, which a Stop's record must still name.
+        let claude_dir = crate::nirvana_subagents::claude_config_dir();
         self.nirvana_fresh_with(now, &home, |query| {
-            read_outside(query, None, SystemTime::now())
+            read_outside_and_transcript(query, claude_dir.as_deref(), SystemTime::now())
         })
     }
 
-    /// `read` gives the Claude process's argv, so a test passes a stand-in.
+    /// `read` gives the Claude process's argv and the pane's transcript, so a test passes a stand-in.
     fn nirvana_fresh_with(
         &mut self,
         now: Instant,
         home: &Path,
-        read: impl Fn(&PaneQuery) -> Outside,
+        read: impl Fn(&PaneQuery) -> (Outside, Option<PathBuf>),
     ) -> bool {
         let Some(terminal_id) = self
             .fresh_terminals()
@@ -117,6 +118,7 @@ impl App {
         fresh.checked_at = Some(now);
         fresh.checks += 1;
         let compact_in_flight = terminal.idle_stretch.pending.is_some();
+        let compact_sent = terminal.idle_stretch.sent;
         let state = terminal.state;
         let panes = self.claude_panes();
         let Some(pane) = panes.iter().find(|pane| pane.terminal_id == terminal_id) else {
@@ -126,16 +128,29 @@ impl App {
         let runtime = self.terminal_runtimes.get(&terminal_id);
         // The process and the screen are read only when a record waits: a poll that finds none costs one file read.
         let waiting = matches!(record, Ok(Some(_)));
-        let nirvana = if waiting && !compact_in_flight {
-            read(&PaneQuery {
+        let (nirvana, transcript) = if waiting && !compact_in_flight && !compact_sent {
+            // The query idle compact builds, so `choose_transcript` tells this pane's conversation from another
+            // Claude pane's in the same folder.
+            let (outside, transcript) = read(&PaneQuery {
                 pane_id: pane.public.clone(),
                 shell_pid: runtime.and_then(TerminalRuntime::child_pid),
-                ..PaneQuery::default()
-            })
-            .argv
-            .map(|argv| is_nirvana(&argv, home))
+                folder: pane.folder.clone(),
+                hook_session: pane.hook_session.clone(),
+                others: panes
+                    .iter()
+                    .filter(|other| other.terminal_id != pane.terminal_id)
+                    .filter_map(|other| {
+                        Some((
+                            other.public.clone(),
+                            other.folder.clone()?,
+                            other.hook_session.clone(),
+                        ))
+                    })
+                    .collect(),
+            });
+            (outside.argv.map(|argv| is_nirvana(&argv, home)), transcript)
         } else {
-            None
+            (None, None)
         };
         let input_line = runtime.map_or_else(
             || InputLine::Unsure("the pane has no runtime".into()),
@@ -143,9 +158,12 @@ impl App {
         );
         let facts = Facts {
             compact_in_flight,
+            compact_sent,
             record,
+            now: crate::nirvana_run::now(),
             sent_for: crate::nirvana_fresh::read_sent(home, &pane.public),
             nirvana,
+            transcript,
             state,
             owner_key: owner_key_of(&pane.public),
             input_line,
@@ -158,6 +176,11 @@ impl App {
                     terminal.idle_stretch.fresh.found = true;
                 }
                 tracing::debug!(pane = %public, why, "nirvana: the fresh start left the pane alone");
+                false
+            }
+            Decision::Forget(why) => {
+                crate::nirvana_fresh::forget(home, &public);
+                tracing::info!(pane = %public, why, "nirvana: the fresh start forgot a stale record");
                 false
             }
             Decision::Send(at) => self.fresh_paste(&terminal_id, &public, now, at),

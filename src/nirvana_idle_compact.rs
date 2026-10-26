@@ -700,13 +700,23 @@ pub struct Outside {
 /// Reads the pane's foreground job and the Claude process in it, then its own transcript (`choose_transcript`).
 /// Stops at the first read that fails, leaving the rest `None`.
 pub fn read_outside(query: &PaneQuery, claude_dir: Option<&Path>, now: SystemTime) -> Outside {
+    read_outside_and_transcript(query, claude_dir, now).0
+}
+
+/// `read_outside`, with the transcript it chose. Plan 25 review S1: the fresh start sends only while the pane's
+/// transcript is still the one its record names, read the way idle compact reads it.
+pub fn read_outside_and_transcript(
+    query: &PaneQuery,
+    claude_dir: Option<&Path>,
+    now: SystemTime,
+) -> (Outside, Option<PathBuf>) {
     let Some(job) = query.shell_pid.and_then(crate::detect::foreground_job) else {
-        return Outside::default();
+        return (Outside::default(), None);
     };
     let found = crate::detect::identify_agent_process_in_job(&job);
     let foreground = found.as_ref().map(|(agent, _, _)| *agent);
     let Some((Agent::Claude, _, claude_pid)) = found else {
-        return Outside::default();
+        return (Outside::default(), None);
     };
     let argv = job
         .processes
@@ -718,7 +728,7 @@ pub fn read_outside(query: &PaneQuery, claude_dir: Option<&Path>, now: SystemTim
         ..Outside::default()
     };
     let (Some(claude_dir), Some(folder)) = (claude_dir, query.folder.as_deref()) else {
-        return outside;
+        return (outside, None);
     };
     let record =
         crate::nirvana::read_claude_session(claude_dir, claude_pid).map(|session| SessionsRecord {
@@ -747,12 +757,12 @@ pub fn read_outside(query: &PaneQuery, claude_dir: Option<&Path>, now: SystemTim
         Ok(transcript) => transcript,
         Err(why) => {
             tracing::debug!(pane = %query.pane_id, why, "nirvana: idle compact found no transcript");
-            return outside;
+            return (outside, None);
         }
     };
     outside.transcript_age = file_age(&transcript, now);
     outside.context_tokens = read_context_tokens(&transcript);
-    outside
+    (outside, Some(transcript))
 }
 
 #[cfg(test)]

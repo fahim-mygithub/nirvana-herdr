@@ -29,7 +29,22 @@ T_S_RACE = 'fresh_start_and_idle_compact_never_share_a_pane'
 T_S_LOOP = 'fresh_deadline_reaches_the_server_loop'
 T_S_NAME = 'fresh_deadline_counts_only_panes_started_as_nirvana_claude'
 T_NEEDED = 'no_tool_nirvana_claude_needs_is_cut'
-T_CUTS = 'the_cut_list_is_the_three_the_probe_passed'
+T_CUTS = 'the_cut_list_is_the_one_the_owner_kept'
+# The review round (P25-fix): B1, S1 to S3 and the nits.
+T_OPEN = 'the_trigger_holds_off_while_a_run_of_the_pane_is_open'
+T_TYPED = 'the_trigger_holds_off_once_the_owner_typed_after_the_end'
+T_RECENT = 'the_trigger_needs_a_recent_end'
+T_SCENE1 = 'scenario_one_a_question_after_the_end_takes_the_record_back'
+T_SCENE2 = 'scenario_two_a_run_opened_after_the_end_takes_the_record_back'
+T_BOUND = 'the_note_goes_only_to_its_project_and_a_resume_forgets_a_stops_record'
+T_OWNER_NOTE = 'the_owners_note_quotes_the_transcript_the_hook_reports'
+T_REFUSED = 'a_named_pane_in_another_project_is_refused'
+T_OWNER_RECORD = 'the_owners_record_names_no_transcript'
+T_STALE = 'a_stale_stop_record_is_forgotten'
+T_OWN_TRANSCRIPT = 'the_fresh_start_needs_the_records_own_transcript'
+T_S_SENT_RACE = 'a_sent_clear_holds_idle_compact_off_and_a_sent_compact_holds_the_fresh_start_off'
+T_S_STALE = 'fresh_server_forgets_a_stale_stop_record'
+T_S_TRANSCRIPT = 'fresh_server_types_only_into_the_records_conversation'
 T_DOUBT = 'a_doubt_keeps_todays_argv'
 T_LAUNCH = 'the_launch_carries_the_probes_cut_list_before_the_resume'
 T_BROWSER = 'only_a_browser_order_gets_the_bladebro_line'
@@ -92,8 +107,8 @@ CONTROLS = (
     # §2 the run this pane ended: other panes' runs do not count
     Control(
         'p25_last_end_this_pane', F,
-        '                == Some(pane)\n',
-        '                != None\n',
+        '                == Some(pane)\n        })\n        .filter_map(',
+        '                != None\n        })\n        .filter_map(',
         T_LAST_END, 'rust',
     ),
     # §2 the run this pane last ended: the latest end
@@ -148,8 +163,8 @@ CONTROLS = (
     # §2 only the Stop hook's own record is taken back, never the owner's
     Control(
         'p25_stop_spares_the_owner', F,
-        '                .is_some_and(|record| record.by == "stop")\n',
-        '                .is_some_and(|_| true)\n',
+        '                .is_some_and(|record| record.by == "stop")\n            {\n                forget(home, pane);\n            }\n            Ok(Err(why))\n',
+        '                .is_some_and(|_| true)\n            {\n                forget(home, pane);\n            }\n            Ok(Err(why))\n',
         T_STOP, 'rust',
     ),
     # §2 a record that does not parse is a doubt, not "none"
@@ -289,7 +304,7 @@ CONTROLS = (
     Control(
         'p25_start_on_clear_only', F,
         '        "clear" => {}\n',
-        '        "clear" | "resume" => {}\n',
+        '        "clear" | "compact" => {}\n',
         T_START, 'rust',
     ),
     # §2 a new session is already fresh: its record is forgotten
@@ -470,9 +485,16 @@ CONTROLS = (
     # §2 a /clear in flight is what holds a compact off
     Control(
         'p25_busy', F,
-        '    pub fn busy(&self) -> bool {\n        self.pending.is_some()\n',
-        '    pub fn busy(&self) -> bool {\n        false\n',
+        '    pub fn busy(&self) -> bool {\n        self.pending.is_some() || self.sent\n',
+        '    pub fn busy(&self) -> bool {\n        self.sent\n',
         T_SCHEDULE, 'rust',
+    ),
+    # review S3: a /clear whose Enter went holds a compact off for the rest of the stretch
+    Control(
+        'p25_busy_once_sent', F,
+        '    pub fn busy(&self) -> bool {\n        self.pending.is_some() || self.sent\n',
+        '    pub fn busy(&self) -> bool {\n        self.pending.is_some()\n',
+        T_S_SENT_RACE, 'rust',
     ),
     # §2 the fresh state lives on the idle stretch, so any other state ends it
     Control(
@@ -519,15 +541,15 @@ CONTROLS = (
     # §2 the server: the process is read only when a record waits
     Control(
         'p25_server_reads_the_process_only_for_a_record', S,
-        '        let nirvana = if waiting && !compact_in_flight {\n',
-        '        let nirvana = if true {\n',
+        '        let (nirvana, transcript) = if waiting && !compact_in_flight && !compact_sent {\n',
+        '        let (nirvana, transcript) = if true {\n',
         T_S_NONE, 'rust',
     ),
     # §2 the server: Nirvana Claude is told by its argv
     Control(
         'p25_server_nirvana_argv', S,
-        '            .map(|argv| is_nirvana(&argv, home))\n',
-        '            .map(|_| true)\n',
+        '            (outside.argv.map(|argv| is_nirvana(&argv, home)), transcript)\n',
+        '            (outside.argv.map(|_| true), transcript)\n',
         T_S_PLAIN, 'rust',
     ),
     # §2 the server: the mark is a fact
@@ -645,8 +667,8 @@ CONTROLS = (
     # §3 no tool Nirvana Claude needs is cut
     Control(
         'p25_cut_never_needed', L,
-        'pub const DISALLOWED: [&str; 3] = ["Workflow", "ScheduleWakeup", "ReportFindings"];\n',
-        'pub const DISALLOWED: [&str; 3] = ["Workflow", "ScheduleWakeup", "Bash"];\n',
+        'pub const DISALLOWED: [&str; 1] = ["ReportFindings"];\n',
+        'pub const DISALLOWED: [&str; 1] = ["Bash"];\n',
         T_NEEDED, 'rust',
     ),
     # §3 the needed list holds what §3.3 names
@@ -656,11 +678,25 @@ CONTROLS = (
         '    "AskUser",\n    "Skill",\n];\n',
         T_NEEDED, 'rust',
     ),
-    # §3 the cut list is the three the probe passed
+    # §3, the owner's ruling of 2026-10-26: "Keep only ReportFindings cut"
     Control(
         'p25_cut_list', L,
-        'pub const DISALLOWED: [&str; 3] = ["Workflow", "ScheduleWakeup", "ReportFindings"];\n',
-        'pub const DISALLOWED: [&str; 3] = ["Workflow", "ScheduleWakeup", "Artifact"];\n',
+        'pub const DISALLOWED: [&str; 1] = ["ReportFindings"];\n',
+        'pub const DISALLOWED: [&str; 1] = ["Artifact"];\n',
+        T_CUTS, 'rust',
+    ),
+    # §3, the owner's ruling: Workflow stays usable
+    Control(
+        'p25_cut_keeps_workflow', L,
+        'pub const DISALLOWED: [&str; 1] = ["ReportFindings"];\n',
+        'pub const DISALLOWED: [&str; 1] = ["Workflow"];\n',
+        T_CUTS, 'rust',
+    ),
+    # §3, the owner's ruling: ScheduleWakeup stays usable
+    Control(
+        'p25_cut_keeps_schedule_wakeup', L,
+        'pub const DISALLOWED: [&str; 1] = ["ReportFindings"];\n',
+        'pub const DISALLOWED: [&str; 1] = ["ScheduleWakeup"];\n',
         T_CUTS, 'rust',
     ),
     # §3 one comma-joined value, the form the probe measured
@@ -680,8 +716,22 @@ CONTROLS = (
     # §3 an argv that already sets the flag is left as it is
     Control(
         'p25_cut_refuses_a_second_flag', L,
-        '    if args.iter().any(|arg| arg.starts_with(DISALLOWED_FLAG)) {\n',
-        '    if args.iter().any(|arg| arg == "--never") {\n',
+        '        .any(|arg| arg.starts_with(DISALLOWED_FLAG) || arg.starts_with(DISALLOWED_ALIAS))\n',
+        '        .any(|arg| arg.starts_with(DISALLOWED_ALIAS))\n',
+        T_DOUBT, 'rust',
+    ),
+    # review nit: --disallowed-tools, the flag's other spelling, sets it too
+    Control(
+        'p25_cut_refuses_the_alias', L,
+        '        .any(|arg| arg.starts_with(DISALLOWED_FLAG) || arg.starts_with(DISALLOWED_ALIAS))\n',
+        '        .any(|arg| arg.starts_with(DISALLOWED_FLAG))\n',
+        T_DOUBT, 'rust',
+    ),
+    # review nit: the alias is Claude Code's spelling
+    Control(
+        'p25_cut_alias_spelling', L,
+        'pub const DISALLOWED_ALIAS: &str = "--disallowed-tools";\n',
+        'pub const DISALLOWED_ALIAS: &str = "--disallowed_tools";\n',
         T_DOUBT, 'rust',
     ),
     # §3 a doubt keeps today's argv
@@ -715,15 +765,43 @@ CONTROLS = (
     # §5 bladebro by name is a browser
     Control(
         'p25_browser_names', L,
-        '        text.contains("browser") || text.contains("bladebro")\n',
-        '        text.contains("browser")\n',
+        'pub const BROWSERS: [&str; 3] = ["browser", "agent-browser", "bladebro"];\n',
+        'pub const BROWSERS: [&str; 2] = ["browser", "agent-browser"];\n',
         T_BROWSER, 'rust',
     ),
     # §5 a browser named in any case
     Control(
         'p25_browser_case', L,
-        '        let text = text.to_ascii_lowercase();\n',
-        '        let text = text.to_owned();\n',
+        '            .map(str::to_ascii_lowercase)\n',
+        '            .map(str::to_owned)\n',
+        T_BROWSER, 'rust',
+    ),
+    # review nit: a name counts as a whole token, so no-browser is not a browser
+    Control(
+        'p25_browser_whole_token', L,
+        '            .any(|token| BROWSERS.contains(&token.as_str()))\n',
+        '            .any(|token| BROWSERS.iter().any(|name| token.contains(name)))\n',
+        T_BROWSER, 'rust',
+    ),
+    # review nit: a need is split on commas and whitespace
+    Control(
+        'p25_browser_split', L,
+        "        text.split(|c: char| c == ',' || c.is_whitespace())\n",
+        "        text.split(|c: char| c == ';')\n",
+        T_BROWSER, 'rust',
+    ),
+    # review nit: only on the claude seat (decision 0043 grants bladebro to headless Claude orders only)
+    Control(
+        'p25_browser_claude_seat', L,
+        '    if cli != BROWSER_CLI {\n',
+        '    if false && cli != BROWSER_CLI {\n',
+        T_BROWSER, 'rust',
+    ),
+    # review nit: the claude seat's CLI is `claude`
+    Control(
+        'p25_browser_cli_name', L,
+        'pub const BROWSER_CLI: &str = "claude";\n',
+        'pub const BROWSER_CLI: &str = "agy";\n',
         T_BROWSER, 'rust',
     ),
     # §5 the order's needs count, not only its class
@@ -739,5 +817,299 @@ CONTROLS = (
         '        brief.push_str(line);\n',
         '        let _ = line;\n',
         T_BRIEF, 'rust',
+    ),
+    # review nit: the brief asks with the seat's CLI
+    Control(
+        'p25_browser_brief_cli', L,
+        '    if let Some(line) = browser_line(cli, class, needs) {\n',
+        '    if let Some(line) = browser_line(BROWSER_CLI, class, needs) {\n',
+        T_BRIEF, 'rust',
+    ),
+    # review B1, rule 1: no open run whose orchestrator_pane is this pane
+    Control(
+        'p25_trigger_open_run', F,
+        '    if let Some(open) = open_here {\n',
+        '    if let Some(open) = None::<&str> {\n',
+        T_OPEN, 'rust',
+    ),
+    # review B1, rule 1: an open run is one not ended
+    Control(
+        'p25_open_of_open_only', F,
+        '        .filter(|(_, state)| state.ended.is_none())\n        .find(',
+        '        .find(',
+        T_OPEN, 'rust',
+    ),
+    # review B1, rule 1: an open run of this pane, not another's
+    Control(
+        'p25_open_of_this_pane', F,
+        '                == Some(pane)\n        })\n        .map(|(run, _)| run.as_str())\n',
+        '                != None\n        })\n        .map(|(run, _)| run.as_str())\n',
+        T_OPEN, 'rust',
+    ),
+    # review B1, rule 1, end to end: the Stop hook reads this pane's open run
+    Control(
+        'p25_stop_reads_the_open_run', F,
+        '        open_of(pane, &runs),\n',
+        '        None,\n',
+        T_SCENE2, 'rust',
+    ),
+    # review B1, rule 3: a recent end
+    Control(
+        'p25_trigger_recent', F,
+        '    if now.saturating_sub(ended_at) > FRESH_WITHIN.as_secs() {\n',
+        '    if false && now.saturating_sub(ended_at) > FRESH_WITHIN.as_secs() {\n',
+        T_RECENT, 'rust',
+    ),
+    # review B1, rule 3: at most FRESH_WITHIN, inclusive
+    Control(
+        'p25_trigger_recent_inclusive', F,
+        '    if now.saturating_sub(ended_at) > FRESH_WITHIN.as_secs() {\n',
+        '    if now.saturating_sub(ended_at) >= FRESH_WITHIN.as_secs() {\n',
+        T_RECENT, 'rust',
+    ),
+    # review B1, rule 3: FRESH_WITHIN is 10 minutes
+    Control(
+        'p25_fresh_within_value', F,
+        'pub const FRESH_WITHIN: Duration = Duration::from_secs(10 * 60);\n',
+        'pub const FRESH_WITHIN: Duration = Duration::from_secs(11 * 60);\n',
+        T_RECENT, 'rust',
+    ),
+    # review B1, rule 2: the owner's check is the trigger's
+    Control(
+        'p25_trigger_owner_check', F,
+        '    owner_since(ended_at)?;\n',
+        '',
+        T_TYPED, 'rust',
+    ),
+    # review B1, rule 2, end to end: the Stop hook reads the transcript for it
+    Control(
+        'p25_stop_reads_the_owner', F,
+        '        |ended_at| owner_since(transcript, ended_at),\n',
+        '        |_| Ok(()),\n',
+        T_SCENE1, 'rust',
+    ),
+    # review B1, rule 2: an owner prompt after the end
+    Control(
+        'p25_owner_after_end', F,
+        '                Some(at) if at < ended_at => {}\n',
+        '                Some(_) if true => {}\n',
+        T_TYPED, 'rust',
+    ),
+    # review B1, rule 2: a prompt in the end's own second is a doubt
+    Control(
+        'p25_owner_same_second', F,
+        '                Some(at) if at < ended_at => {}\n',
+        '                Some(at) if at <= ended_at => {}\n',
+        T_TYPED, 'rust',
+    ),
+    # review B1, rule 2: an owner prompt whose time cannot be read is one after the end
+    Control(
+        'p25_owner_untimed', F,
+        '                None => return Err("an owner prompt\'s time cannot be read".into()),\n',
+        '                None => {}\n',
+        T_TYPED, 'rust',
+    ),
+    # review B1, rule 2: a line that does not parse may be the owner's
+    Control(
+        'p25_owner_unparsed', F,
+        '            return Err("a transcript line does not parse, so it may be the owner\'s".into());\n',
+        '            continue;\n',
+        T_TYPED, 'rust',
+    ),
+    # review B1, rule 2: a tail that never reaches back to the end is a doubt
+    Control(
+        'p25_owner_reaches_the_end', F,
+        '    if !reaches_the_end {\n',
+        '    if false && !reaches_the_end {\n',
+        T_TYPED, 'rust',
+    ),
+    # review B1, rule 2: the end is reached by a line timed before it
+    Control(
+        'p25_owner_reached_before', F,
+        '        reaches_the_end |= at.is_some_and(|at| at < ended_at);\n',
+        '        reaches_the_end |= at.is_some();\n',
+        T_TYPED, 'rust',
+    ),
+    # review B1, rule 2: owner_prompts' own filter (wakes, tool results, meta lines are not the owner's)
+    Control(
+        'p25_owner_filter', F,
+        '        if owner_prompt_in(&value).is_some() {\n',
+        '        if true {\n',
+        T_TYPED, 'rust',
+    ),
+    # review nit: the Stop hook never overwrites the owner's record
+    Control(
+        'p25_stop_never_overwrites_the_owner', F,
+        '            if existing.as_ref().is_some_and(|record| record.by == "owner") {\n',
+        '            if false && existing.as_ref().is_some_and(|record| record.by == "owner") {\n',
+        T_STOP, 'rust',
+    ),
+    # review S1: a Stop's record older than FRESH_WITHIN is forgotten
+    Control(
+        'p25_decide_stale', F,
+        '    if record.by == "stop" && facts.now.saturating_sub(record.at) > FRESH_WITHIN.as_secs() {\n',
+        '    if false && facts.now.saturating_sub(record.at) > FRESH_WITHIN.as_secs() {\n',
+        T_STALE, 'rust',
+    ),
+    # review S1: only a Stop's record ages
+    Control(
+        'p25_decide_stale_only_stop', F,
+        '    if record.by == "stop" && facts.now.saturating_sub(record.at) > FRESH_WITHIN.as_secs() {\n',
+        '    if facts.now.saturating_sub(record.at) > FRESH_WITHIN.as_secs() {\n',
+        T_STALE, 'rust',
+    ),
+    # review S1: a stale record is forgotten before the mark is read, so a mark never keeps it
+    Control(
+        'p25_decide_stale_before_the_mark', F,
+        '    if record.by == "stop" && facts.now.saturating_sub(record.at) > FRESH_WITHIN.as_secs() {\n',
+        '    if facts.sent_for != Some(record.at) && record.by == "stop" && facts.now.saturating_sub(record.at) > FRESH_WITHIN.as_secs() {\n',
+        T_STALE, 'rust',
+    ),
+    # review S1: the pane's transcript must be the record's
+    Control(
+        'p25_decide_transcript', F,
+        '            (Some(want), Some(have)) if same_transcript(Path::new(want), have) => {}\n',
+        '            (Some(_), Some(_)) if true => {}\n',
+        T_OWN_TRANSCRIPT, 'rust',
+    ),
+    # review S1: a transcript that could not be told is a doubt
+    Control(
+        'p25_decide_transcript_unknown', F,
+        '            (_, None) => return skip("the pane\'s transcript could not be told".into()),\n',
+        '            (_, None) => {}\n',
+        T_OWN_TRANSCRIPT, 'rust',
+    ),
+    # review S1: a Stop's record that names no transcript is a doubt
+    Control(
+        'p25_decide_transcript_unnamed', F,
+        '            (None, _) => return skip("the record names no transcript".into()),\n',
+        '            (None, _) => {}\n',
+        T_OWN_TRANSCRIPT, 'rust',
+    ),
+    # review S2: the owner's record is not compared
+    Control(
+        'p25_decide_transcript_not_the_owners', F,
+        '    if record.by != "owner" {\n',
+        '    if true {\n',
+        T_OWN_TRANSCRIPT, 'rust',
+    ),
+    # review S1: one file spelt two ways is one transcript
+    Control(
+        'p25_same_transcript', F,
+        '    crate::nirvana_spaces::same_folder(left, right)\n',
+        '    left == right\n',
+        T_OWN_TRANSCRIPT, 'rust',
+    ),
+    # review S1: the note goes only to the record's own project
+    Control(
+        'p25_start_own_project', F,
+        '        crate::nirvana_spaces::same_folder(project, Path::new(&record.project))\n',
+        '        true\n',
+        T_BOUND, 'rust',
+    ),
+    # review S1: a record of another project is forgotten
+    Control(
+        'p25_start_other_project_forgets', F,
+        '    }) {\n        forget(home, pane);\n        return None;\n    }\n',
+        '    }) {\n        return None;\n    }\n',
+        T_BOUND, 'rust',
+    ),
+    # review S1: a resume forgets a Stop's record
+    Control(
+        'p25_start_resume_forgets', F,
+        '            {\n                forget(home, pane);\n            }\n            return None;\n',
+        '            {\n            }\n            return None;\n',
+        T_BOUND, 'rust',
+    ),
+    # review S1: a resume keeps the owner's record
+    Control(
+        'p25_start_resume_keeps_the_owner', F,
+        '                .is_some_and(|record| record.by == "stop")\n            {\n                forget(home, pane);\n            }\n            return None;\n',
+        '                .is_some_and(|_| true)\n            {\n                forget(home, pane);\n            }\n            return None;\n',
+        T_BOUND, 'rust',
+    ),
+    # review S2: the owner's note quotes the transcript the hook reports
+    Control(
+        'p25_start_owner_transcript', F,
+        '        hook_transcript.map(Path::to_path_buf)\n',
+        '        record.transcript.as_deref().map(PathBuf::from)\n',
+        T_OWNER_NOTE, 'rust',
+    ),
+    # review S2: a Stop's note quotes its own record's transcript
+    Control(
+        'p25_start_stop_transcript', F,
+        '        record.transcript.as_deref().map(PathBuf::from)\n',
+        '        hook_transcript.map(Path::to_path_buf)\n',
+        T_OWNER_NOTE, 'rust',
+    ),
+    # review S2: the note's prompts come from the transcript it is given
+    Control(
+        'p25_note_input_transcript', F,
+        '    let prompts = transcript\n',
+        '    let prompts = None::<&Path>\n',
+        T_START, 'rust',
+    ),
+    # review S2: the owner's record names no transcript
+    Control(
+        'p25_owner_record_no_transcript', F,
+        '        context: None,\n        transcript: None,\n        project: project.root.display().to_string(),\n        at: now,\n',
+        '        context: None,\n        transcript: Some(String::new()),\n        project: project.root.display().to_string(),\n        at: now,\n',
+        T_OWNER_RECORD, 'rust',
+    ),
+    # review S2: and guesses no context
+    Control(
+        'p25_owner_record_no_context', F,
+        '        context: None,\n        transcript: None,\n        project: project.root.display().to_string(),\n        at: now,\n',
+        '        context: Some(0),\n        transcript: None,\n        project: project.root.display().to_string(),\n        at: now,\n',
+        T_OWNER_RECORD, 'rust',
+    ),
+    # review S2: a named pane in another project is refused
+    Control(
+        'p25_refuses_another_project', F,
+        '        Some(target) if crate::nirvana_spaces::same_folder(target, caller) => Ok(()),\n',
+        '        Some(_) if true => Ok(()),\n',
+        T_REFUSED, 'rust',
+    ),
+    # review S2: a pane whose folder could not be read is refused
+    Control(
+        'p25_refuses_an_unread_pane', F,
+        '        None => Err("its folder could not be read".into()),\n',
+        '        None => Ok(()),\n',
+        T_REFUSED, 'rust',
+    ),
+    # review S3: a stretch whose idle compact went gets no fresh start
+    Control(
+        'p25_decide_compact_sent', F,
+        '    if facts.compact_sent {\n',
+        '    if false && facts.compact_sent {\n',
+        T_COMPACT, 'rust',
+    ),
+    # review S3: the server reads the compact's mark
+    Control(
+        'p25_server_compact_sent_fact', S,
+        '        let compact_sent = terminal.idle_stretch.sent;\n',
+        '        let compact_sent = false;\n',
+        T_S_SENT_RACE, 'rust',
+    ),
+    # review S1: the server forgets a stale record
+    Control(
+        'p25_server_forgets', S,
+        '                crate::nirvana_fresh::forget(home, &public);\n',
+        '',
+        T_S_STALE, 'rust',
+    ),
+    # review S1: the server knows the time, for the record's age
+    Control(
+        'p25_server_now_fact', S,
+        '            now: crate::nirvana_run::now(),\n',
+        '            now: 0,\n',
+        T_S_STALE, 'rust',
+    ),
+    # review S1: the server reads the pane's transcript
+    Control(
+        'p25_server_transcript_fact', S,
+        '            (outside.argv.map(|argv| is_nirvana(&argv, home)), transcript)\n',
+        '            (outside.argv.map(|argv| is_nirvana(&argv, home)), None)\n',
+        T_S_TRANSCRIPT, 'rust',
     ),
 )

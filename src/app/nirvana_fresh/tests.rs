@@ -5,6 +5,7 @@ use super::*;
 use crate::detect::{Agent, AgentState};
 use crate::nirvana_fresh::{FreshStretch, Record, LOOKUPS, POLL, RETRY};
 use crate::nirvana_idle_compact::{IdleStretch, ENTER_TRIES, ERASED_AT, ERASE_AT};
+use std::path::PathBuf;
 use std::time::Duration;
 
 const MIN: Duration = Duration::from_secs(60);
@@ -88,27 +89,40 @@ fn typed(receiver: &mut tokio::sync::mpsc::Receiver<Bytes>) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Nirvana Claude's process in the test home: `--agent nirvana` with this home's plugin.
-fn nirvana_in(home: &Path) -> impl Fn(&PaneQuery) -> Outside + '_ {
-    move |_query| Outside {
-        argv: Some(vec![
-            "claude".into(),
-            "--plugin-dir".into(),
-            crate::nirvana_launch::plugin_dir(home)
-                .display()
-                .to_string(),
-            "--agent".into(),
-            "nirvana".into(),
-        ]),
-        ..Outside::default()
+/// Nirvana Claude's process in the test home (`--agent nirvana` with this home's plugin), in the conversation the
+/// records name.
+fn nirvana_in(home: &Path) -> impl Fn(&PaneQuery) -> (Outside, Option<PathBuf>) + '_ {
+    nirvana_with(home, Some(TRANSCRIPT))
+}
+
+/// Nirvana Claude's process in the test home, its transcript `transcript`.
+fn nirvana_with<'a>(
+    home: &'a Path,
+    transcript: Option<&'a str>,
+) -> impl Fn(&PaneQuery) -> (Outside, Option<PathBuf>) + 'a {
+    move |_query| {
+        let outside = Outside {
+            argv: Some(vec![
+                "claude".into(),
+                "--plugin-dir".into(),
+                crate::nirvana_launch::plugin_dir(home)
+                    .display()
+                    .to_string(),
+                "--agent".into(),
+                "nirvana".into(),
+            ]),
+            ..Outside::default()
+        };
+        (outside, transcript.map(PathBuf::from))
     }
 }
 
-fn plain_claude(_query: &PaneQuery) -> Outside {
-    Outside {
+fn plain_claude(_query: &PaneQuery) -> (Outside, Option<PathBuf>) {
+    let outside = Outside {
         argv: Some(vec!["claude".into(), "--model".into(), "opus".into()]),
         ..Outside::default()
-    }
+    };
+    (outside, Some(PathBuf::from(TRANSCRIPT)))
 }
 
 /// A long-idle interactive Claude with a big context, as idle compact's `read_outside` would find it.
@@ -120,12 +134,17 @@ fn long_idle(_query: &PaneQuery) -> Outside {
     }
 }
 
-fn record(at: u64) -> Record {
+/// The pane's conversation, as the Stop hook names it in the record and the server reads it.
+const TRANSCRIPT: &str = r"C:\Users\o\.claude\projects\C--work-print\abc-123.jsonl";
+
+/// A Stop's record written now (review S1: an older one is stale), naming the pane's transcript.
+fn record() -> Record {
+    let at = crate::nirvana_run::now();
     Record {
         run: Some("r1".into()),
         ended_at: Some(at),
         context: Some(180_000),
-        transcript: None,
+        transcript: Some(TRANSCRIPT.into()),
         project: "C:\\work\\print".into(),
         at,
         by: "stop".into(),
@@ -150,7 +169,8 @@ async fn fresh_server_types_clear_then_enter_into_an_idle_nirvana_claude() {
     let t0 = Instant::now();
     let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
     let public = root_public(&app);
-    crate::nirvana_fresh::write_record(&home, &public, &record(1_000)).unwrap();
+    let written = record();
+    crate::nirvana_fresh::write_record(&home, &public, &written).unwrap();
     assert_eq!(app.fresh_deadline(), Some(t0 + LOOKUPS[0]));
     // Nothing is due before the first lookup.
     assert!(!app.nirvana_fresh_with(t0 + Duration::from_secs(1), &home, nirvana_in(&home)));
@@ -163,7 +183,10 @@ async fn fresh_server_types_clear_then_enter_into_an_idle_nirvana_claude() {
     assert!(app.nirvana_fresh_with(pasted + ENTER_TRIES[0], &home, nirvana_in(&home)));
     assert_eq!(typed(&mut receiver), "\r");
     // Sent: the mark names the record, and nothing more is due in the stretch.
-    assert_eq!(crate::nirvana_fresh::read_sent(&home, &public), Some(1_000));
+    assert_eq!(
+        crate::nirvana_fresh::read_sent(&home, &public),
+        Some(written.at)
+    );
     assert!(
         app.state.terminals[&root_terminal_id(&app)]
             .idle_stretch
@@ -204,14 +227,18 @@ async fn fresh_server_types_only_into_nirvana_claude() {
     let mut app = test_app();
     let t0 = Instant::now();
     let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
-    crate::nirvana_fresh::write_record(&home, &root_public(&app), &record(1_000)).unwrap();
+    crate::nirvana_fresh::write_record(&home, &root_public(&app), &record()).unwrap();
     for after in LOOKUPS {
         assert!(!app.nirvana_fresh_with(t0 + after, &home, plain_claude));
     }
     assert_eq!(typed(&mut receiver), "");
     // Left for now: tried again after the owner's quiet window, not at the minute's poll.
     assert_eq!(app.fresh_deadline(), Some(t0 + LOOKUPS[2] + RETRY));
-    assert!(!app.nirvana_fresh_with(t0 + LOOKUPS[2] + RETRY, &home, |_| Outside::default()));
+    assert!(
+        !app.nirvana_fresh_with(t0 + LOOKUPS[2] + RETRY, &home, |_| {
+            (Outside::default(), None)
+        })
+    );
     assert_eq!(typed(&mut receiver), "");
 }
 
@@ -230,7 +257,7 @@ async fn fresh_server_types_nothing_while_the_owner_types_or_the_line_holds_text
         };
         let mut receiver = idle_claude(&mut app, t0, recorded);
         let public = root_public(&app);
-        crate::nirvana_fresh::write_record(&home, &public, &record(1_000)).unwrap();
+        crate::nirvana_fresh::write_record(&home, &public, &record()).unwrap();
         if owner_typed {
             crate::nirvana_run::note_owner_key(&public);
         }
@@ -247,8 +274,9 @@ async fn fresh_server_never_clears_twice_for_one_record() {
     let t0 = Instant::now();
     let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
     let public = root_public(&app);
-    crate::nirvana_fresh::write_record(&home, &public, &record(1_000)).unwrap();
-    crate::nirvana_fresh::write_sent(&home, &public, 1_000).unwrap();
+    let written = record();
+    crate::nirvana_fresh::write_record(&home, &public, &written).unwrap();
+    crate::nirvana_fresh::write_sent(&home, &public, written.at).unwrap();
     assert!(!app.nirvana_fresh_with(t0 + LOOKUPS[0], &home, nirvana_in(&home)));
     assert_eq!(typed(&mut receiver), "");
 }
@@ -261,7 +289,7 @@ async fn fresh_server_erases_a_clear_whose_enter_never_went() {
     let mut app = test_app();
     let t0 = Instant::now();
     let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
-    crate::nirvana_fresh::write_record(&home, &root_public(&app), &record(1_000)).unwrap();
+    crate::nirvana_fresh::write_record(&home, &root_public(&app), &record()).unwrap();
     let pasted = t0 + LOOKUPS[0];
     assert!(app.nirvana_fresh_with(pasted, &home, nirvana_in(&home)));
     assert_eq!(typed(&mut receiver), "/clear");
@@ -295,10 +323,24 @@ async fn fresh_start_and_idle_compact_never_share_a_pane() {
     let t0 = Instant::now();
     let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
     let public = root_public(&app);
-    crate::nirvana_fresh::write_record(&home, &public, &record(1_000)).unwrap();
+    crate::nirvana_fresh::write_record(&home, &public, &record()).unwrap();
     let pass = t0 + 51 * MIN;
     assert!(app.nirvana_idle_compact_with(pass, long_idle));
     assert_eq!(typed(&mut receiver), "/compact");
+    assert!(!app.nirvana_fresh_with(pass, &home, nirvana_in(&home)));
+    assert_eq!(typed(&mut receiver), "");
+    // The paste in flight is a fact of its own, not only the stretch's `sent` (review S3's guard, which the paste
+    // also sets, would hide it): a pending paste with `sent` cleared still holds the fresh start off.
+    let terminal_id = root_terminal_id(&app);
+    let stretch = &mut app
+        .state
+        .terminals
+        .get_mut(&terminal_id)
+        .unwrap()
+        .idle_stretch;
+    assert!(stretch.pending.is_some());
+    stretch.sent = false;
+    stretch.fresh = FreshStretch::default();
     assert!(!app.nirvana_fresh_with(pass, &home, nirvana_in(&home)));
     assert_eq!(typed(&mut receiver), "");
     // And the reverse: a `/clear` in flight holds the compact off.
@@ -338,6 +380,108 @@ async fn fresh_start_and_idle_compact_never_share_a_pane() {
     assert_eq!(typed(&mut receiver), "/compact");
 }
 
+/// Review S3: once the `/clear` Enter went, idle compact stays off the pane for the stretch (it could read the old
+/// transcript and type `/compact` into the new session); and once idle compact went, the fresh start does.
+#[tokio::test]
+async fn a_sent_clear_holds_idle_compact_off_and_a_sent_compact_holds_the_fresh_start_off() {
+    let guard = crate::nirvana::with_test_home("fresh-sent-race");
+    let home = guard.path.clone();
+    let t0 = Instant::now();
+    let pass = t0 + 51 * MIN;
+    // The fresh start sent: the compact's pass types nothing, and is stamped.
+    let mut app = test_app();
+    let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+    let terminal_id = root_terminal_id(&app);
+    app.state
+        .terminals
+        .get_mut(&terminal_id)
+        .unwrap()
+        .idle_stretch
+        .fresh = FreshStretch {
+        sent: true,
+        ..FreshStretch::default()
+    };
+    assert!(!app.nirvana_idle_compact_with(pass, long_idle));
+    assert_eq!(typed(&mut receiver), "");
+    assert_eq!(
+        app.idle_compact_deadline(),
+        Some(pass + crate::nirvana_idle_compact::RECHECK)
+    );
+    // The compact went and its reads are done: a record now waits, and the fresh start types nothing.
+    let mut app = test_app();
+    let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+    let public = root_public(&app);
+    let terminal_id = root_terminal_id(&app);
+    app.state
+        .terminals
+        .get_mut(&terminal_id)
+        .unwrap()
+        .idle_stretch
+        .sent = true;
+    crate::nirvana_fresh::write_record(&home, &public, &record()).unwrap();
+    for after in LOOKUPS {
+        assert!(!app.nirvana_fresh_with(t0 + after, &home, nirvana_in(&home)));
+    }
+    assert_eq!(typed(&mut receiver), "");
+    // In a new stretch, with nothing sent, the same record is typed for: the stretch's mark is what held it.
+    app.state
+        .terminals
+        .get_mut(&terminal_id)
+        .unwrap()
+        .idle_stretch = IdleStretch {
+        since: Some(t0),
+        ..IdleStretch::default()
+    };
+    assert!(app.nirvana_fresh_with(t0 + LOOKUPS[0], &home, nirvana_in(&home)));
+    assert_eq!(typed(&mut receiver), "/clear");
+}
+
+/// Review S1: a Stop's record older than `FRESH_WITHIN` is removed with its mark, and nothing is typed.
+#[tokio::test]
+async fn fresh_server_forgets_a_stale_stop_record() {
+    let guard = crate::nirvana::with_test_home("fresh-stale");
+    let home = guard.path.clone();
+    let mut app = test_app();
+    let t0 = Instant::now();
+    let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+    let public = root_public(&app);
+    let stale = Record {
+        at: crate::nirvana_run::now() - crate::nirvana_fresh::FRESH_WITHIN.as_secs() - 60,
+        ..record()
+    };
+    crate::nirvana_fresh::write_record(&home, &public, &stale).unwrap();
+    crate::nirvana_fresh::write_sent(&home, &public, stale.at - 1).unwrap();
+    assert!(!app.nirvana_fresh_with(t0 + LOOKUPS[0], &home, nirvana_in(&home)));
+    assert_eq!(typed(&mut receiver), "");
+    assert_eq!(crate::nirvana_fresh::read_record(&home, &public), Ok(None));
+    assert_eq!(crate::nirvana_fresh::read_sent(&home, &public), None);
+}
+
+/// Review S1: a Stop's record is typed for only while the pane is still in the conversation the record names.
+#[tokio::test]
+async fn fresh_server_types_only_into_the_records_conversation() {
+    let guard = crate::nirvana::with_test_home("fresh-transcript");
+    let home = guard.path.clone();
+    let other = r"C:\Users\o\.claude\projects\C--work-print\def-456.jsonl";
+    for (transcript, sends) in [
+        (Some(other), false),
+        (None, false),
+        (Some(TRANSCRIPT), true),
+    ] {
+        let mut app = test_app();
+        let t0 = Instant::now();
+        let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+        crate::nirvana_fresh::write_record(&home, &root_public(&app), &record()).unwrap();
+        assert_eq!(
+            app.nirvana_fresh_with(t0 + LOOKUPS[0], &home, nirvana_with(&home, transcript)),
+            sends,
+            "{transcript:?}"
+        );
+        let expected = if sends { "/clear" } else { "" };
+        assert_eq!(typed(&mut receiver), expected, "{transcript:?}");
+    }
+}
+
 #[tokio::test]
 async fn fresh_deadline_reaches_the_server_loop() {
     let guard = crate::nirvana::with_test_home("fresh-loop");
@@ -360,7 +504,7 @@ async fn fresh_deadline_counts_only_panes_started_as_nirvana_claude() {
     let mut app = test_app();
     let t0 = Instant::now();
     let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
-    crate::nirvana_fresh::write_record(&home, &root_public(&app), &record(1_000)).unwrap();
+    crate::nirvana_fresh::write_record(&home, &root_public(&app), &record()).unwrap();
     for name in [None, Some("claude"), Some("nirvana-x")] {
         app.state
             .terminals
