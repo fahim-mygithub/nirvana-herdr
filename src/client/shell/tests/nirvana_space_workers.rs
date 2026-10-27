@@ -9,8 +9,11 @@ use crate::client::shell::nirvana_spaces::{
     render_space_workers, space_workers, worker_line, SpaceWorker,
 };
 use crate::nirvana_subagents::{
-    set_view_for_test, Subagent, SubagentProvider, SubagentState, SubagentsView,
+    asks_for_test, forget_unasked_for_test, seed_view_for_test, set_view_for_test,
+    set_worker_panes_for_test, view_for_test, Subagent, SubagentProvider, SubagentState,
+    SubagentsView,
 };
+use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 
 fn nirvana(pane: &str, workspace: &str) -> ClientShellAgent {
@@ -85,6 +88,15 @@ fn compose_spaces(
     snapshot: ClientShellSnapshot,
     view: Option<HashMap<String, SubagentsView>>,
 ) -> (Vec<Rect>, Vec<Vec<String>>) {
+    let (rects, spaces, _) = compose_frame(snapshot, view);
+    (rects, spaces)
+}
+
+/// `compose_spaces`, with every row of the frame as well.
+fn compose_frame(
+    snapshot: ClientShellSnapshot,
+    view: Option<HashMap<String, SubagentsView>>,
+) -> (Vec<Rect>, Vec<Vec<String>>, Vec<String>) {
     set_view_for_test(view);
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot));
@@ -96,6 +108,7 @@ fn compose_spaces(
         .chunks(frame.width as usize)
         .map(|row| row.iter().map(|cell| cell.symbol.clone()).collect())
         .collect();
+    let text = rows.iter().map(|row| row.concat()).collect();
     let rects: Vec<Rect> = state.hits.workspaces.iter().map(|hit| hit.rect).collect();
     let spaces = rects
         .iter()
@@ -110,7 +123,7 @@ fn compose_spaces(
                 .collect()
         })
         .collect();
-    (rects, spaces)
+    (rects, spaces, text)
 }
 
 fn one_space(agents: Vec<ClientShellAgent>) -> ClientShellSnapshot {
@@ -209,9 +222,9 @@ fn workers_of_another_space_never_show_under_this_one() {
     snap.workspaces.push(other);
     let view = view_of("pane_2", moto_rows(67));
 
-    assert!(space_workers(&snap, "ws_1", |pane| view.get(pane).cloned()).is_empty());
+    assert!(space_workers(&snap, "ws_1", |agent| view.get(&agent.pane_id).cloned()).is_empty());
     assert_eq!(
-        space_workers(&snap, "ws_2", |pane| view.get(pane).cloned()),
+        space_workers(&snap, "ws_2", |agent| view.get(&agent.pane_id).cloned()),
         [SpaceWorker {
             name: "v8-build".into(),
             model: "S5.5".into(),
@@ -238,8 +251,8 @@ fn a_long_worker_name_is_cut_and_keeps_model_and_time() {
         model: "S5.5".into(),
         elapsed: "1m07s".into(),
     };
-    assert_eq!(worker_line(&worker, 19), "v8-build S5.5 1m07s");
-    assert_eq!(worker_line(&worker, 15), "v8-\u{2026} S5.5 1m07s");
+    assert_eq!(worker_line(&worker, 19).line, "v8-build S5.5 1m07s");
+    assert_eq!(worker_line(&worker, 15).line, "v8-\u{2026} S5.5 1m07s");
 }
 
 /// A worktree space that is not its parent's last child keeps the parent's tree line beside its worker rows, as its
@@ -309,4 +322,197 @@ fn live_workers_make_the_spaces_list_scroll() {
     };
     // Three workers and "+2 more" are four more rows in each space: the four spaces no longer fit.
     assert!(scroll_with(5) > scroll_with(0), "{}", scroll_with(0));
+}
+
+/// A view of one live worker.
+fn live_view(name: &str) -> SubagentsView {
+    let subagents = vec![order(name, SubagentState::Running, 67)];
+    SubagentsView {
+        total_count: subagents.len(),
+        subagents,
+        overflow: 0,
+    }
+}
+
+/// A filtered agents view (`agent_view_label`) whose order names none of the space's panes: the agents panel lists
+/// nothing and so asks the poller for none of them. The spaces view is then the only one asking.
+fn panel_lists_nothing(mut snap: ClientShellSnapshot) -> ClientShellSnapshot {
+    snap.agent_view_label = Some("filtered".into());
+    snap.agent_order = Vec::new();
+    snap
+}
+
+/// Review F1: with the agents panel not drawing the pane, its worker rows stay past the poller's 60 s drop, because
+/// the spaces view asks for the pane itself. A pane nobody asks for is still dropped.
+#[test]
+fn worker_rows_outlive_the_drop_window_when_the_panel_does_not_draw_the_pane() {
+    let snap = panel_lists_nothing(one_space(vec![nirvana("p30_hidden_pane", "ws_1")]));
+    seed_view_for_test("p30_hidden_pane", live_view("v8-build"), 61);
+    seed_view_for_test("p30_orphan_pane", live_view("orphan"), 61);
+
+    let (_, spaces, text) = compose_frame(snap.clone(), None);
+    assert!(
+        text.iter().any(|row| row.contains("no matching agents")),
+        "the panel lists the pane: {text:#?}"
+    );
+    assert_eq!(spaces[0].last().unwrap(), "   \u{2514} v8-build S5.5 1m07s");
+
+    forget_unasked_for_test();
+    assert!(
+        view_for_test("p30_orphan_pane").is_none(),
+        "nobody asked for it"
+    );
+    assert!(
+        view_for_test("p30_hidden_pane").is_some(),
+        "the spaces view asked"
+    );
+    let (_, spaces, _) = compose_frame(snap, None);
+    assert_eq!(
+        spaces[0].last().unwrap(),
+        "   \u{2514} v8-build S5.5 1m07s",
+        "{spaces:?}"
+    );
+}
+
+/// Review F2: one frame reads a space's workers once; the space's height and its drawn rows are that one reading.
+#[test]
+fn one_frame_reads_a_spaces_workers_once() {
+    let snap = panel_lists_nothing(one_space(vec![nirvana("p30_once_pane", "ws_1")]));
+    let (before_rects, _) = compose_spaces(snap.clone(), None);
+    let asked_before = asks_for_test("p30_once_pane");
+    let (rects, spaces) = compose_spaces(snap, Some(view_of("p30_once_pane", moto_rows(67))));
+    assert_eq!(asks_for_test("p30_once_pane") - asked_before, 1);
+    assert_eq!(rects[0].height, before_rects[0].height + 1);
+    assert_eq!(spaces[0].last().unwrap(), "   \u{2514} v8-build S5.5 1m07s");
+}
+
+/// Review F3: under a space with agents, workers and a "+N more" row, the next space starts right below it, and a
+/// click on the next space's first row selects that space, through the shell's own mouse path.
+#[test]
+fn a_space_after_live_workers_starts_below_them_and_takes_its_own_click() {
+    let mut snap = one_space(vec![nirvana("pane_1", "ws_1"), nirvana("pane_3", "ws_1")]);
+    let mut other = snap.workspaces[0].clone();
+    other.workspace_id = "ws_2".into();
+    other.number = 2;
+    other.label = "workspace-2".into();
+    other.focused = false;
+    snap.workspaces.push(other);
+    let live = (1..=5)
+        .map(|n| order(&format!("w{n}"), SubagentState::Running, 60 * n))
+        .collect();
+    set_view_for_test(Some(view_of("pane_1", live)));
+    let config = ClientShellConfig::from_config(&Config::default());
+    let gap = config.spaces.row_gap;
+    let mut state = ClientShellState::new(config);
+    state.set_snapshot(Box::new(snap));
+    state.set_pane_surface(surface());
+    let frame = state.compose(106, 40).expect("two spaces").frame;
+    let rows: Vec<String> = frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| row.iter().map(|cell| cell.symbol.clone()).collect())
+        .collect();
+    let first = state.hits.workspaces[0].rect;
+    let second = state.hits.workspaces[1].rect;
+    assert!(
+        rows[usize::from(first.bottom() - 1)].contains("\u{2514} +2 more"),
+        "{rows:#?}"
+    );
+    assert_eq!(second.y, first.bottom() + gap, "{first:?} {second:?}");
+    assert!(
+        rows[usize::from(second.y)].contains("workspace-2"),
+        "{rows:#?}"
+    );
+
+    let click = |state: &mut ClientShellState, kind| {
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column: second.x + 2,
+            row: second.y,
+            modifiers: KeyModifiers::empty(),
+        })])
+    };
+    click(&mut state, MouseEventKind::Down(MouseButton::Left));
+    let up = click(&mut state, MouseEventKind::Up(MouseButton::Left));
+    set_view_for_test(None);
+    assert!(
+        matches!(
+            &up.actions[..],
+            [ClientShellAction::Endpoint { request, .. }]
+                if matches!(
+                    &request.method,
+                    crate::api::schema::Method::WorkspaceFocus(target)
+                        if target.workspace_id == "ws_2"
+                )
+        ),
+        "{:?}",
+        up.actions
+    );
+}
+
+/// Review nit: at 8 cells the tail is cut, and each colour ends where its part ends in what was drawn.
+#[test]
+fn a_cut_tail_keeps_each_part_in_its_own_colour() {
+    let worker = SpaceWorker {
+        name: "v8-build".into(),
+        model: "S5.5".into(),
+        elapsed: "1m07s".into(),
+    };
+    let row = worker_line(&worker, 8);
+    assert_eq!(row.line, " S5.5 1\u{2026}");
+    assert_eq!((row.name_end, row.model_end), (0, 5));
+
+    let palette = ClientShellConfig::from_config(&Config::default()).palette;
+    // The marker at x 3, the text from x 5 for 8 cells, then the agents' one cell short of the edge.
+    let area = Rect::new(0, 0, 14, 1);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    render_space_workers(&mut buf, area, &[worker], false, true, &palette);
+    let cell = |x: u16| buf.cell((x, 0)).unwrap().clone();
+    let drawn: String = (5..13).map(|x| cell(x).symbol().to_string()).collect();
+    assert_eq!(drawn, " S5.5 1\u{2026}");
+    for x in 6..10 {
+        assert_eq!(cell(x).fg, palette.overlay1, "model cell {x}");
+    }
+    for x in 11..13 {
+        assert_eq!(cell(x).fg, palette.overlay0, "time cell {x}");
+    }
+}
+
+/// Review nit: the workers' "+N more" is in the colour of the agents' own "+N more" row.
+#[test]
+fn the_workers_more_row_is_in_the_agents_more_colour() {
+    let workers: Vec<SpaceWorker> = (1..=5)
+        .map(|n| SpaceWorker {
+            name: format!("w{n}"),
+            model: "S5.5".into(),
+            elapsed: "1m".into(),
+        })
+        .collect();
+    let palette = ClientShellConfig::from_config(&Config::default()).palette;
+    let area = Rect::new(0, 0, 25, 4);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    render_space_workers(&mut buf, area, &workers, false, true, &palette);
+    let row: String = (0..25)
+        .map(|x| buf.cell((x, 3)).unwrap().symbol().to_string())
+        .collect();
+    assert_eq!(row.trim_end(), "   \u{2514} +2 more");
+    assert_eq!(buf.cell((5, 3)).unwrap().fg, palette.overlay1);
+}
+
+/// Review nit: a seat worker's pane brings no rows of its own, as `agent_rows` leaves it out of the panel.
+#[test]
+fn a_seat_worker_pane_brings_no_worker_rows() {
+    let snap = one_space(vec![
+        nirvana("pane_1", "ws_1"),
+        nirvana("pane_seat", "ws_1"),
+    ]);
+    let view = view_of("pane_seat", moto_rows(67));
+    set_worker_panes_for_test(Some(["pane_seat".to_string()].into()));
+    let workers = space_workers(&snap, "ws_1", |agent| view.get(&agent.pane_id).cloned());
+    set_worker_panes_for_test(None);
+    assert!(workers.is_empty(), "{workers:?}");
+    assert_eq!(
+        space_workers(&snap, "ws_1", |agent| view.get(&agent.pane_id).cloned()).len(),
+        1
+    );
 }

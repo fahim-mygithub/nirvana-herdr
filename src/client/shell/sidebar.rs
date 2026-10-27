@@ -246,9 +246,29 @@ pub(crate) fn render_sidebar(
             .saturating_sub(WORKSPACE_HEADER_ROWS + 1),
     );
     hits.workspace_body = body;
-    let row_heights = entries
+    // Plan 30: each laid-out space's live workers, read once a frame (review F2): the heights below and the rows the
+    // render pass draws are the same reading. Reading asks for the space's agent panes, so the poller keeps them while
+    // the spaces view shows them, whatever the agents panel lists (review F1).
+    let workers_by_entry = entries
         .iter()
         .map(|entry| {
+            snapshot
+                .workspaces
+                .get(entry.index)
+                .map(|workspace| {
+                    super::nirvana_spaces::space_workers(
+                        snapshot,
+                        &workspace.workspace_id,
+                        |agent| super::agent_sidebar::ask_subagents(snapshot, agent),
+                    )
+                })
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+    let row_heights = entries
+        .iter()
+        .zip(&workers_by_entry)
+        .map(|(entry, workers)| {
             snapshot
                 .workspaces
                 .get(entry.index)
@@ -260,11 +280,6 @@ pub(crate) fn render_sidebar(
                         config.status_indicators,
                     );
                     // Plan 30: and its live workers' rows.
-                    let workers = super::nirvana_spaces::space_workers(
-                        snapshot,
-                        &workspace.workspace_id,
-                        crate::nirvana_subagents::peek,
-                    );
                     (workspace_rows(
                         workspace,
                         displayed_workspace_status(snapshot, workspace, state.collapsed_groups),
@@ -338,11 +353,7 @@ pub(crate) fn render_sidebar(
         let row_height = ((space_rows + super::nirvana_spaces::agents_height(agents.len()))
             .min(u16::MAX as usize) as u16)
             .min(body.height);
-        let workers = super::nirvana_spaces::space_workers(
-            snapshot,
-            &workspace.workspace_id,
-            crate::nirvana_subagents::peek,
-        );
+        let workers = &workers_by_entry[entry_position];
         let agents_rows = super::nirvana_spaces::agents_height(agents.len()) as u16;
         let row_height = row_height
             .saturating_add(super::nirvana_spaces::workers_height(workers.len()) as u16)
@@ -403,7 +414,7 @@ pub(crate) fn render_sidebar(
                 rect.width,
                 rect.bottom().saturating_sub(workers_y),
             ),
-            &workers,
+            workers,
             entry.indented,
             entry.last_child,
             palette,

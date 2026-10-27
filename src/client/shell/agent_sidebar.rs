@@ -495,6 +495,43 @@ pub(super) fn agent_rows(
         .collect()
 }
 
+/// Asks the subagents poller for `agent`'s pane and returns the pane's cached view. The poller gets the pane's folder,
+/// its Claude session and whether it is Claude; `cached` keeps the pane asked for, so the poller keeps reading it. The
+/// agents panel asks for each pane it lists. The spaces view asks for its own spaces' panes (plan 30 review F1), so a
+/// worker's row under its space stays while the worker runs, also when the panel lists other agents (a filtered view).
+pub(super) fn ask_subagents(
+    snapshot: &ClientShellSnapshot,
+    agent: &crate::protocol::ClientShellAgent,
+) -> Option<crate::nirvana_subagents::SubagentsView> {
+    let pane = snapshot
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == agent.pane_id);
+    let canonical_agent = agent
+        .agent
+        .as_deref()
+        .and_then(crate::detect::parse_agent_label);
+    let folder = pane
+        .and_then(|p| p.foreground_cwd.as_deref().or(p.cwd.as_deref()))
+        .map(std::path::PathBuf::from);
+    let agent_session = agent
+        .agent_session
+        .as_ref()
+        .filter(|s| s.agent == "claude" && s.kind == crate::agent_resume::AgentSessionRefKind::Id)
+        .map(|s| s.value.clone());
+    let is_claude = canonical_agent == Some(crate::detect::Agent::Claude);
+    crate::nirvana_subagents::update_pane_query(
+        &agent.pane_id,
+        folder,
+        is_claude,
+        agent_session,
+        None,
+        None,
+    );
+
+    crate::nirvana_subagents::cached(&agent.pane_id)
+}
+
 pub(super) fn agent_row(
     snapshot: &ClientShellSnapshot,
     pane_id: &str,
@@ -561,25 +598,7 @@ pub(super) fn agent_row(
         state_text,
     );
 
-    let folder = pane
-        .and_then(|p| p.foreground_cwd.as_deref().or(p.cwd.as_deref()))
-        .map(std::path::PathBuf::from);
-    let agent_session = agent
-        .agent_session
-        .as_ref()
-        .filter(|s| s.agent == "claude" && s.kind == crate::agent_resume::AgentSessionRefKind::Id)
-        .map(|s| s.value.clone());
-    let is_claude = canonical_agent == Some(crate::detect::Agent::Claude);
-    crate::nirvana_subagents::update_pane_query(
-        pane_id,
-        folder,
-        is_claude,
-        agent_session,
-        None,
-        None,
-    );
-
-    let (mut subagents, subagents_overflow) = match crate::nirvana_subagents::cached(pane_id) {
+    let (mut subagents, subagents_overflow) = match ask_subagents(snapshot, agent) {
         Some(view) => (view.subagents, view.overflow),
         None => (Vec::new(), 0),
     };

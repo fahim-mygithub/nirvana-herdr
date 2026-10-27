@@ -1235,6 +1235,60 @@ pub fn query_pane_shell_pid(pane_id: &str) -> Option<u32> {
 thread_local! {
     static TEST_VIEW: std::cell::RefCell<Option<HashMap<String, SubagentsView>>> = const { std::cell::RefCell::new(None) };
     static TEST_WORKER_PANES: std::cell::RefCell<Option<HashSet<String>>> = const { std::cell::RefCell::new(None) };
+    static TEST_ASKS: std::cell::RefCell<HashMap<String, usize>> = std::cell::RefCell::new(HashMap::new());
+}
+
+/// How many times `cached` was asked for `pane_id` on this thread.
+#[cfg(test)]
+pub fn asks_for_test(pane_id: &str) -> usize {
+    TEST_ASKS.with_borrow(|asks| asks.get(pane_id).copied().unwrap_or(0))
+}
+
+/// Puts `view` in the real cache for `pane_id`, last asked for `asked_secs_ago` seconds ago.
+#[cfg(test)]
+pub fn seed_view_for_test(pane_id: &str, view: SubagentsView, asked_secs_ago: u64) {
+    let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
+    guard.get_or_insert_with(HashMap::new).insert(
+        pane_id.to_string(),
+        PaneCacheEntry {
+            view: Some(view),
+            read_at: Some(Instant::now()),
+            reading: false,
+            asked_at: Instant::now().checked_sub(Duration::from_secs(asked_secs_ago)),
+            folder: None,
+            is_claude: true,
+            agent_session: None,
+            agent_start_secs: None,
+            shell_pid: None,
+            shell_pid_failed_at: None,
+        },
+    );
+}
+
+/// The real cache's view for `pane_id`, read without asking for the pane.
+#[cfg(test)]
+pub fn view_for_test(pane_id: &str) -> Option<SubagentsView> {
+    let guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref()?.get(pane_id)?.view.clone()
+}
+
+/// The poller's first step alone: forget the panes nobody asked for in 60 s.
+#[cfg(test)]
+pub fn forget_unasked_for_test() {
+    let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(map) = guard.as_mut() {
+        forget_unasked(map);
+    }
+}
+
+/// Forgets the entries nobody asked for in the last 60 s. The agents panel and the spaces view (plan 30) ask with
+/// `cached` each frame they draw a pane, so this drops only panes neither shows.
+fn forget_unasked(map: &mut HashMap<String, PaneCacheEntry>) {
+    map.retain(|_, entry| {
+        entry
+            .asked_at
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
+    });
 }
 
 #[cfg(test)]
@@ -1279,6 +1333,7 @@ pub fn record_worker_pane(pane_id: String) {
 pub fn cached(pane_id: &str) -> Option<SubagentsView> {
     #[cfg(test)]
     {
+        TEST_ASKS.with_borrow_mut(|asks| *asks.entry(pane_id.to_string()).or_default() += 1);
         if let Some(map) = TEST_VIEW.with_borrow(Clone::clone) {
             return map.get(pane_id).cloned();
         }
@@ -1302,21 +1357,6 @@ pub fn cached(pane_id: &str) -> Option<SubagentsView> {
         });
     entry.asked_at = Some(Instant::now());
     entry.view.clone()
-}
-
-/// The cached view for `pane_id`, read only. Unlike `cached` it neither creates the entry nor keeps it asked for,
-/// so a second reader of the agents panel's data (the spaces view, plan 30 §2: "no new reads, no new polling")
-/// never keeps a pane polled that the panel has stopped asking for.
-pub fn peek(pane_id: &str) -> Option<SubagentsView> {
-    #[cfg(test)]
-    {
-        if let Some(map) = TEST_VIEW.with_borrow(Clone::clone) {
-            return map.get(pane_id).cloned();
-        }
-    }
-
-    let guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
-    guard.as_ref()?.get(pane_id)?.view.clone()
 }
 
 /// Updates the metadata query parameters for a pane in the cache.
@@ -1373,12 +1413,7 @@ pub fn poll_with<F>(
         let Some(map) = guard.as_mut() else {
             return;
         };
-        // Forget entries unasked for more than 60s
-        map.retain(|_, entry| {
-            entry
-                .asked_at
-                .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
-        });
+        forget_unasked(map);
 
         let mut all_claude: Vec<(String, PathBuf, Option<String>)> = Vec::new();
         for (pane_id, entry) in map.iter() {
@@ -2533,28 +2568,5 @@ mod tests {
         assert_eq!(finished_count, 0, "ended run hides all finished rows");
 
         let _ = std::fs::remove_dir_all(&temp);
-    }
-
-    /// Plan 30: the spaces view reads the panel's cache with `peek`, which never makes an entry of its own and so never
-    /// asks for a pane to be polled; `cached`, the panel's reader, does.
-    #[test]
-    fn peek_reads_the_cache_without_asking_for_a_pane() {
-        assert_eq!(peek("p30-peek"), None);
-        assert!(get_pane_query_for_test("p30-peek").is_none());
-        assert_eq!(cached("p30-peek"), None);
-        assert!(get_pane_query_for_test("p30-peek").is_some());
-        let view = SubagentsView {
-            total_count: 1,
-            ..SubagentsView::default()
-        };
-        ENTRIES
-            .lock()
-            .unwrap()
-            .as_mut()
-            .unwrap()
-            .get_mut("p30-peek")
-            .unwrap()
-            .view = Some(view.clone());
-        assert_eq!(peek("p30-peek"), Some(view));
     }
 }
