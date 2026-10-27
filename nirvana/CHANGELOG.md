@@ -3,6 +3,30 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.41.0: live workers show in the spaces view
+
+- **Changed:** under each space's agent rows in the sidebar's spaces view, one row per live worker of that space, in the
+  agents panel's own words, for example `v8-build S5.5 1m07s`.
+  - Live means the panel's "live first" group. Finished, blocked, stopped and failed rows stay in the panel only.
+  - Rows are indented under the space with a dim marker. Past 4 live workers, 3 show and a `+N more` row.
+  - A space with no live worker looks as it did.
+  - The agents panel is unchanged. The panel and the spaces view share one function for the model and elapsed text.
+  - The spaces view asks for its own spaces' agent panes, the way the panel does. The rows therefore stay while
+    workers run, even when the panel is not drawn. The 60 s drop for panes nobody asks for is unchanged.
+  **Because:** the owner, 2026-10-26: "If there are sub agents running have only the active agents on thebotton be
+  shown in the spacess vieww" and "Like moto projeect should have v8-build s5.5 xMxxS". Plan
+  `nirvana/plans/2026-10-26-30-live-workers-in-spaces.md`, built on Opus high. The plan's "no new polling" was the
+  orchestrator's wording, not the owner's. It is dropped so the rows do not vanish with the panel (record deviation 3).
+  **Measured:**
+  - 25 controls in `nirvana/controls.d/live_in_spaces.py`, each reddening its test alone, plus 5 older controls whose
+    lines moved.
+  - One Sonnet review found no blocker. Its three should-fix items were fixed: rows vanishing with the panel, the
+    workers being read twice per frame, and no test that a click below the worker rows lands on the next space.
+  - Not live-checked yet (plan §4): while a worker runs, its row shows under its space and leaves when the worker
+    ends.
+  **If you remove this:** the spaces view shows only `Nirvana` and `Claude` idle while a run's workers are busy. The
+  owner has to scroll to the agents panel to see them.
+
 ## alpha 0.40.0: an idle Claude compacts before its cache goes stale
 
 - **Changed:** an interactive Claude pane that has sat idle for 50 minutes gets `/compact` typed into it once, before
