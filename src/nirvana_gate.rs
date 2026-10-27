@@ -2113,8 +2113,12 @@ fn send_back(
     let brief = send_back_brief(&order, root, n, &axes, root_text, &integration_branch(run));
     let mut request = Request::new(&seated.class);
     request.size = seated.size;
-    (request.needs, request.claude_only) =
-        crate::nirvana_gui_tools::seat_needs(table, &project.root, &seated.needs);
+    // Plan 29 §5.2: an order seated for a project MCP server goes back on a claude seat or not at all.
+    let needs = match crate::nirvana_gui_tools::seat_needs(table, &project.root, &seated.needs) {
+        Ok(needs) => needs,
+        Err(why) => return ask(format!("{order} must go back, but {why}"), axes),
+    };
+    (request.needs, request.claude_only) = (needs.rest, needs.claude_only);
     request.not_family = seated.not_family.clone();
     request.mode = seated.mode;
     request.order = Some(id.clone());

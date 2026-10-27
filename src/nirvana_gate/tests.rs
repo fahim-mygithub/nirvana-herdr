@@ -1475,3 +1475,94 @@ fn url_tail_keeps_a_paren_the_url_opened() {
         vec!["https://en.wikipedia.org/wiki/Foo_(bar)".to_owned()]
     );
 }
+
+// ---- Plan 29 review round: a server order's send-back goes on a claude seat or not at all ----
+
+#[test]
+fn p29_a_send_back_seats_a_server_order_on_claude_and_a_broken_mcp_json_asks() {
+    let _guard = crate::nirvana::with_test_home("p29-send-back");
+    let root = repo("p29-send-back");
+    let project = Project::at(&root);
+    std::fs::write(
+        root.join(".mcp.json"),
+        r#"{"mcpServers": {"xtool": {"command": "uv"}}}"#,
+    )
+    .expect("mcp");
+    // Every CLI signed in, nothing used: no `claude auth status`, no `claude -p /usage`.
+    nirvana_seat::set_test_world(Some(BTreeMap::new()));
+    let table = nirvana_seat::parse(nirvana_seat::DEFAULT).expect("table");
+    // Without the server the class seats on agy: the rule has something to move.
+    let plain = nirvana_seat::pick(
+        &table,
+        &nirvana_seat::live_world(&table),
+        &Request::new("sweep.mechanical"),
+    )
+    .expect("pick");
+    assert_eq!(plain.cli, "agy", "{}", plain.seat);
+    let send = |order: &str| {
+        let run = "r1";
+        let journal = project.journal(run);
+        let mut seated_order = seated(order, None);
+        seated_order.seat = "haiku".into();
+        seated_order.model = "claude-haiku-5-5".into();
+        seated_order.class = "sweep.mechanical".into();
+        seated_order.chain = Some("chore".into());
+        seated_order.needs = vec!["xtool".into()];
+        seated_order.cwd = worktree(&root, order).display().to_string();
+        journal
+            .append(
+                1,
+                Kind::Opened {
+                    project: "p".into(),
+                    orchestrator_pane: None,
+                    auto: false,
+                    pools: vec![],
+                    pools_basis: None,
+                },
+            )
+            .expect("append");
+        journal
+            .append(2, Kind::Seated(Box::new(seated_order)))
+            .expect("append");
+        let state = replay(&journal.read().0);
+        let known = state.order(order).expect("order").clone();
+        // Held live, so the send-back starts no worker.
+        let child = format!("{order}-s1");
+        let live = crate::nirvana_worker::take_live(&project, run, &child)
+            .expect("live")
+            .expect("lock");
+        let ruling = send_back(
+            &project,
+            run,
+            &journal,
+            &state,
+            &known,
+            order,
+            "the order\n",
+            vec![Axis::new("tests", Mark::Fail, "test failed")],
+            Some(&table),
+        )
+        .expect("send_back");
+        drop(live);
+        let state = replay(&journal.read().0);
+        (
+            ruling,
+            state.order(&child).map(|child| child.seated.clone()),
+        )
+    };
+    let (ruling, child) = send("jig-1");
+    assert_eq!(ruling.verdict, "sent_back", "{:?}", ruling.next);
+    assert_eq!(child.expect("child").cli, "claude");
+    // A `.mcp.json` that no longer parses: the owner is asked, naming the file, and nothing is seated.
+    std::fs::write(root.join(".mcp.json"), "{").expect("mcp");
+    let (ruling, child) = send("jig-2");
+    assert_eq!(ruling.verdict, "asked");
+    assert!(
+        ruling.next[0].starts_with("jig-2 must go back, but ")
+            && ruling.next[0].contains("does not parse"),
+        "{:?}",
+        ruling.next
+    );
+    assert!(child.is_none());
+    nirvana_seat::set_test_world(None);
+}

@@ -322,14 +322,15 @@ pub fn worker_argv(
     Ok(with_preset_settings(argv, settings.as_deref()))
 }
 
-/// Plan 29 §5.1: a claude worker's argv with the MCP servers its order needs, from the project's `.mcp.json`.
+/// Plan 29 §5.1: a claude worker's argv with the MCP servers its order needs, from the project's `.mcp.json`; an
+/// error when it cannot get one it was seated for (review F3).
 fn with_order_servers(
     argv: Vec<String>,
     project: &Project,
     run: &str,
     seated: &Seated,
     out: &mut dyn Write,
-) -> Vec<String> {
+) -> Result<Vec<String>, String> {
     let table = nirvana_seat::table();
     crate::nirvana_gui_tools::order_argv(
         argv,
@@ -1005,6 +1006,13 @@ pub enum AttemptEnd {
     Stopped,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A test's stand-in for the worker's program: `run_attempt` starts it in place of the argv it journals, so a test
+    /// drives `exec` without a real CLI.
+    static TEST_COMMAND: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Starts the worker in its job and reads its stream until it ends, stops, stalls or runs out.
 fn run_attempt(
     journal: &Journal,
@@ -1016,9 +1024,14 @@ fn run_attempt(
     pane: Option<&str>,
     out: &mut dyn Write,
 ) -> std::io::Result<(AttemptEnd, Stream)> {
-    let mut command = std::process::Command::new(&argv[0]);
+    #[cfg(test)]
+    let stand_in = TEST_COMMAND.with_borrow(Clone::clone);
+    #[cfg(not(test))]
+    let stand_in: Option<Vec<String>> = None;
+    let spawned = stand_in.as_deref().unwrap_or(argv);
+    let mut command = std::process::Command::new(&spawned[0]);
     command
-        .args(&argv[1..])
+        .args(&spawned[1..])
         .current_dir(&seated.cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1303,6 +1316,7 @@ pub fn exec(
             resume,
             print_timeout_s: print_timeout_s(&seated),
         };
+        // Plan 29 review F3: an order that cannot get a server it was seated for fails here and never starts without.
         let argv = match worker_argv(
             &nirvana_seat::dir(),
             &spec,
@@ -1310,8 +1324,10 @@ pub fn exec(
             &project.root,
             crate::nirvana_superpowers::claude_dir().as_deref(),
             out,
-        ) {
-            Ok(argv) => with_order_servers(argv, project, run, &seated, out),
+        )
+        .and_then(|argv| with_order_servers(argv, project, run, &seated, out))
+        {
+            Ok(argv) => argv,
             Err(why) => {
                 end_failed(project, &journal, run, &seated, &why, None)?;
                 writeln!(out, "{why}")?;
@@ -1332,7 +1348,7 @@ pub fn exec(
             )
         )?;
         let attempt_started = Instant::now();
-        let (end, stream) = match run_attempt(
+        let attempt_end = run_attempt(
             &journal,
             &stream_path,
             &seated,
@@ -1341,7 +1357,10 @@ pub fn exec(
             &stop,
             pane,
             out,
-        ) {
+        );
+        // Plan 29 review F2: the order's server definitions, tokens and all, go when its worker process ends.
+        crate::nirvana_gui_tools::remove_order_config(&run_dir, order, out);
+        let (end, stream) = match attempt_end {
             Ok(done) => done,
             Err(err) => {
                 let why = format!("the worker could not start: {err}");
@@ -1715,8 +1734,11 @@ fn rate_limited(
     let child = child_id(&state, order);
     let mut request = nirvana_seat::Request::new(&seated.class);
     request.size = seated.size;
-    (request.needs, request.claude_only) =
-        crate::nirvana_gui_tools::seat_needs(&table, &project.root, &seated.needs);
+    // Plan 29 §5.2: an order seated for a project MCP server is re-seated on a claude seat or not at all.
+    let needs = crate::nirvana_gui_tools::seat_needs(&table, &project.root, &seated.needs);
+    if let Ok(needs) = &needs {
+        (request.needs, request.claude_only) = (needs.rest.clone(), needs.claude_only.clone());
+    }
     request.not_family = seated.not_family.clone();
     request.mode = seated.mode;
     request.order = Some(child.clone());
@@ -1727,7 +1749,16 @@ fn rate_limited(
         request.inherited_override = true;
     }
     let world = spent_world(&table, nirvana_seat::live_world(&table), limit, &pool);
-    let picked = nirvana_seat::pick(&table, &world, &request);
+    let picked = match needs {
+        Ok(_) => nirvana_seat::pick(&table, &world, &request),
+        Err(why) => Err(nirvana_seat::NoSeat {
+            class: seated.class.clone(),
+            reason: why,
+            earliest_reset: None,
+            defer: false,
+            skipped: Vec::new(),
+        }),
+    };
     let reseat = match &picked {
         Ok(pick) => Ok(pick.seat.clone()),
         Err(no_seat) => Err(no_seat.earliest_reset),
@@ -1958,6 +1989,9 @@ pub struct Booked {
     /// Plan 12 O8b: Jev's advice stored with the pick.
     #[serde(default)]
     pub jev_pick: Option<crate::nirvana_jev_roles::JevPick>,
+    /// Plan 29: the needs `book` granted as the project's MCP servers; never in the lease.
+    #[serde(skip)]
+    pub servers: Vec<String>,
 }
 
 /// One window of the pick: the order's expected share of it, for the record (expected against real use).
@@ -2740,9 +2774,9 @@ fn book(project: &Project, request: &SeatRequest) -> Result<Booked, (i32, String
     let leases_path = dir.join(nirvana_seat::LEASES_FILE);
     let mut world = nirvana_seat::live_world(&table);
     // Plan 29 §5.1: a need naming one of the project's MCP servers is no seat capability.
-    let (needs, claude_only) =
-        crate::nirvana_gui_tools::seat_needs(&table, &project.root, &request.needs);
-    let words = nirvana_seat::unknown_words(&table, &needs, &request.not_family);
+    let needs = crate::nirvana_gui_tools::seat_needs(&table, &project.root, &request.needs)
+        .map_err(|why| (2, why))?;
+    let words = nirvana_seat::unknown_words(&table, &needs.rest, &request.not_family);
     if !words.is_empty() {
         return Err((2, words.join("; ")));
     }
@@ -2771,8 +2805,8 @@ fn book(project: &Project, request: &SeatRequest) -> Result<Booked, (i32, String
         if let Some(size) = request.size {
             pick_request.size = size;
         }
-        pick_request.needs = needs;
-        pick_request.claude_only = claude_only;
+        pick_request.needs = needs.rest.clone();
+        pick_request.claude_only = needs.claude_only.clone();
         pick_request.not_family = request.not_family.clone();
         pick_request.order = Some(request.order.clone());
         world.leases = leases.leases.clone();
@@ -2855,6 +2889,7 @@ fn book(project: &Project, request: &SeatRequest) -> Result<Booked, (i32, String
         booked.effort = effort;
         booked.model = seat.model_for(effort);
     }
+    booked.servers = needs.servers;
     Ok(booked)
 }
 
@@ -2949,8 +2984,8 @@ pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i3
     } else {
         format!("{}{lessons}", text.trim_end())
     };
-    // Plan 29 §5.3: an order that drives a desktop app is told to batch and read crops.
-    text = crate::nirvana_gui_tools::with_desktop_line(text, &request.needs);
+    // Plan 29 §5.3 and review F4: an order granted a server never starts a device; a desktop one batches, reads crops.
+    text = crate::nirvana_gui_tools::with_server_lines(text, &booked.servers);
     if booked.class.starts_with("research.") || booked.class.starts_with("media.") {
         text.push_str("\n\nYour Work Report must include the `sources` array of `{url, used_for}` for each source consulted.");
     }

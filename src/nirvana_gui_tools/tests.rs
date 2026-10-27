@@ -16,6 +16,9 @@ const MCP_JSON: &str = r#"{
   }
 }"#;
 
+/// Two servers whose tool names flatten alike: `a.b` and `a_b` both give `mcp__a_b__*`.
+const CLASHING_JSON: &str = r#"{"mcpServers": {"a.b": {"command": "one"}, "a_b": {"command": "two"}, "xtool": {"command": "x"}}}"#;
+
 fn words(list: &[&str]) -> Vec<String> {
     list.iter().map(|word| (*word).to_owned()).collect()
 }
@@ -54,7 +57,7 @@ fn the_server_names_are_the_keys_of_mcp_servers() {
     );
     assert!(server_names("{not json")
         .unwrap_err()
-        .contains("is not JSON"));
+        .starts_with("not JSON"));
     assert!(server_names(r#"{"servers": {}}"#)
         .unwrap_err()
         .contains("no mcpServers object"));
@@ -140,14 +143,77 @@ fn seat_needs_takes_the_server_needs_out_and_reads_the_projects_mcp_json() {
     let table = table();
     let needs = words(&["code", "bambu-studio-beta"]);
     let root = project(&home.path, Some(MCP_JSON));
-    let (rest, why) = seat_needs(&table, &root, &needs);
-    assert_eq!(rest, words(&["code"]));
-    assert!(why.unwrap().starts_with("bambu-studio-beta drives"));
-    // No `.mcp.json`, or one that is not JSON: no server, so the need stays and today's check refuses it.
+    let read = seat_needs(&table, &root, &needs).unwrap();
+    assert_eq!(read.rest, words(&["code"]));
+    assert_eq!(read.servers, words(&["bambu-studio-beta"]));
+    assert!(read
+        .claude_only
+        .unwrap()
+        .starts_with("bambu-studio-beta drives"));
+    // No `.mcp.json`: no server, so the need stays and today's unknown-word check refuses it.
     std::fs::remove_file(root.join(MCP_FILE)).unwrap();
-    assert_eq!(seat_needs(&table, &root, &needs), (needs.clone(), None));
-    std::fs::write(root.join(MCP_FILE), "{").unwrap();
-    assert_eq!(seat_needs(&table, &root, &needs), (needs.clone(), None));
+    assert_eq!(
+        seat_needs(&table, &root, &needs).unwrap(),
+        Needs {
+            rest: needs.clone(),
+            ..Needs::default()
+        }
+    );
+}
+
+#[test]
+fn a_broken_mcp_json_refuses_a_server_need_naming_the_file() {
+    let home = crate::nirvana::with_test_home("gui-broken-mcp");
+    let table = table();
+    let root = project(&home.path, Some("{"));
+    let file = root.join(MCP_FILE).display().to_string();
+    // Review F5: the refusal names the file and says it does not parse, not "no seat has xtool".
+    let why = seat_needs(&table, &root, &words(&["code", "xtool"])).unwrap_err();
+    assert!(
+        why.starts_with(&format!("{file} does not parse (not JSON")),
+        "{why}"
+    );
+    assert!(
+        why.ends_with("so the need xtool names none of its servers"),
+        "{why}"
+    );
+    // An order whose needs are all capabilities is not refused by a file it does not use.
+    assert_eq!(
+        seat_needs(&table, &root, &words(&["code"])).unwrap(),
+        Needs {
+            rest: words(&["code"]),
+            ..Needs::default()
+        }
+    );
+    // A file that cannot be read at all says so too.
+    std::fs::remove_file(root.join(MCP_FILE)).unwrap();
+    std::fs::create_dir(root.join(MCP_FILE)).unwrap();
+    let why = seat_needs(&table, &root, &words(&["xtool"])).unwrap_err();
+    assert!(why.starts_with(&format!("cannot read {file}")), "{why}");
+}
+
+#[test]
+fn two_servers_whose_tools_flatten_alike_refuse_the_order() {
+    let home = crate::nirvana::with_test_home("gui-key-clash");
+    let table = table();
+    let root = project(&home.path, Some(CLASHING_JSON));
+    let all = server_names(CLASHING_JSON).unwrap();
+    assert_eq!(key_clash(&words(&["xtool"]), &all), None);
+    let why = seat_needs(&table, &root, &words(&["a.b"])).unwrap_err();
+    assert_eq!(
+        why,
+        ".mcp.json servers a.b and a_b both name their tools mcp__a_b__*, so a grant for one is a grant for both; \
+         rename one of them"
+    );
+    assert!(seat_needs(&table, &root, &words(&["xtool"])).is_ok());
+    // At launch too: no config is written for it.
+    let run_dir = root.join("run");
+    let at_launch = write_order_config(&root, &run_dir, "o1", &words(&["a_b"])).unwrap_err();
+    assert!(
+        at_launch.starts_with(".mcp.json servers a_b and a.b"),
+        "{at_launch}"
+    );
+    assert!(!order_config_path(&run_dir, "o1").exists());
 }
 
 #[test]
@@ -189,7 +255,7 @@ fn the_argv_keeps_strict_mcp_and_adds_the_config_and_the_servers_tools() {
 }
 
 #[test]
-fn a_worker_gets_its_orders_config_file_and_any_error_keeps_todays_argv() {
+fn a_worker_gets_its_orders_config_file_and_only_a_claude_server_order_does() {
     let home = crate::nirvana::with_test_home("gui-order-argv");
     let root = project(&home.path, Some(MCP_JSON));
     let run_dir = root.join(".nirvana").join("runs").join("r1");
@@ -205,7 +271,8 @@ fn a_worker_gets_its_orders_config_file_and_any_error_keeps_todays_argv() {
         &needs,
         caps(),
         &mut out,
-    );
+    )
+    .unwrap();
     let file = run_dir.join("mcp").join("o1.json");
     let written: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     assert_eq!(
@@ -241,69 +308,155 @@ fn a_worker_gets_its_orders_config_file_and_any_error_keeps_todays_argv() {
             &words(&["code"]),
             caps(),
             &mut out
-        ),
+        )
+        .unwrap(),
         today
     );
     let agy = vec!["agy".to_owned(), "--print=x".to_owned()];
     assert_eq!(
-        order_argv(agy.clone(), &root, &run_dir, "o3", &needs, caps(), &mut out),
+        order_argv(agy.clone(), &root, &run_dir, "o3", &needs, caps(), &mut out).unwrap(),
         agy
     );
     assert!(out.is_empty());
     assert!(!run_dir.join("mcp").join("o2.json").exists());
-    // A `.mcp.json` that is not JSON, or seats.toml refused: today's argv and one line.
-    std::fs::write(root.join(MCP_FILE), "{").unwrap();
+    // seats.toml refused at launch: the needs `.mcp.json` names are the servers, and one line says so.
     let mut out = Vec::new();
-    assert_eq!(
-        order_argv(
-            today.clone(),
-            &root,
-            &run_dir,
-            "o4",
-            &needs,
-            caps(),
-            &mut out
-        ),
-        today
-    );
-    let line = String::from_utf8(out).unwrap();
-    assert!(
-        line.starts_with("the worker starts without its MCP servers: .mcp.json is not JSON"),
-        "{line}"
-    );
-    assert_eq!(line.lines().count(), 1);
-    let mut out = Vec::new();
-    assert_eq!(
-        order_argv(
-            today.clone(),
-            &root,
-            &run_dir,
-            "o5",
-            &needs,
-            Err("seats.toml is refused".into()),
-            &mut out
-        ),
-        today
-    );
+    let argv = order_argv(
+        today.clone(),
+        &root,
+        &run_dir,
+        "o5",
+        &needs,
+        Err("seats.toml is refused".into()),
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(argv.last().map(String::as_str), Some("mcp__xtool__*"));
     assert_eq!(
         String::from_utf8(out).unwrap(),
-        "the worker starts without its MCP servers: seats.toml is refused\n"
+        "seats.toml is refused (seats.toml is refused); the needs .mcp.json names are read as its servers\n\
+         MCP servers for this order: xtool\n"
     );
 }
 
 #[test]
-fn a_desktop_order_brief_gets_the_one_line() {
-    let brief = with_desktop_line(
-        "Slice the jig.".into(),
-        &words(&["code", "bambu-studio-beta"]),
+fn an_order_that_cannot_get_its_server_at_launch_does_not_start() {
+    let home = crate::nirvana::with_test_home("gui-order-gone");
+    // Seated for xtool; at launch `.mcp.json` defines only bambu.
+    let root = project(
+        &home.path,
+        Some(r#"{"mcpServers": {"bambu": {"command": "node"}}}"#),
     );
+    let file = root.join(MCP_FILE).display().to_string();
+    let run_dir = root.join(".nirvana").join("runs").join("r1");
+    let needs = words(&["code", "xtool"]);
+    let launch = |order: &str| {
+        let mut out = Vec::new();
+        let got = order_argv(
+            claude_argv(),
+            &root,
+            &run_dir,
+            order,
+            &needs,
+            Ok(vec!["code"]),
+            &mut out,
+        );
+        assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+        got.unwrap_err()
+    };
+    assert_eq!(
+        launch("o1"),
+        format!(
+            "o1 was seated for MCP server xtool and cannot get it: {file} no longer defines xtool"
+        )
+    );
+    // A file that does not parse, or is gone: the same refusal, with the cause.
+    std::fs::write(root.join(MCP_FILE), "{").unwrap();
+    let why = launch("o2");
+    assert!(
+        why.starts_with(&format!(
+            "o2 was seated for MCP server xtool and cannot get it: {file} does not parse"
+        )),
+        "{why}"
+    );
+    std::fs::remove_file(root.join(MCP_FILE)).unwrap();
+    assert_eq!(
+        launch("o3"),
+        format!("o3 was seated for MCP server xtool and cannot get it: {file} is gone")
+    );
+    assert!(!run_dir.join("mcp").exists());
+}
+
+#[test]
+fn the_order_config_goes_when_the_worker_ends_and_a_failed_remove_says_so() {
+    let home = crate::nirvana::with_test_home("gui-remove-config");
+    let root = project(&home.path, Some(MCP_JSON));
+    let run_dir = root.join(".nirvana").join("runs").join("r1");
+    let file = write_order_config(&root, &run_dir, "o1", &words(&["bambu"])).unwrap();
+    assert!(std::fs::read_to_string(&file)
+        .unwrap()
+        .contains("fake-token-not-real"));
+    let mut out = Vec::new();
+    remove_order_config(&run_dir, "o1", &mut out);
+    assert!(!file.exists());
+    // Nothing there: nothing said.
+    remove_order_config(&run_dir, "o1", &mut out);
+    assert!(out.is_empty());
+    // A remove that fails: one line naming the file.
+    std::fs::create_dir_all(&file).unwrap();
+    remove_order_config(&run_dir, "o1", &mut out);
+    let line = String::from_utf8(out).unwrap();
+    assert!(
+        line.starts_with(&format!(
+            "the order's MCP config stays at {}: ",
+            file.display()
+        )),
+        "{line}"
+    );
+    assert_eq!(line.lines().count(), 1);
+}
+
+#[test]
+fn every_server_order_brief_says_never_start_a_device_and_a_desktop_one_batches() {
+    let brief = with_server_lines("Slice the jig.".into(), &words(&["bambu-studio-beta"]));
     assert_eq!(
         brief,
-        "Slice the jig.\n\nUse the `*_run` batch and `*_state`; read crops, not full screenshots; never start a print or a job."
+        "Slice the jig.\n\nNever start a print, a laser job, or a send to a device. Stop and report when that is the \
+         next step.\nUse the `*_run` batch and `*_state`; read crops, not full screenshots; never start a print or a job."
     );
-    assert!(with_desktop_line("Engrave.".into(), &words(&["xtool"])).ends_with(BRIEF_LINE));
+    assert!(with_server_lines("Engrave.".into(), &words(&["xtool"])).ends_with(BRIEF_LINE));
+    // `bambu` is printer control, no desktop server: the device line alone.
     assert_eq!(
-        with_desktop_line("Print status.".into(), &words(&["bambu", "code"])),
-        "Print status."
+        with_server_lines("Print status.".into(), &words(&["bambu"])),
+        format!("Print status.\n\n{DEVICE_LINE}")
     );
+    assert_eq!(with_server_lines("No servers.".into(), &[]), "No servers.");
+}
+
+#[test]
+fn seat_pick_reads_the_server_needs_and_takes_a_claude_seat() {
+    let home = crate::nirvana::with_test_home("gui-seat-pick");
+    let seats = home.path.join("nirvana").join(nirvana_seat::SEATS_FILE);
+    std::fs::create_dir_all(seats.parent().unwrap()).unwrap();
+    std::fs::write(&seats, nirvana_seat::DEFAULT).unwrap();
+    let root = project(&home.path, Some(MCP_JSON));
+    let args = |needs: &str| words(&["--class", "sweep.mechanical", "--needs", needs]);
+    let world = World::default();
+    // Without a server need the class seats on agy: the rule has something to move.
+    let (table, plain) = nirvana_seat::pick_args_for(&root, &args("code")).unwrap();
+    assert_eq!(
+        nirvana_seat::pick(&table, &world, &plain.request)
+            .unwrap()
+            .cli,
+        "agy"
+    );
+    // `herdr seat pick --needs xtool`: the need is no capability, and only a claude seat takes it.
+    let (table, picked) = nirvana_seat::pick_args_for(&root, &args("code,xtool")).unwrap();
+    assert_eq!(picked.request.needs, words(&["code"]));
+    let chosen = nirvana_seat::pick(&table, &world, &picked.request).unwrap();
+    assert_eq!(chosen.cli, "claude", "{}", chosen.seat);
+    // A `.mcp.json` that does not parse: `seat pick` says so.
+    std::fs::write(root.join(MCP_FILE), "{").unwrap();
+    let why = nirvana_seat::pick_args_for(&root, &args("xtool")).unwrap_err();
+    assert!(why.contains("does not parse"), "{why}");
 }

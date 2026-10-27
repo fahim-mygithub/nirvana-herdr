@@ -3293,6 +3293,20 @@ fn load_table() -> Table {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_CLIS: std::cell::RefCell<Option<BTreeMap<String, String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// A test's stand-in for `live_world`: no usage, and these CLIs refused with their reasons, every other one signed
+/// in. Plan 29's review round drives `book`, the reseat and the send-back, and the live reads run `claude auth status`
+/// and `claude -p /usage`.
+#[cfg(test)]
+pub fn set_test_world(clis: Option<BTreeMap<String, String>>) {
+    TEST_CLIS.with_borrow_mut(|slot| *slot = clis);
+}
+
 /// Why a CLI cannot take an order, from the Accounts readers; `None` when it is signed in.
 fn cli_state(cli: &str) -> Option<String> {
     use crate::nirvana_accounts::{read, Cli};
@@ -3408,6 +3422,14 @@ pub fn cached_world(dir: &Path, now: u64) -> World {
 /// The world as this machine has it: usage from `usage.json` (stale readers read first, as `herdr usage`
 /// does), the accounts, and the record when the table blends it.
 pub fn live_world(table: &Table) -> World {
+    #[cfg(test)]
+    if let Some(clis) = TEST_CLIS.with_borrow(Clone::clone) {
+        return World {
+            now: now(),
+            clis,
+            ..World::default()
+        };
+    }
     let sources = nirvana_usage::current_sources(false);
     let mut clis = BTreeMap::new();
     for seat in table.seats.iter().filter(|seat| seat.enabled) {
@@ -3746,6 +3768,9 @@ pub(crate) fn pick_args_for(root: &Path, args: &[String]) -> Result<(Table, Pick
             _ => usage_exit(),
         }
     }
+    // Plan 29 §5.1: a need naming one of the project's MCP servers is no seat capability; the order takes a claude seat.
+    let needs = crate::nirvana_gui_tools::seat_needs(&table, root, &picked.request.needs)?;
+    (picked.request.needs, picked.request.claude_only) = (needs.rest, needs.claude_only);
     Ok((table, picked))
 }
 
@@ -3781,9 +3806,6 @@ fn pick_cli(args: &[String]) -> std::io::Result<()> {
         );
         std::process::exit(2);
     }
-    // Plan 29 §5.1: a need naming one of the project's MCP servers is no seat capability.
-    (request.needs, request.claude_only) =
-        crate::nirvana_gui_tools::seat_needs(&table, &project.root, &request.needs);
     let words = unknown_words(&table, &request.needs, &request.not_family);
     if !words.is_empty() {
         for word in words {

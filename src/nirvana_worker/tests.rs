@@ -1219,3 +1219,262 @@ fn exec_close_refuses_an_order_the_journal_does_not_hold() {
         2
     ));
 }
+
+// ---- Plan 29 review round: a server order through its public paths (book, exec, the reseat) ----
+
+const P29_MCP: &str =
+    r#"{"mcpServers": {"xtool": {"command": "uv", "env": {"XTOOL_TOKEN": "fake-not-real"}}}}"#;
+
+/// A project under a test home with the default seats and `.mcp.json` defining xtool, over a stand-in world where
+/// every CLI is signed in and no window is used (no `claude auth status`, no `claude -p /usage`).
+fn p29_project(name: &str) -> (crate::nirvana::TestHomeGuard, Project) {
+    let home = crate::nirvana::with_test_home(name);
+    let seats = home.path.join("nirvana").join(nirvana_seat::SEATS_FILE);
+    std::fs::create_dir_all(seats.parent().unwrap()).unwrap();
+    std::fs::write(&seats, nirvana_seat::DEFAULT).unwrap();
+    let project = Project::at(home.path.join("project"));
+    project.ensure().unwrap();
+    std::fs::write(project.root.join(".mcp.json"), P29_MCP).unwrap();
+    nirvana_seat::set_test_world(Some(BTreeMap::new()));
+    (home, project)
+}
+
+/// An order seated on a claude seat for the xtool server, working in the project's root.
+fn p29_seated(project: &Project, order: &str, seat: &str) -> Seated {
+    let mut seated = seated(order);
+    seated.seat = seat.into();
+    seated.cli = "claude".into();
+    seated.model = format!("claude-{seat}-5-5");
+    seated.effort = Effort::Medium;
+    seated.pool = "max".into();
+    seated.needs = vec!["xtool".into()];
+    seated.not_family = Vec::new();
+    seated.cwd = project.root.display().to_string();
+    seated.order_file = project.root.join("order.md").display().to_string();
+    seated
+}
+
+#[test]
+fn p29_seat_order_seats_a_server_order_on_claude_and_its_brief_never_starts_a_device() {
+    use crate::nirvana_gui_tools::{BRIEF_LINE, DEVICE_LINE};
+    let (home, project) = p29_project("p29-seat-order");
+    let table = nirvana_seat::table_for(&project.root).unwrap();
+    let world = nirvana_seat::live_world(&table);
+    // Without the server the class seats on agy: the rule has something to move.
+    let plain = nirvana_seat::pick(
+        &table,
+        &world,
+        &nirvana_seat::Request::new("sweep.mechanical"),
+    )
+    .unwrap();
+    assert_eq!(plain.cli, "agy", "{}", plain.seat);
+    let mut only = nirvana_seat::Request::new("sweep.mechanical");
+    only.claude_only = Some("a server".into());
+    let claude_seat = nirvana_seat::pick(&table, &world, &only).unwrap().seat;
+    let order_file = project.root.join("order.md");
+    std::fs::write(&order_file, "# Slice the jig\n").unwrap();
+    let request = |order: &str, seat: &str| SeatRequest {
+        seat: seat.into(),
+        order_file: order_file.clone(),
+        order: order.into(),
+        run: "r1".into(),
+        class: Some("sweep.mechanical".into()),
+        size: None,
+        needs: vec!["xtool".into()],
+        not_family: Vec::new(),
+        mode: None,
+        effort: None,
+        reason: None,
+        worktree: false,
+        auto: false,
+    };
+    // Each order is held live, so `seat_order` starts no worker whatever it books.
+    let _live: Vec<_> = ["o0", "o1", "o2"]
+        .iter()
+        .map(|order| take_live(&project, "r1", order).unwrap().unwrap())
+        .collect();
+    // `seat run` on the agy seat the rule would give it without the server: the rule seats it elsewhere.
+    let (code, why) = seat_order(&project, &request("o0", &plain.seat)).unwrap_err();
+    assert_eq!(code, 3, "{why}");
+    seat_order(&project, &request("o1", &claude_seat)).unwrap();
+    let state = replay(&project.journal("r1").read().0);
+    let seated = &state.order("o1").unwrap().seated;
+    assert_eq!(seated.cli, "claude");
+    let brief = std::fs::read_to_string(&seated.order_file).unwrap();
+    assert!(
+        brief.contains(&format!("\n\n{DEVICE_LINE}\n{BRIEF_LINE}")),
+        "{brief}"
+    );
+    // A need that is a seat capability is no server, even named like one: no line.
+    let seats = home.path.join("nirvana").join(nirvana_seat::SEATS_FILE);
+    let haiku_caps = "capabilities = [\"code\", \"tools\", \"image\"]";
+    assert_eq!(nirvana_seat::DEFAULT.matches(haiku_caps).count(), 1);
+    std::fs::write(
+        &seats,
+        nirvana_seat::DEFAULT.replace(
+            haiku_caps,
+            "capabilities = [\"code\", \"tools\", \"image\", \"xtool\"]",
+        ),
+    )
+    .unwrap();
+    seat_order(&project, &request("o2", "haiku")).unwrap();
+    let state = replay(&project.journal("r1").read().0);
+    let brief = std::fs::read_to_string(&state.order("o2").unwrap().seated.order_file).unwrap();
+    assert!(!brief.contains(DEVICE_LINE), "{brief}");
+    nirvana_seat::set_test_world(None);
+}
+
+#[test]
+fn p29_a_rate_limited_server_order_is_reseated_on_claude_or_not_at_all() {
+    let (_home, project) = p29_project("p29-reseat");
+    let run = "r1";
+    let journal = project.journal(run);
+    let seated = p29_seated(&project, "o1", "haiku");
+    journal.append(1, opened()).unwrap();
+    journal
+        .append(2, Kind::Seated(Box::new(seated.clone())))
+        .unwrap();
+    let child = child_id(&replay(&journal.read().0), "o1");
+    // Held live, so a reseat starts no worker.
+    let _live = take_live(&project, run, &child).unwrap().unwrap();
+    let limit = RateLimit {
+        signal: "rate_limit_event".into(),
+        pool: Some("max".into()),
+        window: None,
+        resets_at: None,
+        detail: String::new(),
+    };
+    // With every claude seat's pool spent the rule reseats the class on agy: it has something to move.
+    let table = nirvana_seat::table_for(&project.root).unwrap();
+    let spent = spent_world(&table, nirvana_seat::live_world(&table), &limit, "max");
+    let mut plain = nirvana_seat::Request::new("sweep.mechanical");
+    plain.size = seated.size;
+    assert_eq!(
+        nirvana_seat::pick(&table, &spent, &plain).unwrap().cli,
+        "agy"
+    );
+    let mut out = Vec::new();
+    let goes_on = rate_limited(
+        &project,
+        &journal,
+        run,
+        &seated,
+        &limit,
+        &Stream::new("claude"),
+        &mut out,
+    )
+    .unwrap();
+    let view = String::from_utf8_lossy(&out).into_owned();
+    assert!(!goes_on, "{view}");
+    let state = replay(&journal.read().0);
+    assert!(state.order(&child).is_none(), "re-seated: {view}");
+    assert!(
+        journal
+            .read()
+            .0
+            .iter()
+            .any(|event| matches!(&event.kind, Kind::Asked { order: Some(o), .. } if o == "o1")),
+        "{view}"
+    );
+    nirvana_seat::set_test_world(None);
+}
+
+/// Review F1 (exec), F2 and F3 through `herdr seat exec`, with a stand-in for the worker's program.
+#[cfg(windows)]
+#[test]
+fn p29_exec_gives_the_worker_its_config_removes_it_after_and_never_starts_without_it() {
+    let (_home, project) = p29_project("p29-exec");
+    std::fs::write(project.root.join("recorded.jsonl"), LIVE_HAIKU).unwrap();
+    let run = "r1";
+    let journal = project.journal(run);
+    journal.append(1, opened()).unwrap();
+    let config =
+        |order: &str| crate::nirvana_gui_tools::order_config_path(&project.run_dir(run), order);
+    let exec_with = |order: &str, script: &str| -> i32 {
+        journal
+            .append(
+                2,
+                Kind::Seated(Box::new(p29_seated(&project, order, "sonnet"))),
+            )
+            .unwrap();
+        TEST_COMMAND.with_borrow_mut(|slot| {
+            *slot = Some(vec!["cmd.exe".into(), "/c".into(), script.to_owned()]);
+        });
+        let mut out = Vec::new();
+        let code = exec(&project, run, order, None, &mut out).unwrap();
+        TEST_COMMAND.with_borrow_mut(|slot| *slot = None);
+        code
+    };
+    let relative = |order: &str| {
+        config(order)
+            .strip_prefix(&project.root)
+            .unwrap()
+            .display()
+            .to_string()
+    };
+    let ended = |order: &str| {
+        journal
+            .read()
+            .0
+            .into_iter()
+            .find_map(|event| match event.kind {
+                Kind::Ended {
+                    order: Some(o),
+                    outcome,
+                    why,
+                    exit,
+                    ..
+                } if o == order => Some((outcome, why, exit)),
+                _ => None,
+            })
+    };
+    let started = |order: &str| {
+        journal
+            .read()
+            .0
+            .into_iter()
+            .find_map(|event| match event.kind {
+                Kind::Started { order: o, argv, .. } if o == order => Some(argv),
+                _ => None,
+            })
+    };
+    // Delivered: the worker starts with --mcp-config naming its file, which is there while it runs and gone after.
+    let code = exec_with(
+        "o1",
+        &format!(
+            "if exist {} (type recorded.jsonl) else (exit /b 3)",
+            relative("o1")
+        ),
+    );
+    assert_eq!(code, 0, "{:?}", ended("o1"));
+    let argv = started("o1").expect("started");
+    let at = argv
+        .iter()
+        .position(|arg| arg == "--mcp-config")
+        .expect("--mcp-config");
+    assert_eq!(argv[at + 1], config("o1").display().to_string());
+    assert_eq!(ended("o1").map(|e| e.0), Some("delivered".to_owned()));
+    assert!(!config("o1").exists());
+    // Failed: the file was there (exit 4, not 3) and is gone after.
+    let code = exec_with(
+        "o2",
+        &format!("if exist {} (exit /b 4) else (exit /b 3)", relative("o2")),
+    );
+    assert_eq!(code, 1);
+    let (outcome, _, exit) = ended("o2").expect("ended");
+    assert_eq!((outcome.as_str(), exit), ("failed", Some(4)));
+    assert!(!config("o2").exists());
+    // The server gone from `.mcp.json` since the seat: the order fails naming it, and its worker never starts.
+    std::fs::write(project.root.join(".mcp.json"), r#"{"mcpServers": {}}"#).unwrap();
+    assert_eq!(exec_with("o3", "exit /b 0"), 1);
+    assert_eq!(started("o3"), None);
+    let (outcome, why, _) = ended("o3").expect("ended");
+    assert_eq!(outcome, "failed");
+    let why = why.unwrap_or_default();
+    assert!(
+        why.starts_with("o3 was seated for MCP server xtool and cannot get it: ")
+            && why.ends_with("no longer defines xtool"),
+        "{why}"
+    );
+    nirvana_seat::set_test_world(None);
+}
