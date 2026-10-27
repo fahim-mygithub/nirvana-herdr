@@ -1,6 +1,7 @@
 # Feature 25: a leaner Nirvana Claude, borrowed from pi
 
-Status: **PLANNED (2026-10-22)**. Build after plan 24. §3's probe runs first and decides its cuts.
+Status: **BUILT (2026-10-27)** as alpha 0.42.0. §4 dropped by the owner 2026-10-26. The build record is
+`nirvana/plans/2026-10-22-25-records/p25.md`.
 
 ## Ledger
 
@@ -10,8 +11,8 @@ Status: **PLANNED (2026-10-22)**. Build after plan 24. §3's probe runs first an
 | L2 | The owner picked all four of: "Fresh session + handoff" ("Nirvana Claude starts fresh at each run from a short note built from the journal. Largest expected saving; I measure it first."), "Lean startup context" ("Measure Nirvana Claude's first-turn tokens and cut what orchestration doesn't use."), "Results while busy" ("A finished worker's result is queued into Nirvana Claude as a prompt, not left waiting for idle."), and "Browser batches" ("Browser workers are told to use bladebro run batches so only the result reaches the model."). | §2 to §5 | orchestrator | each section's tests; §6 |
 
 - After measuring, the orchestrator recommended dropping "Results while busy" and shrinking "Browser batches" to one
-  brief line (§1). The owner has not answered that recommendation. Until they do, §4 builds nothing; it is not
-  dropped from the ledger.
+  brief line (§1). The owner, 2026-10-26, answered "Drop it (Recommended)" for §4 and "Keep only ReportFindings cut
+  (Recommended)" for §3.
 - L2's fresh session does not replace plan 12 R3, "Resume last session". R3 decides what a window reopen continues.
   §2 decides when a long session is cleared during its life. A reopen still resumes the last session, which is then the
   fresh one.
@@ -107,6 +108,9 @@ Tests: `launch_args` carries the chosen `--disallowedTools` list; a test names e
 fails if any is in the list.
 
 ## 4. Results while busy
+
+**Dropped by the owner 2026-10-26** ("Drop it (Recommended)"). Nothing is built. The text below is kept as the
+design, should the owner ask again.
 
 Not built unless the owner asks again after reading §1. If they do, the design is to type a worker's result while
 Nirvana Claude is working, which Claude Code queues as the next prompt. That rests on Claude Code's queueing of

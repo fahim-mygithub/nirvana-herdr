@@ -3,6 +3,34 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.42.0: Nirvana Claude starts fresh after a run, and starts leaner
+
+- **Changed:**
+  - After a run ends, Nirvana Claude's conversation is cleared and a short note from files starts the next one.
+    - The Stop hook records a pending fresh start when the pane's run ended in the last 10 minutes, no run of the pane
+      is open, the owner has not typed since the end, and the context is above `fresh_above` (120k, `seats.toml`).
+    - The server types `/clear` only into Nirvana Claude, only while it is idle, the prompt line is empty and the
+      owner has been quiet. It checks every rule again just before it types. Every doubt sends nothing.
+    - The note comes through the SessionStart hook. It holds the ended run, the open runs, the board, the owner's last
+      three prompts and the lessons line, at most 2,000 tokens. The journal gets a `fresh` event.
+    - `herdr nirvana fresh` does the same on demand. The owner's own `!` command lines do not cancel it.
+  - Nirvana Claude launches with `--disallowedTools ReportFindings`.
+  - A browser order on a `claude` seat gets one brief line: "Use bladebro `run` to batch steps; read the result, not
+    each page."
+  **Because:** the owner, 2026-10-22, picked "Fresh session + handoff", "Lean startup context" and "Browser batches"
+  from the pi-agent ideas. On 2026-10-26 they answered "Keep only ReportFindings cut (Recommended)" and "Drop it
+  (Recommended)" for "Results while busy". Plan `nirvana/plans/2026-10-22-25-lean-orchestrator.md`, built on Opus high.
+  **Measured:**
+  - The §3 probe, one Haiku turn per variant: ReportFindings costs 948 tokens of a 46,369-token first turn. Workflow
+    (2,110) and ScheduleWakeup (1,816) stay, by the owner's ruling. The one-cut argv was not probed again.
+  - 201 controls in `nirvana/controls.d/lean.py`, each reddening its test alone, plus 11 older controls whose lines
+    moved.
+  - Three Sonnet reviews. Every blocker and should-fix item was fixed, in three rounds.
+  - Not live-checked yet: that Claude Code runs the SessionStart hook with source `clear` after a `/clear` herdr typed,
+    and the context-per-turn table over the next week's runs.
+  **If you remove this:** Nirvana Claude carries every run's conversation into the next until it compacts, and pays
+  for it on every turn.
+
 ## alpha 0.41.0: live workers show in the spaces view
 
 - **Changed:** under each space's agent rows in the sidebar's spaces view, one row per live worker of that space, in the
