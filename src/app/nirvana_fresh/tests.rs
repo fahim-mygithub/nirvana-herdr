@@ -5,6 +5,7 @@ use super::*;
 use crate::detect::{Agent, AgentState};
 use crate::nirvana_fresh::{FreshStretch, Record, LOOKUPS, POLL, RETRY};
 use crate::nirvana_idle_compact::{IdleStretch, ENTER_TRIES, ERASED_AT, ERASE_AT};
+use crate::nirvana_run::{Kind, Project};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -90,16 +91,16 @@ fn typed(receiver: &mut tokio::sync::mpsc::Receiver<Bytes>) -> String {
 }
 
 /// Nirvana Claude's process in the test home (`--agent nirvana` with this home's plugin), in the conversation the
-/// records name.
+/// records name (`conversation`).
 fn nirvana_in(home: &Path) -> impl Fn(&PaneQuery) -> (Outside, Option<PathBuf>) + '_ {
-    nirvana_with(home, Some(TRANSCRIPT))
+    nirvana_with(home, Some(conversation(home)))
 }
 
 /// Nirvana Claude's process in the test home, its transcript `transcript`.
-fn nirvana_with<'a>(
-    home: &'a Path,
-    transcript: Option<&'a str>,
-) -> impl Fn(&PaneQuery) -> (Outside, Option<PathBuf>) + 'a {
+fn nirvana_with(
+    home: &Path,
+    transcript: Option<PathBuf>,
+) -> impl Fn(&PaneQuery) -> (Outside, Option<PathBuf>) + '_ {
     move |_query| {
         let outside = Outside {
             argv: Some(vec![
@@ -113,16 +114,20 @@ fn nirvana_with<'a>(
             ]),
             ..Outside::default()
         };
-        (outside, transcript.map(PathBuf::from))
+        (outside, transcript.clone())
     }
 }
 
-fn plain_claude(_query: &PaneQuery) -> (Outside, Option<PathBuf>) {
-    let outside = Outside {
-        argv: Some(vec!["claude".into(), "--model".into(), "opus".into()]),
-        ..Outside::default()
-    };
-    (outside, Some(PathBuf::from(TRANSCRIPT)))
+/// A plain Claude in the conversation the records name, so only its argv keeps the fresh start off.
+fn plain_claude(home: &Path) -> impl Fn(&PaneQuery) -> (Outside, Option<PathBuf>) + '_ {
+    let transcript = conversation(home);
+    move |_query| {
+        let outside = Outside {
+            argv: Some(vec!["claude".into(), "--model".into(), "opus".into()]),
+            ..Outside::default()
+        };
+        (outside, Some(transcript.clone()))
+    }
 }
 
 /// A long-idle interactive Claude with a big context, as idle compact's `read_outside` would find it.
@@ -134,18 +139,53 @@ fn long_idle(_query: &PaneQuery) -> Outside {
     }
 }
 
-/// The pane's conversation, as the Stop hook names it in the record and the server reads it.
+/// A conversation that is not the pane's.
 const TRANSCRIPT: &str = r"C:\Users\o\.claude\projects\C--work-print\abc-123.jsonl";
 
+/// Unix seconds as a transcript's `timestamp`, `2026-10-23T10:00:00.123Z`.
+fn iso(at: u64) -> String {
+    format!(
+        "{}.123Z",
+        crate::nirvana_run::utc(at)
+            .trim_end_matches('Z')
+            .replace(' ', "T")
+    )
+}
+
+/// A transcript line of `kind` at `at`: the owner's words for a user line, a turn of `context` tokens for Claude's.
+fn line_at(kind: &str, text: &str, at: u64) -> String {
+    serde_json::json!({"type": kind, "timestamp": iso(at), "message": {"role": kind, "content": text,
+        "usage": {"input_tokens": 2, "cache_read_input_tokens": 150_000, "output_tokens": 50}}})
+    .to_string()
+}
+
+/// The pane's conversation in the test home, as the Stop hook names it in the record and the server reads it: the
+/// owner's last prompt and Claude's answer, both before the run's end (`record`), so the send-time check (review
+/// round 2, S-A) finds no owner prompt after it.
+fn conversation(home: &Path) -> PathBuf {
+    let path = home.join("abc-123.jsonl");
+    let now = crate::nirvana_run::now();
+    std::fs::write(
+        &path,
+        [
+            line_at("user", "end the run", now - 60),
+            line_at("assistant", "ended", now - 30),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    path
+}
+
 /// A Stop's record written now (review S1: an older one is stale), naming the pane's transcript.
-fn record() -> Record {
+fn record(home: &Path) -> Record {
     let at = crate::nirvana_run::now();
     Record {
         run: Some("r1".into()),
         ended_at: Some(at),
         context: Some(180_000),
-        transcript: Some(TRANSCRIPT.into()),
-        project: "C:\\work\\print".into(),
+        transcript: Some(conversation(home).display().to_string()),
+        project: home.join("project").display().to_string(),
         at,
         by: "stop".into(),
     }
@@ -169,7 +209,7 @@ async fn fresh_server_types_clear_then_enter_into_an_idle_nirvana_claude() {
     let t0 = Instant::now();
     let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
     let public = root_public(&app);
-    let written = record();
+    let written = record(&home);
     crate::nirvana_fresh::write_record(&home, &public, &written).unwrap();
     assert_eq!(app.fresh_deadline(), Some(t0 + LOOKUPS[0]));
     // Nothing is due before the first lookup.
@@ -227,9 +267,9 @@ async fn fresh_server_types_only_into_nirvana_claude() {
     let mut app = test_app();
     let t0 = Instant::now();
     let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
-    crate::nirvana_fresh::write_record(&home, &root_public(&app), &record()).unwrap();
+    crate::nirvana_fresh::write_record(&home, &root_public(&app), &record(&home)).unwrap();
     for after in LOOKUPS {
-        assert!(!app.nirvana_fresh_with(t0 + after, &home, plain_claude));
+        assert!(!app.nirvana_fresh_with(t0 + after, &home, plain_claude(&home)));
     }
     assert_eq!(typed(&mut receiver), "");
     // Left for now: tried again after the owner's quiet window, not at the minute's poll.
@@ -257,7 +297,7 @@ async fn fresh_server_types_nothing_while_the_owner_types_or_the_line_holds_text
         };
         let mut receiver = idle_claude(&mut app, t0, recorded);
         let public = root_public(&app);
-        crate::nirvana_fresh::write_record(&home, &public, &record()).unwrap();
+        crate::nirvana_fresh::write_record(&home, &public, &record(&home)).unwrap();
         if owner_typed {
             crate::nirvana_run::note_owner_key(&public);
         }
@@ -274,7 +314,7 @@ async fn fresh_server_never_clears_twice_for_one_record() {
     let t0 = Instant::now();
     let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
     let public = root_public(&app);
-    let written = record();
+    let written = record(&home);
     crate::nirvana_fresh::write_record(&home, &public, &written).unwrap();
     crate::nirvana_fresh::write_sent(&home, &public, written.at).unwrap();
     assert!(!app.nirvana_fresh_with(t0 + LOOKUPS[0], &home, nirvana_in(&home)));
@@ -289,7 +329,7 @@ async fn fresh_server_erases_a_clear_whose_enter_never_went() {
     let mut app = test_app();
     let t0 = Instant::now();
     let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
-    crate::nirvana_fresh::write_record(&home, &root_public(&app), &record()).unwrap();
+    crate::nirvana_fresh::write_record(&home, &root_public(&app), &record(&home)).unwrap();
     let pasted = t0 + LOOKUPS[0];
     assert!(app.nirvana_fresh_with(pasted, &home, nirvana_in(&home)));
     assert_eq!(typed(&mut receiver), "/clear");
@@ -323,7 +363,7 @@ async fn fresh_start_and_idle_compact_never_share_a_pane() {
     let t0 = Instant::now();
     let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
     let public = root_public(&app);
-    crate::nirvana_fresh::write_record(&home, &public, &record()).unwrap();
+    crate::nirvana_fresh::write_record(&home, &public, &record(&home)).unwrap();
     let pass = t0 + 51 * MIN;
     assert!(app.nirvana_idle_compact_with(pass, long_idle));
     assert_eq!(typed(&mut receiver), "/compact");
@@ -418,7 +458,7 @@ async fn a_sent_clear_holds_idle_compact_off_and_a_sent_compact_holds_the_fresh_
         .unwrap()
         .idle_stretch
         .sent = true;
-    crate::nirvana_fresh::write_record(&home, &public, &record()).unwrap();
+    crate::nirvana_fresh::write_record(&home, &public, &record(&home)).unwrap();
     for after in LOOKUPS {
         assert!(!app.nirvana_fresh_with(t0 + after, &home, nirvana_in(&home)));
     }
@@ -447,7 +487,7 @@ async fn fresh_server_forgets_a_stale_stop_record() {
     let public = root_public(&app);
     let stale = Record {
         at: crate::nirvana_run::now() - crate::nirvana_fresh::FRESH_WITHIN.as_secs() - 60,
-        ..record()
+        ..record(&home)
     };
     crate::nirvana_fresh::write_record(&home, &public, &stale).unwrap();
     crate::nirvana_fresh::write_sent(&home, &public, stale.at - 1).unwrap();
@@ -462,18 +502,21 @@ async fn fresh_server_forgets_a_stale_stop_record() {
 async fn fresh_server_types_only_into_the_records_conversation() {
     let guard = crate::nirvana::with_test_home("fresh-transcript");
     let home = guard.path.clone();
-    let other = r"C:\Users\o\.claude\projects\C--work-print\def-456.jsonl";
     for (transcript, sends) in [
-        (Some(other), false),
+        (Some(PathBuf::from(TRANSCRIPT)), false),
         (None, false),
-        (Some(TRANSCRIPT), true),
+        (Some(conversation(&home)), true),
     ] {
         let mut app = test_app();
         let t0 = Instant::now();
         let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
-        crate::nirvana_fresh::write_record(&home, &root_public(&app), &record()).unwrap();
+        crate::nirvana_fresh::write_record(&home, &root_public(&app), &record(&home)).unwrap();
         assert_eq!(
-            app.nirvana_fresh_with(t0 + LOOKUPS[0], &home, nirvana_with(&home, transcript)),
+            app.nirvana_fresh_with(
+                t0 + LOOKUPS[0],
+                &home,
+                nirvana_with(&home, transcript.clone())
+            ),
             sends,
             "{transcript:?}"
         );
@@ -504,7 +547,7 @@ async fn fresh_deadline_counts_only_panes_started_as_nirvana_claude() {
     let mut app = test_app();
     let t0 = Instant::now();
     let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
-    crate::nirvana_fresh::write_record(&home, &root_public(&app), &record()).unwrap();
+    crate::nirvana_fresh::write_record(&home, &root_public(&app), &record(&home)).unwrap();
     for name in [None, Some("claude"), Some("nirvana-x")] {
         app.state
             .terminals
@@ -521,4 +564,169 @@ async fn fresh_deadline_counts_only_panes_started_as_nirvana_claude() {
         .unwrap()
         .agent_name = Some("nirvana-2".into());
     assert_eq!(app.fresh_deadline(), Some(t0 + LOOKUPS[0]));
+}
+
+/// Review round 2, S-A, end to end: the run's end writes the record (the Stop hook's own half), the owner asks a
+/// question after the end and the Stop hook for that turn never runs (late, or killed at its 15 s timeout). The
+/// server's pass rereads B1's rules, types nothing and forgets the record.
+#[tokio::test]
+async fn fresh_server_rechecks_b1_when_the_stop_hook_was_late() {
+    let guard = crate::nirvana::with_test_home("fresh-late-stop");
+    let home = guard.path.clone();
+    let mut app = test_app();
+    let t0 = Instant::now();
+    let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+    let public = root_public(&app);
+    let project = Project::at(home.join("project"));
+    let transcript = conversation(&home);
+    let end = crate::nirvana_run::now();
+    run(&project, "r1", &public, Some(end));
+    assert_eq!(
+        crate::nirvana_fresh::on_stop_in(
+            &home,
+            &public,
+            &project,
+            &transcript,
+            crate::nirvana_fresh::FRESH_ABOVE,
+            end
+        )
+        .unwrap(),
+        Ok("r1".to_owned())
+    );
+    let mut lines = std::fs::read_to_string(&transcript).unwrap();
+    lines.push('\n');
+    lines.push_str(&line_at("user", "why did order 2 fail?", end + 1));
+    std::fs::write(&transcript, lines).unwrap();
+    assert!(!app.nirvana_fresh_with(t0 + LOOKUPS[0], &home, nirvana_in_kept(&home, &transcript)));
+    assert_eq!(typed(&mut receiver), "");
+    assert_eq!(crate::nirvana_fresh::read_record(&home, &public), Ok(None));
+}
+
+/// Review round 2, S-A: a run of the pane opened after the record, and an end older than `FRESH_WITHIN` while the
+/// record's own second is young, each forget the record at send time; the same record with neither is typed for.
+#[tokio::test]
+async fn fresh_server_rechecks_the_open_run_and_the_ends_age() {
+    let guard = crate::nirvana::with_test_home("fresh-recheck");
+    let home = guard.path.clone();
+    let within = crate::nirvana_fresh::FRESH_WITHIN.as_secs();
+    for case in ["open", "old end", "holds"] {
+        let mut app = test_app();
+        let t0 = Instant::now();
+        let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+        let public = root_public(&app);
+        let project = Project::at(home.join("project"));
+        let _ = std::fs::remove_dir_all(&project.root);
+        let mut written = record(&home);
+        run(&project, "r1", &public, written.ended_at);
+        match case {
+            "open" => {
+                run(&project, "r2", &public, None);
+            }
+            "old end" => written.ended_at = Some(written.at - within - 5),
+            _ => {}
+        }
+        crate::nirvana_fresh::write_record(&home, &public, &written).unwrap();
+        let sends = case == "holds";
+        assert_eq!(
+            app.nirvana_fresh_with(t0 + LOOKUPS[0], &home, nirvana_in(&home)),
+            sends,
+            "{case}"
+        );
+        assert_eq!(
+            typed(&mut receiver),
+            if sends { "/clear" } else { "" },
+            "{case}"
+        );
+        assert_eq!(
+            crate::nirvana_fresh::read_record(&home, &public)
+                .unwrap()
+                .is_some(),
+            sends,
+            "{case}"
+        );
+    }
+}
+
+/// Review round 2, S-C: the owner's own record is forgotten once the owner typed in the pane's conversation after
+/// it, and typed for when they did not.
+#[tokio::test]
+async fn fresh_server_forgets_an_owner_record_the_owner_typed_after() {
+    let guard = crate::nirvana::with_test_home("fresh-owner-typed");
+    let home = guard.path.clone();
+    for typed_after in [true, false] {
+        let mut app = test_app();
+        let t0 = Instant::now();
+        let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+        let public = root_public(&app);
+        let transcript = conversation(&home);
+        let now = crate::nirvana_run::now();
+        let owner = Record {
+            transcript: None,
+            context: None,
+            at: now - 20,
+            by: "owner".into(),
+            ..record(&home)
+        };
+        if typed_after {
+            let mut lines = std::fs::read_to_string(&transcript).unwrap();
+            lines.push('\n');
+            lines.push_str(&line_at("user", "actually, keep this session", now - 10));
+            std::fs::write(&transcript, lines).unwrap();
+        }
+        crate::nirvana_fresh::write_record(&home, &public, &owner).unwrap();
+        assert_eq!(
+            app.nirvana_fresh_with(t0 + LOOKUPS[0], &home, nirvana_in_kept(&home, &transcript)),
+            !typed_after,
+            "{typed_after}"
+        );
+        let expected = if typed_after { "" } else { "/clear" };
+        assert_eq!(typed(&mut receiver), expected, "{typed_after}");
+        assert_eq!(
+            crate::nirvana_fresh::read_record(&home, &public)
+                .unwrap()
+                .is_none(),
+            typed_after
+        );
+    }
+}
+
+/// Nirvana Claude in `transcript` as it now stands (`nirvana_in` writes the conversation afresh).
+fn nirvana_in_kept<'a>(
+    home: &'a Path,
+    transcript: &Path,
+) -> impl Fn(&PaneQuery) -> (Outside, Option<PathBuf>) + 'a {
+    nirvana_with(home, Some(transcript.to_path_buf()))
+}
+
+/// A run in `project` opened from `pane`, ended at `end` when given.
+fn run(project: &Project, id: &str, pane: &str, end: Option<u64>) {
+    std::fs::create_dir_all(project.run_dir(id)).unwrap();
+    let journal = project.journal(id);
+    journal
+        .append(
+            10,
+            Kind::Opened {
+                project: "p".into(),
+                orchestrator_pane: Some(pane.into()),
+                auto: false,
+                pools: Vec::new(),
+                pools_basis: None,
+            },
+        )
+        .unwrap();
+    if let Some(at) = end {
+        journal
+            .append(
+                at,
+                Kind::Ended {
+                    order: None,
+                    outcome: "ended".into(),
+                    why: None,
+                    exit: None,
+                    pools: Vec::new(),
+                    pools_basis: None,
+                },
+            )
+            .unwrap();
+    }
 }

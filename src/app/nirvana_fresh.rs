@@ -169,7 +169,17 @@ impl App {
             input_line,
         };
         let public = pane.public.clone();
-        match decide(&facts) {
+        // Review round 2, S-A: B1's rules again before a paste, over the record's journals and the pane's transcript
+        // now, as the Stop hook that would take the record back may be late or killed.
+        let recheck = |record: &crate::nirvana_fresh::Record| {
+            crate::nirvana_fresh::recheck_in(
+                record,
+                &public,
+                facts.transcript.as_deref(),
+                facts.now,
+            )
+        };
+        match decide(&facts, recheck) {
             Decision::Nothing => false,
             Decision::Skip(why) => {
                 if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {

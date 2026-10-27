@@ -454,6 +454,59 @@ fn the_note_keeps_its_budget_and_holds_the_open_runs_and_the_last_prompts() {
     );
 }
 
+/// Round 2's nits: an image the owner pasted with no words is the owner after the end for B1's rule, though the note
+/// quotes no words of it; Claude Code's `<task-notification>` line, a `user` line without `isMeta`, is not the owner.
+#[test]
+fn an_image_is_the_owner_and_a_task_notification_is_not() {
+    let end = 1_792_800_000;
+    let quiet = quiet_tail(end);
+    let image = serde_json::json!({"type": "user", "timestamp": iso(end + 5), "message": {"role": "user", "content": [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}},
+        {"type": "text", "text": "  "},
+    ]}})
+    .to_string();
+    let with_image = format!("{quiet}\n{image}");
+    assert!(owner_prompt_since(&with_image, end).is_err());
+    assert_eq!(owner_prompts(&with_image, PROMPTS), vec!["end the run"]);
+    // An image beside words that are not the owner's (a reminder), in a tool's result, or on a meta line, stays not
+    // the owner's.
+    let reminded = serde_json::json!({"type": "user", "timestamp": iso(end + 5), "message": {"content": [
+        {"type": "image", "source": {}}, {"type": "text", "text": "<system-reminder>x</system-reminder>"}]}})
+    .to_string();
+    assert_eq!(
+        owner_prompt_since(&format!("{quiet}\n{reminded}"), end),
+        Ok(())
+    );
+    let tool_image = serde_json::json!({"type": "user", "timestamp": iso(end + 5), "message": {"content": [
+        {"type": "tool_result", "content": [{"type": "image", "source": {}}]}, {"type": "image", "source": {}}]}})
+    .to_string();
+    assert_eq!(
+        owner_prompt_since(&format!("{quiet}\n{tool_image}"), end),
+        Ok(())
+    );
+    let meta_image = serde_json::json!({"type": "user", "isMeta": true, "timestamp": iso(end + 5),
+        "message": {"content": [{"type": "image", "source": {}}]}})
+    .to_string();
+    assert_eq!(
+        owner_prompt_since(&format!("{quiet}\n{meta_image}"), end),
+        Ok(())
+    );
+    // The shape recorded in a Claude Code transcript on this machine (2026-10-12), its paths and ids shortened.
+    let notification = serde_json::json!({
+        "parentUuid": "796ff8d6", "isSidechain": false, "promptId": "ca32d304", "type": "user",
+        "message": {"role": "user", "content": "<task-notification>\n<task-id>b42ws8w3l</task-id>\n<tool-use-id>toolu_01Q8</tool-use-id>\n<output-file>C:\\t\\b42ws8w3l.output</output-file>\n<status>killed</status>\n<summary>Background command \"python main.py\" was stopped after reaching its background time limit</summary>\n</task-notification>"},
+        "uuid": "9d8af2fb", "timestamp": iso(end + 5), "permissionMode": "bypassPermissions",
+        "origin": {"kind": "task-notification"},
+    })
+    .to_string();
+    let with_notification = format!("{quiet}\n{notification}");
+    assert_eq!(owner_prompt_since(&with_notification, end), Ok(()));
+    assert_eq!(
+        owner_prompts(&with_notification, PROMPTS),
+        vec!["end the run"]
+    );
+}
+
 #[test]
 fn the_owners_prompts_are_the_last_three_they_typed_not_herdrs_or_claudes() {
     let lines = [
@@ -608,6 +661,56 @@ fn the_note_goes_only_to_its_project_and_a_resume_forgets_a_stops_record() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Round 2's nit: on a `/clear`, a stale Stop's record prints no note and is forgotten, unless the server's mark names
+/// it (the server cleared for it inside `FRESH_WITHIN`).
+#[test]
+fn a_clear_prints_no_note_for_a_stale_stop_record() {
+    let root = scratch("start-stale");
+    let home = root.join("home");
+    let project = Project::at(root.join("project"));
+    run(&project, "r1", "p1", Some(500));
+    let record = Record {
+        run: Some("r1".into()),
+        ended_at: Some(500),
+        context: Some(180_000),
+        transcript: None,
+        project: project.root.display().to_string(),
+        at: 510,
+        by: "stop".into(),
+    };
+    let here = Some(project.root.as_path());
+    let old = 500 + FRESH_WITHIN.as_secs() + 1;
+    write_record(&home, "p1", &record).unwrap();
+    assert_eq!(
+        on_session_start_in(&home, "p1", "clear", here, None, old),
+        None
+    );
+    assert_eq!(read_record(&home, "p1").unwrap(), None);
+    write_record(&home, "p1", &record).unwrap();
+    assert!(on_session_start_in(
+        &home,
+        "p1",
+        "clear",
+        here,
+        None,
+        500 + FRESH_WITHIN.as_secs()
+    )
+    .is_some());
+    // The server cleared for it: its note is printed though the hook runs a little late.
+    write_record(&home, "p1", &record).unwrap();
+    write_sent(&home, "p1", record.at).unwrap();
+    assert!(on_session_start_in(&home, "p1", "clear", here, None, old).is_some());
+    // The owner's record is not aged here, though older than its own `OWNER_WITHIN`.
+    let older = record.at + OWNER_WITHIN.as_secs() + 1;
+    let owner = Record {
+        by: "owner".into(),
+        ..record
+    };
+    write_record(&home, "p1", &owner).unwrap();
+    assert!(on_session_start_in(&home, "p1", "clear", here, None, older).is_some());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Review S2: the owner's record names no transcript; the note's prompts come from the one the hook reports.
 #[test]
 fn the_owners_note_quotes_the_transcript_the_hook_reports() {
@@ -712,18 +815,23 @@ fn sending() -> Facts {
     }
 }
 
+/// `decide` with the send-time check (review round 2, S-A) passing: every other rule's own case.
+fn decided(facts: &Facts) -> Decision {
+    decide(facts, |_| Ok(()))
+}
+
 fn skips(facts: Facts) -> bool {
-    matches!(decide(&facts), Decision::Skip(_))
+    matches!(decided(&facts), Decision::Skip(_))
 }
 
 #[test]
 fn the_fresh_start_sends_when_every_rule_holds() {
-    assert_eq!(decide(&sending()), Decision::Send(600));
+    assert_eq!(decided(&sending()), Decision::Send(600));
     let never = Facts {
         owner_key: OwnerKey::Never,
         ..sending()
     };
-    assert_eq!(decide(&never), Decision::Send(600));
+    assert_eq!(decided(&never), Decision::Send(600));
 }
 
 #[test]
@@ -743,11 +851,26 @@ fn record_of(facts: &Facts) -> Record {
     facts.record.clone().unwrap().unwrap()
 }
 
-/// Review S1: a Stop's record lives `FRESH_WITHIN`; the server forgets an older one. The owner's has no such age.
+/// Review S1: a Stop's record lives `FRESH_WITHIN`; the server forgets an older one. Round 2's S-C: the owner's lives
+/// `OWNER_WITHIN`.
 #[test]
 fn a_stale_stop_record_is_forgotten() {
     let at = record_of(&sending()).at;
-    let aged = |now: u64| decide(&Facts { now, ..sending() });
+    // The journal's end read 100 s after the record's second (a clock stepped back between the two writers), so the
+    // record's own age is what ages it here, not its end's (round 2's S-B, `a_stop_record_ages_from_its_runs_end`).
+    let at_its_end = || Facts {
+        record: Ok(Some(Record {
+            ended_at: Some(at + 100),
+            ..record_of(&sending())
+        })),
+        ..sending()
+    };
+    let aged = |now: u64| {
+        decided(&Facts {
+            now,
+            ..at_its_end()
+        })
+    };
     assert_eq!(aged(at + FRESH_WITHIN.as_secs()), Decision::Send(at));
     assert!(matches!(
         aged(at + FRESH_WITHIN.as_secs() + 1),
@@ -755,22 +878,196 @@ fn a_stale_stop_record_is_forgotten() {
     ));
     // Forgotten even when the server already cleared for it, so a mark never keeps a stale record alive.
     assert!(matches!(
-        decide(&Facts {
+        decided(&Facts {
             now: at + FRESH_WITHIN.as_secs() + 1,
             sent_for: Some(at),
-            ..sending()
+            ..at_its_end()
         }),
         Decision::Forget(_)
     ));
-    let owner = Facts {
+    let owner = |now: u64| Facts {
         record: Ok(Some(Record {
             by: "owner".into(),
             ..record_of(&sending())
         })),
-        now: at + 10 * FRESH_WITHIN.as_secs(),
+        now,
         ..sending()
     };
-    assert_eq!(decide(&owner), Decision::Send(at));
+    // Past a Stop's age, and past its end's, the owner's own record still waits.
+    assert_eq!(
+        decided(&owner(at + 2 * FRESH_WITHIN.as_secs())),
+        Decision::Send(at)
+    );
+    assert_eq!(
+        decided(&owner(at + OWNER_WITHIN.as_secs())),
+        Decision::Send(at)
+    );
+    assert!(matches!(
+        decided(&owner(at + OWNER_WITHIN.as_secs() + 1)),
+        Decision::Forget(_)
+    ));
+    assert_eq!(OWNER_WITHIN, Duration::from_secs(3_600));
+}
+
+/// Round 2's S-B: a Stop's record ages from its run's end too, not only from its own second (a record kept from an
+/// earlier turn of the same run keeps its second); one naming no end is a doubt.
+#[test]
+fn a_stop_record_ages_from_its_runs_end() {
+    let record = record_of(&sending());
+    let (at, end) = (record.at, record.ended_at.unwrap());
+    assert!(at > end);
+    let late = end + FRESH_WITHIN.as_secs() + 1;
+    assert_eq!(stale(&record, end + FRESH_WITHIN.as_secs()), None);
+    let why = stale(&record, late).unwrap();
+    assert!(why.contains("ended"), "{why}");
+    // The record's own second is still young there: the end is what aged it.
+    assert!(late - at <= FRESH_WITHIN.as_secs());
+    assert!(matches!(
+        decided(&Facts {
+            now: late,
+            ..sending()
+        }),
+        Decision::Forget(_)
+    ));
+    let unended = Record {
+        ended_at: None,
+        ..record.clone()
+    };
+    assert!(stale(&unended, at).is_some());
+    // The end is aged at send time as well (S-A's check holds it).
+    let quiet = quiet_tail(end);
+    assert!(recheck(&record, late, None, Ok(&quiet)).is_err());
+    assert_eq!(
+        recheck(&record, end + FRESH_WITHIN.as_secs(), None, Ok(&quiet)),
+        Ok(())
+    );
+}
+
+/// A transcript tail whose last owner prompt and turn come before `end`.
+fn quiet_tail(end: u64) -> String {
+    [
+        line_at("user", "end the run", end - 30),
+        assistant_at(150_000, end - 1),
+    ]
+    .join("\n")
+}
+
+/// Round 2's S-A: B1's rules again at send time, the record still present: an open run, an owner prompt after the end,
+/// an old end, an unread transcript each forget it.
+#[test]
+fn the_send_time_check_runs_every_b1_rule_again() {
+    let record = record_of(&sending());
+    let end = record.ended_at.unwrap();
+    let now = sending().now;
+    let quiet = quiet_tail(end);
+    assert_eq!(recheck(&record, now, None, Ok(&quiet)), Ok(()));
+    assert_eq!(
+        recheck(&record, now, Some("r2"), Ok(&quiet)),
+        Err("run r2 of this pane is open".to_owned())
+    );
+    let asked = format!(
+        "{quiet}\n{}",
+        line_at("user", "why did order 2 fail?", end + 5)
+    );
+    assert!(recheck(&record, now, None, Ok(&asked))
+        .unwrap_err()
+        .contains("after the run's end"));
+    assert!(recheck(&record, end + FRESH_WITHIN.as_secs() + 1, None, Ok(&quiet)).is_err());
+    assert!(recheck(&record, now, None, Err("unread".into())).is_err());
+    // `decide` forgets on the check's failure, and asks it only once every other rule holds.
+    let failing = decide(&sending(), |_| Err("typed".into()));
+    assert_eq!(failing, Decision::Forget("typed".into()));
+    let asked = std::cell::Cell::new(false);
+    let left = decide(
+        &Facts {
+            input_line: InputLine::Text("half a thought".into()),
+            ..sending()
+        },
+        |_| {
+            asked.set(true);
+            Ok(())
+        },
+    );
+    assert!(matches!(left, Decision::Skip(_)));
+    assert!(!asked.get());
+    let given = std::cell::RefCell::new(None);
+    decide(&sending(), |record| {
+        *given.borrow_mut() = Some(record.clone());
+        Ok(())
+    });
+    assert_eq!(given.into_inner(), Some(record));
+}
+
+/// Round 2's S-C: the owner's record is forgotten once the owner typed in the pane's conversation after it; an open
+/// run does not hold the owner's own start off.
+#[test]
+fn an_owner_record_is_forgotten_once_the_owner_types_after_it() {
+    let record = Record {
+        by: "owner".into(),
+        transcript: None,
+        ..record_of(&sending())
+    };
+    let at = record.at;
+    let now = at + 30;
+    let before = quiet_tail(at);
+    assert_eq!(recheck(&record, now, Some("r2"), Ok(&before)), Ok(()));
+    let typed = format!("{before}\n{}", line_at("user", "no, keep going", at + 10));
+    assert!(recheck(&record, now, None, Ok(&typed)).is_err());
+    // A prompt in the record's own second is a doubt, so forgotten.
+    let same = format!("{before}\n{}", line_at("user", "start fresh", at));
+    assert!(recheck(&record, now, None, Ok(&same)).is_err());
+    assert!(recheck(&record, now, None, Err("unread".into())).is_err());
+    assert!(recheck(&record, at + OWNER_WITHIN.as_secs() + 1, None, Ok(&before)).is_err());
+}
+
+/// Round 2's S-A over the files: the open runs come from the record's project, the prompts from the transcript the
+/// server read; an owner's record reads no journal.
+#[test]
+fn the_send_time_check_reads_the_projects_runs_and_the_panes_transcript() {
+    let root = scratch("recheck-in");
+    let project = Project::at(root.join("project"));
+    let transcript = root.join("session.jsonl");
+    let end = 1_792_800_000;
+    std::fs::write(&transcript, quiet_tail(end)).unwrap();
+    run(&project, "r1", "p1", Some(end));
+    let record = Record {
+        run: Some("r1".into()),
+        ended_at: Some(end),
+        context: Some(150_000),
+        transcript: Some(transcript.display().to_string()),
+        project: project.root.display().to_string(),
+        at: end + 2,
+        by: "stop".into(),
+    };
+    let now = end + 20;
+    assert_eq!(recheck_in(&record, "p1", Some(&transcript), now), Ok(()));
+    assert!(recheck_in(&record, "p1", None, now).is_err());
+    assert!(recheck_in(&record, "p1", Some(&root.join("gone.jsonl")), now).is_err());
+    run(&project, "r2", "p1", None);
+    assert_eq!(
+        recheck_in(&record, "p1", Some(&transcript), now),
+        Err("run r2 of this pane is open".to_owned())
+    );
+    // Another pane's open run is not this pane's.
+    assert_eq!(recheck_in(&record, "p2", Some(&transcript), now), Ok(()));
+    let owner = Record {
+        by: "owner".into(),
+        at: end + 5,
+        ..record
+    };
+    assert_eq!(recheck_in(&owner, "p1", Some(&transcript), now), Ok(()));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Round 2's nit: the line said when an open run holds the fresh start off names the run.
+#[test]
+fn an_open_run_holding_the_fresh_start_off_is_said() {
+    assert_eq!(
+        open_blocks(Some(("r1", 500)), Some("r2")),
+        Some("no fresh start after run r1: run r2 of this pane is open".to_owned())
+    );
+    assert_eq!(open_blocks(None, Some("r2")), None);
+    assert_eq!(open_blocks(Some(("r1", 500)), None), None);
 }
 
 /// Review S1 and S2: a Stop's record is sent for only while the pane's transcript is still the one it names; any
@@ -785,7 +1082,7 @@ fn the_fresh_start_needs_the_records_own_transcript() {
         )),
         ..sending()
     };
-    assert_eq!(decide(&spelt), Decision::Send(at));
+    assert_eq!(decided(&spelt), Decision::Send(at));
     // After a `/clear` or a `--resume` into another conversation.
     assert!(skips(Facts {
         transcript: Some(PathBuf::from(
@@ -810,7 +1107,7 @@ fn the_fresh_start_needs_the_records_own_transcript() {
         ..unnamed
     };
     assert_eq!(
-        decide(&Facts {
+        decided(&Facts {
             record: Ok(Some(owner)),
             transcript: None,
             ..sending()
@@ -822,7 +1119,7 @@ fn the_fresh_start_needs_the_records_own_transcript() {
 #[test]
 fn the_fresh_start_needs_a_record_it_has_not_cleared_for() {
     assert_eq!(
-        decide(&Facts {
+        decided(&Facts {
             record: Ok(None),
             ..sending()
         }),
@@ -833,14 +1130,14 @@ fn the_fresh_start_needs_a_record_it_has_not_cleared_for() {
         ..sending()
     }));
     assert_eq!(
-        decide(&Facts {
+        decided(&Facts {
             sent_for: Some(600),
             ..sending()
         }),
         Decision::Nothing
     );
     assert_eq!(
-        decide(&Facts {
+        decided(&Facts {
             sent_for: Some(599),
             ..sending()
         }),

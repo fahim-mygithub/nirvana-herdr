@@ -45,6 +45,17 @@ T_OWN_TRANSCRIPT = 'the_fresh_start_needs_the_records_own_transcript'
 T_S_SENT_RACE = 'a_sent_clear_holds_idle_compact_off_and_a_sent_compact_holds_the_fresh_start_off'
 T_S_STALE = 'fresh_server_forgets_a_stale_stop_record'
 T_S_TRANSCRIPT = 'fresh_server_types_only_into_the_records_conversation'
+# The second review round (P25-fix2): S-A to S-C and the nits.
+T_ENDS_AGE = 'a_stop_record_ages_from_its_runs_end'
+T_RECHECK = 'the_send_time_check_runs_every_b1_rule_again'
+T_RECHECK_OWNER = 'an_owner_record_is_forgotten_once_the_owner_types_after_it'
+T_RECHECK_IN = 'the_send_time_check_reads_the_projects_runs_and_the_panes_transcript'
+T_OPEN_SAID = 'an_open_run_holding_the_fresh_start_off_is_said'
+T_START_STALE = 'a_clear_prints_no_note_for_a_stale_stop_record'
+T_IMAGE = 'an_image_is_the_owner_and_a_task_notification_is_not'
+T_S_LATE = 'fresh_server_rechecks_b1_when_the_stop_hook_was_late'
+T_S_RECHECK = 'fresh_server_rechecks_the_open_run_and_the_ends_age'
+T_S_OWNER_TYPED = 'fresh_server_forgets_an_owner_record_the_owner_typed_after'
 T_DOUBT = 'a_doubt_keeps_todays_argv'
 T_LAUNCH = 'the_launch_carries_the_probes_cut_list_before_the_resume'
 T_BROWSER = 'only_a_browser_order_gets_the_bladebro_line'
@@ -394,8 +405,8 @@ CONTROLS = (
     # §2 every rule holding sends
     Control(
         'p25_decide_send', F,
-        '        InputLine::Empty => Decision::Send(record.at),\n',
-        '        InputLine::Empty => Decision::Nothing,\n',
+        '            Ok(()) => Decision::Send(record.at),\n',
+        '            Ok(()) => Decision::Nothing,\n',
         T_SENDS, 'rust',
     ),
     # §2 the wake's rule: text on the line is left alone
@@ -828,8 +839,8 @@ CONTROLS = (
     # review B1, rule 1: no open run whose orchestrator_pane is this pane
     Control(
         'p25_trigger_open_run', F,
-        '    if let Some(open) = open_here {\n',
-        '    if let Some(open) = None::<&str> {\n',
+        '    };\n    if let Some(open) = open_here {\n        return Err(',
+        '    };\n    if let Some(open) = None::<&str> {\n        return Err(',
         T_OPEN, 'rust',
     ),
     # review B1, rule 1: an open run is one not ended
@@ -849,22 +860,22 @@ CONTROLS = (
     # review B1, rule 1, end to end: the Stop hook reads this pane's open run
     Control(
         'p25_stop_reads_the_open_run', F,
-        '        open_of(pane, &runs),\n',
-        '        None,\n',
+        '    let open = open_of(pane, &runs);\n',
+        '    let open: Option<&str> = None;\n',
         T_SCENE2, 'rust',
     ),
     # review B1, rule 3: a recent end
     Control(
         'p25_trigger_recent', F,
-        '    if now.saturating_sub(ended_at) > FRESH_WITHIN.as_secs() {\n',
-        '    if false && now.saturating_sub(ended_at) > FRESH_WITHIN.as_secs() {\n',
+        '    if now.saturating_sub(ended_at) > FRESH_WITHIN.as_secs() {\n        return Err(',
+        '    if false && now.saturating_sub(ended_at) > FRESH_WITHIN.as_secs() {\n        return Err(',
         T_RECENT, 'rust',
     ),
     # review B1, rule 3: at most FRESH_WITHIN, inclusive
     Control(
         'p25_trigger_recent_inclusive', F,
-        '    if now.saturating_sub(ended_at) > FRESH_WITHIN.as_secs() {\n',
-        '    if now.saturating_sub(ended_at) >= FRESH_WITHIN.as_secs() {\n',
+        '    if now.saturating_sub(ended_at) > FRESH_WITHIN.as_secs() {\n        return Err(',
+        '    if now.saturating_sub(ended_at) >= FRESH_WITHIN.as_secs() {\n        return Err(',
         T_RECENT, 'rust',
     ),
     # review B1, rule 3: FRESH_WITHIN is 10 minutes
@@ -933,7 +944,7 @@ CONTROLS = (
     # review B1, rule 2: owner_prompts' own filter (wakes, tool results, meta lines are not the owner's)
     Control(
         'p25_owner_filter', F,
-        '        if owner_prompt_in(&value).is_some() {\n',
+        '        if owner_typed_in(&value) {\n',
         '        if true {\n',
         T_TYPED, 'rust',
     ),
@@ -944,25 +955,34 @@ CONTROLS = (
         '            if false && existing.as_ref().is_some_and(|record| record.by == "owner") {\n',
         T_STOP, 'rust',
     ),
-    # review S1: a Stop's record older than FRESH_WITHIN is forgotten
+    # review S1 (R2: through `stale`): a stale record is forgotten
     Control(
         'p25_decide_stale', F,
-        '    if record.by == "stop" && facts.now.saturating_sub(record.at) > FRESH_WITHIN.as_secs() {\n',
-        '    if false && facts.now.saturating_sub(record.at) > FRESH_WITHIN.as_secs() {\n',
+        '    if let Some(why) = stale(record, facts.now) {\n',
+        '    if let Some(why) = None::<String> {\n',
         T_STALE, 'rust',
     ),
-    # review S1: only a Stop's record ages
+    # review S1 (R2: the owner's has an age of its own): a Stop's record ages FRESH_WITHIN, the owner's does not
     Control(
         'p25_decide_stale_only_stop', F,
-        '    if record.by == "stop" && facts.now.saturating_sub(record.at) > FRESH_WITHIN.as_secs() {\n',
-        '    if facts.now.saturating_sub(record.at) > FRESH_WITHIN.as_secs() {\n',
+        '    if record.by == "owner" {\n        return (now',
+        '    if false {\n        return (now',
         T_STALE, 'rust',
     ),
     # review S1: a stale record is forgotten before the mark is read, so a mark never keeps it
     Control(
         'p25_decide_stale_before_the_mark', F,
-        '    if record.by == "stop" && facts.now.saturating_sub(record.at) > FRESH_WITHIN.as_secs() {\n',
-        '    if facts.sent_for != Some(record.at) && record.by == "stop" && facts.now.saturating_sub(record.at) > FRESH_WITHIN.as_secs() {\n',
+        '    if let Some(why) = stale(record, facts.now) {\n        return Decision::Forget(why);\n    }\n'
+        '    if facts.sent_for == Some(record.at) {\n        return Decision::Nothing;\n    }\n',
+        '    if facts.sent_for == Some(record.at) {\n        return Decision::Nothing;\n    }\n'
+        '    if let Some(why) = stale(record, facts.now) {\n        return Decision::Forget(why);\n    }\n',
+        T_STALE, 'rust',
+    ),
+    # review S1 (R2: in `stale`): a Stop's record ages from its own second
+    Control(
+        'p25_stale_record_second', F,
+        '    if now.saturating_sub(record.at) > FRESH_WITHIN.as_secs() {\n',
+        '    if false && now.saturating_sub(record.at) > FRESH_WITHIN.as_secs() {\n',
         T_STALE, 'rust',
     ),
     # review S1: the pane's transcript must be the record's
@@ -1111,5 +1131,222 @@ CONTROLS = (
         '            (outside.argv.map(|argv| is_nirvana(&argv, home)), transcript)\n',
         '            (outside.argv.map(|argv| is_nirvana(&argv, home)), None)\n',
         T_S_TRANSCRIPT, 'rust',
+    ),
+    # review round 2, S-B: a Stop's record ages from its run's end
+    Control(
+        'p25_stale_from_the_end', F,
+        '    if now.saturating_sub(ended_at) > FRESH_WITHIN.as_secs() {\n        return Some(',
+        '    if false && now.saturating_sub(ended_at) > FRESH_WITHIN.as_secs() {\n        return Some(',
+        T_ENDS_AGE, 'rust',
+    ),
+    # review round 2, S-B: a Stop's record naming no end is a doubt
+    Control(
+        'p25_stale_no_end', F,
+        '        return Some("the Stop\'s record names no end".into());\n',
+        '        return None;\n',
+        T_ENDS_AGE, 'rust',
+    ),
+    # review round 2, S-C: the owner's record lives an hour
+    Control(
+        'p25_owner_within_value', F,
+        'pub const OWNER_WITHIN: Duration = Duration::from_secs(60 * 60);\n',
+        'pub const OWNER_WITHIN: Duration = Duration::from_secs(60 * 61);\n',
+        T_STALE, 'rust',
+    ),
+    # review round 2, S-C: an hour old exactly still waits
+    Control(
+        'p25_owner_within_inclusive', F,
+        '        return (now.saturating_sub(record.at) > OWNER_WITHIN.as_secs()).then(|| {\n',
+        '        return (now.saturating_sub(record.at) >= OWNER_WITHIN.as_secs()).then(|| {\n',
+        T_STALE, 'rust',
+    ),
+    # review round 2, S-A: the send-time check ages the record again
+    Control(
+        'p25_recheck_stale', F,
+        '    if let Some(why) = stale(record, now) {\n        return Err(why);\n',
+        '    if let Some(why) = None::<String> {\n        return Err(why);\n',
+        T_ENDS_AGE, 'rust',
+    ),
+    # review round 2, S-A: the send-time check refuses an open run of the pane
+    Control(
+        'p25_recheck_open_run', F,
+        '        if let Some(open) = open_here {\n            return Err(',
+        '        if let Some(open) = None::<&str> {\n            return Err(',
+        T_RECHECK, 'rust',
+    ),
+    # review round 2, S-A: the send-time check reads the owner's prompts after the end
+    Control(
+        'p25_recheck_owner_since', F,
+        '    owner_prompt_since(tail?, since)\n',
+        '    tail.map(|_| ())\n',
+        T_RECHECK, 'rust',
+    ),
+    # review round 2, S-A: a Stop's record is read from its run's end
+    Control(
+        'p25_recheck_since_the_end', F,
+        '            .ok_or_else(|| "the Stop\'s record names no end".to_owned())?\n',
+        '            .map_or(0, |end| end + 100)\n',
+        T_RECHECK, 'rust',
+    ),
+    # review round 2, S-C: the owner's record is read from its own second, and an open run does not hold it
+    Control(
+        'p25_recheck_owner_branch', F,
+        '    let since = if record.by == "owner" {\n',
+        '    let since = if false {\n',
+        T_RECHECK_OWNER, 'rust',
+    ),
+    # review round 2, S-C: from its own second, not later
+    Control(
+        'p25_recheck_owner_at', F,
+        '        record.at\n    } else {\n',
+        '        record.at + 100\n    } else {\n',
+        T_RECHECK_OWNER, 'rust',
+    ),
+    # review round 2, S-A over the files: the record's project's runs
+    Control(
+        'p25_recheck_in_runs', F,
+        '        run_states(&Project::at(&record.project))\n',
+        '        Vec::new()\n',
+        T_RECHECK_IN, 'rust',
+    ),
+    # review round 2, S-A over the files: this pane's open run
+    Control(
+        'p25_recheck_in_open_of', F,
+        '        open_of(pane, &runs),\n        tail',
+        '        None,\n        tail',
+        T_RECHECK_IN, 'rust',
+    ),
+    # review round 2, S-A over the files: the transcript's tail
+    Control(
+        'p25_recheck_in_tail', F,
+        '            crate::nirvana_subagents::read_file_tail(path, OWNER_TAIL)\n                .map_err(|err| format!("the transcript could not be read: {err}"))\n        });\n',
+        '            crate::nirvana_subagents::read_file_tail(path, 0)\n                .map_err(|err| format!("the transcript could not be read: {err}"))\n        });\n',
+        T_RECHECK_IN, 'rust',
+    ),
+    # review round 2, S-A: decide asks the check before a send
+    Control(
+        'p25_decide_asks_the_check', F,
+        '        InputLine::Empty => match recheck(record) {\n',
+        '        InputLine::Empty => match Ok::<(), String>(()) {\n',
+        T_RECHECK, 'rust',
+    ),
+    # review round 2, S-A: the check's failure forgets the record
+    Control(
+        'p25_decide_check_forgets', F,
+        '            Err(why) => Decision::Forget(why),\n',
+        '            Err(why) => Decision::Skip(why),\n',
+        T_RECHECK, 'rust',
+    ),
+    # review round 2, S-A: the server passes the check the files
+    Control(
+        'p25_server_rechecks', S,
+        '        let recheck = |record: &crate::nirvana_fresh::Record| {\n',
+        '        let recheck = |record: &crate::nirvana_fresh::Record| -> Result<(), String> {\n            return Ok(());\n',
+        T_S_LATE, 'rust',
+    ),
+    # review round 2, S-A: the server's check reads the pane's own transcript
+    Control(
+        'p25_server_recheck_transcript', S,
+        '                facts.transcript.as_deref(),\n',
+        '                None,\n',
+        T_S_SEND, 'rust',
+    ),
+    # review round 2, S-A: the server's check reads this pane's runs
+    Control(
+        'p25_server_recheck_pane', S,
+        '                &public,\n                facts.transcript',
+        '                "another",\n                facts.transcript',
+        T_S_RECHECK, 'rust',
+    ),
+    # review round 2 nit: an open run holding the fresh start off is said, naming it
+    Control(
+        'p25_open_blocks_needs_an_end', F,
+        '    let (ended, _) = last_end?;\n',
+        '    let (ended, _) = last_end.unwrap_or(("none", 0));\n',
+        T_OPEN_SAID, 'rust',
+    ),
+    # review round 2 nit: only when a run is open
+    Control(
+        'p25_open_blocks_needs_the_run', F,
+        '        open_here?\n',
+        '        open_here.unwrap_or("none")\n',
+        T_OPEN_SAID, 'rust',
+    ),
+    # review round 2 nit: a stale Stop's record prints no note at a clear
+    Control(
+        'p25_start_stale', F,
+        '        && stale(&record, now).is_some()\n',
+        '        && false\n',
+        T_START_STALE, 'rust',
+    ),
+    # review round 2 nit: unless the server cleared for it
+    Control(
+        'p25_start_stale_unless_sent', F,
+        '        && read_sent(home, pane) != Some(record.at)\n',
+        '',
+        T_START_STALE, 'rust',
+    ),
+    # review round 2 nit: the owner's record is not aged at a clear
+    Control(
+        'p25_start_stale_only_stop', F,
+        '    if record.by != "owner"\n        && read_sent',
+        '    if true\n        && read_sent',
+        T_START_STALE, 'rust',
+    ),
+    # review round 2 nit: an image the owner pasted is the owner after the end
+    Control(
+        'p25_image_is_the_owner', F,
+        '    let kind = |block: &Value| block.get("type").and_then(Value::as_str) == Some("image");\n',
+        '    let kind = |block: &Value| block.get("type").and_then(Value::as_str) == Some("picture");\n',
+        T_IMAGE, 'rust',
+    ),
+    # review round 2 nit: read as a word, so owner_prompt_in sees a prompt
+    Control(
+        'p25_image_as_a_word', F,
+        '            *block = serde_json::json!({"type": "text", "text": "[image]"});\n',
+        '            *block = serde_json::json!({"type": "text", "text": ""});\n',
+        T_IMAGE, 'rust',
+    ),
+    # review round 2 nit: owner_prompt_in's header, tool results and leads hold for the image line
+    Control(
+        'p25_image_through_the_filter', F,
+        '    owner_prompt_in(&shown).is_some()\n',
+        '    true\n',
+        T_IMAGE, 'rust',
+    ),
+    # review round 2 nit: a line with words of its own is owner_prompt_in's alone
+    Control(
+        'p25_image_worded', F,
+        '    if worded || !blocks.iter().any(kind) {\n',
+        '    if !blocks.iter().any(kind) {\n',
+        T_IMAGE, 'rust',
+    ),
+    # review round 2 nit: blank words are no words
+    Control(
+        'p25_image_blank_words', F,
+        '            .is_some_and(|text| !text.trim().is_empty())\n',
+        '            .is_some_and(|text| !text.is_empty())\n',
+        T_IMAGE, 'rust',
+    ),
+    # review round 2 nit: a worded prompt is still the owner's first
+    Control(
+        'p25_typed_prompt_first', F,
+        '    if owner_prompt_in(value).is_some() {\n        return true;\n    }\n',
+        '',
+        T_TYPED, 'rust',
+    ),
+    # review round 2 nit: a task notification is not the owner
+    Control(
+        'p25_not_owner_task_notification', F,
+        '        "<task-notification>",\n',
+        '',
+        T_IMAGE, 'rust',
+    ),
+    # review round 2, S-C, end to end: the server forgets an owner's record the owner typed after
+    Control(
+        'p25_server_owner_typed', F,
+        '    let runs = if record.by == "owner" {\n        Vec::new()\n',
+        '    let runs = if record.by == "owner" {\n        return Ok(());\n',
+        T_S_OWNER_TYPED, 'rust',
     ),
 )

@@ -61,6 +61,10 @@ pub const FRESH_WITHIN: Duration = Duration::from_secs(10 * 60);
 /// Review B1: the most of a transcript read for an owner prompt after the run's end. The Stop hook reads it on each
 /// turn inside `FRESH_WITHIN` of an end; the transcripts on this machine reach 126 MB, so it is never read whole.
 const OWNER_TAIL: u64 = 8 * 1024 * 1024;
+/// Review round 2, S-C: the owner's own record lives no longer than this. A hypothesis, not a measurement: the owner
+/// asks for a fresh start to have one soon, and an hour on the conversation they asked it for may not be the one
+/// they are in.
+pub const OWNER_WITHIN: Duration = Duration::from_secs(60 * 60);
 
 /// After an idle stretch begins, the pending file is looked for at these offsets: the Stop hook that writes it may
 /// still be running when herdr reads the pane as idle (its timeout in hooks.json is 15 s).
@@ -194,6 +198,16 @@ pub fn open_of<'a>(pane: &str, runs: &'a [(String, RunState)]) -> Option<&'a str
         .map(|(run, _)| run.as_str())
 }
 
+/// Review round 2 nit: the one line said when an open run holds off the fresh start a run's end would ask for, naming
+/// the run. No age caps an open run: one left open by mistake only fails safe. Pure.
+pub fn open_blocks(last_end: Option<(&str, u64)>, open_here: Option<&str>) -> Option<String> {
+    let (ended, _) = last_end?;
+    Some(format!(
+        "no fresh start after run {ended}: run {} of this pane is open",
+        open_here?
+    ))
+}
+
 /// Plan 25 §2 "When", with the review round's B1: the run this session last ended ended since the session's last
 /// clear and at most `FRESH_WITHIN` ago, no run of this pane is open, the context is above `fresh_above`, and the
 /// owner has typed nothing since the end (`owner_since`, given the end; read last, since it reads the transcript).
@@ -249,7 +263,7 @@ pub fn owner_prompt_since(text: &str, ended_at: u64) -> Result<(), String> {
             .get("timestamp")
             .and_then(Value::as_str)
             .and_then(crate::nirvana_usage::rfc3339);
-        if owner_prompt_in(&value).is_some() {
+        if owner_typed_in(&value) {
             match at {
                 Some(at) if at < ended_at => {}
                 Some(at) => {
@@ -308,10 +322,14 @@ pub fn on_stop_in(
 ) -> std::io::Result<Result<String, String>> {
     let runs = run_states(project);
     let last = last_end_of(pane, &runs);
+    let open = open_of(pane, &runs);
+    if let Some(line) = open_blocks(last, open) {
+        eprintln!("herdr nirvana stop: {line}");
+    }
     let context = crate::nirvana_idle_compact::read_context_tokens(transcript);
     let held = trigger(
         last,
-        open_of(pane, &runs),
+        open,
         session_began(transcript),
         context,
         fresh_above,
@@ -503,11 +521,43 @@ fn owner_prompt_in(value: &Value) -> Option<String> {
         "<system-reminder>",
         "Caveat:",
         "herdr run ",
+        // Review round 2: Claude Code's own news of a background task, a `user` line without `isMeta`.
+        "<task-notification>",
     ];
     if text.is_empty() || not_owner.iter().any(|lead| text.starts_with(lead)) {
         return None;
     }
     Some(text.to_owned())
+}
+
+/// Review round 2: the owner is in the conversation for B1's rule when a line is their prompt, or an image they pasted
+/// with no words, which `owner_prompt_in` leaves out (the note has nothing of it to quote). The image line is read as
+/// the same line with each image as a word, so `owner_prompt_in`'s header, tool results and leads hold for it
+/// unchanged; a line with words of its own was already read by `owner_prompt_in`.
+fn owner_typed_in(value: &Value) -> bool {
+    if owner_prompt_in(value).is_some() {
+        return true;
+    }
+    let Some(Value::Array(blocks)) = value.pointer("/message/content") else {
+        return false;
+    };
+    let kind = |block: &Value| block.get("type").and_then(Value::as_str) == Some("image");
+    let worded = blocks.iter().any(|block| {
+        block
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty())
+    });
+    if worded || !blocks.iter().any(kind) {
+        return false;
+    }
+    let mut shown = value.clone();
+    if let Some(Value::Array(blocks)) = shown.pointer_mut("/message/content") {
+        for block in blocks.iter_mut().filter(|block| kind(block)) {
+            *block = serde_json::json!({"type": "text", "text": "[image]"});
+        }
+    }
+    owner_prompt_in(&shown).is_some()
 }
 
 /// The owner's last `n` prompts in a transcript's text, oldest first. Pure.
@@ -604,7 +654,8 @@ pub fn note_input(record: &Record, transcript: Option<&Path>) -> NoteInput {
 /// print, after the journal's `fresh` event is written and the record removed; a record of another project is
 /// forgotten and nothing printed (review S1: a reused pane id). On `startup`, a session that is already fresh: the
 /// record is removed and nothing printed. On `resume`, a Stop's record is removed (review S1: it was for the
-/// session before the restart); the owner's stays. Any other source leaves it.
+/// session before the restart); the owner's stays. Any other source leaves it. Round 2's nit: on `clear`, a stale
+/// Stop's record (`stale`) the server did not clear for is forgotten and nothing printed.
 ///
 /// The owner's prompts come from the record's transcript for a Stop's record, and from the transcript the hook
 /// reports, `hook_transcript`, for the owner's (review S2: the owner's record names none).
@@ -638,6 +689,15 @@ pub fn on_session_start_in(
     if !project.is_some_and(|project| {
         crate::nirvana_spaces::same_folder(project, Path::new(&record.project))
     }) {
+        forget(home, pane);
+        return None;
+    }
+    // Review round 2 nit: a stale Stop's record is no note for a `/clear` the owner typed. The one the server cleared
+    // for (its mark names it) is not stale here: the server sent it inside `FRESH_WITHIN`, and this hook runs after.
+    if record.by != "owner"
+        && read_sent(home, pane) != Some(record.at)
+        && stale(&record, now).is_some()
+    {
         forget(home, pane);
         return None;
     }
@@ -756,12 +816,99 @@ pub fn same_transcript(left: &Path, right: &Path) -> bool {
     crate::nirvana_spaces::same_folder(left, right)
 }
 
+/// Why a record is too old to clear for, or `None`. A Stop's record: its own second or its run's end more than
+/// `FRESH_WITHIN` ago (review S1, and round 2's S-B: a record kept from an earlier turn of the same run keeps its
+/// second, but the end is what B1 ages); one naming no end is a doubt. The owner's: its second more than
+/// `OWNER_WITHIN` ago (round 2's S-C). Pure.
+pub fn stale(record: &Record, now: u64) -> Option<String> {
+    if record.by == "owner" {
+        return (now.saturating_sub(record.at) > OWNER_WITHIN.as_secs()).then(|| {
+            format!(
+                "the owner's record is more than {} s old",
+                OWNER_WITHIN.as_secs()
+            )
+        });
+    }
+    let Some(ended_at) = record.ended_at else {
+        return Some("the Stop's record names no end".into());
+    };
+    if now.saturating_sub(record.at) > FRESH_WITHIN.as_secs() {
+        return Some(format!(
+            "the Stop's record is more than {} s old",
+            FRESH_WITHIN.as_secs()
+        ));
+    }
+    if now.saturating_sub(ended_at) > FRESH_WITHIN.as_secs() {
+        return Some(format!(
+            "its run ended more than {} s ago",
+            FRESH_WITHIN.as_secs()
+        ));
+    }
+    None
+}
+
+/// Review round 2, S-A and S-C: the rules the record was written under, again at send time and in one place, since
+/// the Stop hook that would take a record back may be late or killed (its timeout in hooks.json is 15 s). A Stop's
+/// record: not stale (`stale`, the end within `FRESH_WITHIN`), no open run of the pane (`open_here`), and no owner
+/// prompt at or after the end in the pane's transcript now. The owner's: not stale, and no owner prompt at or after
+/// the record's own second. `tail` is that transcript's tail; one not read is a doubt. `Err` says why. Pure.
+pub fn recheck(
+    record: &Record,
+    now: u64,
+    open_here: Option<&str>,
+    tail: Result<&str, String>,
+) -> Result<(), String> {
+    if let Some(why) = stale(record, now) {
+        return Err(why);
+    }
+    let since = if record.by == "owner" {
+        record.at
+    } else {
+        if let Some(open) = open_here {
+            return Err(format!("run {open} of this pane is open"));
+        }
+        record
+            .ended_at
+            .ok_or_else(|| "the Stop's record names no end".to_owned())?
+    };
+    owner_prompt_since(tail?, since)
+}
+
+/// `recheck` over the files: the open runs of the record's project (a Stop's record only), and the tail of `transcript`,
+/// the pane's own as the server read it (`read_outside_and_transcript`).
+pub fn recheck_in(
+    record: &Record,
+    pane: &str,
+    transcript: Option<&Path>,
+    now: u64,
+) -> Result<(), String> {
+    let runs = if record.by == "owner" {
+        Vec::new()
+    } else {
+        run_states(&Project::at(&record.project))
+    };
+    let tail = transcript
+        .ok_or_else(|| "the pane's transcript could not be told".to_owned())
+        .and_then(|path| {
+            crate::nirvana_subagents::read_file_tail(path, OWNER_TAIL)
+                .map_err(|err| format!("the transcript could not be read: {err}"))
+        });
+    recheck(
+        record,
+        now,
+        open_of(pane, &runs),
+        tail.as_deref().map_err(String::clone),
+    )
+}
+
 /// Plan 25 §2 "How", with the wake's rules: only into Nirvana Claude, only while it is idle, only when the owner has
 /// been quiet `OWNER_QUIET_S` and the input line is provably empty, and never while idle compact's paste is in
-/// flight or after it went in the stretch. The review round's S1: a Stop's record older than `FRESH_WITHIN` is
-/// forgotten, and one is sent for only while the pane's transcript is still the record's (the owner's record names
-/// none, so it is not compared). The first rule that fails is the reason. Pure.
-pub fn decide(facts: &Facts) -> Decision {
+/// flight or after it went in the stretch. The review round's S1: a stale record is forgotten (`stale`), and a
+/// Stop's is sent for only while the pane's transcript is still the record's (the owner's record names none, so it
+/// is not compared). Round 2's S-A: when every other rule holds, `recheck` (B1's rules again, given the record) is
+/// asked last, since it reads files; its failure forgets the record. The first rule that fails is the reason.
+/// Pure over its arguments.
+pub fn decide(facts: &Facts, recheck: impl FnOnce(&Record) -> Result<(), String>) -> Decision {
     let skip = |why: String| Decision::Skip(why);
     if facts.compact_in_flight {
         return skip("an idle compact's /compact is in flight".into());
@@ -774,11 +921,8 @@ pub fn decide(facts: &Facts) -> Decision {
         Ok(None) => return Decision::Nothing,
         Ok(Some(record)) => record,
     };
-    if record.by == "stop" && facts.now.saturating_sub(record.at) > FRESH_WITHIN.as_secs() {
-        return Decision::Forget(format!(
-            "the Stop's record is more than {} s old",
-            FRESH_WITHIN.as_secs()
-        ));
+    if let Some(why) = stale(record, facts.now) {
+        return Decision::Forget(why);
     }
     if facts.sent_for == Some(record.at) {
         return Decision::Nothing;
@@ -803,7 +947,10 @@ pub fn decide(facts: &Facts) -> Decision {
         return skip(why);
     }
     match &facts.input_line {
-        InputLine::Empty => Decision::Send(record.at),
+        InputLine::Empty => match recheck(record) {
+            Ok(()) => Decision::Send(record.at),
+            Err(why) => Decision::Forget(why),
+        },
         InputLine::Text(_) => skip("the input line holds text".into()),
         InputLine::Unsure(why) => skip(format!("the input line is not provably empty: {why}")),
     }
