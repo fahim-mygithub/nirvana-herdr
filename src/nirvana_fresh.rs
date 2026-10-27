@@ -153,6 +153,16 @@ pub fn read_sent(home: &Path, pane: &str) -> Option<u64> {
         .ok()
 }
 
+/// Round 3's nit: the server's mark names the record `at` and was written at most `FRESH_WITHIN` before `now`. A mark
+/// whose time cannot be read is a doubt, so not lately.
+pub fn sent_lately(home: &Path, pane: &str, at: u64, now: u64) -> bool {
+    let written = std::fs::metadata(sent_path(home, pane))
+        .and_then(|meta| meta.modified())
+        .map(crate::nirvana_usage::unix);
+    read_sent(home, pane) == Some(at)
+        && written.is_ok_and(|written| now.saturating_sub(written) <= FRESH_WITHIN.as_secs())
+}
+
 pub fn write_sent(home: &Path, pane: &str, at: u64) -> std::io::Result<()> {
     let path = sent_path(home, pane);
     if let Some(dir) = path.parent() {
@@ -254,6 +264,28 @@ pub fn trigger(
 /// not parse, an owner prompt whose time cannot be read, and a tail with no line timed before the end, which may
 /// have cut the prompts after the end off. The owner's prompts are `owner_prompts`' own. Pure.
 pub fn owner_prompt_since(text: &str, ended_at: u64) -> Result<(), String> {
+    typed_since(text, ended_at, owner_typed_in)
+}
+
+/// The leads of the lines Claude Code records for a `!` command the owner runs in the pane: the command, then its
+/// output.
+pub const BANG_LEADS: [&str; 3] = ["<bash-input>", "<bash-stdout>", "<bash-stderr>"];
+
+/// A `!` command's line (`BANG_LEADS`), as `owner_prompt_in` reads it.
+fn bang_line(value: &Value) -> bool {
+    owner_prompt_in(value).is_some_and(|text| BANG_LEADS.iter().any(|lead| text.starts_with(lead)))
+}
+
+/// Round 3, R2: `owner_prompt_since` for the owner's own record, read from its second. The owner's
+/// `!herdr nirvana fresh` is recorded as a `<bash-input>` line and a `<bash-stdout>` line in that second or just
+/// after, so counting them forgot the record the owner had just asked for. A `!` command's lines are not the owner
+/// typing here; after a run's end they still are (`owner_prompt_since`), where they are a doubt. Pure.
+pub fn owner_typed_since(text: &str, at: u64) -> Result<(), String> {
+    typed_since(text, at, |value| owner_typed_in(value) && !bang_line(value))
+}
+
+/// `owner_prompt_since` with the owner's lines told by `owners`.
+fn typed_since(text: &str, ended_at: u64, owners: impl Fn(&Value) -> bool) -> Result<(), String> {
     let mut reaches_the_end = false;
     for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
@@ -263,7 +295,7 @@ pub fn owner_prompt_since(text: &str, ended_at: u64) -> Result<(), String> {
             .get("timestamp")
             .and_then(Value::as_str)
             .and_then(crate::nirvana_usage::rfc3339);
-        if owner_typed_in(&value) {
+        if owners(&value) {
             match at {
                 Some(at) if at < ended_at => {}
                 Some(at) => {
@@ -297,7 +329,8 @@ pub fn session_began(transcript: &Path) -> Option<u64> {
     Some(crate::nirvana_usage::unix(created))
 }
 
-/// Every run of the project with its replayed state.
+/// Every run of the project with its replayed state, for the note and the owner's record, where a run not read only
+/// leaves a line out. The fresh start's rules read `read_run_states`.
 fn run_states(project: &Project) -> Vec<(String, RunState)> {
     project
         .runs()
@@ -307,6 +340,73 @@ fn run_states(project: &Project) -> Vec<(String, RunState)> {
             (run, state)
         })
         .collect()
+}
+
+/// Round 3, R1: every run of the project with its replayed state, or why not all of them could be read.
+/// `run_states` reads a runs folder it cannot list, or a journal it cannot read, as no run, and `open_of` then finds
+/// no open run in it: a doubt read as a pass. Here a folder or entry not listed, a journal not read and a journal line
+/// that does not parse are each `Err`. A project with no runs folder has no run, and a folder with no journal is no
+/// run, as `Project::runs` reads them.
+pub fn read_run_states(project: &Project) -> Result<Vec<(String, RunState)>, String> {
+    let dir = project.dir().join("runs");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(format!("{} could not be listed: {err}", dir.display())),
+    };
+    let mut runs = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("{} could not be listed: {err}", dir.display()))?;
+        let kind = entry
+            .file_type()
+            .map_err(|err| format!("{} could not be read: {err}", entry.path().display()))?;
+        if !kind.is_dir() {
+            continue;
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|name| format!("a run folder's name is not text: {name:?}"))?;
+        let path = entry.path().join(nirvana_run::JOURNAL);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(format!("{} could not be read: {err}", path.display())),
+        };
+        let (events, bad) = nirvana_run::parse_lines(&text);
+        if bad > 0 {
+            return Err(format!(
+                "{} has {bad} line(s) that do not parse",
+                path.display()
+            ));
+        }
+        runs.push((name, nirvana_run::replay(&events)));
+    }
+    runs.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(runs)
+}
+
+/// Round 3, R1: a Stop's record is sent for only while the replay finds its own run, and finds it ended. Pure.
+pub fn own_run_ended(record: &Record, runs: &[(String, RunState)]) -> Result<(), String> {
+    let Some(run) = record.run.as_deref() else {
+        return Err("the Stop's record names no run".into());
+    };
+    match runs.iter().find(|(id, _)| id == run) {
+        None => Err(format!("run {run} is not among the project's runs")),
+        Some((_, state)) if state.ended.is_none() => Err(format!("run {run} has not ended")),
+        Some(_) => Ok(()),
+    }
+}
+
+/// Takes back a pending start an earlier Stop wrote; the owner's own is left.
+fn take_back(home: &Path, pane: &str) {
+    if read_record(home, pane)
+        .ok()
+        .flatten()
+        .is_some_and(|record| record.by == "stop")
+    {
+        forget(home, pane);
+    }
 }
 
 /// The Stop hook's half: writes the pane's pending record when `trigger` holds, and takes back a record an earlier
@@ -320,7 +420,15 @@ pub fn on_stop_in(
     fresh_above: u64,
     now: u64,
 ) -> std::io::Result<Result<String, String>> {
-    let runs = run_states(project);
+    // Round 3, R1: a run list not read would read as no open run; that is a doubt, so no record.
+    let runs = match read_run_states(project) {
+        Ok(runs) => runs,
+        Err(why) => {
+            eprintln!("herdr nirvana stop: no fresh start: {why}");
+            take_back(home, pane);
+            return Ok(Err(why));
+        }
+    };
     let last = last_end_of(pane, &runs);
     let open = open_of(pane, &runs);
     if let Some(line) = open_blocks(last, open) {
@@ -361,13 +469,7 @@ pub fn on_stop_in(
             Ok(Ok(run))
         }
         Err(why) => {
-            if read_record(home, pane)
-                .ok()
-                .flatten()
-                .is_some_and(|record| record.by == "stop")
-            {
-                forget(home, pane);
-            }
+            take_back(home, pane);
             Ok(Err(why))
         }
     }
@@ -694,8 +796,10 @@ pub fn on_session_start_in(
     }
     // Review round 2 nit: a stale Stop's record is no note for a `/clear` the owner typed. The one the server cleared
     // for (its mark names it) is not stale here: the server sent it inside `FRESH_WITHIN`, and this hook runs after.
+    // Round 3's nit: only a mark written inside `FRESH_WITHIN` of now (`sent_lately`), so an old mark left beside an
+    // old record never prints its note at a `/clear` the owner typed.
     if record.by != "owner"
-        && read_sent(home, pane) != Some(record.at)
+        && !sent_lately(home, pane, record.at, now)
         && stale(&record, now).is_some()
     {
         forget(home, pane);
@@ -871,11 +975,18 @@ pub fn recheck(
             .ended_at
             .ok_or_else(|| "the Stop's record names no end".to_owned())?
     };
-    owner_prompt_since(tail?, since)
+    let tail = tail?;
+    // Round 3, R2: the owner's own `!herdr nirvana fresh` is not the owner typing after their record.
+    if record.by == "owner" {
+        owner_typed_since(tail, since)
+    } else {
+        owner_prompt_since(tail, since)
+    }
 }
 
-/// `recheck` over the files: the open runs of the record's project (a Stop's record only), and the tail of `transcript`,
-/// the pane's own as the server read it (`read_outside_and_transcript`).
+/// `recheck` over the files: the runs of the record's project (a Stop's record only), and the tail of `transcript`,
+/// the pane's own as the server read it (`read_outside_and_transcript`). Round 3, R1: runs not all read are a doubt,
+/// and a Stop's record is sent for only while its own run is among them, ended (`own_run_ended`).
 pub fn recheck_in(
     record: &Record,
     pane: &str,
@@ -885,7 +996,9 @@ pub fn recheck_in(
     let runs = if record.by == "owner" {
         Vec::new()
     } else {
-        run_states(&Project::at(&record.project))
+        let runs = read_run_states(&Project::at(&record.project))?;
+        own_run_ended(record, &runs)?;
+        runs
     };
     let tail = transcript
         .ok_or_else(|| "the pane's transcript could not be told".to_owned())

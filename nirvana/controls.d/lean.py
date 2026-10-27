@@ -56,6 +56,12 @@ T_IMAGE = 'an_image_is_the_owner_and_a_task_notification_is_not'
 T_S_LATE = 'fresh_server_rechecks_b1_when_the_stop_hook_was_late'
 T_S_RECHECK = 'fresh_server_rechecks_the_open_run_and_the_ends_age'
 T_S_OWNER_TYPED = 'fresh_server_forgets_an_owner_record_the_owner_typed_after'
+# The third review round (P25-fix3): R1, R2 and the nit.
+T_UNREAD = 'an_unread_run_list_is_a_doubt_at_stop_and_at_send'
+T_OWN_RUN = 'a_stop_record_needs_its_own_run_ended_in_the_replay'
+T_BANG = 'the_owners_own_bang_fresh_keeps_their_record'
+T_S_UNREAD = 'fresh_server_forgets_a_record_whose_runs_cannot_be_read'
+T_S_BANG = 'fresh_server_keeps_the_owners_record_through_their_own_bang_command'
 T_DOUBT = 'a_doubt_keeps_todays_argv'
 T_LAUNCH = 'the_launch_carries_the_probes_cut_list_before_the_resume'
 T_BROWSER = 'only_a_browser_order_gets_the_bladebro_line'
@@ -167,15 +173,15 @@ CONTROLS = (
     # §2 a record the rule no longer holds for is taken back
     Control(
         'p25_stop_takes_back', F,
-        '                forget(home, pane);\n            }\n            Ok(Err(why))\n',
-        '            }\n            Ok(Err(why))\n',
+        '            take_back(home, pane);\n            Ok(Err(why))\n',
+        '            Ok(Err(why))\n',
         T_STOP, 'rust',
     ),
-    # §2 only the Stop hook's own record is taken back, never the owner's
+    # §2 only the Stop hook's own record is taken back, never the owner's (round 3: through `take_back`)
     Control(
         'p25_stop_spares_the_owner', F,
-        '                .is_some_and(|record| record.by == "stop")\n            {\n                forget(home, pane);\n            }\n            Ok(Err(why))\n',
-        '                .is_some_and(|_| true)\n            {\n                forget(home, pane);\n            }\n            Ok(Err(why))\n',
+        '        .is_some_and(|record| record.by == "stop")\n    {\n        forget(home, pane);\n    }\n}\n',
+        '        .is_some_and(|_| true)\n    {\n        forget(home, pane);\n    }\n}\n',
         T_STOP, 'rust',
     ),
     # §2 a record that does not parse is a doubt, not "none"
@@ -944,7 +950,7 @@ CONTROLS = (
     # review B1, rule 2: owner_prompts' own filter (wakes, tool results, meta lines are not the owner's)
     Control(
         'p25_owner_filter', F,
-        '        if owner_typed_in(&value) {\n',
+        '        if owners(&value) {\n',
         '        if true {\n',
         T_TYPED, 'rust',
     ),
@@ -1177,8 +1183,8 @@ CONTROLS = (
     # review round 2, S-A: the send-time check reads the owner's prompts after the end
     Control(
         'p25_recheck_owner_since', F,
-        '    owner_prompt_since(tail?, since)\n',
-        '    tail.map(|_| ())\n',
+        '        owner_prompt_since(tail, since)\n    }\n',
+        '        Ok(())\n    }\n',
         T_RECHECK, 'rust',
     ),
     # review round 2, S-A: a Stop's record is read from its run's end
@@ -1205,8 +1211,8 @@ CONTROLS = (
     # review round 2, S-A over the files: the record's project's runs
     Control(
         'p25_recheck_in_runs', F,
-        '        run_states(&Project::at(&record.project))\n',
-        '        Vec::new()\n',
+        '        let runs = read_run_states(&Project::at(&record.project))?;\n',
+        '        let runs = read_run_states(&Project::at(&record.project))?\n            .into_iter()\n            .filter(|(_, state)| state.ended.is_some())\n            .collect::<Vec<_>>();\n',
         T_RECHECK_IN, 'rust',
     ),
     # review round 2, S-A over the files: this pane's open run
@@ -1282,15 +1288,15 @@ CONTROLS = (
     # review round 2 nit: unless the server cleared for it
     Control(
         'p25_start_stale_unless_sent', F,
-        '        && read_sent(home, pane) != Some(record.at)\n',
+        '        && !sent_lately(home, pane, record.at, now)\n',
         '',
         T_START_STALE, 'rust',
     ),
     # review round 2 nit: the owner's record is not aged at a clear
     Control(
         'p25_start_stale_only_stop', F,
-        '    if record.by != "owner"\n        && read_sent',
-        '    if true\n        && read_sent',
+        '    if record.by != "owner"\n        && !sent_lately',
+        '    if true\n        && !sent_lately',
         T_START_STALE, 'rust',
     ),
     # review round 2 nit: an image the owner pasted is the owner after the end
@@ -1348,5 +1354,131 @@ CONTROLS = (
         '    let runs = if record.by == "owner" {\n        Vec::new()\n',
         '    let runs = if record.by == "owner" {\n        return Ok(());\n',
         T_S_OWNER_TYPED, 'rust',
+    ),
+    # review round 3, R1: the Stop hook reads the runs strictly, not as `run_states` reads them
+    Control(
+        'p25_r1_stop_reads_strictly', F,
+        '    let runs = match read_run_states(project) {\n',
+        '    let runs = match Ok::<_, String>(run_states(project)) {\n',
+        T_UNREAD, 'rust',
+    ),
+    # review round 3, R1: a doubt at Stop time takes back the Stop's earlier record
+    Control(
+        'p25_r1_stop_takes_back', F,
+        '            take_back(home, pane);\n            return Ok(Err(why));\n',
+        '            return Ok(Err(why));\n',
+        T_UNREAD, 'rust',
+    ),
+    # review round 3, R1: a runs folder that cannot be listed is a doubt
+    Control(
+        'p25_r1_list_error', F,
+        '        Err(err) => return Err(format!("{} could not be listed: {err}", dir.display())),\n',
+        '        Err(_) => return Ok(Vec::new()),\n',
+        T_UNREAD, 'rust',
+    ),
+    # review round 3, R1: a journal line that does not parse is a doubt
+    Control(
+        'p25_r1_bad_lines', F,
+        '        if bad > 0 {\n',
+        '        if false && bad > 0 {\n',
+        T_UNREAD, 'rust',
+    ),
+    # review round 3, R1: the send-time check reads the runs strictly
+    Control(
+        'p25_r1_recheck_reads_strictly', F,
+        '        let runs = read_run_states(&Project::at(&record.project))?;\n',
+        '        let runs = run_states(&Project::at(&record.project));\n',
+        T_UNREAD, 'rust',
+    ),
+    # review round 3, R1: the send-time check needs the record's own run, ended
+    Control(
+        'p25_r1_recheck_own_run', F,
+        '        own_run_ended(record, &runs)?;\n',
+        '',
+        T_OWN_RUN, 'rust',
+    ),
+    # review round 3, R1: a run missing from the replay is no run that ended
+    Control(
+        'p25_r1_own_run_missing', F,
+        '        None => Err(format!("run {run} is not among the project\'s runs")),\n',
+        '        None => Ok(()),\n',
+        T_OWN_RUN, 'rust',
+    ),
+    # review round 3, R1: nor is a run still open
+    Control(
+        'p25_r1_own_run_open', F,
+        '        Some((_, state)) if state.ended.is_none() => Err(format!("run {run} has not ended")),\n',
+        '        Some((_, state)) if false && state.ended.is_none() => Err(format!("run {run} has not ended")),\n',
+        T_OWN_RUN, 'rust',
+    ),
+    # review round 3, R1: a Stop's record naming no run is a doubt
+    Control(
+        'p25_r1_own_run_named', F,
+        '        return Err("the Stop\'s record names no run".into());\n',
+        '        return Ok(());\n',
+        T_OWN_RUN, 'rust',
+    ),
+    # review round 3, R1, end to end: the server forgets a record whose run is not in the replay
+    Control(
+        'p25_r1_server_own_run', F,
+        '        own_run_ended(record, &runs)?;\n',
+        '',
+        T_S_UNREAD, 'rust',
+    ),
+    # review round 3, R2: a `!` command's lines are not the owner typing after their own record
+    Control(
+        'p25_r2_bang_skipped', F,
+        '    typed_since(text, at, |value| owner_typed_in(value) && !bang_line(value))\n',
+        '    typed_since(text, at, owner_typed_in)\n',
+        T_BANG, 'rust',
+    ),
+    # review round 3, R2: a line is a `!` command's by its lead
+    Control(
+        'p25_r2_bang_lead', F,
+        '    owner_prompt_in(value).is_some_and(|text| BANG_LEADS.iter().any(|lead| text.starts_with(lead)))\n',
+        '    owner_prompt_in(value).is_some_and(|text| BANG_LEADS.iter().any(|lead| text.ends_with(lead)))\n',
+        T_BANG, 'rust',
+    ),
+    # review round 3, R2: the output's stderr lead too
+    Control(
+        'p25_r2_bang_stderr', F,
+        'pub const BANG_LEADS: [&str; 3] = ["<bash-input>", "<bash-stdout>", "<bash-stderr>"];\n',
+        'pub const BANG_LEADS: [&str; 3] = ["<bash-input>", "<bash-stdout>", "<bash-stdout>"];\n',
+        T_BANG, 'rust',
+    ),
+    # review round 3, R2: after a run's end a `!` command is still a doubt for a Stop's record
+    Control(
+        'p25_r2_stop_counts_bang', F,
+        '    typed_since(text, ended_at, owner_typed_in)\n',
+        '    typed_since(text, ended_at, |value| owner_typed_in(value) && !bang_line(value))\n',
+        T_BANG, 'rust',
+    ),
+    # review round 3, R2: the send-time check reads the owner's record without the `!` lines
+    Control(
+        'p25_r2_recheck_owner', F,
+        '        owner_typed_since(tail, since)\n',
+        '        owner_prompt_since(tail, since)\n',
+        T_BANG, 'rust',
+    ),
+    # review round 3, R2, end to end: the server clears for the owner's `!herdr nirvana fresh`
+    Control(
+        'p25_r2_server_bang', F,
+        '        owner_typed_since(tail, since)\n',
+        '        owner_prompt_since(tail, since)\n',
+        T_S_BANG, 'rust',
+    ),
+    # review round 3 nit: the server's mark excepts a stale record only while it is young
+    Control(
+        'p25_sent_lately_age', F,
+        '        && written.is_ok_and(|written| now.saturating_sub(written) <= FRESH_WITHIN.as_secs())\n',
+        '        && written.is_ok()\n',
+        T_START_STALE, 'rust',
+    ),
+    # review round 3 nit: and only the mark of this record
+    Control(
+        'p25_sent_lately_names_the_record', F,
+        '    read_sent(home, pane) == Some(at)\n',
+        '    read_sent(home, pane).is_some()\n',
+        T_START_STALE, 'rust',
     ),
 )

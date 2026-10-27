@@ -699,7 +699,23 @@ fn a_clear_prints_no_note_for_a_stale_stop_record() {
     // The server cleared for it: its note is printed though the hook runs a little late.
     write_record(&home, "p1", &record).unwrap();
     write_sent(&home, "p1", record.at).unwrap();
+    mark_written_at(&home, "p1", old - 5);
     assert!(on_session_start_in(&home, "p1", "clear", here, None, old).is_some());
+    // Round 3's nit: a mark written more than `FRESH_WITHIN` ago is no exception.
+    write_record(&home, "p1", &record).unwrap();
+    write_sent(&home, "p1", record.at).unwrap();
+    mark_written_at(&home, "p1", old - FRESH_WITHIN.as_secs() - 1);
+    assert!(!sent_lately(&home, "p1", record.at, old));
+    assert_eq!(
+        on_session_start_in(&home, "p1", "clear", here, None, old),
+        None
+    );
+    assert_eq!(read_record(&home, "p1").unwrap(), None);
+    write_sent(&home, "p1", record.at).unwrap();
+    mark_written_at(&home, "p1", old - FRESH_WITHIN.as_secs());
+    assert!(sent_lately(&home, "p1", record.at, old));
+    // A mark naming another record is none.
+    assert!(!sent_lately(&home, "p1", record.at + 1, old));
     // The owner's record is not aged here, though older than its own `OWNER_WITHIN`.
     let older = record.at + OWNER_WITHIN.as_secs() + 1;
     let owner = Record {
@@ -709,6 +725,16 @@ fn a_clear_prints_no_note_for_a_stale_stop_record() {
     write_record(&home, "p1", &owner).unwrap();
     assert!(on_session_start_in(&home, "p1", "clear", here, None, older).is_some());
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Sets the server's mark's modified time to `at`, Unix seconds.
+fn mark_written_at(home: &Path, pane: &str, at: u64) {
+    std::fs::File::options()
+        .write(true)
+        .open(sent_path(home, pane))
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(at))
+        .unwrap();
 }
 
 /// Review S2: the owner's record names no transcript; the note's prompts come from the one the hook reports.
@@ -1324,4 +1350,208 @@ fn the_fresh_stretch_ends_with_the_idle_stretch() {
         stretch.after(AgentState::Working, t0).fresh,
         FreshStretch::default()
     );
+}
+
+/// A pane with a run that ended at `end` and a session above `fresh_above`, the Stop hook's record written for it.
+fn stopped(root: &Path) -> (PathBuf, Project, PathBuf, Record) {
+    let home = root.join("home");
+    let project = Project::at(root.join("project"));
+    let transcript = root.join("session.jsonl");
+    std::fs::write(&transcript, "").unwrap();
+    let end = session_began(&transcript).unwrap() + 60;
+    std::fs::write(
+        &transcript,
+        [
+            line_at("user", "end the run", end - 30),
+            assistant_at(180_000, end - 1),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    run(&project, "r1", "p1", Some(end));
+    assert_eq!(
+        on_stop_in(&home, "p1", &project, &transcript, FRESH_ABOVE, end + 5).unwrap(),
+        Ok("r1".to_owned())
+    );
+    let record = read_record(&home, "p1").unwrap().unwrap();
+    (home, project, transcript, record)
+}
+
+/// Round 3, R1: runs that cannot all be read are a doubt, not "no open run": the Stop hook writes no record and
+/// takes back its own, and the send-time check forgets the record. A project with no runs folder has no run.
+#[test]
+fn an_unread_run_list_is_a_doubt_at_stop_and_at_send() {
+    let root = scratch("unread-runs");
+    assert_eq!(
+        read_run_states(&Project::at(root.join("none"))),
+        Ok(Vec::new())
+    );
+    let (home, project, transcript, record) = stopped(&root);
+    let end = record.ended_at.unwrap();
+    let now = end + 20;
+    assert_eq!(recheck_in(&record, "p1", Some(&transcript), now), Ok(()));
+    let runs = project.dir().join("runs");
+    // A journal with a line that does not parse may hide an open run of this pane.
+    std::fs::create_dir_all(runs.join("r2")).unwrap();
+    std::fs::write(
+        runs.join("r2").join(nirvana_run::JOURNAL),
+        "{\"v\":1,\"seq\":1,\n",
+    )
+    .unwrap();
+    let why = read_run_states(&project).unwrap_err();
+    assert!(why.contains("do not parse"), "{why}");
+    assert!(recheck_in(&record, "p1", Some(&transcript), now).is_err());
+    assert!(matches!(
+        decide(&sending(), |_| recheck_in(
+            &record,
+            "p1",
+            Some(&transcript),
+            now
+        )),
+        Decision::Forget(_)
+    ));
+    assert!(
+        on_stop_in(&home, "p1", &project, &transcript, FRESH_ABOVE, end + 6)
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(read_record(&home, "p1").unwrap(), None);
+    // A runs folder that cannot be listed: a file stands where it should be.
+    std::fs::remove_dir_all(&runs).unwrap();
+    std::fs::write(&runs, "not a folder").unwrap();
+    assert!(read_run_states(&project).is_err());
+    // `Project::runs` reads it as no run at all, which is what made the doubt a pass.
+    assert!(project.runs().is_empty());
+    write_record(&home, "p1", &record).unwrap();
+    assert!(
+        on_stop_in(&home, "p1", &project, &transcript, FRESH_ABOVE, end + 7)
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(read_record(&home, "p1").unwrap(), None);
+    assert!(recheck_in(&record, "p1", Some(&transcript), now).is_err());
+    // The owner's record reads no journal, so it is not held by them.
+    let owner = Record {
+        by: "owner".into(),
+        at: end + 5,
+        ..record
+    };
+    assert_eq!(recheck_in(&owner, "p1", Some(&transcript), now), Ok(()));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Round 3, R1: a Stop's record is sent for only while the replay finds its own run, ended.
+#[test]
+fn a_stop_record_needs_its_own_run_ended_in_the_replay() {
+    let root = scratch("own-run");
+    let (_home, project, transcript, record) = stopped(&root);
+    let now = record.ended_at.unwrap() + 20;
+    let states = read_run_states(&project).unwrap();
+    assert_eq!(own_run_ended(&record, &states), Ok(()));
+    let missing = Record {
+        run: Some("r9".into()),
+        ..record.clone()
+    };
+    assert_eq!(
+        own_run_ended(&missing, &states),
+        Err("run r9 is not among the project's runs".to_owned())
+    );
+    assert_eq!(
+        recheck_in(&missing, "p1", Some(&transcript), now),
+        Err("run r9 is not among the project's runs".to_owned())
+    );
+    let unnamed = Record {
+        run: None,
+        ..record.clone()
+    };
+    assert!(own_run_ended(&unnamed, &states).is_err());
+    run(&project, "r3", "p2", None);
+    let open = Record {
+        run: Some("r3".into()),
+        ..record.clone()
+    };
+    assert_eq!(
+        own_run_ended(&open, &read_run_states(&project).unwrap()),
+        Err("run r3 has not ended".to_owned())
+    );
+    assert!(recheck_in(&open, "p1", Some(&transcript), now).is_err());
+    // The journal gone: the run is no longer in the replay.
+    std::fs::remove_dir_all(project.run_dir("r1")).unwrap();
+    assert!(recheck_in(&record, "p1", Some(&transcript), now).is_err());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A `!` command's two lines as Claude Code records them, the command and then its output, at `at`. The shape of
+/// its other `user` lines (no `!` line was found recorded on this machine), ids and paths shortened.
+fn bang_pair(command: &str, out: &str, at: u64) -> String {
+    let line = |content: String| {
+        serde_json::json!({
+            "parentUuid": "6b1f0c2e", "isSidechain": false, "userType": "external", "cwd": r"C:\work\print",
+            "sessionId": "abc-123", "version": "2.1.302", "gitBranch": "main", "type": "user",
+            "message": {"role": "user", "content": content}, "uuid": "e4a7d9b0", "timestamp": iso(at),
+        })
+        .to_string()
+    };
+    [
+        line(format!("<bash-input>{command}</bash-input>")),
+        line(format!(
+            "<bash-stdout>{out}</bash-stdout><bash-stderr></bash-stderr>"
+        )),
+    ]
+    .join("\n")
+}
+
+/// Round 3, R2: the owner's own `!herdr nirvana fresh`, recorded in the record's second or just after, does not
+/// forget the record it wrote; a prompt the owner types after it still does. After a run's end a `!` command is still
+/// the owner, a doubt for a Stop's record.
+#[test]
+fn the_owners_own_bang_fresh_keeps_their_record() {
+    let at = 1_792_800_000;
+    let before = quiet_tail(at);
+    let said =
+        "herdr nirvana fresh: pending for pane p1; herdr types /clear once Nirvana Claude is idle";
+    let owner = Record {
+        run: None,
+        ended_at: None,
+        context: None,
+        transcript: None,
+        project: "p".into(),
+        at,
+        by: "owner".into(),
+    };
+    let now = at + 30;
+    for second in [at, at + 1] {
+        let asked = format!(
+            "{before}\n{}",
+            bang_pair("herdr nirvana fresh", said, second)
+        );
+        assert_eq!(owner_typed_since(&asked, at), Ok(()), "{second}");
+        assert_eq!(recheck(&owner, now, None, Ok(&asked)), Ok(()), "{second}");
+    }
+    let asked = format!("{before}\n{}", bang_pair("herdr nirvana fresh", said, at));
+    let typed = format!(
+        "{asked}\n{}",
+        line_at("user", "wait, one more thing", at + 3)
+    );
+    assert!(recheck(&owner, now, None, Ok(&typed)).is_err());
+    // Each lead on its own.
+    for lead in BANG_LEADS {
+        let tail = format!("{before}\n{}", line_at("user", &format!("{lead}x"), at));
+        assert_eq!(owner_typed_since(&tail, at), Ok(()), "{lead}");
+        assert!(owner_prompt_since(&tail, at).is_err(), "{lead}");
+    }
+    assert_eq!(
+        BANG_LEADS,
+        ["<bash-input>", "<bash-stdout>", "<bash-stderr>"]
+    );
+    // A Stop's record still reads a `!` command after the end as the owner.
+    let stop = Record {
+        run: Some("r1".into()),
+        ended_at: Some(at),
+        at: at + 2,
+        by: "stop".into(),
+        ..owner
+    };
+    assert!(owner_prompt_since(&asked, at).is_err());
+    assert!(recheck(&stop, now, None, Ok(&asked)).is_err());
 }

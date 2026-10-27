@@ -177,9 +177,14 @@ fn conversation(home: &Path) -> PathBuf {
     path
 }
 
-/// A Stop's record written now (review S1: an older one is stale), naming the pane's transcript.
+/// A Stop's record written now (review S1: an older one is stale), naming the pane's transcript. Its run is in the
+/// project's journals, ended (round 3, R1: the send-time check finds it there).
 fn record(home: &Path) -> Record {
     let at = crate::nirvana_run::now();
+    let project = Project::at(home.join("project"));
+    if !project.journal("r1").path.is_file() {
+        run(&project, "r1", "another-pane", Some(at));
+    }
     Record {
         run: Some("r1".into()),
         ended_at: Some(at),
@@ -687,6 +692,95 @@ async fn fresh_server_forgets_an_owner_record_the_owner_typed_after() {
                 .is_none(),
             typed_after
         );
+    }
+}
+
+/// Round 3, R1: a runs folder that cannot be listed, and a record whose run is not in the replay, each forget the
+/// record at send time; the same record with its run there, ended, is typed for.
+#[tokio::test]
+async fn fresh_server_forgets_a_record_whose_runs_cannot_be_read() {
+    let guard = crate::nirvana::with_test_home("fresh-unread-runs");
+    let home = guard.path.clone();
+    for case in ["unlisted", "missing run", "holds"] {
+        let mut app = test_app();
+        let t0 = Instant::now();
+        let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+        let public = root_public(&app);
+        let project = Project::at(home.join("project"));
+        let _ = std::fs::remove_dir_all(&project.root);
+        let mut written = record(&home);
+        match case {
+            "unlisted" => {
+                let runs = project.dir().join("runs");
+                std::fs::remove_dir_all(&runs).unwrap();
+                std::fs::write(&runs, "not a folder").unwrap();
+            }
+            "missing run" => written.run = Some("r9".into()),
+            _ => {}
+        }
+        crate::nirvana_fresh::write_record(&home, &public, &written).unwrap();
+        let sends = case == "holds";
+        assert_eq!(
+            app.nirvana_fresh_with(t0 + LOOKUPS[0], &home, nirvana_in(&home)),
+            sends,
+            "{case}"
+        );
+        assert_eq!(
+            typed(&mut receiver),
+            if sends { "/clear" } else { "" },
+            "{case}"
+        );
+        assert_eq!(
+            crate::nirvana_fresh::read_record(&home, &public)
+                .unwrap()
+                .is_some(),
+            sends,
+            "{case}"
+        );
+    }
+}
+
+/// Round 3, R2: the owner's `!herdr nirvana fresh`, recorded in the record's second, keeps the record, and Nirvana
+/// Claude is cleared; a prompt the owner types after it still forgets it.
+#[tokio::test]
+async fn fresh_server_keeps_the_owners_record_through_their_own_bang_command() {
+    let guard = crate::nirvana::with_test_home("fresh-owner-bang");
+    let home = guard.path.clone();
+    for typed_after in [false, true] {
+        let mut app = test_app();
+        let t0 = Instant::now();
+        let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+        let public = root_public(&app);
+        let transcript = conversation(&home);
+        let now = crate::nirvana_run::now();
+        let owner = Record {
+            transcript: None,
+            context: None,
+            at: now - 20,
+            by: "owner".into(),
+            ..record(&home)
+        };
+        let mut lines = std::fs::read_to_string(&transcript).unwrap();
+        for content in [
+            "<bash-input>herdr nirvana fresh</bash-input>",
+            "<bash-stdout>herdr nirvana fresh: pending for pane 1</bash-stdout><bash-stderr></bash-stderr>",
+        ] {
+            lines.push('\n');
+            lines.push_str(&line_at("user", content, owner.at));
+        }
+        if typed_after {
+            lines.push('\n');
+            lines.push_str(&line_at("user", "no, wait", now - 10));
+        }
+        std::fs::write(&transcript, lines).unwrap();
+        crate::nirvana_fresh::write_record(&home, &public, &owner).unwrap();
+        assert_eq!(
+            app.nirvana_fresh_with(t0 + LOOKUPS[0], &home, nirvana_in_kept(&home, &transcript)),
+            !typed_after,
+            "{typed_after}"
+        );
+        let expected = if typed_after { "" } else { "/clear" };
+        assert_eq!(typed(&mut receiver), expected, "{typed_after}");
     }
 }
 
