@@ -3,6 +3,31 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.43.0: workers can reach the project's MCP servers
+
+- **Changed:**
+  - An order whose `needs` names a server in the project's `.mcp.json` gets a per-order `--mcp-config` with only those
+    servers, and `--allowedTools mcp__<server>__*`. `--strict-mcp-config` stays.
+  - Such an order seats only on a `claude` seat. With none free it is refused, with the reason. This holds at booking,
+    `seat pick`, the rate-limit reseat and the gate's send-back.
+  - Every order granted a server gets the brief line "Never start a print, a laser job, or a send to a device. Stop and
+    report when that is the next step." A Bambu Studio or xTool order also gets the batch, state and crops line.
+  - The per-order config holds the servers' definitions, tokens included. It is removed when the worker ends.
+  - A server gone by launch fails the order, naming the server. A broken `.mcp.json` refuses the order, naming the
+    file. Two servers whose tool names flatten alike refuse it too.
+  **Because:** the owner, 2026-10-26: "Do we dont have offical mcp servers I think we have some work on them but we
+  would need to convert these bash into some type of mcp / cli server." and "2 can be done. 3 can be done, 4 can be
+  done." In the jig-print run the same day, a worker driving Bambu Studio clicked Send after Nirvana Claude said the
+  print was held. Plan `nirvana/plans/2026-10-26-29-gui-tools.md` §5, built on Opus high.
+  **Measured:**
+  - 40 `p29_` controls in `nirvana/controls.d/gui_tools.py`, each reddening its test alone, plus `seat_filter_class`.
+  - One Sonnet review found no blocker. Its four should-fix items and nit were fixed in one round, including the
+    missing device line for the `bambu` printer server.
+  - Not live-checked yet: a worker with a real `.mcp.json` whose `init` line lists the server, and that
+    `mcp__<server>__*` is accepted as a wildcard.
+  **If you remove this:** a worker that needs Bambu Studio or xTool has no server, falls back to Bash and pywinauto,
+  and nothing in its brief tells it not to press Send.
+
 ## alpha 0.42.0: Nirvana Claude starts fresh after a run, and starts leaner
 
 - **Changed:**
