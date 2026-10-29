@@ -36,6 +36,7 @@ mod nirvana_idle_compact;
 mod nirvana_new;
 mod nirvana_relaunch;
 mod nirvana_restart;
+mod nirvana_wake_retry;
 
 use std::collections::HashMap;
 #[cfg(unix)]

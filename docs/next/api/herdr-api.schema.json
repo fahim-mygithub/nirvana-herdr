@@ -1322,6 +1322,10 @@
         },
         "AgentSendKeysParams": {
           "properties": {
+            "force": {
+              "description": "Nirvana fork, plan 31 review S2: type even into a pane whose last Nirvana worker has ended.",
+              "type": "boolean"
+            },
             "keys": {
               "items": {
                 "type": "string"
@@ -3181,6 +3185,10 @@
         },
         "PaneSendKeysParams": {
           "properties": {
+            "force": {
+              "description": "Nirvana fork, plan 31 review S2: type even into a pane whose last Nirvana worker has ended.",
+              "type": "boolean"
+            },
             "keys": {
               "items": {
                 "type": "string"
@@ -3199,6 +3207,10 @@
         },
         "PaneSendTextParams": {
           "properties": {
+            "force": {
+              "description": "Nirvana fork, plan 31 review S2: type even into a pane whose last Nirvana worker has ended.",
+              "type": "boolean"
+            },
             "pane_id": {
               "type": "string"
             },

@@ -1909,6 +1909,23 @@ impl App {
         encode_success(id, ResponseResult::Ok {})
     }
 
+    /// Nirvana fork, plan 31 §2.4 and review S3: why typing into this pane would reach nobody, its last Nirvana worker
+    /// having ended (`nirvana_worker::finished_worker_at`); `None` with `force` or outside Nirvana. Here, where the
+    /// socket's requests are served, rather than in the CLI, so no client goes around it. `pane run` is not checked:
+    /// herdr's own launch types a worker's supervisor into a reused pane with it.
+    pub(super) fn nirvana_finished_worker(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        force: bool,
+    ) -> Option<String> {
+        if force {
+            return None;
+        }
+        let public = self.public_pane_id(ws_idx, pane_id)?;
+        crate::nirvana_worker::finished_worker_at(&crate::nirvana::home()?, &public)
+    }
+
     pub(super) fn handle_pane_send_text(
         &mut self,
         id: String,
@@ -1917,6 +1934,9 @@ impl App {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
+        if let Some(why) = self.nirvana_finished_worker(ws_idx, pane_id, params.force) {
+            return encode_error(id, "finished_worker", why);
+        }
         let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
@@ -2040,6 +2060,9 @@ impl App {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
+        if let Some(why) = self.nirvana_finished_worker(ws_idx, pane_id, params.force) {
+            return encode_error(id, "finished_worker", why);
+        }
         let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
@@ -2426,6 +2449,78 @@ mod tests {
         response.error.code
     }
 
+    /// Plan 31 §2.4 and review S3: the server refuses `pane send-text` and `send-keys` into a pane whose last Nirvana
+    /// worker has ended, so a socket client meets the guard as the CLI does; `force` types all the same.
+    #[tokio::test]
+    async fn p31_the_server_types_nothing_into_a_finished_workers_pane() {
+        use crate::nirvana_run::{Kind, Project};
+        let home = crate::nirvana::with_test_home("p31-api-finished");
+        let (mut app, pane_id, mut rx) = app_with_send_key_runtime(8);
+        let project = Project::at(home.path.join("project"));
+        project.ensure().unwrap();
+        let journal = project.journal("dune-v5");
+        let started = Kind::Started {
+            order: "dune-slice-v5".into(),
+            attempt: 1,
+            pid: None,
+            pane: Some(pane_id.clone()),
+            tab: None,
+            resume: None,
+            argv: Vec::new(),
+        };
+        let ended = Kind::Ended {
+            order: Some("dune-slice-v5".into()),
+            outcome: "delivered".into(),
+            why: None,
+            exit: Some(0),
+            pools: Vec::new(),
+            pools_basis: None,
+        };
+        journal.append(1, started).unwrap();
+        journal.append(2, ended).unwrap();
+        std::fs::create_dir_all(project.run_dir("dune-v5").join("live")).unwrap();
+        crate::nirvana_worker::note_worker_pane(&project, "dune-v5", "dune-slice-v5", &pane_id);
+        let send = |app: &mut App, method| {
+            app.handle_api_request(crate::api::schema::Request {
+                id: "req".into(),
+                method,
+            })
+        };
+        let text = send(
+            &mut app,
+            crate::api::schema::Method::PaneSendText(PaneSendTextParams {
+                pane_id: pane_id.clone(),
+                text: "Print it when ready".into(),
+                force: false,
+            }),
+        );
+        let keys = send(
+            &mut app,
+            crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
+                pane_id: pane_id.clone(),
+                keys: vec!["Enter".into()],
+                force: false,
+            }),
+        );
+        for response in [&text, &keys] {
+            let error: ErrorResponse = serde_json::from_str(response).unwrap();
+            assert_eq!(error.error.code, "finished_worker", "{response}");
+            assert!(error.error.message.contains("dune-slice-v5"), "{response}");
+        }
+        assert!(rx.try_recv().is_err(), "nothing was typed");
+        let forced = send(
+            &mut app,
+            crate::api::schema::Method::PaneSendText(PaneSendTextParams {
+                pane_id: pane_id.clone(),
+                text: "x".into(),
+                force: true,
+            }),
+        );
+        let success: SuccessResponse = serde_json::from_str(&forced).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+        assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from_static(b"x"));
+    }
+
     #[tokio::test]
     async fn api_pane_send_keys_accepts_control_navigation_chords() {
         let (mut app, pane_id, mut rx) = app_with_send_key_runtime(4);
@@ -2433,6 +2528,7 @@ mod tests {
         let response = app.handle_api_request(crate::api::schema::Request {
             id: "req".into(),
             method: crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
+                force: false,
                 pane_id,
                 keys: vec![
                     "ctrl+h".into(),
@@ -2460,6 +2556,7 @@ mod tests {
         let response = app.handle_api_request(crate::api::schema::Request {
             id: "req".into(),
             method: crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
+                force: false,
                 pane_id,
                 keys: vec!["shift+tab".into()],
             }),
@@ -2823,6 +2920,7 @@ mod tests {
         let response = app.handle_api_request(crate::api::schema::Request {
             id: "req".into(),
             method: crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
+                force: false,
                 pane_id,
                 keys: vec!["C-c".into(), "c-c".into(), "ctrl+c".into()],
             }),
@@ -2851,6 +2949,7 @@ mod tests {
         let response = app.handle_api_request(crate::api::schema::Request {
             id: "req".into(),
             method: crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
+                force: false,
                 pane_id,
                 keys: vec!["cmd+c".into()],
             }),
@@ -2880,6 +2979,7 @@ mod tests {
         let response = app.handle_api_request(crate::api::schema::Request {
             id: "req".into(),
             method: crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
+                force: false,
                 pane_id,
                 keys: vec!["cmd+c".into()],
             }),
@@ -2900,6 +3000,7 @@ mod tests {
         let response = app.handle_api_request(crate::api::schema::Request {
             id: "req".into(),
             method: crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
+                force: false,
                 pane_id,
                 keys: vec!["+".into()],
             }),
@@ -2929,6 +3030,7 @@ mod tests {
         let response = app.handle_api_request(crate::api::schema::Request {
             id: "req".into(),
             method: crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
+                force: false,
                 pane_id,
                 keys: vec!["shift+?".into()],
             }),
@@ -2994,6 +3096,7 @@ mod tests {
         let response = app.handle_api_request(crate::api::schema::Request {
             id: "req".into(),
             method: crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
+                force: false,
                 pane_id,
                 keys: vec!["ctrl+h".into(), "not-a-key".into()],
             }),

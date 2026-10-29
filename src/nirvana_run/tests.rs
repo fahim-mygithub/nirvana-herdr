@@ -569,7 +569,7 @@ fn a_wake_never_types_while_the_owner_does() {
     typing.last_key_at = Some(now - 29);
     assert_eq!(
         wake_decision("live1", &state, Some(&typing), now, true),
-        Wake::Queue("the owner typed in the pane 29 s ago".into())
+        Wake::Queue("the owner typed in the pane in the last 30 s".into())
     );
     typing.last_key_at = Some(now - 30);
     assert!(matches!(
@@ -1499,4 +1499,145 @@ fn p31_queued_event_dedupes_only_the_same_reason_since_the_last_wake() {
         event(4, asked),
     ];
     assert_eq!(queued_event(&events, "busy"), Some(queued("busy", 4)));
+}
+
+// ---- plan 31 review W: a queued wake is tried again, and delivered once ----
+
+/// A run with one ended order in its queue, its orchestrator pane `w1:p2`, under a test Nirvana home.
+fn p31_retry_run(name: &str) -> (crate::nirvana::TestHomeGuard, Project) {
+    let home = crate::nirvana::with_test_home(name);
+    let project = Project::at(home.path.join("project"));
+    project.ensure().unwrap();
+    let journal = project.journal("r1");
+    journal.append(T0, opened(Some("w1:p2"))).unwrap();
+    journal
+        .append(
+            T0 + 1,
+            Kind::Ended {
+                order: Some("o1".into()),
+                outcome: "failed".into(),
+                why: Some("exit 1".into()),
+                exit: Some(1),
+                pools: Vec::new(),
+                pools_basis: None,
+            },
+        )
+        .unwrap();
+    (home, project)
+}
+
+#[test]
+fn p31_a_queued_wake_is_delivered_by_the_retry_once_the_owner_goes_quiet() {
+    let (home, project) = p31_retry_run("p31-retry-quiet");
+    let typed = std::cell::RefCell::new(Vec::new());
+    let typer = |pane: &str, digest: &str| {
+        typed.borrow_mut().push(format!("{pane}: {digest}"));
+        Ok(())
+    };
+    // The owner is typing: the wake queues, and the run goes on the retry list, due in 30 s.
+    let typing = |_: &str| PaneView {
+        last_key_at: Some(now()),
+        ..idle_view()
+    };
+    let (verdict, woke) = wake_with(&project, "r1", false, typing, typer).unwrap();
+    assert!(!woke && verdict.contains("queued"), "{verdict}");
+    let at = now();
+    assert!(take_due_retries(&home.path, at).is_empty());
+    let due = take_due_retries(&home.path, at + WAKE_RETRY_FIRST_S + 1);
+    assert_eq!(due.len(), 1);
+    assert_eq!((due[0].run.as_str(), due[0].tries), ("r1", 1));
+    // Queued again while the owner types: the list keeps its tries, so the back-off grows.
+    wake_with(&project, "r1", false, typing, typer).unwrap();
+    assert!(take_due_retries(&home.path, at + WAKE_RETRY_FIRST_S + 2).is_empty());
+    // The owner goes quiet: the retry's wake types the digest, and the run leaves the list.
+    let (verdict, woke) = wake_with(&project, "r1", false, |_: &str| idle_view(), typer).unwrap();
+    assert!(woke, "{verdict}");
+    assert_eq!(typed.borrow().len(), 1);
+    assert!(
+        typed.borrow()[0].starts_with("w1:p2: herdr run r1:"),
+        "{:?}",
+        typed.borrow()
+    );
+    assert!(take_due_retries(&home.path, at + 100_000).is_empty());
+    // The retry stops at a delivery: another wake types nothing.
+    let (verdict, woke) = wake_with(&project, "r1", false, |_: &str| idle_view(), typer).unwrap();
+    assert!(!woke && verdict == "nothing waits", "{verdict}");
+    assert_eq!(typed.borrow().len(), 1);
+}
+
+#[test]
+fn p31_a_notice_that_reached_the_hook_first_is_not_typed_again() {
+    let (home, project) = p31_retry_run("p31-retry-notice");
+    let typed = std::cell::RefCell::new(0);
+    let typer = |_: &str, _: &str| {
+        *typed.borrow_mut() += 1;
+        Ok(())
+    };
+    let typing = |_: &str| PaneView {
+        last_key_at: Some(now()),
+        ..idle_view()
+    };
+    wake_with(&project, "r1", false, typing, typer).unwrap();
+    // The owner's next prompt runs the `UserPromptSubmit` notice: it delivers the queue and ends the retry.
+    notice_cli(&project, &["r1".to_owned()]).unwrap();
+    assert!(take_due_retries(&home.path, now() + 100_000).is_empty());
+    let (verdict, woke) = wake_with(&project, "r1", false, |_: &str| idle_view(), typer).unwrap();
+    assert!(!woke && verdict == "nothing waits", "{verdict}");
+    // The race: the notice lands after the wake read the queue and before it types. The wake reads the journal
+    // again under its lock and types nothing.
+    project
+        .journal("r1")
+        .append(
+            T0 + 5,
+            Kind::Ended {
+                order: Some("o2".into()),
+                outcome: "failed".into(),
+                why: None,
+                exit: Some(1),
+                pools: Vec::new(),
+                pools_basis: None,
+            },
+        )
+        .unwrap();
+    let notice_meanwhile = |_: &str| {
+        notice_cli(&project, &["r1".to_owned()]).unwrap();
+        idle_view()
+    };
+    let (verdict, woke) = wake_with(&project, "r1", false, notice_meanwhile, typer).unwrap();
+    assert!(
+        !woke && verdict.contains("delivered meanwhile"),
+        "{verdict}"
+    );
+    assert_eq!(*typed.borrow(), 0);
+}
+
+#[test]
+fn p31_the_retry_backs_off_from_30_s_to_5_minutes() {
+    let waits: Vec<u64> = (0..7).map(retry_backoff).collect();
+    assert_eq!(waits, vec![30, 60, 120, 240, 300, 300, 300]);
+    let (home, project) = p31_retry_run("p31-retry-backoff");
+    schedule_retry(Some(&home.path), &project, "r1", 1_000);
+    let mut at = 1_000;
+    let mut gaps = Vec::new();
+    for _ in 0..6 {
+        let next = (at..at + 1_000)
+            .find(|t| {
+                std::fs::read_dir(home.path.join("nirvana").join("wakes"))
+                    .unwrap()
+                    .flatten()
+                    .any(|entry| {
+                        let retry: WakeRetry =
+                            serde_json::from_str(&std::fs::read_to_string(entry.path()).unwrap())
+                                .unwrap();
+                        retry.due <= *t
+                    })
+            })
+            .unwrap();
+        assert_eq!(take_due_retries(&home.path, next).len(), 1);
+        gaps.push(next - at);
+        at = next;
+    }
+    assert_eq!(gaps, vec![30, 60, 120, 240, 300, 300]);
+    clear_retry(Some(&home.path), &project, "r1");
+    assert!(take_due_retries(&home.path, u64::MAX).is_empty());
 }

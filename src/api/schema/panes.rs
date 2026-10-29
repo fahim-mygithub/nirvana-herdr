@@ -361,6 +361,10 @@ crate::cli::projection::cli_params! {
     pub struct PaneSendTextParams => PaneSendTextProjection {
         pub pane_id: String => Field::new(String::new()).input(binding::pane_id()),
         pub text: String => Field::new(String::new()).input(binding::joined("text", "TEXT")),
+        /// Nirvana fork, plan 31 review S2: type even into a pane whose last Nirvana worker has ended.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pub force: bool => Field::new(false).input(binding::boolean("force", true)
+            .help("Type even into a pane whose last Nirvana worker has ended")),
     }
 }
 
@@ -369,6 +373,10 @@ crate::cli::projection::cli_params! {
     pub struct PaneSendKeysParams => PaneSendKeysProjection {
         pub pane_id: String => Field::new(String::new()).input(binding::pane_id()),
         pub keys: Vec<String> => Field::new(Vec::new()).input(binding::keys()),
+        /// Nirvana fork, plan 31 review S2: type even into a pane whose last Nirvana worker has ended.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pub force: bool => Field::new(false).input(binding::boolean("force", true)
+            .help("Type even into a pane whose last Nirvana worker has ended")),
     }
 }
 

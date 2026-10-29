@@ -1585,12 +1585,13 @@ fn p29_a_send_back_seats_a_server_order_on_claude_and_a_broken_mcp_json_asks() {
     nirvana_seat::set_test_world(None);
 }
 
-// ---- plan 31 §2.5: a send-back keeps the device line, and the Send line with the parent's approval ----
+// ---- plan 31 §2.5 and review S1: a send-back keeps the device line and never inherits the Send ----
 
 #[test]
-fn p31_a_send_back_child_keeps_the_device_line_and_the_parents_send_line() {
+fn p31_a_send_back_child_never_inherits_the_send_approval() {
     use crate::nirvana_gui_tools::{
-        with_brief_lines, SendOk, DESKTOP_SEND_LINE, DEVICE_LINE, SEND_LINE,
+        with_brief_lines, SendOk, BRIEF_LINE, DESKTOP_SEND_LINE, DEVICE_LINE, SEND_LINE,
+        SENT_BEFORE_LINE,
     };
     let _guard = crate::nirvana::with_test_home("p31-send-back-lines");
     nirvana_seat::set_test_world(Some(BTreeMap::new()));
@@ -1598,7 +1599,10 @@ fn p31_a_send_back_child_keeps_the_device_line_and_the_parents_send_line() {
     let project = Project::at(&root);
     let table = nirvana_seat::parse(nirvana_seat::DEFAULT).expect("table");
     let approval = SendOk {
-        quote: "Print it when ready".into(),
+        quote: "Print the nosepiece when it is ready".into(),
+        prompt: "ok. Print the nosepiece when it is ready".into(),
+        at: "2026-10-29T01:32:14.584Z".into(),
+        transcript: "t.jsonl".into(),
         check: "found verbatim in the owner's prompt at 2026-10-29T01:32:14.584Z".into(),
     };
     let desktop = vec!["bambu-studio-beta".to_owned()];
@@ -1654,17 +1658,22 @@ fn p31_a_send_back_child_keeps_the_device_line_and_the_parents_send_line() {
             .find(|known| known.seated.parent.as_deref() == Some(order))
             .expect("child");
         let brief = std::fs::read_to_string(&child.seated.order_file).expect("brief");
-        assert_eq!(child.seated.send_ok, send_ok, "{order}");
-        if send_ok.is_some() {
-            assert!(
-                brief.contains(&format!("{SEND_LINE}\n{DESKTOP_SEND_LINE}")),
-                "{brief}"
-            );
-            assert!(!brief.contains(DEVICE_LINE), "{brief}");
-        } else {
-            assert!(brief.contains(DEVICE_LINE), "{brief}");
-            assert!(!brief.contains(SEND_LINE), "{brief}");
-        }
+        // Review S1: a new Send needs a new quote. The child keeps the device line, and an approved parent's child
+        // hears it may already have sent.
+        assert_eq!(child.seated.send_ok, None, "{order}");
+        assert!(
+            brief.contains(&format!("{DEVICE_LINE}\n{BRIEF_LINE}")),
+            "{brief}"
+        );
+        assert!(
+            !brief.contains(SEND_LINE) && !brief.contains(DESKTOP_SEND_LINE),
+            "{brief}"
+        );
+        assert_eq!(
+            brief.contains(SENT_BEFORE_LINE),
+            send_ok.is_some(),
+            "{brief}"
+        );
     }
     nirvana_seat::set_test_world(None);
 }

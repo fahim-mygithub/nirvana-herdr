@@ -1497,8 +1497,13 @@ fn p31_owner_line(text: &str, at: &str) -> String {
     .to_string()
 }
 
+/// A transcript's `timestamp` for the second `at`, as Claude Code writes it.
+fn p31_iso(at: u64) -> String {
+    nirvana_run::utc(at).replace(' ', "T")
+}
+
 /// `p29_project` with `.mcp.json` defining bambu-studio-beta as well, and Nirvana Claude's session recorded for the
-/// project with a transcript holding `prompts`.
+/// project with a transcript holding `prompts`, typed a minute ago.
 fn p31_project(name: &str, prompts: &[&str]) -> (crate::nirvana::TestHomeGuard, Project) {
     let (home, project) = p29_project(name);
     std::fs::write(
@@ -1509,12 +1514,16 @@ fn p31_project(name: &str, prompts: &[&str]) -> (crate::nirvana::TestHomeGuard, 
     let transcript = home.path.join("transcript.jsonl");
     let lines: Vec<String> = prompts
         .iter()
-        .map(|text| p31_owner_line(text, "2026-10-29T01:32:14.584Z"))
+        .map(|text| p31_owner_line(text, &p31_iso(nirvana_run::now() - 60)))
         .collect();
     std::fs::write(&transcript, lines.join("\n") + "\n").unwrap();
+    // Review N5: Nirvana Claude started in a folder other than the project's root, as `CLAUDE_PROJECT_DIR` says, so
+    // the session is found only by the variable, never by the root.
+    let started_in = home.path.join("claude-started-here");
+    std::fs::create_dir_all(&started_in).unwrap();
     crate::nirvana_session_record::write(
         &home.path,
-        &crate::nirvana_session_record::absolute_folder(&project.root),
+        &crate::nirvana_session_record::absolute_folder(&started_in),
         &crate::nirvana_session_record::Record {
             session_id: "s1".into(),
             at: "2026-10-29T01:32:15Z".into(),
@@ -1522,11 +1531,8 @@ fn p31_project(name: &str, prompts: &[&str]) -> (crate::nirvana::TestHomeGuard, 
         },
     )
     .unwrap();
-    // The folder `seat run` looks the session up by: the variable Claude Code gives its tools, here the project.
-    std::env::set_var(
-        crate::nirvana_session_record::PROJECT_DIR_ENV,
-        &project.root,
-    );
+    // The folder `seat run` looks the session up by: the variable Claude Code gives its tools.
+    std::env::set_var(crate::nirvana_session_record::PROJECT_DIR_ENV, &started_in);
     (home, project)
 }
 
@@ -1562,41 +1568,62 @@ fn p31_claude_seat(project: &Project) -> String {
 #[test]
 fn p31_seat_run_records_a_verified_send_quote_and_refuses_one_it_cannot_find() {
     use crate::nirvana_gui_tools::{DESKTOP_SEND_LINE, DEVICE_LINE, SEND_LINE};
-    let (_home, project) = p31_project("p31-send-ok", &["Print it when ready"]);
+    let (_home, project) =
+        p31_project("p31-send-ok", &["ok. Print the nosepiece when it is ready"]);
     std::fs::write(
         project.root.join("order.md"),
         "# Slice and send the nosepiece\n",
     )
     .unwrap();
     let seat = p31_claude_seat(&project);
-    let _live: Vec<_> = ["s0", "s1"]
+    let _live: Vec<_> = ["s0", "s1", "s2"]
         .iter()
         .map(|order| take_live(&project, "r1", order).unwrap().unwrap())
         .collect();
     // A quote the owner never typed refuses the order before anything is booked or journaled.
     let mut request = p31_request(&project, "s0", &seat, &["bambu-studio-beta"]);
-    request.send_ok = Some("Print it now".into());
+    request.send_ok = Some("Print the ear hook now please".into());
     let (code, why) = seat_order(&project, &request).unwrap_err();
     assert_eq!(code, 2, "{why}");
-    assert!(why.contains("none of the owner's prompts"), "{why}");
+    assert!(why.contains("none of the owner's own prompts"), "{why}");
     assert!(replay(&project.journal("r1").read().0)
         .order("s0")
         .is_none());
+    // Review N3: the owner's words on an order granted no device server refuse it too: its worker would never hear.
+    let mut request = p31_request(&project, "s2", &seat, &[]);
+    request.send_ok = Some("Print the nosepiece when it is ready".into());
+    let (code, why) = seat_order(&project, &request).unwrap_err();
+    assert_eq!(code, 2, "{why}");
+    assert!(why.contains("granted a device server"), "{why}");
+    assert!(replay(&project.journal("r1").read().0)
+        .order("s2")
+        .is_none());
     // The owner's words: the seated event holds the quote and the check, the brief the Send line, no device line.
     let mut request = p31_request(&project, "s1", &seat, &["bambu-studio-beta"]);
-    request.send_ok = Some("Print it when ready".into());
-    seat_order(&project, &request).unwrap();
+    request.send_ok = Some("Print the nosepiece when it is ready".into());
+    let outcome = seat_order(&project, &request).unwrap();
+    // Review B1 item 4: `seat run` gives back the prompt, its time and the session file.
+    assert_eq!(
+        outcome["send_ok"]["prompt"], "ok. Print the nosepiece when it is ready",
+        "{outcome}"
+    );
+    assert!(
+        outcome["send_ok"]["transcript"]
+            .as_str()
+            .is_some_and(|file| file.ends_with("transcript.jsonl")),
+        "{outcome}"
+    );
     let seated = replay(&project.journal("r1").read().0)
         .order("s1")
         .unwrap()
         .seated
         .clone();
     let send_ok = seated.send_ok.clone().expect("send_ok on seated");
-    assert_eq!(send_ok.quote, "Print it when ready");
+    assert_eq!(send_ok.quote, "Print the nosepiece when it is ready");
+    assert_eq!(send_ok.prompt, "ok. Print the nosepiece when it is ready");
     assert!(
-        send_ok.check.contains("2026-10-29T01:32:14.584Z"),
-        "{}",
-        send_ok.check
+        send_ok.check.contains(&send_ok.at) && send_ok.at.starts_with("20"),
+        "{send_ok:?}"
     );
     let line = std::fs::read_to_string(project.journal("r1").path)
         .unwrap()
@@ -1605,7 +1632,7 @@ fn p31_seat_run_records_a_verified_send_quote_and_refuses_one_it_cannot_find() {
         .unwrap()
         .to_owned();
     assert!(
-        line.contains("\"send_ok\":{\"quote\":\"Print it when ready\""),
+        line.contains("\"send_ok\":{\"quote\":\"Print the nosepiece when it is ready\",\"prompt\":\"ok. Print the nosepiece when it is ready\",\"at\":"),
         "{line}"
     );
     let brief = std::fs::read_to_string(&seated.order_file).unwrap();
@@ -1695,7 +1722,8 @@ fn p31_a_finished_workers_pane_names_its_order_and_a_live_one_does_not() {
             p31_event(65, 1_793_237_831, p31_ended("dune-slice-v5")),
         ],
     );
-    let why = finished_worker_in(std::slice::from_ref(&v5), "wP:p1D").expect("finished");
+    let never = |_: &str, _: &str| false;
+    let why = finished_worker_in(std::slice::from_ref(&v5), "wP:p1D", never).expect("finished");
     assert!(
         why.contains("dune-slice-v5")
             && why.contains("dune-v5")
@@ -1703,7 +1731,7 @@ fn p31_a_finished_workers_pane_names_its_order_and_a_live_one_does_not() {
         "{why}"
     );
     assert_eq!(
-        finished_worker_in(std::slice::from_ref(&v5), "wP:p1E"),
+        finished_worker_in(std::slice::from_ref(&v5), "wP:p1E", never),
         None
     );
     // A worker still running in the pane: no refusal.
@@ -1711,13 +1739,16 @@ fn p31_a_finished_workers_pane_names_its_order_and_a_live_one_does_not() {
         "r2".to_owned(),
         vec![p31_event(1, 10, p31_started("o1", "wP:p9"))],
     );
-    assert_eq!(finished_worker_in(&[live], "wP:p9"), None);
+    assert_eq!(finished_worker_in(&[live], "wP:p9", never), None);
     // A later run's worker reusing the pane owns it, even after the first worker ended.
     let reuse = (
         "r3".to_owned(),
         vec![p31_event(1, 1_793_237_900, p31_started("o2", "wP:p1D"))],
     );
-    assert_eq!(finished_worker_in(&[v5.clone(), reuse], "wP:p1D"), None);
+    assert_eq!(
+        finished_worker_in(&[v5.clone(), reuse], "wP:p1D", never),
+        None
+    );
     // A restarted attempt after an end is live again.
     let restarted = (
         "r4".to_owned(),
@@ -1727,30 +1758,84 @@ fn p31_a_finished_workers_pane_names_its_order_and_a_live_one_does_not() {
             p31_event(3, 30, p31_started("o3", "wP:pA")),
         ],
     );
-    assert_eq!(finished_worker_in(&[restarted], "wP:pA"), None);
+    assert_eq!(finished_worker_in(&[restarted], "wP:pA", never), None);
+    // Review S4: an ended order whose supervisor still holds its lock is not finished.
+    assert_eq!(
+        finished_worker_in(std::slice::from_ref(&v5), "wP:p1D", |run, order| {
+            run == "dune-v5" && order == "dune-slice-v5"
+        }),
+        None
+    );
+}
+
+/// Plan 31 review S3 and S4: the pane's project is found from the Nirvana home, as the server finds it, and a pane a
+/// live supervisor names is never finished, though its last `started` is a finished worker's.
+#[test]
+fn p31_a_pane_a_live_supervisor_names_is_never_finished() {
+    let (home, project) = p29_project("p31-pane-live");
+    let journal = project.journal("r1");
+    journal.append(1, opened()).unwrap();
+    journal.append(2, p31_started("slice-1", "wP:p1D")).unwrap();
+    journal.append(3, p31_ended("slice-1")).unwrap();
+    // No supervisor ever ran in the pane: no project names it, so nothing is refused.
+    assert_eq!(finished_worker_at(&home.path, "wP:p1D"), None);
+    let first = take_live(&project, "r1", "slice-1").unwrap().unwrap();
+    note_worker_pane(&project, "r1", "slice-1", "wP:p1D");
+    drop(first);
+    let why = finished_worker_at(&home.path, "wP:p1D").expect("finished");
+    assert!(why.contains("slice-1") && why.contains("--force"), "{why}");
+    // herdr reuses the pane for the next order: its supervisor holds its lock before its `started`.
+    let next = take_live(&project, "r1", "print-1").unwrap().unwrap();
+    note_worker_pane(&project, "r1", "print-1", "wP:p1D");
+    assert_eq!(finished_worker_at(&home.path, "wP:p1D"), None);
+    drop(next);
+    assert!(finished_worker_at(&home.path, "wP:p1D").is_some());
+    nirvana_seat::set_test_world(None);
 }
 
 #[test]
-fn p31_a_reseats_continuation_brief_keeps_the_device_line_and_the_send_line() {
-    use crate::nirvana_gui_tools::{with_brief_lines, DEVICE_LINE, SEND_LINE};
+fn p31_a_reseats_continuation_brief_keeps_the_device_line_and_drops_the_send_line() {
+    use crate::nirvana_gui_tools::{
+        with_brief_lines, SendOk, BRIEF_LINE, DEVICE_LINE, SEND_LINE, SENT_BEFORE_LINE,
+    };
     let (_home, project) = p29_project("p31-continuation");
     let run = "r1";
     let state = nirvana_run::RunState::default();
-    for (order, send_ok, line) in [("c1", false, DEVICE_LINE), ("c2", true, SEND_LINE)] {
+    for (order, send_ok) in [("c1", false), ("c2", true)] {
         let mut seated = p29_seated(&project, order, "haiku");
+        seated.send_ok = send_ok.then(|| SendOk {
+            quote: "Print the nosepiece when it is ready".into(),
+            prompt: "Print the nosepiece when it is ready".into(),
+            at: "2026-10-29T01:32:14.584Z".into(),
+            transcript: "t.jsonl".into(),
+            check: "found".into(),
+        });
         let text = with_brief_lines("# Slice it\n".into(), &["xtool".into()], send_ok);
         seated.order_file = write_order(&project, &project.root, order, &text).unwrap();
         let file = continuation_brief(&project, run, &seated, &state, None, &Stream::new("claude"))
             .unwrap();
         let brief = std::fs::read_to_string(&file).unwrap();
-        assert!(brief.contains(line), "{order}: {brief}");
+        // Review S1: the continuation never inherits the Send; it keeps the device line and hears the parent may
+        // have sent.
+        assert!(
+            brief.contains(&format!("{DEVICE_LINE}\n{BRIEF_LINE}")),
+            "{order}: {brief}"
+        );
+        assert!(!brief.contains(SEND_LINE), "{order}: {brief}");
+        assert_eq!(
+            brief.contains(SENT_BEFORE_LINE),
+            send_ok,
+            "{order}: {brief}"
+        );
     }
     nirvana_seat::set_test_world(None);
 }
 
 #[test]
-fn p31_a_rate_limited_reseat_keeps_the_parents_send_approval_and_its_lines() {
-    use crate::nirvana_gui_tools::{with_brief_lines, SendOk, SEND_LINE};
+fn p31_a_rate_limited_reseat_never_inherits_the_send_approval() {
+    use crate::nirvana_gui_tools::{
+        with_brief_lines, SendOk, DEVICE_LINE, SEND_LINE, SENT_BEFORE_LINE,
+    };
     let (_home, project) = p29_project("p31-reseat-send-ok");
     let run = "r1";
     let journal = project.journal(run);
@@ -1758,10 +1843,14 @@ fn p31_a_rate_limited_reseat_keeps_the_parents_send_approval_and_its_lines() {
     // No server need, so a spent max pool re-seats it on agy rather than asking.
     seated.needs = Vec::new();
     seated.send_ok = Some(SendOk {
-        quote: "Print it when ready".into(),
+        quote: "Print the nosepiece when it is ready".into(),
+        prompt: "Print the nosepiece when it is ready".into(),
+        at: "2026-10-29T01:32:14.584Z".into(),
+        transcript: "t.jsonl".into(),
         check: "found".into(),
     });
-    let text = with_brief_lines("# Send the slice\n".into(), &[], true);
+    // The order text as an approved server order had it, though this one now sits on no server.
+    let text = with_brief_lines("# Send the slice\n".into(), &["bambu".into()], true);
     seated.order_file = write_order(&project, &project.root, "o1", &text).unwrap();
     journal.append(1, opened()).unwrap();
     journal
@@ -1790,8 +1879,13 @@ fn p31_a_rate_limited_reseat_keeps_the_parents_send_approval_and_its_lines() {
     let view = String::from_utf8_lossy(&out).into_owned();
     let state = replay(&journal.read().0);
     let reseated = &state.order(&child).expect(&view).seated;
-    assert_eq!(reseated.send_ok, seated.send_ok, "{view}");
+    // Review S1: a new Send needs a new quote; the reseat keeps the device line and hears the parent may have sent.
+    assert_eq!(reseated.send_ok, None, "{view}");
     let brief = std::fs::read_to_string(&reseated.order_file).unwrap();
-    assert!(brief.contains(SEND_LINE), "{brief}");
+    assert!(!brief.contains(SEND_LINE), "{brief}");
+    assert!(
+        brief.contains(DEVICE_LINE) && brief.contains(SENT_BEFORE_LINE),
+        "{brief}"
+    );
     nirvana_seat::set_test_world(None);
 }

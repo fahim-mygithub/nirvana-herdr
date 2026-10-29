@@ -1417,7 +1417,11 @@ pub fn wake_decision(
     if let Some(at) = view.last_key_at {
         let since = now.saturating_sub(at);
         if since < OWNER_QUIET_S {
-            return Wake::Queue(format!("the owner typed in the pane {since} s ago"));
+            // Review N1: no count of seconds in the reason, so a retry a second later is the same reason and
+            // `queued_event` writes it once.
+            return Wake::Queue(format!(
+                "the owner typed in the pane in the last {OWNER_QUIET_S} s"
+            ));
         }
     }
     match view.prompt.as_deref() {
@@ -2685,6 +2689,8 @@ fn notice_cli(project: &Project, args: &[String]) -> std::io::Result<()> {
                 lines,
             ))
         })?;
+        // Plan 31 review W: the notice delivered the queue, or nothing waits; either way the retry is over.
+        clear_retry(crate::nirvana::home().as_deref(), project, &run);
         if !written.is_empty() {
             println!("herdr run {run}:");
             for line in lines {
@@ -2722,27 +2728,157 @@ fn record_queued(journal: &Journal, why: &str) {
     });
 }
 
+// ---- plan 31 review W: a queued wake is tried again ----
+
+/// The first retry of a queued wake, after this many seconds; each later one waits twice as long, up to
+/// `WAKE_RETRY_MAX_S`. Measured 2026-10-29: four deliveries had one wake attempt each, which queued, and nothing
+/// tried again; they waited 1,132 s to 25,798 s for the owner's next prompt.
+pub const WAKE_RETRY_FIRST_S: u64 = 30;
+pub const WAKE_RETRY_MAX_S: u64 = 300;
+
+/// A run whose wake queued, waiting for the server's periodic pass (`app/nirvana_wake_retry.rs`) to try again. One
+/// file per run under the Nirvana home, so the server, which serves every project, finds them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WakeRetry {
+    pub root: String,
+    pub run: String,
+    /// The retries the pass has started.
+    pub tries: u32,
+    /// The second the next retry is due.
+    pub due: u64,
+}
+
+/// The wait before retry `tries + 1`: 30, 60, 120, 240, then 300 s. Pure.
+pub fn retry_backoff(tries: u32) -> u64 {
+    (WAKE_RETRY_FIRST_S << tries.min(5)).min(WAKE_RETRY_MAX_S)
+}
+
+fn retry_dir(home: &Path) -> PathBuf {
+    home.join(nirvana_seat::DIR).join("wakes")
+}
+
+fn retry_file(home: &Path, project: &Project, run: &str) -> PathBuf {
+    // FNV-1a over the root and the run: a short name that two runs of two projects do not share.
+    let key = format!("{}\n{run}", project.root.display());
+    let hash = key.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    retry_dir(home).join(format!("{hash:016x}.json"))
+}
+
+/// Puts the run on the retry list when it is not on it; a run already on it keeps its tries and its due time, so
+/// the back-off grows. A failed write loses the retry, never the queue: the owner's next prompt still delivers it.
+pub fn schedule_retry(home: Option<&Path>, project: &Project, run: &str, at: u64) {
+    let Some(home) = home else { return };
+    let path = retry_file(home, project, run);
+    if path.exists() {
+        return;
+    }
+    let retry = WakeRetry {
+        root: project.root.display().to_string(),
+        run: run.to_owned(),
+        tries: 0,
+        due: at + retry_backoff(0),
+    };
+    let _ = std::fs::create_dir_all(retry_dir(home));
+    if let Ok(text) = serde_json::to_string(&retry) {
+        let _ = std::fs::write(path, text);
+    }
+}
+
+/// Takes the run off the retry list: its events were delivered, or nothing waits.
+pub fn clear_retry(home: Option<&Path>, project: &Project, run: &str) {
+    if let Some(home) = home {
+        let _ = std::fs::remove_file(retry_file(home, project, run));
+    }
+}
+
+/// The retries due at `at`, each moved to its next due time before it is returned, so a pass that dies does not try
+/// the same one at every tick.
+pub fn take_due_retries(home: &Path, at: u64) -> Vec<WakeRetry> {
+    let Ok(entries) = std::fs::read_dir(retry_dir(home)) else {
+        return Vec::new();
+    };
+    let mut due = Vec::new();
+    for path in entries.flatten().map(|entry| entry.path()) {
+        let Some(mut retry) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<WakeRetry>(&text).ok())
+        else {
+            // A file that does not parse would be tried never and kept forever.
+            let _ = std::fs::remove_file(&path);
+            continue;
+        };
+        if retry.due > at {
+            continue;
+        }
+        retry.tries += 1;
+        retry.due = at + retry_backoff(retry.tries);
+        if let Ok(text) = serde_json::to_string(&retry) {
+            let _ = std::fs::write(&path, text);
+        }
+        due.push(retry);
+    }
+    due
+}
+
 /// Wakes the orchestrator when §7.2 allows it, else leaves the events queued. Returns the verdict line and
-/// whether a digest was typed.
+/// whether a digest was typed. Plan 31 review W: a queued wake goes on the retry list, and any other answer takes the
+/// run off it.
 pub fn wake(project: &Project, run: &str, urgent: bool) -> std::io::Result<(String, bool)> {
+    wake_with(
+        project,
+        run,
+        urgent,
+        crate::nirvana_worker::pane_view,
+        crate::nirvana_worker::type_prompt,
+    )
+}
+
+/// `wake` with the pane's view and the typing passed in, so a test needs no herdr.
+pub fn wake_with(
+    project: &Project,
+    run: &str,
+    urgent: bool,
+    view_of: impl Fn(&str) -> PaneView,
+    type_prompt: impl Fn(&str, &str) -> Result<(), String>,
+) -> std::io::Result<(String, bool)> {
+    let home = crate::nirvana::home();
+    let (verdict, typed, queued) = wake_once(project, run, urgent, view_of, type_prompt)?;
+    if queued {
+        schedule_retry(home.as_deref(), project, run, now());
+    } else {
+        clear_retry(home.as_deref(), project, run);
+    }
+    Ok((verdict, typed))
+}
+
+fn wake_once(
+    project: &Project,
+    run: &str,
+    urgent: bool,
+    view_of: impl Fn(&str) -> PaneView,
+    type_prompt: impl Fn(&str, &str) -> Result<(), String>,
+) -> std::io::Result<(String, bool, bool)> {
     let journal = project.journal(run);
     let state = replay(&journal.read().0);
     if state.ended.is_some() {
-        return Ok(("the run has ended".into(), false));
+        return Ok(("the run has ended".into(), false, false));
     }
     let pane = state
         .opened
         .as_ref()
         .and_then(|opened| opened.orchestrator_pane.clone());
-    let view = pane.as_deref().map(crate::nirvana_worker::pane_view);
+    let view = pane.as_deref().map(view_of);
     let verdict = wake_decision(run, &state, view.as_ref(), now(), urgent);
     match verdict {
-        Wake::Nothing => Ok(("nothing waits".into(), false)),
+        Wake::Nothing => Ok(("nothing waits".into(), false, false)),
         Wake::Queue(why) => {
             record_queued(&journal, &why);
             Ok((
                 format!("{} event(s) queued: {why}", state.queue.len()),
                 false,
+                true,
             ))
         }
         Wake::Refuse(question) => {
@@ -2760,11 +2896,20 @@ pub fn wake(project: &Project, run: &str, urgent: bool) -> std::io::Result<(Stri
                     (),
                 ))
             })?;
-            Ok((format!("refused: {question}"), false))
+            Ok((format!("refused: {question}"), false, false))
         }
         Wake::Type(digest) => {
+            // Plan 31 review W: delivered once. The `UserPromptSubmit` notice may have delivered the queue since it
+            // was read; the journal says so (`woken_through`), read again under its lock just before typing.
+            let (_, delivered) = journal.transact(now(), |events| {
+                let fresh = replay(events);
+                Ok((Vec::new(), fresh.queue.is_empty() || fresh.ended.is_some()))
+            })?;
+            if delivered {
+                return Ok(("nothing waits: delivered meanwhile".into(), false, false));
+            }
             let pane = pane.unwrap_or_default();
-            match crate::nirvana_worker::type_prompt(&pane, &digest) {
+            match type_prompt(&pane, &digest) {
                 Ok(()) => {
                     journal.append(
                         now(),
@@ -2774,13 +2919,14 @@ pub fn wake(project: &Project, run: &str, urgent: bool) -> std::io::Result<(Stri
                             digest: digest.clone(),
                         },
                     )?;
-                    Ok((format!("woke {pane}: {digest}"), true))
+                    Ok((format!("woke {pane}: {digest}"), true, false))
                 }
                 Err(why) => {
                     record_queued(&journal, &why);
                     Ok((
                         format!("{} event(s) queued: {why}", state.queue.len()),
                         false,
+                        true,
                     ))
                 }
             }

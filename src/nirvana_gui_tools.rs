@@ -43,10 +43,17 @@ pub const BRIEF_LINE: &str = "Use the `*_run` batch and `*_state`; read crops, n
 /// control and holds a token, and it is no desktop server, so §5.3's line alone never reached it.
 pub const DEVICE_LINE: &str = "Never start a print, a laser job, or a send to a device. Stop and report when that is the next step.";
 
-/// Plan 31 §2.2, the Send rule: the line an order with a verified `--send-ok` quote gets in place of `DEVICE_LINE`.
-/// Measured in the 2026-10-29 audit: `dune-print-v5` sent a print with "1 overhang region could not get support"
-/// unread, and the owner's next words were "The ear hook keeps failing".
-pub const SEND_LINE: &str = "You may press Send once, as the last step, only if the slice shows no warning you cannot explain. Otherwise stop and report the warning.";
+/// Plan 31 §2.2, the Send rule: the line an order granted a device server with a verified `--send-ok` quote gets in
+/// place of `DEVICE_LINE`. Measured in the 2026-10-29 audit: `dune-print-v5` sent a print with "1 overhang region
+/// could not get support" unread, and the owner's next words were "The ear hook keeps failing". Review N4: it names
+/// the job the owner approved, so it is no leave to send any other.
+pub const SEND_LINE: &str = "You may press Send once, for the print or laser job the owner approved, as the last step, only if the slice shows no warning you cannot explain. Otherwise stop and report the warning.";
+
+/// Plan 31 review S1: the line a send-back or reseat child of an order that may Send gets after its brief. A child
+/// never inherits the approval: its parent may have pressed Send before it stopped, and a second Send is a second
+/// print. A new Send needs a new `seat run --send-ok` with a new quote.
+pub const SENT_BEFORE_LINE: &str =
+    "The order before you may already have pressed Send. Never press it; stop and report.";
 
 /// Plan 31 §2.2: `BRIEF_LINE` for a desktop order that may Send. `BRIEF_LINE` ends "never start a print or a job",
 /// which would contradict `SEND_LINE` in the same brief.
@@ -59,16 +66,32 @@ pub const DESKTOP_APPS: [(&str, &str); 2] = [
     ("xtool", "xTool Studio"),
 ];
 
+/// Plan 31 review B1: a quote shorter than this, in characters or in words, is refused. "ok", "yes" or "go ahead" is
+/// in many of the owner's prompts and says nothing about which job.
+pub const QUOTE_MIN_CHARS: usize = 20;
+pub const QUOTE_MIN_WORDS: usize = 4;
+
+/// Plan 31 review B1: the oldest owner prompt a quote may come from. An approval is for the job in hand, given in the
+/// turn that seats its order; one from another sitting is not.
+pub const QUOTE_MAX_AGE_S: u64 = 6 * 3600;
+
 /// The most of Nirvana Claude's transcript read for a `--send-ok` quote. The transcripts on this machine reach 55 MB
 /// (`3D-Printer Flow`, 2026-10-29); the owner's approval is in the turn that seats the order, so a tail holds it.
 const SEND_TAIL: u64 = 16 * 1024 * 1024;
 
-/// Plan 31 §2.2: the owner's approval an order carries, and where herdr found it. Recorded on the `seated` event.
+/// Plan 31 §2.2: the owner's approval an order carries, and where herdr found it. Recorded on the `seated` event, and
+/// printed by `seat run` (review B1 item 4), so the owner can read which prompt the approval came from.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SendOk {
     /// The owner's words, as `--send-ok` gave them.
     pub quote: String,
-    /// The check's result: the transcript and the time of the owner's prompt that holds the quote.
+    /// The owner's prompt that holds the quote, whole.
+    pub prompt: String,
+    /// That prompt's time, as the transcript has it.
+    pub at: String,
+    /// The session file the prompt was read from.
+    pub transcript: String,
+    /// The check's result in one line.
     pub check: String,
 }
 
@@ -378,10 +401,11 @@ pub fn with_server_lines(mut text: String, servers: &[String]) -> String {
     text
 }
 
-/// Plan 31 §2.2: an order with a verified `--send-ok` quote ends with `SEND_LINE` in place of `DEVICE_LINE`, and a
-/// desktop one with `DESKTOP_SEND_LINE` after it; every other order gets `with_server_lines`.
+/// Plan 31 §2.2: an order granted a server with a verified `--send-ok` quote ends with `SEND_LINE` in place of
+/// `DEVICE_LINE`, and a desktop one with `DESKTOP_SEND_LINE` after it; every other order gets `with_server_lines`.
+/// Review N3: an order granted no server gets no Send line, as it gets no device line.
 pub fn with_brief_lines(mut text: String, servers: &[String], send_ok: bool) -> String {
-    if !send_ok {
+    if !send_ok || servers.is_empty() {
         return with_server_lines(text, servers);
     }
     text.push_str("\n\n");
@@ -397,43 +421,108 @@ pub fn with_brief_lines(mut text: String, servers: &[String], send_ok: bool) -> 
     text
 }
 
+/// Plan 31 review S1: a send-back or reseat child's brief, from its parent's. The parent's order text is the child's,
+/// but the approval is not: `SEND_LINE` goes back to `DEVICE_LINE` and `DESKTOP_SEND_LINE` to `BRIEF_LINE`, and when
+/// an order before it may have sent, the brief ends with `SENT_BEFORE_LINE`. That is when the parent had `send_ok`,
+/// or the brief still holds the root's `SEND_LINE` (a second send-back quotes the root order) or an earlier child's
+/// `SENT_BEFORE_LINE` (a reseat of a send-back). A brief that lost its Send line still gets `DEVICE_LINE`, so no child
+/// of an approved order is ever without it. Pure.
+pub fn child_brief_lines(brief: &str, parent_send_ok: bool) -> String {
+    let approved = parent_send_ok || brief.contains(SEND_LINE) || brief.contains(SENT_BEFORE_LINE);
+    let mut text = brief
+        .replace(
+            &format!("{SEND_LINE}\n{DESKTOP_SEND_LINE}"),
+            &format!("{DEVICE_LINE}\n{BRIEF_LINE}"),
+        )
+        .replace(SEND_LINE, DEVICE_LINE);
+    if !approved || text.contains(SENT_BEFORE_LINE) {
+        return text;
+    }
+    text.truncate(text.trim_end().len());
+    if !text.contains(DEVICE_LINE) {
+        text.push_str("\n\n");
+        text.push_str(DEVICE_LINE);
+    }
+    text.push_str("\n\n");
+    text.push_str(SENT_BEFORE_LINE);
+    text.push('\n');
+    text
+}
+
 /// Plan 31 §2.1: the warning `herdr seat run` prints when the order's text names a desktop app whose server the
 /// project's `.mcp.json` defines, and its needs name no server. Measured in the 2026-10-29 audit: all 22 Bambu GUI
 /// orders had `needs: []`, so 0.43.0 gave no worker a server and every Studio action was a worker-written script.
 /// A warning, never a refusal: an order may name Studio without driving it.
+///
+/// Review round: 10 of the 22 recorded GUI orders called the app "Studio" alone. When the project defines exactly
+/// one desktop server, the word "Studio" counts as its app; with two, it names neither.
 pub fn server_hint(text: &str, defined: &[String], granted: &[String]) -> Option<String> {
     if !granted.is_empty() {
         return None;
     }
     let lower = text.to_lowercase();
-    let (server, app) = DESKTOP_APPS.iter().find(|(server, app)| {
-        defined.iter().any(|name| name == server) && lower.contains(&app.to_lowercase())
-    })?;
+    let desktop: Vec<&(&str, &str)> = DESKTOP_APPS
+        .iter()
+        .filter(|(server, _)| defined.iter().any(|name| name == server))
+        .collect();
+    let bare_studio = || {
+        let [only] = desktop[..] else { return None };
+        lower
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|word| word == "studio")
+            .then_some(only)
+    };
+    let (server, app) = DESKTOP_APPS
+        .iter()
+        .find(|(server, app)| {
+            defined.iter().any(|name| name == server) && lower.contains(&app.to_lowercase())
+        })
+        .or_else(bare_studio)?;
     Some(format!(
         "the order names {app} and its needs name no server; add `--needs {server}` if its worker drives {app}"
     ))
 }
 
-/// Plan 31 §2.2: the `--send-ok` quote checked against the owner's own prompts in Nirvana Claude's transcript text
-/// (`nirvana_fresh::owner_quote_at`: herdr's digests, `<task-notification>` and `!` lines are not the owner's). Pure.
-pub fn send_ok_in(text: &str, quote: &str, transcript: &Path) -> Result<SendOk, String> {
+/// Plan 31 §2.2 and review B1: the `--send-ok` quote checked against the owner's own prompts in Nirvana Claude's
+/// transcript text (`nirvana_fresh::owner_quote_at`, which tells the owner's lines by `origin` and refuses relayed
+/// ones). The quote holds at least `QUOTE_MIN_CHARS` characters and `QUOTE_MIN_WORDS` words, and the prompt is at most
+/// `QUOTE_MAX_AGE_S` old at `now`. Pure.
+pub fn send_ok_in(text: &str, quote: &str, transcript: &Path, now: u64) -> Result<SendOk, String> {
     let quote = quote.trim();
-    if quote.is_empty() {
-        return Err("--send-ok needs the owner's words".into());
+    if quote.chars().count() < QUOTE_MIN_CHARS || quote.split_whitespace().count() < QUOTE_MIN_WORDS
+    {
+        return Err(format!(
+            "--send-ok {quote:?} is too short to name a job: quote at least {QUOTE_MIN_WORDS} words and \
+             {QUOTE_MIN_CHARS} characters of the owner's approval"
+        ));
     }
-    match crate::nirvana_fresh::owner_quote_at(text, quote) {
-        Some(at) => Ok(SendOk {
-            quote: quote.to_owned(),
-            check: format!(
-                "found verbatim in the owner's prompt at {at} in {}",
-                transcript.display()
-            ),
-        }),
-        None => Err(format!(
-            "--send-ok {quote:?} is in none of the owner's prompts in {}; quote the owner's words exactly",
+    let Some(found) = crate::nirvana_fresh::owner_quote_at(text, quote) else {
+        return Err(format!(
+            "--send-ok {quote:?} is in none of the owner's own prompts in {} (a relayed message, a paste or a \
+             tool's text is not the owner's); quote the owner's words exactly",
             transcript.display()
-        )),
+        ));
+    };
+    let age = now.saturating_sub(found.at_s);
+    if age > QUOTE_MAX_AGE_S {
+        return Err(format!(
+            "--send-ok {quote:?} was found in the owner's prompt at {}, {} h ago, older than {} h; ask the owner again",
+            found.at,
+            age / 3600,
+            QUOTE_MAX_AGE_S / 3600
+        ));
     }
+    Ok(SendOk {
+        quote: quote.to_owned(),
+        check: format!(
+            "found verbatim in the owner's prompt at {} in {}",
+            found.at,
+            transcript.display()
+        ),
+        prompt: found.prompt,
+        at: found.at,
+        transcript: transcript.display().to_string(),
+    })
 }
 
 /// Plan 31 §2.2: the quote checked against the transcript of Nirvana Claude's last session in `folder`, which its
@@ -455,7 +544,7 @@ pub fn verify_send_ok(home: Option<&Path>, folder: &Path, quote: &str) -> Result
             transcript.display()
         )
     })?;
-    send_ok_in(&text, quote, &transcript)
+    send_ok_in(&text, quote, &transcript, crate::nirvana_run::now())
 }
 
 #[cfg(test)]

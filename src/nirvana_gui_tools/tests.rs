@@ -476,9 +476,8 @@ fn p31_a_send_ok_order_gets_the_send_line_in_place_of_the_device_line() {
     // A printer server is no desktop: the Send line alone.
     let printer = with_brief_lines("# o\n".into(), &["bambu".to_owned()], true);
     assert!(printer.ends_with(&format!("\n\n{SEND_LINE}")), "{printer}");
-    // An approval with no server still carries the rule.
-    let bare = with_brief_lines("# o\n".into(), &[], true);
-    assert!(bare.ends_with(&format!("\n\n{SEND_LINE}")), "{bare}");
+    // Review N3: an approval with no server gets no Send line, as it gets no device line.
+    assert_eq!(with_brief_lines("# o\n".into(), &[], true), "# o\n");
     // Without an approval every server order keeps the device line, and no order gets the Send line.
     let kept = with_brief_lines("# o\n".into(), &desktop, false);
     assert_eq!(kept, with_server_lines("# o\n".into(), &desktop));
@@ -511,11 +510,49 @@ fn p31_the_hint_names_the_server_when_the_order_names_its_app_and_needs_none() {
     );
 }
 
-/// One transcript line, as Claude Code 2.1.311 records it.
+/// Review round: a bare "Studio" counts as the app when the project defines exactly one desktop server, and as
+/// neither when it defines both; a word that only holds "studio" is not it.
+#[test]
+fn p31_a_bare_studio_names_the_one_desktop_server() {
+    let bambu_only = vec!["bambu".to_owned(), "bambu-studio-beta".to_owned()];
+    let hint =
+        server_hint("Slice the hook in Studio, then save\n", &bambu_only, &[]).expect("hint");
+    assert!(hint.contains("`--needs bambu-studio-beta`"), "{hint}");
+    let xtool_only = vec!["xtool".to_owned()];
+    let hint = server_hint("Open the dial in studio.", &xtool_only, &[]).expect("hint");
+    assert!(hint.contains("`--needs xtool`"), "{hint}");
+    let both = server_names(MCP_JSON).unwrap();
+    assert_eq!(server_hint("Slice it in Studio", &both, &[]), None);
+    assert_eq!(
+        server_hint("Render it in a studiolike light", &bambu_only, &[]),
+        None
+    );
+    assert_eq!(
+        server_hint("Slice it in Studio", &["bambu".to_owned()], &[]),
+        None
+    );
+    assert_eq!(
+        server_hint(
+            "Slice it in Studio",
+            &bambu_only,
+            &["bambu-studio-beta".to_owned()]
+        ),
+        None
+    );
+}
+
+/// The time the B1 tests read the transcripts at: 2026-10-29T04:00:00Z, 2 h 28 min after `P31_AT`.
+const P31_NOW: u64 = 1_793_246_400;
+const P31_AT: &str = "2026-10-29T01:32:14.584Z";
+
+/// The owner's approval in the B1 tests: 7 words, 36 characters.
+const P31_WORDS: &str = "Print the nosepiece when it is ready";
+
+/// One transcript line, as Claude Code 2.1.310 records it: a prompt the owner typed carries `origin: human`.
 fn p31_line(kind: &str, content: Value, extra: &[(&str, Value)]) -> String {
     let mut line = serde_json::json!({
         "type": kind,
-        "timestamp": "2026-10-29T01:32:14.584Z",
+        "timestamp": P31_AT,
         "message": {"role": kind, "content": content},
     });
     for (key, value) in extra {
@@ -524,71 +561,203 @@ fn p31_line(kind: &str, content: Value, extra: &[(&str, Value)]) -> String {
     line.to_string()
 }
 
+fn p31_human() -> (&'static str, Value) {
+    ("origin", serde_json::json!({"kind": "human"}))
+}
+
+fn p31_owner(text: &str) -> String {
+    p31_line("user", Value::String(text.into()), &[p31_human()])
+}
+
 #[test]
 fn p31_a_send_ok_quote_is_found_only_in_the_owners_own_prompts() {
-    let words = "Print it when ready";
+    let words = P31_WORDS;
+    let human = p31_human();
     let not_owner = [
-        // herdr's own wake digest, Claude Code's news of a background task, a `!` command and its output.
+        // herdr's own wake digest is typed in the pane, so it is `human` too; its lead tells it.
         p31_line(
             "user",
             Value::String(format!("herdr run dune-v5: {words}")),
-            &[],
+            std::slice::from_ref(&human),
         ),
+        // Claude Code's news of a background task, a `!` command and its output.
         p31_line(
             "user",
             Value::String(format!("<task-notification>{words}</task-notification>")),
-            &[],
+            &[("origin", serde_json::json!({"kind": "task-notification"}))],
         ),
         p31_line(
             "user",
             Value::String(format!("<bash-input>echo {words}</bash-input>")),
-            &[],
+            std::slice::from_ref(&human),
         ),
         p31_line(
             "user",
             Value::String(format!("<bash-stdout>{words}</bash-stdout>")),
-            &[],
+            std::slice::from_ref(&human),
         ),
         // A tool's result, a meta line, a subagent's prompt, and Nirvana Claude's own words.
         p31_line(
             "user",
             serde_json::json!([{"type": "tool_result", "content": words}]),
-            &[],
+            std::slice::from_ref(&human),
         ),
         p31_line(
             "user",
             Value::String(words.into()),
-            &[("isMeta", Value::Bool(true))],
+            &[human.clone(), ("toolUseResult", serde_json::json!({}))],
         ),
         p31_line(
             "user",
             Value::String(words.into()),
-            &[("isSidechain", Value::Bool(true))],
+            &[
+                human.clone(),
+                ("sourceToolUseID", Value::String("toolu_1".into())),
+            ],
+        ),
+        p31_line(
+            "user",
+            Value::String(words.into()),
+            &[human.clone(), ("isMeta", Value::Bool(true))],
+        ),
+        p31_line(
+            "user",
+            Value::String(words.into()),
+            &[human.clone(), ("isSidechain", Value::Bool(true))],
+        ),
+        // Claude Code's compact summary is shown in the transcript only; `owner_prompt_in` reads no such flag.
+        p31_line(
+            "user",
+            Value::String(words.into()),
+            &[
+                human.clone(),
+                ("isVisibleInTranscriptOnly", Value::Bool(true)),
+            ],
         ),
         p31_line(
             "assistant",
             serde_json::json!([{"type": "text", "text": words}]),
-            &[],
+            std::slice::from_ref(&human),
         ),
+        // A user line with no `origin`: what an agent-written prompt looks like, so it is not the owner's.
+        p31_line("user", Value::String(words.into()), &[]),
     ]
     .join("\n");
     let transcript = Path::new("C:/t/s.jsonl");
-    let why = send_ok_in(&not_owner, words, transcript).unwrap_err();
-    assert!(why.contains("none of the owner's prompts"), "{why}");
-    let owner = format!(
-        "{not_owner}\n{}",
-        p31_line("user", Value::String(format!("ok. {words}")), &[])
-    );
-    let found = send_ok_in(&owner, &format!("  {words} "), transcript).expect("found");
+    let why = send_ok_in(&not_owner, words, transcript, P31_NOW).unwrap_err();
+    assert!(why.contains("none of the owner's own prompts"), "{why}");
+    let owner = format!("{not_owner}\n{}", p31_owner(&format!("ok. {words}")));
+    let found = send_ok_in(&owner, &format!("  {words} "), transcript, P31_NOW).expect("found");
     assert_eq!(found.quote, words);
+    assert_eq!(found.prompt, format!("ok. {words}"));
+    assert_eq!(found.at, P31_AT);
+    assert_eq!(found.transcript, "C:/t/s.jsonl");
     assert!(
-        found.check.contains("2026-10-29T01:32:14.584Z") && found.check.contains("s.jsonl"),
+        found.check.contains(P31_AT) && found.check.contains("s.jsonl"),
         "{}",
         found.check
     );
     // Verbatim: another spelling is not the owner's words, and no words are no approval.
-    assert!(send_ok_in(&owner, "print it when ready", transcript).is_err());
-    assert!(send_ok_in(&owner, "  ", transcript).is_err());
+    assert!(send_ok_in(&owner, &words.to_lowercase(), transcript, P31_NOW).is_err());
+    assert!(send_ok_in(&owner, "  ", transcript, P31_NOW).is_err());
+}
+
+/// Review B1.1: "ok" and a three-word quote refuse, though the owner typed them.
+#[test]
+fn p31_a_short_quote_refuses_though_the_owner_typed_it() {
+    let transcript = Path::new("C:/t/s.jsonl");
+    let text = [
+        p31_owner("ok"),
+        p31_owner("Send it now"),
+        p31_owner("Send the print now"),
+        p31_owner("Approved: sendthenosepiece"),
+        p31_owner(P31_WORDS),
+    ]
+    .join("\n");
+    // 2, 11 and 18 characters; and 26 characters in 2 words.
+    for quote in [
+        "ok",
+        "Send it now",
+        "Send the print now",
+        "Approved: sendthenosepiece",
+    ] {
+        let why = send_ok_in(&text, quote, transcript, P31_NOW).unwrap_err();
+        assert!(why.contains("too short"), "{quote}: {why}");
+    }
+    assert!(send_ok_in(&text, P31_WORDS, transcript, P31_NOW).is_ok());
+}
+
+/// Review B1.2: the matching prompt is at most 6 hours old.
+#[test]
+fn p31_a_seven_hour_old_prompt_refuses() {
+    let transcript = Path::new("C:/t/s.jsonl");
+    let at = crate::nirvana_usage::rfc3339(P31_AT).unwrap();
+    let text = p31_owner(P31_WORDS);
+    let why = send_ok_in(&text, P31_WORDS, transcript, at + 7 * 3600).unwrap_err();
+    assert!(
+        why.contains("7 h ago") && why.contains("older than 6 h"),
+        "{why}"
+    );
+    assert!(send_ok_in(&text, P31_WORDS, transcript, at + 6 * 3600).is_ok());
+    // A time that does not read is no prompt.
+    let untimed = p31_line(
+        "user",
+        Value::String(P31_WORDS.into()),
+        &[
+            p31_human(),
+            ("timestamp", Value::String("yesterday".into())),
+        ],
+    );
+    assert!(send_ok_in(&untimed, P31_WORDS, transcript, P31_NOW).is_err());
+}
+
+/// Review B1.3: a teammate message, a cross-session message, an Artifact comment and a paste holding the quote refuse,
+/// as do prompts that mix the owner's words with one. Each is written as the 2026-10-29 scan found it (a relay with no
+/// `origin`), and again marked `human`, so the text alone must refuse it.
+#[test]
+fn p31_a_relayed_message_holding_the_quote_refuses() {
+    let transcript = Path::new("C:/t/s.jsonl");
+    let words = P31_WORDS;
+    let relayed = [
+        format!("<teammate-message teammate_id=\"team-lead\" summary=\"go\">\n{words}\n</teammate-message>"),
+        format!(
+            "Another Claude session sent a message: <teammate-message teammate_id=\"main\">{words}</teammate-message>"
+        ),
+        format!("<cross-session-message from=\"worker\">{words}</cross-session-message>"),
+        format!("[Artifact comment sent to Claude] {words}"),
+        format!("<pasted_content id=\"1\">{words}</pasted_content>"),
+        // Mixed: the owner's words first, a relayed block after them.
+        format!("{words}\n<teammate-message teammate_id=\"x\">done</teammate-message>"),
+        format!("I approve. {words}\n\n<pasted_content id=\"2\">log</pasted_content>"),
+    ];
+    for text in &relayed {
+        for extra in [vec![], vec![p31_human()]] {
+            let line = p31_line("user", Value::String(text.clone()), &extra);
+            let why = send_ok_in(&line, words, transcript, P31_NOW).unwrap_err();
+            assert!(
+                why.contains("none of the owner's own prompts"),
+                "{text}: {why}"
+            );
+        }
+        // A relay as one text block beside the owner's own block is mixed too.
+        let blocks = serde_json::json!([
+            {"type": "text", "text": format!("ok. {words}")},
+            {"type": "text", "text": text},
+        ]);
+        let line = p31_line("user", blocks, &[p31_human()]);
+        assert!(
+            send_ok_in(&line, words, transcript, P31_NOW).is_err(),
+            "{text}"
+        );
+    }
+    // A real owner prompt, with an image beside its words, passes.
+    let blocks = serde_json::json!([
+        {"type": "text", "text": format!("Looks right. {words}")},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA=="}},
+    ]);
+    let line = p31_line("user", blocks, &[p31_human()]);
+    let found = send_ok_in(&line, words, transcript, P31_NOW).expect("owner");
+    assert_eq!(found.prompt, format!("Looks right. {words}"));
 }
 
 #[test]
@@ -596,7 +765,7 @@ fn p31_verify_send_ok_reads_the_recorded_session_and_refuses_every_doubt() {
     let home = crate::nirvana::with_test_home("p31-verify-send-ok");
     let folder = home.path.join("project");
     std::fs::create_dir_all(&folder).unwrap();
-    let words = "Print it when ready";
+    let words = P31_WORDS;
     assert!(verify_send_ok(None, &folder, words).is_err());
     let why = verify_send_ok(Some(&home.path), &folder, words).unwrap_err();
     assert!(
@@ -612,13 +781,61 @@ fn p31_verify_send_ok_reads_the_recorded_session_and_refuses_every_doubt() {
     crate::nirvana_session_record::write(&home.path, &folder, &record).unwrap();
     let why = verify_send_ok(Some(&home.path), &folder, words).unwrap_err();
     assert!(why.contains("cannot be read"), "{why}");
+    // A prompt typed a minute ago, read against the clock.
+    let at = crate::nirvana_run::utc(crate::nirvana_run::now() - 60).replace(' ', "T");
     std::fs::write(
         &transcript,
-        p31_line("user", Value::String(words.into()), &[]) + "\n",
+        p31_line(
+            "user",
+            Value::String(words.into()),
+            &[p31_human(), ("timestamp", Value::String(at.clone()))],
+        ) + "\n",
     )
     .unwrap();
     let found = verify_send_ok(Some(&home.path), &folder, words).expect("found");
-    assert_eq!(found.quote, words);
+    assert_eq!(
+        (found.quote.as_str(), found.at.as_str()),
+        (words, at.as_str())
+    );
+}
+
+/// Review S1: a child's brief puts the device line back in place of the Send line, and an approved parent's child
+/// hears the parent may have sent. A child of a child, which quotes the root's text or its parent's brief, hears it too.
+#[test]
+fn p31_a_child_brief_never_carries_the_send_line() {
+    let desktop = vec!["bambu-studio-beta".to_owned()];
+    let approved = with_brief_lines("# Print it\n".into(), &desktop, true);
+    let child = child_brief_lines(&approved, true);
+    assert!(
+        child.contains(&format!("{DEVICE_LINE}\n{BRIEF_LINE}")),
+        "{child}"
+    );
+    assert!(
+        !child.contains(SEND_LINE) && !child.contains(DESKTOP_SEND_LINE),
+        "{child}"
+    );
+    assert!(child.trim_end().ends_with(SENT_BEFORE_LINE), "{child}");
+    // A printer server's Send line alone.
+    let printer = child_brief_lines(
+        &with_brief_lines("# o\n".into(), &["bambu".into()], true),
+        true,
+    );
+    assert!(
+        printer.contains(DEVICE_LINE) && !printer.contains(SEND_LINE),
+        "{printer}"
+    );
+    // The grandchild: its parent had no `send_ok`, but the text it quotes did.
+    assert_eq!(child_brief_lines(&approved, false), child);
+    assert_eq!(child_brief_lines(&child, false), child);
+    // A brief that lost its lines still gets the device line when its parent was approved.
+    let bare = child_brief_lines("# Send it\n", true);
+    assert!(
+        bare.contains(DEVICE_LINE) && bare.contains(SENT_BEFORE_LINE),
+        "{bare}"
+    );
+    // No approval anywhere: the brief is unchanged.
+    let plain = with_brief_lines("# Slice it\n".into(), &desktop, false);
+    assert_eq!(child_brief_lines(&plain, false), plain);
 }
 
 /// Plan 31 §2.1's measurement, run by hand: `P31_ORDERS` names a TSV of `run, order, cli, class, gui|-, file` for

@@ -389,6 +389,12 @@ impl App {
             Ok(resolved) => resolved,
             Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
         };
+        // Nirvana fork, plan 31 review S3: the agent's keys go to its pane, so the same guard as `pane send-keys`.
+        if let Some(why) =
+            self.nirvana_finished_worker(resolved.ws_idx, resolved.pane_id, params.force)
+        {
+            return encode_error(id, "finished_worker", why);
+        }
         let Some(terminal_id) = self
             .state
             .workspaces
@@ -831,6 +837,7 @@ mod tests {
         let rejected = app.handle_agent_send_keys(
             "req-invalid".into(),
             AgentSendKeysParams {
+                force: false,
                 target: "reviewer".into(),
                 keys: vec!["enter".into(), "not-a-key".into()],
             },
@@ -842,6 +849,7 @@ mod tests {
         let sent = app.handle_agent_send_keys(
             "req-valid".into(),
             AgentSendKeysParams {
+                force: false,
                 target: "reviewer".into(),
                 keys: vec!["up".into(), "enter".into()],
             },

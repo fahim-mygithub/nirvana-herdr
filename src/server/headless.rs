@@ -3385,6 +3385,8 @@ impl HeadlessServer {
         changed |= self.app.nirvana_idle_compact(now);
         // Plan 25 §2: after the compact, so a compact pasted in this pass holds the fresh start off its pane.
         changed |= self.app.nirvana_fresh(now);
+        // Plan 31 review W: a queued wake is tried again until it is delivered.
+        changed |= self.app.nirvana_wake_retry(now);
         changed
     }
 }

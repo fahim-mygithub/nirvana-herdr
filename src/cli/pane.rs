@@ -10,6 +10,16 @@ pub(crate) fn command() -> clap::Command {
     bindings::command()
 }
 
+/// Plan 31 review S2: a send from herdr itself (`nirvana_worker::SELF_SEND_ENV`) passes the finished-worker guard, as
+/// the owner's `--force` does.
+fn self_send(method: &mut Method, from_herdr: bool) {
+    if let Method::PaneSendText(crate::api::schema::panes::PaneSendTextParams { force, .. })
+    | Method::PaneSendKeys(crate::api::schema::panes::PaneSendKeysParams { force, .. }) = method
+    {
+        *force |= from_herdr;
+    }
+}
+
 pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
     let Some(name) = args.first() else {
         command().print_help()?;
@@ -27,7 +37,7 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         }
         return Ok(2);
     };
-    let request = match leaf.request(&args[1..]) {
+    let mut request = match leaf.request(&args[1..]) {
         Ok(request) => request,
         Err(ParseError::Io(error)) => return Err(error),
         Err(ParseError::Usage(message)) => {
@@ -36,16 +46,12 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         }
         Err(ParseError::Clap(error)) => return super::print_clap_error(&error),
     };
-    // Nirvana fork, plan 31 §2.4: text typed into a finished worker's pane is read by nobody; say so and name the order.
-    if let Method::PaneSendText(crate::api::schema::panes::PaneSendTextParams { pane_id, .. })
-    | Method::PaneSendKeys(crate::api::schema::panes::PaneSendKeysParams { pane_id, .. }) =
-        &request.method
-    {
-        if let Some(why) = crate::nirvana_worker::finished_worker(pane_id) {
-            eprintln!("herdr pane {name}: {why}");
-            return Ok(1);
-        }
-    }
+    // Nirvana fork, plan 31 §2.4: the server refuses text for a finished worker's pane (review S3). herdr's own calls
+    // of this CLI pass the escape (review S2: the agy account switch types into its own tab's pane).
+    self_send(
+        &mut request.method,
+        std::env::var_os(crate::nirvana_worker::SELF_SEND_ENV).is_some(),
+    );
     if matches!(leaf.output, bindings::Output::Quiet) {
         return super::send_ok_request(request.method);
     }
@@ -1067,51 +1073,30 @@ mod tests {
         );
     }
 
-    /// Plan 31 §2.4: `pane send-text` and `pane send-keys` into a finished worker's pane type nothing and exit 1.
-    /// The socket names a file that does not exist, so a send that got past the guard fails here and never reaches
-    /// a live herdr.
+    /// Plan 31 review S2: `--force` is the owner's way past the finished-worker guard, and herdr's own calls set it
+    /// through `SELF_SEND_ENV`; any other send leaves it off.
     #[test]
-    fn p31_send_text_to_a_finished_workers_pane_types_nothing() {
-        use crate::nirvana_run::{Kind, Project, PROJECT_ENV};
-        let root = std::env::temp_dir().join(format!("herdr-p31-send-text-{}", std::process::id()));
-        let project = Project::at(&root);
-        project.ensure().unwrap();
-        let journal = project.journal("dune-v5");
-        journal
-            .append(
-                1,
-                Kind::Started {
-                    order: "dune-slice-v5".into(),
-                    attempt: 1,
-                    pid: None,
-                    pane: Some("wP:p1D".into()),
-                    tab: None,
-                    resume: None,
-                    argv: Vec::new(),
-                },
-            )
-            .unwrap();
-        journal
-            .append(
-                2,
-                Kind::Ended {
-                    order: Some("dune-slice-v5".into()),
-                    outcome: "delivered".into(),
-                    why: None,
-                    exit: Some(0),
-                    pools: Vec::new(),
-                    pools_basis: None,
-                },
-            )
-            .unwrap();
-        std::env::set_var(PROJECT_ENV, &root);
-        std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, root.join("no-such.sock"));
-        let text = run_pane_command(&args(&["send-text", "wP:p1D", "Print it when ready"]));
-        let keys = run_pane_command(&args(&["send-keys", "wP:p1D", "Enter"]));
-        std::env::remove_var(PROJECT_ENV);
-        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
-        let _ = std::fs::remove_dir_all(&root);
-        assert_eq!(text.ok(), Some(1));
-        assert_eq!(keys.ok(), Some(1));
+    fn p31_herdrs_own_send_and_force_pass_the_guard() {
+        let force = |method: &Method| match method {
+            Method::PaneSendText(params) => params.force,
+            Method::PaneSendKeys(params) => params.force,
+            _ => panic!("not a send"),
+        };
+        for name in ["send-text", "send-keys"] {
+            let typed = if name == "send-text" {
+                "hello"
+            } else {
+                "Enter"
+            };
+            let mut plain = request(name, &["wP:p1D", typed]).unwrap().method;
+            self_send(&mut plain, false);
+            assert!(!force(&plain), "{name}");
+            let mut own = request(name, &["wP:p1D", typed]).unwrap().method;
+            self_send(&mut own, true);
+            assert!(force(&own), "{name}");
+            let mut forced = request(name, &["--force", "wP:p1D", typed]).unwrap().method;
+            self_send(&mut forced, false);
+            assert!(force(&forced), "{name}");
+        }
     }
 }

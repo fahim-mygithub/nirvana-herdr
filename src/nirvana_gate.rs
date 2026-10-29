@@ -2111,6 +2111,9 @@ fn send_back(
     };
     let seated = &known.seated;
     let brief = send_back_brief(&order, root, n, &axes, root_text, &integration_branch(run));
+    // Plan 31 review S1: the child never inherits the approval; it keeps the device line, and hears the parent may
+    // have sent.
+    let brief = crate::nirvana_gui_tools::child_brief_lines(&brief, known.seated.send_ok.is_some());
     let mut request = Request::new(&seated.class);
     request.size = seated.size;
     // Plan 29 §5.2: an order seated for a project MCP server goes back on a claude seat or not at all.
@@ -2204,7 +2207,8 @@ fn send_back(
             .map(|w| (w.window.clone(), w.expected))
             .collect(),
         jev_pick: None,
-        send_ok: seated.send_ok.clone(),
+        // Plan 31 review S1: a new Send needs a new `--send-ok` with a new quote.
+        send_ok: None,
     };
     journal
         .transact(now(), |_| {

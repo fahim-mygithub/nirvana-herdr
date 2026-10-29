@@ -26,6 +26,10 @@ cli_params! {
     pub struct AgentSendKeysParams => AgentSendKeysProjection {
         pub target: String => Field::new(String::new()).input(bindings::target()),
         pub keys: Vec<String> => Field::new(Vec::new()).input(bindings::keys()),
+        /// Nirvana fork, plan 31 review S2: type even into a pane whose last Nirvana worker has ended.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pub force: bool => Field::new(false).input(crate::cli::projection::boolean("force", true)
+            .help("Type even into a pane whose last Nirvana worker has ended")),
     }
 }
 

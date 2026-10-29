@@ -600,7 +600,9 @@ fn agent_prompt(params: AgentPromptParams) -> std::io::Result<i32> {
     super::print_response(&response)
 }
 
-fn agent_send_keys(params: AgentSendKeysParams) -> std::io::Result<i32> {
+fn agent_send_keys(mut params: AgentSendKeysParams) -> std::io::Result<i32> {
+    // Nirvana fork, plan 31 review S2: herdr's own calls pass the finished-worker guard's escape.
+    params.force |= std::env::var_os(crate::nirvana_worker::SELF_SEND_ENV).is_some();
     super::print_response(&super::send_request(&Request {
         id: "cli:agent:send-keys".into(),
         method: Method::AgentSendKeys(params),

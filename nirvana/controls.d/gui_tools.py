@@ -100,7 +100,7 @@ CONTROLS = (
             "    let file = write_order_config(", T_ORDER, "rust"),
     # §5.3 and review F4: every server order's brief says never start a device; a desktop one batches too.
     Control("p29_brief_no_device_line", GUI,
-            "    text.push_str(DEVICE_LINE);\n", "", T_BRIEF, "rust"),
+            "\n    text.push_str(DEVICE_LINE);\n    if servers\n", "\n    if servers\n", T_BRIEF, "rust"),
     Control("p29_brief_desktop_for_all", GUI,
             "        .any(|server| DESKTOP_SERVERS.contains(&server.as_str()))\n",
             "        .any(|server| !server.is_empty())\n", T_BRIEF, "rust"),

@@ -51,6 +51,10 @@ chore, can go to a `worker-*` subagent instead of a pane worker; the agent's nam
   `herdr seat run ... --send-ok "<the owner's words, copied exactly>"`. herdr finds the words in the owner's prompts
   or refuses the order. The worker then sends once, last, and only if the slice shows no warning it cannot explain.
   A print sent with "1 overhang region could not get support" unread failed at the ear hook (2026-10-29).
+  The quote is at least 4 words and 20 characters, from a prompt the owner typed in the last 6 hours, on an order
+  that names its device server in `--needs`. A teammate's or another session's message, an Artifact comment or a
+  paste is not the owner's words. A send-back or reseat never inherits the approval: a new Send needs a new
+  `--send-ok`.
 - Never type into a finished worker's pane: nobody reads it. Answer a worker that asked through the gate, whose
   send-back carries the answer to a new worker. On 2026-10-29 a go-ahead typed into a finished pane sat 68 minutes.
 - Run builds, test suites and gates longer than about a minute with `herdr job run`, then check them with `herdr job status` or `herdr job tail`, never by reading the whole log.

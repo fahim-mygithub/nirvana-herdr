@@ -498,18 +498,25 @@ pub fn agy_ready_for(screen: &str, account: &str) -> bool {
 /// How long the switch watches agy's screen for the old account before it gives up typing.
 const AGY_WATCH: Duration = Duration::from_secs(90);
 
+/// Runs this herdr's CLI. Plan 31 review S2: with `nirvana_worker::SELF_SEND_ENV`, so its typing into its own tab's
+/// pane (the agy switch below) is never refused as a message to a finished worker.
 fn herdr_self(args: &[&str]) -> Option<String> {
-    let exe = std::env::current_exe().ok()?;
-    let mut command = Command::new(exe);
-    command
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    crate::platform::configure_background_command(&mut command);
+    let mut command = self_command(std::env::current_exe().ok()?, args);
     let out = command.output().ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn self_command(exe: std::path::PathBuf, args: &[&str]) -> Command {
+    let mut command = Command::new(exe);
+    command
+        .env(crate::nirvana_worker::SELF_SEND_ENV, "1")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    crate::platform::configure_background_command(&mut command);
+    command
 }
 
 /// Watches this tab's pane until agy shows `account`, then types the switch text and Enter, once.
@@ -1005,5 +1012,19 @@ mod tests {
         store_drift(None);
         assert!(take_changed());
         assert_eq!(antigravity_drift(), None);
+    }
+
+    /// Plan 31 review S2: the agy switch types into its own tab's pane through herdr's CLI, with the escape the
+    /// finished-worker guard lets pass.
+    #[test]
+    fn p31_herdrs_own_cli_calls_carry_the_self_send_escape() {
+        let command = self_command("herdr".into(), &["pane", "send-text", "wP:p1", "x"]);
+        let env: Vec<_> = command.get_envs().collect();
+        assert!(
+            env.iter().any(|(key, value)| *key
+                == std::ffi::OsStr::new(crate::nirvana_worker::SELF_SEND_ENV)
+                && value.is_some()),
+            "{env:?}"
+        );
     }
 }

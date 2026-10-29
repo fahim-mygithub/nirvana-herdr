@@ -798,6 +798,42 @@ pub struct LiveLock {
 impl Drop for LiveLock {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(self.path.with_extension("stop"));
+        let _ = std::fs::remove_file(self.path.with_extension(PANE_EXT));
+    }
+}
+
+/// Plan 31 review S4: beside a live lock, `<order>.pane` names the pane its supervisor runs in. herdr's launch types
+/// `seat exec` into a reused pane, and the supervisor holds its lock before its worker's `started` event, so for that
+/// stretch the pane's last `started` is the finished worker before it.
+const PANE_EXT: &str = "pane";
+
+/// Plan 31 review S2: set only by herdr's own calls of its CLI (`nirvana_accounts::herdr_self`), so its own typing
+/// into a pane is never taken for a message to a finished worker. The owner's way past the guard is `--force`.
+pub const SELF_SEND_ENV: &str = "HERDR_NIRVANA_SELF_SEND";
+
+/// Plan 31 review S3: the file under the Nirvana home that names the project whose worker last ran in a pane, so the
+/// server, which serves every project's panes, finds the journals to read.
+fn pane_index(home: &Path, pane: &str) -> PathBuf {
+    let safe: String = pane
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    home.join(nirvana_seat::DIR).join("panes").join(safe)
+}
+
+/// Records, as the supervisor takes a pane, that it runs `order` there (`PANE_EXT`) and that the pane's journals are
+/// `project`'s (`pane_index`). A failed write loses the guard's facts, never the worker.
+pub(crate) fn note_worker_pane(project: &Project, run: &str, order: &str, pane: &str) {
+    let _ = std::fs::write(
+        live_dir(project, run).join(format!("{order}.{PANE_EXT}")),
+        pane,
+    );
+    if let Some(home) = crate::nirvana::home() {
+        let path = pane_index(&home, pane);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, project.root.display().to_string());
     }
 }
 
@@ -856,8 +892,13 @@ pub fn take_live(project: &Project, run: &str, order: &str) -> std::io::Result<O
 /// On 2026-10-29 Nirvana Claude answered `dune-slice-v5`'s question, then the owner's go-ahead, with `herdr pane
 /// send-text wP:p1D` and `send-keys Enter` (its transcript, lines 4283 and 4312) after the worker had ended. Nobody read
 /// them: 4,111 s passed until the owner asked "whats the progresss can we print?". A pane a later worker reuses
-/// (`place::Placement::Reuse`) belongs to that worker. Pure.
-pub fn finished_worker_in(runs: &[(String, Vec<Event>)], pane: &str) -> Option<String> {
+/// (`place::Placement::Reuse`) belongs to that worker. Review S4: `live` says whether a supervisor holds the order's
+/// lock; a pane whose last order is live is not finished. Pure but for `live`.
+pub fn finished_worker_in(
+    runs: &[(String, Vec<Event>)],
+    pane: &str,
+    live: impl Fn(&str, &str) -> bool,
+) -> Option<String> {
     let (run, events, started) = runs
         .iter()
         .flat_map(|(run, events)| {
@@ -873,6 +914,9 @@ pub fn finished_worker_in(runs: &[(String, Vec<Event>)], pane: &str) -> Option<S
         .max_by_key(|(_, _, event, _)| (event.at, event.seq))
         .map(|(run, events, event, order)| (run, events, (event.seq, order)))?;
     let (seq, order) = started;
+    if live(run, order) {
+        return None;
+    }
     let ended = events.iter().find_map(|event| match &event.kind {
         Kind::Ended {
             order: Some(done),
@@ -885,14 +929,19 @@ pub fn finished_worker_in(runs: &[(String, Vec<Event>)], pane: &str) -> Option<S
     Some(format!(
         "pane {pane} held order {order} of run {run}, whose worker ended {outcome} at {}; nothing was typed, since a \
          finished worker reads nothing. Answer it through the gate (`herdr gate run {order} --run {run}`: a send-back \
-         carries the answer to a new worker) or seat a new order",
+         carries the answer to a new worker) or seat a new order. If the pane is yours now, pass `--force`. \
+         (`pane run` is not checked: herdr's own launch types into a reused pane with it.)",
         utc(at)
     ))
 }
 
-/// `finished_worker_in` over the caller's project, read from its journals; `None` outside a Nirvana project.
-pub fn finished_worker(pane: &str) -> Option<String> {
-    let project = Project::from_env();
+/// `finished_worker_in` for a pane, over the journals of the project `pane_index` names under `home`; `None` when no
+/// worker of any project ran there. Called where herdr's server serves `pane send-text`, `pane send-keys` and
+/// `agent send-keys` (review S3), so a socket client meets it as the CLI does. Review S4: a pane any live supervisor
+/// names (`PANE_EXT`) is never finished.
+pub fn finished_worker_at(home: &Path, pane: &str) -> Option<String> {
+    let root = std::fs::read_to_string(pane_index(home, pane)).ok()?;
+    let project = Project::at(root.trim());
     if !project.dir().join("runs").is_dir() {
         return None;
     }
@@ -904,7 +953,26 @@ pub fn finished_worker(pane: &str) -> Option<String> {
             (run, events)
         })
         .collect();
-    finished_worker_in(&runs, pane)
+    let held = runs.iter().any(|(run, _)| {
+        std::fs::read_dir(live_dir(&project, run))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == PANE_EXT))
+            .any(|entry| {
+                let path = entry.path();
+                let order = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("");
+                std::fs::read_to_string(&path).is_ok_and(|named| named.trim() == pane)
+                    && live(&project, run, order)
+            })
+    });
+    if held {
+        return None;
+    }
+    finished_worker_in(&runs, pane, |run, order| live(&project, run, order))
 }
 
 /// Whether a supervisor runs for the order now.
@@ -1326,6 +1394,9 @@ pub fn exec(
         writeln!(out, "{order} already has a live worker")?;
         return Ok(0);
     };
+    if let Some(pane) = pane {
+        note_worker_pane(project, run, order, pane);
+    }
     let run_dir = project.run_dir(run);
     let streams = run_dir.join("streams");
     std::fs::create_dir_all(&streams)?;
@@ -1883,7 +1954,8 @@ fn rate_limited(
                 use_basis: booked.use_basis.clone(),
                 expected: booked.expected(),
                 jev_pick: None,
-                send_ok: seated.send_ok.clone(),
+                // Plan 31 review S1: a new Send needs a new `--send-ok` with a new quote.
+                send_ok: None,
             };
             let why = if override_dropped {
                 format!(
@@ -2015,6 +2087,8 @@ seat: continue its work, do not start over. Its changes are already in this fold
     }
     brief.push_str("\n## The original order\n\n");
     brief.push_str(&original);
+    // Plan 31 review S1: the reseat never inherits the approval; it keeps the device line, and hears it may have sent.
+    let brief = crate::nirvana_gui_tools::child_brief_lines(&brief, seated.send_ok.is_some());
     write_order(project, Path::new(&seated.cwd), &child, &brief)
 }
 
@@ -2763,6 +2837,16 @@ fn run_cli(args: &[String]) -> std::io::Result<()> {
                 if let Some(reason) = outcome["reason"].as_str() {
                     println!("{reason}");
                 }
+                // Plan 31 review B1 item 4: the prompt the approval was read from, so the owner can see it is theirs.
+                if let Some(send_ok) = outcome["send_ok"].as_object() {
+                    let field = |key: &str| send_ok.get(key).and_then(Value::as_str).unwrap_or("");
+                    println!(
+                        "send approved by the owner's prompt at {} in {}:\n> {}",
+                        field("at"),
+                        field("transcript"),
+                        field("prompt").replace('\n', "\n> ")
+                    );
+                }
             }
             Ok(())
         }
@@ -3008,14 +3092,28 @@ pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i3
     let spec = crate::nirvana_gate::spec(&text);
     // Plan 31 §2.2: a quote herdr cannot find in the owner's own prompts refuses the order, before it is booked.
     let send_ok = match &request.send_ok {
-        Some(quote) => Some(
-            crate::nirvana_gui_tools::verify_send_ok(
-                crate::nirvana::home().as_deref(),
-                &send_ok_folder(project),
-                quote,
+        Some(quote) => {
+            // Review N3: the Send line goes only to an order granted a device server, so an approval for an order
+            // with none would be journaled and never told to its worker. It is refused instead, naming the fix.
+            let defined =
+                crate::nirvana_gui_tools::project_servers(&project.root).unwrap_or_default();
+            if !request.needs.iter().any(|need| defined.contains(need)) {
+                return Err((
+                    2,
+                    "--send-ok needs an order granted a device server: name it in --needs (bambu-studio-beta, xtool, \
+                     bambu)"
+                        .into(),
+                ));
+            }
+            Some(
+                crate::nirvana_gui_tools::verify_send_ok(
+                    crate::nirvana::home().as_deref(),
+                    &send_ok_folder(project),
+                    quote,
+                )
+                .map_err(|why| (2, why))?,
             )
-            .map_err(|why| (2, why))?,
-        ),
+        }
         None => None,
     };
     if let Some(class) = &request.class {
@@ -3145,6 +3243,7 @@ pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i3
         "events": written.len(),
         "worker": worker,
         "warning": warning,
+        "send_ok": seated.send_ok,
     }))
 }
 

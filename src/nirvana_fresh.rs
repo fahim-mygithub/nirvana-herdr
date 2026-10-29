@@ -662,24 +662,112 @@ fn owner_typed_in(value: &Value) -> bool {
     owner_prompt_in(&shown).is_some()
 }
 
-/// Plan 31 §2.2: the time of the owner's last prompt in a transcript's text that holds `quote` verbatim; `None` when
-/// none does. The owner's prompts are `owner_prompt_in`'s own (herdr's digests, Claude Code's meta lines and
-/// `<task-notification>` are not), and a `!` command's lines are not the owner's words. A line that does not parse is
-/// no prompt here: a doubt finds no quote, and no quote refuses the Send. Pure.
-pub fn owner_quote_at(text: &str, quote: &str) -> Option<String> {
+/// Plan 31 review B1: what marks a `user` line's text as relayed, not typed by the owner, wherever in the text it
+/// stands. Read from the transcripts under `~/.claude/projects` on 2026-10-29 (2,151 files of the last 40 days):
+/// a teammate's message is recorded as `<teammate-message ...>` text, and in a lead's own transcript as `Another
+/// Claude session sent a message: <teammate-message ...>`, which is also how a cross-session message and the one
+/// Artifact-comment relay seen arrive; none of the 939 such lines carries `origin`. An owner's paste is wrapped in
+/// `<pasted_content>` on lines that do carry `origin: human` (11), so the owner's own lines can still hold words
+/// that are not theirs. `<cross-session-message` and `[Artifact comment sent to Claude]` were seen in no `user`
+/// line; they are named because Claude Code documents them as the leads of those relays.
+pub const RELAYED_MARKS: [&str; 12] = [
+    "<teammate-message",
+    "<cross-session-message",
+    "Another Claude session sent",
+    "[Artifact comment sent to Claude]",
+    "<pasted_content",
+    "<task-notification>",
+    "<system-reminder>",
+    "<bash-input>",
+    "<bash-stdout>",
+    "<bash-stderr>",
+    "<command-",
+    "<local-command-",
+];
+
+/// Plan 31 §2.2: the owner's prompt a `--send-ok` quote was found in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerQuote {
+    /// The prompt's `timestamp`, as the transcript has it.
+    pub at: String,
+    /// The same time in seconds.
+    pub at_s: u64,
+    /// The prompt's text.
+    pub prompt: String,
+}
+
+/// Plan 31 §2.2 and review B1: the owner's last prompt in a transcript's text that holds `quote` verbatim; `None` when
+/// none does. Here the owner is told positively, not by leaving others out:
+/// - The line carries `origin: {"kind": "human"}`. Claude Code 2.1.272 to 2.1.310 wrote it on every prompt typed in
+///   the pane or sent from Remote Control (the 2026-10-29 scan: 968 lines), and on no teammate message, cross-session
+///   message, task notice, `/compact` or compact summary. herdr's wake digest is typed in the pane, so it is `human`
+///   too (53 in `3D-Printer Flow`'s transcript), and `owner_prompt_in`'s `herdr run ` lead leaves it out.
+/// - No flag of another writer: `isMeta`, `isSidechain`, `isCompactSummary`, `isVisibleInTranscriptOnly`, a
+///   `toolUseResult` or a `sourceToolUseID`; and every content block is text or an image.
+/// - No text block holds a `RELAYED_MARKS` mark anywhere, so a prompt mixing the owner's words with a relayed
+///   message is not the owner's either.
+/// - The time reads. A line that does not parse is no prompt: a doubt finds no quote, and no quote refuses the Send.
+///
+/// A transcript from a Claude Code that writes no `origin` therefore holds no owner quote. Pure.
+pub fn owner_quote_at(text: &str, quote: &str) -> Option<OwnerQuote> {
     text.lines().rev().find_map(|line| {
         let value: Value = serde_json::from_str(line.trim()).ok()?;
-        if bang_line(&value) || !owner_prompt_in(&value)?.contains(quote) {
+        let prompt = owner_words_in(&value)?;
+        if !prompt.contains(quote) {
             return None;
         }
-        Some(
-            value
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .unwrap_or("an unknown time")
-                .to_owned(),
-        )
+        let at = value.get("timestamp").and_then(Value::as_str)?;
+        Some(OwnerQuote {
+            at: at.to_owned(),
+            at_s: crate::nirvana_usage::rfc3339(at)?,
+            prompt,
+        })
     })
+}
+
+/// `owner_quote_at`'s reading of one line: the prompt's text when the owner typed it, by its rules. Pure.
+fn owner_words_in(value: &Value) -> Option<String> {
+    if value.pointer("/origin/kind").and_then(Value::as_str) != Some("human") {
+        return None;
+    }
+    // A flag present with any value but `false` is another writer's line.
+    let flagged = [
+        "isMeta",
+        "isSidechain",
+        "isCompactSummary",
+        "isVisibleInTranscriptOnly",
+    ]
+    .iter()
+    .any(|flag| {
+        value
+            .get(*flag)
+            .is_some_and(|set| *set != Value::Bool(false))
+    });
+    if flagged || value.get("toolUseResult").is_some() || value.get("sourceToolUseID").is_some() {
+        return None;
+    }
+    let texts: Vec<&str> = match value.pointer("/message/content")? {
+        Value::String(text) => vec![text.as_str()],
+        Value::Array(blocks) => {
+            let mut texts = Vec::new();
+            for block in blocks {
+                match block.get("type").and_then(Value::as_str) {
+                    Some("text") => texts.push(block.get("text").and_then(Value::as_str)?),
+                    Some("image") => {}
+                    _ => return None,
+                }
+            }
+            texts
+        }
+        _ => return None,
+    };
+    if texts
+        .iter()
+        .any(|text| RELAYED_MARKS.iter().any(|mark| text.contains(mark)))
+    {
+        return None;
+    }
+    owner_prompt_in(value)
 }
 
 /// The owner's last `n` prompts in a transcript's text, oldest first. Pure.
