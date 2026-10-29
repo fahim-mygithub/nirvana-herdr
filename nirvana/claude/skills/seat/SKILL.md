@@ -47,6 +47,9 @@ owner's words where they matter. Then:
 - **A pane worker** (anything longer than a few minutes, and every agy or local order):
   `herdr seat run <seat> --order .nirvana/orders/<order>.md --order-id <order> --run <run> --class <class> --size <size> --worktree`.
   It reuses the booking, opens a pane, and returns at once. A second `seat run` of the same order returns the first.
+  An order that drives Bambu Studio or xTool Studio adds `--needs bambu-studio-beta` or `--needs xtool`, the
+  project's `.mcp.json` server, so its worker gets the server's tools. An order that may press Send adds
+  `--send-ok "<the owner's words>"`, copied exactly from the owner's prompt; herdr refuses a quote it cannot find.
 - **A worker subagent** (a short read, review or chore on Claude that needs no pane): spawn
   `nirvana:worker-<seat>-<effort>` with the seat and effort the pick gave (`opus-high`, `opus-medium`,
   `sonnet-medium`, `sonnet-low`, `haiku-low`). Every subagent is seated first: `herdr seat pick --book <order>`,

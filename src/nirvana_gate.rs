@@ -2204,6 +2204,7 @@ fn send_back(
             .map(|w| (w.window.clone(), w.expected))
             .collect(),
         jev_pick: None,
+        send_ok: seated.send_ok.clone(),
     };
     journal
         .transact(now(), |_| {

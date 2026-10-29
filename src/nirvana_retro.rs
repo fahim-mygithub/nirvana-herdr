@@ -1041,6 +1041,7 @@ mod tests {
             use_basis: None,
             expected: BTreeMap::new(),
             jev_pick: None,
+            send_ok: None,
         }
     }
 

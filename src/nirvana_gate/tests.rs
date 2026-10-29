@@ -471,6 +471,7 @@ fn seated(order: &str, parent: Option<&str>) -> Seated {
         use_basis: None,
         expected: BTreeMap::new(),
         jev_pick: None,
+        send_ok: None,
     }
 }
 
@@ -1210,8 +1211,23 @@ fn send_back_inherits_override_and_does_not_count_against_run_overrides() {
     let journal = project.journal(run);
 
     let table = nirvana_seat::parse(nirvana_seat::DEFAULT).expect("table");
+    // Plan 31 §2.5: the stand-in world, so the pick never reads this machine's live seats. With the live world the
+    // rule picked sonnet without the override too, so its sabotage control could not go red (p29c record).
+    nirvana_seat::set_test_world(Some(BTreeMap::new()));
+    let mut rule = nirvana_seat::Request::new("build.bounded");
+    rule.size = SizeName::Small;
+    let rule_pick = nirvana_seat::pick(&table, &nirvana_seat::live_world(&table), &rule)
+        .expect("rule pick")
+        .seat;
+    // The parent sat on a seat the rule would not give it, by the owner's override.
+    let overridden = if rule_pick == "opus" { "haiku" } else { "opus" };
     let mut seated_order = seated("build-1", None);
-    seated_order.override_reason = Some("owner insisted on sonnet".into());
+    seated_order.seat = overridden.into();
+    seated_order.model = table
+        .seat(overridden)
+        .expect("seat")
+        .model_for(Effort::Medium);
+    seated_order.override_reason = Some(format!("owner insisted on {overridden}"));
     seated_order.cwd = worktree(&root, "build-1").display().to_string();
 
     // Initialize journal with Opened and Seated
@@ -1272,11 +1288,12 @@ fn send_back_inherits_override_and_does_not_count_against_run_overrides() {
     // Read replay state after send-back
     state = replay(&journal.read().0);
     let child = state.order(child_order).expect("child");
-    assert_eq!(child.seated.seat, "sonnet");
+    assert_ne!(rule_pick, overridden, "the rule must pick another seat");
+    assert_eq!(child.seated.seat, overridden);
     assert_eq!(child.seated.effort, Effort::Medium);
     assert_eq!(
         child.seated.override_reason,
-        Some("owner insisted on sonnet".into())
+        Some(format!("owner insisted on {overridden}"))
     );
 
     // Run overrides in leases is still 3 because child was an inherited override and did not increment!
@@ -1284,6 +1301,7 @@ fn send_back_inherits_override_and_does_not_count_against_run_overrides() {
         crate::nirvana_seat::load_leases(&nirvana_seat::dir().join(nirvana_seat::LEASES_FILE))
             .expect("leases");
     assert_eq!(leases.overrides(run), 3);
+    nirvana_seat::set_test_world(None);
 }
 
 #[test]
@@ -1564,5 +1582,89 @@ fn p29_a_send_back_seats_a_server_order_on_claude_and_a_broken_mcp_json_asks() {
         ruling.next
     );
     assert!(child.is_none());
+    nirvana_seat::set_test_world(None);
+}
+
+// ---- plan 31 §2.5: a send-back keeps the device line, and the Send line with the parent's approval ----
+
+#[test]
+fn p31_a_send_back_child_keeps_the_device_line_and_the_parents_send_line() {
+    use crate::nirvana_gui_tools::{
+        with_brief_lines, SendOk, DESKTOP_SEND_LINE, DEVICE_LINE, SEND_LINE,
+    };
+    let _guard = crate::nirvana::with_test_home("p31-send-back-lines");
+    nirvana_seat::set_test_world(Some(BTreeMap::new()));
+    let root = repo("p31-send-back-lines");
+    let project = Project::at(&root);
+    let table = nirvana_seat::parse(nirvana_seat::DEFAULT).expect("table");
+    let approval = SendOk {
+        quote: "Print it when ready".into(),
+        check: "found verbatim in the owner's prompt at 2026-10-29T01:32:14.584Z".into(),
+    };
+    let desktop = vec!["bambu-studio-beta".to_owned()];
+    for (order, send_ok) in [("slice-1", None), ("print-1", Some(approval.clone()))] {
+        let run = format!("r-{order}");
+        let journal = project.journal(&run);
+        let mut parent = seated(order, None);
+        parent.cwd = worktree(&root, order).display().to_string();
+        parent.send_ok = send_ok.clone();
+        // The parent's brief as `seat run` wrote it: the order, its lines, herdr's footer.
+        let text = with_brief_lines(
+            "# Slice the nosepiece\n".into(),
+            &desktop,
+            send_ok.is_some(),
+        );
+        parent.order_file =
+            crate::nirvana_worker::write_order(&project, &root, order, &text).expect("order");
+        journal
+            .append(
+                1,
+                Kind::Opened {
+                    project: "p".into(),
+                    orchestrator_pane: None,
+                    auto: false,
+                    pools: vec![],
+                    pools_basis: None,
+                },
+            )
+            .expect("append");
+        journal
+            .append(2, Kind::Seated(Box::new(parent.clone())))
+            .expect("append");
+        let state = replay(&journal.read().0);
+        let known = state.order(order).expect("order").clone();
+        let root_text = order_text(&parent);
+        let ruling = send_back(
+            &project,
+            &run,
+            &journal,
+            &state,
+            &known,
+            order,
+            &root_text,
+            vec![Axis::new("tests", Mark::Fail, "the slice warns")],
+            Some(&table),
+        )
+        .expect("send_back");
+        assert_eq!(ruling.verdict, "sent_back");
+        let state = replay(&journal.read().0);
+        let child = state
+            .orders
+            .iter()
+            .find(|known| known.seated.parent.as_deref() == Some(order))
+            .expect("child");
+        let brief = std::fs::read_to_string(&child.seated.order_file).expect("brief");
+        assert_eq!(child.seated.send_ok, send_ok, "{order}");
+        if send_ok.is_some() {
+            assert!(
+                brief.contains(&format!("{SEND_LINE}\n{DESKTOP_SEND_LINE}")),
+                "{brief}"
+            );
+            assert!(!brief.contains(DEVICE_LINE), "{brief}");
+        } else {
+            assert!(brief.contains(DEVICE_LINE), "{brief}");
+            assert!(!brief.contains(SEND_LINE), "{brief}");
+        }
+    }
     nirvana_seat::set_test_world(None);
 }

@@ -2335,6 +2335,7 @@ mod tests {
                 use_basis: None,
                 expected: std::collections::BTreeMap::new(),
                 jev_pick: None,
+                send_ok: None,
             }
         };
 

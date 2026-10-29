@@ -43,6 +43,35 @@ pub const BRIEF_LINE: &str = "Use the `*_run` batch and `*_state`; read crops, n
 /// control and holds a token, and it is no desktop server, so §5.3's line alone never reached it.
 pub const DEVICE_LINE: &str = "Never start a print, a laser job, or a send to a device. Stop and report when that is the next step.";
 
+/// Plan 31 §2.2, the Send rule: the line an order with a verified `--send-ok` quote gets in place of `DEVICE_LINE`.
+/// Measured in the 2026-10-29 audit: `dune-print-v5` sent a print with "1 overhang region could not get support"
+/// unread, and the owner's next words were "The ear hook keeps failing".
+pub const SEND_LINE: &str = "You may press Send once, as the last step, only if the slice shows no warning you cannot explain. Otherwise stop and report the warning.";
+
+/// Plan 31 §2.2: `BRIEF_LINE` for a desktop order that may Send. `BRIEF_LINE` ends "never start a print or a job",
+/// which would contradict `SEND_LINE` in the same brief.
+pub const DESKTOP_SEND_LINE: &str =
+    "Use the `*_run` batch and `*_state`; read crops, not full screenshots.";
+
+/// Plan 31 §2.1: the app each desktop server drives, as an order names it.
+pub const DESKTOP_APPS: [(&str, &str); 2] = [
+    ("bambu-studio-beta", "Bambu Studio"),
+    ("xtool", "xTool Studio"),
+];
+
+/// The most of Nirvana Claude's transcript read for a `--send-ok` quote. The transcripts on this machine reach 55 MB
+/// (`3D-Printer Flow`, 2026-10-29); the owner's approval is in the turn that seats the order, so a tail holds it.
+const SEND_TAIL: u64 = 16 * 1024 * 1024;
+
+/// Plan 31 §2.2: the owner's approval an order carries, and where herdr found it. Recorded on the `seated` event.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SendOk {
+    /// The owner's words, as `--send-ok` gave them.
+    pub quote: String,
+    /// The check's result: the transcript and the time of the owner's prompt that holds the quote.
+    pub check: String,
+}
+
 /// The server names a `.mcp.json` text defines, in its order.
 pub fn server_names(text: &str) -> Result<Vec<String>, String> {
     Ok(defined(text)?.keys().cloned().collect())
@@ -347,6 +376,86 @@ pub fn with_server_lines(mut text: String, servers: &[String]) -> String {
         text.push_str(BRIEF_LINE);
     }
     text
+}
+
+/// Plan 31 §2.2: an order with a verified `--send-ok` quote ends with `SEND_LINE` in place of `DEVICE_LINE`, and a
+/// desktop one with `DESKTOP_SEND_LINE` after it; every other order gets `with_server_lines`.
+pub fn with_brief_lines(mut text: String, servers: &[String], send_ok: bool) -> String {
+    if !send_ok {
+        return with_server_lines(text, servers);
+    }
+    text.push_str("\n\n");
+    text.push_str(SEND_LINE);
+    if servers
+        .iter()
+        .map(String::as_str)
+        .any(|server| DESKTOP_SERVERS.contains(&server))
+    {
+        text.push('\n');
+        text.push_str(DESKTOP_SEND_LINE);
+    }
+    text
+}
+
+/// Plan 31 §2.1: the warning `herdr seat run` prints when the order's text names a desktop app whose server the
+/// project's `.mcp.json` defines, and its needs name no server. Measured in the 2026-10-29 audit: all 22 Bambu GUI
+/// orders had `needs: []`, so 0.43.0 gave no worker a server and every Studio action was a worker-written script.
+/// A warning, never a refusal: an order may name Studio without driving it.
+pub fn server_hint(text: &str, defined: &[String], granted: &[String]) -> Option<String> {
+    if !granted.is_empty() {
+        return None;
+    }
+    let lower = text.to_lowercase();
+    let (server, app) = DESKTOP_APPS.iter().find(|(server, app)| {
+        defined.iter().any(|name| name == server) && lower.contains(&app.to_lowercase())
+    })?;
+    Some(format!(
+        "the order names {app} and its needs name no server; add `--needs {server}` if its worker drives {app}"
+    ))
+}
+
+/// Plan 31 §2.2: the `--send-ok` quote checked against the owner's own prompts in Nirvana Claude's transcript text
+/// (`nirvana_fresh::owner_quote_at`: herdr's digests, `<task-notification>` and `!` lines are not the owner's). Pure.
+pub fn send_ok_in(text: &str, quote: &str, transcript: &Path) -> Result<SendOk, String> {
+    let quote = quote.trim();
+    if quote.is_empty() {
+        return Err("--send-ok needs the owner's words".into());
+    }
+    match crate::nirvana_fresh::owner_quote_at(text, quote) {
+        Some(at) => Ok(SendOk {
+            quote: quote.to_owned(),
+            check: format!(
+                "found verbatim in the owner's prompt at {at} in {}",
+                transcript.display()
+            ),
+        }),
+        None => Err(format!(
+            "--send-ok {quote:?} is in none of the owner's prompts in {}; quote the owner's words exactly",
+            transcript.display()
+        )),
+    }
+}
+
+/// Plan 31 §2.2: the quote checked against the transcript of Nirvana Claude's last session in `folder`, which its
+/// `SessionStart` and `Stop` hooks record (`nirvana_session_record`). Every doubt refuses: no home, no record, a
+/// transcript that cannot be read.
+pub fn verify_send_ok(home: Option<&Path>, folder: &Path, quote: &str) -> Result<SendOk, String> {
+    let home = home.ok_or("--send-ok: no Nirvana home to find Nirvana Claude's session in")?;
+    let folder = crate::nirvana_session_record::absolute_folder(folder);
+    let record = crate::nirvana_session_record::read(home, &folder).ok_or_else(|| {
+        format!(
+            "--send-ok: no Nirvana Claude session is recorded for {}",
+            folder.display()
+        )
+    })?;
+    let transcript = PathBuf::from(&record.transcript);
+    let text = crate::nirvana_subagents::read_file_tail(&transcript, SEND_TAIL).map_err(|err| {
+        format!(
+            "--send-ok: the transcript {} cannot be read: {err}",
+            transcript.display()
+        )
+    })?;
+    send_ok_in(&text, quote, &transcript)
 }
 
 #[cfg(test)]

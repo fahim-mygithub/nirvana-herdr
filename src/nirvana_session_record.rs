@@ -148,8 +148,7 @@ pub fn write(home: &Path, folder: &Path, record: &Record) -> std::io::Result<()>
 }
 
 /// The record for `folder`, if there is a readable one. P1's launch reads the file by its fixed format and this is the
-/// same reading for any other caller; the tests use it, the command does not.
-#[allow(dead_code)]
+/// same reading for any other caller. Plan 31 §2.2's `--send-ok` reads it for the transcript to check a quote in.
 pub fn read(home: &Path, folder: &Path) -> Option<Record> {
     let text = std::fs::read_to_string(path_in(home, folder)).ok()?;
     serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()

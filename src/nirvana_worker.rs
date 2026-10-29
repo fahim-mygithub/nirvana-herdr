@@ -850,6 +850,63 @@ pub fn take_live(project: &Project, run: &str, order: &str) -> std::io::Result<O
     }
 }
 
+/// Plan 31 §2.4: why text must not be typed into `pane`, when the last worker any run of the project started in it
+/// has ended; `None` when no worker ran there or the last one has not ended. `runs` are each run's id and events.
+///
+/// On 2026-10-29 Nirvana Claude answered `dune-slice-v5`'s question, then the owner's go-ahead, with `herdr pane
+/// send-text wP:p1D` and `send-keys Enter` (its transcript, lines 4283 and 4312) after the worker had ended. Nobody read
+/// them: 4,111 s passed until the owner asked "whats the progresss can we print?". A pane a later worker reuses
+/// (`place::Placement::Reuse`) belongs to that worker. Pure.
+pub fn finished_worker_in(runs: &[(String, Vec<Event>)], pane: &str) -> Option<String> {
+    let (run, events, started) = runs
+        .iter()
+        .flat_map(|(run, events)| {
+            events.iter().filter_map(move |event| match &event.kind {
+                Kind::Started {
+                    order,
+                    pane: Some(at),
+                    ..
+                } if at == pane => Some((run, events, event, order)),
+                _ => None,
+            })
+        })
+        .max_by_key(|(_, _, event, _)| (event.at, event.seq))
+        .map(|(run, events, event, order)| (run, events, (event.seq, order)))?;
+    let (seq, order) = started;
+    let ended = events.iter().find_map(|event| match &event.kind {
+        Kind::Ended {
+            order: Some(done),
+            outcome,
+            ..
+        } if done == order && event.seq > seq => Some((event.at, outcome)),
+        _ => None,
+    })?;
+    let (at, outcome) = ended;
+    Some(format!(
+        "pane {pane} held order {order} of run {run}, whose worker ended {outcome} at {}; nothing was typed, since a \
+         finished worker reads nothing. Answer it through the gate (`herdr gate run {order} --run {run}`: a send-back \
+         carries the answer to a new worker) or seat a new order",
+        utc(at)
+    ))
+}
+
+/// `finished_worker_in` over the caller's project, read from its journals; `None` outside a Nirvana project.
+pub fn finished_worker(pane: &str) -> Option<String> {
+    let project = Project::from_env();
+    if !project.dir().join("runs").is_dir() {
+        return None;
+    }
+    let runs: Vec<(String, Vec<Event>)> = project
+        .runs()
+        .into_iter()
+        .map(|run| {
+            let events = project.journal(&run).read().0;
+            (run, events)
+        })
+        .collect();
+    finished_worker_in(&runs, pane)
+}
+
 /// Whether a supervisor runs for the order now.
 pub fn live(project: &Project, run: &str, order: &str) -> bool {
     let path = live_dir(project, run).join(format!("{order}.lock"));
@@ -1826,6 +1883,7 @@ fn rate_limited(
                 use_basis: booked.use_basis.clone(),
                 expected: booked.expected(),
                 jev_pick: None,
+                send_ok: seated.send_ok.clone(),
             };
             let why = if override_dropped {
                 format!(
@@ -2518,7 +2576,7 @@ pub fn launch_worker(project: &Project, run: &str, seated: &Seated) -> Result<St
 
 const USAGE: &str = "usage: herdr seat run <seat> --order <file> [--order-id id] [--run id] [--class c] [--size s]
                       [--needs a,b] [--not-family f] [--mode m] [--effort e] [--reason \"why\"] [--worktree] [--no-pane]
-                      [--no-auto] [--json]
+                      [--no-auto] [--send-ok \"the owner's words\"] [--json]
        herdr seat exec <order> --run <run> [--pane <pane>]   the worker's supervisor (a pane runs it)
        herdr seat status [<order>|--run <run>] [--json]
        herdr seat read <order> [--tail n]
@@ -2604,6 +2662,7 @@ fn run_cli(args: &[String]) -> std::io::Result<()> {
     let mut mode: Option<Mode> = None;
     let mut effort: Option<Effort> = None;
     let mut reason: Option<String> = None;
+    let mut send_ok: Option<String> = None;
     let (mut worktree, mut no_pane, mut auto, mut json) = (false, false, true, false);
     let mut iter = args[1..].iter();
     while let Some(arg) = iter.next() {
@@ -2637,6 +2696,7 @@ fn run_cli(args: &[String]) -> std::io::Result<()> {
                 )
             }
             "--reason" => reason = Some(value()),
+            "--send-ok" => send_ok = Some(value()),
             "--worktree" => worktree = true,
             "--no-pane" => no_pane = true,
             "--no-auto" => auto = false,
@@ -2677,11 +2737,16 @@ fn run_cli(args: &[String]) -> std::io::Result<()> {
         reason,
         worktree,
         auto,
+        send_ok,
     };
     let project = Project::from_env();
     let outcome = seat_order(&project, &request);
     match outcome {
         Ok(outcome) => {
+            // Plan 31 §2.1: one line, never a refusal; on stderr, so `--json` stays one JSON value.
+            if let Some(warning) = outcome["warning"].as_str() {
+                eprintln!("herdr seat run: warning: {warning}");
+            }
             if json {
                 println!("{}", serde_json::to_string_pretty(&outcome)?);
             } else {
@@ -2723,6 +2788,8 @@ pub struct SeatRequest {
     pub reason: Option<String>,
     pub worktree: bool,
     pub auto: bool,
+    /// Plan 31 §2.2: `--send-ok "<the owner's words>"`, checked against the owner's prompts before anything is booked.
+    pub send_ok: Option<String>,
 }
 
 /// What an existing order answers a second `seat run` with: the first one (§7.2, idempotent per order id).
@@ -2939,6 +3006,18 @@ pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i3
         )
     })?;
     let spec = crate::nirvana_gate::spec(&text);
+    // Plan 31 §2.2: a quote herdr cannot find in the owner's own prompts refuses the order, before it is booked.
+    let send_ok = match &request.send_ok {
+        Some(quote) => Some(
+            crate::nirvana_gui_tools::verify_send_ok(
+                crate::nirvana::home().as_deref(),
+                &send_ok_folder(project),
+                quote,
+            )
+            .map_err(|why| (2, why))?,
+        ),
+        None => None,
+    };
     if let Some(class) = &request.class {
         if crate::nirvana_gate::requires_owns(class) && spec.owns.is_empty() {
             return Err((
@@ -2979,13 +3058,20 @@ pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i3
     };
     // Plan 12 O5 (§7.4.3): one line per live lesson of the class, the path and the description, never the body.
     let lessons = crate::nirvana_lessons::offer(&project.root, &cwd, &booked.class);
+    // Plan 31 §2.1: read from the order as written, before herdr's lessons and lines, which name apps of their own.
+    let warning = crate::nirvana_gui_tools::server_hint(
+        &text,
+        &crate::nirvana_gui_tools::project_servers(&project.root).unwrap_or_default(),
+        &booked.servers,
+    );
     let mut text = if lessons.is_empty() {
         text
     } else {
         format!("{}{lessons}", text.trim_end())
     };
     // Plan 29 §5.3 and review F4: an order granted a server never starts a device; a desktop one batches, reads crops.
-    text = crate::nirvana_gui_tools::with_server_lines(text, &booked.servers);
+    // Plan 31 §2.2: an order with the owner's verified approval may Send once, after an explained slice.
+    text = crate::nirvana_gui_tools::with_brief_lines(text, &booked.servers, send_ok.is_some());
     if booked.class.starts_with("research.") || booked.class.starts_with("media.") {
         text.push_str("\n\nYour Work Report must include the `sources` array of `{url, used_for}` for each source consulted.");
     }
@@ -3021,6 +3107,7 @@ pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i3
         use_basis: booked.use_basis.clone(),
         expected: booked.expected(),
         jev_pick: booked.jev_pick.clone(),
+        send_ok,
     };
     let (pools, pools_basis) = nirvana_run::cached_pools();
     let opened = Kind::Opened {
@@ -3057,7 +3144,16 @@ pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i3
         "journal": journal.path.display().to_string(),
         "events": written.len(),
         "worker": worker,
+        "warning": warning,
     }))
+}
+
+/// The folder Nirvana Claude's session is recorded under (`nirvana_session_record`): the directory it started in,
+/// which Claude Code passes its tools as `CLAUDE_PROJECT_DIR`, else the project's root.
+fn send_ok_folder(project: &Project) -> PathBuf {
+    std::env::var_os(crate::nirvana_session_record::PROJECT_DIR_ENV)
+        .filter(|dir| !dir.is_empty())
+        .map_or_else(|| project.root.clone(), PathBuf::from)
 }
 
 /// `herdr seat status` (positional: an order) and `herdr run status` (positional: a run).

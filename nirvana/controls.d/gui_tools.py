@@ -106,9 +106,11 @@ CONTROLS = (
             "        .any(|server| !server.is_empty())\n", T_BRIEF, "rust"),
     Control("p29_brief_without_servers", GUI,
             "    if servers.is_empty() {\n        return text;\n    }\n", "", T_BRIEF, "rust"),
+    # Plan 31 §2.2 moved the call to `with_brief_lines`, which hands an order without `--send-ok` to `with_server_lines`.
     Control("p29_brief_reads_raw_needs", WORKER,
-            "    text = crate::nirvana_gui_tools::with_server_lines(text, &booked.servers);\n",
-            "    text = crate::nirvana_gui_tools::with_server_lines(text, &request.needs);\n", T_SEAT_ORDER, "rust"),
+            "    text = crate::nirvana_gui_tools::with_brief_lines(text, &booked.servers, send_ok.is_some());\n",
+            "    text = crate::nirvana_gui_tools::with_brief_lines(text, &request.needs, send_ok.is_some());\n",
+            T_SEAT_ORDER, "rust"),
     Control("p29_book_drops_servers", WORKER,
             "    booked.servers = needs.servers;\n", "", T_SEAT_ORDER, "rust"),
     # Review F1: each call site that builds a seat request takes a claude seat, driven through its public path.

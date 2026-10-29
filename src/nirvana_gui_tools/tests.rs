@@ -460,3 +460,197 @@ fn seat_pick_reads_the_server_needs_and_takes_a_claude_seat() {
     let why = nirvana_seat::pick_args_for(&root, &args("xtool")).unwrap_err();
     assert!(why.contains("does not parse"), "{why}");
 }
+
+// ---- plan 31 P31a ----
+
+#[test]
+fn p31_a_send_ok_order_gets_the_send_line_in_place_of_the_device_line() {
+    let desktop = vec!["bambu-studio-beta".to_owned()];
+    let sent = with_brief_lines("# o\n".into(), &desktop, true);
+    assert!(
+        sent.ends_with(&format!("\n\n{SEND_LINE}\n{DESKTOP_SEND_LINE}")),
+        "{sent}"
+    );
+    assert!(!sent.contains(DEVICE_LINE), "{sent}");
+    assert!(!sent.contains("never start a print"), "{sent}");
+    // A printer server is no desktop: the Send line alone.
+    let printer = with_brief_lines("# o\n".into(), &["bambu".to_owned()], true);
+    assert!(printer.ends_with(&format!("\n\n{SEND_LINE}")), "{printer}");
+    // An approval with no server still carries the rule.
+    let bare = with_brief_lines("# o\n".into(), &[], true);
+    assert!(bare.ends_with(&format!("\n\n{SEND_LINE}")), "{bare}");
+    // Without an approval every server order keeps the device line, and no order gets the Send line.
+    let kept = with_brief_lines("# o\n".into(), &desktop, false);
+    assert_eq!(kept, with_server_lines("# o\n".into(), &desktop));
+    assert!(!kept.contains(SEND_LINE), "{kept}");
+    assert_eq!(with_brief_lines("# o\n".into(), &[], false), "# o\n");
+}
+
+#[test]
+fn p31_the_hint_names_the_server_when_the_order_names_its_app_and_needs_none() {
+    let defined = server_names(MCP_JSON).unwrap();
+    let hint = server_hint("# Slice in bambu studio, then save\n", &defined, &[]).expect("hint");
+    assert!(
+        hint.contains("Bambu Studio") && hint.contains("`--needs bambu-studio-beta`"),
+        "{hint}"
+    );
+    let hint = server_hint("Open the job in xTool Studio\n", &defined, &[]).expect("hint");
+    assert!(hint.contains("`--needs xtool`"), "{hint}");
+    // A need naming a server, no app named, or a project with no such server: nothing.
+    assert_eq!(
+        server_hint("Bambu Studio", &defined, &["bambu".to_owned()]),
+        None
+    );
+    assert_eq!(
+        server_hint("Fit the nosepiece in Blender", &defined, &[]),
+        None
+    );
+    assert_eq!(
+        server_hint("Bambu Studio", &["bambu".to_owned()], &[]),
+        None
+    );
+}
+
+/// One transcript line, as Claude Code 2.1.311 records it.
+fn p31_line(kind: &str, content: Value, extra: &[(&str, Value)]) -> String {
+    let mut line = serde_json::json!({
+        "type": kind,
+        "timestamp": "2026-10-29T01:32:14.584Z",
+        "message": {"role": kind, "content": content},
+    });
+    for (key, value) in extra {
+        line[*key] = value.clone();
+    }
+    line.to_string()
+}
+
+#[test]
+fn p31_a_send_ok_quote_is_found_only_in_the_owners_own_prompts() {
+    let words = "Print it when ready";
+    let not_owner = [
+        // herdr's own wake digest, Claude Code's news of a background task, a `!` command and its output.
+        p31_line(
+            "user",
+            Value::String(format!("herdr run dune-v5: {words}")),
+            &[],
+        ),
+        p31_line(
+            "user",
+            Value::String(format!("<task-notification>{words}</task-notification>")),
+            &[],
+        ),
+        p31_line(
+            "user",
+            Value::String(format!("<bash-input>echo {words}</bash-input>")),
+            &[],
+        ),
+        p31_line(
+            "user",
+            Value::String(format!("<bash-stdout>{words}</bash-stdout>")),
+            &[],
+        ),
+        // A tool's result, a meta line, a subagent's prompt, and Nirvana Claude's own words.
+        p31_line(
+            "user",
+            serde_json::json!([{"type": "tool_result", "content": words}]),
+            &[],
+        ),
+        p31_line(
+            "user",
+            Value::String(words.into()),
+            &[("isMeta", Value::Bool(true))],
+        ),
+        p31_line(
+            "user",
+            Value::String(words.into()),
+            &[("isSidechain", Value::Bool(true))],
+        ),
+        p31_line(
+            "assistant",
+            serde_json::json!([{"type": "text", "text": words}]),
+            &[],
+        ),
+    ]
+    .join("\n");
+    let transcript = Path::new("C:/t/s.jsonl");
+    let why = send_ok_in(&not_owner, words, transcript).unwrap_err();
+    assert!(why.contains("none of the owner's prompts"), "{why}");
+    let owner = format!(
+        "{not_owner}\n{}",
+        p31_line("user", Value::String(format!("ok. {words}")), &[])
+    );
+    let found = send_ok_in(&owner, &format!("  {words} "), transcript).expect("found");
+    assert_eq!(found.quote, words);
+    assert!(
+        found.check.contains("2026-10-29T01:32:14.584Z") && found.check.contains("s.jsonl"),
+        "{}",
+        found.check
+    );
+    // Verbatim: another spelling is not the owner's words, and no words are no approval.
+    assert!(send_ok_in(&owner, "print it when ready", transcript).is_err());
+    assert!(send_ok_in(&owner, "  ", transcript).is_err());
+}
+
+#[test]
+fn p31_verify_send_ok_reads_the_recorded_session_and_refuses_every_doubt() {
+    let home = crate::nirvana::with_test_home("p31-verify-send-ok");
+    let folder = home.path.join("project");
+    std::fs::create_dir_all(&folder).unwrap();
+    let words = "Print it when ready";
+    assert!(verify_send_ok(None, &folder, words).is_err());
+    let why = verify_send_ok(Some(&home.path), &folder, words).unwrap_err();
+    assert!(
+        why.contains("no Nirvana Claude session is recorded"),
+        "{why}"
+    );
+    let transcript = home.path.join("t.jsonl");
+    let record = crate::nirvana_session_record::Record {
+        session_id: "s".into(),
+        at: "2026-10-29T01:32:15Z".into(),
+        transcript: transcript.display().to_string(),
+    };
+    crate::nirvana_session_record::write(&home.path, &folder, &record).unwrap();
+    let why = verify_send_ok(Some(&home.path), &folder, words).unwrap_err();
+    assert!(why.contains("cannot be read"), "{why}");
+    std::fs::write(
+        &transcript,
+        p31_line("user", Value::String(words.into()), &[]) + "\n",
+    )
+    .unwrap();
+    let found = verify_send_ok(Some(&home.path), &folder, words).expect("found");
+    assert_eq!(found.quote, words);
+}
+
+/// Plan 31 §2.1's measurement, run by hand: `P31_ORDERS` names a TSV of `run, order, cli, class, gui|-, file` for
+/// recorded orders, and the hint is read on each file's order text (herdr's footer cut off) against
+/// `bambu-studio-beta`, the server those orders' project defines. It prints each flagged order and the totals.
+#[test]
+#[ignore]
+fn p31_measure_the_hint_on_recorded_orders() {
+    let list = std::env::var("P31_ORDERS").expect("P31_ORDERS");
+    let defined = vec!["bambu-studio-beta".to_owned()];
+    let (mut orders, mut gui, mut flagged, mut flagged_gui) = (0, 0, 0, 0);
+    for line in std::fs::read_to_string(list).unwrap().lines() {
+        let cols: Vec<&str> = line.split('\t').collect();
+        let text = std::fs::read_to_string(cols[5]).unwrap();
+        let text = text.split("\n\n---\nFrom herdr").next().unwrap_or("");
+        let is_gui = cols[4] == "gui";
+        let hint = server_hint(text, &defined, &[]);
+        orders += 1;
+        gui += usize::from(is_gui);
+        if hint.is_some() {
+            flagged += 1;
+            flagged_gui += usize::from(is_gui);
+        }
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            cols[0],
+            cols[1],
+            cols[2],
+            cols[3],
+            cols[4],
+            if hint.is_some() { "FLAGGED" } else { "-" }
+        );
+    }
+    println!("orders {orders}, gui {gui}, flagged {flagged}, flagged gui {flagged_gui}");
+}

@@ -662,6 +662,26 @@ fn owner_typed_in(value: &Value) -> bool {
     owner_prompt_in(&shown).is_some()
 }
 
+/// Plan 31 §2.2: the time of the owner's last prompt in a transcript's text that holds `quote` verbatim; `None` when
+/// none does. The owner's prompts are `owner_prompt_in`'s own (herdr's digests, Claude Code's meta lines and
+/// `<task-notification>` are not), and a `!` command's lines are not the owner's words. A line that does not parse is
+/// no prompt here: a doubt finds no quote, and no quote refuses the Send. Pure.
+pub fn owner_quote_at(text: &str, quote: &str) -> Option<String> {
+    text.lines().rev().find_map(|line| {
+        let value: Value = serde_json::from_str(line.trim()).ok()?;
+        if bang_line(&value) || !owner_prompt_in(&value)?.contains(quote) {
+            return None;
+        }
+        Some(
+            value
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .unwrap_or("an unknown time")
+                .to_owned(),
+        )
+    })
+}
+
 /// The owner's last `n` prompts in a transcript's text, oldest first. Pure.
 pub fn owner_prompts(text: &str, n: usize) -> Vec<String> {
     let mut prompts: Vec<String> = text

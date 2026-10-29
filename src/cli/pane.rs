@@ -36,6 +36,16 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         }
         Err(ParseError::Clap(error)) => return super::print_clap_error(&error),
     };
+    // Nirvana fork, plan 31 §2.4: text typed into a finished worker's pane is read by nobody; say so and name the order.
+    if let Method::PaneSendText(crate::api::schema::panes::PaneSendTextParams { pane_id, .. })
+    | Method::PaneSendKeys(crate::api::schema::panes::PaneSendKeysParams { pane_id, .. }) =
+        &request.method
+    {
+        if let Some(why) = crate::nirvana_worker::finished_worker(pane_id) {
+            eprintln!("herdr pane {name}: {why}");
+            return Ok(1);
+        }
+    }
     if matches!(leaf.output, bindings::Output::Quiet) {
         return super::send_ok_request(request.method);
     }
@@ -1055,5 +1065,53 @@ mod tests {
             request("process-info", old_form_pos).is_err(),
             "Old positional form must fail"
         );
+    }
+
+    /// Plan 31 §2.4: `pane send-text` and `pane send-keys` into a finished worker's pane type nothing and exit 1.
+    /// The socket names a file that does not exist, so a send that got past the guard fails here and never reaches
+    /// a live herdr.
+    #[test]
+    fn p31_send_text_to_a_finished_workers_pane_types_nothing() {
+        use crate::nirvana_run::{Kind, Project, PROJECT_ENV};
+        let root = std::env::temp_dir().join(format!("herdr-p31-send-text-{}", std::process::id()));
+        let project = Project::at(&root);
+        project.ensure().unwrap();
+        let journal = project.journal("dune-v5");
+        journal
+            .append(
+                1,
+                Kind::Started {
+                    order: "dune-slice-v5".into(),
+                    attempt: 1,
+                    pid: None,
+                    pane: Some("wP:p1D".into()),
+                    tab: None,
+                    resume: None,
+                    argv: Vec::new(),
+                },
+            )
+            .unwrap();
+        journal
+            .append(
+                2,
+                Kind::Ended {
+                    order: Some("dune-slice-v5".into()),
+                    outcome: "delivered".into(),
+                    why: None,
+                    exit: Some(0),
+                    pools: Vec::new(),
+                    pools_basis: None,
+                },
+            )
+            .unwrap();
+        std::env::set_var(PROJECT_ENV, &root);
+        std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, root.join("no-such.sock"));
+        let text = run_pane_command(&args(&["send-text", "wP:p1D", "Print it when ready"]));
+        let keys = run_pane_command(&args(&["send-keys", "wP:p1D", "Enter"]));
+        std::env::remove_var(PROJECT_ENV);
+        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(text.ok(), Some(1));
+        assert_eq!(keys.ok(), Some(1));
     }
 }

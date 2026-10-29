@@ -238,6 +238,10 @@ pub struct Seated {
     /// own pick in `seat`. In shadow it changed nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jev_pick: Option<crate::nirvana_jev_roles::JevPick>,
+    /// Plan 31 §2.2: the owner's approval to Send, as `herdr seat run --send-ok` checked it. A send-back or a reseat
+    /// keeps its parent's, as its brief keeps the parent's order text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_ok: Option<crate::nirvana_gui_tools::SendOk>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -348,6 +352,13 @@ pub enum Kind {
         through: u64,
         digest: String,
     },
+    /// Plan 31 §2.3: a wake that left the events queued, and the rule's reason. On 2026-10-29 four deliveries waited
+    /// 1,132 s to 25,798 s for the owner's next prompt: herdr's log shows no `agent.prompt` at those workers' ends,
+    /// and the reason was nowhere, because `seat exec` drops the wake's verdict. Moves no order.
+    WakeQueued {
+        why: String,
+        through: u64,
+    },
     /// Plan 12 O8a: the owner changed the mode while the run was open (the Seats square's key, or `herdr seat
     /// mode`). Each order's own mode is on its `seated`; this says why two orders of one run sat at two modes.
     ModeChanged {
@@ -430,6 +441,7 @@ impl Kind {
             }
             Self::Opened { .. }
             | Self::Woken { .. }
+            | Self::WakeQueued { .. }
             | Self::ModeChanged { .. }
             | Self::Fresh { .. }
             | Self::Unknown => None,
@@ -1045,7 +1057,11 @@ pub fn replay(events: &[Event]) -> RunState {
             },
             // Shadow or on, it moves no order: the line below is all a yes does, and only when it acted.
             // Plan 25: a fresh session moves no order; the receipt was written at the end, before it.
-            Kind::JevWatch { .. } | Kind::Fresh { .. } | Kind::Unknown => {}
+            // Plan 31 §2.3: a queued wake is a record of why, and moves no order.
+            Kind::JevWatch { .. }
+            | Kind::Fresh { .. }
+            | Kind::WakeQueued { .. }
+            | Kind::Unknown => {}
         }
         if let Some(line) = queue_line(&event.kind) {
             state.queue.push(QueueItem {
@@ -2679,6 +2695,33 @@ fn notice_cli(project: &Project, args: &[String]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Plan 31 §2.3: the `wake_queued` event a queued wake writes, or `None` when the journal's last lines already hold the
+/// same reason with no other event after them, so a repeated wake adds no line. `through` is the last event the
+/// reason was given for, a `wake_queued` line not counted. Pure.
+pub fn queued_event(events: &[Event], why: &str) -> Option<Kind> {
+    let through = events
+        .iter()
+        .rev()
+        .find(|event| !matches!(event.kind, Kind::WakeQueued { .. }))
+        .map_or(0, |event| event.seq);
+    let repeated = events
+        .iter()
+        .rev()
+        .take_while(|event| matches!(event.kind, Kind::WakeQueued { .. }))
+        .any(|event| matches!(&event.kind, Kind::WakeQueued { why: was, .. } if was == why));
+    (!repeated).then(|| Kind::WakeQueued {
+        why: why.to_owned(),
+        through,
+    })
+}
+
+/// Writes a queued wake's reason to the journal (`queued_event`). A failed write loses the record, never the wake.
+fn record_queued(journal: &Journal, why: &str) {
+    let _ = journal.transact(now(), |events| {
+        Ok((queued_event(events, why).into_iter().collect(), ()))
+    });
+}
+
 /// Wakes the orchestrator when §7.2 allows it, else leaves the events queued. Returns the verdict line and
 /// whether a digest was typed.
 pub fn wake(project: &Project, run: &str, urgent: bool) -> std::io::Result<(String, bool)> {
@@ -2695,10 +2738,13 @@ pub fn wake(project: &Project, run: &str, urgent: bool) -> std::io::Result<(Stri
     let verdict = wake_decision(run, &state, view.as_ref(), now(), urgent);
     match verdict {
         Wake::Nothing => Ok(("nothing waits".into(), false)),
-        Wake::Queue(why) => Ok((
-            format!("{} event(s) queued: {why}", state.queue.len()),
-            false,
-        )),
+        Wake::Queue(why) => {
+            record_queued(&journal, &why);
+            Ok((
+                format!("{} event(s) queued: {why}", state.queue.len()),
+                false,
+            ))
+        }
         Wake::Refuse(question) => {
             journal.transact(now(), |events| {
                 let state = replay(events);
@@ -2730,10 +2776,13 @@ pub fn wake(project: &Project, run: &str, urgent: bool) -> std::io::Result<(Stri
                     )?;
                     Ok((format!("woke {pane}: {digest}"), true))
                 }
-                Err(why) => Ok((
-                    format!("{} event(s) queued: {why}", state.queue.len()),
-                    false,
-                )),
+                Err(why) => {
+                    record_queued(&journal, &why);
+                    Ok((
+                        format!("{} event(s) queued: {why}", state.queue.len()),
+                        false,
+                    ))
+                }
             }
         }
     }

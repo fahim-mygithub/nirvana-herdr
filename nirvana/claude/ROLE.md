@@ -44,6 +44,15 @@ chore, can go to a `worker-*` subagent instead of a pane worker; the agent's nam
 - A merge to `main` asks the owner, except in auto mode within its budgets (§12 R6).
 - Some skills, MCP servers and plugins may be off in this folder by its Preload preset (`herdr preload why`). When
   you need one, say which, and the owner presses `p` in Preload or switches it on there (plan 13 §4).
+- An order that drives a desktop app names its `.mcp.json` server in `needs`: `--needs bambu-studio-beta` for Bambu
+  Studio, `--needs xtool` for xTool Studio. In the 2026-10-29 audit all 22 Bambu GUI orders had `needs: []`, so no
+  worker got the server and every Studio action was a hand-written script; `herdr seat run` warns when one is missing.
+- A worker may press Send only when its order carries the owner's approval in the owner's own words:
+  `herdr seat run ... --send-ok "<the owner's words, copied exactly>"`. herdr finds the words in the owner's prompts
+  or refuses the order. The worker then sends once, last, and only if the slice shows no warning it cannot explain.
+  A print sent with "1 overhang region could not get support" unread failed at the ear hook (2026-10-29).
+- Never type into a finished worker's pane: nobody reads it. Answer a worker that asked through the gate, whose
+  send-back carries the answer to a new worker. On 2026-10-29 a go-ahead typed into a finished pane sat 68 minutes.
 - Run builds, test suites and gates longer than about a minute with `herdr job run`, then check them with `herdr job status` or `herdr job tail`, never by reading the whole log.
 
 The section numbers name plan 12, `nirvana/plans/2026-10-17-12-nirvana-claude-orchestrator.md` in the

@@ -433,6 +433,7 @@ fn seated(order: &str) -> Seated {
         use_basis: None,
         expected: BTreeMap::new(),
         jev_pick: None,
+        send_ok: None,
     }
 }
 
@@ -815,6 +816,7 @@ fn worker_supervisor_uses_project_mode_when_order_names_none() {
         reason: None,
         worktree: false,
         auto: false,
+        send_ok: None,
     };
 
     let booked = book(&project, &request).expect("book succeeds");
@@ -852,6 +854,7 @@ fn rate_limited_reseat_drops_override_on_same_pool_and_keeps_on_other() {
         use_basis: None,
         expected: BTreeMap::new(),
         jev_pick: None,
+        send_ok: None,
     };
 
     // Case 1: rate limit on "max" (the override seat's own pool) -> override dropped
@@ -934,6 +937,7 @@ fn seat_order_refuses_empty_owns_for_build_fix_plan_and_permits_read_only() {
         reason: None,
         worktree: false,
         auto: false,
+        send_ok: None,
     };
 
     // build.* refuses with exit 2
@@ -1287,6 +1291,7 @@ fn p29_seat_order_seats_a_server_order_on_claude_and_its_brief_never_starts_a_de
         reason: None,
         worktree: false,
         auto: false,
+        send_ok: None,
     };
     // Each order is held live, so `seat_order` starts no worker whatever it books.
     let _live: Vec<_> = ["o0", "o1", "o2"]
@@ -1476,5 +1481,317 @@ fn p29_exec_gives_the_worker_its_config_removes_it_after_and_never_starts_withou
             && why.ends_with("no longer defines xtool"),
         "{why}"
     );
+    nirvana_seat::set_test_world(None);
+}
+
+// ---- plan 31 P31a: the Send rule, the server warning, a finished worker's pane ----
+
+/// A transcript line of the owner's prompt, as Claude Code 2.1.311 records one.
+fn p31_owner_line(text: &str, at: &str) -> String {
+    serde_json::json!({
+        "type": "user",
+        "timestamp": at,
+        "origin": {"kind": "human"},
+        "message": {"role": "user", "content": text},
+    })
+    .to_string()
+}
+
+/// `p29_project` with `.mcp.json` defining bambu-studio-beta as well, and Nirvana Claude's session recorded for the
+/// project with a transcript holding `prompts`.
+fn p31_project(name: &str, prompts: &[&str]) -> (crate::nirvana::TestHomeGuard, Project) {
+    let (home, project) = p29_project(name);
+    std::fs::write(
+        project.root.join(".mcp.json"),
+        r#"{"mcpServers": {"xtool": {"command": "uv"}, "bambu-studio-beta": {"command": "uv"}}}"#,
+    )
+    .unwrap();
+    let transcript = home.path.join("transcript.jsonl");
+    let lines: Vec<String> = prompts
+        .iter()
+        .map(|text| p31_owner_line(text, "2026-10-29T01:32:14.584Z"))
+        .collect();
+    std::fs::write(&transcript, lines.join("\n") + "\n").unwrap();
+    crate::nirvana_session_record::write(
+        &home.path,
+        &crate::nirvana_session_record::absolute_folder(&project.root),
+        &crate::nirvana_session_record::Record {
+            session_id: "s1".into(),
+            at: "2026-10-29T01:32:15Z".into(),
+            transcript: transcript.display().to_string(),
+        },
+    )
+    .unwrap();
+    // The folder `seat run` looks the session up by: the variable Claude Code gives its tools, here the project.
+    std::env::set_var(
+        crate::nirvana_session_record::PROJECT_DIR_ENV,
+        &project.root,
+    );
+    (home, project)
+}
+
+fn p31_request(project: &Project, order: &str, seat: &str, needs: &[&str]) -> SeatRequest {
+    SeatRequest {
+        seat: seat.into(),
+        order_file: project.root.join("order.md"),
+        order: order.into(),
+        run: "r1".into(),
+        class: Some("sweep.mechanical".into()),
+        size: None,
+        needs: needs.iter().map(|need| (*need).to_owned()).collect(),
+        not_family: Vec::new(),
+        mode: None,
+        effort: None,
+        reason: None,
+        worktree: false,
+        auto: false,
+        send_ok: None,
+    }
+}
+
+/// The claude seat the rule gives `sweep.mechanical` once only a claude seat may take it.
+fn p31_claude_seat(project: &Project) -> String {
+    let table = nirvana_seat::table_for(&project.root).unwrap();
+    let mut only = nirvana_seat::Request::new("sweep.mechanical");
+    only.claude_only = Some("a server".into());
+    nirvana_seat::pick(&table, &nirvana_seat::live_world(&table), &only)
+        .unwrap()
+        .seat
+}
+
+#[test]
+fn p31_seat_run_records_a_verified_send_quote_and_refuses_one_it_cannot_find() {
+    use crate::nirvana_gui_tools::{DESKTOP_SEND_LINE, DEVICE_LINE, SEND_LINE};
+    let (_home, project) = p31_project("p31-send-ok", &["Print it when ready"]);
+    std::fs::write(
+        project.root.join("order.md"),
+        "# Slice and send the nosepiece\n",
+    )
+    .unwrap();
+    let seat = p31_claude_seat(&project);
+    let _live: Vec<_> = ["s0", "s1"]
+        .iter()
+        .map(|order| take_live(&project, "r1", order).unwrap().unwrap())
+        .collect();
+    // A quote the owner never typed refuses the order before anything is booked or journaled.
+    let mut request = p31_request(&project, "s0", &seat, &["bambu-studio-beta"]);
+    request.send_ok = Some("Print it now".into());
+    let (code, why) = seat_order(&project, &request).unwrap_err();
+    assert_eq!(code, 2, "{why}");
+    assert!(why.contains("none of the owner's prompts"), "{why}");
+    assert!(replay(&project.journal("r1").read().0)
+        .order("s0")
+        .is_none());
+    // The owner's words: the seated event holds the quote and the check, the brief the Send line, no device line.
+    let mut request = p31_request(&project, "s1", &seat, &["bambu-studio-beta"]);
+    request.send_ok = Some("Print it when ready".into());
+    seat_order(&project, &request).unwrap();
+    let seated = replay(&project.journal("r1").read().0)
+        .order("s1")
+        .unwrap()
+        .seated
+        .clone();
+    let send_ok = seated.send_ok.clone().expect("send_ok on seated");
+    assert_eq!(send_ok.quote, "Print it when ready");
+    assert!(
+        send_ok.check.contains("2026-10-29T01:32:14.584Z"),
+        "{}",
+        send_ok.check
+    );
+    let line = std::fs::read_to_string(project.journal("r1").path)
+        .unwrap()
+        .lines()
+        .find(|line| line.contains("\"seated\"") && line.contains("\"s1\""))
+        .unwrap()
+        .to_owned();
+    assert!(
+        line.contains("\"send_ok\":{\"quote\":\"Print it when ready\""),
+        "{line}"
+    );
+    let brief = std::fs::read_to_string(&seated.order_file).unwrap();
+    assert!(
+        brief.contains(&format!("\n\n{SEND_LINE}\n{DESKTOP_SEND_LINE}")),
+        "{brief}"
+    );
+    assert!(!brief.contains(DEVICE_LINE), "{brief}");
+    std::env::remove_var(crate::nirvana_session_record::PROJECT_DIR_ENV);
+    nirvana_seat::set_test_world(None);
+}
+
+#[test]
+fn p31_seat_run_warns_when_an_order_names_studio_and_needs_no_server() {
+    let (_home, project) = p31_project("p31-hint", &[]);
+    std::fs::write(
+        project.root.join("order.md"),
+        "# Slice the nosepiece in Bambu Studio\n",
+    )
+    .unwrap();
+    let seat = p31_claude_seat(&project);
+    let _live: Vec<_> = ["h0", "h1"]
+        .iter()
+        .map(|order| take_live(&project, "r1", order).unwrap().unwrap())
+        .collect();
+    let mut request = p31_request(&project, "h0", &seat, &[]);
+    request.reason = Some("the window".into());
+    let outcome = seat_order(&project, &request).unwrap();
+    let warning = outcome["warning"].as_str().unwrap_or_default();
+    assert!(
+        warning.contains("Bambu Studio") && warning.contains("--needs bambu-studio-beta"),
+        "{outcome}"
+    );
+    // The order seats all the same: a warning, never a refusal.
+    assert!(replay(&project.journal("r1").read().0)
+        .order("h0")
+        .is_some());
+    let outcome = seat_order(
+        &project,
+        &p31_request(&project, "h1", &seat, &["bambu-studio-beta"]),
+    )
+    .unwrap();
+    assert!(outcome["warning"].is_null(), "{outcome}");
+    std::env::remove_var(crate::nirvana_session_record::PROJECT_DIR_ENV);
+    nirvana_seat::set_test_world(None);
+}
+
+fn p31_event(seq: u64, at: u64, kind: Kind) -> Event {
+    Event {
+        v: nirvana_run::V,
+        seq,
+        at,
+        kind,
+    }
+}
+
+fn p31_started(order: &str, pane: &str) -> Kind {
+    Kind::Started {
+        order: order.into(),
+        attempt: 1,
+        pid: None,
+        pane: Some(pane.into()),
+        tab: None,
+        resume: None,
+        argv: Vec::new(),
+    }
+}
+
+fn p31_ended(order: &str) -> Kind {
+    Kind::Ended {
+        order: Some(order.into()),
+        outcome: "delivered".into(),
+        why: None,
+        exit: Some(0),
+        pools: Vec::new(),
+        pools_basis: None,
+    }
+}
+
+#[test]
+fn p31_a_finished_workers_pane_names_its_order_and_a_live_one_does_not() {
+    // dune-v5, 2026-10-29: dune-slice-v5 ended in wP:p1D at 01:30:31Z; the answer was typed there at 01:30:36Z.
+    let v5 = (
+        "dune-v5".to_owned(),
+        vec![
+            p31_event(31, 1_793_237_363, p31_started("dune-slice-v5", "wP:p1D")),
+            p31_event(65, 1_793_237_831, p31_ended("dune-slice-v5")),
+        ],
+    );
+    let why = finished_worker_in(std::slice::from_ref(&v5), "wP:p1D").expect("finished");
+    assert!(
+        why.contains("dune-slice-v5")
+            && why.contains("dune-v5")
+            && why.contains("nothing was typed"),
+        "{why}"
+    );
+    assert_eq!(
+        finished_worker_in(std::slice::from_ref(&v5), "wP:p1E"),
+        None
+    );
+    // A worker still running in the pane: no refusal.
+    let live = (
+        "r2".to_owned(),
+        vec![p31_event(1, 10, p31_started("o1", "wP:p9"))],
+    );
+    assert_eq!(finished_worker_in(&[live], "wP:p9"), None);
+    // A later run's worker reusing the pane owns it, even after the first worker ended.
+    let reuse = (
+        "r3".to_owned(),
+        vec![p31_event(1, 1_793_237_900, p31_started("o2", "wP:p1D"))],
+    );
+    assert_eq!(finished_worker_in(&[v5.clone(), reuse], "wP:p1D"), None);
+    // A restarted attempt after an end is live again.
+    let restarted = (
+        "r4".to_owned(),
+        vec![
+            p31_event(1, 10, p31_started("o3", "wP:pA")),
+            p31_event(2, 20, p31_ended("o3")),
+            p31_event(3, 30, p31_started("o3", "wP:pA")),
+        ],
+    );
+    assert_eq!(finished_worker_in(&[restarted], "wP:pA"), None);
+}
+
+#[test]
+fn p31_a_reseats_continuation_brief_keeps_the_device_line_and_the_send_line() {
+    use crate::nirvana_gui_tools::{with_brief_lines, DEVICE_LINE, SEND_LINE};
+    let (_home, project) = p29_project("p31-continuation");
+    let run = "r1";
+    let state = nirvana_run::RunState::default();
+    for (order, send_ok, line) in [("c1", false, DEVICE_LINE), ("c2", true, SEND_LINE)] {
+        let mut seated = p29_seated(&project, order, "haiku");
+        let text = with_brief_lines("# Slice it\n".into(), &["xtool".into()], send_ok);
+        seated.order_file = write_order(&project, &project.root, order, &text).unwrap();
+        let file = continuation_brief(&project, run, &seated, &state, None, &Stream::new("claude"))
+            .unwrap();
+        let brief = std::fs::read_to_string(&file).unwrap();
+        assert!(brief.contains(line), "{order}: {brief}");
+    }
+    nirvana_seat::set_test_world(None);
+}
+
+#[test]
+fn p31_a_rate_limited_reseat_keeps_the_parents_send_approval_and_its_lines() {
+    use crate::nirvana_gui_tools::{with_brief_lines, SendOk, SEND_LINE};
+    let (_home, project) = p29_project("p31-reseat-send-ok");
+    let run = "r1";
+    let journal = project.journal(run);
+    let mut seated = p29_seated(&project, "o1", "haiku");
+    // No server need, so a spent max pool re-seats it on agy rather than asking.
+    seated.needs = Vec::new();
+    seated.send_ok = Some(SendOk {
+        quote: "Print it when ready".into(),
+        check: "found".into(),
+    });
+    let text = with_brief_lines("# Send the slice\n".into(), &[], true);
+    seated.order_file = write_order(&project, &project.root, "o1", &text).unwrap();
+    journal.append(1, opened()).unwrap();
+    journal
+        .append(2, Kind::Seated(Box::new(seated.clone())))
+        .unwrap();
+    let child = child_id(&replay(&journal.read().0), "o1");
+    let _live = take_live(&project, run, &child).unwrap().unwrap();
+    let limit = RateLimit {
+        signal: "rate_limit_event".into(),
+        pool: Some("max".into()),
+        window: None,
+        resets_at: None,
+        detail: String::new(),
+    };
+    let mut out = Vec::new();
+    rate_limited(
+        &project,
+        &journal,
+        run,
+        &seated,
+        &limit,
+        &Stream::new("claude"),
+        &mut out,
+    )
+    .unwrap();
+    let view = String::from_utf8_lossy(&out).into_owned();
+    let state = replay(&journal.read().0);
+    let reseated = &state.order(&child).expect(&view).seated;
+    assert_eq!(reseated.send_ok, seated.send_ok, "{view}");
+    let brief = std::fs::read_to_string(&reseated.order_file).unwrap();
+    assert!(brief.contains(SEND_LINE), "{brief}");
     nirvana_seat::set_test_world(None);
 }

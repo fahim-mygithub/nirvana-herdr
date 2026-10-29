@@ -49,6 +49,7 @@ fn seated(order: &str) -> Seated {
         use_basis: None,
         expected: BTreeMap::new(),
         jev_pick: None,
+        send_ok: None,
     }
 }
 
@@ -1401,4 +1402,101 @@ fn run_end_calls_close_run_tab() {
         [run.to_string()]
     );
     let _ = std::fs::remove_dir_all(dir);
+}
+
+// ---- plan 31 §2.3: a queued wake says why ----
+
+#[test]
+fn p31_a_queued_wake_records_its_reason_once_per_new_event() {
+    let root = temp_dir("p31-wake-queued");
+    let project = Project::at(&root);
+    project.ensure().unwrap();
+    let journal = project.journal("r1");
+    let end = |order: &str| Kind::Ended {
+        order: Some(order.into()),
+        outcome: "failed".into(),
+        why: Some("exit 1".into()),
+        exit: Some(1),
+        pools: Vec::new(),
+        pools_basis: None,
+    };
+    // A run whose orchestrator pane is unknown: the wake queues without asking herdr anything.
+    journal
+        .append(
+            T0,
+            Kind::Opened {
+                project: root.display().to_string(),
+                orchestrator_pane: None,
+                auto: false,
+                pools: Vec::new(),
+                pools_basis: None,
+            },
+        )
+        .unwrap();
+    journal.append(T0 + 1, end("o1")).unwrap();
+    let queued = |journal: &Journal| -> Vec<(String, u64)> {
+        journal
+            .read()
+            .0
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                Kind::WakeQueued { why, through } => Some((why, through)),
+                _ => None,
+            })
+            .collect()
+    };
+    let (verdict, typed) = wake(&project, "r1", false).unwrap();
+    assert!(!typed && verdict.contains("queued"), "{verdict}");
+    assert_eq!(
+        queued(&journal),
+        vec![("the run has no orchestrator pane".to_owned(), 2)]
+    );
+    // The same wake again adds no line; a new event after it does.
+    wake(&project, "r1", false).unwrap();
+    assert_eq!(queued(&journal).len(), 1);
+    journal.append(T0 + 2, end("o2")).unwrap();
+    wake(&project, "r1", false).unwrap();
+    assert_eq!(
+        queued(&journal).last(),
+        Some(&("the run has no orchestrator pane".to_owned(), 4))
+    );
+    // The record moves no order and leaves the queue as it was.
+    let state = replay(&journal.read().0);
+    assert_eq!(state.queue.len(), 2);
+    assert_eq!(state.unproductive_wakes, 0);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn p31_queued_event_dedupes_only_the_same_reason_since_the_last_wake() {
+    let event = |seq: u64, kind: Kind| Event {
+        v: V,
+        seq,
+        at: T0,
+        kind,
+    };
+    let queued = |why: &str, through: u64| Kind::WakeQueued {
+        why: why.into(),
+        through,
+    };
+    let woken = Kind::Woken {
+        via: "prompt".into(),
+        through: 1,
+        digest: "d".into(),
+    };
+    let asked = Kind::Asked {
+        order: None,
+        question: "q".into(),
+    };
+    let events = vec![event(1, asked.clone()), event(2, queued("busy", 1))];
+    assert_eq!(queued_event(&events, "busy"), None);
+    assert_eq!(queued_event(&events, "typing"), Some(queued("typing", 1)));
+    // After a wake the same reason is news again.
+    let events = vec![
+        event(1, asked.clone()),
+        event(2, queued("busy", 1)),
+        event(3, woken),
+        event(4, asked),
+    ];
+    assert_eq!(queued_event(&events, "busy"), Some(queued("busy", 4)));
 }
