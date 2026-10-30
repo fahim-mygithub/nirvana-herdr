@@ -34,7 +34,9 @@ herdr seat pick --class build.bounded --size small [--needs video] [--not-family
 ```
 
 It prints the seat, model, effort, pool and the reason line, and books the order's expected use so parallel picks
-see each other. Say the pick in one line: `build.bounded -> sonnet medium (max): <reason>`. Exit 3 is no seat:
+see each other. When the order fits one of the project's profiles (the session digest lists them; `herdr profile
+list`), add `--profile <name>`: its `class` stands in when you name none, its `needs` join yours, its model or family
+narrows the seats and its effort replaces the class's. Exit 3 with a profile names it: no seat fits that profile. Say the pick in one line: `build.bounded -> sonnet medium (max): <reason>`. Exit 3 is no seat:
 its `earliest_reset` says when; defer, or ask the owner. To overrule, `--override <seat> --reason "..."`, at most 3
 a run.
 
@@ -51,6 +53,9 @@ owner's words where they matter. Then:
   project's `.mcp.json` server, so its worker gets the server's tools. An order that may press Send adds
   `--send-ok "<the owner's words>"`, copied exactly from the owner's prompt of the last 6 hours (4 words or more);
   herdr refuses a quote it cannot find, and a send-back or reseat never inherits it.
+  An order picked with `--profile <name>` is run with the same `--profile <name>`: herdr copies the profile into the
+  run, gives the worker its persona (a system prompt on Claude, the top of the order on agy), and a send-back or
+  reseat keeps the copy. Design one with `herdr profile new <name>`, then `herdr profile check <name>`.
 - **A worker subagent** (a short read, review or chore on Claude that needs no pane): spawn
   `nirvana:worker-<seat>-<effort>` with the seat and effort the pick gave (`opus-high`, `opus-medium`,
   `sonnet-medium`, `sonnet-low`, `haiku-low`). Every subagent is seated first: `herdr seat pick --book <order>`,

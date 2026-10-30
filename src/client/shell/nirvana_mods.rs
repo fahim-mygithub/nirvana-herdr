@@ -526,6 +526,8 @@ pub(crate) struct PreloadPanel {
     /// The first body line shown.
     pub(super) scroll: usize,
     pub(super) message: Option<String>,
+    /// Plan 33 §2.4: the name typed after `n`, while the panel asks for one.
+    pub(super) naming: Option<String>,
 }
 
 /// Where the panel drew its parts, for the mouse.
@@ -562,10 +564,10 @@ fn lines(items: &[Item]) -> Vec<Line> {
     lines
 }
 
-/// The panel's items for a view.
+/// The panel's items for a view, then the project's profiles (plan 33 §2.4), last so Preload's rows keep their place.
 pub(super) fn panel_items(panel: &PreloadPanel, view: &View) -> Vec<Item> {
     let config_dir = crate::nirvana::claude_config_dir();
-    preload::items(
+    let mut items = preload::items(
         view.report.as_ref(),
         &view.local,
         &panel.cwd,
@@ -574,7 +576,9 @@ pub(super) fn panel_items(panel: &PreloadPanel, view: &View) -> Vec<Item> {
         Some(&view.preset),
         view.trim.as_ref(),
         view.trim_error.as_deref(),
-    )
+    );
+    items.extend(super::nirvana_profiles::items(&panel.cwd));
+    items
 }
 
 pub(super) fn folder_name(cwd: &std::path::Path) -> String {
@@ -1125,23 +1129,31 @@ pub(super) fn render_panel(
         }
     }
 
-    // The keys, then what the last action did.
-    let keys = "space switch \u{b7} e edit \u{b7} r restart Claude \u{b7} esc close";
+    // The keys, then what the last action did; the name being typed after `n` before both.
+    let keys =
+        "space switch \u{b7} e edit \u{b7} r restart Claude \u{b7} n new profile \u{b7} esc close";
     let foot_y = bottom.saturating_sub(1);
-    let message = panel.message.as_deref().unwrap_or(keys);
+    let naming = panel
+        .naming
+        .as_deref()
+        .map(super::nirvana_profiles::naming_line);
+    let message = naming
+        .as_deref()
+        .or(panel.message.as_deref())
+        .unwrap_or(keys);
     put_text(
         buffer,
         inner_x,
         foot_y,
         inner_width,
         &fit(message, usize::from(inner_width)),
-        if panel.message.is_some() {
+        if panel.message.is_some() || panel.naming.is_some() {
             base.fg(palette.yellow)
         } else {
             muted
         },
     );
-    if panel.message.is_none() {
+    if panel.message.is_none() && panel.naming.is_none() {
         let start = "space switch \u{b7} e edit \u{b7} ";
         let restart = Rect::new(inner_x + width(start), foot_y, width("r restart Claude"), 1);
         if restart.right() <= inner_x + inner_width {
@@ -1341,6 +1353,7 @@ impl ClientShellState {
             selected: 0,
             scroll: 0,
             message: None,
+            naming: None,
         });
     }
 
@@ -1365,7 +1378,12 @@ impl ClientShellState {
             return;
         };
         let Some(switch) = item.switch.clone() else {
-            let reason = if item.group == Group::Jev {
+            let reason = if super::nirvana_profiles::is_profile(&item) {
+                format!(
+                    "a profile is used per order, `herdr seat run ... --profile {}`; e opens its file, n makes a new one",
+                    item.name
+                )
+            } else if item.group == Group::Jev {
                 "what Jev did today for every agent here; herdr jev stats lists each agent"
                     .to_owned()
             } else if item.group == Group::Skills {
@@ -1440,6 +1458,11 @@ impl ClientShellState {
             self.preload_say(format!("{} has no file to open", item.name));
             return;
         };
+        self.open_in_editor(&file, outcome);
+    }
+
+    /// Opens a file in the editor, in a pane the server starts, and closes the panel.
+    fn open_in_editor(&mut self, file: &std::path::Path, outcome: &mut ClientShellInput) {
         let Some(panel) = self.nirvana_preload.as_ref() else {
             return;
         };
@@ -1489,6 +1512,23 @@ impl ClientShellState {
         };
         let last = count.saturating_sub(1);
         panel.message = None;
+        // Plan 33 §2.4: while the panel asks for a profile's name, every key is the name's.
+        if let Some(name) = panel.naming.as_mut() {
+            let step = super::nirvana_profiles::naming_key(name, key.code);
+            let cwd = panel.cwd.clone();
+            if step != super::nirvana_profiles::Naming::Typing {
+                panel.naming = None;
+            }
+            if let super::nirvana_profiles::Naming::Make(name) = step {
+                match super::nirvana_profiles::make(&cwd, &name) {
+                    // The new file opens in an edit tab, as `e` opens one: a template is for filling in.
+                    Ok(file) => self.open_in_editor(&file, outcome),
+                    Err(why) => self.preload_say(format!("not made: {why}")),
+                }
+            }
+            outcome.repaint = true;
+            return;
+        }
         let selected = panel.selected;
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.nirvana_preload = None,
@@ -1500,6 +1540,7 @@ impl ClientShellState {
             KeyCode::End => panel.selected = last,
             KeyCode::Char(' ') | KeyCode::Enter => self.preload_switch(selected),
             KeyCode::Char('e') => self.preload_edit(selected, outcome),
+            KeyCode::Char('n') => panel.naming = Some(String::new()),
             KeyCode::Char('p') => {
                 let cwd = panel.cwd.clone();
                 let view = preload::view(&cwd);
