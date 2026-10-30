@@ -45,6 +45,7 @@ pub const HISTORICAL_DEFAULTS: &[&str] = &[
     include_str!("nirvana_seats_v2.toml"),
     include_str!("nirvana_seats_v3.toml"),
     include_str!("nirvana_seats_v4.toml"),
+    include_str!("nirvana_seats_v5.toml"),
 ];
 pub const DIR: &str = "nirvana";
 pub const SEATS_FILE: &str = "seats.toml";
@@ -218,6 +219,11 @@ fn default_fresh_above() -> u64 {
     crate::nirvana_fresh::FRESH_ABOVE
 }
 
+/// Plan 33 §3.3's `lesson_reviews_per_day` when a table written before it leaves the line out.
+fn default_lesson_reviews_per_day() -> u32 {
+    crate::nirvana_review::PER_DAY
+}
+
 /// The rule's numbers (plan 12 §5.3). Each is commented with its source in the default file.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -248,6 +254,11 @@ pub struct Constants {
     /// Plan 25 §2: a fresh session after a run ends only above this context (`nirvana_fresh::trigger`).
     #[serde(default = "default_fresh_above")]
     pub fresh_above: u64,
+    /// Plan 33 §3.3: lesson reviews a project may queue per UTC day; 0 turns them off. The field holds the key's
+    /// place under `deny_unknown_fields`; `nirvana_review::per_day` reads the value from the table's text.
+    #[serde(default = "default_lesson_reviews_per_day")]
+    #[allow(dead_code)]
+    pub lesson_reviews_per_day: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -4270,7 +4281,8 @@ mod tests {
                 "sweep.mechanical",
                 "chore.memory",
                 "chore.script",
-                "chore.github"
+                "chore.github",
+                "lesson-review"
             ]
         );
         assert_eq!(

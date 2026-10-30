@@ -2202,6 +2202,12 @@ fn send_back(
     request.not_family = seated.not_family.clone();
     request.mode = seated.mode;
     request.order = Some(id.clone());
+    // Plan 33 §2.2: "A send-back child and a reseat keep the parent's profile copy", and so its narrowing.
+    if let Err(why) =
+        crate::nirvana_profiles::narrow_for_order(&mut request, &project.run_dir(run), root_text)
+    {
+        return ask(format!("{order} must go back, but {why}"), axes);
+    }
     if let Some(reason) = &seated.override_reason {
         request.override_seat = Some((
             format!("{}:{}", seated.seat, seated.effort.word()),

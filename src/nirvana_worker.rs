@@ -41,11 +41,19 @@ use crate::nirvana_usage::Reading;
 
 /// The Work Report every worker ends with, passed to both CLIs as `--json-schema` (P3: both take it).
 /// `lesson` is O5's: a worker's proposed lesson, which the gate checks before it is written.
-pub const REPORT_SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["status","summary","files","tests","gotchas"],"properties":{"status":{"type":"string","enum":["done","blocked","needs_answer"]},"summary":{"type":"string","minLength":1},"question":{"type":"string"},"files":{"type":"array","items":{"type":"string"}},"tests":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["name","result"],"properties":{"name":{"type":"string"},"result":{"type":"string","enum":["pass","fail","not_run"]}}}},"gotchas":{"type":"array","items":{"type":"string"}},"lesson":{"type":"object","additionalProperties":false,"required":["name","class","steps","evidence"],"properties":{"name":{"type":"string","minLength":1},"class":{"type":"string","minLength":1},"steps":{"type":"string","minLength":1},"evidence":{"type":"string","minLength":1}}},"sources":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["url","used_for"],"properties":{"url":{"type":"string","minLength":1},"used_for":{"type":"string","minLength":1}}}}}}"#;
+pub const REPORT_SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["status","summary","files","tests","gotchas"],"properties":{"status":{"type":"string","enum":["done","blocked","needs_answer"]},"summary":{"type":"string","minLength":1},"question":{"type":"string"},"files":{"type":"array","items":{"type":"string"}},"tests":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["name","result"],"properties":{"name":{"type":"string"},"result":{"type":"string","enum":["pass","fail","not_run"]}}}},"gotchas":{"type":"array","items":{"type":"string"}},"lesson":{"type":"object","additionalProperties":false,"required":["name","class","steps","evidence"],"properties":{"name":{"type":"string","minLength":1},"class":{"type":"string","minLength":1},"steps":{"type":"string","minLength":1},"evidence":{"type":"string","minLength":1}}},"lesson_ops":{"type":"array","items":{"type":"object","required":["op"],"properties":{"op":{"type":"string","enum":["new","patch","merge"]},"slug":{"type":"string"},"base_sha":{"type":"string"},"name":{"type":"string"},"class":{"type":"string"},"steps":{"type":"string"},"evidence":{"type":"string"},"slugs":{"type":"array","items":{"type":"string"}}}}},"sources":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["url","used_for"],"properties":{"url":{"type":"string","minLength":1},"used_for":{"type":"string","minLength":1}}}}}}"#;
 
 /// The schema's properties, which the check below allows and nothing else.
-pub const REPORT_KEYS: [&str; 8] = [
-    "status", "summary", "question", "files", "tests", "gotchas", "lesson", "sources",
+pub const REPORT_KEYS: [&str; 9] = [
+    "status",
+    "summary",
+    "question",
+    "files",
+    "tests",
+    "gotchas",
+    "lesson",
+    "sources",
+    "lesson_ops",
 ];
 
 /// The keys agy adds to its structured answer (P3: "the response is the object, plus agy's own `toolAction`
@@ -133,6 +141,13 @@ pub fn check_report(report: &Value) -> Result<(), String> {
                 "the lesson's steps run {lines} lines, over {LESSON_LINES}"
             ));
         }
+    }
+    // Plan 33 §3.3: a lesson review's ops; herdr checks each one when it gates the review.
+    if object.get("lesson_ops").is_some_and(|ops| {
+        !ops.as_array()
+            .is_some_and(|items| items.iter().all(Value::is_object))
+    }) {
+        return Err("lesson_ops is not a list of objects".into());
     }
     if let Some(sources) = object.get("sources") {
         let Some(items) = sources.as_array() else {
@@ -3321,7 +3336,14 @@ pub fn seat_order_with(
         (project.root.clone(), None, None)
     };
     // Plan 12 O5 (§7.4.3): one line per live lesson of the class, the path and the description, never the body.
-    let lessons = crate::nirvana_lessons::offer(&project.root, &cwd, &booked.class);
+    let lessons = crate::nirvana_lessons::offer_for(
+        &project.root,
+        &cwd,
+        &booked.class,
+        // The `--profile` the order is seated with: the order as written carries no `Profile:` line, herdr adds it
+        // to the copy below, and a written line that differs from `--profile` was refused above.
+        profile,
+    );
     // Plan 31 §2.1: read from the order as written, before herdr's lessons and lines, which name apps of their own.
     let warning = crate::nirvana_gui_tools::server_hint(
         &text,

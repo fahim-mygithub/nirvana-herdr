@@ -863,7 +863,8 @@ pub fn fits(entry: &Entry, class: &str, profile: Option<&str>) -> bool {
     }
 }
 
-/// O3's brief composer calls this for an order seated with no profile; see `offer_for`.
+/// An order seated with no profile; see `offer_for`.
+#[cfg(test)]
 pub fn offer(root: &Path, cwd: &Path, class: &str) -> String {
     offer_for(root, cwd, class, None)
 }
