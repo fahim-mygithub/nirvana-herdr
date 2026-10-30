@@ -400,6 +400,16 @@ pub fn from_run(run_dir: &Path, profile: &Ref) -> Result<Profile, String> {
     parse(&file, &profile.name, text).map_err(|problems| problems.join("\n"))
 }
 
+/// The profile an order was seated with, as its `seated` event journals it: `seat run --profile` ends the reason with
+/// `; profile <name> sha256 <hex>`. The journal, not the order's text: a lesson review's brief quotes another order's
+/// text (plan 33 review B1).
+pub fn from_reason(reason: &str) -> Option<String> {
+    let (_, tail) = reason.rsplit_once("; profile ")?;
+    let (name, sha) = tail.split_once(" sha256 ")?;
+    (valid_name(name) && sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| name.to_owned())
+}
+
 pub fn order_lines(profile: &Ref) -> String {
     format!("{LINE} {}\n{SHA_LINE} {}\n", profile.name, profile.sha)
 }
@@ -462,7 +472,7 @@ pub fn strip_sections(text: &str, name: &str) -> String {
     out
 }
 
-fn strip_profile_lines(text: &str) -> String {
+pub fn strip_profile_lines(text: &str) -> String {
     text.split_inclusive('\n')
         .filter(|line| !line.starts_with(LINE) && !line.starts_with(SHA_LINE))
         .collect()
@@ -512,12 +522,17 @@ pub fn narrow(request: &mut nirvana_seat::Request, profile: &Profile) {
 }
 
 /// The narrowing for a child of an order: from the run's copy its parent was seated with, never the project's file,
-/// which may have changed since. Nothing when the text names no profile.
+/// which may have changed since. Nothing when the text names no profile, and nothing for a lesson review, whose brief
+/// quotes the order it reviews (plan 33 review B1: a reseat would put the review on the profile's model or effort,
+/// off the cheap seat).
 pub fn narrow_for_order(
     request: &mut nirvana_seat::Request,
     run_dir: &Path,
     text: &str,
 ) -> Result<(), String> {
+    if request.class == crate::nirvana_review::CLASS {
+        return Ok(());
+    }
     match in_order(text) {
         None => Ok(()),
         Some(found) => {

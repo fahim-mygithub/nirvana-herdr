@@ -1694,3 +1694,19 @@ fn p33_the_order_copy_names_its_profile_at_a_lines_start() {
     assert_eq!(spec("# Slice\nProfile: Slicer Two\n").profile, None);
     assert_eq!(spec("## Profile: slicer\n").profile, None);
 }
+
+/// Plan 33 review B1: the gate reads no profile for a lesson review, whose brief quotes the order it reviews.
+#[test]
+fn p33_the_gate_reads_no_profile_for_a_lesson_review() {
+    let dir = temp("p33-review-profile");
+    let file = dir.join("review.md");
+    std::fs::write(&file, "Profile: slicer\n# Lesson review of b1\n").unwrap();
+    let mut order = seated("b1-lr", None);
+    order.order_file = file.display().to_string();
+    assert_eq!(
+        order_profile(&order, &Spec::default()).as_deref(),
+        Some("slicer")
+    );
+    order.class = crate::nirvana_review::CLASS.into();
+    assert_eq!(order_profile(&order, &Spec::default()), None);
+}

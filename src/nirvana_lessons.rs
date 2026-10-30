@@ -55,6 +55,14 @@ pub const ARCHIVE: &str = ".archive";
 /// The verdict words a journal's `gated` event passes with. `accepted` is the word the gate wrote before O5's
 /// outcome words: in `3D-Printer Flow`, 53 of the 72 `gated` events read `accepted` and none reads `pass`.
 pub const PASS_WORDS: [&str; 2] = ["pass", "accepted"];
+/// Plan 33 review S2: a review op's evidence is at least this long. A review's ops apply with no orchestrator turn, so
+/// the quote is the one check left, and a quote of `e` is in every stream. A hypothesis: the shortest quote in the
+/// review tests that proves a command's output ("TOTAL 12 passed, 0 failed") is 26.
+pub const MIN_EVIDENCE: usize = 20;
+/// Plan 33 review B3: every file herdr writes in `lessons/` (not `index.json`), one JSON line each with its sha after
+/// the write. Under `runs/`, which O3's `.gitignore` ignores. A review whose folder changed in a way this log does not
+/// explain is failed (`unexplained`).
+const WRITES: &str = ".lesson-writes.jsonl";
 
 /// §3.5: where a kept lesson came from.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -366,9 +374,29 @@ pub fn verify_and_write(
         Err(why) => return Verdict::Refused(why),
     };
     let written = (|| {
-        let _lock = lock(root)?;
+        let io = |err: std::io::Error| format!("could not write it: {err}");
+        let _lock = lock(root).map_err(io)?;
         let mut index = read_index(root);
         let slug = slug(&lesson.name);
+        // Plan 33 review S3: a worker's lesson never overwrites one a review or a merge made, nor one of another class
+        // or profile; a merge's rollback would then refuse, and the umbrella would be lost silently.
+        if let Some(entry) = index.lessons.get(&slug) {
+            if entry.origin != Origin::Worker
+                || entry.class != one_line(&lesson.class)
+                || entry.profile.as_deref() != meta.profile
+            {
+                return Err(format!(
+                    "a lesson {slug} of origin {}, class {}{} is kept: patch it through a review",
+                    entry.origin.word(),
+                    entry.class,
+                    entry
+                        .profile
+                        .as_deref()
+                        .map(|p| format!(", profile {p}"))
+                        .unwrap_or_default()
+                ));
+            }
+        }
         let path = write_locked(
             root,
             &mut index,
@@ -376,13 +404,14 @@ pub fn verify_and_write(
             &lesson,
             &Source { order, run, at },
             meta,
-        )?;
-        write_index(root, &index)?;
-        Ok::<_, std::io::Error>(path)
+        )
+        .map_err(io)?;
+        write_index(root, &index).map_err(io)?;
+        Ok::<_, String>(path)
     })();
     match written {
         Ok(path) => Verdict::Written(path),
-        Err(err) => Verdict::Refused(format!("could not write it: {err}")),
+        Err(why) => Verdict::Refused(why),
     }
 }
 
@@ -399,6 +428,138 @@ struct Source<'a> {
 
 fn lesson_path(root: &Path, slug: &str) -> PathBuf {
     dir(root).join(format!("{slug}.md"))
+}
+
+/// Plan 33 review nit: the evidence goes into a tracked file, and a worker's stream can hold a secret that the
+/// owner's own `git push` would publish. Tokens shaped like `sk-...`, `ghp_...`, `github_pat_...`, `Bearer ...`, and
+/// any run of over 32 letters and digits holding both (a hex or base64 secret; a sha quoted goes with it), are
+/// replaced.
+pub fn redact(text: &str) -> String {
+    use std::sync::OnceLock;
+    static PATTERNS: OnceLock<[regex::Regex; 4]> = OnceLock::new();
+    let [bearer, sk, github, run] = PATTERNS.get_or_init(|| {
+        [
+            regex::Regex::new(r"(?i)\bbearer\s+\S{8,}").expect("bearer"),
+            regex::Regex::new(r"\bsk-[A-Za-z0-9_-]{16,}").expect("sk"),
+            regex::Regex::new(r"\b(?:gh[poursa]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})")
+                .expect("github"),
+            regex::Regex::new(r"[A-Za-z0-9+/]{33,}={0,2}").expect("run"),
+        ]
+    });
+    let text = bearer.replace_all(text, "Bearer [redacted]");
+    let text = sk.replace_all(&text, "[redacted]");
+    let text = github.replace_all(&text, "[redacted]");
+    run.replace_all(&text, |found: &regex::Captures| {
+        let found = &found[0];
+        if found.bytes().any(|b| b.is_ascii_digit())
+            && found.bytes().any(|b| b.is_ascii_alphabetic())
+        {
+            "[redacted]".to_owned()
+        } else {
+            found.to_owned()
+        }
+    })
+    .into_owned()
+}
+
+// ---- herdr's own writes in `lessons/` (plan 33 review B3) ----
+
+fn writes_path(root: &Path) -> PathBuf {
+    root.join(nirvana_run::DIR).join("runs").join(WRITES)
+}
+
+/// A file's path under `lessons/`, `/`-separated, as the writes log and a snapshot name it.
+fn rel(root: &Path, path: &Path) -> String {
+    path.strip_prefix(dir(root))
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn file_sha(path: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    std::fs::read(path).ok().map(|bytes| {
+        Sha256::digest(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    })
+}
+
+/// Records that herdr wrote or removed `path`: its sha now, `null` when it is gone.
+fn noted(root: &Path, path: &Path) {
+    use std::io::Write;
+    let line = serde_json::json!({"path": rel(root, path), "sha": file_sha(path)});
+    let log = writes_path(root);
+    if let Some(parent) = log.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+/// What a review's gate compares: every file in `lessons/` but `index.json` (its counters move with every order), by
+/// sha, and how many lines the writes log held then.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FolderSnap {
+    pub files: BTreeMap<String, String>,
+    pub writes: usize,
+}
+
+pub fn folder_snap(root: &Path) -> FolderSnap {
+    let mut files = BTreeMap::new();
+    let mut todo = vec![dir(root)];
+    while let Some(next) = todo.pop() {
+        for entry in std::fs::read_dir(&next).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                todo.push(path);
+            } else if path != dir(root).join(INDEX) {
+                if let Some(sha) = file_sha(&path) {
+                    files.insert(rel(root, &path), sha);
+                }
+            }
+        }
+    }
+    let writes = std::fs::read_to_string(writes_path(root))
+        .map(|text| text.lines().count())
+        .unwrap_or(0);
+    FolderSnap { files, writes }
+}
+
+/// The files of `lessons/` that changed since `before` with no herdr write after it that leaves each as it is now: a
+/// reviewer that wrote a lesson itself, around the ops herdr checks.
+pub fn unexplained(root: &Path, before: &FolderSnap) -> Vec<String> {
+    let now = folder_snap(root);
+    let log = std::fs::read_to_string(writes_path(root)).unwrap_or_default();
+    let herdr: Vec<(String, Option<String>)> = log
+        .lines()
+        .skip(before.writes)
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .map(|value| {
+            (
+                value["path"].as_str().unwrap_or("").to_owned(),
+                value["sha"].as_str().map(str::to_owned),
+            )
+        })
+        .collect();
+    let mut paths: Vec<&String> = before.files.keys().chain(now.files.keys()).collect();
+    paths.sort();
+    paths.dedup();
+    paths
+        .into_iter()
+        .filter(|path| before.files.get(*path) != now.files.get(*path))
+        .filter(|path| {
+            let sha = now.files.get(*path).cloned();
+            !herdr.iter().any(|(p, s)| p == *path && *s == sha)
+        })
+        .cloned()
+        .collect()
 }
 
 /// Writes `<slug>.md` and its index entry; the caller holds the lock and writes the index. A lesson already at the
@@ -423,10 +584,11 @@ fn write_locked(
         one_line(&lesson.class),
         source.order,
         source.run,
-        one_line(&lesson.evidence),
+        redact(&one_line(&lesson.evidence)),
         lesson.steps.replace("\r\n", "\n").trim_end()
     );
     std::fs::write(&path, body)?;
+    noted(root, &path);
     let (counters, seen) = index
         .lessons
         .get(slug)
@@ -523,17 +685,56 @@ fn snap(root: &Path, index: &Index, slug: &str) -> Snap {
 fn append_ledger(root: &Path, row: &LedgerRow) -> std::io::Result<()> {
     use std::io::Write;
     std::fs::create_dir_all(dir(root))?;
+    let path = dir(root).join(LEDGER);
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir(root).join(LEDGER))?;
+        .open(&path)?;
     let mut line = serde_json::to_string(row)?;
     line.push('\n');
-    file.write_all(line.as_bytes())
+    file.write_all(line.as_bytes())?;
+    drop(file);
+    noted(root, &path);
+    Ok(())
 }
 
-/// Runs `change` under the lock and records it: every touched slug before and after, in one ledger row. Nothing
-/// is written or recorded when it refuses. `change` gets the op's id and returns the slug it made.
+/// Plan 33 review S5: the highest `op-<n>` plus one. `ledger()` drops a line it cannot read, so a count of rows would
+/// hand a damaged ledger's next op an id it already holds.
+fn next_id(rows: &[LedgerRow]) -> String {
+    let top = rows
+        .iter()
+        .filter_map(|row| row.id.strip_prefix("op-")?.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0);
+    format!("op-{}", top + 1)
+}
+
+/// Puts each lesson file back as `snaps` hold it; what failed is said, never hidden.
+fn restore_files(root: &Path, snaps: &[Snap]) -> Vec<String> {
+    let mut failed = Vec::new();
+    for was in snaps {
+        // A file the failed op never reached is left byte for byte: the snapshot reads CRLF as LF.
+        if read_body(root, &was.slug) == was.file {
+            continue;
+        }
+        let path = lesson_path(root, &was.slug);
+        let done = match &was.file {
+            Some(text) => std::fs::write(&path, text),
+            None if path.exists() => std::fs::remove_file(&path),
+            None => Ok(()),
+        };
+        match done {
+            Ok(()) => noted(root, &path),
+            Err(err) => failed.push(format!("{}: {err}", was.slug)),
+        }
+    }
+    failed
+}
+
+/// Runs `change` under the lock and records it: every touched slug before and after, in one ledger row. `slugs` names
+/// every lesson `change` may write or remove. When it refuses, or the index or the ledger cannot be written, every
+/// one of them is put back as it stood (plan 33 review S5): an op is in the folder and the ledger, or in neither.
+/// `change` gets the op's id and returns the slug it made.
 fn ledgered(
     root: &Path,
     op: &str,
@@ -544,12 +745,36 @@ fn ledgered(
     change: impl FnOnce(&mut Index, &str) -> Result<String, String>,
 ) -> Result<(String, String), String> {
     let _lock = lock(root).map_err(|err| err.to_string())?;
-    let mut index = read_index(root);
-    let id = format!("op-{}", ledger(root).len() + 1);
-    let mut before: Vec<Snap> = slugs.iter().map(|slug| snap(root, &index, slug)).collect();
-    let made = change(&mut index, &id)?;
-    write_index(root, &index).map_err(|err| err.to_string())?;
-    if !slugs.contains(&made) {
+    let was = read_index(root);
+    let mut index = was.clone();
+    let id = next_id(&ledger(root));
+    let mut before: Vec<Snap> = Vec::new();
+    for slug in slugs {
+        if !before.iter().any(|snap| snap.slug == *slug) {
+            before.push(snap(root, &index, slug));
+        }
+    }
+    let undo = |why: String, index_written: bool, before: &[Snap]| -> String {
+        let mut failed = restore_files(root, before);
+        if index_written {
+            if let Err(err) = write_index(root, &was) {
+                failed.push(format!("{INDEX}: {err}"));
+            }
+        }
+        if failed.is_empty() {
+            why
+        } else {
+            format!("{why}; and could not put back {}", failed.join(", "))
+        }
+    };
+    let made = match change(&mut index, &id) {
+        Ok(made) => made,
+        Err(why) => return Err(undo(why, false, &before)),
+    };
+    if let Err(err) = write_index(root, &index) {
+        return Err(undo(err.to_string(), true, &before));
+    }
+    if !before.iter().any(|snap| snap.slug == made) {
         before.push(Snap {
             slug: made.clone(),
             file: None,
@@ -560,21 +785,20 @@ fn ledgered(
         .iter()
         .map(|was| snap(root, &index, &was.slug))
         .collect();
-    append_ledger(
-        root,
-        &LedgerRow {
-            v: 1,
-            id: id.clone(),
-            at,
-            op: op.to_owned(),
-            by: by.to_owned(),
-            run: run.to_owned(),
-            before,
-            after,
-            of: None,
-        },
-    )
-    .map_err(|err| err.to_string())?;
+    let row = LedgerRow {
+        v: 1,
+        id: id.clone(),
+        at,
+        op: op.to_owned(),
+        by: by.to_owned(),
+        run: run.to_owned(),
+        before: before.clone(),
+        after,
+        of: None,
+    };
+    if let Err(err) = append_ledger(root, &row) {
+        return Err(undo(format!("the ledger: {err}"), true, &before));
+    }
     Ok((made, id))
 }
 
@@ -619,13 +843,15 @@ pub fn review_new(
     )
 }
 
-/// A review's `patch` op: `base_sha` must be the lesson's body sha now. The slug stays; counters and profile carry.
+/// A review's `patch` op: `base_sha` must be the lesson's body sha now, and the lesson one the reviewed order is
+/// offered (`fits` its class and profile; plan 33 review S1). The slug stays; class, profile and counters carry.
 #[allow(clippy::too_many_arguments)]
 pub fn review_patch(
     root: &Path,
     slug: &str,
     base_sha: &str,
     lesson: &Lesson,
+    scope: (&str, Option<&str>),
     by: &str,
     run: &str,
     at: u64,
@@ -635,17 +861,32 @@ pub fn review_patch(
         let Some(entry) = index.lessons.get(slug).cloned() else {
             return Err(format!("no lesson {slug} to patch"));
         };
+        if !fits(&entry, scope.0, scope.1) {
+            return Err(format!(
+                "{slug} is not a lesson the reviewed order is offered (class {}{})",
+                entry.class,
+                entry
+                    .profile
+                    .as_deref()
+                    .map(|p| format!(", profile {p}"))
+                    .unwrap_or_default()
+            ));
+        }
         let now_sha = body_sha(root, slug).unwrap_or_default();
         if now_sha != base_sha {
             return Err(format!(
                 "base_sha {base_sha} is not {slug}'s body sha {now_sha}: it changed since it was read"
             ));
         }
+        let lesson = Lesson {
+            class: entry.class.clone(),
+            ..lesson.clone()
+        };
         write_locked(
             root,
             index,
             slug,
-            lesson,
+            &lesson,
             &Source { order: by, run, at },
             Meta {
                 profile: entry.profile.as_deref(),
@@ -660,7 +901,8 @@ pub fn review_patch(
 
 /// §3.4: an umbrella of `slugs`, of one class and one profile. Each part's file goes to `.archive/<id>-<slug>.md`
 /// and out of the index; the umbrella's counters are the sum of its parts'. `shas` holds the parts' body shas as
-/// the merge order's brief showed them: a part changed since is refused.
+/// the merge order's brief showed them: a part changed since is refused. Plan 33 review S5: the umbrella is written
+/// before any part is removed, and `ledgered` puts every file back when a step fails.
 #[allow(clippy::too_many_arguments)]
 pub fn merge(
     root: &Path,
@@ -689,7 +931,9 @@ pub fn merge(
         return Err(format!("the steps run over {STEPS_LINES} lines"));
     }
     let target = slug(name);
-    ledgered(root, "merge", by, run, at, &parts, |index, id| {
+    let mut touched = parts.clone();
+    touched.push(target.clone());
+    ledgered(root, "merge", by, run, at, &touched, |index, id| {
         let mut entries = Vec::new();
         for part in &parts {
             let Some(entry) = index.lessons.get(part).cloned() else {
@@ -714,16 +958,16 @@ pub fn merge(
                 "the umbrella's name {target} is another lesson's: name it apart"
             ));
         }
+        // The archive copies first: a copy is never lost, and a failed merge leaves only a spare copy behind.
         let archive = dir(root).join(ARCHIVE);
         std::fs::create_dir_all(&archive).map_err(|err| err.to_string())?;
         let mut counters = Counters::default();
         let mut seen: Vec<String> = Vec::new();
         for (part, entry) in parts.iter().zip(&entries) {
-            let from = lesson_path(root, part);
-            std::fs::copy(&from, archive.join(format!("{id}-{part}.md")))
+            let copy = archive.join(format!("{id}-{part}.md"));
+            std::fs::copy(lesson_path(root, part), &copy)
                 .map_err(|err| format!("archive {part}: {err}"))?;
-            std::fs::remove_file(&from).map_err(|err| format!("remove {part}: {err}"))?;
-            index.lessons.remove(part);
+            noted(root, &copy);
             counters.offered += entry.counters.offered;
             counters.opened += entry.counters.opened;
             counters.passed_after_opened += entry.counters.passed_after_opened;
@@ -742,6 +986,9 @@ pub fn merge(
             steps: steps.to_owned(),
             evidence: format!("merged from {}", parts.join(", ")),
         };
+        for part in &parts {
+            index.lessons.remove(part);
+        }
         write_locked(
             root,
             index,
@@ -753,10 +1000,15 @@ pub fn merge(
                 origin: Origin::Merge,
             },
         )
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| format!("the umbrella {target}: {err}"))?;
         if let Some(entry) = index.lessons.get_mut(&target) {
             entry.counters = counters;
             entry.seen = seen;
+        }
+        for part in parts.iter().filter(|part| **part != target) {
+            let from = lesson_path(root, part);
+            std::fs::remove_file(&from).map_err(|err| format!("remove {part}: {err}"))?;
+            noted(root, &from);
         }
         Ok(target.clone())
     })
@@ -776,6 +1028,19 @@ pub fn rollback(root: &Path, id: &str, at: u64) -> Result<String, String> {
     };
     if rows.iter().any(|r| r.of.as_deref() == Some(id)) {
         return Err(format!("{id} is rolled back already"));
+    }
+    // Plan 33 review S6: `ledger.jsonl` is tracked with the project, so a slug read from it names a file only when it
+    // is one `slug()` could have made; `../x` would write outside `lessons/`. Checked before any write.
+    if let Some(bad) = row
+        .before
+        .iter()
+        .chain(&row.after)
+        .find(|snap| slug(&snap.slug) != snap.slug)
+    {
+        return Err(format!(
+            "{id} names {:?}, which is not a lesson slug: the ledger was edited by hand",
+            bad.slug
+        ));
     }
     let mut index = read_index(root);
     for after in &row.after {
@@ -798,6 +1063,7 @@ pub fn rollback(root: &Path, id: &str, at: u64) -> Result<String, String> {
             None if path.exists() => std::fs::remove_file(&path).map_err(|err| err.to_string())?,
             None => {}
         }
+        noted(root, &path);
         match &before.entry {
             Some(entry) => {
                 index.lessons.insert(before.slug.clone(), entry.clone());
@@ -808,7 +1074,7 @@ pub fn rollback(root: &Path, id: &str, at: u64) -> Result<String, String> {
         }
     }
     write_index(root, &index).map_err(|err| err.to_string())?;
-    let back = format!("op-{}", rows.len() + 1);
+    let back = next_id(&rows);
     append_ledger(
         root,
         &LedgerRow {
@@ -984,6 +1250,7 @@ struct Told {
     lesson: Option<Value>,
     verdict: Option<String>,
     order_file: Option<String>,
+    class: Option<String>,
 }
 
 fn told(journal: &str) -> BTreeMap<String, Told> {
@@ -998,7 +1265,10 @@ fn told(journal: &str) -> BTreeMap<String, Told> {
         let text = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
         let entry = orders.entry(order.to_owned()).or_default();
         match value.get("event").and_then(Value::as_str) {
-            Some("seated") => entry.order_file = text("order_file"),
+            Some("seated") => {
+                entry.order_file = text("order_file");
+                entry.class = text("class");
+            }
             Some("delivered") => entry.lesson = value.pointer("/report/lesson").cloned(),
             Some("gated") => entry.verdict = text("verdict"),
             _ => {}
@@ -1020,6 +1290,10 @@ pub fn import(project: &Project, run: Option<&str>, dry: bool, at: u64) -> Impor
         None => project.runs(),
     };
     let mut out = Imported::default();
+    // Plan 33 review S3: a slug already kept, or kept earlier in this pass, is skipped, so a second import changes
+    // nothing and never overwrites a lesson a review patched or a merge made with the worker's first text.
+    let mut kept: std::collections::BTreeSet<String> =
+        read_index(&project.root).lessons.into_keys().collect();
     for run in runs {
         let journal = std::fs::read_to_string(project.run_dir(&run).join("journal.jsonl"))
             .unwrap_or_default();
@@ -1027,6 +1301,10 @@ pub fn import(project: &Project, run: Option<&str>, dry: bool, at: u64) -> Impor
             let Some(lesson) = said.lesson else {
                 continue;
             };
+            // Plan 33 §3.3 and review S4: "The reviewer's own lesson, if any, is ignored."
+            if said.class.as_deref() == Some(crate::nirvana_review::CLASS) {
+                continue;
+            }
             let name = lesson
                 .get("name")
                 .and_then(Value::as_str)
@@ -1049,28 +1327,35 @@ pub fn import(project: &Project, run: Option<&str>, dry: bool, at: u64) -> Impor
                 .order_file
                 .and_then(|file| std::fs::read_to_string(file).ok())
                 .and_then(|text| order_profile(&text));
-            let result = if dry {
-                check(&lesson, passed, &stream).map(|lesson| slug(&lesson.name))
-            } else {
-                match verify_and_write(
-                    &project.root,
-                    &lesson,
-                    passed,
-                    &stream,
-                    &order,
-                    &run,
-                    at,
-                    Meta {
-                        profile: profile.as_deref(),
-                        origin: Origin::Worker,
-                    },
-                ) {
-                    Verdict::Written(_) => Ok(slug(&name)),
-                    Verdict::Refused(why) => Err(why),
-                }
-            };
+            let checked = check(&lesson, passed, &stream).map(|lesson| slug(&lesson.name));
+            let result =
+                if let Some(slug) = checked.as_ref().ok().filter(|slug| kept.contains(*slug)) {
+                    Err(format!("a lesson {slug} is kept already"))
+                } else if dry {
+                    checked
+                } else {
+                    match verify_and_write(
+                        &project.root,
+                        &lesson,
+                        passed,
+                        &stream,
+                        &order,
+                        &run,
+                        at,
+                        Meta {
+                            profile: profile.as_deref(),
+                            origin: Origin::Worker,
+                        },
+                    ) {
+                        Verdict::Written(_) => Ok(slug(&name)),
+                        Verdict::Refused(why) => Err(why),
+                    }
+                };
             match result {
-                Ok(slug) => out.written.push((run.clone(), order, slug)),
+                Ok(slug) => {
+                    kept.insert(slug.clone());
+                    out.written.push((run.clone(), order, slug));
+                }
                 Err(why) if !passed && why == "the order did not pass the gate" => {
                     out.refused.push((
                         run.clone(),
@@ -1712,6 +1997,279 @@ mod tests {
             (entry.origin, entry.profile.as_deref()),
             (Origin::Worker, Some("slicer"))
         );
+    }
+
+    /// Review S3: a worker's lesson never overwrites a review's or a merge's, nor one of another class or profile.
+    #[test]
+    fn p33_a_worker_lesson_never_overwrites_a_review_or_another_scope() {
+        let root = temp("clobber");
+        let text = stream("=== TOTAL 12 passed", "TOTAL 12 passed");
+        let l = lesson("TOTAL 12 passed");
+        assert!(matches!(
+            verify_and_write(&root, &l, true, &text, "o1", "r1", 5, Meta::default()),
+            Verdict::Written(_)
+        ));
+        // The same slug again from a worker of the same class and no profile: written, as before plan 33.
+        assert!(matches!(
+            verify_and_write(&root, &l, true, &text, "o2", "r1", 6, Meta::default()),
+            Verdict::Written(_)
+        ));
+        let profiled = Meta {
+            profile: Some("slicer"),
+            origin: Origin::Worker,
+        };
+        assert_eq!(
+            verify_and_write(&root, &l, true, &text, "o3", "r1", 7, profiled),
+            Verdict::Refused(
+                "a lesson run-the-suite-headless of origin worker, class build.bounded is kept: patch it through a review"
+                    .into()
+            )
+        );
+        let mut other = l.clone();
+        other["class"] = "ops.terminal".into();
+        assert!(matches!(
+            verify_and_write(&root, &other, true, &text, "o4", "r1", 8, Meta::default()),
+            Verdict::Refused(why) if why.ends_with("patch it through a review")
+        ));
+        let mut index = read_index(&root);
+        index
+            .lessons
+            .get_mut("run-the-suite-headless")
+            .expect("entry")
+            .origin = Origin::Merge;
+        write_index(&root, &index).expect("index");
+        let before = body(&root, "run-the-suite-headless");
+        assert!(matches!(
+            verify_and_write(&root, &l, true, &text, "o5", "r1", 9, Meta::default()),
+            Verdict::Refused(why) if why.contains("of origin merge")
+        ));
+        assert_eq!(body(&root, "run-the-suite-headless"), before);
+        assert_eq!(
+            read_index(&root).lessons["run-the-suite-headless"].order,
+            "o2"
+        );
+    }
+
+    /// Review S3 and S4: a second import changes nothing, and a lesson-review order's own lesson is never imported.
+    #[test]
+    fn p33_a_second_import_changes_nothing_and_skips_the_reviewers_lesson() {
+        let root = temp("import-twice");
+        let project = Project::at(&root);
+        let run_dir = project.run_dir("old");
+        std::fs::create_dir_all(run_dir.join("streams")).expect("streams");
+        let delivered = |order: &str| {
+            serde_json::json!({"v":1,"seq":2,"at":2,"event":"delivered","order":order,
+                "report":{"status":"done","summary":"s","files":[],"tests":[],"gotchas":[],
+                "lesson":{"name":format!("Lesson of {order}"),"class":"build.bounded","steps":"1. x","evidence":"TOTAL 12 passed"}}})
+        };
+        let gated = |order: &str| serde_json::json!({"v":1,"seq":3,"at":3,"event":"gated","order":order,"verdict":"pass"});
+        let lines = [
+            serde_json::json!({"v":1,"seq":1,"at":1,"event":"seated","order":"w1","class":"build.bounded"}),
+            delivered("w1"),
+            gated("w1"),
+            serde_json::json!({"v":1,"seq":1,"at":1,"event":"seated","order":"w1-lr","class":"lesson-review"}),
+            delivered("w1-lr"),
+            gated("w1-lr"),
+        ];
+        let journal: Vec<String> = lines.iter().map(Value::to_string).collect();
+        std::fs::write(run_dir.join("journal.jsonl"), journal.join("\n")).expect("journal");
+        for order in ["w1", "w1-lr"] {
+            std::fs::write(
+                run_dir.join("streams").join(format!("{order}.jsonl")),
+                stream("TOTAL 12 passed", "unused"),
+            )
+            .expect("stream");
+        }
+        let first = import(&project, None, false, 9);
+        assert_eq!(
+            first.written,
+            vec![("old".to_owned(), "w1".to_owned(), "lesson-of-w1".to_owned())]
+        );
+        assert!(first.refused.is_empty(), "{:?}", first.refused);
+        assert!(!read_index(&root).lessons.contains_key("lesson-of-w1-lr"));
+        // A review patches it; a second import keeps the patch.
+        std::fs::write(dir(&root).join("lesson-of-w1.md"), "patched\n").expect("patch");
+        let second = import(&project, None, false, 10);
+        assert!(second.written.is_empty(), "{:?}", second.written);
+        assert_eq!(second.refused[0].3, "a lesson lesson-of-w1 is kept already");
+        assert_eq!(body(&root, "lesson-of-w1").as_deref(), Some("patched\n"));
+        assert_eq!(import(&project, None, true, 11).written, Vec::new());
+    }
+
+    fn kept_lesson(root: &Path, name: &str) -> String {
+        let text = stream(&format!("{name} proof"), "unused");
+        let mut l = lesson(&format!("{name} proof"));
+        l["name"] = name.into();
+        assert!(matches!(
+            verify_and_write(root, &l, true, &text, "o", "r", 5, Meta::default()),
+            Verdict::Written(_)
+        ));
+        slug(name)
+    }
+
+    /// Review S5: a merge whose umbrella cannot be written leaves every part where it was, the index as it was and no
+    /// ledger row; ids are the highest plus one, past a damaged line.
+    #[test]
+    fn p33_a_failed_merge_leaves_the_folder_as_it_was_and_ids_never_collide() {
+        let root = temp("merge-fail");
+        let parts = vec![kept_lesson(&root, "Tip one"), kept_lesson(&root, "Tip two")];
+        let index_before = read_index(&root);
+        // The umbrella's path is a folder: its write fails.
+        std::fs::create_dir_all(dir(&root).join("tips.md")).expect("folder");
+        let why = merge(
+            &root,
+            &parts,
+            "Tips",
+            "1. both",
+            &BTreeMap::new(),
+            "m",
+            "r",
+            9,
+        )
+        .expect_err("the umbrella cannot be written");
+        assert!(why.starts_with("the umbrella tips: "), "{why}");
+        for part in &parts {
+            assert!(lesson_path(&root, part).is_file(), "{part} is kept");
+        }
+        assert_eq!(read_index(&root), index_before);
+        assert!(ledger(&root).is_empty());
+        std::fs::remove_dir(dir(&root).join("tips.md")).expect("folder");
+        // A ledger holding op-5 and a damaged line: the next op is op-6.
+        std::fs::write(
+            dir(&root).join(LEDGER),
+            format!(
+                "{}\nnot json\n",
+                serde_json::to_string(&LedgerRow {
+                    v: 1,
+                    id: "op-5".into(),
+                    at: 1,
+                    op: "new".into(),
+                    by: "x".into(),
+                    run: "r".into(),
+                    before: Vec::new(),
+                    after: Vec::new(),
+                    of: None,
+                })
+                .expect("row")
+            ),
+        )
+        .expect("ledger");
+        let (made, id) = merge(
+            &root,
+            &parts,
+            "Tips",
+            "1. both",
+            &BTreeMap::new(),
+            "m",
+            "r",
+            10,
+        )
+        .expect("merge");
+        assert_eq!((made.as_str(), id.as_str()), ("tips", "op-6"));
+        assert!(!lesson_path(&root, &parts[0]).exists());
+        assert!(dir(&root).join(ARCHIVE).join("op-6-tip-one.md").is_file());
+    }
+
+    /// Review S5: a merge that fails after it removed a part (the second part's file is held open, shared for reading only)
+    /// puts the removed part back and takes the umbrella out.
+    #[cfg(windows)]
+    #[test]
+    fn p33_a_merge_that_fails_midway_puts_every_file_back() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = temp("merge-midway");
+        let parts = vec![kept_lesson(&root, "Tip one"), kept_lesson(&root, "Tip two")];
+        let index_before = read_index(&root);
+        let first = body(&root, &parts[0]);
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            // FILE_SHARE_READ alone: the archive copy reads it, the removal is refused.
+            .share_mode(1)
+            .open(lesson_path(&root, &parts[1]))
+            .expect("hold");
+        let why = merge(
+            &root,
+            &parts,
+            "Tips",
+            "1. both",
+            &BTreeMap::new(),
+            "m",
+            "r",
+            9,
+        )
+        .expect_err("the second part cannot be removed");
+        drop(held);
+        assert!(why.starts_with("remove tip-two: "), "{why}");
+        assert_eq!(body(&root, &parts[0]), first, "the removed part is back");
+        assert!(!lesson_path(&root, "tips").exists(), "the umbrella is out");
+        assert_eq!(read_index(&root), index_before);
+        assert!(ledger(&root).is_empty());
+    }
+
+    /// Review S6: a ledger row naming a slug `slug()` could not make is refused before any file is written.
+    #[test]
+    fn p33_rollback_refuses_a_ledger_slug_that_leaves_the_folder() {
+        let root = temp("rollback-slug");
+        let outside = root.join(nirvana_run::DIR).join("escaped.md");
+        let row = LedgerRow {
+            v: 1,
+            id: "op-1".into(),
+            at: 1,
+            op: "new".into(),
+            by: "x".into(),
+            run: "r".into(),
+            before: vec![Snap {
+                slug: "../escaped".into(),
+                file: Some("owned\n".into()),
+                entry: None,
+            }],
+            after: vec![Snap {
+                slug: "../escaped".into(),
+                file: None,
+                entry: None,
+            }],
+            of: None,
+        };
+        std::fs::create_dir_all(dir(&root)).expect("dir");
+        std::fs::write(
+            dir(&root).join(LEDGER),
+            serde_json::to_string(&row).expect("row") + "\n",
+        )
+        .expect("ledger");
+        let why = rollback(&root, "op-1", 2).expect_err("refused");
+        assert!(why.contains("not a lesson slug"), "{why}");
+        assert!(!outside.exists());
+        assert_eq!(ledger(&root).len(), 1);
+    }
+
+    /// Review nit: the evidence written into a tracked lesson file carries no token.
+    #[test]
+    fn p33_evidence_is_redacted_before_it_is_written() {
+        let hex = "a".repeat(20) + &"1".repeat(20);
+        let said = format!(
+            "key sk-proj-AbCdEfGhIjKlMnOpQr gh ghp_AbCdEfGhIjKlMnOpQrSt auth Bearer eyJhbGciOiJIUzI1 sha {hex} kept TOTAL 12 passed"
+        );
+        assert_eq!(
+            redact(&said),
+            "key [redacted] gh [redacted] auth Bearer [redacted] sha [redacted] kept TOTAL 12 passed"
+        );
+        assert_eq!(
+            redact("run-the-godot-suite-headless-and-read-it"),
+            "run-the-godot-suite-headless-and-read-it"
+        );
+        let root = temp("redact");
+        let text = stream(&format!("=== {said}"), "unused");
+        let l = lesson(&said);
+        let Verdict::Written(path) =
+            verify_and_write(&root, &l, true, &text, "o1", "r1", 5, Meta::default())
+        else {
+            panic!("written")
+        };
+        let body = std::fs::read_to_string(path).expect("body");
+        assert!(
+            !body.contains("sk-proj") && !body.contains("ghp_") && !body.contains(&hex),
+            "{body}"
+        );
+        assert!(body.contains("kept TOTAL 12 passed"), "{body}");
     }
 
     #[test]

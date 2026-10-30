@@ -59,7 +59,26 @@ fn done(status: &str) -> Value {
     serde_json::json!({"status":status,"summary":"added mul","files":["calc.py"],"tests":[{"name":"test_mul","result":"pass"}],"gotchas":[]})
 }
 
+/// A profile that would show on a worker that took it: a persona, a model, an effort, a forbidden tool.
+const SLICER: &str = "---\ndescription: Slices prints through the studio server.\nmodel: claude-opus-5-5\neffort: high\n\
+disallowed_tools: [Bash]\n---\nYou slice prints only through the studio server.\n";
+
+/// The profile `name` copied into the run as `seat run --profile` copies it, and the order copy's two lines.
+fn seated_profile(root: &Path, run: &str, name: &str) -> crate::nirvana_profiles::Ref {
+    let project = Project::at(root);
+    std::fs::create_dir_all(crate::nirvana_profiles::folder(root)).expect("profiles");
+    std::fs::write(crate::nirvana_profiles::path(root, name), SLICER).expect("profile");
+    let loaded = crate::nirvana_profiles::load(root, name).expect("load");
+    crate::nirvana_profiles::copy_into_run(&project.run_dir(run), &loaded).expect("copy");
+    crate::nirvana_profiles::Ref {
+        name: name.into(),
+        sha: loaded.sha,
+    }
+}
+
 /// Order `id` of class `build.bounded` in its own worktree, delivered with `report`, its stream holding `output`.
+/// With a profile it is seated as `seat run --profile` seats it: the copy in the run, the order copy's two lines, the
+/// `seated` reason naming the profile and its sha.
 fn delivered(root: &Path, run: &str, id: &str, report: Value, output: &str, profile: Option<&str>) {
     let project = Project::at(root);
     let cwd = root.join(".nirvana").join("worktrees").join(id);
@@ -81,10 +100,12 @@ fn delivered(root: &Path, run: &str, id: &str, report: Value, output: &str, prof
     )
     .expect("mul");
     std::fs::write(cwd.join("test_mul.py"), "from calc import mul\n").expect("test");
+    let profiled = profile.map(|name| seated_profile(root, run, name));
     let text = format!(
-        "# Add mul\n\nowns: calc.py test_mul.py\ntest: git ls-files\ncheck: test_mul\n{}",
-        profile
-            .map(|p| format!("Profile: {p}\n"))
+        "{}# Add mul\n\nowns: calc.py test_mul.py\ntest: git ls-files\ncheck: test_mul\n",
+        profiled
+            .as_ref()
+            .map(crate::nirvana_profiles::order_lines)
             .unwrap_or_default()
     );
     let order_file = crate::nirvana_worker::write_order(&project, &cwd, id, &text).expect("order");
@@ -104,6 +125,9 @@ fn delivered(root: &Path, run: &str, id: &str, report: Value, output: &str, prof
             .expect("opened");
     }
     let mut seated = seated(id, "build.bounded");
+    if let Some(found) = &profiled {
+        seated.reason = format!("r; profile {} sha256 {}", found.name, found.sha);
+    }
     seated.cwd = cwd.display().to_string();
     seated.worktree = Some(cwd.display().to_string());
     seated.branch = Some(format!("nirvana/{id}"));
@@ -226,24 +250,31 @@ fn p33_a_review_is_queued_after_a_pass_and_its_new_op_keeps_a_lesson() {
     let review = state.order("b1-lr").expect("the review is seated");
     assert_eq!(review.seated.class, CLASS);
     assert_eq!(review.seated.mode, Mode::Efficient);
-    assert_eq!(review.seated.cwd, root.display().to_string());
+    // Review B3: its own folder under the run, never the project's root.
+    let cwd = review_cwd(&project, "r1", "b1-lr");
+    assert_eq!(review.seated.cwd, cwd.display().to_string());
+    assert!(cwd.starts_with(project.run_dir("r1")));
     let brief = std::fs::read_to_string(&review.seated.order_file).expect("brief");
+    assert!(
+        brief.contains(&cwd.join("stream.jsonl").display().to_string()),
+        "the brief names the stream's copy in the review's folder: {brief}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(cwd.join("stream.jsonl")).expect("copy"),
+        stream("TOTAL 12 passed, stream only tail")
+    );
     assert!(
         brief.contains("## The rules") && brief.contains("pass\n"),
         "{brief}"
     );
     assert!(brief.contains("profile slicer"), "{brief}");
     assert!(
-        brief.contains("b1.jsonl"),
-        "the brief names the stream file"
-    );
-    assert!(
         !brief.contains("stream only tail"),
         "the brief never holds the stream"
     );
     // The reviewer delivers one op whose evidence is in b1's stream, and a lesson of its own.
     let mut report = done("done");
-    report["lesson_ops"] = serde_json::json!([{"op":"new","name":"Read the suite total","class":"build.bounded","steps":"1. read TOTAL","evidence":"TOTAL 12 passed"}]);
+    report["lesson_ops"] = serde_json::json!([{"op":"new","name":"Read the suite total","class":"build.bounded","steps":"1. read TOTAL","evidence":"TOTAL 12 passed, stream only tail"}]);
     report["lesson"] = serde_json::json!({"name":"Mine","class":"lesson-review","steps":"x","evidence":"TOTAL 12 passed"});
     project
         .journal("r1")
@@ -389,22 +420,27 @@ fn p33_each_lesson_op_refusal_says_why() {
     let root = temp("ops");
     let slug = kept(&root, "Read the total", "build.bounded");
     let sha = nirvana_lessons::body_sha(&root, &slug).expect("sha");
-    let text = stream("TOTAL 3 passed");
+    let text = stream("TOTAL 3 passed, 0 failed in 1.2 s");
+    let proof = "TOTAL 3 passed, 0 failed";
     let report = serde_json::json!({"lesson_ops":[
-        {"op":"new","name":"Not proved","class":"build.bounded","steps":"1","evidence":"never printed"},
-        {"op":"patch","slug":slug,"base_sha":"0000","name":"Read the total","class":"build.bounded","steps":"2","evidence":"TOTAL 3 passed"},
+        {"op":"new","name":"Not proved","class":"build.bounded","steps":"1","evidence":"never printed by any command"},
+        {"op":"patch","slug":slug,"base_sha":"0000","name":"Read the total","class":"build.bounded","steps":"2","evidence":proof},
         {"op":"rename","name":"x"},
         {"op":"merge","slugs":["a","b"],"name":"x","steps":"y"},
-        {"op":"patch","slug":slug,"name":"Read the total","class":"build.bounded","steps":"2","evidence":"TOTAL 3 passed"},
-        {"op":"new","name":"Read the total","class":"build.bounded","steps":"3","evidence":"TOTAL 3 passed"},
-        {"op":"patch","slug":slug,"base_sha":sha,"name":"Read the total","class":"build.bounded","steps":"1. read TOTAL last","evidence":"TOTAL 3 passed"},
+        {"op":"patch","slug":slug,"name":"Read the total","class":"build.bounded","steps":"2","evidence":proof},
+        {"op":"new","name":"Read the total","class":"build.bounded","steps":"3","evidence":proof},
+        {"op":"patch","slug":slug,"base_sha":sha,"name":"Read the total","class":"build.bounded","steps":"1. read TOTAL last","evidence":proof},
     ]});
     let applied = apply_review(
         &root,
         parse_ops(&report),
         &text,
-        "s1",
-        None,
+        &Scope {
+            order: "s1",
+            class: "build.bounded",
+            profile: None,
+            herdr_wrote: Vec::new(),
+        },
         "s1-lr",
         "r",
         9,
@@ -452,6 +488,374 @@ fn p33_each_lesson_op_refusal_says_why() {
     assert!(body.ends_with("1. read TOTAL last\n"), "{body}");
     // Only the applied op is in the ledger.
     assert_eq!(nirvana_lessons::ledger(&root).len(), 1);
+}
+
+/// Review S1 and S2: an op keeps a lesson only for the reviewed order's class and profile, and only on a quote of at
+/// least 20 characters that the worker's stream holds and herdr did not write.
+#[test]
+fn p33_a_review_op_stays_in_its_scope_and_its_evidence_is_the_workers_own() {
+    let root = temp("scope");
+    let gui = kept(&root, "Click the field first", "gui.studio");
+    let gui_sha = nirvana_lessons::body_sha(&root, &gui).expect("sha");
+    let own = kept(&root, "Read the total", "build.bounded");
+    let own_sha = nirvana_lessons::body_sha(&root, &own).expect("sha");
+    let order_copy = "# Add mul\n\nRun the suite and read TOTAL from its last line.\n";
+    let text = stream(&format!(
+        "{order_copy}\nTOTAL 3 passed, 0 failed in 1.2 s\nRead the total proof"
+    ));
+    let proof = "TOTAL 3 passed, 0 failed";
+    let report = serde_json::json!({"lesson_ops":[
+        {"op":"new","name":"Plant a gui lesson","class":"gui.studio","steps":"1","evidence":proof},
+        {"op":"patch","slug":gui,"base_sha":gui_sha,"name":"Click","class":"build.bounded","steps":"2","evidence":proof},
+        {"op":"new","name":"Short","class":"build.bounded","steps":"1","evidence":"TOTAL 3"},
+        {"op":"new","name":"From the order","class":"build.bounded","steps":"1","evidence":"Run the suite and read TOTAL"},
+        {"op":"new","name":"From a lesson","class":"build.bounded","steps":"1","evidence":"Read the total proof"},
+        {"op":"patch","slug":own,"base_sha":own_sha,"name":"Read the total","class":"gui.studio","steps":"1. read TOTAL last","evidence":proof},
+    ]});
+    let applied = apply_review(
+        &root,
+        parse_ops(&report),
+        &text,
+        &Scope {
+            order: "s1",
+            class: "build.bounded",
+            profile: None,
+            herdr_wrote: vec![order_copy.to_owned()],
+        },
+        "s1-lr",
+        "r",
+        9,
+    );
+    let lines: Vec<(bool, &str)> = applied
+        .lines
+        .iter()
+        .map(|(k, l)| (*k, l.as_str()))
+        .collect();
+    assert_eq!(
+        lines[0],
+        (
+            false,
+            "op 1 refused: a review of a build.bounded order keeps build.bounded lessons, not gui.studio"
+        )
+    );
+    assert_eq!(
+        lines[1],
+        (
+            false,
+            "op 2 refused: click-the-field-first is not a lesson the reviewed order is offered (class gui.studio)"
+        )
+    );
+    assert_eq!(
+        lines[2],
+        (
+            false,
+            "op 3 refused: the evidence is 7 characters; a quote of at least 20 proves something"
+        )
+    );
+    assert_eq!(
+        lines[3],
+        (
+            false,
+            "op 4 refused: the evidence is text herdr wrote (the order or this brief), not the worker's"
+        )
+    );
+    assert_eq!(
+        lines[4],
+        (
+            false,
+            "op 5 refused: the evidence is lesson read-the-total's own text"
+        )
+    );
+    // A patch keeps the entry's own class, whatever the op says.
+    assert!(lines[5].0, "{lines:?}");
+    let index = nirvana_lessons::read_index(&root);
+    assert_eq!(index.lessons[&own].class, "build.bounded");
+    assert_eq!(index.lessons[&gui].class, "gui.studio");
+    assert!(!index.lessons.contains_key("plant-a-gui-lesson"));
+    let body = nirvana_lessons::body(&root, &own).expect("body");
+    assert!(body.contains("\nclass: build.bounded\n"), "{body}");
+}
+
+/// Review B1: a review of an order seated with a profile takes none of it. Its brief carries no profile line, a
+/// worker started on it gets no persona and no forbidden tools, a reseat is not narrowed, and its ops are scoped to
+/// the profile the subject's `seated` event journals.
+#[test]
+fn p33_a_review_of_a_profiled_order_takes_no_profile() {
+    let _home = quiet("review-profile");
+    let root = repo("review-profile");
+    let project = Project::at(&root);
+    delivered(
+        &root,
+        "r1",
+        "b1",
+        done("done"),
+        // The worker read its order file back: the stream holds herdr's own text too.
+        "TOTAL 12 passed, 0 failed in 3 s\nowns: calc.py test_mul.py\n",
+        Some("slicer"),
+    );
+    nirvana_gate::gate(&project, "r1", "b1").expect("gate");
+    let state = state_of(&root, "r1");
+    let subject = state.order("b1").expect("b1").seated.clone();
+    let review = state.order("b1-lr").expect("review").seated.clone();
+    let brief = std::fs::read_to_string(&review.order_file).expect("brief");
+    assert!(
+        crate::nirvana_profiles::in_order(&brief).is_none()
+            && !brief.lines().any(|line| line.starts_with("Profile")),
+        "{brief}"
+    );
+    assert!(brief.contains("profile slicer"), "{brief}");
+    // A review whose order file did say the subject's lines, as a reseat's continuation brief quotes its parent's.
+    let mut quoting = review.clone();
+    quoting.cli = "claude".into();
+    quoting.order_file = subject.order_file.clone();
+    let run_dir = project.run_dir("r1");
+    assert_eq!(
+        crate::nirvana_worker::with_profile(vec!["claude".to_owned()], &run_dir, &quoting),
+        Ok(vec!["claude".to_owned()])
+    );
+    let mut request = nirvana_seat::Request::new(CLASS);
+    crate::nirvana_profiles::narrow_for_order(
+        &mut request,
+        &run_dir,
+        &std::fs::read_to_string(&subject.order_file).expect("copy"),
+    )
+    .expect("narrow");
+    assert_eq!((request.profile, request.claude_only), (None, None));
+    // Its op keeps a lesson of the subject's journaled profile; an op quoting the order copy herdr wrote keeps none.
+    let mut report = done("done");
+    report["lesson_ops"] = serde_json::json!([
+        {"op":"new","name":"Read the suite total","class":"build.bounded","steps":"1. read TOTAL","evidence":"TOTAL 12 passed, 0 failed"},
+        {"op":"new","name":"Own the files","class":"build.bounded","steps":"1. own them","evidence":"owns: calc.py test_mul.py"},
+    ]);
+    project
+        .journal("r1")
+        .append(
+            9,
+            Kind::Delivered {
+                order: "b1-lr".into(),
+                report,
+            },
+        )
+        .expect("delivered");
+    let ruling = nirvana_gate::gate(&project, "r1", "b1-lr").expect("gate the review");
+    assert_eq!(ruling.verdict, "pass", "{ruling:?}");
+    let index = nirvana_lessons::read_index(&root);
+    assert_eq!(
+        index.lessons["read-the-suite-total"].profile.as_deref(),
+        Some("slicer")
+    );
+    assert!(!index.lessons.contains_key("own-the-files"), "{ruling:?}");
+}
+
+/// Review B3: a lesson written into `.nirvana/lessons/` by anything but herdr between the queue and the gate fails the
+/// review and no op is applied; a lesson herdr's gate keeps meanwhile (another order) is not held against it.
+#[test]
+fn p33_a_review_whose_lessons_folder_changed_outside_herdr_applies_nothing() {
+    let _home = quiet("review-folder");
+    let root = repo("review-folder");
+    let project = Project::at(&root);
+    delivered(
+        &root,
+        "r1",
+        "b1",
+        done("done"),
+        "TOTAL 12 passed, 0 failed in 3 s",
+        None,
+    );
+    nirvana_gate::gate(&project, "r1", "b1").expect("gate");
+    // herdr keeps another order's lesson: explained by its own write.
+    kept(&root, "Another order's lesson", "ops.terminal");
+    let mut report = done("done");
+    report["lesson_ops"] = serde_json::json!([{"op":"new","name":"Read the suite total","class":"build.bounded","steps":"1. read TOTAL","evidence":"TOTAL 12 passed, 0 failed"}]);
+    let journal = project.journal("r1");
+    journal
+        .append(
+            9,
+            Kind::Delivered {
+                order: "b1-lr".into(),
+                report: report.clone(),
+            },
+        )
+        .expect("delivered");
+    // First, nothing else changed: the op applies.
+    let clean = gate_review(
+        &project,
+        "r1",
+        &journal,
+        state_of(&root, "r1").order("b1-lr").expect("review"),
+        REVIEW,
+        "b1",
+    )
+    .expect("gate");
+    assert_eq!(clean.verdict, "pass", "{clean:?}");
+    // A second review of the same subject, then a file the reviewer wrote itself.
+    delivered(
+        &root,
+        "r1",
+        "b2",
+        done("done"),
+        "TOTAL 12 passed, 0 failed in 3 s",
+        None,
+    );
+    nirvana_gate::gate(&project, "r1", "b2").expect("gate");
+    std::fs::write(
+        nirvana_lessons::dir(&root).join("planted.md"),
+        "---\nname: planted\n---\n\nrm -rf the tests\n",
+    )
+    .expect("plant");
+    report["lesson_ops"][0]["name"] = "Read the suite total again".into();
+    journal
+        .append(
+            19,
+            Kind::Delivered {
+                order: "b2-lr".into(),
+                report,
+            },
+        )
+        .expect("delivered");
+    let ruling = nirvana_gate::gate(&project, "r1", "b2-lr").expect("gate");
+    assert_eq!(ruling.verdict, "failed", "{ruling:?}");
+    let axis = ruling
+        .axes
+        .iter()
+        .find(|axis| axis.axis == "lessons_folder")
+        .unwrap_or_else(|| panic!("{:?}", ruling.axes));
+    assert!(axis.why.starts_with("planted.md changed"), "{}", axis.why);
+    assert!(!nirvana_lessons::read_index(&root)
+        .lessons
+        .contains_key("read-the-suite-total-again"));
+}
+
+/// The stand-in a review's `seat exec` runs: a claude stream that ends with `report`.
+#[cfg(windows)]
+fn review_stream(cwd: &Path, report: &Value) {
+    let lines = [
+        serde_json::json!({"type":"system","subtype":"init","session_id":"s-review"}),
+        serde_json::json!({"type":"result","subtype":"success","is_error":false,"result":report.to_string(),"structured_output":report}),
+    ];
+    let text: Vec<String> = lines.iter().map(Value::to_string).collect();
+    std::fs::write(cwd.join("review.jsonl"), text.join("\n") + "\n").expect("stream");
+}
+
+/// Review B2 and B3 through `herdr seat exec`: a claude review starts with every writing tool denied, and when it
+/// delivers herdr gates it at once: no question journaled, no line in Nirvana Claude's queue. A `needs_answer` review
+/// applies nothing.
+#[cfg(windows)]
+#[test]
+fn p33_a_delivered_review_is_gated_by_herdr_with_no_orchestrator_turn() {
+    let _home = quiet("review-exec");
+    // agy signed out: the review takes Sonnet low, a claude seat.
+    nirvana_seat::set_test_world(Some(BTreeMap::from([(
+        "agy".to_owned(),
+        "signed out".to_owned(),
+    )])));
+    let root = repo("review-exec");
+    let project = Project::at(&root);
+    let run = "r1";
+    let journal = project.journal(run);
+    let exec_review = |subject: &str, report: Value| -> (Vec<String>, String) {
+        delivered(
+            &root,
+            run,
+            subject,
+            done("done"),
+            "TOTAL 12 passed, 0 failed in 3 s",
+            Some("slicer"),
+        );
+        nirvana_gate::gate(&project, run, subject).expect("gate");
+        let id = review_id(subject);
+        let review = state_of(&root, run)
+            .order(&id)
+            .expect("review")
+            .seated
+            .clone();
+        assert_eq!(review.cli, "claude", "{review:?}");
+        review_stream(Path::new(&review.cwd), &report);
+        crate::nirvana_worker::TEST_COMMAND.with_borrow_mut(|slot| {
+            *slot = Some(vec![
+                "cmd.exe".into(),
+                "/c".into(),
+                "type review.jsonl".into(),
+            ]);
+        });
+        let mut out = Vec::new();
+        crate::nirvana_worker::exec(&project, run, &id, None, &mut out).expect("exec");
+        crate::nirvana_worker::TEST_COMMAND.with_borrow_mut(|slot| *slot = None);
+        let argv = journal
+            .read()
+            .0
+            .into_iter()
+            .find_map(|event| match event.kind {
+                Kind::Started { order, argv, .. } if order == id => Some(argv),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("started: {}", String::from_utf8_lossy(&out)));
+        (argv, String::from_utf8_lossy(&out).into_owned())
+    };
+    let mut report = done("done");
+    report["lesson_ops"] = serde_json::json!([{"op":"new","name":"Read the suite total","class":"build.bounded","steps":"1. read TOTAL","evidence":"TOTAL 12 passed, 0 failed"}]);
+    let (argv, out) = exec_review("b1", report.clone());
+    let at = argv
+        .iter()
+        .position(|arg| arg == "--disallowedTools")
+        .unwrap_or_else(|| panic!("{argv:?}"));
+    assert_eq!(argv[at + 1], DENIED);
+    let denied: Vec<&str> = DENIED.split(',').collect();
+    for tool in [
+        "Bash",
+        "PowerShell",
+        "Edit",
+        "Write",
+        "NotebookEdit",
+        "Agent",
+    ] {
+        assert!(denied.contains(&tool), "{tool} is not denied: {DENIED}");
+    }
+    assert!(
+        !argv.iter().any(|arg| arg == "--append-system-prompt-file"),
+        "the subject's persona: {argv:?}"
+    );
+    let state = state_of(&root, run);
+    assert_eq!(
+        state.order("b1-lr").and_then(|o| o.verdict.as_deref()),
+        Some("pass"),
+        "{out}"
+    );
+    assert!(nirvana_lessons::read_index(&root)
+        .lessons
+        .contains_key("read-the-suite-total"));
+    assert!(
+        !state
+            .queue
+            .iter()
+            .any(|item| item.order.as_deref() == Some("b1-lr")),
+        "{:?}",
+        state.queue
+    );
+    // needs_answer: no question for the orchestrator, and nothing applied.
+    report["status"] = "needs_answer".into();
+    report["question"] = "keep it?".into();
+    report["lesson_ops"][0]["name"] = "Read the suite total twice".into();
+    let (_, out) = exec_review("b2", report);
+    let state = state_of(&root, run);
+    assert_eq!(
+        state.order("b2-lr").and_then(|o| o.verdict.as_deref()),
+        Some("failed"),
+        "{out}"
+    );
+    assert!(!journal
+        .read()
+        .0
+        .iter()
+        .any(|event| matches!(&event.kind, Kind::Asked { order: Some(o), .. } if o == "b2-lr")));
+    assert!(!state
+        .queue
+        .iter()
+        .any(|item| item.order.as_deref() == Some("b2-lr")));
+    assert!(!nirvana_lessons::read_index(&root)
+        .lessons
+        .contains_key("read-the-suite-total-twice"));
+    nirvana_seat::set_test_world(None);
 }
 
 #[test]

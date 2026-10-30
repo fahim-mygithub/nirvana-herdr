@@ -1784,7 +1784,21 @@ pub fn gate(project: &Project, run: &str, order: &str) -> Result<Ruling, String>
         .clone();
     let sidecar = read_sidecar(project, run, order);
     let table = nirvana_seat::table_for(&project.root).ok();
-    match sidecar.helps.clone() {
+    // Plan 33 review: a lesson review re-seated when its pool ran out carries its first review's sidecar, so its child
+    // is gated as a review and never as a plain order.
+    let helps = sidecar.helps.clone().or_else(|| {
+        (known.seated.class == crate::nirvana_review::CLASS)
+            .then(|| {
+                read_sidecar(
+                    project,
+                    run,
+                    &crate::nirvana_review::review_root(&state, order),
+                )
+                .helps
+            })
+            .flatten()
+    });
+    match helps {
         Some((kind, subject)) if kind == "author" => {
             return gate_author(project, run, &journal, &known, &subject, table.as_ref())
         }
@@ -2109,8 +2123,12 @@ fn gate_subject(
     Ok(ruling)
 }
 
-/// The profile an order was seated with: its own copy's `Profile:` line, else its chain root's.
+/// The profile an order was seated with: its own copy's `Profile:` line, else its chain root's. None for a lesson
+/// review, whose brief quotes the order it reviews (plan 33 review B1).
 fn order_profile(seated: &Seated, root_spec: &Spec) -> Option<String> {
+    if seated.class == crate::nirvana_review::CLASS {
+        return None;
+    }
     spec(&order_text(seated))
         .profile
         .or_else(|| root_spec.profile.clone())

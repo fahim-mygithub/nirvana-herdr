@@ -8,12 +8,19 @@
 //!
 //! - **A normal herdr order.** Seated by the seat rule at Efficient (agy Flash, then Sonnet low), booked, journaled
 //!   `seated` and started the way a send-back child is (`nirvana_gate::send_back`): herdr's one launcher,
-//!   `nirvana_worker::launch_worker`. Nirvana Claude gates it when it delivers, as every delivery; nothing here
-//!   seats around the table. A review delivered into a run that has ended (a merge queued at `run end`) is gated by
-//!   the next `run end` of the project (`settle`).
+//!   `nirvana_worker::launch_worker`. Nothing here seats around the table. It never takes the reviewed order's
+//!   profile: its scope is the subject's journaled seating (review B1).
+//! - **No orchestrator turn** (review B2). `seat exec` gates a delivered review itself, since the gate is
+//!   deterministic, and neither wakes Nirvana Claude nor journals a question; its delivery is no queue line. `settle`
+//!   at `herdr run end` gates any review that delivered with no `seat exec` to gate it.
+//! - **Contained** (review B3). It works in a folder of its own under the run (`review_cwd`), with a copy of the
+//!   stream; a claude reviewer is denied every tool that writes or runs (`DENIED`). Its gate fails it, applying
+//!   nothing, when `.nirvana/lessons/` changed since it was queued in a way herdr's own writes do not explain.
 //! - **herdr applies the ops, the reviewer writes nothing.** An op whose evidence is not in the reviewed worker's
-//!   own stream is refused; so is a patch whose `base_sha` is not the lesson's body sha now (read before write), and
-//!   any op this kind of review does not make. The reviewer's own `lesson` is never kept.
+//!   own stream, is shorter than `MIN_EVIDENCE`, or is text herdr wrote (the order, the brief, a lesson) is refused;
+//!   so is a patch whose `base_sha` is not the lesson's body sha now (read before write), an op outside the reviewed
+//!   order's class and profile, and any op this kind of review does not make. Ops apply only on a `done` report. The
+//!   reviewer's own `lesson` is never kept.
 //! - **A daily cap**, `lesson_reviews_per_day` per project (default 20). Over it the review is skipped, said in the
 //!   `gated` event as an axis `review_skipped`. A review never reviews a review.
 
@@ -41,6 +48,12 @@ pub const MERGE_ABOVE: usize = 8;
 /// A pending review older than this is dropped from `settle`'s list: its worker never delivered.
 const PENDING_DAYS: u64 = 7;
 const STATE: &str = ".lesson-reviews.json";
+/// Plan 33 review B3: what a claude reviewer may not use, by Claude Code's own tool names (this machine's Claude Code
+/// session lists them: `Bash`, `PowerShell` on Windows, `Edit`, `Write`, `NotebookEdit`, `Agent`, `Monitor`, ...).
+/// A reviewer reads (`Read`, `Grep`, `Glob`) and answers. A deny list misses a tool Claude Code adds later; the
+/// folder check in `gate_review` is the backstop.
+pub const DENIED: &str =
+    "Bash,PowerShell,Edit,Write,NotebookEdit,Agent,Monitor,WebFetch,WebSearch,EnterWorktree,CronCreate";
 
 /// What the gate ruled on the reviewed order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,6 +247,59 @@ fn without_footer(text: &str) -> String {
         .to_owned()
 }
 
+/// The reviewed order's copy as a review brief quotes it: no `Profile:` or `Profile sha256:` line and no agy profile
+/// section, so nothing that reads a brief for a profile (`seat exec`, a reseat, the gate) finds the subject's in it
+/// (review B1).
+pub fn quoted_order(text: &str, profile: Option<&str>) -> String {
+    let mut text = without_footer(text);
+    let named = crate::nirvana_profiles::in_order(&text).and_then(Result::ok);
+    for name in named.iter().map(|found| found.name.as_str()).chain(profile) {
+        text = crate::nirvana_profiles::strip_sections(&text, name);
+    }
+    crate::nirvana_profiles::strip_profile_lines(&text)
+        .trim()
+        .to_owned()
+}
+
+/// The profile `order` was seated with, from its journaled `seated` event, else from its send-back chain root's.
+pub fn subject_profile(state: &nirvana_run::RunState, order: &str) -> Option<String> {
+    let own = state.order(order)?;
+    if own.seated.class == CLASS {
+        return None;
+    }
+    crate::nirvana_profiles::from_reason(&own.seated.reason).or_else(|| {
+        let (root, _) = nirvana_gate::chain(state, order);
+        state
+            .order(&root)
+            .and_then(|root| crate::nirvana_profiles::from_reason(&root.seated.reason))
+    })
+}
+
+/// The review a reseat child carries on: up its `reseat` parents while they are reviews. The sidecar, the merge's
+/// shas and the folder snapshot are the first review's.
+pub fn review_root(state: &nirvana_run::RunState, order: &str) -> String {
+    let mut current = order.to_owned();
+    while let Some(known) = state.order(&current) {
+        match (&known.seated.why, &known.seated.parent) {
+            (Some(why), Some(parent))
+                if why == "reseat"
+                    && state
+                        .order(parent)
+                        .is_some_and(|parent| parent.seated.class == CLASS) =>
+            {
+                current = parent.clone();
+            }
+            _ => break,
+        }
+    }
+    current
+}
+
+/// Review B3: a review's own folder, under its run, never the project's root where workers edit.
+pub fn review_cwd(project: &Project, run: &str, id: &str) -> PathBuf {
+    project.run_dir(run).join("reviews").join(id)
+}
+
 /// The live lessons an order of `class` and `profile` is offered, each with its body and body sha.
 fn lessons_section(root: &Path, class: &str, profile: Option<&str>) -> String {
     let index = nirvana_lessons::read_index(root);
@@ -277,8 +343,8 @@ pub struct Subject<'a> {
 pub fn review_brief(root: &Path, subject: &Subject) -> String {
     let mut text = format!(
         "# Lesson review of {} (plan 33 §3.3)\n\nherdr's gate ruled on the order below. Decide whether a lesson should be \
-kept for later {} orders{}. Change no file: herdr checks each op in your Work Report and applies the ones that \
-hold.\n\n{RULES}\n## The gate's verdict\n\n",
+kept for later {} orders{}. Change no file: you can only read, and herdr checks each op in your Work Report and \
+applies the ones that hold.\n\n{RULES}\n## The gate's verdict\n\n",
         subject.order,
         subject.class,
         subject
@@ -298,7 +364,7 @@ hold.\n\n{RULES}\n## The gate's verdict\n\n",
     }
     text.push_str(&format!(
         "## The order\n\n{}\n\n## Its Work Report\n\n",
-        without_footer(subject.order_text)
+        quoted_order(subject.order_text, subject.profile)
     ));
     let mut report = subject.report.cloned().unwrap_or(Value::Null);
     let own = report
@@ -316,7 +382,7 @@ hold.\n\n{RULES}\n## The gate's verdict\n\n",
         None => text.push_str("None offered.\n\n"),
     }
     text.push_str(&format!(
-        "## The worker's stream\n\n{} (JSON lines; read what you need, the evidence comes from here)\n\n\
+        "## The worker's stream\n\n{} (a copy, JSON lines; read what you need, the evidence comes from here)\n\n\
 ## The live lessons of {}{}\n\n{}",
         subject.stream.display(),
         subject.class,
@@ -411,7 +477,9 @@ pub fn pick(
         .map_err(|no_seat| format!("no seat: {}", no_seat.reason))
 }
 
-/// Seats `id` of `kind` about `subject`, in the project's own folder, and starts it.
+/// Seats `id` of `kind` about `subject` in its own folder under the run (review B3), and starts it. The lease is
+/// booked last, after the order, the sidecar, the folder snapshot and the count are written, and released when the
+/// `seated` event cannot be journaled: a review that never reaches the journal holds no seat.
 #[allow(clippy::too_many_arguments)]
 fn queue(
     project: &Project,
@@ -431,8 +499,9 @@ fn queue(
         world.overrides_used = leases.overrides(run);
     }
     let pick = pick(table, &world, id)?;
-    nirvana_gate::book(table, &pick, id, run).map_err(|err| err.to_string())?;
-    let order_file = crate::nirvana_worker::write_order(project, &project.root, id, brief)
+    let cwd = review_cwd(project, run, id);
+    std::fs::create_dir_all(&cwd).map_err(|err| err.to_string())?;
+    let order_file = crate::nirvana_worker::write_order(project, &cwd, id, brief)
         .map_err(|err| err.to_string())?;
     let seated = Seated {
         order: id.to_owned(),
@@ -450,7 +519,7 @@ fn queue(
         reason: pick.reason.clone(),
         override_reason: None,
         order_file,
-        cwd: project.root.display().to_string(),
+        cwd: cwd.display().to_string(),
         worktree: None,
         branch: None,
         parent: parent.map(str::to_owned),
@@ -477,9 +546,14 @@ fn queue(
         },
     )
     .map_err(|err| err.to_string())?;
-    journal
-        .append(now(), Kind::Seated(Box::new(seated.clone())))
-        .map_err(|err| err.to_string())?;
+    // Review B3: the lessons folder as it stands now, which the review's gate compares against.
+    std::fs::create_dir_all(nirvana_gate::gate_dir(project, run)).map_err(|e| e.to_string())?;
+    std::fs::write(
+        snap_path(project, run, id),
+        serde_json::to_string_pretty(&nirvana_lessons::folder_snap(&project.root))
+            .unwrap_or_default(),
+    )
+    .map_err(|err| err.to_string())?;
     let at = now();
     change_state(&project.root, |state| {
         if state.day != at / 86_400 {
@@ -496,9 +570,14 @@ fn queue(
         });
     })
     .map_err(|err| err.to_string())?;
+    nirvana_gate::book(table, &pick, id, run).map_err(|err| err.to_string())?;
+    if let Err(err) = journal.append(now(), Kind::Seated(Box::new(seated.clone()))) {
+        crate::nirvana_worker::release_lease(id);
+        return Err(err.to_string());
+    }
     let how = launch(project, run, &seated).unwrap_or_else(|err| err);
     Ok(format!(
-        "{id} seated on {} {} ({how}): the {kind} of {subject}; `herdr gate run {id} --run {run}` when it delivers",
+        "{id} seated on {} {} ({how}): the {kind} of {subject}; herdr gates it when it delivers",
         pick.seat,
         pick.effort.word()
     ))
@@ -518,11 +597,19 @@ pub fn queue_review(
     };
     let order = known.id();
     let order_text = nirvana_gate::order_text(&known.seated);
-    let profile = nirvana_lessons::order_profile(&order_text);
+    let profile = subject_profile(&replay(&journal.read().0), order);
+    let id = review_id(order);
+    // Review B3: the reviewer reads a copy of the stream in its own folder; its file tools stay inside that folder.
     let stream = project
         .run_dir(run)
         .join("streams")
         .join(format!("{order}.jsonl"));
+    let cwd = review_cwd(project, run, &id);
+    let copy = cwd.join("stream.jsonl");
+    let stream = match std::fs::create_dir_all(&cwd).and_then(|()| std::fs::copy(&stream, &copy)) {
+        Ok(_) => copy,
+        Err(_) => stream,
+    };
     let brief = review_brief(
         &project.root,
         &Subject {
@@ -535,7 +622,6 @@ pub fn queue_review(
             stream: &stream,
         },
     );
-    let id = review_id(order);
     queue(
         project,
         run,
@@ -635,14 +721,56 @@ pub struct Applied {
     pub lines: Vec<(bool, String)>,
 }
 
+/// What a review's ops may touch and what their evidence may not be: the reviewed order's class and its journaled
+/// profile, and the text herdr itself wrote (the order copy, the review's brief), which a worker's stream holds when
+/// the worker read its order file.
+pub struct Scope<'a> {
+    pub order: &'a str,
+    pub class: &'a str,
+    pub profile: Option<&'a str>,
+    pub herdr_wrote: Vec<String>,
+}
+
+/// Review S2: why a review op's evidence does not count, when it does not.
+fn evidence_refusal(root: &Path, stream: &str, scope: &Scope, evidence: &str) -> Option<String> {
+    let quote = evidence.replace("\r\n", "\n");
+    let quote = quote.trim();
+    let length = quote.chars().count();
+    if length < nirvana_lessons::MIN_EVIDENCE {
+        return Some(format!(
+            "the evidence is {length} characters; a quote of at least {} proves something",
+            nirvana_lessons::MIN_EVIDENCE
+        ));
+    }
+    if !nirvana_lessons::quote_in_stream(stream, quote) {
+        return Some(format!("the evidence is not in {}'s stream", scope.order));
+    }
+    if scope
+        .herdr_wrote
+        .iter()
+        .any(|text| text.replace("\r\n", "\n").contains(quote))
+    {
+        return Some(
+            "the evidence is text herdr wrote (the order or this brief), not the worker's".into(),
+        );
+    }
+    let index = nirvana_lessons::read_index(root);
+    if let Some(slug) = index
+        .lessons
+        .keys()
+        .find(|slug| nirvana_lessons::body(root, slug).is_some_and(|body| body.contains(quote)))
+    {
+        return Some(format!("the evidence is lesson {slug}'s own text"));
+    }
+    None
+}
+
 /// A review's ops against the reviewed worker's `stream`; a merge op is refused here.
-#[allow(clippy::too_many_arguments)]
 pub fn apply_review(
     root: &Path,
     ops: Vec<Result<Op, String>>,
     stream: &str,
-    subject: &str,
-    profile: Option<&str>,
+    scope: &Scope,
     by: &str,
     run: &str,
     at: u64,
@@ -657,18 +785,34 @@ pub fn apply_review(
                     return Err("merge is a merge order's op, not a review's".into())
                 }
             };
-            if !nirvana_lessons::quote_in_stream(stream, evidence) {
-                return Err(format!("the evidence is not in {subject}'s stream"));
+            if let Some(why) = evidence_refusal(root, stream, scope, evidence) {
+                return Err(why);
             }
             match op {
-                Op::New(lesson) => nirvana_lessons::review_new(root, &lesson, by, run, at, profile)
-                    .map(|(slug, id)| format!("{id}: new {slug}")),
+                // Review S1: a review keeps lessons for the class it reviewed, nowhere else.
+                Op::New(lesson) if lesson.class != scope.class => Err(format!(
+                    "a review of a {} order keeps {} lessons, not {}",
+                    scope.class, scope.class, lesson.class
+                )),
+                Op::New(lesson) => {
+                    nirvana_lessons::review_new(root, &lesson, by, run, at, scope.profile)
+                        .map(|(slug, id)| format!("{id}: new {slug}"))
+                }
                 Op::Patch {
                     slug,
                     base_sha,
                     lesson,
-                } => nirvana_lessons::review_patch(root, &slug, &base_sha, &lesson, by, run, at)
-                    .map(|id| format!("{id}: patched {slug}")),
+                } => nirvana_lessons::review_patch(
+                    root,
+                    &slug,
+                    &base_sha,
+                    &lesson,
+                    (scope.class, scope.profile),
+                    by,
+                    run,
+                    at,
+                )
+                .map(|id| format!("{id}: patched {slug}")),
                 Op::Merge { .. } => unreachable!("refused above"),
             }
         });
@@ -679,7 +823,6 @@ pub fn apply_review(
     }
     Applied { lines }
 }
-
 /// A merge order's ops: each a merge of the group's own lessons, none changed since the brief.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_merge(
@@ -749,12 +892,45 @@ fn shas_path(project: &Project, run: &str, id: &str) -> PathBuf {
     nirvana_gate::gate_dir(project, run).join(format!("{id}.shas.json"))
 }
 
+/// Review B3: the lessons folder as it stood when the review was queued.
+fn snap_path(project: &Project, run: &str, id: &str) -> PathBuf {
+    nirvana_gate::gate_dir(project, run).join(format!("{id}.lessons.json"))
+}
+
 /// A merge order's subject: `<class>`, or `<class>@<profile>`.
 fn group(subject: &str) -> (&str, Option<&str>) {
     match subject.split_once('@') {
         Some((class, profile)) => (class, Some(profile)),
         None => (subject, None),
     }
+}
+
+/// Why no op of this review is applied, before any is tried: its report is not `done` (review B2), or the lessons
+/// folder changed since it was queued in a way herdr's own writes do not explain (review B3).
+fn held_back(project: &Project, run: &str, root: &str, report: &Value) -> Option<Axis> {
+    let status = report.get("status").and_then(Value::as_str).unwrap_or("");
+    if status != "done" {
+        return Some(Axis::new(
+            "status",
+            Mark::Fail,
+            format!("the review's status is {status}: no op is applied"),
+        ));
+    }
+    let snap: nirvana_lessons::FolderSnap = std::fs::read_to_string(snap_path(project, run, root))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())?;
+    let changed = nirvana_lessons::unexplained(&project.root, &snap);
+    (!changed.is_empty()).then(|| {
+        Axis::new(
+            "lessons_folder",
+            Mark::Fail,
+            format!(
+                "{} changed in .nirvana/lessons since the review was queued, and herdr did not write it: no op is \
+                 applied",
+                changed.join(", ")
+            ),
+        )
+    })
 }
 
 /// `herdr gate run <review>`: the report well formed, then each op applied or refused, said one axis each.
@@ -782,20 +958,27 @@ pub fn gate_review(
             known.phase.word()
         ));
     }
+    let state = replay(&journal.read().0);
+    let root = review_root(&state, &order);
     let report = known.report.clone();
     let mut axes = vec![report_axis(report.as_ref())];
-    let well_formed = axes[0].mark != Mark::Fail;
-    if well_formed {
+    let mut passed = axes[0].mark != Mark::Fail;
+    if passed {
         let report = report.unwrap_or(Value::Null);
+        let held = held_back(project, run, &root, &report);
         let ops = parse_ops(&report);
         let at = now();
-        let applied = if ops.is_empty() {
+        let applied = if let Some(axis) = held {
+            passed = false;
+            axes.push(axis);
+            Applied { lines: Vec::new() }
+        } else if ops.is_empty() {
             Applied {
                 lines: vec![(true, "nothing to keep".into())],
             }
         } else if kind == MERGE {
             let shas: BTreeMap<String, String> =
-                std::fs::read_to_string(shas_path(project, run, &order))
+                std::fs::read_to_string(shas_path(project, run, &root))
                     .ok()
                     .and_then(|text| serde_json::from_str(&text).ok())
                     .unwrap_or_default();
@@ -803,17 +986,31 @@ pub fn gate_review(
             apply_merge(&project.root, ops, class, profile, &shas, &order, run, at)
         } else {
             let stream = nirvana_gate::stream_text(project, run, subject);
-            let state = replay(&journal.read().0);
-            let profile = state
-                .order(subject)
+            let reviewed = state.order(subject);
+            let class = reviewed.map(|s| s.seated.class.clone()).unwrap_or_default();
+            let profile = subject_profile(&state, subject);
+            // Review S2: the text herdr wrote, which the worker's stream holds when it read its order: the subject's
+            // copy, and this review's brief (and its first review's, for a reseat child).
+            let mut herdr_wrote: Vec<String> = reviewed
                 .map(|s| nirvana_gate::order_text(&s.seated))
-                .and_then(|text| nirvana_lessons::order_profile(&text));
+                .into_iter()
+                .collect();
+            for id in [order.as_str(), root.as_str()] {
+                if let Some(review) = state.order(id) {
+                    herdr_wrote.push(nirvana_gate::order_text(&review.seated));
+                }
+            }
+            herdr_wrote.retain(|text| !text.trim().is_empty());
             apply_review(
                 &project.root,
                 ops,
                 &stream,
-                subject,
-                profile.as_deref(),
+                &Scope {
+                    order: subject,
+                    class: &class,
+                    profile: profile.as_deref(),
+                    herdr_wrote,
+                },
                 &order,
                 run,
                 at,
@@ -837,7 +1034,7 @@ pub fn gate_review(
             let _ = nirvana_lessons::write_index_line(&home, &project.root);
         }
     }
-    let verdict = if well_formed {
+    let verdict = if passed {
         Outcome::Pass
     } else {
         Outcome::Failed
@@ -848,7 +1045,7 @@ pub fn gate_review(
             Kind::Gated {
                 order: order.clone(),
                 verdict: verdict.word().into(),
-                reason: (!well_formed).then(|| format!("report: {}", axes[0].why)),
+                reason: (!passed).then(|| nirvana_gate::reason_line(&axes).unwrap_or_default()),
                 axes: nirvana_gate::axes_values(&axes),
             },
         )
@@ -856,7 +1053,7 @@ pub fn gate_review(
     let _ = change_state(&project.root, |state| {
         state
             .pending
-            .retain(|p| !(p.run == run && p.order == order));
+            .retain(|p| !(p.run == run && (p.order == order || p.order == root)));
     });
     Ok(Ruling {
         order,
@@ -866,7 +1063,6 @@ pub fn gate_review(
         next: Vec::new(),
     })
 }
-
 // ---- merging (§3.4) ----
 
 /// The groups over `MERGE_ABOVE` live lessons: `(class, profile, count)`.
@@ -901,6 +1097,9 @@ pub fn queue_merge(
     cap: u32,
 ) -> Result<String, String> {
     let subject = group_subject(class, profile);
+    // Review S6: the pending check, the cap and the count under the gate's lock, as a review's are inside `gate`, so
+    // two merges at once cannot both pass the cap.
+    let _lock = nirvana_gate::gate_lock(project).map_err(|err| err.to_string())?;
     if read_state(&project.root)
         .pending
         .iter()

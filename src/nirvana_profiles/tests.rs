@@ -871,3 +871,30 @@ fn p33_new_writes_a_template_naming_the_projects_servers_and_check_reads_the_tab
     );
     nirvana_seat::set_test_world(None);
 }
+
+/// Plan 33 review nit: `--override` onto a seat the profile refuses is refused, naming the profile's reason; an
+/// override onto a seat it takes still stands. §2.2's "`--override` keeps its meaning": an override never takes a seat
+/// a filter skipped, and a profile is such a filter.
+#[test]
+fn p33_an_override_onto_a_seat_the_profile_refuses_is_refused() {
+    let (_home, project) = project("p33-override");
+    let table = nirvana_seat::table_for(&project.root).unwrap();
+    let world = nirvana_seat::live_world(&table);
+    let over = |seat: &str| {
+        let mut request = Request::new("sweep.mechanical");
+        request.profile = Some(nirvana_seat::Narrow {
+            name: "slicer".into(),
+            model: Some("claude-sonnet-5-5".into()),
+            family: None,
+            effort: None,
+        });
+        request.override_seat = Some((seat.into(), "the owner asked".into()));
+        nirvana_seat::pick(&table, &world, &request)
+    };
+    let refused = over("flash").expect_err("the profile refuses flash");
+    assert_eq!(
+        refused.reason,
+        "with profile slicer: override flash refused: profile slicer asks for model claude-sonnet-5-5; this seat is gemini-3.8-flash-{effort}"
+    );
+    assert_eq!(over("sonnet").expect("sonnet").seat, "sonnet");
+}

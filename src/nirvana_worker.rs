@@ -370,6 +370,10 @@ pub fn with_profile(
     run_dir: &Path,
     seated: &Seated,
 ) -> Result<Vec<String>, String> {
+    // Plan 33 review B1: a lesson review quotes the order it reviews, never takes its profile.
+    if seated.class == crate::nirvana_review::CLASS {
+        return Ok(argv);
+    }
     let file = Path::new(&seated.order_file);
     let Ok(text) = std::fs::read_to_string(file) else {
         return Ok(argv);
@@ -400,6 +404,21 @@ pub fn with_profile(
         _ => {}
     }
     Ok(argv)
+}
+
+/// Plan 33 review B3: a claude lesson reviewer reads and answers; every tool that writes or runs is denied. agy has no
+/// tool filter: its reviewer is held only by its own folder (`nirvana_review::review_cwd`) and the gate's check of the
+/// lessons folder.
+pub fn with_review_limits(mut argv: Vec<String>, seated: &Seated) -> Vec<String> {
+    if seated.class == crate::nirvana_review::CLASS
+        && argv.first().map(String::as_str) == Some("claude")
+    {
+        argv.extend([
+            "--disallowedTools".to_owned(),
+            crate::nirvana_review::DENIED.to_owned(),
+        ]);
+    }
+    argv
 }
 
 /// The one line a worker is started with (§4).
@@ -1411,7 +1430,7 @@ pub fn write_diff(
     }
 }
 
-fn release_lease(order: &str) {
+pub(crate) fn release_lease(order: &str) {
     let dir = nirvana_seat::dir();
     if let Ok(_lock) = nirvana_seat::Lock::take(&dir) {
         let path = dir.join(nirvana_seat::LEASES_FILE);
@@ -1511,6 +1530,7 @@ pub fn exec(
         )
         .and_then(|argv| with_order_servers(argv, project, run, &seated, out))
         .and_then(|argv| with_profile(argv, &run_dir, &seated))
+        .map(|argv| with_review_limits(argv, &seated))
         {
             Ok(argv) => argv,
             Err(why) => {
@@ -1559,11 +1579,14 @@ pub fn exec(
                 return match stream.report() {
                     Ok(report) => {
                         let status = report["status"].as_str().unwrap_or("done").to_owned();
+                        // Plan 33 review B2: a lesson review costs no orchestrator turn. herdr gates it below, and its
+                        // question is no one's to answer: the gate applies nothing that is not `done`.
+                        let review = seated.class == crate::nirvana_review::CLASS;
                         let mut kinds = vec![Kind::Delivered {
                             order: order.to_owned(),
                             report: report.clone(),
                         }];
-                        if status == "needs_answer" {
+                        if status == "needs_answer" && !review {
                             kinds.push(Kind::Asked {
                                 order: Some(order.to_owned()),
                                 question: report
@@ -1595,7 +1618,14 @@ pub fn exec(
                                 true
                             )
                         )?;
-                        let _ = nirvana_run::wake(project, run, false);
+                        if review {
+                            match crate::nirvana_gate::gate(project, run, order) {
+                                Ok(ruling) => writeln!(out, "gated: {}", ruling.verdict)?,
+                                Err(why) => writeln!(out, "not gated: {why}")?,
+                            }
+                        } else {
+                            let _ = nirvana_run::wake(project, run, false);
+                        }
                         // Plan 26 §2: A worker that delivers done closes its own pane through herdr
                         // as the last thing it does. The tab's last pane stays while the run is open.
                         if in_herdr() {
