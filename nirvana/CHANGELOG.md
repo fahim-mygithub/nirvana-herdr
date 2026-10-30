@@ -3,6 +3,40 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.44.0: GUI orders reach their servers, a checked Send, and deliveries that retry
+
+- **Changed:**
+  - Nirvana Claude is told to name a desktop app's `.mcp.json` server in `needs`. `herdr seat run` warns when an
+    order names Bambu Studio, xTool Studio, or a bare "Studio" with one desktop server, and names no server.
+  - `herdr seat run --send-ok "<the owner's words>"` lets a worker press Send once, for the print or laser job the
+    owner approved, only when no slicer warning is unexplained.
+    - The quote has at least 20 characters and 4 words, and is found in a prompt the owner typed in the last 6 hours.
+      A line counts as the owner's only when Claude Code marks it `origin: human`, and it holds no relayed message,
+      paste, task notice or `!` command.
+    - `seat run` prints the matched prompt, its time and its session, and journals them on `seated`.
+    - A send-back child or reseat never inherits it. Its brief says a Send may already have been pressed.
+    - Every other server order keeps "Never start a print, a laser job, or a send to a device."
+  - A wake that queues is retried by the server, from 30 s up to 5 minutes, until it is delivered. It is delivered
+    once. Each queued try journals `wake_queued` with its reason.
+  - `pane send-text`, `pane send-keys` and `agent send-keys` refuse to type into a finished worker's pane, naming
+    the order, in the server, so the socket API is covered. herdr's own sends and `--force` pass.
+  **Because:** the owner, 2026-10-29: "Audit the Nirvan runs is there any improvements I can make? I wwant to mainly
+  improve computer use of xtool and bambu slicer", then "These all look like good improvements." The audit found 0 MCP
+  calls in 22 Bambu GUI orders, a print sent past an unread overhang warning, four deliveries that waited about
+  13.5 h in all for the owner's next prompt, and a go-ahead typed into a finished worker's pane. Plan
+  `nirvana/plans/2026-10-29-31-gui-tools-in-use.md` §2, built on Opus high.
+  **Measured:**
+  - The late deliveries: each had one wake attempt, which queued, and nothing retried it. Ruled out: the daemon
+    version, plan 25's fresh start, plan 27's idle compact. Why the first try queued is not proven; all four
+    followed a prompt sent through Remote Control.
+  - The needs warning on the 43 recorded orders: 22 of 22 GUI orders flagged, and 11 non-GUI orders.
+  - 76 controls in `nirvana/controls.d/gui_in_use.py`, each reddening its test alone, plus the older controls whose
+    lines moved. `p24_send_back_inherits_override` now goes red.
+  - One Sonnet review. Its blocker, a quote check that "ok" or another agent's message could pass, was fixed.
+  - Not live-checked yet: the retry inside the running server, and a prompt from the phone followed by a delivery.
+  **If you remove this:** GUI workers run without their servers, any quoted word lets a worker send a print, and a
+  queued delivery waits for the owner's next prompt.
+
 ## alpha 0.43.0: workers can reach the project's MCP servers
 
 - **Changed:**

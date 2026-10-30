@@ -1,6 +1,7 @@
 # Feature 31: the printer and laser tools in real use
 
-Status: **PLANNED (2026-10-29)**. Three packages in three worktrees, built in parallel. The evidence is the audit of
+Status: **P31a BUILT (2026-10-30)** as Nirvana-Herdr alpha 0.44.0. P31b and P31c are built and handed to the owner,
+not merged (§6). Three packages in three worktrees, built in parallel. The evidence is the audit of
 2026-10-29, `nirvana/plans/2026-10-29-31-records/audit-bambu.md` and `audit-xtool.md`.
 
 ## Ledger
