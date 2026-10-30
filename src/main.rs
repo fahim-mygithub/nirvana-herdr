@@ -55,6 +55,7 @@ mod nirvana_memory_trim;
 mod nirvana_preload;
 mod nirvana_preset;
 mod nirvana_retro;
+mod nirvana_review;
 mod nirvana_run;
 mod nirvana_running;
 mod nirvana_seat;

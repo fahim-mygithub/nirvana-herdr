@@ -836,7 +836,16 @@ pub fn retro_with(project: &Project, run: &str, record: &[RecordLine]) -> Result
 pub fn retro(project: &Project, run: &str) -> Result<String, String> {
     let record = nirvana_seat::read_record(&nirvana_seat::dir().join(nirvana_seat::RECORD_FILE));
     let summary = retro_with(project, run, &record)?;
-    Ok(summary_line(&summary))
+    let mut line = summary_line(&summary);
+    // Plan 33 §3.4: "the same step at `herdr run end` when a class holds more than 8 live lessons". The pending
+    // reviews are settled first: one delivered after its run ended has no orchestrator to wake.
+    for said in crate::nirvana_review::settle(project)
+        .into_iter()
+        .chain(crate::nirvana_review::merge_crowded(project, run))
+    {
+        line.push_str(&format!("; {said}"));
+    }
+    Ok(line)
 }
 
 fn summary_line(summary: &Summary) -> String {
@@ -889,16 +898,19 @@ pub fn open_ids(project: &Project) -> Vec<String> {
     open(project).into_iter().map(|(id, _, _)| id).collect()
 }
 
-/// The receipt's section; empty when nothing is open.
+/// The receipt's sections after the journal's: the open proposals, then the project's lessons by origin (plan 33
+/// §3.5: "The receipt and `herdr lessons stats` print, per origin, offered, opened and passed after opened"). Each
+/// is empty when it has nothing to say. The receipt calls this one function, so the lessons ride on it.
 pub fn open_section(project: &Project) -> String {
     let open = open(project);
-    if open.is_empty() {
-        return String::new();
+    let mut text = String::new();
+    if !open.is_empty() {
+        text = format!("\n## Open retro proposals ({})\n\n", open.len());
+        for (id, gap, path) in open {
+            text.push_str(&format!("- {id}: {gap} ({})\n", path.display()));
+        }
     }
-    let mut text = format!("\n## Open retro proposals ({})\n\n", open.len());
-    for (id, gap, path) in open {
-        text.push_str(&format!("- {id}: {gap} ({})\n", path.display()));
-    }
+    text.push_str(&crate::nirvana_lessons::stats_section(&project.root));
     text
 }
 
