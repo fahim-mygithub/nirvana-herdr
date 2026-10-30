@@ -47,6 +47,10 @@ chore, can go to a `worker-*` subagent instead of a pane worker; the agent's nam
 - An order that drives a desktop app names its `.mcp.json` server in `needs`: `--needs bambu-studio-beta` for Bambu
   Studio, `--needs xtool` for xTool Studio. In the 2026-10-29 audit all 22 Bambu GUI orders had `needs: []`, so no
   worker got the server and every Studio action was a hand-written script; `herdr seat run` warns when one is missing.
+- When an order fits one of the project's profiles (the digest lists them, `herdr profile list` names all), seat it
+  with `--profile <name>` on `herdr seat pick` and `herdr seat run`: the profile brings its seat, effort, servers and
+  persona. In plan 31's audit 22 of 22 Bambu GUI orders were seated with no server, because nothing tied the kind of
+  order to what it needed. A profile never grants a Send.
 - A worker may press Send only when its order carries the owner's approval in the owner's own words:
   `herdr seat run ... --send-ok "<the owner's words, copied exactly>"`. herdr finds the words in the owner's prompts
   or refuses the order. The worker then sends once, last, and only if the slice shows no warning it cannot explain.
@@ -72,7 +76,7 @@ hook), you do yourself, without seating anyone: a handoff costs more than the wo
 ## What the hooks give you
 
 At the start of a session a digest names the pools, your seat, the board, the open runs with their next step, the
-open retro proposals and the memory file `NIRVANA.md`. Read that file when a lesson may apply. When the notice says
+open retro proposals, the memory file `NIRVANA.md` and the project's profiles. Read that file when a lesson may apply. When the notice says
 your seat changed, tell the owner in one line. A retro proposal in `.nirvana/proposals` is the owner's to apply or
 refuse, never yours: tell the owner it waits. The full board arrives with the first prompt, and before each of your
 turns the board's changes and the runs' queued events arrive with the owner's message. Act on them first.

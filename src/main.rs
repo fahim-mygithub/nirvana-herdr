@@ -54,6 +54,7 @@ mod nirvana_media;
 mod nirvana_memory_trim;
 mod nirvana_preload;
 mod nirvana_preset;
+mod nirvana_profiles;
 mod nirvana_retro;
 mod nirvana_review;
 mod nirvana_run;
@@ -633,6 +634,10 @@ fn main() -> io::Result<()> {
     }
     if args.get(1).map(String::as_str) == Some("lessons") {
         return nirvana_lessons::cli(&args[2..]);
+    }
+    // Nirvana fork, plan 33 P33a: the project's agent profiles, which `herdr seat run --profile` seats an order with.
+    if args.get(1).map(String::as_str) == Some("profile") {
+        return nirvana_profiles::cli(&args[2..]);
     }
     // Nirvana fork, plan 13 P1: the smart Preload's presets, catalog and generated settings file.
     if args.get(1).map(String::as_str) == Some("preload") {

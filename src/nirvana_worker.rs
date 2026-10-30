@@ -346,6 +346,47 @@ fn with_order_servers(
     )
 }
 
+/// Plan 33 §2.3: a worker of an order seated with a profile gets the run's copy, never the project's file. Its sha is
+/// checked before every start; a copy gone or changed fails the order, as a server it cannot get does (plan 29 F3).
+/// The order copy is brought to the worker's CLI: a send-back or reseat child quotes its parent's, which was written
+/// for the parent's CLI, so an agy child gets the body at its top and a claude child loses the agy section.
+pub fn with_profile(
+    mut argv: Vec<String>,
+    run_dir: &Path,
+    seated: &Seated,
+) -> Result<Vec<String>, String> {
+    let file = Path::new(&seated.order_file);
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return Ok(argv);
+    };
+    let Some(found) = crate::nirvana_profiles::in_order(&text) else {
+        return Ok(argv);
+    };
+    let found = found.map_err(|why| format!("{}: {why}", seated.order))?;
+    let parsed = crate::nirvana_profiles::from_run(run_dir, &found).map_err(|why| {
+        format!(
+            "{} was seated with profile {}: {why}",
+            seated.order, found.name
+        )
+    })?;
+    let wanted = crate::nirvana_profiles::order_text(&text, &found, &parsed, &seated.cli);
+    if wanted != text {
+        std::fs::write(file, &wanted)
+            .map_err(|err| format!("cannot write {}: {err}", file.display()))?;
+    }
+    match seated.cli.as_str() {
+        "claude" => argv.extend(crate::nirvana_profiles::claude_args(run_dir, &found, &parsed)?),
+        _ if !parsed.disallowed_tools.is_empty() => {
+            return Err(format!(
+                "{} was seated with profile {}, which forbids tools only a claude worker can be denied, on {}",
+                seated.order, found.name, seated.cli
+            ))
+        }
+        _ => {}
+    }
+    Ok(argv)
+}
+
 /// The one line a worker is started with (§4).
 pub fn first_line(order_file: &str) -> String {
     format!(
@@ -364,7 +405,7 @@ pub fn continue_line(order_file: &str, why: &str) -> String {
 pub const ORDER_FOOTER: &str = "\n\n---\nFrom herdr (plan 12 §4): do not start subagents or background processes unless this order allows it. \
 Work only in this folder. Your last message is the Work Report: status (done, blocked or needs_answer), summary, \
 files you changed, tests with their results, gotchas, and, when a step is worth keeping, a lesson.\n";
-const FOOTER_MARK: &str = "From herdr (plan 12 §4)";
+pub(crate) const FOOTER_MARK: &str = "From herdr (plan 12 §4)";
 
 // ---- the stream ----
 
@@ -1135,7 +1176,7 @@ pub enum AttemptEnd {
 thread_local! {
     /// A test's stand-in for the worker's program: `run_attempt` starts it in place of the argv it journals, so a test
     /// drives `exec` without a real CLI.
-    static TEST_COMMAND: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static TEST_COMMAND: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Starts the worker in its job and reads its stream until it ends, stops, stalls or runs out.
@@ -1454,6 +1495,7 @@ pub fn exec(
             out,
         )
         .and_then(|argv| with_order_servers(argv, project, run, &seated, out))
+        .and_then(|argv| with_profile(argv, &run_dir, &seated))
         {
             Ok(argv) => argv,
             Err(why) => {
@@ -1815,7 +1857,7 @@ pub fn rate_limited_override(seated: &Seated, limit_pool: &str) -> (bool, bool, 
 }
 
 /// §5.6 for one order. Returns whether the supervisor goes on (a deferral it waits out itself).
-fn rate_limited(
+pub(crate) fn rate_limited(
     project: &Project,
     journal: &Journal,
     run: &str,
@@ -1870,6 +1912,12 @@ fn rate_limited(
     request.not_family = seated.not_family.clone();
     request.mode = seated.mode;
     request.order = Some(child.clone());
+    // Plan 33 §2.2: "A send-back child and a reseat keep the parent's profile copy", and so its narrowing.
+    let narrowed = crate::nirvana_profiles::narrow_for_order(
+        &mut request,
+        &project.run_dir(run),
+        &std::fs::read_to_string(&seated.order_file).unwrap_or_default(),
+    );
     let limit_pool = limit.pool.as_deref().unwrap_or(&pool);
     let (override_dropped, inherited_override, target) = rate_limited_override(seated, limit_pool);
     if let (Some(target), Some(reason)) = (target, &seated.override_reason) {
@@ -1877,7 +1925,7 @@ fn rate_limited(
         request.inherited_override = true;
     }
     let world = spent_world(&table, nirvana_seat::live_world(&table), limit, &pool);
-    let picked = match needs {
+    let picked = match needs.and(narrowed) {
         Ok(_) => nirvana_seat::pick(&table, &world, &request),
         Err(why) => Err(nirvana_seat::NoSeat {
             class: seated.class.clone(),
@@ -2042,7 +2090,7 @@ fn rate_limited(
 }
 
 /// `<order>-r<n>`, the first free number in the run.
-fn child_id(state: &nirvana_run::RunState, order: &str) -> String {
+pub(crate) fn child_id(state: &nirvana_run::RunState, order: &str) -> String {
     let base: String = order.chars().take(58).collect();
     (1..)
         .map(|n| format!("{base}-r{n}"))
@@ -2124,6 +2172,9 @@ pub struct Booked {
     /// Plan 29: the needs `book` granted as the project's MCP servers; never in the lease.
     #[serde(skip)]
     pub servers: Vec<String>,
+    /// Plan 33 §2.2: the profile the pick was narrowed by, from the lease.
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 /// One window of the pick: the order's expected share of it, for the record (expected against real use).
@@ -2650,7 +2701,7 @@ pub fn launch_worker(project: &Project, run: &str, seated: &Seated) -> Result<St
 
 const USAGE: &str = "usage: herdr seat run <seat> --order <file> [--order-id id] [--run id] [--class c] [--size s]
                       [--needs a,b] [--not-family f] [--mode m] [--effort e] [--reason \"why\"] [--worktree] [--no-pane]
-                      [--no-auto] [--send-ok \"the owner's words\"] [--json]
+                      [--no-auto] [--send-ok \"the owner's words\"] [--profile name] [--json]
        herdr seat exec <order> --run <run> [--pane <pane>]   the worker's supervisor (a pane runs it)
        herdr seat status [<order>|--run <run>] [--json]
        herdr seat read <order> [--tail n]
@@ -2737,6 +2788,7 @@ fn run_cli(args: &[String]) -> std::io::Result<()> {
     let mut effort: Option<Effort> = None;
     let mut reason: Option<String> = None;
     let mut send_ok: Option<String> = None;
+    let mut profile: Option<String> = None;
     let (mut worktree, mut no_pane, mut auto, mut json) = (false, false, true, false);
     let mut iter = args[1..].iter();
     while let Some(arg) = iter.next() {
@@ -2771,6 +2823,7 @@ fn run_cli(args: &[String]) -> std::io::Result<()> {
             }
             "--reason" => reason = Some(value()),
             "--send-ok" => send_ok = Some(value()),
+            "--profile" => profile = Some(value()),
             "--worktree" => worktree = true,
             "--no-pane" => no_pane = true,
             "--no-auto" => auto = false,
@@ -2814,7 +2867,7 @@ fn run_cli(args: &[String]) -> std::io::Result<()> {
         send_ok,
     };
     let project = Project::from_env();
-    let outcome = seat_order(&project, &request);
+    let outcome = seat_order_with(&project, &request, profile.as_deref());
     match outcome {
         Ok(outcome) => {
             // Plan 31 §2.1: one line, never a refusal; on stderr, so `--json` stays one JSON value.
@@ -2836,6 +2889,15 @@ fn run_cli(args: &[String]) -> std::io::Result<()> {
                 );
                 if let Some(reason) = outcome["reason"].as_str() {
                     println!("{reason}");
+                }
+                if let Some(profile) = outcome["profile"].as_object() {
+                    let field = |key: &str| profile.get(key).and_then(Value::as_str).unwrap_or("");
+                    println!(
+                        "profile {} (sha256 {}), copied to {}",
+                        field("name"),
+                        field("sha256"),
+                        field("copy")
+                    );
                 }
                 // Plan 31 review B1 item 4: the prompt the approval was read from, so the owner can see it is theirs.
                 if let Some(send_ok) = outcome["send_ok"].as_object() {
@@ -2915,8 +2977,19 @@ pub fn seating(
     Ok(kinds)
 }
 
-/// Books the order on the seat (the rule must agree, or the caller gives a reason: an override, 3 a run).
+/// Books the order on the seat (the rule must agree, or the caller gives a reason: an override, 3 a run). The tests'
+/// entry; `seat_order_with` books through `book_with`.
+#[cfg_attr(not(test), allow(dead_code))]
 fn book(project: &Project, request: &SeatRequest) -> Result<Booked, (i32, String)> {
+    book_with(project, request, None)
+}
+
+/// `book` with a profile, which narrows the pick (plan 33 §2.2); `request.needs` already holds its needs.
+fn book_with(
+    project: &Project,
+    request: &SeatRequest,
+    profile: Option<&crate::nirvana_profiles::Profile>,
+) -> Result<Booked, (i32, String)> {
     let table = nirvana_seat::table_for(&project.root).map_err(|why| (2, why))?;
     let Some(seat) = table.seat(&request.seat) else {
         return Err((2, format!("no seat {} in seats.toml", request.seat)));
@@ -2960,6 +3033,9 @@ fn book(project: &Project, request: &SeatRequest) -> Result<Booked, (i32, String
         pick_request.claude_only = needs.claude_only.clone();
         pick_request.not_family = request.not_family.clone();
         pick_request.order = Some(request.order.clone());
+        if let Some(profile) = profile {
+            crate::nirvana_profiles::narrow(&mut pick_request, profile);
+        }
         world.leases = leases.leases.clone();
         world.overrides_used = leases.overrides(&request.run);
         let mut pick = nirvana_seat::pick(&table, &world, &pick_request);
@@ -3058,8 +3134,21 @@ fn git_in(root: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-/// `herdr seat run`: book, copy the order, open the worktree, journal `seated`, start the worker.
+/// `herdr seat run`: book, copy the order, open the worktree, journal `seated`, start the worker. The tests' entry;
+/// the CLI passes its `--profile` to `seat_order_with`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i32, String)> {
+    seat_order_with(project, request, None)
+}
+
+/// `seat_order` with `--profile <name>` (plan 33 §2.2): the project's profile file is read once, its class used when
+/// the order names none, its needs joined to the order's, the pick narrowed by it, and the bytes copied into the run
+/// with their sha, which the order copy and the `seated` event's reason name.
+pub fn seat_order_with(
+    project: &Project,
+    request: &SeatRequest,
+    profile: Option<&str>,
+) -> Result<Value, (i32, String)> {
     let io = |err: std::io::Error| (2, err.to_string());
     project.ensure().map_err(io)?;
     let journal = project.journal(&request.run);
@@ -3090,6 +3179,41 @@ pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i3
         )
     })?;
     let spec = crate::nirvana_gate::spec(&text);
+    // Plan 33 §2.2. An order whose text already says `Profile:` at line start is refused unless it is seated with that
+    // profile: P33b reads the line, and a profile herdr never applied must not scope its lessons.
+    let loaded = profile
+        .map(|name| crate::nirvana_profiles::load(&project.root, name))
+        .transpose()
+        .map_err(|why| (2, why))?;
+    let written = crate::nirvana_profiles::in_order(&text).map(|found| match found {
+        Ok(found) => found.name,
+        Err(_) => text
+            .lines()
+            .find_map(|line| line.strip_prefix(crate::nirvana_profiles::LINE))
+            .unwrap_or("")
+            .trim()
+            .to_owned(),
+    });
+    if let Some(written) = written.filter(|written| Some(written.as_str()) != profile) {
+        return Err((
+            2,
+            format!(
+                "the order says `{} {written}` at line start; seat it with `--profile {written}`, or take the line out",
+                crate::nirvana_profiles::LINE
+            ),
+        ));
+    }
+    let request = &match &loaded {
+        Some(loaded) => {
+            let mut request = request.clone();
+            request.needs = crate::nirvana_profiles::joined_needs(&request.needs, &loaded.profile);
+            if request.class.is_none() {
+                request.class = loaded.profile.class.clone();
+            }
+            request
+        }
+        None => request.clone(),
+    };
     // Plan 31 §2.2: a quote herdr cannot find in the owner's own prompts refuses the order, before it is booked.
     let send_ok = match &request.send_ok {
         Some(quote) => {
@@ -3124,7 +3248,49 @@ pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i3
             ));
         }
     }
-    let booked = book(project, request)?;
+    let mut booked = book_with(
+        project,
+        request,
+        loaded.as_ref().map(|loaded| &loaded.profile),
+    )?;
+    // A booking `seat pick --book` narrowed by a profile is seated with that profile, and only that one.
+    let named = loaded.as_ref().map(|loaded| loaded.profile.name.as_str());
+    if booked.profile.as_deref() != named {
+        return Err((
+            2,
+            match (&booked.profile, named) {
+                (Some(booked), _) => format!(
+                    "{} was booked with profile {booked}: seat it with `--profile {booked}`",
+                    request.order
+                ),
+                (None, Some(named)) => format!(
+                    "{} was booked without a profile: `herdr seat release {}`, then book it with `--profile {named}`",
+                    request.order, request.order
+                ),
+                (None, None) => unreachable!("equal"),
+            },
+        ));
+    }
+    // §2.2: "The profile file is copied, with its sha256, into the run folder at seating."
+    let profiled = match &loaded {
+        Some(loaded) => {
+            let copy =
+                crate::nirvana_profiles::copy_into_run(&project.run_dir(&request.run), loaded)
+                    .map_err(|why| (2, why))?;
+            booked.reason = format!(
+                "{}; profile {} sha256 {}",
+                booked.reason, loaded.profile.name, loaded.sha
+            );
+            Some((
+                crate::nirvana_profiles::Ref {
+                    name: loaded.profile.name.clone(),
+                    sha: loaded.sha.clone(),
+                },
+                copy,
+            ))
+        }
+        None => None,
+    };
     // With no --class, `book` only reuses a booking made by `herdr seat pick --book` and writes nothing, so the
     // refusal keeps that booking: the retry, once `owns:` is added, must not have to book again.
     if crate::nirvana_gate::requires_owns(&booked.class) && spec.owns.is_empty() {
@@ -3177,6 +3343,13 @@ pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i3
     // `booked.cli` is the booked seat's CLI (`seats.toml`'s `cli`), the one `seat exec` starts.
     let text =
         crate::nirvana_lean::with_browser_line(text, &booked.cli, &booked.class, &request.needs);
+    // Plan 33 §2.3: the `Profile:` lines at the top, and for agy the body above the order.
+    let text = match (&profiled, &loaded) {
+        (Some((found, _)), Some(loaded)) => {
+            crate::nirvana_profiles::order_text(&text, found, &loaded.profile, &booked.cli)
+        }
+        _ => text,
+    };
     let order_file = write_order(project, &cwd, &request.order, &text).map_err(io)?;
     let seated = Seated {
         order: request.order.clone(),
@@ -3244,6 +3417,11 @@ pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i3
         "worker": worker,
         "warning": warning,
         "send_ok": seated.send_ok,
+        "profile": profiled.map(|(found, copy)| serde_json::json!({
+            "name": found.name,
+            "sha256": found.sha,
+            "copy": copy.display().to_string(),
+        })),
     }))
 }
 
