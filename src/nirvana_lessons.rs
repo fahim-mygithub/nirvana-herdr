@@ -8,9 +8,19 @@
 //!
 //! - **Written only after the gate.** A Work Report's `lesson` (name, class, steps of at most 120 lines, an evidence
 //!   quote) becomes `<project>/.nirvana/lessons/<slug>.md` only when its order passed the gate and the quote is in
-//!   the worker's own stream, outside the Work Report itself, and only when the project's repository has a GitHub
-//!   remote. The Ledger-Lessons research of 2026-10-16 measured 21 of 21 memory writes skipped where the old
-//!   harness wrote into a folder the repositories did not have; here the folder is the project's own.
+//!   the worker's own stream, outside the Work Report itself. The Ledger-Lessons research of 2026-10-16 measured 21
+//!   of 21 memory writes skipped where the old harness wrote into a folder the repositories did not have; here the
+//!   folder is the project's own.
+//! - **Any project, never pushed** (plan 33 §3.1, ledger L3). The GitHub-remote condition of 2026-10-16 is gone:
+//!   `3D-Printer Flow` has no remote, its workers offered 41 lessons, and 0 were kept. herdr never pushes a lesson.
+//! - **Profile scope** (§3.2): a lesson written from an order seated with a profile carries it; an order of class C
+//!   and profile P is offered C's lessons with no profile, and P's.
+//! - **Origin** (§3.5): `worker` (the gate kept a worker's lesson), `review` (a `lesson-review` order's op), `merge`
+//!   (an umbrella of several). `herdr lessons stats` prints the counters per origin, so whether a review's lessons
+//!   help is measured, not assumed: Hermes counts views and never outcomes (the 2026-10-30 source review §2h).
+//! - **A ledger** (§3.4): every review and merge op appends `ledger.jsonl` with the bodies before and after, a
+//!   merged-away file is kept under `.archive/`, and `herdr lessons rollback <id>` restores one op (Hermes'
+//!   `skills/.curator_ledger.jsonl` and `hermes curator rollback`).
 //! - **One line in a brief, never the body.** Decision 0023: "everything in the prompt is paid for on every call".
 //!   The worker reads the file when it wants it.
 //! - **Counters** in `.nirvana/lessons/index.json`: offered (a brief listed it), opened (the worker's stream read
@@ -38,6 +48,51 @@ pub const HELP_EVERY: u32 = 3;
 const SEEN_KEPT: usize = 100;
 /// The marker of the project's line in `<home>/nirvana/NIRVANA.md`.
 const INDEX_MARK: &str = "<!-- herdr-lessons ";
+/// §3.4: every review and merge op, one JSON line each, with the bodies before and after.
+pub const LEDGER: &str = "ledger.jsonl";
+/// §3.4: merged-away and rolled-over files, never deleted.
+pub const ARCHIVE: &str = ".archive";
+/// The verdict words a journal's `gated` event passes with. `accepted` is the word the gate wrote before O5's
+/// outcome words: in `3D-Printer Flow`, 53 of the 72 `gated` events read `accepted` and none reads `pass`.
+pub const PASS_WORDS: [&str; 2] = ["pass", "accepted"];
+
+/// §3.5: where a kept lesson came from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Origin {
+    /// The gate kept a worker's own lesson; every lesson written before plan 33.
+    #[default]
+    Worker,
+    Review,
+    Merge,
+}
+
+impl Origin {
+    pub const ALL: [Self; 3] = [Self::Worker, Self::Review, Self::Merge];
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::Review => "review",
+            Self::Merge => "merge",
+        }
+    }
+}
+
+/// What a write records beside the lesson: the profile its order was seated with, and its origin.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Meta<'a> {
+    pub profile: Option<&'a str>,
+    pub origin: Origin,
+}
+
+/// Plan 33 §2.1's profile name, `[a-z0-9-]{1,32}`: anything else in a `Profile:` line is not a profile.
+pub fn valid_profile(name: &str) -> bool {
+    (1..=32).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Counters {
@@ -63,6 +118,12 @@ pub struct Entry {
     /// Orders already counted as opening it (the last `SEEN_KEPT`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub seen: Vec<String>,
+    /// Plan 33 §3.2: the profile of the order it was written from; offered only to orders of that profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// Plan 33 §3.5. An entry written before it reads as `worker`, which it was.
+    #[serde(default)]
+    pub origin: Origin,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,24 +205,6 @@ pub fn slug(name: &str) -> String {
     } else {
         out
     }
-}
-
-/// Whether the repository has a GitHub remote: `git remote -v` names github.com (the ruling: "keep it per github
-/// remote assuming that project has a github").
-pub fn has_github_remote(root: &Path) -> bool {
-    std::process::Command::new("git")
-        .args(["remote", "-v"])
-        .current_dir(root)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .is_some_and(|out| {
-            String::from_utf8_lossy(&out.stdout)
-                .to_ascii_lowercase()
-                .contains("github.com")
-        })
 }
 
 /// Every string a worker's stream holds that the worker did not write as its Work Report: tool inputs and
@@ -251,11 +294,63 @@ pub fn opened_in_stream(stream: &str, slug: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     Written(PathBuf),
-    /// Checked and kept out, with why: no GitHub remote, the order did not pass, the quote is not in the stream.
+    /// Checked and kept out, with why: the order did not pass, the quote is not in the stream, a field is missing.
     Refused(String),
 }
 
+/// A lesson's four fields, trimmed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lesson {
+    pub name: String,
+    pub class: String,
+    pub steps: String,
+    pub evidence: String,
+}
+
+impl Lesson {
+    pub fn from_value(lesson: &Value) -> Result<Self, String> {
+        let text = |key: &str| {
+            lesson
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_owned()
+        };
+        let lesson = Self {
+            name: text("name"),
+            class: text("class"),
+            steps: text("steps"),
+            evidence: text("evidence"),
+        };
+        if lesson.name.is_empty()
+            || lesson.class.is_empty()
+            || lesson.steps.is_empty()
+            || lesson.evidence.is_empty()
+        {
+            return Err("the lesson lacks a name, class, steps or evidence".into());
+        }
+        if lesson.steps.lines().count() > STEPS_LINES {
+            return Err(format!("the steps run over {STEPS_LINES} lines"));
+        }
+        Ok(lesson)
+    }
+}
+
+/// The gate's checks, writing nothing: `herdr lessons import --dry-run` runs exactly these.
+pub fn check(lesson: &Value, passed: bool, stream: &str) -> Result<Lesson, String> {
+    let lesson = Lesson::from_value(lesson)?;
+    if !passed {
+        return Err("the order did not pass the gate".into());
+    }
+    if !quote_in_stream(stream, &lesson.evidence) {
+        return Err("the evidence quote is not in the worker's stream".into());
+    }
+    Ok(lesson)
+}
+
 /// The gate's check and write. `passed` is the order's gate verdict; `stream` the worker's raw stream.
+#[allow(clippy::too_many_arguments)]
 pub fn verify_and_write(
     root: &Path,
     lesson: &Value,
@@ -264,30 +359,28 @@ pub fn verify_and_write(
     order: &str,
     run: &str,
     at: u64,
-    github: bool,
+    meta: Meta,
 ) -> Verdict {
-    let text = |key: &str| lesson.get(key).and_then(Value::as_str).unwrap_or("").trim();
-    let (name, class, steps, evidence) =
-        (text("name"), text("class"), text("steps"), text("evidence"));
-    if name.is_empty() || class.is_empty() || steps.is_empty() || evidence.is_empty() {
-        return Verdict::Refused("the lesson lacks a name, class, steps or evidence".into());
-    }
-    if steps.lines().count() > STEPS_LINES {
-        return Verdict::Refused(format!("the steps run over {STEPS_LINES} lines"));
-    }
-    if !passed {
-        return Verdict::Refused("the order did not pass the gate".into());
-    }
-    if !quote_in_stream(stream, evidence) {
-        return Verdict::Refused("the evidence quote is not in the worker's stream".into());
-    }
-    if !github {
-        return Verdict::Refused(
-            "the repository has no GitHub remote (the ruling of 2026-10-16: lessons live per GitHub remote)"
-                .into(),
-        );
-    }
-    match write(root, name, class, steps, evidence, order, run, at) {
+    let lesson = match check(lesson, passed, stream) {
+        Ok(lesson) => lesson,
+        Err(why) => return Verdict::Refused(why),
+    };
+    let written = (|| {
+        let _lock = lock(root)?;
+        let mut index = read_index(root);
+        let slug = slug(&lesson.name);
+        let path = write_locked(
+            root,
+            &mut index,
+            &slug,
+            &lesson,
+            &Source { order, run, at },
+            meta,
+        )?;
+        write_index(root, &index)?;
+        Ok::<_, std::io::Error>(path)
+    })();
+    match written {
         Ok(path) => Verdict::Written(path),
         Err(err) => Verdict::Refused(format!("could not write it: {err}")),
     }
@@ -297,60 +390,458 @@ fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Writes `<slug>.md` and its index entry. A lesson of the same name replaces the older text and keeps its
-/// counters: the newer one was checked more recently.
-#[allow(clippy::too_many_arguments)]
-fn write(
-    root: &Path,
-    name: &str,
-    class: &str,
-    steps: &str,
-    evidence: &str,
-    order: &str,
-    run: &str,
+/// The order and run a write names, and when.
+struct Source<'a> {
+    order: &'a str,
+    run: &'a str,
     at: u64,
+}
+
+fn lesson_path(root: &Path, slug: &str) -> PathBuf {
+    dir(root).join(format!("{slug}.md"))
+}
+
+/// Writes `<slug>.md` and its index entry; the caller holds the lock and writes the index. A lesson already at the
+/// slug keeps its counters: the newer text was checked more recently.
+fn write_locked(
+    root: &Path,
+    index: &mut Index,
+    slug: &str,
+    lesson: &Lesson,
+    source: &Source,
+    meta: Meta,
 ) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir(root))?;
-    let _lock = lock(root)?;
-    let slug = slug(name);
-    let path = dir(root).join(format!("{slug}.md"));
-    let name_line = one_line(name);
+    let path = lesson_path(root, slug);
+    let name_line = one_line(&lesson.name);
+    let profile_line = meta
+        .profile
+        .map(|profile| format!("profile: {profile}\n"))
+        .unwrap_or_default();
     let body = format!(
-        "---\nname: {name_line}\ndescription: {name_line}\nclass: {}\norder: {order}\nrun: {run}\nevidence: {}\n---\n\n{}\n",
-        one_line(class),
-        one_line(evidence),
-        steps.replace("\r\n", "\n").trim_end()
+        "---\nname: {name_line}\ndescription: {name_line}\nclass: {}\n{profile_line}order: {}\nrun: {}\nevidence: {}\n---\n\n{}\n",
+        one_line(&lesson.class),
+        source.order,
+        source.run,
+        one_line(&lesson.evidence),
+        lesson.steps.replace("\r\n", "\n").trim_end()
     );
     std::fs::write(&path, body)?;
-    let mut index = read_index(root);
-    let counters = index
+    let (counters, seen) = index
         .lessons
-        .get(&slug)
-        .map(|entry| (entry.counters.clone(), entry.seen.clone()));
-    let (counters, seen) = counters.unwrap_or_default();
+        .get(slug)
+        .map(|entry| (entry.counters.clone(), entry.seen.clone()))
+        .unwrap_or_default();
     index.lessons.insert(
-        slug,
+        slug.to_owned(),
         Entry {
             name: name_line.clone(),
-            class: one_line(class),
+            class: one_line(&lesson.class),
             description: name_line,
-            order: order.to_owned(),
-            run: run.to_owned(),
-            written_at: at,
+            order: source.order.to_owned(),
+            run: source.run.to_owned(),
+            written_at: source.at,
             counters,
             seen,
+            profile: meta.profile.map(str::to_owned),
+            origin: meta.origin,
         },
     );
-    write_index(root, &index)?;
     Ok(path)
 }
 
-/// One brief line per live lesson of `class`: the path from the worker's folder, and the description.
-pub fn lines_for(index: &Index, class: &str) -> Vec<(String, String)> {
+/// A lesson file's text with CRLF read as LF, so a checkout's line endings never change its sha.
+fn read_body(root: &Path, slug: &str) -> Option<String> {
+    std::fs::read_to_string(lesson_path(root, slug))
+        .ok()
+        .map(|text| text.replace("\r\n", "\n"))
+}
+
+pub fn sha256(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// §3.3: "a body sha", the sha256 of the lesson's file; a patch must name the one it read (read before write).
+pub fn body_sha(root: &Path, slug: &str) -> Option<String> {
+    read_body(root, slug).map(|text| sha256(&text))
+}
+
+/// The lesson's file as a review brief carries it.
+pub fn body(root: &Path, slug: &str) -> Option<String> {
+    read_body(root, slug)
+}
+
+// ---- the ledger: review and merge ops, with rollback (§3.4) ----
+
+/// One lesson as it stood: its file and its index entry, `None` when it did not exist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Snap {
+    pub slug: String,
+    #[serde(default)]
+    pub file: Option<String>,
+    #[serde(default)]
+    pub entry: Option<Entry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LedgerRow {
+    pub v: u32,
+    pub id: String,
+    pub at: u64,
+    /// new, patch, merge or rollback.
+    pub op: String,
+    /// The order whose Work Report carried the op, or `herdr` for a rollback.
+    pub by: String,
+    pub run: String,
+    pub before: Vec<Snap>,
+    pub after: Vec<Snap>,
+    /// A rollback: the op it undid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub of: Option<String>,
+}
+
+pub fn ledger(root: &Path) -> Vec<LedgerRow> {
+    std::fs::read_to_string(dir(root).join(LEDGER))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line.trim()).ok())
+        .collect()
+}
+
+fn snap(root: &Path, index: &Index, slug: &str) -> Snap {
+    Snap {
+        slug: slug.to_owned(),
+        file: read_body(root, slug),
+        entry: index.lessons.get(slug).cloned(),
+    }
+}
+
+fn append_ledger(root: &Path, row: &LedgerRow) -> std::io::Result<()> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir(root))?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir(root).join(LEDGER))?;
+    let mut line = serde_json::to_string(row)?;
+    line.push('\n');
+    file.write_all(line.as_bytes())
+}
+
+/// Runs `change` under the lock and records it: every touched slug before and after, in one ledger row. Nothing
+/// is written or recorded when it refuses. `change` gets the op's id and returns the slug it made.
+fn ledgered(
+    root: &Path,
+    op: &str,
+    by: &str,
+    run: &str,
+    at: u64,
+    slugs: &[String],
+    change: impl FnOnce(&mut Index, &str) -> Result<String, String>,
+) -> Result<(String, String), String> {
+    let _lock = lock(root).map_err(|err| err.to_string())?;
+    let mut index = read_index(root);
+    let id = format!("op-{}", ledger(root).len() + 1);
+    let mut before: Vec<Snap> = slugs.iter().map(|slug| snap(root, &index, slug)).collect();
+    let made = change(&mut index, &id)?;
+    write_index(root, &index).map_err(|err| err.to_string())?;
+    if !slugs.contains(&made) {
+        before.push(Snap {
+            slug: made.clone(),
+            file: None,
+            entry: None,
+        });
+    }
+    let after = before
+        .iter()
+        .map(|was| snap(root, &index, &was.slug))
+        .collect();
+    append_ledger(
+        root,
+        &LedgerRow {
+            v: 1,
+            id: id.clone(),
+            at,
+            op: op.to_owned(),
+            by: by.to_owned(),
+            run: run.to_owned(),
+            before,
+            after,
+            of: None,
+        },
+    )
+    .map_err(|err| err.to_string())?;
+    Ok((made, id))
+}
+
+/// A review's `new` op: the lesson must not exist yet, since a lesson already kept is patched after it is read
+/// (Hermes' read-before-write: `skill_manage` refuses a patch to a skill not viewed in the same review).
+pub fn review_new(
+    root: &Path,
+    lesson: &Lesson,
+    by: &str,
+    run: &str,
+    at: u64,
+    profile: Option<&str>,
+) -> Result<(String, String), String> {
+    let slug = slug(&lesson.name);
+    ledgered(
+        root,
+        "new",
+        by,
+        run,
+        at,
+        std::slice::from_ref(&slug),
+        |index, _| {
+            if index.lessons.contains_key(&slug) || lesson_path(root, &slug).exists() {
+                return Err(format!(
+                    "a lesson {slug} exists: patch it with its base_sha"
+                ));
+            }
+            write_locked(
+                root,
+                index,
+                &slug,
+                lesson,
+                &Source { order: by, run, at },
+                Meta {
+                    profile,
+                    origin: Origin::Review,
+                },
+            )
+            .map_err(|err| err.to_string())?;
+            Ok(slug.clone())
+        },
+    )
+}
+
+/// A review's `patch` op: `base_sha` must be the lesson's body sha now. The slug stays; counters and profile carry.
+#[allow(clippy::too_many_arguments)]
+pub fn review_patch(
+    root: &Path,
+    slug: &str,
+    base_sha: &str,
+    lesson: &Lesson,
+    by: &str,
+    run: &str,
+    at: u64,
+) -> Result<String, String> {
+    let slugs = [slug.to_owned()];
+    ledgered(root, "patch", by, run, at, &slugs, |index, _| {
+        let Some(entry) = index.lessons.get(slug).cloned() else {
+            return Err(format!("no lesson {slug} to patch"));
+        };
+        let now_sha = body_sha(root, slug).unwrap_or_default();
+        if now_sha != base_sha {
+            return Err(format!(
+                "base_sha {base_sha} is not {slug}'s body sha {now_sha}: it changed since it was read"
+            ));
+        }
+        write_locked(
+            root,
+            index,
+            slug,
+            lesson,
+            &Source { order: by, run, at },
+            Meta {
+                profile: entry.profile.as_deref(),
+                origin: Origin::Review,
+            },
+        )
+        .map_err(|err| err.to_string())?;
+        Ok(slug.to_owned())
+    })
+    .map(|(_, id)| id)
+}
+
+/// §3.4: an umbrella of `slugs`, of one class and one profile. Each part's file goes to `.archive/<id>-<slug>.md`
+/// and out of the index; the umbrella's counters are the sum of its parts'. `shas` holds the parts' body shas as
+/// the merge order's brief showed them: a part changed since is refused.
+#[allow(clippy::too_many_arguments)]
+pub fn merge(
+    root: &Path,
+    slugs: &[String],
+    name: &str,
+    steps: &str,
+    shas: &BTreeMap<String, String>,
+    by: &str,
+    run: &str,
+    at: u64,
+) -> Result<(String, String), String> {
+    let mut parts: Vec<String> = Vec::new();
+    for slug in slugs {
+        if !parts.contains(slug) {
+            parts.push(slug.clone());
+        }
+    }
+    if parts.len() < 2 {
+        return Err("a merge names at least two lessons".into());
+    }
+    let (name, steps) = (name.trim(), steps.trim());
+    if name.is_empty() || steps.is_empty() {
+        return Err("a merge lacks a name or steps".into());
+    }
+    if steps.lines().count() > STEPS_LINES {
+        return Err(format!("the steps run over {STEPS_LINES} lines"));
+    }
+    let target = slug(name);
+    ledgered(root, "merge", by, run, at, &parts, |index, id| {
+        let mut entries = Vec::new();
+        for part in &parts {
+            let Some(entry) = index.lessons.get(part).cloned() else {
+                return Err(format!("no lesson {part} to merge"));
+            };
+            if let Some(sha) = shas.get(part) {
+                if body_sha(root, part).as_deref() != Some(sha.as_str()) {
+                    return Err(format!("{part} changed since the merge was queued"));
+                }
+            }
+            entries.push(entry);
+        }
+        let first = entries[0].clone();
+        if entries
+            .iter()
+            .any(|entry| entry.class != first.class || entry.profile != first.profile)
+        {
+            return Err("a merge's lessons must share one class and one profile".into());
+        }
+        if !parts.contains(&target) && index.lessons.contains_key(&target) {
+            return Err(format!(
+                "the umbrella's name {target} is another lesson's: name it apart"
+            ));
+        }
+        let archive = dir(root).join(ARCHIVE);
+        std::fs::create_dir_all(&archive).map_err(|err| err.to_string())?;
+        let mut counters = Counters::default();
+        let mut seen: Vec<String> = Vec::new();
+        for (part, entry) in parts.iter().zip(&entries) {
+            let from = lesson_path(root, part);
+            std::fs::copy(&from, archive.join(format!("{id}-{part}.md")))
+                .map_err(|err| format!("archive {part}: {err}"))?;
+            std::fs::remove_file(&from).map_err(|err| format!("remove {part}: {err}"))?;
+            index.lessons.remove(part);
+            counters.offered += entry.counters.offered;
+            counters.opened += entry.counters.opened;
+            counters.passed_after_opened += entry.counters.passed_after_opened;
+            for order in &entry.seen {
+                if !seen.contains(order) {
+                    seen.push(order.clone());
+                }
+            }
+        }
+        while seen.len() > SEEN_KEPT {
+            seen.remove(0);
+        }
+        let lesson = Lesson {
+            name: name.to_owned(),
+            class: first.class.clone(),
+            steps: steps.to_owned(),
+            evidence: format!("merged from {}", parts.join(", ")),
+        };
+        write_locked(
+            root,
+            index,
+            &target,
+            &lesson,
+            &Source { order: by, run, at },
+            Meta {
+                profile: first.profile.as_deref(),
+                origin: Origin::Merge,
+            },
+        )
+        .map_err(|err| err.to_string())?;
+        if let Some(entry) = index.lessons.get_mut(&target) {
+            entry.counters = counters;
+            entry.seen = seen;
+        }
+        Ok(target.clone())
+    })
+}
+
+/// `herdr lessons rollback <id>`: the lessons op `id` touched go back to how they stood before it, when each still
+/// stands as the op left it. A lesson changed since (a later op, a later gate) is refused: roll that back first.
+/// Counters an umbrella earned after its merge go with it; its parts get back their own.
+pub fn rollback(root: &Path, id: &str, at: u64) -> Result<String, String> {
+    let _lock = lock(root).map_err(|err| err.to_string())?;
+    let rows = ledger(root);
+    let Some(row) = rows.iter().find(|row| row.id == id && row.op != "rollback") else {
+        return Err(format!(
+            "no op {id} in {}",
+            dir(root).join(LEDGER).display()
+        ));
+    };
+    if rows.iter().any(|r| r.of.as_deref() == Some(id)) {
+        return Err(format!("{id} is rolled back already"));
+    }
+    let mut index = read_index(root);
+    for after in &row.after {
+        if read_body(root, &after.slug) != after.file {
+            return Err(format!(
+                "{} changed since {id}: roll back the later op first",
+                after.slug
+            ));
+        }
+    }
+    let now: Vec<Snap> = row
+        .after
+        .iter()
+        .map(|after| snap(root, &index, &after.slug))
+        .collect();
+    for before in &row.before {
+        let path = lesson_path(root, &before.slug);
+        match &before.file {
+            Some(text) => std::fs::write(&path, text).map_err(|err| err.to_string())?,
+            None if path.exists() => std::fs::remove_file(&path).map_err(|err| err.to_string())?,
+            None => {}
+        }
+        match &before.entry {
+            Some(entry) => {
+                index.lessons.insert(before.slug.clone(), entry.clone());
+            }
+            None => {
+                index.lessons.remove(&before.slug);
+            }
+        }
+    }
+    write_index(root, &index).map_err(|err| err.to_string())?;
+    let back = format!("op-{}", rows.len() + 1);
+    append_ledger(
+        root,
+        &LedgerRow {
+            v: 1,
+            id: back.clone(),
+            at,
+            op: "rollback".into(),
+            by: "herdr".into(),
+            run: row.run.clone(),
+            before: now,
+            after: row.before.clone(),
+            of: Some(id.to_owned()),
+        },
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(format!(
+        "{back}: rolled back {id} ({} of {})",
+        row.op,
+        row.before
+            .iter()
+            .map(|s| s.slug.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+/// One brief line per live lesson an order of `class` and `profile` is offered (`fits`): the path from the
+/// worker's folder, and the description.
+pub fn lines_for(index: &Index, class: &str, profile: Option<&str>) -> Vec<(String, String)> {
     index
         .lessons
         .iter()
-        .filter(|(_, entry)| entry.class == class && live(&entry.counters))
+        .filter(|(_, entry)| live(&entry.counters) && fits(entry, class, profile))
         .map(|(slug, entry)| {
             (
                 slug.clone(),
@@ -364,25 +855,42 @@ pub fn lines_for(index: &Index, class: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// O3's brief composer calls this for each new order: the section to add, and each offered lesson's
-/// `offered` counted. Empty when the class has no live lesson. The files are copied into the worker's folder
-/// when it is a worktree, since claude's print-mode file tools stay inside the working folder.
+/// §3.2: "lessons of class C with no profile, plus lessons of profile P".
+pub fn fits(entry: &Entry, class: &str, profile: Option<&str>) -> bool {
+    match entry.profile.as_deref() {
+        None => entry.class == class,
+        Some(own) => profile == Some(own),
+    }
+}
+
+/// O3's brief composer calls this for an order seated with no profile; see `offer_for`.
 pub fn offer(root: &Path, cwd: &Path, class: &str) -> String {
+    offer_for(root, cwd, class, None)
+}
+
+/// The section to add to a new order's brief, and each offered lesson's `offered` counted. Empty when nothing is
+/// live for the class and profile. The files are copied into the worker's folder when it is a worktree, since
+/// claude's print-mode file tools stay inside the working folder.
+pub fn offer_for(root: &Path, cwd: &Path, class: &str, profile: Option<&str>) -> String {
     let Ok(_lock) = lock(root) else {
         return String::new();
     };
     let mut index = read_index(root);
-    let lines = lines_for(&index, class);
+    let lines = lines_for(&index, class, profile);
     if lines.is_empty() {
         return String::new();
     }
+    let of = profile.map_or_else(
+        || format!("{class} orders"),
+        |profile| format!("{class} and {profile} orders"),
+    );
     let mut section = format!(
-        "\n\n## Lessons from earlier {class} orders\n\nEach was checked by herdr's gate. Open one only if it fits this order.\n\n"
+        "\n\n## Lessons from earlier {of}\n\nEach was checked by herdr's gate. Open one only if it fits this order.\n\n"
     );
     for (slug, line) in &lines {
         if cwd != root {
-            let from = dir(root).join(format!("{slug}.md"));
-            let to = dir(cwd).join(format!("{slug}.md"));
+            let from = lesson_path(root, slug);
+            let to = lesson_path(cwd, slug);
             if let Some(parent) = to.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -396,6 +904,185 @@ pub fn offer(root: &Path, cwd: &Path, class: &str) -> String {
     }
     let _ = write_index(root, &index);
     section
+}
+
+// ---- measured, not assumed (§3.5) ----
+
+/// Per origin: how many lessons, and their offered, opened and passed after opened summed.
+pub fn stats(index: &Index) -> Vec<(Origin, usize, Counters)> {
+    Origin::ALL
+        .iter()
+        .map(|origin| {
+            let mut sum = Counters::default();
+            let mut count = 0;
+            for entry in index.lessons.values().filter(|e| e.origin == *origin) {
+                count += 1;
+                sum.offered += entry.counters.offered;
+                sum.opened += entry.counters.opened;
+                sum.passed_after_opened += entry.counters.passed_after_opened;
+            }
+            (*origin, count, sum)
+        })
+        .collect()
+}
+
+pub fn stats_lines(index: &Index) -> Vec<String> {
+    stats(index)
+        .into_iter()
+        .map(|(origin, count, sum)| {
+            format!(
+                "{}: {count} lesson(s) · offered {} · opened {} · passed after opened {}",
+                origin.word(),
+                sum.offered,
+                sum.opened,
+                sum.passed_after_opened
+            )
+        })
+        .collect()
+}
+
+/// The receipt's section; empty when the project keeps no lesson.
+pub fn stats_section(root: &Path) -> String {
+    let index = read_index(root);
+    if index.lessons.is_empty() {
+        return String::new();
+    }
+    let mut text = String::from("\n## Lessons by origin\n\n");
+    for line in stats_lines(&index) {
+        text.push_str(&format!("- {line}\n"));
+    }
+    text
+}
+
+// ---- recovering the lost ones (§3.6) ----
+
+/// What `herdr lessons import` did, or with `--dry-run` would do.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Imported {
+    /// `(run, order, slug)` for each lesson written, or that would be.
+    pub written: Vec<(String, String, String)>,
+    /// `(run, order, name, why)` for each refused.
+    pub refused: Vec<(String, String, String, String)>,
+}
+
+impl Imported {
+    /// The lessons kept: two orders offering one lesson write one file.
+    pub fn distinct(&self) -> usize {
+        self.written
+            .iter()
+            .map(|(_, _, slug)| slug.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    }
+}
+
+/// What one order of a journal says, read as raw JSON lines: a journal written before one of today's fields
+/// existed may not replay through today's `Event`, and the import must read every run the project kept.
+#[derive(Default)]
+struct Told {
+    lesson: Option<Value>,
+    verdict: Option<String>,
+    order_file: Option<String>,
+}
+
+fn told(journal: &str) -> BTreeMap<String, Told> {
+    let mut orders: BTreeMap<String, Told> = BTreeMap::new();
+    for line in journal.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        let Some(order) = value.get("order").and_then(Value::as_str) else {
+            continue;
+        };
+        let text = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
+        let entry = orders.entry(order.to_owned()).or_default();
+        match value.get("event").and_then(Value::as_str) {
+            Some("seated") => entry.order_file = text("order_file"),
+            Some("delivered") => entry.lesson = value.pointer("/report/lesson").cloned(),
+            Some("gated") => entry.verdict = text("verdict"),
+            _ => {}
+        }
+    }
+    orders
+}
+
+/// The `Profile:` line of an order's copy (the gate's line list), when it names a valid profile.
+pub fn order_profile(text: &str) -> Option<String> {
+    crate::nirvana_gate::spec(text).profile
+}
+
+/// §3.6: every lesson a worker offered on an order its journal shows gated pass, through the gate's own checks.
+/// `dry` checks and writes nothing: no folder, no lock file, no index.
+pub fn import(project: &Project, run: Option<&str>, dry: bool, at: u64) -> Imported {
+    let runs = match run {
+        Some(run) => vec![run.to_owned()],
+        None => project.runs(),
+    };
+    let mut out = Imported::default();
+    for run in runs {
+        let journal = std::fs::read_to_string(project.run_dir(&run).join("journal.jsonl"))
+            .unwrap_or_default();
+        for (order, said) in told(&journal) {
+            let Some(lesson) = said.lesson else {
+                continue;
+            };
+            let name = lesson
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let Some(verdict) = said.verdict else {
+                out.refused
+                    .push((run.clone(), order, name, "the order was never gated".into()));
+                continue;
+            };
+            let passed = PASS_WORDS.contains(&verdict.as_str());
+            let stream = std::fs::read_to_string(
+                project
+                    .run_dir(&run)
+                    .join("streams")
+                    .join(format!("{order}.jsonl")),
+            )
+            .unwrap_or_default();
+            let profile = said
+                .order_file
+                .and_then(|file| std::fs::read_to_string(file).ok())
+                .and_then(|text| order_profile(&text));
+            let result = if dry {
+                check(&lesson, passed, &stream).map(|lesson| slug(&lesson.name))
+            } else {
+                match verify_and_write(
+                    &project.root,
+                    &lesson,
+                    passed,
+                    &stream,
+                    &order,
+                    &run,
+                    at,
+                    Meta {
+                        profile: profile.as_deref(),
+                        origin: Origin::Worker,
+                    },
+                ) {
+                    Verdict::Written(_) => Ok(slug(&name)),
+                    Verdict::Refused(why) => Err(why),
+                }
+            };
+            match result {
+                Ok(slug) => out.written.push((run.clone(), order, slug)),
+                Err(why) if !passed && why == "the order did not pass the gate" => {
+                    out.refused.push((
+                        run.clone(),
+                        order,
+                        name,
+                        format!("the order was gated {verdict}"),
+                    ))
+                }
+                Err(why) => out.refused.push((run.clone(), order, name, why)),
+            }
+        }
+    }
+    out
 }
 
 /// The gate's count at an order's verdict: each lesson the worker opened gains `opened`, and
@@ -470,7 +1157,11 @@ pub fn write_index_line(home: &Path, root: &Path) -> std::io::Result<PathBuf> {
 // ---- the CLI ----
 
 const USAGE: &str = "usage: herdr lessons for --class <class> [--all]   one line per lesson: its path and description
-       herdr lessons list [--json]                  every lesson with its counters";
+       herdr lessons list [--json]                  every lesson with its counters
+       herdr lessons stats                          per origin (worker, review, merge): offered, opened, passed after
+       herdr lessons import [--run <run>] [--dry-run]  keep the lessons of gated-pass orders, through the gate's checks
+       herdr lessons merge [--class <class>] [--run <run>]  queue an umbrella review of a class over 8 live lessons
+       herdr lessons rollback <op-id>               undo one review or merge op from ledger.jsonl";
 
 fn usage_exit() -> ! {
     eprintln!("{USAGE}");
@@ -536,8 +1227,77 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             }
             Ok(())
         }
+        Some("stats") => {
+            let index = read_index(&root);
+            for line in stats_lines(&index) {
+                println!("{line}");
+            }
+            Ok(())
+        }
+        Some("import") => {
+            let mut run = None;
+            let mut dry = false;
+            let mut iter = args[1..].iter();
+            while let Some(arg) = iter.next() {
+                match arg.as_str() {
+                    "--run" => run = iter.next().cloned(),
+                    "--dry-run" => dry = true,
+                    _ => usage_exit(),
+                }
+            }
+            if run
+                .as_deref()
+                .is_some_and(|run| !nirvana_run::valid_id(run))
+            {
+                usage_exit();
+            }
+            let done = import(&project, run.as_deref(), dry, nirvana_run::now());
+            print!("{}", import_report(&done, dry));
+            if !dry && !done.written.is_empty() {
+                if let Some(home) = crate::nirvana::home() {
+                    let _ = write_index_line(&home, &root);
+                }
+            }
+            Ok(())
+        }
+        Some("merge") => crate::nirvana_review::merge_cli(&project, &args[1..]),
+        Some("rollback") => {
+            let Some(id) = args.get(1) else { usage_exit() };
+            match rollback(&root, id, nirvana_run::now()) {
+                Ok(line) => {
+                    println!("{line}");
+                    Ok(())
+                }
+                Err(why) => {
+                    eprintln!("herdr lessons rollback: {why}");
+                    std::process::exit(1);
+                }
+            }
+        }
         _ => usage_exit(),
     }
+}
+
+/// The import's counts, then each refusal reason with its count, then each refused order.
+pub fn import_report(done: &Imported, dry: bool) -> String {
+    let verb = if dry { "would write" } else { "wrote" };
+    let mut text = format!(
+        "{verb} {} lesson(s) from {} order(s); refused {}\n",
+        done.distinct(),
+        done.written.len(),
+        done.refused.len()
+    );
+    let mut reasons: BTreeMap<&str, usize> = BTreeMap::new();
+    for (_, _, _, why) in &done.refused {
+        *reasons.entry(why.as_str()).or_default() += 1;
+    }
+    for (why, count) in reasons {
+        text.push_str(&format!("  {count} refused: {why}\n"));
+    }
+    for (run, order, name, why) in &done.refused {
+        text.push_str(&format!("  - {run}/{order} {name:?}: {why}\n"));
+    }
+    text
 }
 
 #[cfg(test)]
@@ -600,25 +1360,30 @@ mod tests {
         assert!(!quote_in_stream(&text, "   "));
     }
 
+    /// Plan 33 §3.1 (L3): a folder with no git remote, and no git at all, keeps a checked lesson.
     #[test]
-    fn a_lesson_is_written_only_after_a_pass_and_only_with_a_github_remote() {
+    fn p33_a_lesson_is_written_after_a_pass_in_a_project_with_no_remote() {
         let root = temp("write");
+        git(&root, &["init", "-q"]);
+        let remotes = std::process::Command::new("git")
+            .args(["remote", "-v"])
+            .current_dir(&root)
+            .output()
+            .expect("git remote");
+        assert!(remotes.stdout.is_empty(), "the fixture has no remote");
         let text = stream("=== TOTAL 12 passed", "TOTAL 12 passed");
         let l = lesson("TOTAL 12 passed");
         assert_eq!(
-            verify_and_write(&root, &l, false, &text, "o1", "r1", 5, true),
+            verify_and_write(&root, &l, false, &text, "o1", "r1", 5, Meta::default()),
             Verdict::Refused("the order did not pass the gate".into())
         );
         assert!(matches!(
-            verify_and_write(&root, &l, true, &text, "o1", "r1", 5, false),
-            Verdict::Refused(why) if why.contains("no GitHub remote")
-        ));
-        assert!(matches!(
-            verify_and_write(&root, &lesson("not in it"), true, &text, "o1", "r1", 5, true),
+            verify_and_write(&root, &lesson("not in it"), true, &text, "o1", "r1", 5, Meta::default()),
             Verdict::Refused(why) if why.contains("not in the worker's stream")
         ));
         assert!(!dir(&root).join("run-the-suite-headless.md").exists());
-        let Verdict::Written(path) = verify_and_write(&root, &l, true, &text, "o1", "r1", 5, true)
+        let Verdict::Written(path) =
+            verify_and_write(&root, &l, true, &text, "o1", "r1", 5, Meta::default())
         else {
             panic!("written")
         };
@@ -640,23 +1405,9 @@ mod tests {
         l["steps"] = Value::String("step\n".repeat(121));
         let text = stream("TOTAL 12 passed", "TOTAL 12 passed");
         assert!(matches!(
-            verify_and_write(&root, &l, true, &text, "o1", "r1", 5, true),
+            verify_and_write(&root, &l, true, &text, "o1", "r1", 5, Meta::default()),
             Verdict::Refused(why) if why.contains("120")
         ));
-    }
-
-    #[test]
-    fn the_remote_check_reads_git_remote_for_github() {
-        let root = temp("remote");
-        git(&root, &["init", "-q"]);
-        assert!(!has_github_remote(&root));
-        git(
-            &root,
-            &["remote", "add", "origin", "https://gitlab.com/a/b.git"],
-        );
-        assert!(!has_github_remote(&root));
-        git(&root, &["remote", "add", "up", "git@github.com:a/b.git"]);
-        assert!(has_github_remote(&root));
     }
 
     #[test]
@@ -671,7 +1422,7 @@ mod tests {
             "o1",
             "r1",
             5,
-            true,
+            Meta::default(),
         );
         assert_eq!(offer(&root, &root, "chore.script"), "");
         let section = offer(&root, &root, "build.bounded");
@@ -707,7 +1458,7 @@ mod tests {
             "o1",
             "r1",
             5,
-            true,
+            Meta::default(),
         );
         let read = serde_json::json!({"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","name":"Read","input":{"file_path":".nirvana/lessons/run-the-suite-headless.md"}}]}}).to_string();
         // The order file read back names the lesson in a tool result: not an open.
@@ -752,9 +1503,11 @@ mod tests {
                 written_at: 0,
                 counters: c(6, 0),
                 seen: Vec::new(),
+                profile: None,
+                origin: Origin::Worker,
             },
         );
-        assert!(lines_for(&index, "build.bounded").is_empty());
+        assert!(lines_for(&index, "build.bounded", None).is_empty());
     }
 
     #[test]
@@ -773,6 +1526,191 @@ mod tests {
         );
         assert_eq!(text.matches(INDEX_MARK).count(), 1);
         assert!(text.contains(": 0 live in "));
+    }
+
+    /// Plan 33 §3.2: class C with no profile, plus profile P's own; a profile's lesson never reaches another order.
+    #[test]
+    fn p33_offer_gives_the_class_lessons_with_no_profile_and_the_profiles_own() {
+        let root = temp("profile");
+        let write = |name: &str, class: &str, profile: Option<&str>| {
+            let quote = format!("{name} proof");
+            let text = stream(&quote, &quote);
+            let mut l = lesson(&quote);
+            l["name"] = Value::String(name.into());
+            l["class"] = Value::String(class.into());
+            let meta = Meta {
+                profile,
+                origin: Origin::Worker,
+            };
+            assert!(matches!(
+                verify_and_write(&root, &l, true, &text, "o", "r", 5, meta),
+                Verdict::Written(_)
+            ));
+        };
+        write("Plain build", "build.bounded", None);
+        write("Slicer gui", "ops.terminal", Some("slicer"));
+        write("Other ops", "ops.terminal", None);
+        let section = offer_for(&root, &root, "build.bounded", Some("slicer"));
+        assert!(
+            section.contains("plain-build.md") && section.contains("slicer-gui.md"),
+            "{section}"
+        );
+        assert!(
+            !section.contains("other-ops.md"),
+            "another class: {section}"
+        );
+        assert!(
+            section.contains("build.bounded and slicer orders"),
+            "{section}"
+        );
+        let plain = offer(&root, &root, "ops.terminal");
+        assert!(
+            plain.contains("other-ops.md") && !plain.contains("slicer-gui.md"),
+            "{plain}"
+        );
+        let index = read_index(&root);
+        assert_eq!(
+            index.lessons["slicer-gui"].profile.as_deref(),
+            Some("slicer")
+        );
+        let body = std::fs::read_to_string(dir(&root).join("slicer-gui.md")).expect("body");
+        assert!(body.contains("\nprofile: slicer\n"), "{body}");
+        assert_eq!(index.lessons["slicer-gui"].counters.offered, 1);
+    }
+
+    #[test]
+    fn p33_stats_count_per_origin() {
+        let mut index = Index::default();
+        let entry = |origin, offered, passed| Entry {
+            name: "x".into(),
+            class: "c".into(),
+            description: "x".into(),
+            order: "o".into(),
+            run: "r".into(),
+            written_at: 0,
+            counters: Counters {
+                offered,
+                opened: passed,
+                passed_after_opened: passed,
+            },
+            seen: Vec::new(),
+            profile: None,
+            origin,
+        };
+        index
+            .lessons
+            .insert("a".into(), entry(Origin::Worker, 4, 1));
+        index
+            .lessons
+            .insert("b".into(), entry(Origin::Review, 2, 2));
+        index
+            .lessons
+            .insert("c".into(), entry(Origin::Review, 1, 0));
+        assert_eq!(
+            stats_lines(&index),
+            [
+                "worker: 1 lesson(s) · offered 4 · opened 1 · passed after opened 1",
+                "review: 2 lesson(s) · offered 3 · opened 2 · passed after opened 2",
+                "merge: 0 lesson(s) · offered 0 · opened 0 · passed after opened 0",
+            ]
+        );
+        // An index written before plan 33 reads every lesson as a worker's.
+        let old: Entry = serde_json::from_str(
+            r#"{"name":"x","class":"c","description":"x","order":"o","run":"r","written_at":0,"offered":1}"#,
+        )
+        .expect("old entry");
+        assert_eq!((old.origin, old.profile), (Origin::Worker, None));
+    }
+
+    /// §3.6 on a fixture: a run with an order gated `accepted` (the pre-O5 word), one `sent_back`, one never gated,
+    /// and one whose quote is only in its own report. The dry pass writes nothing at all.
+    #[test]
+    fn p33_import_keeps_only_gated_pass_lessons_and_the_dry_run_writes_nothing() {
+        let root = temp("import");
+        let project = Project::at(&root);
+        let run_dir = project.run_dir("old");
+        std::fs::create_dir_all(run_dir.join("streams")).expect("streams");
+        let order_copy = root.join("passed.md");
+        std::fs::write(&order_copy, "# do it\nProfile: slicer\n").expect("copy");
+        let delivered = |order: &str, quote: &str| {
+            serde_json::json!({"v":1,"seq":2,"at":2,"event":"delivered","order":order,
+                "report":{"status":"done","summary":"s","files":[],"tests":[],"gotchas":[],
+                "lesson":{"name":format!("Lesson of {order}"),"class":"build.bounded","steps":"1. x","evidence":quote}}})
+        };
+        let lines = [
+            serde_json::json!({"v":1,"seq":1,"at":1,"event":"seated","order":"passed","order_file":order_copy.display().to_string()}),
+            delivered("passed", "TOTAL 12 passed"),
+            serde_json::json!({"v":1,"seq":3,"at":3,"event":"gated","order":"passed","verdict":"accepted","reason":"ok"}),
+            delivered("failed", "TOTAL 0 passed"),
+            serde_json::json!({"v":1,"seq":5,"at":5,"event":"gated","order":"failed","verdict":"sent_back"}),
+            delivered("ungated", "TOTAL 1 passed"),
+            delivered("unproved", "TOTAL 7 passed"),
+            serde_json::json!({"v":1,"seq":8,"at":8,"event":"gated","order":"unproved","verdict":"pass"}),
+        ];
+        let journal: Vec<String> = lines.iter().map(Value::to_string).collect();
+        std::fs::write(run_dir.join("journal.jsonl"), journal.join("\n")).expect("journal");
+        for (order, output) in [
+            ("passed", "TOTAL 12 passed"),
+            ("failed", "TOTAL 0 passed"),
+            ("ungated", "TOTAL 1 passed"),
+            ("unproved", "nothing"),
+        ] {
+            std::fs::write(
+                run_dir.join("streams").join(format!("{order}.jsonl")),
+                stream(output, "unused"),
+            )
+            .expect("stream");
+        }
+        let listing = |dir: &Path| -> Vec<PathBuf> {
+            let mut out = Vec::new();
+            let mut todo = vec![dir.to_path_buf()];
+            while let Some(next) = todo.pop() {
+                for entry in std::fs::read_dir(&next).into_iter().flatten().flatten() {
+                    if entry.path().is_dir() {
+                        todo.push(entry.path());
+                    }
+                    out.push(entry.path());
+                }
+            }
+            out.sort();
+            out
+        };
+        let before = listing(&root);
+        let dry = import(&project, None, true, 9);
+        assert_eq!(listing(&root), before, "the dry run wrote nothing");
+        assert_eq!(
+            dry.written,
+            vec![(
+                "old".to_owned(),
+                "passed".to_owned(),
+                "lesson-of-passed".to_owned()
+            )]
+        );
+        let why: BTreeMap<&str, &str> = dry
+            .refused
+            .iter()
+            .map(|(_, order, _, why)| (order.as_str(), why.as_str()))
+            .collect();
+        assert_eq!(why["failed"], "the order was gated sent_back");
+        assert_eq!(why["ungated"], "the order was never gated");
+        assert_eq!(
+            why["unproved"],
+            "the evidence quote is not in the worker's stream"
+        );
+        let report = import_report(&dry, true);
+        assert!(
+            report.starts_with("would write 1 lesson(s) from 1 order(s); refused 3\n"),
+            "{report}"
+        );
+        let real = import(&project, Some("old"), false, 9);
+        assert_eq!(real.written, dry.written);
+        let index = read_index(&root);
+        assert_eq!(index.lessons.len(), 1);
+        let entry = &index.lessons["lesson-of-passed"];
+        assert_eq!(
+            (entry.origin, entry.profile.as_deref()),
+            (Origin::Worker, Some("slicer"))
+        );
     }
 
     #[test]
