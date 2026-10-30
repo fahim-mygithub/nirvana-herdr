@@ -65,26 +65,9 @@ pub enum Verdict {
 
 // ---- the cap and the pending list ----
 
-/// `[constants] lesson_reviews_per_day` of a seats.toml text, else `PER_DAY`. Read as plain TOML: `Constants`
-/// refuses keys it does not know, so the line waits for its field there (P33b record).
-pub fn per_day(text: &str) -> u32 {
-    text.parse::<toml::Table>()
-        .ok()
-        .and_then(|table| {
-            table
-                .get("constants")?
-                .get("lesson_reviews_per_day")?
-                .as_integer()
-        })
-        .and_then(|n| u32::try_from(n).ok())
-        .unwrap_or(PER_DAY)
-}
-
-fn machine_per_day() -> u32 {
-    per_day(
-        &std::fs::read_to_string(nirvana_seat::dir().join(nirvana_seat::SEATS_FILE))
-            .unwrap_or_default(),
-    )
+/// The table's `[constants] lesson_reviews_per_day`; `PER_DAY` when the table is refused.
+pub fn per_day(table: Option<&Table>) -> u32 {
+    table.map_or(PER_DAY, |table| table.constants.lesson_reviews_per_day)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,11 +155,11 @@ pub fn review_id(subject: &str) -> String {
 /// `Err(Some(why))`: skipped, journaled as `review_skipped`.
 pub fn wanted(
     project: &Project,
-    _run: &str,
     state: &nirvana_run::RunState,
     known: &OrderState,
+    table: Option<&Table>,
 ) -> Result<(), Option<String>> {
-    wanted_with(project, state, known, machine_per_day(), now())
+    wanted_with(project, state, known, per_day(table), now())
 }
 
 pub fn wanted_with(
@@ -1145,7 +1128,7 @@ pub fn merge_crowded(project: &Project, run: &str) -> Vec<String> {
         Ok(table) => table,
         Err(why) => return vec![format!("lessons merge: seats.toml is refused: {why}")],
     };
-    let cap = machine_per_day();
+    let cap = per_day(Some(&table));
     groups
         .into_iter()
         .map(|(class, profile, count)| {
@@ -1218,7 +1201,7 @@ pub fn merge_cli(project: &Project, args: &[String]) -> std::io::Result<()> {
                 &class,
                 profile.as_deref(),
                 &table,
-                machine_per_day(),
+                per_day(Some(&table)),
             )
             .unwrap_or_else(|why| format!("not queued: {why}"))]
         }

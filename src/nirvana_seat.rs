@@ -254,10 +254,8 @@ pub struct Constants {
     /// Plan 25 §2: a fresh session after a run ends only above this context (`nirvana_fresh::trigger`).
     #[serde(default = "default_fresh_above")]
     pub fresh_above: u64,
-    /// Plan 33 §3.3: lesson reviews a project may queue per UTC day; 0 turns them off. The field holds the key's
-    /// place under `deny_unknown_fields`; `nirvana_review::per_day` reads the value from the table's text.
+    /// Plan 33 §3.3: lesson reviews a project may queue per UTC day; 0 turns them off.
     #[serde(default = "default_lesson_reviews_per_day")]
-    #[allow(dead_code)]
     pub lesson_reviews_per_day: u32,
 }
 

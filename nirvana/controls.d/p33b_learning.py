@@ -103,8 +103,11 @@ CONTROLS = (
     Control("p33b_skip_not_journaled", GATE,
             "                crate::nirvana_review::SKIPPED,\n                Mark::Note,\n",
             "                \"other\",\n                Mark::Note,\n", T_CAP, "rust"),
-    Control("p33b_per_day_key", REVIEW,
-            '.get("lesson_reviews_per_day")?', '.get("lesson_reviews")?', T_PER_DAY, "rust"),
+    Control("p33b_per_day_default_line", SEATS,
+            "lesson_reviews_per_day = 20\n", "lesson_reviews_per_day = 21\n", T_PER_DAY, "rust"),
+    Control("p33b_per_day_from_table", REVIEW,
+            "    table.map_or(PER_DAY, |table| table.constants.lesson_reviews_per_day)\n",
+            "    table.map_or(PER_DAY, |_| PER_DAY + 1)\n", T_PER_DAY, "rust"),
     # Each lesson_ops refusal.
     Control("p33b_evidence_unchecked", REVIEW,
             "    if !nirvana_lessons::quote_in_stream(stream, quote) {\n",

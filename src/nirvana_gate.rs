@@ -2054,7 +2054,7 @@ fn gate_subject(
         }
         let _ = crate::nirvana_lessons::note_gated(&project.root, &stream, &order, true);
         // Plan 33 §3.3: the cap's refusal is journaled with the verdict, as an axis named `review_skipped`.
-        let review = crate::nirvana_review::wanted(project, run, state, known);
+        let review = crate::nirvana_review::wanted(project, state, known, table);
         if let Err(Some(why)) = &review {
             axes.push(Axis::new(
                 crate::nirvana_review::SKIPPED,
@@ -2098,7 +2098,7 @@ fn gate_subject(
         .iter()
         .map(|axis| format!("{}: {}", axis.axis, axis.why))
         .collect();
-    let review = crate::nirvana_review::wanted(project, run, state, known);
+    let review = crate::nirvana_review::wanted(project, state, known, table);
     if let Err(Some(why)) = &review {
         axes.push(Axis::new(
             crate::nirvana_review::SKIPPED,

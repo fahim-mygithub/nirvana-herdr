@@ -369,12 +369,19 @@ fn p33_over_the_daily_cap_the_review_is_skipped_and_journaled() {
 
 #[test]
 fn p33_the_cap_reads_lesson_reviews_per_day_from_constants() {
-    assert_eq!(per_day(nirvana_seat::DEFAULT), PER_DAY);
-    assert_eq!(per_day("[constants]\nlesson_reviews_per_day = 3\n"), 3);
+    let table = nirvana_seat::parse(nirvana_seat::DEFAULT).expect("table");
+    assert!(nirvana_seat::DEFAULT.contains("\nlesson_reviews_per_day = 20\n"));
+    assert_eq!(per_day(Some(&table)), PER_DAY);
+    // A table written before the line reads the default; a refused table, too.
+    let old = nirvana_seat::parse(nirvana_seat::HISTORICAL_DEFAULTS[4]).expect("v5");
+    assert_eq!(per_day(Some(&old)), PER_DAY);
+    let three =
+        nirvana_seat::DEFAULT.replace("lesson_reviews_per_day = 20", "lesson_reviews_per_day = 3");
     assert_eq!(
-        per_day("[constants]\nlesson_reviews_per_day = -1\n"),
-        PER_DAY
+        per_day(Some(&nirvana_seat::parse(&three).expect("three"))),
+        3
     );
+    assert_eq!(per_day(None), PER_DAY);
 }
 
 #[test]
