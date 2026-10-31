@@ -59,8 +59,11 @@ pub const RULES_BUDGET_BYTES: usize = 80_000;
 pub const SKILL_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 /// §5 P35b item 3: the line an agy research or media order gets after its `sources` line. P35a teaches the gate to see
-/// shell fetches; a URL built inside a script (`watch?v={vid}`) it still cannot see.
-pub const SOURCES_LINE: &str = "Read every URL you cite in a command of its own, or with bladebro when you have it; a URL built inside a script is not seen as read.";
+/// shell fetches; a URL built inside a script (`watch?v={vid}`) it still cannot see. The MotoProject analysis of
+/// 2026-10-31 (F1): four agy research orders whose brief said to open every page cited 47 URLs, all real (26 of 26
+/// YouTube ids exist); the one order without that line invented 12 of 12. Four against one is too few to size the
+/// effect, so this is an instruction with one measurement behind it, not enforcement.
+pub const SOURCES_LINE: &str = "Never cite a URL you did not open in this session. Open each one in a command of its own (curl, yt_dlp, or bladebro when you have it) before citing it; a URL built inside a script is not seen as read.";
 
 /// `<run>/agy/<order>/`.
 pub fn tools_dir(run_dir: &Path, order: &str) -> PathBuf {
