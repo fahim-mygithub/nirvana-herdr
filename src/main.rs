@@ -50,6 +50,7 @@ pub mod nirvana_job;
 mod nirvana_knowledge;
 mod nirvana_launch;
 mod nirvana_lean;
+mod nirvana_learning;
 mod nirvana_lessons;
 mod nirvana_media;
 mod nirvana_memory_trim;

@@ -37,6 +37,8 @@ mod nirvana_seats;
 mod nirvana_jobs;
 // Plan 16: the Git square of a space and its panel.
 mod nirvana_git;
+// Plan 36: the Learning square of a space and its panel.
+mod nirvana_learning;
 mod nirvana_spaces;
 mod notification_policy;
 mod notifications;

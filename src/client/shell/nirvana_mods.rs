@@ -142,6 +142,8 @@ pub(super) struct StripHits {
     pub(super) jobs: Rect,
     /// Plan 16: the Git square.
     pub(super) git: Rect,
+    /// Plan 36: the Learning square, after Preload and before Memory and Git.
+    pub(super) learning: Rect,
 }
 
 /// How a part of a square's value reads. The owner, 2026-10-21: "improve the readbility maybe include bg color or
@@ -260,6 +262,15 @@ pub(super) fn jobs_marks(view: &crate::nirvana_job::JobsView, narrow: bool) -> V
     marks
 }
 
+/// Plan 36: the Learning square's mark, in the words `learning_value` writes.
+pub(super) fn learning_marks(view: &crate::nirvana_learning::LearningView) -> Vec<Mark> {
+    if view.today.last_went_wrong() {
+        vec![mark(super::nirvana_learning::WENT_WRONG, Tone::Bad)]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Colours the first place each mark's text stands in the cells from `from` to `to` on row `y`.
 fn tint(buffer: &mut Buffer, y: u16, from: u16, to: u16, marks: &[Mark], palette: &Palette) {
     let cells: Vec<String> = (from..to)
@@ -345,7 +356,9 @@ fn draw_square(
 
 /// Draws the strip: the agent, then the Running square, the Seats square in a Nirvana tab (plan 12 O8a: the
 /// tab's seating comes right after what its Claude is doing), the Jobs square (plan 15), the Preload square,
-/// and the Memory square when `memory` holds its value. `seats` is the Seats view, `Some(None)` before its first read.
+/// the Learning square once `learning` is read (plan 36: "beor ethe git module and ater the preload module"), the
+/// Memory square when `memory` holds its value, and the Git square. `seats` is the Seats view, `Some(None)` before
+/// its first read.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_strip(
     buffer: &mut Buffer,
@@ -357,6 +370,7 @@ pub(super) fn render_strip(
     seats: Option<Option<&crate::nirvana_seats_square::View>>,
     jobs: Option<&crate::nirvana_job::JobsView>,
     git: Option<&crate::nirvana_git::GitView>,
+    learning: Option<&crate::nirvana_learning::LearningView>,
     open: OpenPanel,
     palette: &Palette,
 ) -> StripHits {
@@ -469,8 +483,30 @@ pub(super) fn render_strip(
         open == OpenPanel::Preload,
         palette,
     );
-    if let Some((value, new)) = memory {
+    if let Some(learning) = learning {
         x = hits.preload.right() + 1;
+        let narrow = area.width < super::nirvana_learning::NARROW_STRIP;
+        hits.learning = draw_square(
+            buffer,
+            x,
+            area.y,
+            right,
+            "Learning",
+            &super::nirvana_learning::learning_value(learning, narrow),
+            palette.subtext0,
+            &learning_marks(learning),
+            open == OpenPanel::Learning,
+            palette,
+        );
+    }
+    // The square drawn last before Memory and Git: Learning once read, else Preload.
+    let before = if hits.learning.width > 0 {
+        hits.learning
+    } else {
+        hits.preload
+    };
+    if let Some((value, new)) = memory {
+        x = before.right() + 1;
         hits.memory = draw_square(
             buffer,
             x,
@@ -495,7 +531,7 @@ pub(super) fn render_strip(
             x = if hits.memory.width > 0 {
                 hits.memory.right() + 1
             } else {
-                hits.preload.right() + 1
+                before.right() + 1
             };
             let git_tints = git_marks(&git_view.status, git_view.ci.as_ref(), narrow);
             hits.git = draw_square(
@@ -645,6 +681,8 @@ pub(super) enum OpenPanel {
     Jobs,
     /// Plan 16.
     Git,
+    /// Plan 36.
+    Learning,
 }
 
 /// The open Running panel, for one agent's pane.
@@ -1183,6 +1221,8 @@ impl ClientShellState {
             OpenPanel::Jobs
         } else if self.nirvana_git.is_some() {
             OpenPanel::Git
+        } else if self.nirvana_learning.is_some() {
+            OpenPanel::Learning
         } else {
             OpenPanel::None
         }
@@ -1196,6 +1236,7 @@ impl ClientShellState {
         let Some(agent) = self.snapshot.as_deref().and_then(strip_agent) else {
             return;
         };
+        self.nirvana_learning = None;
         self.nirvana_seats = None;
         self.nirvana_jobs = None;
         self.nirvana_git = None;
@@ -1339,6 +1380,7 @@ impl ClientShellState {
         self.nirvana_running = None;
         self.nirvana_memory = None;
         self.nirvana_accounts = None;
+        self.nirvana_learning = None;
         self.nirvana_seats = None;
         self.nirvana_jobs = None;
         self.nirvana_git = None;

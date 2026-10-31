@@ -688,6 +688,13 @@ impl ClientShellState {
             }
             return None;
         }
+        // Plan 36: and the Learning panel.
+        if self.nirvana_learning.is_some() {
+            if key.kind == KeyEventKind::Press {
+                self.route_learning_key(key, outcome);
+            }
+            return None;
+        }
         if matches!(key.code, KeyCode::Modifier(_)) {
             return None;
         }

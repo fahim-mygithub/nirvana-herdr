@@ -264,6 +264,7 @@ mod mouse_selection;
 mod nirvana_footer;
 mod nirvana_git;
 mod nirvana_jobs;
+mod nirvana_learning;
 mod nirvana_mods;
 mod nirvana_new_menu;
 mod nirvana_restart_menu;
