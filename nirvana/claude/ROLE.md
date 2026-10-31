@@ -54,7 +54,9 @@ chore, can go to a `worker-*` subagent instead of a pane worker; the agent's nam
 - A folder profile (`.nirvana/profiles/<name>/profile.md`) keeps knowledge cards; its orders get one line per card,
   and `herdr kb search --profile <name> <words>` finds the rest. Start teaching only when the owner asks for it, with
   their words: `herdr profile teach <name> --from <url|path> --quote "<the owner's words>"`. herdr refuses a teach
-  from your shell without the quote (plan 34 §2.5, plan 31's rule), and its gate writes the cards.
+  from your shell without the quote, or with one that names neither the profile nor the source (plan 34 §2.5, plan
+  31's rule, P34a review S1), and its gate writes the cards. A card written by hand is never offered until the owner
+  runs `herdr profile check <name> --adopt`; say so when `herdr profile check` lists one (P34a review B1).
 - A worker may press Send only when its order carries the owner's approval in the owner's own words:
   `herdr seat run ... --send-ok "<the owner's words, copied exactly>"`. herdr finds the words in the owner's prompts
   or refuses the order. The worker then sends once, last, and only if the slice shows no warning it cannot explain.

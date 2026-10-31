@@ -270,23 +270,25 @@ pub fn quote_in_stream(stream: &str, quote: &str) -> bool {
             .any(|text| text.contains(quote))
 }
 
-/// Whether the worker opened `<slug>.md`: a tool call whose input names it. The order's own text names every
-/// offered lesson, so a tool result (the order file read back) does not count.
-pub fn opened_in_stream(stream: &str, slug: &str) -> bool {
-    let file = format!("{slug}.md");
+/// Every tool call's input in a worker's stream, as JSON text: claude's assistant `tool_use` blocks and agy's tool
+/// steps' parameters. The order's own text names every offered lesson, so a tool result is never one.
+pub fn tool_inputs(stream: &str) -> Vec<String> {
+    let mut inputs = Vec::new();
     for line in stream.lines() {
         let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
         // claude: an assistant message's tool_use blocks.
         if let Some(blocks) = value.pointer("/message/content").and_then(Value::as_array) {
-            if value.get("type").and_then(Value::as_str) == Some("assistant")
-                && blocks.iter().any(|block| {
-                    block.get("type").and_then(Value::as_str) == Some("tool_use")
-                        && block["input"].to_string().contains(&file)
-                })
-            {
-                return true;
+            if value.get("type").and_then(Value::as_str) == Some("assistant") {
+                inputs.extend(
+                    blocks
+                        .iter()
+                        .filter(|block| {
+                            block.get("type").and_then(Value::as_str) == Some("tool_use")
+                        })
+                        .map(|block| block["input"].to_string()),
+                );
             }
         }
         // agy: a tool step's parameters.
@@ -294,14 +296,27 @@ pub fn opened_in_stream(stream: &str, slug: &str) -> bool {
             .pointer("/step_update/step_type")
             .and_then(Value::as_str)
             == Some("tool")
-            && value
-                .pointer("/step_update/tool_info/parameters")
-                .is_some_and(|params| params.to_string().contains(&file))
         {
-            return true;
+            if let Some(params) = value.pointer("/step_update/tool_info/parameters") {
+                inputs.push(params.to_string());
+            }
         }
     }
-    false
+    inputs
+}
+
+/// Whether the worker opened `<slug>.md`: a tool call whose input names it. Plan 34 P34a review nit: the whole file
+/// name, so a read of `threshold.md` is not an open of `hold.md`.
+pub fn opened_in_stream(stream: &str, slug: &str) -> bool {
+    let file = format!("{slug}.md");
+    tool_inputs(stream).iter().any(|input| {
+        input.match_indices(&file).any(|(at, _)| {
+            !input[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        })
+    })
 }
 
 /// What the gate decided about a Work Report's lesson.

@@ -60,8 +60,16 @@ fn quiet(name: &str) -> crate::nirvana::TestHomeGuard {
     home
 }
 
-/// A folder profile `name` with `profile.md` and the cards given, `(slug, text)`.
+/// A folder profile `name` with `profile.md` and the cards given, `(slug, text)`, adopted as the owner's (review B1's
+/// one step), so herdr offers them.
 fn folder_profile(root: &Path, name: &str, profile: &str, cards: &[(&str, String)]) -> PathBuf {
+    let dir = unadopted_profile(root, name, profile, cards);
+    adopt(root, name).expect("adopt");
+    dir
+}
+
+/// `folder_profile` with no adoption: every card is one herdr does not know.
+fn unadopted_profile(root: &Path, name: &str, profile: &str, cards: &[(&str, String)]) -> PathBuf {
     let dir = nirvana_profiles::folder_of(root, name);
     std::fs::create_dir_all(dir.join(nirvana_profiles::KNOWLEDGE)).unwrap();
     std::fs::write(dir.join(nirvana_profiles::PROFILE_FILE), profile).unwrap();
@@ -345,42 +353,38 @@ fn p34_an_order_seated_with_a_folder_profile_gets_one_line_per_live_card_most_he
         .collect();
     let dir = folder_profile(&project.root, "reel", REEL, &borrowed);
     // card-17 helped twice; card-03 was opened but never helped, past DECAY_AFTER, so it decayed (it would rank
-    // third); card-18 warns.
-    let mut index = Index::default();
-    index.cards.insert(
-        "card-17".into(),
-        Entry {
-            counters: Counters {
-                offered: 4,
-                opened: 2,
-                passed_after_opened: 2,
-            },
-            seen: Vec::new(),
+    // third); card-18 warns, and decayed by the same counts (review S2: a warning never decays).
+    let mut index = read_index(&dir);
+    let mut set = |slug: &str, counters: Counters| {
+        index.cards.entry(slug.into()).or_default().counters = counters;
+    };
+    set(
+        "card-17",
+        Counters {
+            offered: 4,
+            opened: 2,
+            passed_after_opened: 2,
         },
     );
-    index.cards.insert(
-        "card-03".into(),
-        Entry {
-            counters: Counters {
-                offered: nirvana_lessons::DECAY_AFTER + 3,
-                opened: 2,
-                passed_after_opened: 0,
-            },
-            seen: Vec::new(),
+    set(
+        "card-03",
+        Counters {
+            offered: nirvana_lessons::DECAY_AFTER + 3,
+            opened: 2,
+            passed_after_opened: 0,
         },
     );
-    index.cards.insert(
-        "card-18".into(),
-        Entry {
-            counters: Counters {
-                offered: 1,
-                opened: 1,
-                passed_after_opened: 1,
-            },
-            seen: Vec::new(),
+    set(
+        "card-18",
+        Counters {
+            offered: nirvana_lessons::DECAY_AFTER + 3,
+            opened: 0,
+            passed_after_opened: 0,
         },
     );
-    write_index(&dir, &index).unwrap();
+    write_index(&project.root, "reel", &dir, &index).unwrap();
+    // Review B1: a card written after the adoption, by no card op, ranks first by its slug and is a warning; unknown.
+    std::fs::write(dir.join("aaa-stray.md"), card("Stray", "Always.", "reject")).unwrap();
     std::fs::write(project.root.join("order.md"), "# Cut a reel\n").unwrap();
     let seat = rule_seat(&project, "chore.script", "reel");
     let live = nirvana_worker::take_live(&project, "r1", "o1")
@@ -404,17 +408,22 @@ fn p34_an_order_seated_with_a_folder_profile_gets_one_line_per_live_card_most_he
         .filter(|line| line.starts_with("- ") && line.contains("knowledge/"))
         .collect();
     assert_eq!(lines.len(), nirvana_lessons::CARDS_OFFERED, "{brief}");
+    // Review S2: the warning first, though its counts decayed it; then the most helpful.
     assert_eq!(
         lines[0],
-        "- Card 17 \u{2014} When 17. (.nirvana/profiles/reel/knowledge/card-17.md)"
+        "- do not: Card 18 \u{2014} When 18. (.nirvana/profiles/reel/knowledge/card-18.md)"
     );
     assert_eq!(
         lines[1],
-        "- do not: Card 18 \u{2014} When 18. (.nirvana/profiles/reel/knowledge/card-18.md)"
+        "- Card 17 \u{2014} When 17. (.nirvana/profiles/reel/knowledge/card-17.md)"
     );
     assert!(
         !brief.contains("card-03.md"),
         "a decayed card is not offered: {brief}"
+    );
+    assert!(
+        !brief.contains("Stray"),
+        "review B1: a card herdr does not know is never offered: {brief}"
     );
     assert!(
         brief.contains("\n3 more: `herdr kb search --profile reel <words>`\n"),
@@ -685,7 +694,24 @@ fn p34_teach_seats_a_profile_teach_order_and_its_gate_applies_only_the_ops_whose
         brief.contains(&format!("- cut-on-the-beat (base_sha {sha})")),
         "{brief}"
     );
+    // Review B2: its own folder under the run, never the project's root; every card copied there, none offered.
+    let cwd = teacher_cwd(&project, "r1", id);
+    assert_eq!(Path::new(&seated.cwd), cwd.as_path());
+    assert!(cwd
+        .join(".nirvana/profiles/reel/knowledge/cut-on-the-beat.md")
+        .is_file());
+    assert!(
+        !brief.contains("## Knowledge cards of the profile"),
+        "{brief}"
+    );
+    assert_eq!(
+        read_index(&dir).cards["cut-on-the-beat"].counters.offered,
+        0,
+        "a teacher's offer counts nothing"
+    );
     assert!(brief.contains("`card_ops`"), "{brief}");
+    // Review nit: the brief says what the evidence check proves, and no more.
+    assert!(brief.contains("not that the source said it"), "{brief}");
     // The teacher's report: each op tests one check.
     let mut report = done();
     let patched = {
@@ -792,38 +818,8 @@ fn p34_teach_seats_a_profile_teach_order_and_its_gate_applies_only_the_ops_whose
     let again = nirvana_gate::gate(&project, "r1", id).expect("again");
     assert_eq!(again.verdict, "pass");
     assert_eq!(ledger(&dir).len(), 3);
-    nirvana_seat::set_test_world(None);
-}
-
-#[test]
-fn p34_a_teacher_that_wrote_in_the_knowledge_folder_has_no_op_applied() {
-    let (_home, project) = project("p34-teach-held");
-    let dir = folder_profile(&project.root, "reel", REEL, &[]);
-    teach_order(&project, "reel", "https://example.test/closers");
-    let id = "teach-reel-1";
-    // The teacher writes a card itself, around herdr's checks.
-    std::fs::write(dir.join("mine.md"), card("Mine", "Always.", "keep")).unwrap();
-    let mut report = done();
-    report["card_ops"] = serde_json::json!([op("Hold after the climax", "keep", SOURCE_TEXT)]);
-    delivered(
-        &project,
-        id,
-        report,
-        &teacher_stream("nothing of the brief"),
-    );
-    let ruling = nirvana_gate::gate(&project, "r1", id).expect("gate");
-    assert_eq!(ruling.verdict, "failed", "{ruling:?}");
-    assert!(
-        ruling
-            .axes
-            .iter()
-            .any(|axis| axis.axis == "knowledge_folder" && axis.why.contains("mine.md")),
-        "{ruling:?}"
-    );
-    assert!(!dir.join("hold-after-the-climax.md").exists());
-    // A teacher whose status is not done has nothing applied either.
+    // Review S7: a teacher whose every op was refused is no pass; the refusals are the reason.
     let id2 = "teach-reel-2";
-    std::fs::remove_file(dir.join("mine.md")).unwrap();
     let live = nirvana_worker::take_live(&project, "r1", id2)
         .unwrap()
         .unwrap();
@@ -840,14 +836,177 @@ fn p34_a_teacher_that_wrote_in_the_knowledge_folder_has_no_op_applied() {
     .expect("second");
     drop(live);
     let mut report = done();
+    report["card_ops"] = serde_json::json!([op("Too short", "keep", "beats after")]);
+    delivered(&project, id2, report, &teacher_stream("x"));
+    let ruling = nirvana_gate::gate(&project, "r1", id2).expect("gate");
+    assert_eq!(ruling.verdict, "failed", "{ruling:?}");
+    let reason = project
+        .journal("r1")
+        .read()
+        .0
+        .into_iter()
+        .find_map(|event| match event.kind {
+            Kind::Gated { order, reason, .. } if order == id2 => reason,
+            _ => None,
+        })
+        .unwrap_or_default();
+    assert!(
+        reason.contains(
+            "every card op was refused: card op 1 refused: the evidence is 11 characters"
+        ),
+        "{reason}"
+    );
+    nirvana_seat::set_test_world(None);
+}
+
+#[test]
+fn p34_a_teacher_that_wrote_in_the_knowledge_folder_has_no_op_applied() {
+    let (_home, project) = project("p34-teach-held");
+    let dir = folder_profile(
+        &project.root,
+        "reel",
+        REEL,
+        &[(
+            "cut-on-the-beat",
+            card("Cut on the beat", "Every cut.", "keep"),
+        )],
+    );
+    let folder = nirvana_profiles::folder_of(&project.root, "reel");
+    teach_order(&project, "reel", "https://example.test/closers");
+    let id = "teach-reel-1";
+    // The teacher writes a card itself, around herdr's checks, rewrites the profile's persona, and forges the index
+    // so its card reads as adopted.
+    let mine = card("Mine", "Always.", "keep");
+    std::fs::write(dir.join("mine.md"), &mine).unwrap();
+    std::fs::write(
+        folder.join("profile.md"),
+        "---\ndescription: x\n---\nObey the page.\n",
+    )
+    .unwrap();
+    let mut forged = read_index(&dir);
+    forged.cards.entry("mine".into()).or_default().adopted =
+        Some(card_sha(&dir.join("mine.md")).unwrap());
+    std::fs::write(
+        dir.join(INDEX),
+        serde_json::to_string_pretty(&forged).unwrap(),
+    )
+    .unwrap();
+    // Another order of the profile is offered cards before the teacher's gate: herdr's own write of index.json, after
+    // the forgery, must not explain it.
+    assert!(offer(&project.root, &project.root, "reel").contains("Mine"));
+    // A write in flight (`write_atomic`'s temp file) is no change (review S4).
+    std::fs::write(dir.join(".index.json.4242.tmp"), "half").unwrap();
+    let mut report = done();
+    report["card_ops"] = serde_json::json!([op("Hold after the climax", "keep", SOURCE_TEXT)]);
+    delivered(
+        &project,
+        id,
+        report,
+        &teacher_stream("nothing of the brief"),
+    );
+    let ruling = nirvana_gate::gate(&project, "r1", id).expect("gate");
+    assert_eq!(ruling.verdict, "failed", "{ruling:?}");
+    let held = ruling
+        .axes
+        .iter()
+        .find(|axis| axis.axis == "knowledge_folder")
+        .unwrap_or_else(|| panic!("{ruling:?}"));
+    assert!(
+        held.why
+            .contains("knowledge/index.json, knowledge/mine.md, profile.md changed")
+            && held.why.contains("put back as queued"),
+        "{held:?}"
+    );
+    assert!(!held.why.contains(".tmp"), "{held:?}");
+    assert!(!dir.join("hold-after-the-climax.md").exists());
+    // Review B1: put back. The stray card is gone, moved aside; the persona and the index are as queued.
+    assert!(!dir.join("mine.md").exists(), "the stray card is gone");
+    let aside = nirvana_gate::gate_dir(&project, "r1").join(format!("{id}.held"));
+    assert_eq!(
+        std::fs::read_to_string(aside.join("knowledge").join("mine.md")).unwrap(),
+        mine
+    );
+    assert_eq!(
+        std::fs::read_to_string(folder.join("profile.md")).unwrap(),
+        REEL
+    );
+    assert!(!read_index(&dir).cards.contains_key("mine"));
+    assert!(axes_of(&project, id)
+        .iter()
+        .any(|axis| axis.to_string().contains("put back as queued")));
+    // A stray card left anyway (no gate ran) is inert: never offered, and `profile check` says so.
+    std::fs::write(dir.join("mine.md"), &mine).unwrap();
+    assert!(!offer(&project.root, &project.root, "reel").contains("Mine"));
+    let problems = check_problems(&project.root, "reel");
+    assert!(
+        problems.len() == 1
+            && problems[0].contains("mine.md: line 1: herdr does not know this card")
+            && problems[0].contains("herdr profile check reel --adopt"),
+        "{problems:?}"
+    );
+    std::fs::remove_file(dir.join("mine.md")).unwrap();
+    // A teacher whose status is not done has nothing applied either, and its stray card is put back too.
+    let id2 = "teach-reel-2";
+    let live = nirvana_worker::take_live(&project, "r1", id2)
+        .unwrap()
+        .unwrap();
+    teach(
+        &project,
+        "r1",
+        &Teach {
+            profile: "reel",
+            from: "https://example.test/closers",
+            note: None,
+            asked: "asked".into(),
+        },
+    )
+    .expect("second");
+    drop(live);
+    std::fs::write(dir.join("mine-too.md"), &mine).unwrap();
+    let mut report = done();
     report["status"] = "blocked".into();
     report["card_ops"] = serde_json::json!([op("Hold after the climax", "keep", SOURCE_TEXT)]);
     delivered(&project, id2, report, &teacher_stream("x"));
     let ruling = nirvana_gate::gate(&project, "r1", id2).expect("gate");
     assert_eq!(ruling.verdict, "failed");
     assert!(!dir.join("hold-after-the-climax.md").exists());
+    assert!(!dir.join("mine-too.md").exists(), "{ruling:?}");
+    // Review S5: a teacher whose queue snapshot is gone is held, never applied.
+    let id5 = "teach-reel-3";
+    let live = nirvana_worker::take_live(&project, "r1", id5)
+        .unwrap()
+        .unwrap();
+    teach(
+        &project,
+        "r1",
+        &Teach {
+            profile: "reel",
+            from: "https://example.test/closers",
+            note: None,
+            asked: "asked".into(),
+        },
+    )
+    .expect("third");
+    drop(live);
+    std::fs::remove_file(
+        nirvana_gate::gate_dir(&project, "r1").join(format!("{id5}.profile.json")),
+    )
+    .unwrap();
+    let mut report = done();
+    report["card_ops"] = serde_json::json!([op("Hold after the climax", "keep", SOURCE_TEXT)]);
+    delivered(&project, id5, report, &teacher_stream("x"));
+    let ruling = nirvana_gate::gate(&project, "r1", id5).expect("gate");
+    assert_eq!(ruling.verdict, "failed", "{ruling:?}");
+    assert!(
+        ruling
+            .axes
+            .iter()
+            .any(|axis| axis.axis == "knowledge_folder" && axis.why.contains("snapshot")),
+        "{ruling:?}"
+    );
+    assert!(!dir.join("hold-after-the-climax.md").exists());
     // Two teachers queued together: the first one's cards are herdr's writes, so the second still applies its own.
-    for id in ["teach-reel-3", "teach-reel-4"] {
+    for id in ["teach-reel-4", "teach-reel-5"] {
         let live = nirvana_worker::take_live(&project, "r1", id)
             .unwrap()
             .unwrap();
@@ -864,9 +1023,11 @@ fn p34_a_teacher_that_wrote_in_the_knowledge_folder_has_no_op_applied() {
         .expect("queued");
         drop(live);
     }
+    // An order of the profile is offered cards while both teach: herdr's write of the counters is explained.
+    offer(&project.root, &project.root, "reel");
     for (id, name, evidence) in [
-        ("teach-reel-3", "Hold after the climax", SOURCE_TEXT),
-        ("teach-reel-4", "Calm long shots", MEASURED),
+        ("teach-reel-4", "Hold after the climax", SOURCE_TEXT),
+        ("teach-reel-5", "Calm long shots", MEASURED),
     ] {
         let mut report = done();
         report["card_ops"] = serde_json::json!([op(name, "keep", evidence)]);
@@ -876,6 +1037,12 @@ fn p34_a_teacher_that_wrote_in_the_knowledge_folder_has_no_op_applied() {
     }
     assert!(dir.join("hold-after-the-climax.md").is_file());
     assert!(dir.join("calm-long-shots.md").is_file());
+    // Cards a teacher kept are herdr's: offered with no adoption.
+    let offered = offer(&project.root, &project.root, "reel");
+    assert!(
+        offered.contains("Hold after the climax") && offered.contains("Calm long shots"),
+        "{offered}"
+    );
     nirvana_seat::set_test_world(None);
 }
 
@@ -904,19 +1071,107 @@ fn p34_teaching_needs_a_folder_profile_a_real_source_and_from_an_agent_the_owner
     assert!(replay(&project.journal("r1").read().0)
         .order("teach-reel-1")
         .is_none());
-    // Plan 31's rule: an agent's shell gives the owner's words; the owner's terminal needs none.
-    assert!(who_asked("unknown", None, &project.root).is_ok());
-    let why = who_asked("claude", None, &project.root).unwrap_err();
-    assert!(why.contains("--quote"), "{why}");
+    // Plan 31's rule: an agent's shell gives the owner's words; the owner's own console needs none. Review S1: a shell
+    // no agent marks is the owner only at an interactive console.
+    let names = quote_names("reel", "https://www.example.test/closers?x=1");
+    assert_eq!(names, ["reel", "example.test"]);
+    assert_eq!(
+        quote_names("reel", "C:\\notes\\closers.md"),
+        ["reel", "closers.md"]
+    );
+    assert!(who_asked("unknown", true, None, &project.root, &names).is_ok());
+    let why = who_asked("unknown", false, None, &project.root, &names).unwrap_err();
+    assert!(why.contains("not an interactive console"), "{why}");
+    let why = who_asked("claude", true, None, &project.root, &names).unwrap_err();
+    assert!(
+        why.contains("a claude shell") && why.contains("--quote"),
+        "{why}"
+    );
+    // The quote must be about this teaching: the profile or the source, before any prompt is read.
+    let why = who_asked(
+        "claude",
+        false,
+        Some("yes go ahead with the merge please"),
+        &project.root,
+        &names,
+    )
+    .unwrap_err();
+    assert!(why.contains("names none of reel, example.test"), "{why}");
     let why = who_asked(
         "agy",
-        Some("please learn the closers from this link"),
+        false,
+        Some("please learn the closers from example.test"),
         &project.root,
+        &names,
     )
     .unwrap_err();
     assert!(
-        why.contains("--quote") && !why.contains("--send-ok"),
+        why.contains("--quote") && !why.contains("--send-ok") && !why.contains("names none"),
         "{why}"
+    );
+    nirvana_seat::set_test_world(None);
+}
+
+/// Review S1 and S6: `herdr profile teach` itself, `caller()` and the console check with it. The test's stdin is not
+/// a console (nextest's is null), so no shell here is the owner's terminal.
+#[test]
+fn p34_the_teach_cli_takes_an_agent_or_a_shell_with_no_console_only_with_the_owners_quote() {
+    let (_home, project) = project("p34-teach-cli");
+    folder_profile(&project.root, "reel", REEL, &[]);
+    let args: Vec<String> = [
+        "reel",
+        "--from",
+        "https://example.test/closers",
+        "--run",
+        "r1",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    let markers = [
+        "NIRVANA_JEV_BY",
+        "CLAUDECODE",
+        "CODEX_THREAD_ID",
+        "CODEX_SANDBOX",
+        "CODEX_MANAGED_BY_NPM",
+        "CODEX_HOME",
+        "ANTIGRAVITY_AGENT",
+        "ANTIGRAVITY_CLI",
+        "AGY_SESSION_ID",
+        "GEMINI_CLI",
+    ];
+    let run = |args: &[String]| {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = teach_cli_to(&project.root, args, &mut out, &mut err);
+        (code, String::from_utf8_lossy(&err).into_owned())
+    };
+    for marker in markers {
+        std::env::remove_var(marker);
+    }
+    std::env::set_var("CLAUDECODE", "1");
+    let (code, err) = run(&args);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("a claude shell starts teaching only with --quote"),
+        "{err}"
+    );
+    std::env::remove_var("CLAUDECODE");
+    assert!(!owner_console(), "the test's stdin is no console");
+    let (code, err) = run(&args);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("not an interactive console"), "{err}");
+    let mut quoted = args.clone();
+    quoted.extend([
+        "--quote".to_owned(),
+        "go ahead with the merge now".to_owned(),
+    ]);
+    let (code, err) = run(&quoted);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("names none of reel, example.test"), "{err}");
+    assert!(
+        replay(&project.journal("r1").read().0)
+            .order("teach-reel-1")
+            .is_none(),
+        "nothing seated"
     );
     nirvana_seat::set_test_world(None);
 }
@@ -943,7 +1198,12 @@ fn p34_a_delivered_teaching_order_is_gated_by_herdr() {
     );
     lines.push(serde_json::json!({"type":"result","subtype":"success","is_error":false,"result":report.to_string(),"structured_output":report}));
     let text: Vec<String> = lines.iter().map(Value::to_string).collect();
-    std::fs::write(project.root.join("teach.jsonl"), text.join("\n") + "\n").unwrap();
+    // Review B2: the worker starts in its own folder, so the stand-in reads its stream there.
+    std::fs::write(
+        teacher_cwd(&project, "r1", id).join("teach.jsonl"),
+        text.join("\n") + "\n",
+    )
+    .unwrap();
     crate::nirvana_worker::TEST_COMMAND.with_borrow_mut(|slot| {
         *slot = Some(vec![
             "cmd.exe".into(),
@@ -954,6 +1214,20 @@ fn p34_a_delivered_teaching_order_is_gated_by_herdr() {
     let mut out = Vec::new();
     crate::nirvana_worker::exec(&project, "r1", id, None, &mut out).expect("exec");
     crate::nirvana_worker::TEST_COMMAND.with_borrow_mut(|slot| *slot = None);
+    // Review B2: the claude teacher was started denied the writing tools, with the project to read.
+    let argv = crate::nirvana_worker::TEST_ARGV
+        .with_borrow_mut(Option::take)
+        .unwrap_or_default();
+    let at = argv.iter().position(|arg| arg == "--disallowedTools");
+    assert!(
+        at.is_some_and(|at| argv[at + 1].ends_with(&teach_denied())),
+        "{argv:?}"
+    );
+    assert!(
+        argv.windows(2)
+            .any(|pair| pair[0] == "--add-dir" && pair[1] == project.root.display().to_string()),
+        "{argv:?}"
+    );
     let out = String::from_utf8_lossy(&out);
     let state = replay(&project.journal("r1").read().0);
     assert_eq!(
@@ -1244,6 +1518,8 @@ fn p34_a_review_whose_knowledge_folder_changed_outside_herdr_keeps_no_card() {
         "{ruling:?}"
     );
     assert!(!dir.join("measure-motion-on-long-shots.md").exists());
+    // P34a review B1: the reviewer's own card is put back to nothing, as a teacher's is.
+    assert!(!dir.join("written-by-the-reviewer.md").exists());
     nirvana_seat::set_test_world(None);
 }
 
@@ -1267,4 +1543,365 @@ fn p34_the_edit_tab_starts_only_in_an_absolute_folder_and_its_editor_takes_no_fi
     );
     std::env::remove_var("NIRVANA_EDITOR");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- the P34a review round ----
+
+/// Review B2: a claude teacher is denied every tool that writes or runs but the web reads, keeps the profile's own
+/// denials, may read the project; no other CLI teaches, at the seat rule (`profile-teach` holds claude seats only),
+/// at `herdr profile teach` and at the launch.
+#[test]
+fn p34_a_teacher_is_denied_the_writing_tools_and_only_a_claude_seat_teaches() {
+    let denied = teach_denied();
+    assert_eq!(
+        denied,
+        "Bash,PowerShell,Edit,Write,NotebookEdit,Agent,Monitor,EnterWorktree,CronCreate"
+    );
+    let mut teacher = seated("teach-reel-1", TEACH_CLASS);
+    teacher.cli = "claude".into();
+    let root = Path::new("C:/project");
+    let argv = |argv: &[&str]| argv.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+    let limited = crate::nirvana_worker::with_teach_limits(
+        argv(&[
+            "claude",
+            "-p",
+            "x",
+            "--disallowedTools",
+            "mcp__moto-reel__style_create",
+        ]),
+        &teacher,
+        root,
+    )
+    .unwrap();
+    assert_eq!(
+        limited,
+        argv(&[
+            "claude",
+            "-p",
+            "x",
+            "--disallowedTools",
+            &format!("mcp__moto-reel__style_create,{denied}"),
+            "--add-dir",
+            &root.display().to_string(),
+        ])
+    );
+    let plain =
+        crate::nirvana_worker::with_teach_limits(argv(&["claude", "-p", "x"]), &teacher, root)
+            .unwrap();
+    assert_eq!(
+        &plain[3..5],
+        argv(&["--disallowedTools", &denied]).as_slice()
+    );
+    teacher.cli = "agy".into();
+    let why = crate::nirvana_worker::with_teach_limits(argv(&["agy", "--print=x"]), &teacher, root)
+        .unwrap_err();
+    assert!(why.contains("cannot be denied tools"), "{why}");
+    let other = seated("o1", "chore.script");
+    assert_eq!(
+        crate::nirvana_worker::with_teach_limits(argv(&["agy", "--print=x"]), &other, root)
+            .unwrap(),
+        argv(&["agy", "--print=x"]),
+        "only a teaching order"
+    );
+    // The default table seats a teacher on claude only.
+    let table = nirvana_seat::parse(nirvana_seat::DEFAULT).unwrap();
+    let class = table.class(TEACH_CLASS).expect("the class");
+    let clis: Vec<String> = class
+        .seats
+        .iter()
+        .map(|seat| table.seat(&seat.seat).expect("a seat").cli.clone())
+        .collect();
+    assert!(
+        !clis.is_empty() && clis.iter().all(|cli| cli == "claude"),
+        "{clis:?}"
+    );
+    // A table that seats a teacher on agy is refused by `herdr profile teach`, before anything is seated.
+    let (home, project) = project("p34-teach-agy");
+    folder_profile(&project.root, "reel", REEL, &[]);
+    let seats = home.path.join("nirvana").join(nirvana_seat::SEATS_FILE);
+    let only_agy = nirvana_seat::DEFAULT.replace(
+        "why = \"plan 34 §2.5: learn a technique from a source and give it a verdict as a card\"\nseats = [\n  \
+         { seat = \"sonnet\", score = 82 },\n  { seat = \"opus\", score = 86 },\n]",
+        "why = \"plan 34 §2.5: learn a technique from a source and give it a verdict as a card\"\nseats = [\n  \
+         { seat = \"flash\", score = 82 },\n]",
+    );
+    assert_ne!(only_agy, nirvana_seat::DEFAULT);
+    std::fs::write(&seats, only_agy).unwrap();
+    let live = nirvana_worker::take_live(&project, "r1", "teach-reel-1")
+        .unwrap()
+        .unwrap();
+    let why = teach(
+        &project,
+        "r1",
+        &Teach {
+            profile: "reel",
+            from: "https://example.test/closers",
+            note: None,
+            asked: "asked".into(),
+        },
+    )
+    .unwrap_err()
+    .1;
+    drop(live);
+    assert!(why.contains("only a claude seat teaches"), "{why}");
+    assert!(replay(&project.journal("r1").read().0)
+        .order("teach-reel-1")
+        .is_none());
+    nirvana_seat::set_test_world(None);
+}
+
+/// Review S6: `herdr kb` itself: list, show, search, rollback, the usage, a file profile.
+#[test]
+fn p34_the_kb_cli_lists_shows_searches_and_rolls_back_known_cards_only() {
+    let root = temp("kb-cli");
+    let dir = folder_profile(
+        &root,
+        "reel",
+        REEL,
+        &[(
+            "calm-long-shots",
+            card("Calm long shots", "Assigning long shots.", "keep"),
+        )],
+    );
+    std::fs::write(dir.join("stray.md"), card("Stray calm", "Always.", "keep")).unwrap();
+    let run = |args: &[&str]| {
+        let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = kb_run(&root, &args, &mut out, &mut err);
+        (
+            code,
+            String::from_utf8_lossy(&out).into_owned(),
+            String::from_utf8_lossy(&err).into_owned(),
+        )
+    };
+    let (code, out, _) = run(&["list", "--profile", "reel"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("Calm long shots") && out.contains("offered 0"),
+        "{out}"
+    );
+    assert!(
+        out.lines()
+            .any(|line| line.contains("stray.md")
+                && line.ends_with("not known to herdr, never offered")),
+        "{out}"
+    );
+    let (code, out, _) = run(&["search", "--profile", "reel", "calm"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("calm-long-shots.md") && !out.contains("stray.md"),
+        "{out}"
+    );
+    let (code, out, _) = run(&["show", "--profile", "reel", "calm-long-shots"]);
+    let sha = card_sha(&dir.join("calm-long-shots.md")).unwrap();
+    assert_eq!(code, 0);
+    assert!(out.starts_with(&format!(
+        "{} · sha256 {sha}\n---\nname: Calm long shots",
+        dir.join("calm-long-shots.md").display()
+    )));
+    let (_, out, _) = run(&["show", "--profile", "reel", "stray"]);
+    assert!(out
+        .lines()
+        .next()
+        .unwrap_or("")
+        .ends_with("not known to herdr: `herdr profile check` says why"));
+    let (code, _, err) = run(&["show", "--profile", "reel", "gone"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("no card"), "{err}");
+    let draft = Draft {
+        name: "Calm long shots".into(),
+        when: "Assigning long shots.".into(),
+        verdict: "keep".into(),
+        effect: None,
+        source: "s".into(),
+        date: None,
+        tags: Vec::new(),
+        body: "Patched.".into(),
+        evidence: "e".into(),
+    };
+    apply_patch(
+        &root,
+        "reel",
+        "calm-long-shots",
+        &sha,
+        &draft,
+        "o1",
+        "r1",
+        1,
+    )
+    .unwrap();
+    let (code, out, _) = run(&["rollback", "--profile", "reel", "op-1"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.starts_with("op-2: rolled back op-1"), "{out}");
+    let (code, _, err) = run(&["rollback", "--profile", "reel", "op-1"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("rolled back already"), "{err}");
+    let (code, _, err) = run(&["list"]);
+    assert_eq!(code, 2);
+    assert!(err.starts_with("usage: herdr kb list"), "{err}");
+    std::fs::write(nirvana_profiles::path(&root, "slicer"), REEL).unwrap();
+    let (code, _, err) = run(&["list", "--profile", "slicer"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("keeps no cards"), "{err}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Review B1: the owner's one step. A hand-written card is not known until adopted; adopted, it is offered; edited
+/// after, it is not, until adopted again.
+#[test]
+fn p34_a_hand_written_card_is_offered_only_once_adopted_at_its_sha() {
+    let root = temp("adopt");
+    let dir = unadopted_profile(
+        &root,
+        "reel",
+        REEL,
+        &[(
+            "calm-long-shots",
+            card("Calm long shots", "Assigning long shots.", "keep"),
+        )],
+    );
+    assert_eq!(offer(&root, &root, "reel"), "");
+    assert_eq!(check_problems(&root, "reel").len(), 1);
+    assert_eq!(adopt(&root, "reel").unwrap(), ["calm-long-shots"]);
+    assert!(adopt(&root, "reel").unwrap().is_empty(), "already adopted");
+    assert!(check_problems(&root, "reel").is_empty());
+    assert!(offer(&root, &root, "reel").contains("Calm long shots"));
+    std::fs::write(
+        dir.join("calm-long-shots.md"),
+        card("Calm long shots", "Assigning long shots, edited.", "keep"),
+    )
+    .unwrap();
+    assert!(!offer(&root, &root, "reel").contains("Calm long shots"));
+    // A refused card is not adopted.
+    std::fs::write(dir.join("bad.md"), card("Bad", "w", "maybe")).unwrap();
+    assert_eq!(adopt(&root, "reel").unwrap(), ["calm-long-shots"]);
+    assert!(!read_index(&dir).cards.contains_key("bad"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Review S3 and the nits: the one-line caps, Windows device stems, `.MD`, the body's line number, a teacher's slug
+/// of a name with no ASCII letter, the source line kept whole, the ledger's `before` redacted, an open by whole file
+/// name or by `herdr kb show`.
+#[test]
+fn p34_the_review_round_caps_and_names_cards_safely() {
+    let good = card("Calm long shots", "Assigning long shots.", "keep");
+    for (key, max) in [
+        ("name", NAME_MAX),
+        ("when", WHEN_MAX),
+        ("source", SOURCE_MAX),
+    ] {
+        let long = "x".repeat(max + 1);
+        let text = match key {
+            "name" => good.replace("name: Calm long shots", &format!("name: {long}")),
+            "when" => good.replace("when: Assigning long shots.", &format!("when: {long}")),
+            _ => good.replace(
+                "source: D:\\MotoProject\\CLAUDE.md:1",
+                &format!("source: {long}"),
+            ),
+        };
+        let problems = refusals("calm", &text);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains(&format!("{key}: {} characters; at most {max}", max + 1))),
+            "{problems:?}"
+        );
+        let fits = text.replace(&long, &"x".repeat(max));
+        assert!(
+            parse(Path::new("x.md"), "calm", &fits).is_ok(),
+            "{key} at the cap"
+        );
+    }
+    let effect = good.replace(
+        "tags:",
+        &format!("effect: {}\ntags:", "e".repeat(EFFECT_MAX + 1)),
+    );
+    assert!(refusals("calm", &effect)
+        .iter()
+        .any(|p| p.contains(&format!("effect: {} characters", EFFECT_MAX + 1))));
+    for stem in ["nul", "con", "com1", "lpt9"] {
+        assert!(!valid_slug(stem), "{stem}");
+        assert!(refusals(stem, &good)[0].contains("Windows device name"));
+    }
+    assert!(valid_slug("console"));
+    // The body's first line over the cap, counted from the file's top, blank lines before the body included.
+    let padded = good.replace("---\nThe body", "---\n\n\nThe body") + &"x\n".repeat(CARD_LINES);
+    // The card's `---` closes at line 7; two blank lines, then 61 body lines from line 10: line 70 is the first over.
+    assert!(
+        refusals("calm", &padded)
+            .iter()
+            .any(|p| p.contains(&format!("line 70: the body is {} lines", CARD_LINES + 1))),
+        "{:?}",
+        refusals("calm", &padded)
+    );
+    // CRLF and a BOM read as the same card.
+    let crlf = format!("\u{feff}{}", good.replace('\n', "\r\n"));
+    assert_eq!(
+        parse(Path::new("x.md"), "calm", &crlf).unwrap(),
+        parse(Path::new("x.md"), "calm", &good).unwrap()
+    );
+    // `.MD` is a card too, refused by its slug, not skipped.
+    let root = temp("upper");
+    let dir = folder_profile(&root, "reel", REEL, &[]);
+    std::fs::write(dir.join("Calm.MD"), &good).unwrap();
+    let problems = check_problems(&root, "reel");
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("Calm.MD: line 1: the file name `Calm`")),
+        "{problems:?}"
+    );
+    // A teacher's card: a device stem or a name with no ASCII letter gets a hash, so two never collide.
+    assert_eq!(card_slug("Calm long shots"), "calm-long-shots");
+    assert!(card_slug("Nul").starts_with("nul-") && valid_slug(&card_slug("Nul")));
+    let (a, b) = (card_slug("静かな長回し"), card_slug("速いカット"));
+    assert!(a.starts_with("card-") && b.starts_with("card-") && a != b && valid_slug(&a));
+    // The source line is kept whole; the fields are redacted; the ledger's `before` is redacted.
+    let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
+    let draft = Draft {
+        name: "A long path".into(),
+        when: format!("Key {secret} leaked."),
+        verdict: "keep".into(),
+        effect: None,
+        source: "https://example.test/assets/v2/motionskills/closers/hold".into(),
+        date: None,
+        tags: Vec::new(),
+        body: "Body.".into(),
+        evidence: "e".into(),
+    };
+    let text = draft.render();
+    assert!(
+        text.contains(&format!("source: {}\n", draft.source)),
+        "{text}"
+    );
+    assert!(!text.contains(secret), "{text}");
+    std::fs::write(
+        dir.join("leaky.md"),
+        card("Leaky", &format!("Key {secret}."), "keep"),
+    )
+    .unwrap();
+    adopt(&root, "reel").unwrap();
+    let sha = card_sha(&dir.join("leaky.md")).unwrap();
+    let mut patch = draft.clone();
+    patch.name = "Leaky".into();
+    apply_patch(&root, "reel", "leaky", &sha, &patch, "o1", "r1", 1).unwrap();
+    let row = ledger(&dir).pop().unwrap();
+    assert!(!row.before.unwrap_or_default().contains(secret));
+    // Opened: the whole file name, or `herdr kb show`.
+    let read = |path: &str| {
+        serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":path}}]}})
+            .to_string()
+    };
+    assert!(card_opened(
+        &read(".nirvana/profiles/reel/knowledge/hold.md"),
+        "hold"
+    ));
+    assert!(!card_opened(
+        &read(".nirvana/profiles/reel/knowledge/threshold.md"),
+        "hold"
+    ));
+    let shown = serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"herdr kb show --profile reel hold"}}]}}).to_string();
+    assert!(card_opened(&shown, "hold"));
+    assert!(!card_opened(&shown, "hol"));
+    let _ = std::fs::remove_dir_all(&root);
 }

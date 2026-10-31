@@ -798,6 +798,8 @@ const USAGE: &str = "usage: herdr profile list
        herdr profile show <name>
        herdr profile new <name>          writes .nirvana/profiles/<name>.md from the template
        herdr profile check [<name>]      prints every refusal, a folder profile's cards too; exit 1 when there is one
+       herdr profile check <name> --adopt
+                                         records the cards you wrote by hand as they stand, so they are offered
        herdr profile teach <name> --from <url|path> [--note \"what to learn\"] [--quote \"the owner's words\"] [--run <run>]
                                          seats a profile-teach order; its Work Report's card_ops become cards
 A profile is used by `herdr seat run <seat> --profile <name> ...` and `herdr seat pick --profile <name> ...`.";
@@ -851,6 +853,26 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
                 1
             }
         },
+        (Some("check"), [name, flag]) if flag == "--adopt" => {
+            // Plan 34 P34a review B1: the owner's one step for cards written by hand; then the check, as without it.
+            match crate::nirvana_knowledge::adopt(&root, name) {
+                Ok(adopted) => println!(
+                    "{name}: adopted {} card{}{}",
+                    adopted.len(),
+                    if adopted.len() == 1 { "" } else { "s" },
+                    if adopted.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", adopted.join(", "))
+                    }
+                ),
+                Err(why) => {
+                    eprintln!("herdr profile check --adopt: {why}");
+                    std::process::exit(1);
+                }
+            }
+            return cli(&["check".to_owned(), name.clone()]);
+        }
         (Some("check"), names) if names.len() <= 1 => {
             let table = nirvana_seat::table_for(&root);
             if let Err(why) = &table {

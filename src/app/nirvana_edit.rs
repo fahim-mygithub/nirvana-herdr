@@ -209,6 +209,51 @@ mod tests {
         shutdown_test_runtimes(&mut app);
     }
 
+    /// Plan 34 P34a review S6: the Profiles group's `K` is routed by `command.invoke`'s id to `nirvana_edit_dir`,
+    /// which refuses a folder that is not absolute and opens the editor, with no file, in one that is.
+    #[tokio::test]
+    async fn p34_the_edit_dir_command_is_routed_and_opens_the_editor_in_the_cards_folder() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("cards")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let params = |dir: &str| crate::api::schema::CommandInvokeParams {
+            command_id: format!("{}{dir}", crate::nirvana::EDIT_DIR_COMMAND),
+            workspace_id: None,
+            tab_id: None,
+            pane_id: None,
+            selection: None,
+        };
+        let response = app.handle_command_invoke("bad".into(), params("knowledge"));
+        assert!(
+            response.contains("not_editable") && response.contains("not a folder: knowledge"),
+            "{response}"
+        );
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1, "no tab");
+        let dir = std::env::temp_dir()
+            .join(format!("nirvana-edit-dir-{}", std::process::id()))
+            .join("reel")
+            .join("knowledge");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::env::set_var("NIRVANA_EDITOR", exiting_test_command());
+        let response = app.handle_command_invoke("req".into(), params(&dir.display().to_string()));
+        std::env::remove_var("NIRVANA_EDITOR");
+        assert!(response.contains("\"ok\""), "{response}");
+        let ws = &app.state.workspaces[0];
+        assert_eq!(ws.tabs.len(), 2, "a new tab");
+        assert_eq!(ws.tabs[1].custom_name.as_deref(), Some("cards reel"));
+        shutdown_test_runtimes(&mut app);
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap().parent().unwrap());
+    }
+
     #[tokio::test]
     async fn a_sign_in_opens_its_own_focused_tab_and_an_unknown_cli_opens_none() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();

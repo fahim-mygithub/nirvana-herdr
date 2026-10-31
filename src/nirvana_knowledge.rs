@@ -21,8 +21,13 @@
 //!   `nirvana_lessons::MIN_EVIDENCE` characters) is in the teacher's stream and is not text herdr wrote; every op goes
 //!   in `knowledge/ledger.jsonl` with the card before and after, and `herdr kb rollback` undoes one. A plan 33 lesson
 //!   review of a profiled order may return `card_ops` too, under the same checks.
-//! - **Contained as a review is** (plan 33 review B3): the gate applies nothing when `knowledge/` changed since the
-//!   order was queued in a way herdr's own writes log does not explain.
+//! - **Contained as a review is** (plan 33 review B3): the gate applies nothing when the profile's folder changed since
+//!   the order was queued in a way herdr's own writes log does not explain, and puts each such file back as it stood
+//!   at the queue (P34a review B1), the file it found moved aside. A claude teacher works in its own folder under the
+//!   run, denied every tool that writes or runs (`teach_denied`); no other CLI teaches (review B2).
+//! - **Only cards herdr knows are offered** (review B1): a card is known when its text is the one its last ledger row
+//!   left, or the one `herdr profile check <name> --adopt` recorded in `index.json`. Any other `*.md` is reported by
+//!   `herdr profile check` and never offered, searched or listed in a brief.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -48,6 +53,35 @@ pub const INDEX: &str = nirvana_lessons::INDEX;
 pub const LEDGER: &str = nirvana_lessons::LEDGER;
 /// §2.5: the class of a teaching order, in `seats.toml`.
 pub const TEACH_CLASS: &str = "profile-teach";
+/// P34a review S3: `name` and `when` are in every brief the profile is offered in, 15 lines each order, so a long one
+/// is paid on every order. The staged reel-editor set's longest of 2026-10-30: name 64, when 80, effect 149, source 77
+/// characters; each cap is above that with room, a hypothesis.
+pub const NAME_MAX: usize = 100;
+pub const WHEN_MAX: usize = 250;
+pub const EFFECT_MAX: usize = 300;
+pub const SOURCE_MAX: usize = 300;
+/// P34a review B2: a teacher reads a URL, the one input an attacker writes, so it is held as plan 33's reviewer is
+/// (plan 33 review B3): its own folder under the run, never the project's root where workers edit.
+pub fn teacher_cwd(project: &Project, run: &str, id: &str) -> PathBuf {
+    project.run_dir(run).join("teachers").join(id)
+}
+
+/// Review B2: what a claude teacher may not use, plan 33's reviewer's `DENIED` with `WebFetch` and `WebSearch` given
+/// back (it must read its source). The profile's own MCP tools stay; its `disallowed_tools` denies the ones that
+/// write.
+pub fn teach_denied() -> String {
+    crate::nirvana_review::DENIED
+        .split(',')
+        .filter(|tool| !matches!(*tool, "WebFetch" | "WebSearch"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Review nit: Windows opens a device, not a file, for these stems whatever the extension (`nul.md` is NUL).
+const RESERVED: [&str; 22] = [
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
 
 /// §2.2: `keep | reject | dead-end`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +131,24 @@ pub fn valid_slug(slug: &str) -> bool {
         && slug
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !RESERVED.contains(&slug)
+}
+
+/// The slug a teacher's new card takes: the lessons' `slug`, with a hash of the name after it when that is a Windows
+/// device stem or the lessons' fallback for a name with no ASCII letter or digit (review nit: a second such card
+/// would read "a card lesson exists").
+fn card_slug(name: &str) -> String {
+    let slug = nirvana_lessons::slug(name);
+    let plain = name.bytes().any(|b| b.is_ascii_alphanumeric());
+    if plain && !RESERVED.contains(&slug.as_str()) {
+        return slug;
+    }
+    let hash = &nirvana_lessons::sha256(name)[..8];
+    if plain {
+        format!("{slug}-{hash}")
+    } else {
+        format!("card-{hash}")
+    }
 }
 
 /// A `# comment` after a one-word value, as in §2.2's own example (`verdict: keep          # keep | reject | dead-end`).
@@ -114,6 +166,16 @@ fn is_date(value: &str) -> bool {
         })
 }
 
+/// Review S3's cap of a one-line key.
+fn field_max(key: &str) -> usize {
+    match key {
+        "name" => NAME_MAX,
+        "when" => WHEN_MAX,
+        "effect" => EFFECT_MAX,
+        _ => SOURCE_MAX,
+    }
+}
+
 /// Parses a card's text. `slug` is its file's stem. Every problem is returned, each with the file and a line, so
 /// `herdr profile check` prints all of them.
 pub fn parse(path: &Path, slug: &str, text: &str) -> Result<Card, Vec<String>> {
@@ -121,7 +183,7 @@ pub fn parse(path: &Path, slug: &str, text: &str) -> Result<Card, Vec<String>> {
     let mut problems = Vec::new();
     if !valid_slug(slug) {
         problems.push(format!(
-            "{shown}: line 1: the file name `{slug}` is not 1 to {SLUG_MAX} of [a-z0-9-]"
+            "{shown}: line 1: the file name `{slug}` is not 1 to {SLUG_MAX} of [a-z0-9-], or is a Windows device name"
         ));
     }
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
@@ -185,6 +247,13 @@ pub fn parse(path: &Path, slug: &str, text: &str) -> Result<Card, Vec<String>> {
         let mut bad = |why: String| problems.push(format!("{shown}: line {line_no}: {key}: {why}"));
         match *known {
             "name" | "when" | "source" | "effect" if scalar.is_empty() => bad("empty".into()),
+            "name" | "when" | "source" | "effect" if scalar.chars().count() > field_max(known) => {
+                bad(format!(
+                    "{} characters; at most {}",
+                    scalar.chars().count(),
+                    field_max(known)
+                ))
+            }
             "name" => card.name = scalar.to_owned(),
             "when" => card.when = scalar.to_owned(),
             "source" => card.source = scalar.to_owned(),
@@ -221,12 +290,17 @@ pub fn parse(path: &Path, slug: &str, text: &str) -> Result<Card, Vec<String>> {
         }
     }
     let body = lines[close + 1..].join("\n");
+    // Review nit: the line named is the first one over the cap in the file, so the blank lines before the body count.
+    let blank = lines[close + 1..]
+        .iter()
+        .take_while(|line| line.trim_end_matches('\r').is_empty())
+        .count();
     let body = body.trim_matches(|c: char| c == '\n' || c == '\r');
     let count = body.lines().count();
     if count > CARD_LINES {
         problems.push(format!(
             "{shown}: line {}: the body is {count} lines; at most {CARD_LINES}",
-            close + 2 + CARD_LINES
+            close + 2 + blank + CARD_LINES
         ));
     }
     card.body = body.trim_end().to_owned();
@@ -245,7 +319,13 @@ pub fn cards(dir: &Path) -> Vec<(String, PathBuf, Result<Card, Vec<String>>)> {
     let mut found: Vec<(String, PathBuf, Result<Card, Vec<String>>)> = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|file| file.is_file() && file.extension().is_some_and(|ext| ext == "md"))
+        // Review nit: `Calm.MD` is a card too, refused by its slug, never skipped in silence.
+        .filter(|file| {
+            file.is_file()
+                && file
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+        })
         .map(|file| {
             let slug = file
                 .file_stem()
@@ -265,25 +345,87 @@ pub fn cards(dir: &Path) -> Vec<(String, PathBuf, Result<Card, Vec<String>>)> {
     found
 }
 
-/// The cards that parse, with their files.
-fn good_cards(dir: &Path) -> Vec<(PathBuf, Card)> {
+/// Review B1: whether herdr knows the card `slug` as it stands, by its sha now. Known when the last ledger row of the
+/// slug left this text (a card op herdr checked), or `herdr profile check --adopt` recorded this sha (the owner's own
+/// card). A card written around herdr, or edited after either, is not known: it is never offered.
+fn known(index: &Index, rows: &[Row], slug: &str, sha: &str) -> bool {
+    let adopted = index
+        .cards
+        .get(slug)
+        .and_then(|entry| entry.adopted.as_deref())
+        == Some(sha);
+    let ledgered = rows
+        .iter()
+        .rev()
+        .find(|row| row.slug == slug)
+        .and_then(|row| row.after.as_deref())
+        .is_some_and(|after| nirvana_lessons::sha256(after) == sha);
+    adopted || ledgered
+}
+
+/// The cards that parse and that herdr knows (`known`), with their files: the only ones offered, searched or listed.
+fn known_cards(dir: &Path) -> Vec<(PathBuf, Card)> {
+    let (index, rows) = (read_index(dir), ledger(dir));
     cards(dir)
         .into_iter()
-        .filter_map(|(_, file, parsed)| parsed.ok().map(|card| (file, card)))
+        .filter_map(|(slug, file, parsed)| {
+            let card = parsed.ok()?;
+            let sha = card_sha(&file)?;
+            known(&index, &rows, &slug, &sha).then_some((file, card))
+        })
         .collect()
 }
 
-/// `herdr profile check`'s addition for a folder profile: every refusal of every card, and a folder with no
-/// `profile.md`. Nothing for a profile that is one file.
+/// `herdr profile check`'s addition for a folder profile: every refusal of every card, and every card herdr does not
+/// know (review B1), each with the one step that makes it known. Nothing for a profile that is one file.
 pub fn check_problems(root: &Path, name: &str) -> Vec<String> {
     let Some(dir) = nirvana_profiles::knowledge_dir(root, name) else {
         return Vec::new();
     };
-    cards(&dir)
-        .into_iter()
-        .filter_map(|(_, _, parsed)| parsed.err())
-        .flatten()
-        .collect()
+    let (index, rows) = (read_index(&dir), ledger(&dir));
+    let mut problems = Vec::new();
+    for (slug, file, parsed) in cards(&dir) {
+        match parsed {
+            Err(refused) => problems.extend(refused),
+            Ok(_) => {
+                let sha = card_sha(&file).unwrap_or_default();
+                if !known(&index, &rows, &slug, &sha) {
+                    problems.push(format!(
+                        "{}: line 1: herdr does not know this card as it stands (no card op left it, and it was not \
+                         adopted at this sha), so it is never offered; if you wrote it, `herdr profile check {name} \
+                         --adopt` takes it",
+                        file.display()
+                    ));
+                }
+            }
+        }
+    }
+    problems
+}
+
+/// `herdr profile check <name> --adopt`, the owner's one step for cards written by hand (review B1): the sha of
+/// every card that parses is recorded in `index.json`, so `known` holds for it until its text changes. A refused card
+/// is not adopted. The slugs adopted, or why none was.
+pub fn adopt(root: &Path, name: &str) -> Result<Vec<String>, String> {
+    let dir = nirvana_profiles::knowledge_dir(root, name)
+        .ok_or_else(|| format!("profile {name} keeps no cards: only a folder profile does"))?;
+    let _lock = lock(root, name).map_err(|err| err.to_string())?;
+    let mut index = read_index(&dir);
+    let mut adopted = Vec::new();
+    for (slug, file, parsed) in cards(&dir) {
+        let (Ok(_), Some(sha)) = (parsed, card_sha(&file)) else {
+            continue;
+        };
+        let entry = index.cards.entry(slug.clone()).or_default();
+        if entry.adopted.as_deref() != Some(sha.as_str()) {
+            entry.adopted = Some(sha);
+            adopted.push(slug);
+        }
+    }
+    if !adopted.is_empty() {
+        write_index(root, name, &dir, &index).map_err(|err| err.to_string())?;
+    }
+    Ok(adopted)
 }
 
 /// The count `herdr profile check` prints beside `ok`.
@@ -314,6 +456,9 @@ pub struct Entry {
     /// Orders already counted as opening it (the last `SEEN_KEPT`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub seen: Vec<String>,
+    /// Review B1: the card's sha when the owner adopted it (`herdr profile check --adopt`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopted: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,13 +478,52 @@ pub fn read_index(dir: &Path) -> Index {
         .unwrap_or_default()
 }
 
-fn write_index(dir: &Path, index: &Index) -> std::io::Result<()> {
+/// Writes `index.json`, logged as herdr's (review B1: it says which cards are adopted, so a change no herdr write
+/// explains is put back). The caller holds the profile's lock.
+fn write_index(root: &Path, profile: &str, dir: &Path, index: &Index) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let mut index = index.clone();
     index.v = 1;
     let mut text = serde_json::to_string_pretty(&index)?;
     text.push('\n');
-    crate::nirvana_seat::write_atomic(&dir.join(INDEX), text.as_bytes())
+    let file = dir.join(INDEX);
+    let before = bytes_sha(&file);
+    crate::nirvana_seat::write_atomic(&file, text.as_bytes())?;
+    noted(root, profile, &file, before);
+    Ok(())
+}
+
+fn bytes_sha(file: &Path) -> Option<String> {
+    std::fs::read(file)
+        .ok()
+        .map(|bytes| nirvana_profiles::sha256_hex(&bytes))
+}
+
+/// A file's path in the profile's folder, `/`-separated, as the writes log and a snapshot name it.
+fn rel(root: &Path, profile: &str, file: &Path) -> String {
+    nirvana_lessons::rel_in(&nirvana_profiles::folder_of(root, profile), file)
+}
+
+/// Records that herdr changed `file` from the sha `before` to the sha it has now (`null` for no file). Review B1:
+/// the `before` makes a chain, so a change made between two of herdr's writes is not explained by the later one.
+fn noted(root: &Path, profile: &str, file: &Path, before: Option<String>) {
+    use std::io::Write;
+    let log = writes_log(root, profile);
+    let line = serde_json::json!({
+        "path": rel(root, profile, file),
+        "before": before,
+        "sha": bytes_sha(file),
+    });
+    if let Some(parent) = log.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut out) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+    {
+        let _ = writeln!(out, "{line}");
+    }
 }
 
 /// Under `runs/`, which O3's `.gitignore` ignores, as the lessons' lock is.
@@ -419,27 +603,41 @@ pub fn offer(root: &Path, cwd: &Path, profile: &str) -> String {
     let Some(dir) = nirvana_profiles::knowledge_dir(root, profile) else {
         return String::new();
     };
-    let Ok(_lock) = lock(root, profile) else {
-        return String::new();
+    // Review nit: a locked profile says so; an empty section would read as a profile with no cards.
+    let _lock = match lock(root, profile) {
+        Ok(lock) => lock,
+        Err(err) => {
+            return format!(
+                "\n\n## Knowledge cards of the profile {profile}\n\nNot listed: herdr could not take the profile's \
+lock ({err}). `herdr kb search --profile {profile} <words>` finds them.\n"
+            )
+        }
     };
-    let found = good_cards(&dir);
+    let found = known_cards(&dir);
     if found.is_empty() {
         return String::new();
     }
     let mut index = read_index(&dir);
+    // Review S2: a warning is read from the brief and never needs opening, so it never decays, and it is listed first.
     let mut live: Vec<&(PathBuf, Card)> = found
         .iter()
         .filter(|(_, card)| {
-            nirvana_lessons::live(
-                &index
-                    .cards
-                    .get(&card.slug)
-                    .map(|entry| entry.counters.clone())
-                    .unwrap_or_default(),
-            )
+            card.verdict.warns()
+                || nirvana_lessons::live(
+                    &index
+                        .cards
+                        .get(&card.slug)
+                        .map(|entry| entry.counters.clone())
+                        .unwrap_or_default(),
+                )
         })
         .collect();
-    live.sort_by(|a, b| rank(&index, &a.1, &b.1));
+    live.sort_by(|a, b| {
+        b.1.verdict
+            .warns()
+            .cmp(&a.1.verdict.warns())
+            .then_with(|| rank(&index, &a.1, &b.1))
+    });
     live.truncate(nirvana_lessons::CARDS_OFFERED);
     let mut section = format!(
         "\n\n## Knowledge cards of the profile {profile}\n\nEach is one measured finding, dead end or owner preference \
@@ -468,8 +666,35 @@ with its source line. Open one when it fits this order; a `do not:` line is a wa
             "\n{rest} more: `herdr kb search --profile {profile} <words>`\n"
         ));
     }
-    let _ = write_index(&dir, &index);
+    let _ = write_index(root, profile, &dir, &index);
     section
+}
+
+/// Whether the worker opened card `slug`: a tool call naming `<slug>.md` (`opened_in_stream`, the whole file name),
+/// or `herdr kb show ... <slug>`, the path the brief's `N more` line teaches (review nit).
+pub fn card_opened(stream: &str, slug: &str) -> bool {
+    nirvana_lessons::opened_in_stream(stream, slug)
+        || nirvana_lessons::tool_inputs(stream).iter().any(|input| {
+            input.contains("kb show")
+                && input
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                    .any(|word| word == slug)
+        })
+}
+
+/// Review nit: a teaching order is seated with its profile but is offered no card (each offer counts toward decay,
+/// and a teacher's pass is no order's outcome): every known card is copied into its folder, where its brief names it.
+pub fn copy_for_teacher(root: &Path, cwd: &Path, profile: &str) {
+    let Some(dir) = nirvana_profiles::knowledge_dir(root, profile) else {
+        return;
+    };
+    for (file, card) in known_cards(&dir) {
+        let to = cwd.join(brief_path(profile, &card.slug));
+        if let Some(parent) = to.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::copy(file, to);
+    }
 }
 
 /// The gate's count at an order's verdict, the lessons' rule: each card the worker opened gains `opened`, and
@@ -487,11 +712,9 @@ pub fn note_gated(
     let _lock = lock(root, profile)?;
     let mut index = read_index(&dir);
     let mut counted = Vec::new();
-    for (_, card) in good_cards(&dir) {
+    for (_, card) in known_cards(&dir) {
         let entry = index.cards.entry(card.slug.clone()).or_default();
-        if entry.seen.iter().any(|seen| seen == order)
-            || !nirvana_lessons::opened_in_stream(stream, &card.slug)
-        {
+        if entry.seen.iter().any(|seen| seen == order) || !card_opened(stream, &card.slug) {
             continue;
         }
         entry.counters.opened += 1;
@@ -505,7 +728,7 @@ pub fn note_gated(
         counted.push(card.slug);
     }
     if !counted.is_empty() {
-        write_index(&dir, &index)?;
+        write_index(root, profile, &dir, &index)?;
     }
     Ok(counted)
 }
@@ -669,28 +892,33 @@ impl Draft {
         Ok(draft)
     }
 
-    /// The card file herdr writes, redacted as a lesson's evidence is (plan 33 review nit): it is tracked.
+    /// The card file herdr writes, its fields redacted as a lesson's evidence is (plan 33 review nit): it is tracked.
+    /// The `source` line is kept whole (P34a review nit): a long path or URL with a digit reads as a secret to
+    /// `redact`, and a card that lost its source line says nothing about where it came from.
     pub fn render(&self) -> String {
+        let red = nirvana_lessons::redact;
         let mut text = format!(
             "---\nname: {}\nwhen: {}\nverdict: {}\n",
-            self.name, self.when, self.verdict
+            red(&self.name),
+            red(&self.when),
+            self.verdict
         );
         if let Some(effect) = &self.effect {
-            text.push_str(&format!("effect: {effect}\n"));
+            text.push_str(&format!("effect: {}\n", red(effect)));
         }
         text.push_str(&format!("source: {}\n", self.source));
         if let Some(date) = &self.date {
             text.push_str(&format!("date: {date}\n"));
         }
         if !self.tags.is_empty() {
-            text.push_str(&format!("tags: [{}]\n", self.tags.join(", ")));
+            text.push_str(&format!("tags: [{}]\n", red(&self.tags.join(", "))));
         }
         text.push_str("---\n");
         if !self.body.is_empty() {
-            text.push_str(&self.body);
+            text.push_str(&red(&self.body));
             text.push('\n');
         }
-        nirvana_lessons::redact(&text)
+        text
     }
 }
 
@@ -772,6 +1000,7 @@ fn next_id(rows: &[Row]) -> String {
 fn append_row(root: &Path, profile: &str, dir: &Path, row: &Row) -> std::io::Result<()> {
     use std::io::Write;
     let path = dir.join(LEDGER);
+    let before = bytes_sha(&path);
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -780,7 +1009,7 @@ fn append_row(root: &Path, profile: &str, dir: &Path, row: &Row) -> std::io::Res
     line.push('\n');
     file.write_all(line.as_bytes())?;
     drop(file);
-    nirvana_lessons::noted_in(dir, &writes_log(root, profile), &path);
+    noted(root, profile, &path, before);
     Ok(())
 }
 
@@ -808,14 +1037,14 @@ fn ledgered(
     let before = read_text(&file);
     let rows = ledger(&dir);
     let of = check(before.as_deref(), &rows)?;
-    let log = writes_log(root, profile);
     let put = |text: Option<&str>| -> std::io::Result<()> {
+        let was = bytes_sha(&file);
         match text {
             Some(text) => crate::nirvana_seat::write_atomic(&file, text.as_bytes())?,
             None if file.exists() => std::fs::remove_file(&file)?,
             None => {}
         }
-        nirvana_lessons::noted_in(&dir, &log, &file);
+        noted(root, profile, &file, was);
         Ok(())
     };
     put(text).map_err(|err| format!("{slug}: {err}"))?;
@@ -828,7 +1057,8 @@ fn ledgered(
         by: by.to_owned(),
         run: run.to_owned(),
         slug: slug.to_owned(),
-        before: before.clone(),
+        // Review nit: the ledger is tracked, and a hand-written card's text before an op is no checked text.
+        before: before.as_deref().map(nirvana_lessons::redact),
         after: text.map(str::to_owned),
         evidence,
         of,
@@ -859,7 +1089,7 @@ pub fn apply_new(
     run: &str,
     at: u64,
 ) -> Result<String, String> {
-    let slug = nirvana_lessons::slug(&draft.name);
+    let slug = card_slug(&draft.name);
     let text = checked(&slug, draft)?;
     ledgered(
         root,
@@ -1048,15 +1278,76 @@ pub fn apply_ops(
 // ---- containment (plan 33 review B3, for cards) ----
 
 fn snap_path(project: &Project, run: &str, id: &str) -> PathBuf {
-    nirvana_gate::gate_dir(project, run).join(format!("{id}.knowledge.json"))
+    nirvana_gate::gate_dir(project, run).join(format!("{id}.profile.json"))
 }
 
-/// The profile's `knowledge/` as it stands when an order that may change it is queued; nothing for a file profile.
+/// The copy of the profile's folder taken with the snapshot, which a held verdict restores from.
+fn copy_dir(project: &Project, run: &str, id: &str) -> PathBuf {
+    nirvana_gate::gate_dir(project, run).join(format!("{id}.profile"))
+}
+
+/// Where a held verdict moves the files it found, so restoring loses nothing (the owner may have edited a card
+/// through `K` while a teacher ran).
+fn held_dir(project: &Project, run: &str, id: &str) -> PathBuf {
+    nirvana_gate::gate_dir(project, run).join(format!("{id}.held"))
+}
+
+/// Review B1 and B2: what the gate compares. Every file of the profile's folder (`profile.md`, the cards,
+/// `index.json`, `ledger.jsonl`) by sha, and how many lines the writes log held.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Snap {
+    pub files: BTreeMap<String, String>,
+    pub writes: usize,
+}
+
+/// Every file of a profile's folder by its path in it. Review S4: `write_atomic`'s `.<name>.<pid>.tmp` is left out,
+/// so a write in flight is no change.
+fn folder_files(folder: &Path) -> BTreeMap<String, String> {
+    let mut files = BTreeMap::new();
+    let mut todo = vec![folder.to_path_buf()];
+    while let Some(next) = todo.pop() {
+        for entry in std::fs::read_dir(&next).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                todo.push(path);
+            } else if !(name.starts_with('.') && name.ends_with(".tmp")) {
+                if let Some(sha) = bytes_sha(&path) {
+                    files.insert(nirvana_lessons::rel_in(folder, &path), sha);
+                }
+            }
+        }
+    }
+    files
+}
+
+fn log_lines(root: &Path, profile: &str) -> Vec<String> {
+    std::fs::read_to_string(writes_log(root, profile))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The profile's folder as it stands when an order that may change it is queued, with a copy of each file; nothing
+/// for a file profile. Review S4: under the profile's lock, so no herdr write is half done in it.
 pub fn write_snap(project: &Project, run: &str, id: &str, profile: &str) -> Result<(), String> {
-    let Some(dir) = nirvana_profiles::knowledge_dir(&project.root, profile) else {
+    if nirvana_profiles::knowledge_dir(&project.root, profile).is_none() {
         return Ok(());
+    }
+    let folder = nirvana_profiles::folder_of(&project.root, profile);
+    let _lock = lock(&project.root, profile).map_err(|err| err.to_string())?;
+    let snap = Snap {
+        files: folder_files(&folder),
+        writes: log_lines(&project.root, profile).len(),
     };
-    let snap = nirvana_lessons::folder_snap_in(&dir, &writes_log(&project.root, profile));
+    let copy = copy_dir(project, run, id);
+    for path in snap.files.keys() {
+        let to = copy.join(path);
+        std::fs::create_dir_all(to.parent().unwrap_or(&copy)).map_err(|e| e.to_string())?;
+        std::fs::copy(folder.join(path), &to)
+            .map_err(|err| format!("cannot copy {path} for the gate: {err}"))?;
+    }
     std::fs::create_dir_all(nirvana_gate::gate_dir(project, run)).map_err(|e| e.to_string())?;
     std::fs::write(
         snap_path(project, run, id),
@@ -1065,24 +1356,104 @@ pub fn write_snap(project: &Project, run: &str, id: &str, profile: &str) -> Resu
     .map_err(|err| err.to_string())
 }
 
-/// Why no card op of order `id` is applied: `knowledge/` changed since it was queued and herdr did not write it.
+/// The files of the profile's folder that changed since `snap` with no chain of herdr's writes from the snapshot's
+/// sha to the sha now. Review B1: each logged write names the sha it found, so a change made between two of herdr's
+/// writes (a forged `index.json` that the next offer rewrote) breaks the chain.
+fn unexplained(root: &Path, profile: &str, snap: &Snap) -> Vec<String> {
+    let now = folder_files(&nirvana_profiles::folder_of(root, profile));
+    let writes: Vec<Value> = log_lines(root, profile)
+        .iter()
+        .skip(snap.writes)
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let mut paths: Vec<&String> = snap.files.keys().chain(now.keys()).collect();
+    paths.sort();
+    paths.dedup();
+    paths
+        .into_iter()
+        .filter(|path| {
+            let mut sha = snap.files.get(*path).cloned();
+            let mut broken = false;
+            for write in writes
+                .iter()
+                .filter(|w| w["path"].as_str() == Some(path.as_str()))
+            {
+                if write
+                    .get("before")
+                    .is_some_and(|b| b.as_str() != sha.as_deref())
+                {
+                    broken = true;
+                }
+                sha = write["sha"].as_str().map(str::to_owned);
+            }
+            broken || sha.as_ref() != now.get(*path)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Why no card op of order `id` is applied, or `None`. Review B1: when the profile's folder changed since the order
+/// was queued and herdr did not write it, each such file is put back as it stood (or removed, when it was not
+/// there), the file found moved aside first; said in the axis, which the `gated` event journals. Review S5: a missing
+/// snapshot holds too (CLAUDE.md rule 8). Under the profile's lock (review S4).
 pub fn held_back(project: &Project, run: &str, id: &str, profile: &str) -> Option<Axis> {
-    let dir = nirvana_profiles::knowledge_dir(&project.root, profile)?;
-    let snap: nirvana_lessons::FolderSnap = std::fs::read_to_string(snap_path(project, run, id))
+    nirvana_profiles::knowledge_dir(&project.root, profile)?;
+    let folder = nirvana_profiles::folder_of(&project.root, profile);
+    let fail = |why: String| Some(Axis::new("knowledge_folder", Mark::Fail, why));
+    let _lock = match lock(&project.root, profile) {
+        Ok(lock) => lock,
+        Err(err) => return fail(format!("the profile's lock: {err}: no card op is applied")),
+    };
+    let Some(snap) = std::fs::read_to_string(snap_path(project, run, id))
         .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())?;
-    let changed = nirvana_lessons::unexplained_in(&dir, &writes_log(&project.root, profile), &snap);
-    (!changed.is_empty()).then(|| {
-        Axis::new(
-            "knowledge_folder",
-            Mark::Fail,
-            format!(
-                "{} changed in {} since the order was queued, and herdr did not write it: no card op is applied",
-                changed.join(", "),
-                dir.display()
-            ),
-        )
-    })
+        .and_then(|text| serde_json::from_str::<Snap>(&text).ok())
+    else {
+        return fail(format!(
+            "the queue snapshot of {} is missing, so nothing shows what changed: no card op is applied",
+            folder.display()
+        ));
+    };
+    let changed = unexplained(&project.root, profile, &snap);
+    if changed.is_empty() {
+        return None;
+    }
+    let (copy, aside) = (copy_dir(project, run, id), held_dir(project, run, id));
+    let mut undone = Vec::new();
+    for path in &changed {
+        let file = folder.join(path);
+        let before = bytes_sha(&file);
+        let restored = (|| -> std::io::Result<()> {
+            if file.is_file() {
+                let to = aside.join(path);
+                std::fs::create_dir_all(to.parent().unwrap_or(&aside))?;
+                std::fs::copy(&file, &to)?;
+            }
+            if snap.files.contains_key(path) {
+                let text = std::fs::read(copy.join(path))?;
+                std::fs::create_dir_all(file.parent().unwrap_or(&folder))?;
+                crate::nirvana_seat::write_atomic(&file, &text)?;
+            } else if file.exists() {
+                std::fs::remove_file(&file)?;
+            }
+            Ok(())
+        })();
+        noted(&project.root, profile, &file, before);
+        if let Err(err) = restored {
+            undone.push(format!("{path} ({err})"));
+        }
+    }
+    fail(format!(
+        "{} changed in {} since the order was queued, and herdr did not write it: no card op is applied, and each is \
+         put back as queued (the files found are in {}){}",
+        changed.join(", "),
+        folder.display(),
+        aside.display(),
+        if undone.is_empty() {
+            String::new()
+        } else {
+            format!("; NOT put back: {}", undone.join(", "))
+        }
+    ))
 }
 
 // ---- plan 33's review, of a profiled order (§2.6) ----
@@ -1093,7 +1464,7 @@ pub fn review_section(root: &Path, profile: &str, stream: &str) -> String {
     let Some(dir) = nirvana_profiles::knowledge_dir(root, profile) else {
         return String::new();
     };
-    let found = good_cards(&dir);
+    let found = known_cards(&dir);
     if found.is_empty() {
         return String::new();
     }
@@ -1111,7 +1482,7 @@ The cards the worker opened are shown whole.\n\n"
             card.name,
             card.verdict.word()
         ));
-        if nirvana_lessons::opened_in_stream(stream, &card.slug) {
+        if card_opened(stream, &card.slug) {
             opened.push_str(&format!(
                 "### {}\n\n```markdown\n{}\n```\n\n",
                 card.slug,
@@ -1132,7 +1503,8 @@ pub fn ops_format(profile: &str) -> String {
 measured, or unmeasured\", \"source\": \"where it came from, a path:line or a URL\", \"date\": \"YYYY-MM-DD\", \"tags\": \
 [\"...\"], \"body\": \"at most {CARD_LINES} lines\", \"evidence\": \"a quote, word for word, from the stream\"}}`\n\
 - `{{\"op\": \"patch\", \"slug\": \"...\", \"base_sha\": \"...\", ...the same fields, the whole new card...}}`\n\n\
-An empty list keeps no card.\n"
+Each field is one line: `name` at most {NAME_MAX} characters, `when` {WHEN_MAX}, `effect` {EFFECT_MAX}, `source` \
+{SOURCE_MAX}; a longer one is refused. An empty list keeps no card.\n"
     )
 }
 
@@ -1213,26 +1585,34 @@ and why.\n\
 ## What you may change\n\nNo file. herdr writes each card from your Work Report after checking it.\n\n",
     );
     if let Some(dir) = nirvana_profiles::knowledge_dir(root, profile) {
-        let found = good_cards(&dir);
-        text.push_str("## The cards now\n\n");
+        let found = known_cards(&dir);
+        text.push_str(
+            "## The cards now\n\nEach is copied into your folder at the path given; the project itself you may read, \
+not change.\n\n",
+        );
         if found.is_empty() {
             text.push_str("None yet.\n");
         }
         for (file, card) in &found {
             text.push_str(&format!(
-                "- {} (base_sha {}): {} [{}]\n",
+                "- {} (base_sha {}): {} [{}] ({})\n",
                 card.slug,
                 card_sha(file).unwrap_or_default(),
                 card.name,
-                card.verdict.word()
+                card.verdict.word(),
+                brief_path(profile, &card.slug)
             ));
         }
         text.push('\n');
     }
+    // Review nit: say what the check proves and no more. The quote is found in the stream and is not herdr's text;
+    // a teacher's own words are in its stream too, so the check cannot show that the source said it.
     text.push_str(&format!(
         "## Your Work Report\n\nstatus `done`; the summary lists each technique with its verdict; files, tests and \
-gotchas as for any order. {}\nherdr refuses an op whose evidence is under {} characters, is not in your own stream \
-(the source's text as you read it, or a measurement's output), or is text herdr wrote (this order, a card).\n",
+gotchas as for any order. {}\nherdr refuses an op whose evidence is under {} characters, is not found in your stream \
+(what a tool returned to you, or what you wrote), or is text herdr wrote (this order, a card). That check shows the \
+quote was in the stream, not that the source said it: quote the source's text or a measurement's output, word for \
+word.\n",
         ops_format(profile),
         nirvana_lessons::MIN_EVIDENCE
     ));
@@ -1306,6 +1686,17 @@ pub fn teach(
             format!("no seat: {}", no_seat.reason),
         )
     })?;
+    // Review B2: a teacher reads an untrusted page, so it is seated only where its tools can be denied.
+    if pick.cli != "claude" {
+        return Err((
+            crate::nirvana_seat::NO_SEAT_EXIT,
+            format!(
+                "no seat: the rule picked {} on {}, which cannot be denied tools; a teacher reads untrusted pages, so \
+                 only a claude seat teaches",
+                pick.seat, pick.cli
+            ),
+        ));
+    }
     let seated = crate::nirvana_worker::seat_order_with(
         project,
         &crate::nirvana_worker::SeatRequest {
@@ -1331,11 +1722,62 @@ pub fn teach(
     Ok(out)
 }
 
-/// §2.5: "Teaching is started only by the owner or by Nirvana Claude quoting the owner (plan 31's quote rule)". A
-/// shell an agent runs (Claude Code's, agy's, Codex's) must give `--quote`, checked against the owner's own prompts in
-/// Nirvana Claude's recorded session as `--send-ok` is; the owner's own terminal needs none.
-pub fn who_asked(agent: &str, quote: Option<&str>, root: &Path) -> Result<String, String> {
-    if agent == "unknown" {
+/// Review S1: whether stdin is an interactive console, which a redirected or piped stdin cannot fake. On Windows a
+/// redirect from `NUL` is a character device that `isatty` calls a terminal, so the console mode is read instead:
+/// `GetConsoleMode` fails on anything but a console.
+pub fn owner_console() -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE};
+        let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return false;
+        }
+        let mut mode = 0;
+        unsafe { GetConsoleMode(handle, &mut mode) != 0 }
+    }
+    #[cfg(not(windows))]
+    {
+        use std::io::IsTerminal;
+        std::io::stdin().is_terminal()
+    }
+}
+
+/// The words a quote must hold one of to be about this teaching (review S1): the profile's name, and the source's
+/// host (a URL) or file name (a path).
+pub fn quote_names(profile: &str, from: &str) -> Vec<String> {
+    let from = from.trim();
+    let source = match from.split_once("://") {
+        Some((_, rest)) => {
+            let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+            let host = host.rsplit('@').next().unwrap_or("");
+            let host = host.split(':').next().unwrap_or("");
+            host.trim_start_matches("www.").to_owned()
+        }
+        None => Path::new(from)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    };
+    [profile.to_owned(), source]
+        .into_iter()
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// §2.5: "Teaching is started only by the owner or by Nirvana Claude quoting the owner (plan 31's quote rule)". Review
+/// S1: the owner is a shell no agent marks (`agent` is `unknown`) whose stdin is an interactive console (`console`);
+/// nothing else is taken as the owner. Any other shell gives `--quote`, which must name the profile or the source
+/// (`names`) and is checked against the owner's own prompts in Nirvana Claude's recorded session as `--send-ok` is.
+pub fn who_asked(
+    agent: &str,
+    console: bool,
+    quote: Option<&str>,
+    root: &Path,
+    names: &[String],
+) -> Result<String, String> {
+    if agent == "unknown" && console {
         return Ok(match quote {
             Some(quote) => format!(
                 "The owner asked for this at a terminal: \"{}\"",
@@ -1345,10 +1787,26 @@ pub fn who_asked(agent: &str, quote: Option<&str>, root: &Path) -> Result<String
         });
     }
     let Some(quote) = quote else {
-        return Err(format!(
-            "a {agent} shell starts teaching only with --quote \"<the owner's words asking for it>\" (plan 31's rule)"
-        ));
+        return Err(if agent == "unknown" {
+            "this shell's stdin is not an interactive console, so it is not taken as the owner's terminal: give \
+             --quote \"<the owner's words asking for it>\" (plan 31's rule)"
+                .to_owned()
+        } else {
+            format!(
+                "a {agent} shell starts teaching only with --quote \"<the owner's words asking for it>\" (plan 31's rule)"
+            )
+        });
     };
+    let lower = quote.to_lowercase();
+    if !names
+        .iter()
+        .any(|name| lower.contains(&name.to_lowercase()))
+    {
+        return Err(format!(
+            "the --quote names none of {}: the owner's words must ask for this teaching, by the profile or the source",
+            names.join(", ")
+        ));
+    }
     let folder = std::env::var_os(crate::nirvana_session_record::PROJECT_DIR_ENV)
         .filter(|dir| !dir.is_empty())
         .map_or_else(|| root.to_path_buf(), PathBuf::from);
@@ -1368,12 +1826,22 @@ const TEACH_USAGE: &str =
 
 /// `herdr profile teach`; the exit code.
 pub fn teach_cli(root: &Path, args: &[String]) -> i32 {
-    let usage = || {
-        eprintln!("{TEACH_USAGE}");
+    teach_cli_to(root, args, &mut std::io::stdout(), &mut std::io::stderr())
+}
+
+/// `teach_cli` writing to `out` and `err` (review S6: the CLI path is tested, `caller()` and the console with it).
+pub fn teach_cli_to(
+    root: &Path,
+    args: &[String],
+    out: &mut dyn std::io::Write,
+    err: &mut dyn std::io::Write,
+) -> i32 {
+    let usage = |err: &mut dyn std::io::Write| {
+        let _ = writeln!(err, "{TEACH_USAGE}");
         2
     };
     let Some(profile) = args.first().filter(|arg| !arg.starts_with("--")) else {
-        return usage();
+        return usage(err);
     };
     let (mut from, mut note, mut quote, mut run, mut json) = (None, None, None, None, false);
     let mut iter = args[1..].iter();
@@ -1384,11 +1852,11 @@ pub fn teach_cli(root: &Path, args: &[String]) -> i32 {
             "--quote" => quote = iter.next().cloned(),
             "--run" => run = iter.next().cloned(),
             "--json" => json = true,
-            _ => return usage(),
+            _ => return usage(err),
         }
     }
     let Some(from) = from else {
-        return usage();
+        return usage(err);
     };
     let run = run
         .or_else(|| std::env::var("NIRVANA_RUN").ok())
@@ -1399,12 +1867,18 @@ pub fn teach_cli(root: &Path, args: &[String]) -> i32 {
             format!("run-{stamp}")
         });
     if !nirvana_run::valid_id(&run) {
-        return usage();
+        return usage(err);
     }
-    let asked = match who_asked(&crate::nirvana_jev::caller(), quote.as_deref(), root) {
+    let asked = match who_asked(
+        &crate::nirvana_jev::caller(),
+        owner_console(),
+        quote.as_deref(),
+        root,
+        &quote_names(profile, &from),
+    ) {
         Ok(asked) => asked,
         Err(why) => {
-            eprintln!("herdr profile teach: {why}");
+            let _ = writeln!(err, "herdr profile teach: {why}");
             return 2;
         }
     };
@@ -1419,30 +1893,36 @@ pub fn teach_cli(root: &Path, args: &[String]) -> i32 {
             asked,
         },
     ) {
-        Ok(out) => {
+        Ok(seated) => {
             if json {
-                println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
-            } else {
-                println!(
-                    "{} {} · run {} · {} {} {} · {}",
-                    out["order"].as_str().unwrap_or(""),
-                    out["booked"].as_str().unwrap_or(""),
-                    out["run"].as_str().unwrap_or(""),
-                    out["seat"].as_str().unwrap_or(""),
-                    out["model"].as_str().unwrap_or(""),
-                    out["effort"].as_str().unwrap_or(""),
-                    out["worker"].as_str().unwrap_or("")
+                let _ = writeln!(
+                    out,
+                    "{}",
+                    serde_json::to_string_pretty(&seated).unwrap_or_default()
                 );
-                println!(
+            } else {
+                let _ = writeln!(
+                    out,
+                    "{} {} · run {} · {} {} {} · {}",
+                    seated["order"].as_str().unwrap_or(""),
+                    seated["booked"].as_str().unwrap_or(""),
+                    seated["run"].as_str().unwrap_or(""),
+                    seated["seat"].as_str().unwrap_or(""),
+                    seated["model"].as_str().unwrap_or(""),
+                    seated["effort"].as_str().unwrap_or(""),
+                    seated["worker"].as_str().unwrap_or("")
+                );
+                let _ = writeln!(
+                    out,
                     "teaching {profile} from {}; herdr gates it when it delivers, and `herdr kb list --profile {profile}` \
                      shows the cards",
-                    out["teach"]["from"].as_str().unwrap_or("")
+                    seated["teach"]["from"].as_str().unwrap_or("")
                 );
             }
             0
         }
         Err((code, why)) => {
-            eprintln!("herdr profile teach: {why}");
+            let _ = writeln!(err, "herdr profile teach: {why}");
             code
         }
     }
@@ -1490,22 +1970,27 @@ pub fn gate_teach(
     let mut axes = vec![crate::nirvana_review::report_axis(known.report.as_ref())];
     let mut passed = axes[0].mark != Mark::Fail;
     let status = report.get("status").and_then(Value::as_str).unwrap_or("");
+    // Review B1: the folder is compared, and what herdr did not write put back, whatever the report says: a teacher
+    // that wrote a card and then reported `blocked` leaves no file behind either.
+    let folder = match &profile {
+        Some(profile) => held_back(project, run, &root, profile),
+        None => Some(Axis::new(
+            "profile",
+            Mark::Fail,
+            "the teaching order's seated event names no profile",
+        )),
+    };
     let held = if !passed {
-        None
+        folder
     } else if status != "done" {
+        axes.extend(folder);
         Some(Axis::new(
             "status",
             Mark::Fail,
             format!("the teaching order's status is {status}: no card op is applied"),
         ))
-    } else if let Some(profile) = &profile {
-        held_back(project, run, &root, profile)
     } else {
-        Some(Axis::new(
-            "profile",
-            Mark::Fail,
-            "the teaching order's seated event names no profile",
-        ))
+        folder
     };
     if let Some(axis) = held {
         passed = false;
@@ -1521,7 +2006,7 @@ pub fn gate_teach(
             herdr_wrote.push(nirvana_gate::order_text(&first.seated));
         }
         herdr_wrote.retain(|text| !text.trim().is_empty());
-        for (kept, line) in apply_ops(
+        let applied = apply_ops(
             &project.root,
             profile.as_deref(),
             ops,
@@ -1530,11 +2015,27 @@ pub fn gate_teach(
             &order,
             run,
             now(),
-        ) {
+        );
+        // Review S7: a teacher whose every op was refused kept nothing it was sent for; that is no pass.
+        let refused: Vec<String> = applied
+            .iter()
+            .filter(|(kept, _)| !kept)
+            .map(|(_, line)| line.clone())
+            .collect();
+        let all_refused = !applied.is_empty() && refused.len() == applied.len();
+        for (kept, line) in applied {
             axes.push(Axis::new(
                 "card_op",
                 if kept { Mark::Pass } else { Mark::Note },
                 line,
+            ));
+        }
+        if all_refused {
+            passed = false;
+            axes.push(Axis::new(
+                "card_ops",
+                Mark::Fail,
+                format!("every card op was refused: {}", refused.join("; ")),
             ));
         }
         if report.get("lesson").is_some() || report.get("lesson_ops").is_some() {
@@ -1579,13 +2080,23 @@ const KB_USAGE: &str =
        herdr kb search --profile <name> <words...>  at most 20 paths, by name, when, tags and body
        herdr kb rollback --profile <name> <op-id>   undo one card op from knowledge/ledger.jsonl";
 
-fn kb_usage() -> ! {
-    eprintln!("{KB_USAGE}");
-    std::process::exit(2);
-}
-
 pub fn kb_cli(args: &[String]) -> std::io::Result<()> {
     let root = Project::from_env().root;
+    let code = kb_run(&root, args, &mut std::io::stdout(), &mut std::io::stderr());
+    std::process::exit(code);
+}
+
+/// `herdr kb` writing to `out` and `err`; the exit code (review S6: the CLI path is tested).
+pub fn kb_run(
+    root: &Path,
+    args: &[String],
+    out: &mut dyn std::io::Write,
+    err: &mut dyn std::io::Write,
+) -> i32 {
+    let usage = |err: &mut dyn std::io::Write| {
+        let _ = writeln!(err, "{KB_USAGE}");
+        2
+    };
     let verb = args.first().map(String::as_str);
     let mut profile = None;
     let mut rest: Vec<String> = Vec::new();
@@ -1597,23 +2108,24 @@ pub fn kb_cli(args: &[String]) -> std::io::Result<()> {
         }
     }
     let Some(profile) = profile.filter(|name| nirvana_profiles::valid_name(name)) else {
-        kb_usage()
+        return usage(err);
     };
-    let Some(dir) = nirvana_profiles::knowledge_dir(&root, &profile) else {
-        eprintln!(
+    let Some(dir) = nirvana_profiles::knowledge_dir(root, &profile) else {
+        let _ = writeln!(
+            err,
             "herdr kb: profile {profile} keeps no cards: only a folder profile does, {}",
-            nirvana_profiles::folder_of(&root, &profile)
+            nirvana_profiles::folder_of(root, &profile)
                 .join(nirvana_profiles::KNOWLEDGE)
                 .display()
         );
-        std::process::exit(1);
+        return 1;
     };
     match (verb, rest.as_slice()) {
         (Some("list"), []) => {
-            let index = read_index(&dir);
+            let (index, rows) = (read_index(&dir), ledger(&dir));
             let found = cards(&dir);
             if found.is_empty() {
-                println!("no card in {}", dir.display());
+                let _ = writeln!(out, "no card in {}", dir.display());
             }
             for (slug, file, parsed) in &found {
                 match parsed {
@@ -1623,59 +2135,73 @@ pub fn kb_cli(args: &[String]) -> std::io::Result<()> {
                             .get(slug)
                             .map(|entry| entry.counters.clone())
                             .unwrap_or_default();
-                        println!(
+                        let sha = card_sha(file).unwrap_or_default();
+                        let _ = writeln!(
+                            out,
                             "{} · offered {} · opened {} · passed after opened {}{}",
                             result_line(file, card),
                             counters.offered,
                             counters.opened,
                             counters.passed_after_opened,
-                            if nirvana_lessons::live(&counters) {
+                            if !known(&index, &rows, slug, &sha) {
+                                " · not known to herdr, never offered"
+                            } else if card.verdict.warns() || nirvana_lessons::live(&counters) {
                                 ""
                             } else {
                                 " · decayed"
                             }
                         );
                     }
-                    Err(_) => println!(
-                        "{}: refused; `herdr profile check {profile}`",
-                        file.display()
-                    ),
+                    Err(_) => {
+                        let _ = writeln!(
+                            out,
+                            "{}: refused; `herdr profile check {profile}`",
+                            file.display()
+                        );
+                    }
                 }
             }
+            0
         }
         (Some("show"), [slug]) if valid_slug(slug) => {
             let file = dir.join(format!("{slug}.md"));
             let Some(text) = read_text(&file) else {
-                eprintln!("herdr kb show: no card {}", file.display());
-                std::process::exit(1);
+                let _ = writeln!(err, "herdr kb show: no card {}", file.display());
+                return 1;
             };
-            println!(
-                "{} · sha256 {}",
-                file.display(),
-                nirvana_lessons::sha256(&text)
-            );
-            print!("{text}");
+            let sha = nirvana_lessons::sha256(&text);
+            let note = if known(&read_index(&dir), &ledger(&dir), slug, &sha) {
+                ""
+            } else {
+                " · not known to herdr: `herdr profile check` says why"
+            };
+            let _ = writeln!(out, "{} · sha256 {sha}{note}", file.display());
+            let _ = write!(out, "{text}");
+            0
         }
         (Some("search"), words) if !words.is_empty() => {
-            let found = good_cards(&dir);
+            let found = known_cards(&dir);
             let lines = search_lines(&found, words);
             if lines.is_empty() {
-                println!("no card holds {}", words.join(" "));
+                let _ = writeln!(out, "no card holds {}", words.join(" "));
             }
             for line in lines {
-                println!("{line}");
+                let _ = writeln!(out, "{line}");
             }
+            0
         }
-        (Some("rollback"), [id]) => match rollback(&root, &profile, id, now()) {
-            Ok(line) => println!("{line}"),
+        (Some("rollback"), [id]) => match rollback(root, &profile, id, now()) {
+            Ok(line) => {
+                let _ = writeln!(out, "{line}");
+                0
+            }
             Err(why) => {
-                eprintln!("herdr kb rollback: {why}");
-                std::process::exit(1);
+                let _ = writeln!(err, "herdr kb rollback: {why}");
+                1
             }
         },
-        _ => kb_usage(),
+        _ => usage(err),
     }
-    Ok(())
 }
 
 #[cfg(test)]

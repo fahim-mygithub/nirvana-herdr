@@ -971,24 +971,29 @@ pub fn gate_review(
     let report = known.report.clone();
     let mut axes = vec![report_axis(report.as_ref())];
     let mut passed = axes[0].mark != Mark::Fail;
-    if passed {
+    // Plan 34 §2.6: a review's card ops are the subject's profile's; its profile folder is held as `lessons/` is.
+    // P34a review B1: compared, and what herdr did not write put back, whatever the report says.
+    let card_profile = (kind == REVIEW)
+        .then(|| subject_profile(&state, subject))
+        .flatten();
+    let cards_held = card_profile
+        .as_deref()
+        .and_then(|profile| crate::nirvana_knowledge::held_back(project, run, &root, profile));
+    let cards_held_any = cards_held.is_some();
+    if let Some(axis) = cards_held {
+        passed = false;
+        axes.push(axis);
+    }
+    if axes[0].mark != Mark::Fail {
         let report = report.unwrap_or(Value::Null);
-        // Plan 34 §2.6: a review's card ops are the subject's profile's; its `knowledge/` is held as `lessons/` is.
         let card_ops = crate::nirvana_knowledge::parse_card_ops(&report);
-        let card_profile = (kind == REVIEW)
-            .then(|| subject_profile(&state, subject))
-            .flatten();
-        let held = held_back(project, run, &root, &report).or_else(|| {
-            card_profile.as_deref().and_then(|profile| {
-                crate::nirvana_knowledge::held_back(project, run, &root, profile)
-            })
-        });
+        let held = held_back(project, run, &root, &report);
         let ops = parse_ops(&report);
         let at = now();
-        let held_any = held.is_some();
-        let applied = if let Some(axis) = held {
+        let held_any = held.is_some() || cards_held_any;
+        let applied = if held_any {
             passed = false;
-            axes.push(axis);
+            axes.extend(held);
             Applied { lines: Vec::new() }
         } else if ops.is_empty() {
             Applied {
