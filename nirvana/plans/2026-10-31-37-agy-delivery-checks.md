@@ -31,11 +31,18 @@ the MotoProject analysis of 2026-10-31, `nirvana/plans/2026-10-31-35-records/mot
    Reddit `.rss`, curl per page, bladebro when the order needs a browser), "never cite a URL you did not open in this
    session", what done means and how to check it, and never promises a connector agy does not have. Each rule names
    the MotoProject failure it answers. The plan 35 P35b order line stays as herdr's floor.
+   The rules and the checklist are the analysis's §3, `nirvana/plans/2026-10-31-35-records/moto-gemini-briefs.md`
+   (rules 1-9, the seat-skill checklist; rule 4 is dropped, since P35a fixes the sources rule).
+5. **A `web-researcher` profile template** (the analysis's rule 10): herdr ships its body (rules 1-3 and 7) as a
+   template that `herdr profile new <name> --from web-researcher` writes into a project's `.nirvana/profiles/`, and
+   ROLE.md tells Nirvana Claude to seat agy research orders with it when the project has one. Its lessons then
+   build up through plan 33's reviews instead of being retyped.
 
 ## 2. Package P37
 
 Owns `src/nirvana_gate.rs` (items 2, 3), the delivery path in `src/nirvana_worker.rs` (item 1), the re-pick in
-`src/nirvana_seat.rs` (item 3), `nirvana/claude/ROLE.md` and `nirvana/claude/skills/seat/SKILL.md` (item 4),
+`src/nirvana_seat.rs` (item 3), `nirvana/claude/ROLE.md` and `nirvana/claude/skills/seat/SKILL.md` (item 4), the profile template and its
+`profile new --from` path in `src/nirvana_profiles.rs` (item 5),
 `nirvana/controls.d/p37_delivery.py`, and the record `nirvana/plans/2026-10-31-37-records/p37.md`. Built on master after
 P35a and P35b merge; if P35c is still building, its one `SKILL.md` line is joined at merge.
 
