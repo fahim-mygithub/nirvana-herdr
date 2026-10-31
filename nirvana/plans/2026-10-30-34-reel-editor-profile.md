@@ -1,6 +1,6 @@
 # Feature 34: a reel-editor profile with tools and a knowledge base
 
-Status: **PLANNED (2026-10-30)**. Three packages. P34b and P34c start now. P34a starts on master once plan 33 is merged.
+Status: **P34a BUILT (2026-10-31, alpha 0.46.0); P34b built in moto-reel-mcp; P34c staged.** Was PLANNED (2026-10-30). Three packages. P34b and P34c start now. P34a starts on master once plan 33 is merged.
 The evidence is the MotoProject map of 2026-10-30, `nirvana/plans/2026-10-30-34-records/moto-map.md`.
 
 ## Ledger

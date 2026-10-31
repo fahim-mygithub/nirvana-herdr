@@ -41,10 +41,10 @@ use crate::nirvana_usage::Reading;
 
 /// The Work Report every worker ends with, passed to both CLIs as `--json-schema` (P3: both take it).
 /// `lesson` is O5's: a worker's proposed lesson, which the gate checks before it is written.
-pub const REPORT_SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["status","summary","files","tests","gotchas"],"properties":{"status":{"type":"string","enum":["done","blocked","needs_answer"]},"summary":{"type":"string","minLength":1},"question":{"type":"string"},"files":{"type":"array","items":{"type":"string"}},"tests":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["name","result"],"properties":{"name":{"type":"string"},"result":{"type":"string","enum":["pass","fail","not_run"]}}}},"gotchas":{"type":"array","items":{"type":"string"}},"lesson":{"type":"object","additionalProperties":false,"required":["name","class","steps","evidence"],"properties":{"name":{"type":"string","minLength":1},"class":{"type":"string","minLength":1},"steps":{"type":"string","minLength":1},"evidence":{"type":"string","minLength":1}}},"lesson_ops":{"type":"array","items":{"type":"object","required":["op"],"properties":{"op":{"type":"string","enum":["new","patch","merge"]},"slug":{"type":"string"},"base_sha":{"type":"string"},"name":{"type":"string"},"class":{"type":"string"},"steps":{"type":"string"},"evidence":{"type":"string"},"slugs":{"type":"array","items":{"type":"string"}}}}},"sources":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["url","used_for"],"properties":{"url":{"type":"string","minLength":1},"used_for":{"type":"string","minLength":1}}}}}}"#;
+pub const REPORT_SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["status","summary","files","tests","gotchas"],"properties":{"status":{"type":"string","enum":["done","blocked","needs_answer"]},"summary":{"type":"string","minLength":1},"question":{"type":"string"},"files":{"type":"array","items":{"type":"string"}},"tests":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["name","result"],"properties":{"name":{"type":"string"},"result":{"type":"string","enum":["pass","fail","not_run"]}}}},"gotchas":{"type":"array","items":{"type":"string"}},"lesson":{"type":"object","additionalProperties":false,"required":["name","class","steps","evidence"],"properties":{"name":{"type":"string","minLength":1},"class":{"type":"string","minLength":1},"steps":{"type":"string","minLength":1},"evidence":{"type":"string","minLength":1}}},"lesson_ops":{"type":"array","items":{"type":"object","required":["op"],"properties":{"op":{"type":"string","enum":["new","patch","merge"]},"slug":{"type":"string"},"base_sha":{"type":"string"},"name":{"type":"string"},"class":{"type":"string"},"steps":{"type":"string"},"evidence":{"type":"string"},"slugs":{"type":"array","items":{"type":"string"}}}}},"card_ops":{"type":"array","items":{"type":"object","required":["op"],"properties":{"op":{"type":"string","enum":["new","patch"]},"slug":{"type":"string"},"base_sha":{"type":"string"},"name":{"type":"string"},"when":{"type":"string"},"verdict":{"type":"string","enum":["keep","reject","dead-end"]},"effect":{"type":"string"},"source":{"type":"string"},"date":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"body":{"type":"string"},"evidence":{"type":"string"}}}},"sources":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["url","used_for"],"properties":{"url":{"type":"string","minLength":1},"used_for":{"type":"string","minLength":1}}}}}}"#;
 
 /// The schema's properties, which the check below allows and nothing else.
-pub const REPORT_KEYS: [&str; 9] = [
+pub const REPORT_KEYS: [&str; 10] = [
     "status",
     "summary",
     "question",
@@ -54,6 +54,7 @@ pub const REPORT_KEYS: [&str; 9] = [
     "lesson",
     "sources",
     "lesson_ops",
+    "card_ops",
 ];
 
 /// The keys agy adds to its structured answer (P3: "the response is the object, plus agy's own `toolAction`
@@ -142,12 +143,14 @@ pub fn check_report(report: &Value) -> Result<(), String> {
             ));
         }
     }
-    // Plan 33 §3.3: a lesson review's ops; herdr checks each one when it gates the review.
-    if object.get("lesson_ops").is_some_and(|ops| {
-        !ops.as_array()
-            .is_some_and(|items| items.iter().all(Value::is_object))
-    }) {
-        return Err("lesson_ops is not a list of objects".into());
+    // Plan 33 §3.3: a lesson review's ops; plan 34 §2.5: a teacher's card ops. herdr checks each one at the gate.
+    for key in ["lesson_ops", "card_ops"] {
+        if object.get(key).is_some_and(|ops| {
+            !ops.as_array()
+                .is_some_and(|items| items.iter().all(Value::is_object))
+        }) {
+            return Err(format!("{key} is not a list of objects"));
+        }
     }
     if let Some(sources) = object.get("sources") {
         let Some(items) = sources.as_array() else {
@@ -419,6 +422,35 @@ pub fn with_review_limits(mut argv: Vec<String>, seated: &Seated) -> Vec<String>
         ]);
     }
     argv
+}
+
+/// Plan 34 P34a review B2: a teacher reads an untrusted page, so a claude teacher is denied every tool that writes or
+/// runs (`nirvana_knowledge::teach_denied`, joined to the profile's own `--disallowedTools`), and may read the project
+/// from its own folder (`--add-dir`). Any other CLI cannot be denied tools, so it is refused here too, behind
+/// `herdr profile teach`'s own refusal.
+pub fn with_teach_limits(
+    mut argv: Vec<String>,
+    seated: &Seated,
+    root: &Path,
+) -> Result<Vec<String>, String> {
+    if seated.class != crate::nirvana_knowledge::TEACH_CLASS {
+        return Ok(argv);
+    }
+    if argv.first().map(String::as_str) != Some("claude") {
+        return Err(format!(
+            "{} is a teaching order on {}, which cannot be denied tools: only a claude seat teaches",
+            seated.order, seated.cli
+        ));
+    }
+    let denied = crate::nirvana_knowledge::teach_denied();
+    match argv.iter().position(|arg| arg == "--disallowedTools") {
+        Some(at) if at + 1 < argv.len() => {
+            argv[at + 1] = format!("{},{denied}", argv[at + 1]);
+        }
+        _ => argv.extend(["--disallowedTools".to_owned(), denied]),
+    }
+    argv.extend(["--add-dir".to_owned(), root.display().to_string()]);
+    Ok(argv)
 }
 
 /// The one line a worker is started with (§4).
@@ -1211,6 +1243,8 @@ thread_local! {
     /// A test's stand-in for the worker's program: `run_attempt` starts it in place of the argv it journals, so a test
     /// drives `exec` without a real CLI.
     pub(crate) static TEST_COMMAND: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+    /// The argv `run_attempt` was given, which the stand-in replaced (plan 34 P34a review B2: a teacher's limits).
+    pub(crate) static TEST_ARGV: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Starts the worker in its job and reads its stream until it ends, stops, stalls or runs out.
@@ -1226,6 +1260,8 @@ fn run_attempt(
 ) -> std::io::Result<(AttemptEnd, Stream)> {
     #[cfg(test)]
     let stand_in = TEST_COMMAND.with_borrow(Clone::clone);
+    #[cfg(test)]
+    TEST_ARGV.with_borrow_mut(|slot| *slot = Some(argv.to_vec()));
     #[cfg(not(test))]
     let stand_in: Option<Vec<String>> = None;
     let spawned = stand_in.as_deref().unwrap_or(argv);
@@ -1531,6 +1567,7 @@ pub fn exec(
         .and_then(|argv| with_order_servers(argv, project, run, &seated, out))
         .and_then(|argv| with_profile(argv, &run_dir, &seated))
         .map(|argv| with_review_limits(argv, &seated))
+        .and_then(|argv| with_teach_limits(argv, &seated, &project.root))
         {
             Ok(argv) => argv,
             Err(why) => {
@@ -1582,6 +1619,10 @@ pub fn exec(
                         // Plan 33 review B2: a lesson review costs no orchestrator turn. herdr gates it below, and its
                         // question is no one's to answer: the gate applies nothing that is not `done`.
                         let review = seated.class == crate::nirvana_review::CLASS;
+                        // Plan 34 §2.5: a done teaching order is gated by herdr too, whose checks apply its card ops;
+                        // Nirvana Claude is still woken to say what was kept.
+                        let teach = seated.class == crate::nirvana_knowledge::TEACH_CLASS
+                            && status == "done";
                         let mut kinds = vec![Kind::Delivered {
                             order: order.to_owned(),
                             report: report.clone(),
@@ -1618,6 +1659,12 @@ pub fn exec(
                                 true
                             )
                         )?;
+                        if teach {
+                            match crate::nirvana_gate::gate(project, run, order) {
+                                Ok(ruling) => writeln!(out, "gated: {}", ruling.verdict)?,
+                                Err(why) => writeln!(out, "not gated: {why}")?,
+                            }
+                        }
                         if review {
                             match crate::nirvana_gate::gate(project, run, order) {
                                 Ok(ruling) => writeln!(out, "gated: {}", ruling.verdict)?,
@@ -3362,6 +3409,11 @@ pub fn seat_order_with(
             .map_err(|why| (2, format!("git worktree add: {why}")))?;
         }
         (path.clone(), Some(path.display().to_string()), Some(branch))
+    } else if booked.class == crate::nirvana_knowledge::TEACH_CLASS {
+        // Plan 34 P34a review B2: a teacher works in its own folder under the run, as plan 33's reviewer does.
+        let cwd = crate::nirvana_knowledge::teacher_cwd(project, &request.run, &request.order);
+        std::fs::create_dir_all(&cwd).map_err(io)?;
+        (cwd, None, None)
     } else {
         (project.root.clone(), None, None)
     };
@@ -3380,10 +3432,20 @@ pub fn seat_order_with(
         &crate::nirvana_gui_tools::project_servers(&project.root).unwrap_or_default(),
         &booked.servers,
     );
-    let mut text = if lessons.is_empty() {
+    // Plan 34 §2.3: a folder profile's cards, one line each, after the lessons and offered the same way. A teacher is
+    // offered none (P34a review nit: an offer counts toward decay); its brief lists every card, copied into its folder.
+    let cards = match profile {
+        Some(name) if booked.class == crate::nirvana_knowledge::TEACH_CLASS => {
+            crate::nirvana_knowledge::copy_for_teacher(&project.root, &cwd, name);
+            String::new()
+        }
+        Some(name) => crate::nirvana_knowledge::offer(&project.root, &cwd, name),
+        None => String::new(),
+    };
+    let mut text = if lessons.is_empty() && cards.is_empty() {
         text
     } else {
-        format!("{}{lessons}", text.trim_end())
+        format!("{}{lessons}{cards}", text.trim_end())
     };
     // Plan 29 §5.3 and review F4: an order granted a server never starts a device; a desktop one batches, reads crops.
     // Plan 31 §2.2: an order with the owner's verified approval may Send once, after an explained slice.

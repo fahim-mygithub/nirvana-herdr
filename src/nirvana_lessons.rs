@@ -44,6 +44,12 @@ pub const STEPS_LINES: usize = 120;
 /// decay a lesson that a later order would have used.
 pub const DECAY_AFTER: u32 = 6;
 pub const HELP_EVERY: u32 = 3;
+/// Plan 34 §2.3: the knowledge cards an order's brief lists, most helpful first, under the same decay rule; the rest
+/// get one line naming `herdr kb search`. The number is the plan's, a hypothesis; on the staged reel-editor set of
+/// 2026-10-30 the 15 lines and their head came to about 2,900 characters per order (a card line averages 177).
+pub const CARDS_OFFERED: usize = 15;
+/// Plan 34 §2.4: `herdr kb search` prints at most this many paths.
+pub const SEARCH_RESULTS: usize = 20;
 /// The orders an index entry remembers having counted, so a re-gated order is not counted twice.
 const SEEN_KEPT: usize = 100;
 /// The marker of the project's line in `<home>/nirvana/NIRVANA.md`.
@@ -264,23 +270,25 @@ pub fn quote_in_stream(stream: &str, quote: &str) -> bool {
             .any(|text| text.contains(quote))
 }
 
-/// Whether the worker opened `<slug>.md`: a tool call whose input names it. The order's own text names every
-/// offered lesson, so a tool result (the order file read back) does not count.
-pub fn opened_in_stream(stream: &str, slug: &str) -> bool {
-    let file = format!("{slug}.md");
+/// Every tool call's input in a worker's stream, as JSON text: claude's assistant `tool_use` blocks and agy's tool
+/// steps' parameters. The order's own text names every offered lesson, so a tool result is never one.
+pub fn tool_inputs(stream: &str) -> Vec<String> {
+    let mut inputs = Vec::new();
     for line in stream.lines() {
         let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
         // claude: an assistant message's tool_use blocks.
         if let Some(blocks) = value.pointer("/message/content").and_then(Value::as_array) {
-            if value.get("type").and_then(Value::as_str) == Some("assistant")
-                && blocks.iter().any(|block| {
-                    block.get("type").and_then(Value::as_str) == Some("tool_use")
-                        && block["input"].to_string().contains(&file)
-                })
-            {
-                return true;
+            if value.get("type").and_then(Value::as_str) == Some("assistant") {
+                inputs.extend(
+                    blocks
+                        .iter()
+                        .filter(|block| {
+                            block.get("type").and_then(Value::as_str) == Some("tool_use")
+                        })
+                        .map(|block| block["input"].to_string()),
+                );
             }
         }
         // agy: a tool step's parameters.
@@ -288,14 +296,27 @@ pub fn opened_in_stream(stream: &str, slug: &str) -> bool {
             .pointer("/step_update/step_type")
             .and_then(Value::as_str)
             == Some("tool")
-            && value
-                .pointer("/step_update/tool_info/parameters")
-                .is_some_and(|params| params.to_string().contains(&file))
         {
-            return true;
+            if let Some(params) = value.pointer("/step_update/tool_info/parameters") {
+                inputs.push(params.to_string());
+            }
         }
     }
-    false
+    inputs
+}
+
+/// Whether the worker opened `<slug>.md`: a tool call whose input names it. Plan 34 P34a review nit: the whole file
+/// name, so a read of `threshold.md` is not an open of `hold.md`.
+pub fn opened_in_stream(stream: &str, slug: &str) -> bool {
+    let file = format!("{slug}.md");
+    tool_inputs(stream).iter().any(|input| {
+        input.match_indices(&file).any(|(at, _)| {
+            !input[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        })
+    })
 }
 
 /// What the gate decided about a Work Report's lesson.
@@ -415,7 +436,7 @@ pub fn verify_and_write(
     }
 }
 
-fn one_line(text: &str) -> String {
+pub(crate) fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -468,9 +489,10 @@ fn writes_path(root: &Path) -> PathBuf {
     root.join(nirvana_run::DIR).join("runs").join(WRITES)
 }
 
-/// A file's path under `lessons/`, `/`-separated, as the writes log and a snapshot name it.
-fn rel(root: &Path, path: &Path) -> String {
-    path.strip_prefix(dir(root))
+/// A file's path under `dir` (`lessons/`, or plan 34's `knowledge/`), `/`-separated, as the writes log and a snapshot
+/// name it.
+pub(crate) fn rel_in(dir: &Path, path: &Path) -> String {
+    path.strip_prefix(dir)
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/")
@@ -488,16 +510,20 @@ fn file_sha(path: &Path) -> Option<String> {
 
 /// Records that herdr wrote or removed `path`: its sha now, `null` when it is gone.
 fn noted(root: &Path, path: &Path) {
+    noted_in(&dir(root), &writes_path(root), path);
+}
+
+/// `noted` for any folder herdr keeps a writes log of (plan 34: a profile's `knowledge/`).
+pub(crate) fn noted_in(dir: &Path, log: &Path, path: &Path) {
     use std::io::Write;
-    let line = serde_json::json!({"path": rel(root, path), "sha": file_sha(path)});
-    let log = writes_path(root);
+    let line = serde_json::json!({"path": rel_in(dir, path), "sha": file_sha(path)});
     if let Some(parent) = log.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&log)
+        .open(log)
     {
         let _ = writeln!(file, "{line}");
     }
@@ -512,21 +538,26 @@ pub struct FolderSnap {
 }
 
 pub fn folder_snap(root: &Path) -> FolderSnap {
+    folder_snap_in(&dir(root), &writes_path(root))
+}
+
+/// `folder_snap` of any folder and its writes log; the folder's own `index.json` (counters) is left out.
+pub(crate) fn folder_snap_in(dir: &Path, log: &Path) -> FolderSnap {
     let mut files = BTreeMap::new();
-    let mut todo = vec![dir(root)];
+    let mut todo = vec![dir.to_path_buf()];
     while let Some(next) = todo.pop() {
         for entry in std::fs::read_dir(&next).into_iter().flatten().flatten() {
             let path = entry.path();
             if path.is_dir() {
                 todo.push(path);
-            } else if path != dir(root).join(INDEX) {
+            } else if path != dir.join(INDEX) {
                 if let Some(sha) = file_sha(&path) {
-                    files.insert(rel(root, &path), sha);
+                    files.insert(rel_in(dir, &path), sha);
                 }
             }
         }
     }
-    let writes = std::fs::read_to_string(writes_path(root))
+    let writes = std::fs::read_to_string(log)
         .map(|text| text.lines().count())
         .unwrap_or(0);
     FolderSnap { files, writes }
@@ -535,8 +566,13 @@ pub fn folder_snap(root: &Path) -> FolderSnap {
 /// The files of `lessons/` that changed since `before` with no herdr write after it that leaves each as it is now: a
 /// reviewer that wrote a lesson itself, around the ops herdr checks.
 pub fn unexplained(root: &Path, before: &FolderSnap) -> Vec<String> {
-    let now = folder_snap(root);
-    let log = std::fs::read_to_string(writes_path(root)).unwrap_or_default();
+    unexplained_in(&dir(root), &writes_path(root), before)
+}
+
+/// `unexplained` for any folder and its writes log.
+pub(crate) fn unexplained_in(dir: &Path, log: &Path, before: &FolderSnap) -> Vec<String> {
+    let now = folder_snap_in(dir, log);
+    let log = std::fs::read_to_string(log).unwrap_or_default();
     let herdr: Vec<(String, Option<String>)> = log
         .lines()
         .skip(before.writes)

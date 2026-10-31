@@ -3,6 +3,48 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.46.0: profile folders with knowledge cards, search, and teaching
+
+- **Changed:**
+  - A profile may be a folder, `.nirvana/profiles/<name>/profile.md` plus `knowledge/<slug>.md` cards. A name that is
+    both a file and a folder is refused. The run copy is `profile.md` alone; cards are read live.
+  - A card has front matter (`name`, `when`, `verdict` keep|reject|dead-end, `source` required; `effect`, `date`,
+    `tags` optional, each field length-capped) and a body of at most 60 lines. `herdr profile check <name>` names
+    every problem with its file and line.
+  - Only cards herdr knows are offered or searched: written through a ledgered card op, or recorded by
+    `herdr profile check <name> --adopt`. An order seated with a folder profile gets up to 15 card lines after its
+    lessons, warning cards first as "do not:" and never decayed, with the lessons' own counters in
+    `knowledge/index.json`.
+  - `herdr kb list|show|search|rollback --profile <name>`: keyword search with no model call, at most 20 results.
+  - `herdr profile teach <name> --from <url|path> [--note]` seats a `profile-teach` order on a claude seat only, in
+    its own folder, with every writing tool denied except web reads. Its `card_ops` (`new`, `patch` with
+    `base_sha`) are applied under plan 33's evidence check into `knowledge/ledger.jsonl`. An agent may start it only
+    with `--quote` of the owner's words naming the profile or the source; a shell counts as the owner only on a
+    real console. A teacher whose every op was refused fails.
+  - A plan 33 review of a profiled order may return `card_ops` under the same checks.
+  - At a teacher's or reviewer's gate, any file in the profile folder that herdr's chained writes log does not
+    explain is put back to its queue-time copy, the found file kept in `<id>.held/`.
+  - The Profiles panel shows a folder profile's card count; `K` opens `knowledge/` in the editor.
+  **Because:** the owner, 2026-10-30: "I want to create an agent that can ontrol the reeleditor and be able to make
+  different styles and reel have access to tool and have a knowledge bases to pull from as it creates reels or gets
+  taught new techniques." Plan `nirvana/plans/2026-10-30-34-reel-editor-profile.md` §2, built on Opus high, one
+  Sonnet review, one fix round.
+  **Measured:**
+  - The staged reel-editor set (40 cards from MotoProject's CLAUDE.md, notes and the motion-skills plan) parses as
+    it is; after one `--adopt`, `profile check` prints `ok (40 cards)`. A card line averages 177 characters, so the
+    card section is about 2,900 characters per order.
+  - Gates on the branch: nextest 4,443 of 4,444, the one failure being the known Windows plugin-path test; clippy
+    clean; the dry run finds 2,016 of 2,016; every `p34a_` control and the 8 older controls whose lines moved go red
+    alone.
+  - The review's two blockers (a card written around herdr stayed live; the teacher had no containment) were
+    fixed.
+  - Known limits: a claude teacher can read any project file unless the profile denies it; `--adopt` has no owner
+    check; an agy lesson reviewer still has no tool filter. Not live-checked: a real teaching order, and the card
+    lines in a real worker's brief.
+  - The panel key is `K`, not the plan's `k`, which is already the panel's up key.
+  **If you remove this:** a profile carries no project knowledge, what a worker is taught is lost, and a card
+  written by any process would reach every later brief.
+
 ## alpha 0.45.0: agent profiles per project, and lessons that are kept and reviewed
 
 - **Changed:**

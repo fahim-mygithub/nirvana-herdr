@@ -1798,6 +1798,10 @@ pub fn gate(project: &Project, run: &str, order: &str) -> Result<Ruling, String>
             })
             .flatten()
     });
+    // Plan 34 §2.5: a teaching order's card ops are applied by herdr; it is never gated as a plain order.
+    if known.seated.class == crate::nirvana_knowledge::TEACH_CLASS {
+        return crate::nirvana_knowledge::gate_teach(project, run, &journal, &known);
+    }
     match helps {
         Some((kind, subject)) if kind == "author" => {
             return gate_author(project, run, &journal, &known, &subject, table.as_ref())
@@ -2014,6 +2018,8 @@ fn gate_subject(
         });
     }
     let stream = stream_text(project, run, &order);
+    // Plan 34 §2.3: the cards' counters are the lessons' own, counted at the same verdicts.
+    let card_profile = order_profile(seated, &spec);
     if failing(&axes).is_empty() {
         // Lessons: the order passed; the quote must be in its own stream (§7.4.3).
         if let Some(lesson) = known
@@ -2053,6 +2059,10 @@ fn gate_subject(
             });
         }
         let _ = crate::nirvana_lessons::note_gated(&project.root, &stream, &order, true);
+        if let Some(profile) = &card_profile {
+            let _ =
+                crate::nirvana_knowledge::note_gated(&project.root, profile, &stream, &order, true);
+        }
         // Plan 33 §3.3: the cap's refusal is journaled with the verdict, as an axis named `review_skipped`.
         let review = crate::nirvana_review::wanted(project, state, known, table);
         if let Err(Some(why)) = &review {
@@ -2094,6 +2104,10 @@ fn gate_subject(
         });
     }
     let _ = crate::nirvana_lessons::note_gated(&project.root, &stream, &order, false);
+    if let Some(profile) = &card_profile {
+        let _ =
+            crate::nirvana_knowledge::note_gated(&project.root, profile, &stream, &order, false);
+    }
     let reasons: Vec<String> = failing(&axes)
         .iter()
         .map(|axis| format!("{}: {}", axis.axis, axis.why))

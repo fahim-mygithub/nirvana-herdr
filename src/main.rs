@@ -47,6 +47,7 @@ mod nirvana_jev_install;
 mod nirvana_jev_memory;
 mod nirvana_jev_roles;
 pub mod nirvana_job;
+mod nirvana_knowledge;
 mod nirvana_launch;
 mod nirvana_lean;
 mod nirvana_lessons;
@@ -638,6 +639,10 @@ fn main() -> io::Result<()> {
     // Nirvana fork, plan 33 P33a: the project's agent profiles, which `herdr seat run --profile` seats an order with.
     if args.get(1).map(String::as_str) == Some("profile") {
         return nirvana_profiles::cli(&args[2..]);
+    }
+    // Plan 34 P34a: a folder profile's knowledge cards, listed, shown, searched and rolled back.
+    if args.get(1).map(String::as_str) == Some("kb") {
+        return nirvana_knowledge::kb_cli(&args[2..]);
     }
     // Nirvana fork, plan 13 P1: the smart Preload's presets, catalog and generated settings file.
     if args.get(1).map(String::as_str) == Some("preload") {

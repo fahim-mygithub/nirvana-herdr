@@ -213,6 +213,8 @@ pub fn supervise_code(args: &[String]) -> std::io::Result<i32> {
 pub const RESTART_CLAUDE_COMMAND: &str = "nirvana.restart_claude";
 /// The `command.invoke` id the Preload panel's "edit" sends, the file's path after it (feature 5).
 pub const EDIT_FILE_COMMAND: &str = "nirvana.edit_file:";
+/// Plan 34 §2.7: the Preload panel's `K`, a folder profile's `knowledge/` after the id; the editor starts in it.
+pub const EDIT_DIR_COMMAND: &str = "nirvana.edit_dir:";
 /// The `command.invoke` id the Accounts panel's sign-in sends, the CLI's key after it (feature 11).
 pub const ACCOUNT_LOGIN_COMMAND: &str = "nirvana.account_login:";
 
@@ -225,6 +227,20 @@ pub fn editable_file(file: &str) -> Option<PathBuf> {
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("md"));
     (path.is_absolute() && markdown && path.is_file()).then_some(path)
+}
+
+/// A folder the edit tab may start in: absolute and there.
+pub fn editable_dir(dir: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(dir);
+    (path.is_absolute() && path.is_dir()).then_some(path)
+}
+
+/// The argv of the terminal editor alone, with no file: the editor opens in the tab's folder, whose files its own
+/// open dialog lists (plan 34 §2.7, a folder of cards).
+pub fn terminal_editor_program() -> Option<Vec<String>> {
+    let mut argv = terminal_editor_argv(Path::new(""))?;
+    argv.pop();
+    Some(argv)
 }
 
 /// The terminal editors "edit" tries, first found, each with the arguments that give it the mouse.

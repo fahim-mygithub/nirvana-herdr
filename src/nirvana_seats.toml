@@ -648,3 +648,23 @@ seats = [
   { seat = "flash", score = 80 },
   { seat = "sonnet", score = 78 },
 ]
+
+# Plan 34 §2.5 (ledger L1, "gets taught new techniques"): `herdr profile teach` reads a source as data and gives each
+# technique a verdict against the project's own measurements, the owner's motion-skills method. Seated with the
+# profile applied, so its model, family and needs narrow these. Scores are priors, research.web's; chain research.
+# P34a review B2: claude seats only. A teacher reads an untrusted page, and agy has no tool filter
+# (`--dangerously-skip-permissions`), so no agy seat teaches; `herdr profile teach` refuses any other CLI too.
+[[class]]
+id = "profile-teach"
+chain = "research"
+blast = "bounded"
+effort = "medium"
+efficient_effort = "low"
+sota_effort = "high"
+weight = 0.5
+bars = { efficient = 68, balanced = 80, sota = 100 }
+why = "plan 34 §2.5: learn a technique from a source and give it a verdict as a card"
+seats = [
+  { seat = "sonnet", score = 82 },
+  { seat = "opus", score = 86 },
+]
