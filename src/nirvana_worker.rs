@@ -259,9 +259,10 @@ pub fn argv(spec: &LaunchSpec) -> Result<Vec<String>, String> {
                     &spec.model,
                     "--print-timeout",
                     &format!("{}s", spec.print_timeout_s),
-                    // R6: agy's own auto mode is "available on Linux and macOS, with Windows support coming
-                    // later" (its changelog, read on 1.4.2), so the worker skips prompts inside its worktree and
-                    // its job object, as old Nirvana's adapter did.
+                    // R6, reread for plan 35 §3.6 on agy 1.4.12: auto mode reached Windows in 1.4.4, but it needs
+                    // the terminal sandbox, which is off on this machine (`enableTerminalSandbox=false`), and it adds
+                    // a review per risky command. So the worker skips prompts inside its folder and its job object,
+                    // as old Nirvana's adapter did. A `--settings` deny still holds under this flag (plan 35 probes).
                     "--dangerously-skip-permissions",
                     "--json-schema",
                     REPORT_SCHEMA,
@@ -353,6 +354,7 @@ fn with_order_servers(
     crate::nirvana_gui_tools::order_argv(
         argv,
         &project.root,
+        Path::new(&seated.cwd),
         &project.run_dir(run),
         &seated.order,
         &seated.needs,
@@ -398,6 +400,16 @@ pub fn with_profile(
     }
     match seated.cli.as_str() {
         "claude" => argv.extend(crate::nirvana_profiles::claude_args(run_dir, &found, &parsed)?),
+        // Plan 35 §3.4: agy is denied through `--settings` (`with_agy_tools`); a tool with no measured agy rule
+        // fails the order, as every denial did on agy before.
+        "agy" => {
+            crate::nirvana_agy_tools::deny_rules(&parsed.disallowed_tools).map_err(|why| {
+                format!(
+                    "{} was seated with profile {} on agy, and {why}",
+                    seated.order, found.name
+                )
+            })?;
+        }
         _ if !parsed.disallowed_tools.is_empty() => {
             return Err(format!(
                 "{} was seated with profile {}, which forbids tools only a claude worker can be denied, on {}",
@@ -409,9 +421,50 @@ pub fn with_profile(
     Ok(argv)
 }
 
-/// Plan 33 review B3: a claude lesson reviewer reads and answers; every tool that writes or runs is denied. agy has no
-/// tool filter: its reviewer is held only by its own folder (`nirvana_review::review_cwd`) and the gate's check of the
-/// lessons folder.
+/// Plan 35 §3.4: the agy rules an order is denied. A lesson review gets `REVIEW_DENIED`; an order seated with a
+/// profile gets its `disallowed_tools` mapped, read from the run's copy as `with_profile` read it.
+pub fn agy_denials(run_dir: &Path, seated: &Seated) -> Result<Vec<String>, String> {
+    if seated.class == crate::nirvana_review::CLASS {
+        return Ok(crate::nirvana_agy_tools::REVIEW_DENIED
+            .map(str::to_owned)
+            .to_vec());
+    }
+    let Ok(text) = std::fs::read_to_string(&seated.order_file) else {
+        return Ok(Vec::new());
+    };
+    let Some(found) = crate::nirvana_profiles::in_order(&text) else {
+        return Ok(Vec::new());
+    };
+    let found = found.map_err(|why| format!("{}: {why}", seated.order))?;
+    let parsed = crate::nirvana_profiles::from_run(run_dir, &found)?;
+    crate::nirvana_agy_tools::deny_rules(&parsed.disallowed_tools)
+}
+
+/// Plan 35 §3.1: an agy worker's argv with its tools folder (servers, rules, skills) and its deny file.
+fn with_agy_tools(
+    argv: Vec<String>,
+    project: &Project,
+    run_dir: &Path,
+    seated: &Seated,
+    out: &mut dyn Write,
+) -> Result<Vec<String>, String> {
+    if argv.first().map(String::as_str) != Some("agy") {
+        return Ok(argv);
+    }
+    let order = crate::nirvana_agy_tools::Order {
+        root: &project.root,
+        cwd: Path::new(&seated.cwd),
+        run_dir,
+        order: &seated.order,
+        order_file: &seated.order_file,
+        deny: agy_denials(run_dir, seated)?,
+    };
+    crate::nirvana_agy_tools::with_tools(argv, &order, out)
+}
+
+/// Plan 33 review B3: a claude lesson reviewer reads and answers; every tool that writes or runs is denied. Plan 35
+/// §3.4: an agy reviewer is denied `command(*)` and `write_file(*)` through `--settings` (`agy_denials`), besides its
+/// own folder (`nirvana_review::review_cwd`) and the gate's check of the lessons folder.
 pub fn with_review_limits(mut argv: Vec<String>, seated: &Seated) -> Vec<String> {
     if seated.class == crate::nirvana_review::CLASS
         && argv.first().map(String::as_str) == Some("claude")
@@ -810,8 +863,16 @@ impl Stream {
             .ok_or("the stream ended with no result")?;
         let (failed, text) = if self.cli == "agy" {
             let status = result.get("status").and_then(Value::as_str).unwrap_or("");
+            // Plan 35 §3.6: agy 1.4.11 added `finished_reason` (`print_timeout`, `interrupted`, `error`). A string
+            // there is a turn that did not finish, whatever `structured_output` holds; null or missing (69 of 69 real
+            // results) is today's path.
+            let unfinished = result
+                .get("finished_reason")
+                .and_then(Value::as_str)
+                .map(|reason| format!("agy finished with {reason:?}, status {status:?}"));
             (
-                (status != "SUCCESS").then(|| format!("agy status {status:?}")),
+                unfinished
+                    .or_else(|| (status != "SUCCESS").then(|| format!("agy status {status:?}"))),
                 result.get("response").and_then(Value::as_str),
             )
         } else {
@@ -1555,6 +1616,8 @@ pub fn exec(
             resume,
             print_timeout_s: print_timeout_s(&seated),
         };
+        // Plan 35 §3.1: a tools folder a crash left behind is never handed to this attempt; it is written afresh.
+        crate::nirvana_gui_tools::remove_order_config(&run_dir, &seated.order, out);
         // Plan 29 review F3: an order that cannot get a server it was seated for fails here and never starts without.
         let argv = match worker_argv(
             &nirvana_seat::dir(),
@@ -1568,9 +1631,12 @@ pub fn exec(
         .and_then(|argv| with_profile(argv, &run_dir, &seated))
         .map(|argv| with_review_limits(argv, &seated))
         .and_then(|argv| with_teach_limits(argv, &seated, &project.root))
+        .and_then(|argv| with_agy_tools(argv, project, &run_dir, &seated, out))
         {
             Ok(argv) => argv,
             Err(why) => {
+                // A step after the servers were written failed: their definitions go now, not at a later end.
+                crate::nirvana_gui_tools::remove_order_config(&run_dir, &seated.order, out);
                 end_failed(project, &journal, run, &seated, &why, None)?;
                 writeln!(out, "{why}")?;
                 return Ok(1);
@@ -3453,6 +3519,11 @@ pub fn seat_order_with(
     if booked.class.starts_with("research.") || booked.class.starts_with("media.") {
         text.push_str("\n\nYour Work Report must include the `sources` array of `{url, used_for}` for each source consulted.");
     }
+    // Plan 35 §5 P35b item 3: an agy worker reads pages with shell fetches; the gate sees only a URL in its command.
+    if let Some(line) = crate::nirvana_agy_tools::sources_line(&booked.cli, &booked.class) {
+        text.push(' ');
+        text.push_str(line);
+    }
     // Plan 25 §5: a browser order's worker batches its steps, so only the result reaches the model.
     // `booked.cli` is the booked seat's CLI (`seats.toml`'s `cli`), the one `seat exec` starts.
     let text =
@@ -3804,6 +3875,12 @@ fn cleanup_cli(args: &[String]) -> std::io::Result<()> {
             println!("the pane {pane} stays: title is not {expected}");
         }
     }
+    // Plan 35 §7.1: a crash between write and removal left the order's server definitions; they go here.
+    crate::nirvana_gui_tools::remove_order_config(
+        &project.run_dir(&run),
+        order,
+        &mut std::io::stdout(),
+    );
     if let Some(worktree) = known.seated.worktree.as_deref().filter(|_| !shared) {
         match remove_worktree(&project.root, Path::new(worktree)) {
             Ok(()) => println!("removed the worktree {worktree}"),

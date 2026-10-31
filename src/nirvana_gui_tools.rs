@@ -9,8 +9,11 @@
 //!   servers alone, copied from the project's definition, and `--allowedTools mcp__<server>__*` for each.
 //!   `--strict-mcp-config` stays, so nothing else loads. Names match exactly.
 //! - A need that is a seat capability stays a capability, so a server named like one changes nothing that seats today.
-//! - Only a Claude seat takes such an order. agy panes cannot see the Studio window (MainWindowHandle 0, §1), and only
-//!   the claude argv carries `--mcp-config`. With no Claude seat free the order is refused, with the reason.
+//! - Only a Claude seat takes an order for a desktop server: agy panes cannot see the Studio window (MainWindowHandle
+//!   0, §1). With no Claude seat free the order is refused, with the reason.
+//! - Plan 35 P35b (owner ruling R4, "Yes, allow"): any other server reaches an agy worker too, translated into its
+//!   tools folder (`nirvana_agy_tools`). A definition agy cannot take (`${...}`, a `type` no probe measured, a key
+//!   herdr does not carry) keeps the order on claude, saying why.
 //! - The file is written beside the run's journal, `.nirvana/runs/<run>/mcp/<order>.json`, which `.nirvana/.gitignore`
 //!   keeps out of git. The project's definition can hold a printer token in `env`, and the journal records the argv,
 //!   so the definition never goes on the command line. The supervisor removes the file when the worker ends.
@@ -120,25 +123,23 @@ pub fn servers_among(needs: &[String], capabilities: &[&str], servers: &[String]
     named
 }
 
-/// Why only a Claude seat may take an order that needs these servers; `None` when it needs none.
-pub fn claude_only(servers: &[String]) -> Option<String> {
-    if servers.is_empty() {
-        return None;
+/// Why only a Claude seat may take an order that needs these servers; `None` when an agy seat may take it too. A
+/// desktop server says so first; then a server whose definition in `defined` agy cannot take (plan 35 §3.2), or one
+/// `defined` lacks.
+pub fn claude_only(servers: &[String], defined: &Map<String, Value>) -> Option<String> {
+    if let Some(desktop) = servers
+        .iter()
+        .find(|server| DESKTOP_SERVERS.contains(&server.as_str()))
+    {
+        return Some(format!(
+            "{desktop} drives a desktop window and agy panes cannot see it (plan 29 §5.2)"
+        ));
     }
-    Some(
-        match servers
-            .iter()
-            .find(|server| DESKTOP_SERVERS.contains(&server.as_str()))
-        {
-            Some(desktop) => format!(
-                "{desktop} drives a desktop window and agy panes cannot see it (plan 29 §5.2)"
-            ),
-            None => format!(
-                "only a claude worker takes a per-order --mcp-config, for {} (plan 29 §5.1)",
-                servers.join(", ")
-            ),
-        },
-    )
+    servers.iter().find_map(|server| match defined.get(server) {
+        Some(definition) => crate::nirvana_agy_tools::refusal(server, definition)
+            .map(|why| format!("only a claude worker can take {server}: {why}")),
+        None => Some(format!("{MCP_FILE} has no server {server:?}")),
+    })
 }
 
 /// The review round's nit: a named server whose tool name another server of the project's flattens to as well.
@@ -172,12 +173,17 @@ pub fn capabilities(table: &Table) -> Vec<&str> {
 
 /// The server names in `<root>/.mcp.json`; none when the project has no such file.
 pub fn project_servers(root: &Path) -> Result<Vec<String>, String> {
+    Ok(project_definitions(root)?.keys().cloned().collect())
+}
+
+/// The server definitions in `<root>/.mcp.json`, by name; none when the project has no such file.
+pub fn project_definitions(root: &Path) -> Result<Map<String, Value>, String> {
     let path = root.join(MCP_FILE);
     match std::fs::read_to_string(&path) {
         Ok(text) => {
-            server_names(&text).map_err(|why| format!("{} does not parse ({why})", path.display()))
+            defined(&text).map_err(|why| format!("{} does not parse ({why})", path.display()))
         }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Map::new()),
         Err(err) => Err(format!("cannot read {}: {err}", path.display())),
     }
 }
@@ -198,8 +204,8 @@ pub struct Needs {
 /// (review F5: it read as an unknown need); an order whose needs are all capabilities is not refused by it.
 pub fn seat_needs(table: &Table, root: &Path, needs: &[String]) -> Result<Needs, String> {
     let words = capabilities(table);
-    let servers = match project_servers(root) {
-        Ok(servers) => servers,
+    let definitions = match project_definitions(root) {
+        Ok(definitions) => definitions,
         Err(why) => {
             return match needs.iter().find(|need| !words.contains(&need.as_str())) {
                 Some(need) => Err(format!(
@@ -212,6 +218,7 @@ pub fn seat_needs(table: &Table, root: &Path, needs: &[String]) -> Result<Needs,
             };
         }
     };
+    let servers: Vec<String> = definitions.keys().cloned().collect();
     let named = servers_among(needs, &words, &servers);
     if let Some(why) = key_clash(&named, &servers) {
         return Err(why);
@@ -223,7 +230,7 @@ pub fn seat_needs(table: &Table, root: &Path, needs: &[String]) -> Result<Needs,
         .collect();
     Ok(Needs {
         rest,
-        claude_only: claude_only(&named),
+        claude_only: claude_only(&named, &definitions),
         servers: named,
     })
 }
@@ -279,14 +286,9 @@ pub fn order_config_path(run_dir: &Path, order: &str) -> PathBuf {
     run_dir.join("mcp").join(format!("{order}.json"))
 }
 
-/// Writes the order's config for `servers`, read from `<root>/.mcp.json` now. Review F3: a server the order was seated
-/// for that the file no longer defines, a file gone or not parsing, is an error, never a config without it.
-pub fn write_order_config(
-    root: &Path,
-    run_dir: &Path,
-    order: &str,
-    servers: &[String],
-) -> Result<PathBuf, String> {
+/// `<root>/.mcp.json` read now, with the names it defines. Review F3: a server the order was seated for that the file
+/// no longer defines, a file gone or not parsing, is an error.
+fn read_seated(root: &Path, servers: &[String]) -> Result<(String, Vec<String>), String> {
     let path = root.join(MCP_FILE);
     let text = std::fs::read_to_string(&path).map_err(|err| match err.kind() {
         std::io::ErrorKind::NotFound => format!("{} is gone", path.display()),
@@ -297,6 +299,18 @@ pub fn write_order_config(
     if let Some(gone) = servers.iter().find(|server| !names.contains(server)) {
         return Err(format!("{} no longer defines {gone}", path.display()));
     }
+    Ok((text, names))
+}
+
+/// Writes the order's config for `servers`, read from `<root>/.mcp.json` now. Review F3: a server the order was seated
+/// for that the file no longer defines, a file gone or not parsing, is an error, never a config without it.
+pub fn write_order_config(
+    root: &Path,
+    run_dir: &Path,
+    order: &str,
+    servers: &[String],
+) -> Result<PathBuf, String> {
+    let (text, names) = read_seated(root, servers)?;
     if let Some(why) = key_clash(servers, &names) {
         return Err(why);
     }
@@ -314,7 +328,7 @@ pub fn write_order_config(
 /// Review F2: the definition can hold a printer token, so the file is the owner's alone where `std` says so in one
 /// flag (0600 on Unix). On Windows it takes the ACL of the project folder it sits in: narrowing it needs the security
 /// API, which this round does not build.
-fn write_private(file: &Path, body: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_private(file: &Path, body: &[u8]) -> std::io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -326,8 +340,10 @@ fn write_private(file: &Path, body: &[u8]) -> std::io::Result<()> {
 }
 
 /// Review F2: the order's config goes when its worker process ends, whatever the outcome; a restart or a reseat
-/// writes it again. A remove that fails says so in one line of the worker's view.
+/// writes it again. A remove that fails says so in one line of the worker's view. Plan 35 §3.2: an agy order's tools
+/// folder and deny file go with it.
 pub fn remove_order_config(run_dir: &Path, order: &str, out: &mut dyn Write) {
+    crate::nirvana_agy_tools::remove(run_dir, order, out);
     let file = order_config_path(run_dir, order);
     match std::fs::remove_file(&file) {
         Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
@@ -341,21 +357,28 @@ pub fn remove_order_config(run_dir: &Path, order: &str, out: &mut dyn Write) {
     }
 }
 
-/// §5.1: the worker's argv with its order's servers. Only a claude argv takes them, and only for an order with a
-/// server need. Review F3: an order that cannot get a server it was seated for gets an error, and the supervisor
-/// fails it rather than start it without. With seats.toml refused, the needs `.mcp.json` names are read as servers.
+/// §5.1: the worker's argv with its order's servers, for an order with a server need. A claude argv gets the
+/// per-order `--mcp-config`. Plan 35 §3.2: for an agy argv the same servers are written, translated, into the order's
+/// tools folder, which `nirvana_agy_tools::with_tools` adds with `--add-dir`; the argv comes back unchanged here.
+/// `cwd` is the worker's folder, whose own `.agents/mcp_config.json` agy loads anyway. Review F3: an order that cannot
+/// get a server it was seated for gets an error, and the supervisor fails it rather than start it without. With
+/// seats.toml refused, the needs `.mcp.json` names are read as servers.
+#[allow(clippy::too_many_arguments)]
 pub fn order_argv(
     argv: Vec<String>,
     root: &Path,
+    cwd: &Path,
     run_dir: &Path,
     order: &str,
     needs: &[String],
     capabilities: Result<Vec<&str>, String>,
     out: &mut dyn Write,
 ) -> Result<Vec<String>, String> {
-    if needs.is_empty() || argv.first().map(String::as_str) != Some("claude") {
+    let cli = argv.first().map(String::as_str);
+    if needs.is_empty() || !matches!(cli, Some("claude" | "agy")) {
         return Ok(argv);
     }
+    let agy = cli == Some("agy");
     let servers = match capabilities {
         Ok(words) => seated_servers(needs, &words),
         Err(why) => {
@@ -373,12 +396,33 @@ pub fn order_argv(
     if servers.is_empty() {
         return Ok(argv);
     }
-    let file = write_order_config(root, run_dir, order, &servers).map_err(|why| {
+    let cannot = |why: String| {
         format!(
             "{order} was seated for MCP server {} and cannot get it: {why}",
             servers.join(", ")
         )
-    })?;
+    };
+    if agy {
+        let (text, _) = read_seated(root, &servers).map_err(cannot)?;
+        let all =
+            defined(&text).map_err(|why| cannot(format!("{MCP_FILE} does not parse ({why})")))?;
+        // Plan 29 §5.2 holds on agy: a desktop server never goes to a worker that cannot see its window, and a
+        // definition agy cannot take fails the order as a server gone would.
+        if let Some(why) = claude_only(&servers, &all) {
+            return Err(cannot(why));
+        }
+        let chosen: Map<String, Value> = servers
+            .iter()
+            .filter_map(|server| Some((server.clone(), all.get(server)?.clone())))
+            .collect();
+        let written = crate::nirvana_agy_tools::write_servers(&chosen, cwd, run_dir, order, out)
+            .map_err(cannot)?;
+        if !written.is_empty() {
+            let _ = writeln!(out, "MCP servers for this order: {}", written.join(", "));
+        }
+        return Ok(argv);
+    }
+    let file = write_order_config(root, run_dir, order, &servers).map_err(cannot)?;
     let _ = writeln!(out, "MCP servers for this order: {}", servers.join(", "));
     Ok(with_servers(argv, &file, &servers))
 }

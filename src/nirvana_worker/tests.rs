@@ -1889,3 +1889,294 @@ fn p31_a_rate_limited_reseat_never_inherits_the_send_approval() {
     );
     nirvana_seat::set_test_world(None);
 }
+
+// ---- plan 35 P35b: what an agy worker starts with ----
+
+/// §3.6: a `finished_reason` string is a turn that did not finish, whatever the result holds; null keeps today's path.
+#[test]
+fn p35b_an_agy_result_with_a_finished_reason_fails_naming_it() {
+    let (stream, _) = feed("agy", LIVE_FLASH);
+    assert!(stream.report().is_ok());
+    for (reason, ok) in [
+        (Value::Null, true),
+        (Value::from("print_timeout"), false),
+        (Value::from("error"), false),
+    ] {
+        let mut cut = stream.clone();
+        cut.result.as_mut().unwrap()["finished_reason"] = reason.clone();
+        match cut.report() {
+            Ok(_) => assert!(ok, "{reason}"),
+            Err(why) => {
+                assert!(!ok, "{why}");
+                assert_eq!(
+                    why,
+                    format!("agy finished with {reason}, status \"SUCCESS\"")
+                );
+            }
+        }
+    }
+}
+
+/// A project under a test home with the default seats, `.mcp.json` defining a non-desktop `bambu`, and a CLAUDE.md
+/// when `rules`; an agy order in its root needing `needs`.
+fn p35b_project(
+    name: &str,
+    rules: bool,
+    needs: &[&str],
+) -> (crate::nirvana::TestHomeGuard, Project, Seated) {
+    let (home, project) = p29_project(name);
+    std::fs::write(
+        project.root.join(".mcp.json"),
+        r#"{"mcpServers": {"bambu": {"type": "stdio", "command": "node", "env": {"BAMBU_TOKEN": "fake-not-real"}}}}"#,
+    )
+    .unwrap();
+    if rules {
+        std::fs::write(project.root.join("CLAUDE.md"), "# Rules\nNever push.\n").unwrap();
+    }
+    std::fs::write(project.root.join("recorded.jsonl"), LIVE_FLASH).unwrap();
+    let mut seated = seated("o1");
+    seated.needs = needs.iter().map(|need| (*need).to_owned()).collect();
+    seated.cwd = project.root.display().to_string();
+    seated.order_file = project.root.join("order.md").display().to_string();
+    std::fs::write(&seated.order_file, "# Read the printer\n").unwrap();
+    (home, project, seated)
+}
+
+/// §5 P35b items 1, 2 and 7 through `herdr seat exec`, with a stand-in for agy that checks its tools folder.
+#[cfg(windows)]
+#[test]
+fn p35b_exec_gives_an_agy_worker_its_tools_folder_and_removes_it_after_a_failed_one_included() {
+    let (_home, project, base) = p35b_project("p35b-exec", true, &["bambu"]);
+    let run = "r1";
+    let run_dir = project.run_dir(run);
+    let journal = project.journal(run);
+    journal.append(1, opened()).unwrap();
+    let exec_with = |order: &str, script: &str| -> i32 {
+        let mut seated = base.clone();
+        seated.order = order.into();
+        journal.append(2, Kind::Seated(Box::new(seated))).unwrap();
+        TEST_COMMAND.with_borrow_mut(|slot| {
+            *slot = Some(vec!["cmd.exe".into(), "/c".into(), script.to_owned()]);
+        });
+        let mut out = Vec::new();
+        let code = exec(&project, run, order, None, &mut out).unwrap();
+        TEST_COMMAND.with_borrow_mut(|slot| *slot = None);
+        code
+    };
+    let tools = |order: &str| crate::nirvana_agy_tools::tools_dir(&run_dir, order);
+    let relative = |order: &str| {
+        tools(order)
+            .strip_prefix(&project.root)
+            .unwrap()
+            .display()
+            .to_string()
+    };
+    let started = |order: &str| {
+        journal
+            .read()
+            .0
+            .into_iter()
+            .find_map(|event| match event.kind {
+                Kind::Started { order: o, argv, .. } if o == order => Some(argv),
+                _ => None,
+            })
+    };
+    let check = |order: &str| {
+        let at = relative(order);
+        format!(r"if exist {at}\.agents\mcp_config.json if exist {at}\AGENTS.md")
+    };
+    let code = exec_with(
+        "o1",
+        &format!("{} (type recorded.jsonl) else (exit /b 3)", check("o1")),
+    );
+    assert_eq!(code, 0);
+    let argv = started("o1").expect("started");
+    assert_eq!(
+        after(&argv, "--add-dir"),
+        Some(tools("o1").display().to_string().as_str())
+    );
+    let settings = crate::nirvana_agy_tools::settings_path(&run_dir, "o1");
+    assert_eq!(
+        after(&argv, "--settings"),
+        Some(settings.display().to_string().as_str())
+    );
+    let print = argv.last().unwrap();
+    assert!(
+        print.starts_with("--print=Do the work order in "),
+        "{print}"
+    );
+    assert!(
+        print.contains("holds herdr's tool config: never write there."),
+        "{print}"
+    );
+    assert!(!tools("o1").exists() && !settings.exists());
+    // Failed (exit 4: the folder was there): gone after too.
+    let code = exec_with(
+        "o2",
+        &format!("{} (exit /b 4) else (exit /b 3)", check("o2")),
+    );
+    assert_eq!(code, 1);
+    let ended = journal
+        .read()
+        .0
+        .into_iter()
+        .find_map(|event| match event.kind {
+            Kind::Ended {
+                order: Some(o),
+                exit,
+                ..
+            } if o == "o2" => Some(exit),
+            _ => None,
+        });
+    assert_eq!(ended, Some(Some(4)));
+    assert!(!tools("o2").exists());
+    assert!(!crate::nirvana_agy_tools::settings_path(&run_dir, "o2").exists());
+    // A folder a crash left behind is not handed to the next start.
+    std::fs::create_dir_all(tools("o3")).unwrap();
+    std::fs::write(tools("o3").join("stale.txt"), "x").unwrap();
+    let code = exec_with(
+        "o3",
+        &format!(
+            r"if exist {}\stale.txt (exit /b 5) else (type recorded.jsonl)",
+            relative("o3")
+        ),
+    );
+    assert_eq!(code, 0);
+    // A step after the servers were written fails (a profile copy gone): the order never starts, and its servers go.
+    let ghost = project.root.join("ghost.md");
+    std::fs::write(
+        &ghost,
+        format!(
+            "Profile: ghost\nProfile sha256: {}\n\n# Read it\n",
+            "0".repeat(64)
+        ),
+    )
+    .unwrap();
+    let mut seated = base.clone();
+    seated.order = "o4".into();
+    seated.order_file = ghost.display().to_string();
+    journal.append(3, Kind::Seated(Box::new(seated))).unwrap();
+    let mut out = Vec::new();
+    assert_eq!(exec(&project, run, "o4", None, &mut out).unwrap(), 1);
+    let view = String::from_utf8_lossy(&out).into_owned();
+    assert!(
+        view.contains("MCP servers for this order: bambu")
+            && view.contains("o4 was seated with profile ghost"),
+        "{view}"
+    );
+    assert_eq!(started("o4"), None);
+    assert!(!tools("o4").exists());
+    nirvana_seat::set_test_world(None);
+}
+
+/// §5 P35b item 7: an agy order with no server, no rules, no skills and no denials starts with today's argv.
+#[cfg(windows)]
+#[test]
+fn p35b_exec_an_agy_order_with_nothing_to_add_starts_with_todays_argv() {
+    let (_home, project, seated) = p35b_project("p35b-exec-plain", false, &[]);
+    let run = "r1";
+    let journal = project.journal(run);
+    journal.append(1, opened()).unwrap();
+    journal
+        .append(2, Kind::Seated(Box::new(seated.clone())))
+        .unwrap();
+    TEST_COMMAND.with_borrow_mut(|slot| {
+        *slot = Some(vec![
+            "cmd.exe".into(),
+            "/c".into(),
+            "type recorded.jsonl".into(),
+        ]);
+    });
+    let mut out = Vec::new();
+    let code = exec(&project, run, "o1", None, &mut out).unwrap();
+    TEST_COMMAND.with_borrow_mut(|slot| *slot = None);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&out));
+    let started = journal
+        .read()
+        .0
+        .into_iter()
+        .find_map(|event| match event.kind {
+            Kind::Started { argv, .. } => Some(argv),
+            _ => None,
+        });
+    let today = super::argv(&LaunchSpec {
+        cli: seated.cli.clone(),
+        model: seated.model.clone(),
+        effort: seated.effort,
+        prompt: first_line(&seated.order_file),
+        resume: None,
+        print_timeout_s: print_timeout_s(&seated),
+    })
+    .unwrap();
+    assert_eq!(started, Some(today));
+    assert!(!project
+        .run_dir(run)
+        .join(crate::nirvana_agy_tools::DIR)
+        .exists());
+    nirvana_seat::set_test_world(None);
+}
+
+/// §3.4: a lesson review on agy is denied running and writing through its settings file.
+#[test]
+fn p35b_an_agy_lesson_review_is_denied_commands_and_writes() {
+    let mut review = seated("rv1");
+    review.class = crate::nirvana_review::CLASS.into();
+    let dir = temp_dir("p35b_review_denials");
+    assert_eq!(
+        agy_denials(&dir, &review).unwrap(),
+        ["command(*)", "write_file(*)"]
+    );
+    let mut plain = seated("o1");
+    plain.order_file = dir.join("none.md").display().to_string();
+    assert_eq!(agy_denials(&dir, &plain).unwrap(), Vec::<String>::new());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// §5 P35b item 3: an agy research order's brief carries the line on reading URLs; a claude one does not.
+#[test]
+fn p35b_seat_run_gives_an_agy_research_order_the_sources_line() {
+    use crate::nirvana_agy_tools::SOURCES_LINE;
+    let (_home, project) = p29_project("p35b-sources-line");
+    let order_file = project.root.join("order.md");
+    std::fs::write(&order_file, "# Find the dial specs\n").unwrap();
+    let table = nirvana_seat::table_for(&project.root).unwrap();
+    let world = nirvana_seat::live_world(&table);
+    let mut request = nirvana_seat::Request::new("research.web");
+    let agy_seat = nirvana_seat::pick(&table, &world, &request).unwrap();
+    assert_eq!(agy_seat.cli, "agy", "{}", agy_seat.seat);
+    request.claude_only = Some("a test".into());
+    let claude_seat = nirvana_seat::pick(&table, &world, &request).unwrap().seat;
+    let seat = |order: &str, seat: &str| SeatRequest {
+        seat: seat.into(),
+        order_file: order_file.clone(),
+        order: order.into(),
+        run: "r1".into(),
+        class: Some("research.web".into()),
+        size: None,
+        needs: Vec::new(),
+        not_family: Vec::new(),
+        mode: None,
+        effort: None,
+        reason: (seat != agy_seat.seat).then(|| "the sources line on a claude seat".to_owned()),
+        worktree: false,
+        auto: false,
+        send_ok: None,
+    };
+    let _live: Vec<_> = ["a1", "c1"]
+        .iter()
+        .map(|order| take_live(&project, "r1", order).unwrap().unwrap())
+        .collect();
+    seat_order(&project, &seat("a1", &agy_seat.seat)).unwrap();
+    seat_order(&project, &seat("c1", &claude_seat)).unwrap();
+    let state = replay(&project.journal("r1").read().0);
+    let brief = |order: &str| {
+        std::fs::read_to_string(&state.order(order).unwrap().seated.order_file).unwrap()
+    };
+    assert!(
+        brief("a1").contains(&format!("for each source consulted. {SOURCES_LINE}")),
+        "{}",
+        brief("a1")
+    );
+    assert!(!brief("c1").contains(SOURCES_LINE), "{}", brief("c1"));
+    nirvana_seat::set_test_world(None);
+}
