@@ -420,8 +420,8 @@ pub(super) fn render_space_agents(
 }
 
 /// Plan 38: whether anything under a space is working: one of its agents is Working or Blocked (its Nirvana Claude,
-/// a plain Claude, Codex, agy, a local pane, a seat worker's pane), or it has a live worker row (`workers`, the rows
-/// the list already read this frame). herdr's own space status cannot be asked: it ranks Done above Working. A
+/// a plain Claude, Codex, agy, a local pane, a seat worker's pane), or one of its live worker rows is at work
+/// (`workers`, the rows the list already read this frame; `SpaceWorker::working`). herdr's own space status cannot be asked: it ranks Done above Working. A
 /// collapsed worktree group's parent counts its hidden children's agents, as `displayed_workspace_status` does; their
 /// workers are not read while they are hidden, so they do not count (no new reads for the sparkle).
 pub(super) fn space_working(
@@ -433,7 +433,7 @@ pub(super) fn space_working(
 ) -> bool {
     use crate::api::schema::AgentStatus;
     let busy = |status: AgentStatus| matches!(status, AgentStatus::Working | AgentStatus::Blocked);
-    if busy(status) || !workers.is_empty() {
+    if busy(status) || workers.iter().any(|worker| worker.working) {
         return true;
     }
     let group = workspace
@@ -480,6 +480,29 @@ pub(super) fn space_marker(
     }
 }
 
+/// Plan 38 review S3: the marker of a space in a list that does not draw its worker rows (the narrow sidebar, the
+/// machines list), by the same `space_working`. `read_workers` reads the workers the spaces list would show, from the
+/// same cache; a remote machine's spaces pass false, as this window's cache holds this machine's journals only.
+pub(super) fn listed_space_marker(
+    snapshot: &ClientShellSnapshot,
+    workspace: &ClientShellWorkspace,
+    status: crate::api::schema::AgentStatus,
+    collapsed_groups: &std::collections::HashSet<String>,
+    read_workers: bool,
+    indicators: crate::config::StatusIndicatorStyle,
+    frame: usize,
+) -> (&'static str, crate::api::schema::AgentStatus) {
+    let workers = if read_workers {
+        space_workers(snapshot, &workspace.workspace_id, |agent| {
+            super::agent_sidebar::ask_subagents(snapshot, agent)
+        })
+    } else {
+        Vec::new()
+    };
+    let working = space_working(snapshot, workspace, status, collapsed_groups, &workers);
+    space_marker(status, working, indicators, frame)
+}
+
 /// Plan 30: a space shows all its live workers up to this many; past it, `WORKERS_CUT_TO` rows and "+N more".
 pub(super) const WORKERS_SHOWN: usize = 4;
 pub(super) const WORKERS_CUT_TO: usize = 3;
@@ -504,6 +527,10 @@ pub(super) struct SpaceWorker {
     pub(super) name: String,
     pub(super) model: String,
     pub(super) elapsed: String,
+    /// Plan 38 review S4: whether the worker is at work, so its space sparkles. A live row is also an order that waits
+    /// (Asked: on an answer; Deferred: on a window's reset) or one whose own pane is gone, which the journal can keep
+    /// live forever; those keep their row and do not sparkle.
+    pub(super) working: bool,
 }
 
 /// The live workers of the space's agents, in the agents panel's own order. `view` is the panel's cached data for an
@@ -528,10 +555,17 @@ pub(super) fn space_workers(
         .flat_map(|group| group.live.iter())
         .map(|sub| {
             let (model, elapsed) = super::agent_sidebar::live_worker_model_and_elapsed(sub);
+            let pane_alive = sub.target_pane_id.as_deref().is_none_or(|pane| {
+                snapshot
+                    .panes
+                    .iter()
+                    .any(|candidate| candidate.pane_id == pane)
+            });
             SpaceWorker {
                 name: sub.name.clone(),
                 model,
                 elapsed,
+                working: !sub.waiting && pane_alive,
             }
         })
         .collect()
@@ -649,9 +683,12 @@ mod sparkle_tests {
 
     use super::*;
     use crate::api::schema::AgentStatus;
+    use crate::client::endpoint::{
+        ClientEndpointId, ClientEndpointStatus, ProfileId, SavedSshEndpoint,
+    };
     use crate::nirvana_spaces::{
-        set_sparkle_clock_for_test, sparkle_frame_at, sparkle_glyph, take_sparkle_due, Kind,
-        SPARKLE_FRAME, SPARKLE_FRAMES,
+        note_sparkle_drawn, set_sparkle_clock_for_test, sparkle_due, sparkle_frame_at,
+        sparkle_glyph, sparkle_timer_delay, Kind, SparkleGate, SPARKLE_FRAME, SPARKLE_FRAMES,
     };
     use crate::nirvana_subagents::{
         set_view_for_test, Subagent, SubagentProvider, SubagentState, SubagentsView,
@@ -687,7 +724,15 @@ mod sparkle_tests {
 
     /// A live seat order under `pane`, as the owner's screenshot's `quad-pegs…` at 56s.
     fn live_worker(pane: &str) -> HashMap<String, SubagentsView> {
-        let worker = Subagent {
+        worker_with(pane, |_| {})
+    }
+
+    /// `live_worker`, changed by `change`.
+    fn worker_with(
+        pane: &str,
+        change: impl FnOnce(&mut Subagent),
+    ) -> HashMap<String, SubagentsView> {
+        let mut worker = Subagent {
             id: "order-quad-pegs".into(),
             parent_id: None,
             name: "quad-pegs".into(),
@@ -702,7 +747,9 @@ mod sparkle_tests {
             target_pane_id: None,
             run_id: Some("run-20261031-000000".into()),
             run_event_time: Some(1000),
+            waiting: false,
         };
+        change(&mut worker);
         HashMap::from([(
             pane.to_string(),
             SubagentsView {
@@ -713,6 +760,8 @@ mod sparkle_tests {
         )])
     }
 
+    /// The pane surface: one pane no test agent is in, so no agent's Done reads as seen (the window shows a Done agent
+    /// whose pane is on the screen as Idle, `endpoint_agent_state::acknowledge_surface`).
     fn surface() -> PaneSurfaceFrame {
         let surface_buffer = Buffer::with_lines(["LIVE", "PANE"]);
         let rect = SurfaceRect {
@@ -727,7 +776,7 @@ mod sparkle_tests {
             surface_revision: 1,
             frame: FrameData::from_ratatui_buffer_with_hyperlinks(&surface_buffer, None, &[]),
             panes: vec![PaneSurfacePane {
-                pane_id: "pane_1".into(),
+                pane_id: "pane_shown".into(),
                 content_revision: 0,
                 rect,
                 inner_rect: rect,
@@ -782,20 +831,7 @@ mod sparkle_tests {
         collapsed: &[&str],
     ) -> Vec<String> {
         let (frame, rects) = compose_at(snap, view, at, collapsed);
-        let rows: Vec<Vec<String>> = frame
-            .cells
-            .chunks(frame.width as usize)
-            .map(|row| row.iter().map(|cell| cell.symbol.clone()).collect())
-            .collect();
-        rects
-            .iter()
-            .map(|rect| {
-                rows[usize::from(rect.y)][usize::from(rect.x)..usize::from(rect.right())]
-                    .concat()
-                    .trim_end()
-                    .to_string()
-            })
-            .collect()
+        row_texts(&frame, &rects)
     }
 
     /// The composed frame and each space's rectangle.
@@ -805,14 +841,22 @@ mod sparkle_tests {
         at: Duration,
         collapsed: &[&str],
     ) -> (FrameData, Vec<Rect>) {
+        compose_with(snap, view, at, 106, |state| {
+            state
+                .collapsed_groups
+                .extend(collapsed.iter().map(|key| key.to_string()));
+        })
+    }
+
+    /// The window as the owner sees it: `snap` seen working first (see below), `cols` wide, after `setup`.
+    fn state_for(
+        snap: &ClientShellSnapshot,
+        setup: impl FnOnce(&mut ClientShellState),
+    ) -> ClientShellState {
         let mut config = Config::default();
         config.ui.status_indicators = crate::config::StatusIndicatorStyle::Symbols;
-        set_view_for_test(view);
-        set_sparkle_clock_for_test(Some(at));
         let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
-        state
-            .collapsed_groups
-            .extend(collapsed.iter().map(|key| key.to_string()));
+        setup(&mut state);
         // The window shows Done only for an agent it saw working (`endpoint_agent_state`), so each Done agent is
         // working in the snapshot before.
         let mut before = snap.clone();
@@ -827,12 +871,61 @@ mod sparkle_tests {
         for agent in &mut after.agents {
             agent.state_change_seq += 1;
         }
+        // The surface matches the snapshot drawn, so `compose` draws the whole window (`render_shell`), not the
+        // placeholder it draws while it waits for one (`compose_unavailable`).
+        let mut pane_surface = surface();
+        pane_surface.projection_revision = after.revision;
         state.set_snapshot(Box::new(after));
-        state.set_pane_surface(surface());
-        let frame = state.compose(106, 30).expect("composed frame").frame;
+        state.set_pane_surface(pane_surface);
+        assert!(
+            state.pane_surface.is_some(),
+            "the surface is the snapshot's"
+        );
+        state
+    }
+
+    /// `compose_at`, `cols` wide, after `setup`.
+    fn compose_with(
+        snap: &ClientShellSnapshot,
+        view: Option<HashMap<String, SubagentsView>>,
+        at: Duration,
+        cols: u16,
+        setup: impl FnOnce(&mut ClientShellState),
+    ) -> (FrameData, Vec<Rect>) {
+        let mut state = state_for(snap, setup);
+        compose_state(&mut state, view, at, cols)
+    }
+
+    fn compose_state(
+        state: &mut ClientShellState,
+        view: Option<HashMap<String, SubagentsView>>,
+        at: Duration,
+        cols: u16,
+    ) -> (FrameData, Vec<Rect>) {
+        set_view_for_test(view);
+        set_sparkle_clock_for_test(Some(at));
+        let frame = state.compose(cols, 30).expect("composed frame").frame;
         set_view_for_test(None);
         let rects = state.hits.workspaces.iter().map(|hit| hit.rect).collect();
         (frame, rects)
+    }
+
+    /// The text of each space's first row in `frame`.
+    fn row_texts(frame: &FrameData, rects: &[Rect]) -> Vec<String> {
+        let rows: Vec<Vec<String>> = frame
+            .cells
+            .chunks(frame.width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol.clone()).collect())
+            .collect();
+        rects
+            .iter()
+            .map(|rect| {
+                rows[usize::from(rect.y)][usize::from(rect.x)..usize::from(rect.right())]
+                    .concat()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
     }
 
     /// A moment inside frame `index` on the clock.
@@ -1042,10 +1135,11 @@ mod sparkle_tests {
         }
     }
 
-    /// §2.3: with nothing working the timer schedules no repaint at all; with a working space it repaints once per new
+    /// §2.3: with nothing working the timer schedules no repaint at all; with a working space it repaints on each new
     /// frame, and only a drawing that still sparkles keeps it going.
     #[test]
     fn no_repaint_is_scheduled_when_nothing_is_working() {
+        let default = Duration::from_millis(100);
         let idle = spaces(vec![(
             AgentStatus::Done,
             vec![agent("pane_1", "ws_1", AgentStatus::Done, true)],
@@ -1053,7 +1147,8 @@ mod sparkle_tests {
         first_rows(&idle, None, at(0));
         for index in 0..8 {
             set_sparkle_clock_for_test(Some(at(index)));
-            assert!(!take_sparkle_due(), "frame {index}");
+            assert!(!sparkle_due(), "frame {index}");
+            assert_eq!(sparkle_timer_delay(default), default, "frame {index}");
         }
 
         let busy = spaces(vec![(
@@ -1062,16 +1157,253 @@ mod sparkle_tests {
         )]);
         first_rows(&busy, None, at(0));
         set_sparkle_clock_for_test(Some(at(0)));
-        assert!(!take_sparkle_due(), "the frame drawn is still showing");
+        assert!(!sparkle_due(), "the frame drawn is still showing");
         set_sparkle_clock_for_test(Some(at(1)));
-        assert!(take_sparkle_due(), "the clock moved on");
-        assert!(!take_sparkle_due(), "asked once per drawing");
+        assert!(sparkle_due(), "the clock moved on");
 
         // The worker ends: the next drawing settles the marker and stops the timer's repaints.
         first_rows(&idle, None, at(1));
         set_sparkle_clock_for_test(Some(at(2)));
-        assert!(!take_sparkle_due());
+        assert!(!sparkle_due());
+        assert_eq!(sparkle_timer_delay(default), default);
         set_sparkle_clock_for_test(None);
+    }
+
+    /// Review S2: asking does not change the drawing, so a tick whose compose draws nothing (no surface yet, a stale
+    /// snapshot) leaves the repaint due and the next tick asks again; the sparkle cannot freeze on a frame. A window
+    /// that draws no sidebar at all clears it.
+    #[test]
+    fn a_tick_that_draws_nothing_leaves_the_repaint_due() {
+        let busy = spaces(vec![(
+            AgentStatus::Working,
+            vec![agent("pane_1", "ws_1", AgentStatus::Working, true)],
+        )]);
+        first_rows(&busy, None, at(0));
+        set_sparkle_clock_for_test(Some(at(1)));
+        for tick in 0..3 {
+            assert!(sparkle_due(), "tick {tick}");
+        }
+        // A phone-narrow window draws the mobile header and no sidebar (its own spaces list, `mobile.rs`, keeps
+        // herdr's marker): nothing sparkles, nothing is due.
+        let (frame, _) = compose_with(&busy, None, at(1), 40, |_| {});
+        let text: String = frame
+            .cells
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect();
+        assert!(!sparkles(&text), "{text}");
+        set_sparkle_clock_for_test(Some(at(2)));
+        assert!(!sparkle_due());
+        set_sparkle_clock_for_test(None);
+    }
+
+    /// Review S2 and S5: the gate itself, the same type the window's static holds. A new gate is not due; a drawing
+    /// that sparkled is due on every later frame until the next drawing, however often it is asked; a drawing with
+    /// nothing sparkling is never due.
+    #[test]
+    fn the_gate_is_due_only_on_another_frame_of_a_sparkling_drawing() {
+        let gate = SparkleGate::new();
+        for frame in 0..8 {
+            assert!(!gate.due(frame), "new gate, frame {frame}");
+        }
+        gate.note(Some(3));
+        assert!(!gate.due(3));
+        assert!(gate.due(4));
+        assert!(gate.due(4), "asking leaves the drawing as it was");
+        gate.note(None);
+        assert!(!gate.due(4));
+        assert!(!gate.due(5));
+    }
+
+    /// Review N1: while a drawing sparkles, the timer wakes on the next frame's boundary, so every frame shows its
+    /// 250 ms (on the plain 100 ms tick they showed 300 and 200 ms in turn); otherwise it waits its default.
+    #[test]
+    fn the_timer_wakes_on_the_next_frame_while_sparkling() {
+        let default = Duration::from_millis(100);
+        let gate = SparkleGate::new();
+        let elapsed = SPARKLE_FRAME * 5 + Duration::from_millis(190);
+        assert_eq!(gate.delay(elapsed, default), default);
+        gate.note(Some(5));
+        assert_eq!(gate.delay(elapsed, default), Duration::from_millis(60));
+        assert_eq!(gate.delay(SPARKLE_FRAME * 5, default), default);
+        assert_eq!(
+            gate.delay(
+                SPARKLE_FRAME * 5 + Duration::from_millis(10),
+                Duration::from_secs(1)
+            ),
+            Duration::from_millis(240)
+        );
+
+        // The window's own gate, through the sidebar.
+        let busy = spaces(vec![(
+            AgentStatus::Working,
+            vec![agent("pane_1", "ws_1", AgentStatus::Working, true)],
+        )]);
+        first_rows(&busy, None, at(0));
+        set_sparkle_clock_for_test(Some(elapsed));
+        assert_eq!(sparkle_timer_delay(default), Duration::from_millis(60));
+        note_sparkle_drawn(None);
+        assert_eq!(sparkle_timer_delay(default), default);
+        set_sparkle_clock_for_test(None);
+    }
+
+    /// Review S3: the narrow sidebar shows the same marker as the spaces list: the owner's case sparkles there too,
+    /// through a working pane and through a live worker, and keeps the timer going; a done space reads `✓`.
+    #[test]
+    fn the_narrow_sidebar_sparkles_as_the_spaces_list_does() {
+        let narrow = |snap: &ClientShellSnapshot,
+                      view: Option<HashMap<String, SubagentsView>>,
+                      index: u32| {
+            // Folded after the surface is in, as the owner's toggle does.
+            let mut state = state_for(snap, |_| {});
+            state.sidebar_collapsed = true;
+            let (frame, rects) = compose_state(&mut state, view, at(index), 106);
+            let row = row_texts(&frame, &rects).remove(0);
+            // The narrow row is the space's number in two cells, then its marker.
+            row.chars().nth(2).map(String::from).unwrap_or_default()
+        };
+        let pane = spaces(vec![(
+            AgentStatus::Done,
+            vec![
+                agent("pane_1", "ws_1", AgentStatus::Done, true),
+                agent("pane_2", "ws_1", AgentStatus::Working, false),
+            ],
+        )]);
+        assert_eq!(narrow(&pane, None, 4), SPARKLE_FRAMES[4]);
+        set_sparkle_clock_for_test(Some(at(5)));
+        assert!(sparkle_due(), "the narrow sidebar keeps the sparkle going");
+
+        let worker = spaces(vec![(
+            AgentStatus::Done,
+            vec![agent("pane_1", "ws_1", AgentStatus::Done, true)],
+        )]);
+        assert_eq!(
+            narrow(&worker, Some(live_worker("pane_1")), 2),
+            SPARKLE_FRAMES[2]
+        );
+        assert_eq!(narrow(&worker, None, 2), "\u{2713}");
+        set_sparkle_clock_for_test(Some(at(3)));
+        assert!(
+            !sparkle_due(),
+            "a narrow sidebar with nothing working schedules nothing"
+        );
+        set_sparkle_clock_for_test(None);
+    }
+
+    fn remote_profile() -> SavedSshEndpoint {
+        SavedSshEndpoint {
+            id: ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+            label: "Build".into(),
+            target: "dev@build.example".into(),
+            session: "agents".into(),
+            enabled: true,
+        }
+    }
+
+    /// Each space row of the machines list (this machine's spaces, then the remote's), expanded or narrow, with the
+    /// machine it belongs to. The remote machine has one space whose one agent, `pane_r`, has `remote_status`; it is
+    /// online, or reconnecting with its last snapshot.
+    fn machines_rows(
+        local: &ClientShellSnapshot,
+        remote_status: AgentStatus,
+        remote_online: bool,
+        view: Option<HashMap<String, SubagentsView>>,
+        narrow: bool,
+        index: u32,
+    ) -> Vec<(ClientEndpointId, String)> {
+        let profile = remote_profile();
+        let remote_id = ClientEndpointId::Ssh(profile.id.clone());
+        let mut state = state_for(local, |state| {
+            state.set_endpoint_catalog(&[profile]);
+            state.set_endpoint_status(&remote_id, ClientEndpointStatus::Online);
+        });
+        let mut remote = spaces(vec![(
+            remote_status,
+            vec![agent("pane_r", "ws_1", remote_status, false)],
+        )]);
+        remote.boot_id = "remote-boot".into();
+        remote.workspaces[0].label = "remote-space".into();
+        state.set_endpoint_snapshot(&remote_id, Box::new(remote));
+        if !remote_online {
+            state.set_endpoint_status(&remote_id, ClientEndpointStatus::Reconnecting);
+        }
+        state.sidebar_collapsed = narrow;
+        let (frame, rects) = compose_state(&mut state, view, at(index), 106);
+        let ids: Vec<ClientEndpointId> = state
+            .hits
+            .workspaces
+            .iter()
+            .map(|hit| hit.endpoint_id.clone())
+            .collect();
+        ids.into_iter().zip(row_texts(&frame, &rects)).collect()
+    }
+
+    /// Review S3: the machines list, expanded and narrow, sparkles as the spaces list does: this machine's space for
+    /// its live worker, a remote space for its working agent; a remote space never for this window's worker cache,
+    /// which holds this machine's journals only, nor while its machine is not online.
+    #[test]
+    fn the_machines_list_sparkles_as_the_spaces_list_does() {
+        let local = spaces(vec![(
+            AgentStatus::Done,
+            vec![agent("pane_1", "ws_1", AgentStatus::Done, true)],
+        )]);
+        for narrow in [false, true] {
+            let mut view = live_worker("pane_1");
+            view.extend(live_worker("pane_r"));
+            let rows = machines_rows(&local, AgentStatus::Idle, true, Some(view), narrow, 3);
+            assert_eq!(rows.len(), 2, "narrow {narrow}: {rows:?}");
+            assert_eq!(rows[0].0, ClientEndpointId::Local, "{rows:?}");
+            assert!(sparkles(&rows[0].1), "narrow {narrow}: {rows:?}");
+            assert!(!sparkles(&rows[1].1), "narrow {narrow}: {rows:?}");
+            set_sparkle_clock_for_test(Some(at(4)));
+            assert!(sparkle_due(), "narrow {narrow}");
+
+            let rows = machines_rows(&local, AgentStatus::Working, true, None, narrow, 3);
+            assert!(!sparkles(&rows[0].1), "narrow {narrow}: {rows:?}");
+            assert!(sparkles(&rows[1].1), "narrow {narrow}: {rows:?}");
+            // A machine that is not online shows its last snapshot, which may be stale: no sparkle.
+            let rows = machines_rows(&local, AgentStatus::Working, false, None, narrow, 3);
+            assert_eq!(rows.len(), 2, "narrow {narrow}: {rows:?}");
+            assert!(!sparkles(&rows[1].1), "narrow {narrow}: {rows:?}");
+
+            let rows = machines_rows(&local, AgentStatus::Idle, true, None, narrow, 3);
+            assert!(rows.iter().all(|(_, row)| !sparkles(row)), "{rows:?}");
+            set_sparkle_clock_for_test(Some(at(4)));
+            assert!(!sparkle_due(), "narrow {narrow}");
+        }
+        set_sparkle_clock_for_test(None);
+    }
+
+    /// Review S4: a live row is not always a worker at work. An order that waits (Asked, Deferred) or whose own pane
+    /// is gone keeps its row and does not make the space sparkle; one whose pane is there does.
+    #[test]
+    fn a_waiting_or_paneless_worker_does_not_sparkle() {
+        let snap = spaces(vec![(
+            AgentStatus::Done,
+            vec![agent("pane_1", "ws_1", AgentStatus::Done, true)],
+        )]);
+        let waiting = worker_with("pane_1", |worker| worker.waiting = true);
+        let (frame, rects) = compose_at(&snap, Some(waiting), at(2), &[]);
+        let rows = row_texts(&frame, &rects);
+        assert_eq!(marker(&rows[0]), "\u{2713}", "{rows:?}");
+        let text: String = frame
+            .cells
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect();
+        assert!(text.contains("quad-pegs"), "the worker's row stays");
+
+        let gone = worker_with("pane_1", |worker| {
+            worker.target_pane_id = Some("pane_gone".into());
+        });
+        let rows = first_rows(&snap, Some(gone), at(2));
+        assert_eq!(marker(&rows[0]), "\u{2713}", "{rows:?}");
+
+        let there = worker_with("pane_1", |worker| {
+            worker.target_pane_id = Some("pane_1".into());
+        });
+        let rows = first_rows(&snap, Some(there), at(2));
+        assert_eq!(marker(&rows[0]), SPARKLE_FRAMES[2], "{rows:?}");
     }
 
     /// §2.4: every frame is one cell wide by the width function the sidebar uses, so none falls back to `◐`.

@@ -804,6 +804,8 @@ async fn run_client_loop(
             .map_or(Duration::from_millis(100), |shell| {
                 shell.timer_delay(std::time::Instant::now())
             });
+        // Plan 38: while a space sparkles, wake on the next frame's boundary, so each frame shows its full length.
+        let timer_delay = crate::nirvana_spaces::sparkle_timer_delay(timer_delay);
         let timer_deadline = client_timer.deadline(std::time::Instant::now(), timer_delay);
         let immediate_event = scheduled_activation.take();
         #[cfg(windows)]
@@ -2345,6 +2347,9 @@ async fn run_client_loop(
                             outcome.repaint |= repaint;
                             outcome.actions.extend(actions);
                         }
+                        // Plan 38: the next sparkle frame, only while the last drawing had a working space. A
+                        // statement of its own, away from the `take_changed` chain every square appends to.
+                        outcome.repaint |= crate::nirvana_spaces::sparkle_due();
                         let (effects, notification_repaint) = shell.tick_notifications(now);
                         outcome.repaint |= notification_repaint
                             | shell.tick_copy_feedback(now)

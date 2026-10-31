@@ -72,6 +72,10 @@ pub struct Subagent {
     pub run_id: Option<String>,
     #[serde(default)]
     pub run_event_time: Option<u64>,
+    /// A live seat order that waits rather than works: Asked (on an answer) or Deferred (on a window's reset). Its
+    /// row still shows as live; only plan 38's sparkle leaves it out.
+    #[serde(default)]
+    pub waiting: bool,
 }
 
 /// Cached view of subagents for a pane.
@@ -591,6 +595,7 @@ pub fn read_claude_subagents(
             target_pane_id: Some(parent_pane_id.to_string()),
             run_id: None,
             run_event_time: None,
+            waiting: false,
         });
     }
 
@@ -864,6 +869,7 @@ pub fn find_agy_processes_under(
                     target_pane_id: Some(parent_pane_id.to_string()),
                     run_id: None,
                     run_event_time: None,
+                    waiting: false,
                 });
             }
         }
@@ -934,6 +940,7 @@ pub fn read_agy_jobs(home: &Path, pane_id: &str, now_secs: u64) -> Vec<Subagent>
             target_pane_id: Some(pane_id.to_string()),
             run_id: None,
             run_event_time: None,
+            waiting: false,
         });
     }
     subagents
@@ -1100,6 +1107,10 @@ pub fn read_seat_orders(
                 target_pane_id: target_pane,
                 run_id: Some(run_id),
                 run_event_time,
+                waiting: matches!(
+                    order.phase,
+                    crate::nirvana_run::Phase::Asked | crate::nirvana_run::Phase::Deferred
+                ),
             });
         }
     }
@@ -1753,6 +1764,7 @@ mod tests {
             target_pane_id: None,
             run_id: None,
             run_event_time: None,
+            waiting: false,
         };
         let child = Subagent {
             id: "a2".into(),
@@ -1769,6 +1781,7 @@ mod tests {
             target_pane_id: None,
             run_id: None,
             run_event_time: None,
+            waiting: false,
         };
         let other = Subagent {
             id: "a3".into(),
@@ -1785,6 +1798,7 @@ mod tests {
             target_pane_id: None,
             run_id: None,
             run_event_time: None,
+            waiting: false,
         };
 
         let nested = nest_subagents(vec![child, other, parent]);
@@ -2284,6 +2298,7 @@ mod tests {
             target_pane_id: None,
             run_id: run.map(str::to_owned),
             run_event_time: None,
+            waiting: false,
         };
         let mut rows: Vec<Subagent> = (0..3)
             .map(|i| row(&format!("w{i}"), Some("run-new")))
@@ -2544,6 +2559,14 @@ mod tests {
         assert_eq!(find_state("o-failed"), Some(SubagentState::Failed));
         // Reseated is skipped!
         assert_eq!(find_state("o-reseated"), None);
+        // Plan 38 review S4: Asked and Deferred orders are live but wait; Seated and Running ones work.
+        let waiting = |name: &str| -> Option<bool> {
+            subs.iter().find(|s| s.name == name).map(|s| s.waiting)
+        };
+        assert_eq!(waiting("o-seated"), Some(false));
+        assert_eq!(waiting("o-running"), Some(false));
+        assert_eq!(waiting("o-asked"), Some(true));
+        assert_eq!(waiting("o-deferred"), Some(true));
 
         // Now test Ended run: finished rows are hidden!
         events.push(make_ev(crate::nirvana_run::Kind::Ended {

@@ -57,6 +57,7 @@ fn order(name: &str, state: SubagentState, elapsed_secs: u64) -> Subagent {
         target_pane_id: None,
         run_id: Some("run-20261023-024041".into()),
         run_event_time: Some(1000),
+        waiting: false,
     }
 }
 
@@ -146,8 +147,17 @@ fn a_space_shows_exactly_its_one_live_worker_in_the_panels_format() {
         "   \u{2514} v8-build S5.5 1m07s",
         "{rows:?}"
     );
-    // Everything above the worker row is the space as it was.
-    assert_eq!(&rows[..rows.len() - 1], &before[0][..], "{rows:?}");
+    // Everything above the worker row is the space as it was, but for its marker: a live worker makes the space
+    // sparkle (plan 38).
+    let unmarked = |row: &str| -> String { row.chars().skip(2).collect() };
+    assert_eq!(unmarked(&rows[0]), unmarked(&before[0][0]), "{rows:?}");
+    assert_eq!(&rows[1..rows.len() - 1], &before[0][1..], "{rows:?}");
+    assert!(
+        crate::nirvana_spaces::SPARKLE_FRAMES
+            .iter()
+            .any(|frame| rows[0].starts_with(&format!(" {frame}"))),
+        "{rows:?}"
+    );
     for finished in ["v7-build", "reveal", "lint-fix", "perf-pass"] {
         assert!(rows.iter().all(|row| !row.contains(finished)), "{rows:?}");
     }
@@ -229,6 +239,7 @@ fn workers_of_another_space_never_show_under_this_one() {
             name: "v8-build".into(),
             model: "S5.5".into(),
             elapsed: "1m07s".into(),
+            working: true,
         }]
     );
 
@@ -250,6 +261,7 @@ fn a_long_worker_name_is_cut_and_keeps_model_and_time() {
         name: "v8-build".into(),
         model: "S5.5".into(),
         elapsed: "1m07s".into(),
+        working: true,
     };
     assert_eq!(worker_line(&worker, 19).line, "v8-build S5.5 1m07s");
     assert_eq!(worker_line(&worker, 15).line, "v8-\u{2026} S5.5 1m07s");
@@ -263,6 +275,7 @@ fn a_worktree_space_keeps_its_tree_line_beside_worker_rows() {
         name: "v8-build".into(),
         model: "S5.5".into(),
         elapsed: "1m07s".into(),
+        working: true,
     }];
     let palette = ClientShellConfig::from_config(&Config::default()).palette;
     let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 25, 1));
@@ -457,6 +470,7 @@ fn a_cut_tail_keeps_each_part_in_its_own_colour() {
         name: "v8-build".into(),
         model: "S5.5".into(),
         elapsed: "1m07s".into(),
+        working: true,
     };
     let row = worker_line(&worker, 8);
     assert_eq!(row.line, " S5.5 1\u{2026}");
@@ -486,6 +500,7 @@ fn the_workers_more_row_is_in_the_agents_more_colour() {
             name: format!("w{n}"),
             model: "S5.5".into(),
             elapsed: "1m".into(),
+            working: true,
         })
         .collect();
     let palette = ClientShellConfig::from_config(&Config::default()).palette;
