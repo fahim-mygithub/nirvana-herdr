@@ -584,9 +584,7 @@ pub fn set_live_for_test(live: bool) {
     TEST_LIVE.with(|l| l.set(live));
 }
 
-/// Whether a view changed since the last call: the window repaints when one did. Called from `src/client/mod.rs`'s
-/// repaint chain, a line outside P36's files (the hunk is in the P36 record).
-#[cfg_attr(not(test), allow(dead_code))]
+/// Whether a view changed since the last call: `src/client/mod.rs`'s repaint chain asks every tick.
 pub fn take_changed() -> bool {
     CHANGED.swap(false, Ordering::AcqRel)
 }

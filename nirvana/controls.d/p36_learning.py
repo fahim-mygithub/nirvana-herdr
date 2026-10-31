@@ -24,6 +24,10 @@ T_PANEL = "p36_the_panel_shows_every_section_from_a_fixture_project"
 T_U = "p36_u_asks_first_and_then_rolls_back_exactly_that_row"
 T_OPEN = "p36_enter_opens_the_lesson_or_card_in_the_edit_tab"
 T_DRAW = "p36_drawing_reads_no_file_and_browsing_writes_nothing"
+T_ONE = "p36_one_panel_is_open_at_a_time_with_the_learning_panel_among_them"
+T_PATCH = "p36_the_open_learning_panel_is_not_painted_over_by_its_agent"
+PATCH = "src/client/shell/surface_patch.rs"
+SHELL = "src/client/shell/"
 
 CONTROLS = (
     # §1.2 Lessons: `live` as the offer reads it, live first.
@@ -190,4 +194,25 @@ CONTROLS = (
     Control("p36_profile_opens_file", SQUARE,
             '                        format!("{}{}", crate::nirvana::EDIT_DIR_COMMAND, dir.display())\n',
             '                        format!("{}{}", crate::nirvana::EDIT_FILE_COMMAND, dir.display())\n', T_OPEN, "rust"),
+    # The extension the lead granted (2026-10-31): the repaint flag, the painted-over guard, one panel at a time.
+    Control("p36_view_change_unflagged", LEARN,
+            "                entry.view = Some(view);\n                CHANGED.store(true, Ordering::Release);\n",
+            "                entry.view = Some(view);\n", T_CACHE, "rust"),
+    Control("p36_patch_paints_over", PATCH,
+            "    } else if state.nirvana_learning.is_some() {\n", "    } else if false {\n", T_PATCH, "rust"),
+    Control("p36_accounts_keeps_learning", SHELL + "nirvana_accounts.rs",
+            "        self.nirvana_learning = None;\n        self.nirvana_preload = None;\n",
+            "        self.nirvana_preload = None;\n", T_ONE, "rust"),
+    Control("p36_memory_keeps_learning", SHELL + "nirvana_memory.rs",
+            "        self.nirvana_learning = None;\n        self.nirvana_seats = None;\n",
+            "        self.nirvana_seats = None;\n", T_ONE, "rust"),
+    Control("p36_seats_keeps_learning", SHELL + "nirvana_seats.rs",
+            "        self.nirvana_learning = None;\n        self.nirvana_preload = None;\n",
+            "        self.nirvana_preload = None;\n", T_ONE, "rust"),
+    Control("p36_jobs_keeps_learning", SHELL + "nirvana_jobs.rs",
+            "        self.nirvana_learning = None;\n        self.nirvana_preload = None;\n",
+            "        self.nirvana_preload = None;\n", T_ONE, "rust"),
+    Control("p36_git_keeps_learning", SHELL + "nirvana_git.rs",
+            "        self.nirvana_learning = None;\n        self.nirvana_preload = None;\n",
+            "        self.nirvana_preload = None;\n", T_ONE, "rust"),
 )

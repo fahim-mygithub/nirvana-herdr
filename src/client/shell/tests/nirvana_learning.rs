@@ -446,3 +446,85 @@ fn p36_drawing_reads_no_file_and_browsing_writes_nothing() {
     set_live_for_test(false);
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// Every other panel's toggle closes the Learning panel, and the Learning toggle closes theirs: one is open at a time.
+#[test]
+fn p36_one_panel_is_open_at_a_time_with_the_learning_panel_among_them() {
+    let _home = crate::nirvana::with_test_home("p36-one");
+    let (mut state, root, _) = fixture_state("one");
+    type Toggle = fn(&mut ClientShellState);
+    // A Nirvana tab, so the Seats panel opens too.
+    let mut projected = state.snapshot.as_deref().expect("snapshot").clone();
+    projected.agents[0].name = Some("nirvana".into());
+    state.set_snapshot(Box::new(projected));
+    let others: [(&str, Toggle); 7] = [
+        ("running", ClientShellState::toggle_running_panel),
+        ("preload", ClientShellState::toggle_preload_panel),
+        ("memory", ClientShellState::toggle_memory_panel),
+        ("accounts", ClientShellState::toggle_accounts_panel),
+        ("seats", ClientShellState::toggle_seats_panel),
+        ("jobs", ClientShellState::toggle_jobs_panel),
+        ("git", ClientShellState::toggle_git_panel),
+    ];
+    for (name, toggle) in others {
+        let _ = rows_of(&mut state, 200, 60);
+        state.toggle_learning_panel();
+        assert!(state.nirvana_learning.is_some(), "{name}: learning opens");
+        toggle(&mut state);
+        assert!(
+            state.nirvana_learning.is_none(),
+            "{name} closes the Learning panel"
+        );
+        state.nirvana_preload = None;
+        state.nirvana_running = None;
+        state.nirvana_memory = None;
+        state.nirvana_accounts = None;
+        state.nirvana_seats = None;
+        state.nirvana_jobs = None;
+        state.nirvana_git = None;
+    }
+    done(root);
+}
+
+/// A pane's output while the Learning panel is open composes the frame again, panel on top, as the other panels do.
+#[test]
+fn p36_the_open_learning_panel_is_not_painted_over_by_its_agent() {
+    use crate::client::shell::surface_patch::ClientPaneSurfacePatchOutcome;
+    let _home = crate::nirvana::with_test_home("p36-patch");
+    let (mut state, root, _) = fixture_state("patch");
+    for open_it in [false, true] {
+        state.nirvana_learning = None;
+        let _ = rows_of(&mut state, 200, 60);
+        if open_it {
+            state.toggle_learning_panel();
+            let _ = rows_of(&mut state, 200, 60);
+        }
+        let current = state.pane_surface.clone().expect("pane surface");
+        let mut cell = current.frame.cells[0].clone();
+        cell.symbol = "y".into();
+        let patch = crate::protocol::PaneSurfacePatch {
+            boot_id: current.boot_id,
+            projection_revision: current.projection_revision,
+            base_surface_revision: current.surface_revision,
+            surface_revision: current.surface_revision + 1,
+            panes: current.panes.clone(),
+            rows: vec![crate::protocol::PaneSurfacePatchRow {
+                x: 0,
+                y: 0,
+                cells: vec![cell],
+            }],
+            cursor: current.frame.cursor.clone(),
+        };
+        let outcome = state.apply_pane_surface_patch(patch);
+        assert!(
+            matches!(outcome, ClientPaneSurfacePatchOutcome::Applied(_)),
+            "open {open_it}: taken"
+        );
+        let straight = matches!(outcome, ClientPaneSurfacePatchOutcome::Applied(Some(_)));
+        assert_eq!(
+            straight, !open_it,
+            "written straight to the screen only with no panel open"
+        );
+    }
+    done(root);
+}

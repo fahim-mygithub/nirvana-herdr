@@ -2363,6 +2363,8 @@ async fn run_client_loop(
                             | crate::nirvana_job::take_changed()
                             // Plan 16: the Git square; polls 5s open / 15s idle off the draw path
                             | crate::nirvana_git::take_changed()
+                            // Plan 36: the Learning square; stats its files every 3 s off the draw path
+                            | crate::nirvana_learning::take_changed()
                             // Plan 17: subagents under each agent in the agents panel; polls 2s running / 10s idle
                             | crate::nirvana_subagents::take_changed();
                         let frame = outcome
