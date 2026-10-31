@@ -179,13 +179,21 @@ fn words(rest: &str) -> impl Iterator<Item = String> + '_ {
         .map(str::to_owned)
 }
 
+/// `line` without its leading `key`, the key's case ignored: MotoProject's reel-motion-gemini wrote `Owns:`, and the
+/// gate read "the order names no owned file" (2026-10-31).
+fn strip_key<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    line.get(..key.len())
+        .filter(|head| head.eq_ignore_ascii_case(key))
+        .map(|_| &line[key.len()..])
+}
+
 /// The gate lines of an order file (the syntax in the module comment). herdr's own footer and a send-back's brief
 /// never start a line with one of these words, so a child order reads its root's lines unchanged.
 pub fn spec(text: &str) -> Spec {
     let mut spec = Spec::default();
     for line in text.lines() {
         let line = line.trim_end();
-        if let Some(rest) = line.strip_prefix("owns:") {
+        if let Some(rest) = strip_key(line, "owns:") {
             spec.owns
                 .extend(words(rest).map(|path| path.replace('\\', "/")));
         } else if let Some(rest) = line.strip_prefix("test:") {
@@ -612,6 +620,10 @@ pub const SCRIPT_FETCH_WORDS: &[&str] = &[
     "Invoke-RestMethod",
 ];
 
+/// MotoProject's reel-motion-gemini-r2 read YouTube through `yt_dlp` (16 of its 56 commands), in a script or as
+/// `python -m yt_dlp`; YouTube watches, Shorts and searches all go through it.
+pub const VIDEO_FETCH_WORDS: &[&str] = &["yt_dlp", "yt-dlp", "YoutubeDL"];
+
 /// Fetch words that count only as a whole word: `irm` is inside "confirm". `iwr` stays a substring in
 /// `SHELL_FETCH_WORDS`, as before plan 35.
 pub const FETCH_TOKENS: &[&str] = &["irm"];
@@ -621,6 +633,7 @@ pub fn command_is_shell_fetch(cmd: &str) -> bool {
     SHELL_FETCH_WORDS
         .iter()
         .chain(SCRIPT_FETCH_WORDS)
+        .chain(VIDEO_FETCH_WORDS)
         .any(|word| lower.contains(&word.to_ascii_lowercase()))
         || FETCH_TOKENS.iter().any(|word| has_token(&lower, word))
 }
@@ -721,6 +734,26 @@ fn gh_name(word: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+/// An agy tool step that reads a page: its URL readers and browser tools, or an MCP call to a browser server.
+fn agy_fetch_tool(tool_name: &str, params: &Value) -> bool {
+    let is_browser_mcp = tool_name == "call_mcp_tool" && {
+        let mut p_strings = Vec::new();
+        collect_json_strings(params, &mut p_strings);
+        p_strings.iter().any(|s| {
+            let s_lower = s.to_ascii_lowercase();
+            s_lower.contains("browser")
+                || s_lower.contains("bladebro")
+                || s_lower.contains("chrome")
+                || s_lower.contains("playwright")
+        })
+    };
+    tool_name == "read_url_content"
+        || tool_name == "open_browser_url"
+        || tool_name == "read_browser_page"
+        || tool_name.starts_with("browser_")
+        || is_browser_mcp
+}
+
 /// Checks if a normalized URL was fetched, read or browsed in the worker stream.
 fn url_in_stream(norm_url: &str, stream: &str) -> bool {
     if norm_url.is_empty() {
@@ -780,23 +813,7 @@ fn url_in_stream(norm_url: &str, stream: &str) -> bool {
         if step.get("step_type").and_then(Value::as_str) == Some("tool") {
             let tool_name = step.get("tool_name").and_then(Value::as_str).unwrap_or("");
             let params = &step["tool_info"]["parameters"];
-            let is_browser_mcp = tool_name == "call_mcp_tool" && {
-                let mut p_strings = Vec::new();
-                collect_json_strings(params, &mut p_strings);
-                p_strings.iter().any(|s| {
-                    let s_lower = s.to_ascii_lowercase();
-                    s_lower.contains("browser")
-                        || s_lower.contains("bladebro")
-                        || s_lower.contains("chrome")
-                        || s_lower.contains("playwright")
-                })
-            };
-            let is_agy_fetch = tool_name == "read_url_content"
-                || tool_name == "open_browser_url"
-                || tool_name == "read_browser_page"
-                || tool_name.starts_with("browser_")
-                || is_browser_mcp;
-            if is_agy_fetch {
+            if agy_fetch_tool(tool_name, params) {
                 let mut strings = Vec::new();
                 collect_json_strings(params, &mut strings);
                 for s in strings {
@@ -824,6 +841,266 @@ fn url_in_stream(norm_url: &str, stream: &str) -> bool {
     false
 }
 
+/// A cited source's stable id: what stays the same between the URL a worker cites and the one it fetched
+/// (MotoProject's reel-motion-gemini-r2 cited `reddit.com/r/x/comments/<id>/<slug>/` and fetched `.../<slug>/.rss`, and
+/// read YouTube pages through `yt_dlp` with the ids in a Python list).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StableId {
+    /// A YouTube video id, 11 characters.
+    Video(String),
+    /// A Reddit post id, lowercased.
+    Post(String),
+    /// A GitHub repository as `owner/name`, lowercased; only a repository's own page or API URL.
+    Repo(String),
+    /// A local file, lowercased, `/` separators.
+    Path(String),
+}
+
+/// The stable id of a cited source, or `None` for any other URL (which keeps the per-segment rule alone).
+pub fn stable_id(url: &str) -> Option<StableId> {
+    let url = url.trim();
+    if let Some(path) = url.strip_prefix("file:///") {
+        return Some(StableId::Path(local_path(&path.replace("%20", " "))));
+    }
+    let bytes = url.as_bytes();
+    if bytes.len() > 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+    {
+        return Some(StableId::Path(local_path(url)));
+    }
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let rest = rest.split('#').next().unwrap_or(rest);
+    let (host, path_query) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let host = host.to_ascii_lowercase();
+    let host = ["www.", "m.", "old.", "music.", "embed."]
+        .iter()
+        .find_map(|sub| host.strip_prefix(sub))
+        .unwrap_or(&host);
+    let (path, query) = path_query.split_once('?').unwrap_or((path_query, ""));
+    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+    let video = |id: &str| {
+        (id.len() == 11 && id.bytes().all(id_byte)).then(|| StableId::Video(id.to_owned()))
+    };
+    match host {
+        "youtube.com" => match parts.as_slice() {
+            ["watch"] => query
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("v="))
+                .and_then(video),
+            ["shorts" | "embed" | "live", id, ..] => video(id),
+            _ => None,
+        },
+        "youtu.be" => parts.first().and_then(|id| video(id)),
+        "redd.it" => parts.first().and_then(|id| post(id)),
+        "reddit.com" => parts
+            .iter()
+            .position(|p| *p == "comments")
+            .and_then(|at| parts.get(at + 1))
+            .and_then(|id| post(id)),
+        "github.com" => match parts.as_slice() {
+            [owner, name] => repo(owner, name),
+            _ => None,
+        },
+        "api.github.com" => match parts.as_slice() {
+            ["repos", owner, name] => repo(owner, name),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn id_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')
+}
+
+fn post(id: &str) -> Option<StableId> {
+    (id.len() >= 4 && id.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .then(|| StableId::Post(id.to_ascii_lowercase()))
+}
+
+fn repo(owner: &str, name: &str) -> Option<StableId> {
+    let name = name.strip_suffix(".git").unwrap_or(name);
+    (gh_name(owner) && gh_name(name))
+        .then(|| StableId::Repo(format!("{owner}/{name}").to_ascii_lowercase()))
+}
+
+fn local_path(path: &str) -> String {
+    path.replace('\\', "/").to_lowercase()
+}
+
+/// `id` stands in `text` as itself: for a video id no id character touches it; a post id follows `comments/` or
+/// `redd.it/`; a repository is not part of a longer name.
+fn id_in(text: &str, id: &StableId) -> bool {
+    let free = |text: &str, at: usize, len: usize, joins: &dyn Fn(char) -> bool| {
+        !text[..at].chars().next_back().is_some_and(joins)
+            && !text[at + len..].chars().next().is_some_and(joins)
+    };
+    match id {
+        StableId::Video(v) => text
+            .match_indices(v.as_str())
+            .any(|(at, _)| free(text, at, v.len(), &|c| c.is_ascii() && id_byte(c as u8))),
+        StableId::Post(p) => {
+            let lower = text.to_ascii_lowercase();
+            ["comments/", "redd.it/"].iter().any(|lead| {
+                let needle = format!("{lead}{p}");
+                lower.match_indices(&needle).any(|(at, _)| {
+                    !lower[at + needle.len()..]
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_alphanumeric())
+                })
+            })
+        }
+        StableId::Repo(r) => {
+            let lower = text.to_ascii_lowercase();
+            let joins = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.');
+            lower.match_indices(r.as_str()).any(|(at, _)| {
+                let tail = &lower[at + r.len()..];
+                let tail = tail.strip_prefix(".git").unwrap_or(tail);
+                !lower[..at].chars().next_back().is_some_and(joins)
+                    && !tail.chars().next().is_some_and(joins)
+            })
+        }
+        StableId::Path(_) => false,
+    }
+}
+
+/// What a stream shows the worker read, beyond the per-segment rule: the text of each command that runs a fetch
+/// (looked for outside its URLs, anywhere in the command) and each fetch tool's call, the output of each, and every
+/// path a file-reading tool opened. A stable id counts in a fetch's text or output; a plain URL only in an output,
+/// where the page or its redirect came back (reveal-gemini printed each resolved vertexaisearch URL).
+#[derive(Debug, Default)]
+pub struct Reads {
+    texts: Vec<String>,
+    outputs: Vec<String>,
+    paths: Vec<String>,
+}
+
+/// A whole command runs a fetch: a fetch word outside its URLs, or a `gh` read in one of its segments.
+fn command_fetches(cmd: &str) -> bool {
+    let mut rest = cmd.to_owned();
+    for token in extract_url_tokens(cmd) {
+        rest = rest.replace(token.as_str(), " ");
+    }
+    command_is_shell_fetch(&rest)
+        || cmd
+            .split(['\n', ';', '|'])
+            .flat_map(|s| s.split("&&"))
+            .any(|segment| !gh_read_urls(segment).is_empty())
+}
+
+fn json_text(val: &Value) -> String {
+    let mut strings = Vec::new();
+    collect_json_strings(val, &mut strings);
+    strings.join("\n")
+}
+
+pub fn stream_reads(stream: &str) -> Reads {
+    let mut reads = Reads::default();
+    let mut fetch_ids: Vec<String> = Vec::new();
+    for line in stream.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if let Some(content) = val.pointer("/message/content").and_then(Value::as_array) {
+            for block in content {
+                let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+                match block.get("type").and_then(Value::as_str) {
+                    Some("tool_use") => {
+                        let input = block.get("input").unwrap_or(&Value::Null);
+                        let id = block.get("id").and_then(Value::as_str).unwrap_or("");
+                        let command = input.get("command").and_then(Value::as_str);
+                        if name == "Bash" || name == "PowerShell" {
+                            if let Some(command) = command.filter(|c| command_fetches(c)) {
+                                reads.texts.push(command.to_owned());
+                                fetch_ids.push(id.to_owned());
+                            }
+                        } else if name == "WebFetch"
+                            || (name.starts_with("mcp__")
+                                && ["browser", "bladebro", "chrome", "playwright"]
+                                    .iter()
+                                    .any(|w| name.contains(w)))
+                        {
+                            reads.texts.push(json_text(input));
+                            fetch_ids.push(id.to_owned());
+                        } else if name == "Read" {
+                            if let Some(path) = input.get("file_path").and_then(Value::as_str) {
+                                reads.paths.push(local_path(path));
+                            }
+                        }
+                    }
+                    Some("tool_result") => {
+                        let id = block
+                            .get("tool_use_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        if !id.is_empty() && fetch_ids.iter().any(|f| f == id) {
+                            reads
+                                .outputs
+                                .push(json_text(block.get("content").unwrap_or(&Value::Null)));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let step = val.get("step_update").unwrap_or(&val);
+        if step.get("step_type").and_then(Value::as_str) != Some("tool") {
+            continue;
+        }
+        let tool = step.get("tool_name").and_then(Value::as_str).unwrap_or("");
+        let params = &step["tool_info"]["parameters"];
+        let output = step["tool_info"]["output"].as_str().unwrap_or("");
+        match tool {
+            "run_command" => {
+                let command = params["CommandLine"].as_str().unwrap_or("");
+                if command_fetches(command) {
+                    reads.texts.push(command.to_owned());
+                    reads.outputs.push(output.to_owned());
+                }
+            }
+            "read_file" | "view_file" => {
+                for key in ["Path", "AbsolutePath", "file_path"] {
+                    if let Some(path) = params.get(key).and_then(Value::as_str) {
+                        reads.paths.push(local_path(path));
+                    }
+                }
+            }
+            _ if agy_fetch_tool(tool, params) => {
+                reads.texts.push(json_text(params));
+                reads.outputs.push(output.to_owned());
+            }
+            _ => {}
+        }
+    }
+    reads
+}
+
+/// A cited source the stream shows read beyond the per-segment rule (`stream_reads`).
+pub fn stable_read(url: &str, reads: &Reads) -> bool {
+    match stable_id(url) {
+        Some(StableId::Path(path)) => reads.paths.contains(&path),
+        Some(id) => reads
+            .texts
+            .iter()
+            .chain(&reads.outputs)
+            .any(|text| id_in(text, &id)),
+        None => {
+            let norm = normalize_url(url);
+            !norm.is_empty()
+                && reads.outputs.iter().any(|output| {
+                    extract_url_tokens(output)
+                        .iter()
+                        .any(|token| normalize_url(token) == norm)
+                })
+        }
+    }
+}
+
 /// Plan 24 §5: gate axis for `research.*` and `media.*` classes.
 /// Fails with no sources; fails for each source URL that does not appear in the order's stream
 /// as a fetch, read or browser call. URLs are compared after trimming a trailing `/` and the fragment.
@@ -848,6 +1125,7 @@ pub fn sources_axis(class: &str, report: Option<&Value>, stream: &str) -> Option
             ))
         }
     };
+    let reads = stream_reads(stream);
     let mut missing = Vec::new();
     for item in sources {
         let Some(url) = item.get("url").and_then(Value::as_str) else {
@@ -855,6 +1133,9 @@ pub fn sources_axis(class: &str, report: Option<&Value>, stream: &str) -> Option
             continue;
         };
         let norm = normalize_url(url);
+        if stable_read(url, &reads) {
+            continue;
+        }
         if !url_in_stream(&norm, stream) {
             missing.push(url.to_owned());
         }
@@ -1230,6 +1511,85 @@ fn uncommitted(cwd: &Path) -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// A file's size and modification time, or `None` when it is gone.
+fn fingerprint(path: &Path) -> Option<(u64, u128)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?;
+    let nanos = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    Some((meta.len(), nanos))
+}
+
+fn seat_snapshot_path(project: &Project, run: &str, order: &str) -> PathBuf {
+    gate_dir(project, run).join(format!("{order}.seat-dirty.json"))
+}
+
+/// Plan 35 P35a, MotoProject round: the project folder's uncommitted files when an order is seated there, each with
+/// its size and time, so the owned axis counts only what the order changed. reel-motion-gemini-r2 ran in the project
+/// folder and was sent back for "3958 file(s) changed that the order does not own": the whole dirty tree, none of
+/// it its own. `seat run` calls this for an order with no worktree, before the worker starts.
+// `seat run` calls it once the plan 35 P35a hunk for `nirvana_worker.rs` lands; until then only the tests do.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn write_seat_snapshot(
+    project: &Project,
+    run: &str,
+    order: &str,
+    cwd: &Path,
+) -> Result<usize, String> {
+    let dirty = uncommitted(cwd)?;
+    let snapshot: serde_json::Map<String, Value> = dirty
+        .iter()
+        .map(|path| {
+            let print = fingerprint(&cwd.join(path)).map_or(Value::Null, |(len, nanos)| {
+                serde_json::json!([len, nanos.to_string()])
+            });
+            (path.clone(), print)
+        })
+        .collect();
+    let file = seat_snapshot_path(project, run, order);
+    std::fs::create_dir_all(gate_dir(project, run)).map_err(|err| err.to_string())?;
+    std::fs::write(&file, Value::Object(snapshot).to_string())
+        .map_err(|err| format!("{}: {err}", file.display()))?;
+    Ok(dirty.len())
+}
+
+/// The uncommitted paths an order in the project folder changed, against its chain root's seat snapshot: a path
+/// dirty at seating counts only when its size or time moved since. With no snapshot (an order seated before plan 35),
+/// a path counts when it was modified at or after the root was seated, and a deletion is not counted, because the
+/// gate cannot tell when it happened. With neither a snapshot nor a seating in the journal, the whole dirty tree.
+fn order_changes(subject: &Subject) -> Result<Vec<String>, String> {
+    let dirty = uncommitted(subject.cwd)?;
+    let project = Project::at(subject.root);
+    let state = replay(&project.journal(subject.run).read().0);
+    let (root, _) = chain(&state, subject.order);
+    let snapshot = std::fs::read_to_string(seat_snapshot_path(&project, subject.run, &root))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Map<String, Value>>(&text).ok());
+    if let Some(snapshot) = snapshot {
+        return Ok(dirty
+            .into_iter()
+            .filter(|path| {
+                let now = fingerprint(&subject.cwd.join(path))
+                    .map_or(Value::Null, |(len, nanos)| {
+                        serde_json::json!([len, nanos.to_string()])
+                    });
+                snapshot.get(path) != Some(&now)
+            })
+            .collect());
+    }
+    let Some(seated_at) = state.order(&root).map(|known| known.seated_at) else {
+        return Ok(dirty);
+    };
+    Ok(dirty
+        .into_iter()
+        .filter(|path| {
+            fingerprint(&subject.cwd.join(path))
+                .is_some_and(|(_, nanos)| nanos / 1_000_000_000 >= u128::from(seated_at))
+        })
+        .collect())
+}
+
 /// Commits the worker's work on its own branch, herdr's folder left out: every change to a tracked file, and each
 /// new file an `owns:` pattern names. A new file no pattern names stays out of the commit and is returned: the live
 /// run of 2026-10-18 committed the worker's `__pycache__/*.pyc`, which its own test run had made in a project with
@@ -1489,7 +1849,7 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
     axes.push(report_axis(subject.report));
     let changed = match (&base, worktree) {
         (Some(base), true) => changed_files(subject.cwd, base),
-        _ => uncommitted(subject.cwd),
+        _ => order_changes(subject),
     };
     axes.push(match changed {
         Ok(changed) => owned_axis(subject.class, &changed, &subject.spec.owns),
@@ -1699,6 +2059,12 @@ fn original(text: &str) -> String {
 }
 
 /// A send-back child's brief: the reasons, then the root order. A held-out failure gives the case ids only.
+/// A sources fail means the gate saw no read of the cited sources, and reel-motion-gemini's twelve were invented: its
+/// send-back said "do not start over" and kept them (MotoProject, 2026-10-31). Nothing cited is trusted.
+pub const SOURCES_REDO: &str = "none of the sources you cited is trusted, because the gate saw no read of them. Open \
+each one again in this session, with a command or tool of its own, before you cite it; drop every source you cannot \
+open, and redo each claim that rests on a dropped source.";
+
 pub fn send_back_brief(
     order: &str,
     root: &str,
@@ -1709,7 +2075,12 @@ pub fn send_back_brief(
 ) -> String {
     let mut brief = format!(
         "# Send-back {n} of {SEND_BACK_CAP}: {root}\n\nherdr's gate sent back {order}. Its work is in this folder, committed \
-on this branch. You are a new session: fix what the gate found, do not start over.\n\n## What the gate found\n\n"
+on this branch. You are a new session: {}\n\n## What the gate found\n\n",
+        if failing(axes).iter().any(|axis| axis.axis == "sources") {
+            SOURCES_REDO
+        } else {
+            "fix what the gate found, do not start over."
+        }
     );
     for axis in failing(axes) {
         brief.push_str(&format!("- **{}**: {}\n", axis.axis, axis.why));

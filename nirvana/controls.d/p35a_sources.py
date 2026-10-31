@@ -65,8 +65,122 @@ CONTROLS = (
             '            ("repo", Some("view")) => {\n', '            ("repo" | "search", _) => {\n', T_GH_VIEW, "rust"),
     # Item 3: agy's bladebro call through call_mcp_tool.
     Control("p35a_p2_no_bladebro", GATE,
-            '                        || s_lower.contains("bladebro")\n', "", T_P2, "rust"),
-    # Items 4 and 5: the real send-backs count exactly what the twin counted, neither less (gh) nor more (per script).
+            '                || s_lower.contains("bladebro")\n', "", T_P2, "rust"),
+    # Items 4 and 5: the real send-backs count exactly what the twin counted. Reading per script no longer moves them
+    # (the stable-id and output rules already count every URL per script would), so that sabotage is T_SEG's alone.
     Control("p35a_real_no_gh", GATE, GH_CALL, "", T_REAL, "rust"),
-    Control("p35a_real_per_script", GATE, PER_SEGMENT, "    for segment in [cmd] {\n", T_REAL, "rust"),
+)
+
+# The MotoProject round (orchestrator, 2026-10-31): stable ids, yt_dlp, file sources, `Owns:`, the sources send-back
+# brief, and the owned axis in the project folder.
+T_SID = "p35a_stable_ids_are_video_post_repository_and_path"
+T_STABLE = "p35a_a_stable_id_counts_in_a_fetching_command_or_its_output"
+T_YT = "p35a_yt_dlp_is_a_fetch_word"
+T_FILE = "p35a_a_file_source_counts_against_read_file"
+T_OWNS = "p35a_the_owns_key_is_read_in_any_case"
+T_BRIEF = "p35a_a_sources_send_back_says_no_cited_source_is_trusted"
+T_SNAP = "p35a_the_owned_axis_in_the_project_folder_counts_only_the_orders_changes"
+T_MTIME = "p35a_with_no_snapshot_the_owned_axis_counts_files_modified_since_seating"
+T_MOTO = "p35a_motoproject_streams_count_what_the_twin_counts"
+
+STABLE_CALL = "        if stable_read(url, &reads) {\n            continue;\n        }\n"
+NO_STABLE = ""
+AGY_FETCH_ONLY = "                if command_fetches(command) {\n                    reads.texts.push(command.to_owned());\n"
+AGY_ANY = "                if true {\n                    reads.texts.push(command.to_owned());\n"
+VIDEO = 'pub const VIDEO_FETCH_WORDS: &[&str] = &["yt_dlp", "yt-dlp", "YoutubeDL"];'
+
+CONTROLS = CONTROLS + (
+    # Stable ids: each form, the id length, a page inside a repository, the API form, a file, the lowercase repo.
+    Control("p35a_sid_no_youtu_be", GATE,
+            '        "youtu.be" => parts.first().and_then(|id| video(id)),\n', '        "youtu.be" => None,\n',
+            T_SID, "rust"),
+    Control("p35a_sid_no_shorts", GATE,
+            '            ["shorts" | "embed" | "live", id, ..] => video(id),\n',
+            '            ["embed" | "live", id, ..] => video(id),\n', T_SID, "rust"),
+    Control("p35a_sid_any_length", GATE,
+            "        (id.len() == 11 && id.bytes().all(id_byte))", "        (id.bytes().all(id_byte))", T_SID, "rust"),
+    Control("p35a_sid_no_post", GATE,
+            '            .position(|p| *p == "comments")\n', '            .position(|p| *p == "comment")\n', T_SID, "rust"),
+    Control("p35a_sid_deep_repo", GATE,
+            "            [owner, name] => repo(owner, name),\n", "            [owner, name, ..] => repo(owner, name),\n",
+            T_SID, "rust"),
+    Control("p35a_sid_no_api_repo", GATE,
+            '            ["repos", owner, name] => repo(owner, name),\n', "            _ if false => None,\n",
+            T_SID, "rust"),
+    Control("p35a_sid_no_file", GATE,
+            '        return Some(StableId::Path(local_path(&path.replace("%20", " "))));\n', "        return None;\n",
+            T_SID, "rust"),
+    Control("p35a_sid_repo_case_kept", GATE,
+            '        .then(|| StableId::Repo(format!("{owner}/{name}").to_ascii_lowercase()))\n',
+            '        .then(|| StableId::Repo(format!("{owner}/{name}")))\n', T_SID, "rust"),
+    # Counting: the rule is used at all, only fetching commands, outputs read, plain URLs only in outputs, the id
+    # boundaries, Claude's results, the `.rss` post.
+    Control("p35a_stable_unused", GATE, STABLE_CALL, NO_STABLE, T_STABLE, "rust"),
+    Control("p35a_stable_any_command", GATE, AGY_FETCH_ONLY, AGY_ANY, T_STABLE, "rust"),
+    Control("p35a_stable_no_output", GATE,
+            "                    reads.texts.push(command.to_owned());\n                    reads.outputs.push(output.to_owned());\n",
+            "                    reads.texts.push(command.to_owned());\n", T_STABLE, "rust"),
+    Control("p35a_plain_url_in_command_text", GATE,
+            "                && reads.outputs.iter().any(|output| {\n",
+            "                && reads.outputs.iter().chain(&reads.texts).any(|output| {\n", T_STABLE, "rust"),
+    Control("p35a_video_id_unbounded", GATE,
+            "            .any(|(at, _)| free(text, at, v.len(), &|c| c.is_ascii() && id_byte(c as u8))),\n",
+            "            .any(|(at, _)| free(text, at, v.len(), &|_| false)),\n", T_STABLE, "rust"),
+    Control("p35a_post_id_unbounded", GATE,
+            "                    !lower[at + needle.len()..]\n", "                    true || !lower[at + needle.len()..]\n",
+            T_STABLE, "rust"),
+    Control("p35a_claude_result_unread", GATE,
+            "                        if !id.is_empty() && fetch_ids.iter().any(|f| f == id) {\n",
+            "                        if false {\n", T_STABLE, "rust"),
+    Control("p35a_post_only_redd_it", GATE,
+            '            ["comments/", "redd.it/"].iter().any(|lead| {\n', '            ["redd.it/"].iter().any(|lead| {\n',
+            T_STABLE, "rust"),
+    # yt_dlp: drop each word.
+    Control("p35a_no_yt_dlp", GATE, VIDEO, 'pub const VIDEO_FETCH_WORDS: &[&str] = &["yt-dlp", "YoutubeDL"];', T_YT, "rust"),
+    Control("p35a_no_yt_dash_dlp", GATE, VIDEO, 'pub const VIDEO_FETCH_WORDS: &[&str] = &["yt_dlp", "YoutubeDL"];', T_YT,
+            "rust"),
+    Control("p35a_no_youtubedl", GATE, VIDEO, 'pub const VIDEO_FETCH_WORDS: &[&str] = &["yt_dlp", "yt-dlp"];', T_YT,
+            "rust"),
+    # Files: agy's read_file, Claude's Read, separators and case, the exact path.
+    Control("p35a_file_no_read_file", GATE,
+            '            "read_file" | "view_file" => {\n', '            "view_file" => {\n', T_FILE, "rust"),
+    Control("p35a_file_no_claude_read", GATE,
+            '                        } else if name == "Read" {\n', '                        } else if name == "ReadX" {\n',
+            T_FILE, "rust"),
+    Control("p35a_file_raw_path", GATE,
+            "    path.replace('\\\\', \"/\").to_lowercase()\n", "    path.to_owned()\n", T_FILE, "rust"),
+    Control("p35a_file_any_path", GATE,
+            "        Some(StableId::Path(path)) => reads.paths.contains(&path),\n",
+            "        Some(StableId::Path(_)) => !reads.paths.is_empty(),\n", T_FILE, "rust"),
+    # `Owns:` in any case, and only the key itself.
+    Control("p35a_owns_lowercase_only", GATE,
+            '        if let Some(rest) = strip_key(line, "owns:") {\n',
+            '        if let Some(rest) = line.strip_prefix("owns:") {\n', T_OWNS, "rust"),
+    Control("p35a_owns_prefix_only", GATE,
+            "        .filter(|head| head.eq_ignore_ascii_case(key))\n",
+            "        .filter(|head| head[..4].eq_ignore_ascii_case(&key[..4]))\n", T_OWNS, "rust"),
+    # The send-back brief: the sources text on a sources fail, and only then.
+    Control("p35a_brief_never_redo", GATE,
+            '        if failing(axes).iter().any(|axis| axis.axis == "sources") {\n', "        if false {\n", T_BRIEF, "rust"),
+    Control("p35a_brief_always_redo", GATE,
+            '        if failing(axes).iter().any(|axis| axis.axis == "sources") {\n', "        if true {\n", T_BRIEF, "rust"),
+    # The owned axis in the project folder: the whole tree again, the snapshot's prints ignored, the time ignored,
+    # a deletion counted.
+    Control("p35a_owned_whole_tree", GATE,
+            "        _ => order_changes(subject),\n", "        _ => uncommitted(subject.cwd),\n", T_SNAP, "rust"),
+    Control("p35a_owned_whole_tree_mtime", GATE,
+            "        _ => order_changes(subject),\n", "        _ => uncommitted(subject.cwd),\n", T_MTIME, "rust"),
+    Control("p35a_owned_snapshot_paths_only", GATE,
+            "                snapshot.get(path) != Some(&now)\n", "                !snapshot.contains_key(path)\n",
+            T_SNAP, "rust"),
+    Control("p35a_owned_time_ignored", GATE,
+            "                .is_some_and(|(_, nanos)| nanos / 1_000_000_000 >= u128::from(seated_at))\n",
+            "                .is_some_and(|_| seated_at > 0)\n", T_MTIME, "rust"),
+    Control("p35a_owned_deletion_counted", GATE,
+            "                .is_some_and(|(_, nanos)| nanos / 1_000_000_000 >= u128::from(seated_at))\n",
+            "                .map_or(true, |(_, nanos)| nanos / 1_000_000_000 >= u128::from(seated_at))\n", T_MTIME, "rust"),
+    # MotoProject's streams: the stable rule at all, and only fetching commands (the fabricated order and its notes).
+    Control("p35a_moto_stable_unused", GATE, STABLE_CALL, NO_STABLE, T_MOTO, "rust"),
+    Control("p35a_moto_any_command", GATE, AGY_FETCH_ONLY, AGY_ANY, T_MOTO, "rust"),
+    Control("p35a_real_stable_unused", GATE, STABLE_CALL, NO_STABLE, T_REAL, "rust"),
 )

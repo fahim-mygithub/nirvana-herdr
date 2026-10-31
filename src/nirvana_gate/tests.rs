@@ -1798,6 +1798,17 @@ fn p35a_gh_repo_view_counts_the_repository() {
     ] {
         assert_eq!(p35a_mark(url, &agy_run(cmd)), Mark::Pass, "{url}");
     }
+    // The stable id would count these URLs anyway (the repository named in a gh read), so the mapping itself is
+    // checked where the per-segment rule uses it.
+    let urls = shell_fetch_urls(cmd);
+    for url in [
+        "https://github.com/MindDock/motion-tracker",
+        "https://api.github.com/repos/MindDock/motion-tracker",
+        "https://github.com/lguibr/Mimeflow",
+        "https://api.github.com/repos/lguibr/Mimeflow",
+    ] {
+        assert!(urls.contains(&url.to_owned()), "{url}: {urls:?}");
+    }
     // A search names repositories it does not read.
     assert_eq!(
         p35a_mark(
@@ -1843,9 +1854,27 @@ fn p35a_the_probe_2_bladebro_stream_passes_example_com() {
     assert_eq!(p35a_mark("https://example.com", PROBE_2), Mark::Pass);
 }
 
-/// Plan 35 P35a items 4 and 5: the 11 sources send-backs in groove-coach (research §4's 9, and yt-breakdown and
-/// yt-breakdown-illit after it), cut to their tool calls with no outputs (record `p35a.md`). The counts are the ones
-/// the build's Python twin of this rule printed on the full streams; master's rule counts 23 of agy's 85.
+/// Each fixture's cited sources, and how many of them the sources check counts.
+fn p35a_counts(fixture: &str) -> (usize, usize) {
+    let (head, stream) = fixture.split_once('\n').expect("head line");
+    let head: Value = serde_json::from_str(head).expect("head json");
+    let urls: Vec<&str> = head["sources"]
+        .as_array()
+        .expect("sources")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let counted = urls
+        .iter()
+        .filter(|url| p35a_mark(url, stream) == Mark::Pass)
+        .count();
+    (urls.len(), counted)
+}
+
+/// Plan 35 P35a items 4 and 5, and the MotoProject round: the 11 sources send-backs in groove-coach (research §4's 9,
+/// and yt-breakdown and yt-breakdown-illit after it), cut to their tool calls with each output's lines that hold a URL
+/// or a cited id (record `p35a.md`). The counts are the ones the build's Python twin printed on the full streams;
+/// master's rule counts 23 of agy's 85.
 #[test]
 fn p35a_real_sources_send_backs_count_what_the_twin_counts() {
     let fixtures: [(&str, &str, usize, usize); 11] = [
@@ -1865,19 +1894,19 @@ fn p35a_real_sources_send_backs_count_what_the_twin_counts() {
             "body-extrapolation",
             include_str!("fixtures/body-extrapolation.jsonl"),
             20,
-            0,
+            20,
         ),
         (
             "ref-authoring",
             include_str!("fixtures/ref-authoring.jsonl"),
             10,
-            0,
+            10,
         ),
         (
             "ref-authoring-s1",
             include_str!("fixtures/ref-authoring-s1.jsonl"),
             10,
-            0,
+            10,
         ),
         (
             "ref-dance-apps",
@@ -1895,7 +1924,7 @@ fn p35a_real_sources_send_backs_count_what_the_twin_counts() {
             "video-breakdown",
             include_str!("fixtures/video-breakdown.jsonl"),
             2,
-            0,
+            2,
         ),
         (
             "yt-breakdown",
@@ -1913,24 +1942,335 @@ fn p35a_real_sources_send_backs_count_what_the_twin_counts() {
             "yt-video-pick",
             include_str!("fixtures/yt-video-pick.jsonl"),
             5,
-            0,
+            5,
         ),
     ];
     for (order, text, cited, counted) in fixtures {
-        let (head, stream) = text.split_once('\n').expect("head line");
-        let head: Value = serde_json::from_str(head).expect("head json");
-        assert_eq!(head["order"], order);
-        let urls: Vec<&str> = head["sources"]
-            .as_array()
-            .expect("sources")
-            .iter()
-            .filter_map(Value::as_str)
-            .collect();
-        assert_eq!(urls.len(), cited, "{order}");
-        let got = urls
-            .iter()
-            .filter(|url| p35a_mark(url, stream) == Mark::Pass)
-            .count();
-        assert_eq!(got, counted, "{order}");
+        assert_eq!(p35a_counts(text), (cited, counted), "{order}");
     }
+}
+
+/// The MotoProject round (orchestrator, 2026-10-31): agy research orders in MotoProject, cut the same way. r2 read
+/// through `yt_dlp`, Python URL lists and Reddit `.rss`; master and the per-segment rule counted 0 of its 22. The
+/// fabricated reel-motion-gemini stays at 0 of 12, and so does its copy with one added step that prints the notes
+/// file holding every cited URL (the analysis's sabotage, `control_fab_cat.jsonl`): no fetch, so no read.
+#[test]
+fn p35a_motoproject_streams_count_what_the_twin_counts() {
+    let fixtures: [(&str, &str, usize, usize); 7] = [
+        (
+            "reel-motion-gemini-r2",
+            include_str!("fixtures/moto-reel-motion-gemini-r2.jsonl"),
+            22,
+            22,
+        ),
+        (
+            "reel-motion-gemini",
+            include_str!("fixtures/moto-reel-motion-gemini.jsonl"),
+            12,
+            0,
+        ),
+        (
+            "fab-cat",
+            include_str!("fixtures/moto-fab-cat.jsonl"),
+            12,
+            0,
+        ),
+        (
+            "reveal-gemini",
+            include_str!("fixtures/moto-reveal-gemini.jsonl"),
+            18,
+            17,
+        ),
+        (
+            "imp-gemini-aspect",
+            include_str!("fixtures/moto-imp-gemini-aspect.jsonl"),
+            17,
+            17,
+        ),
+        (
+            "v13-drone-research",
+            include_str!("fixtures/moto-v13-drone-research.jsonl"),
+            12,
+            2,
+        ),
+        (
+            "v12-smudge-map",
+            include_str!("fixtures/moto-v12-smudge-map.jsonl"),
+            12,
+            12,
+        ),
+    ];
+    for (order, text, cited, counted) in fixtures {
+        assert_eq!(p35a_counts(text), (cited, counted), "{order}");
+    }
+}
+
+/// An agy `run_command` step with its output.
+fn agy_run_out(command: &str, output: &str) -> String {
+    serde_json::json!({
+        "step_update": {
+            "step_type": "tool",
+            "state": "DONE",
+            "tool_name": "run_command",
+            "tool_info": {"parameters": {"CommandLine": command}, "output": output}
+        }
+    })
+    .to_string()
+}
+
+/// The MotoProject round: what has a stable id, and what does not.
+#[test]
+fn p35a_stable_ids_are_video_post_repository_and_path() {
+    let video = |id: &str| Some(StableId::Video(id.to_owned()));
+    assert_eq!(
+        stable_id("https://www.youtube.com/watch?v=U24jDyYnU3A&t=3"),
+        video("U24jDyYnU3A")
+    );
+    assert_eq!(
+        stable_id("https://youtube.com/shorts/v9SaLex6pn0"),
+        video("v9SaLex6pn0")
+    );
+    assert_eq!(
+        stable_id("https://youtu.be/5-HTPj-tS54"),
+        video("5-HTPj-tS54")
+    );
+    assert_eq!(
+        stable_id("https://www.reddit.com/r/Insta360/comments/1qdd4qr/keyframe_ramping/"),
+        Some(StableId::Post("1qdd4qr".into()))
+    );
+    assert_eq!(
+        stable_id("https://github.com/MindDock/motion-tracker"),
+        Some(StableId::Repo("minddock/motion-tracker".into()))
+    );
+    assert_eq!(
+        stable_id("https://api.github.com/repos/o/n"),
+        Some(StableId::Repo("o/n".into()))
+    );
+    assert_eq!(
+        stable_id("file:///D:/MotoProject/scripts/post.py"),
+        Some(StableId::Path("d:/motoproject/scripts/post.py".into()))
+    );
+    // A page inside a repository, a search, a short id and any other site keep the per-segment rule alone.
+    for url in [
+        "https://github.com/o/n/blob/main/x.py",
+        "https://www.youtube.com/results?search_query=hiking",
+        "https://www.youtube.com/watch?v=short",
+        "https://example.com/watch?v=U24jDyYnU3A",
+    ] {
+        assert_eq!(stable_id(url), None, "{url}");
+    }
+}
+
+/// The MotoProject round: a stable id counts anywhere in a command that runs a fetch (`yt_dlp` included) or in its
+/// output; a plain URL counts in a fetch's output too. A command that fetches nothing vouches for nothing, whatever
+/// it prints, and a longer id is not the cited one.
+#[test]
+fn p35a_a_stable_id_counts_in_a_fetching_command_or_its_output() {
+    let video = "https://www.youtube.com/watch?v=U24jDyYnU3A";
+    let listed = "python -c \"import yt_dlp\nids = [\n  'U24jDyYnU3A',\n]\nfor i in ids:\n  yt_dlp.YoutubeDL().extract_info(i, download=False)\"";
+    assert_eq!(p35a_mark(video, &agy_run(listed)), Mark::Pass);
+    let post = "https://www.reddit.com/r/Insta360/comments/1qdd4qr/keyframe_ramping/";
+    let rss = "python -c \"import urllib.request\nu = 'https://www.reddit.com/r/Insta360/comments/1qdd4qr/keyframe_ramping/.rss'\nprint(urllib.request.urlopen(u).read()[:99])\"";
+    assert_eq!(p35a_mark(post, &agy_run(rss)), Mark::Pass);
+    let plain = "https://example.com/blog/hooks";
+    let resolved = agy_run_out(
+        "python -c \"import urllib.request\nfor u in urls:\n  print(urllib.request.urlopen(u).url)\"",
+        "https://example.com/blog/hooks\n",
+    );
+    assert_eq!(p35a_mark(plain, &resolved), Mark::Pass);
+    assert_eq!(
+        p35a_mark(
+            video,
+            &agy_run_out("python -m yt_dlp --flat-playlist ytsearch5:hiking", video)
+        ),
+        Mark::Pass
+    );
+    // Claude: the same through a Bash call and its result.
+    let claude = format!(
+        "{}\n{}",
+        serde_json::json!({"type": "assistant", "message": {"content": [{
+            "type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "curl -s https://example.com/list"}
+        }]}}),
+        serde_json::json!({"type": "user", "message": {"content": [{
+            "type": "tool_result", "tool_use_id": "t1", "content": format!("{plain}\n")
+        }]}})
+    );
+    assert_eq!(p35a_mark(plain, &claude), Mark::Pass);
+
+    // Printing the notes is not a read: no fetch word in the command.
+    let notes = agy_run_out("type notes.md", &format!("{video}\n{post}\n{plain}\n"));
+    for url in [video, post, plain] {
+        assert_eq!(p35a_mark(url, &notes), Mark::Fail, "{url}");
+    }
+    assert_eq!(p35a_mark(video, &agy_run("echo U24jDyYnU3A")), Mark::Fail);
+    // A plain URL in a fetching command's text, outside the segment that fetches, still does not count.
+    assert_eq!(
+        p35a_mark(
+            plain,
+            &agy_run(&format!("curl -s https://other.org/a; echo {plain}"))
+        ),
+        Mark::Fail
+    );
+    // A longer id or post id is another source.
+    assert_eq!(
+        p35a_mark(video, &agy_run("yt-dlp --print title xU24jDyYnU3A")),
+        Mark::Fail
+    );
+    assert_eq!(
+        p35a_mark(
+            post,
+            &agy_run("curl -s https://www.reddit.com/comments/1qdd4qrx/.rss")
+        ),
+        Mark::Fail
+    );
+}
+
+/// The MotoProject round: `yt_dlp`, `yt-dlp` and `YoutubeDL` are fetch words, per segment as well.
+#[test]
+fn p35a_yt_dlp_is_a_fetch_word() {
+    let url = "https://vimeo.com/76979871";
+    for case in [
+        format!("python -m yt_dlp --skip-download {url}"),
+        format!("yt-dlp -j {url}"),
+        format!("python -c \"print(YoutubeDL().extract_info('{url}'))\""),
+    ] {
+        assert_eq!(p35a_mark(url, &agy_run(&case)), Mark::Pass, "{case}");
+    }
+}
+
+/// The MotoProject round: a `file:///` source counts when a file tool opened that path, the case and separators
+/// aside; a shell `type` of it does not.
+#[test]
+fn p35a_a_file_source_counts_against_read_file() {
+    let url = "file:///D:/MotoProject/scripts/post.py";
+    let agy = serde_json::json!({"step_update": {"step_type": "tool", "state": "DONE", "tool_name": "read_file",
+        "tool_info": {"parameters": {"Path": "D:\\MotoProject\\scripts\\post.py"}}}})
+    .to_string();
+    assert_eq!(p35a_mark(url, &agy), Mark::Pass);
+    let claude = serde_json::json!({"type": "assistant", "message": {"content": [{
+        "type": "tool_use", "id": "r1", "name": "Read", "input": {"file_path": "d:/motoproject/scripts/post.py"}
+    }]}})
+    .to_string();
+    assert_eq!(p35a_mark(url, &claude), Mark::Pass);
+    assert_eq!(
+        p35a_mark(url, &agy_run("type D:\\MotoProject\\scripts\\post.py")),
+        Mark::Fail
+    );
+    assert_eq!(
+        p35a_mark("file:///D:/MotoProject/scripts/other.py", &agy),
+        Mark::Fail
+    );
+}
+
+/// The MotoProject round: reel-motion-gemini's `Owns:` line was read as "the order names no owned file".
+#[test]
+fn p35a_the_owns_key_is_read_in_any_case() {
+    for line in ["owns: a.py", "Owns: a.py", "OWNS: a.py"] {
+        assert_eq!(spec(line).owns, vec!["a.py".to_owned()], "{line}");
+    }
+    assert!(spec("ownsx: a.py").owns.is_empty());
+}
+
+/// The MotoProject round: a sources send-back trusts nothing the worker cited; any other keeps "do not start over".
+#[test]
+fn p35a_a_sources_send_back_says_no_cited_source_is_trusted() {
+    let sources = vec![Axis::new(
+        "sources",
+        Mark::Fail,
+        "12 source(s) cited that were not fetched",
+    )];
+    let brief = send_back_brief("o", "o", 1, &sources, "# o\n", "nirvana-integrate/r1");
+    assert!(brief.contains(SOURCES_REDO), "{brief}");
+    assert!(!brief.contains("do not start over"), "{brief}");
+    let tests = vec![Axis::new("tests", Mark::Fail, "1 failing")];
+    let brief = send_back_brief("o", "o", 1, &tests, "# o\n", "nirvana-integrate/r1");
+    assert!(brief.contains("do not start over"), "{brief}");
+    assert!(!brief.contains(SOURCES_REDO), "{brief}");
+}
+
+/// The owned axis of an order in the project folder, gated with no branch.
+fn p35a_root_owned(root: &Path, order: &str, owns: &[&str]) -> Axis {
+    let spec = spec_with(owns, "git ls-files", &[]);
+    let det = deterministic(
+        &Subject {
+            root,
+            cwd: root,
+            run: "r1",
+            order,
+            branch: None,
+            class: "build.bounded",
+            report: Some(&done()),
+            spec: &spec,
+            ports: &no_ports,
+        },
+        None,
+    );
+    axis(&det, "owned").clone()
+}
+
+fn p35a_seat_in_root(root: &Path, order: &str, at: u64) {
+    let mut order_seated = seated(order, None);
+    order_seated.cwd = root.display().to_string();
+    Project::at(root)
+        .journal("r1")
+        .append(at, Kind::Seated(Box::new(order_seated)))
+        .expect("seated");
+}
+
+/// The MotoProject round: reel-motion-gemini-r2 ran in the project folder and was sent back for "3958 file(s) changed
+/// that the order does not own", the whole dirty tree. With the seat snapshot, only what the order changed counts: a
+/// file dirty before seating counts only when the order changes it again, and a new unowned file still fails.
+#[test]
+fn p35a_the_owned_axis_in_the_project_folder_counts_only_the_orders_changes() {
+    let root = repo("p35a-owned-snap");
+    std::fs::write(root.join("README.md"), "dirty before seating\n").unwrap();
+    std::fs::write(root.join("stray.txt"), "untracked before seating\n").unwrap();
+    std::fs::remove_file(root.join("test_calc.py")).unwrap();
+    let project = Project::at(&root);
+    p35a_seat_in_root(&root, "root-order", now());
+    assert_eq!(
+        write_seat_snapshot(&project, "r1", "root-order", &root),
+        Ok(3)
+    );
+    std::fs::write(root.join("calc.py"), "def add(a, b):\n    return b + a\n").unwrap();
+    let owned = p35a_root_owned(&root, "root-order", &["calc.py"]);
+    assert_eq!(owned.mark, Mark::Pass, "{owned:?}");
+    assert!(owned.why.starts_with("1 changed file"), "{owned:?}");
+
+    // The order changes a file that was already dirty, and makes a new one: both are its own, unowned.
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(
+        root.join("README.md"),
+        "dirty before seating, and changed by the order\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("new.txt"), "the order's\n").unwrap();
+    let owned = p35a_root_owned(&root, "root-order", &["calc.py"]);
+    assert_eq!(owned.mark, Mark::Fail, "{owned:?}");
+    assert_eq!(
+        owned.lines,
+        vec!["README.md".to_owned(), "new.txt".to_owned()]
+    );
+}
+
+/// The MotoProject round: an order seated before the snapshot existed (r2 itself) counts a dirty file only when it was
+/// modified at or after its seating, and a deletion not at all.
+#[test]
+fn p35a_with_no_snapshot_the_owned_axis_counts_files_modified_since_seating() {
+    let root = repo("p35a-owned-mtime");
+    let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+    for name in ["README.md", "stray.txt"] {
+        std::fs::write(root.join(name), "dirty an hour before seating\n").unwrap();
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.join(name))
+            .unwrap();
+        file.set_modified(old).unwrap();
+    }
+    std::fs::remove_file(root.join("test_calc.py")).unwrap();
+    p35a_seat_in_root(&root, "old-order", now());
+    std::fs::write(root.join("calc.py"), "def add(a, b):\n    return b + a\n").unwrap();
+    let owned = p35a_root_owned(&root, "old-order", &["calc.py"]);
+    assert_eq!(owned.mark, Mark::Pass, "{owned:?}");
+    assert!(owned.why.starts_with("1 changed file"), "{owned:?}");
 }
