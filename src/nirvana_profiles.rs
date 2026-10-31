@@ -98,11 +98,43 @@ pub fn path(root: &Path, name: &str) -> PathBuf {
     folder(root).join(format!("{name}.md"))
 }
 
+/// Plan 34 §2.1: a profile may be a folder, `<name>/profile.md` (the same format as `<name>.md`) beside `knowledge/`.
+pub const PROFILE_FILE: &str = "profile.md";
+pub const KNOWLEDGE: &str = "knowledge";
+
+/// The folder a folder profile lives in, whether or not it exists.
+pub fn folder_of(root: &Path, name: &str) -> PathBuf {
+    folder(root).join(name)
+}
+
+/// The file a profile's name reads: `<name>/profile.md` when the folder is there, else `<name>.md`. A name that is both
+/// is refused: which one the worker got would depend on herdr's order of looking.
+pub fn resolve(root: &Path, name: &str) -> Result<PathBuf, String> {
+    let (file, dir) = (path(root, name), folder_of(root, name));
+    match (file.is_file(), dir.is_dir()) {
+        (true, true) => Err(format!(
+            "profile {name} is both {} and the folder {}: keep one",
+            file.display(),
+            dir.display()
+        )),
+        (_, true) => Ok(dir.join(PROFILE_FILE)),
+        _ => Ok(file),
+    }
+}
+
+/// A folder profile's `knowledge/`; `None` for a profile that is one file, which keeps no cards.
+pub fn knowledge_dir(root: &Path, name: &str) -> Option<PathBuf> {
+    valid_name(name)
+        .then(|| folder_of(root, name))
+        .filter(|dir| dir.is_dir() && !path(root, name).is_file())
+        .map(|dir| dir.join(KNOWLEDGE))
+}
+
 pub fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn unquote(value: &str) -> &str {
+pub(crate) fn unquote(value: &str) -> &str {
     let value = value.trim();
     for quote in ['"', '\''] {
         if value.len() >= 2 && value.starts_with(quote) && value.ends_with(quote) {
@@ -120,7 +152,7 @@ fn word(value: &str) -> bool {
 }
 
 /// `[a, b]` on one line, items trimmed and unquoted.
-fn one_line(value: &str) -> Result<Vec<String>, String> {
+pub(crate) fn one_line(value: &str) -> Result<Vec<String>, String> {
     let value = value.trim();
     let inner = value
         .strip_prefix('[')
@@ -303,7 +335,8 @@ pub fn load(root: &Path, name: &str) -> Result<Loaded, String> {
             "--profile {name:?}: a profile's name is 1 to {NAME_MAX} of [a-z0-9-]"
         ));
     }
-    let file = path(root, name);
+    // Plan 34 §2.1: the run copy is `profile.md`'s bytes alone; the cards are read live, like lessons.
+    let file = resolve(root, name)?;
     let bytes = std::fs::read(&file).map_err(|err| match err.kind() {
         std::io::ErrorKind::NotFound => format!(
             "no profile {name}: {} is not there; `herdr profile list` names this project's",
@@ -573,27 +606,44 @@ pub fn list(root: &Path) -> Vec<(String, PathBuf, Result<Profile, Vec<String>>)>
     let Ok(entries) = std::fs::read_dir(folder(root)) else {
         return Vec::new();
     };
-    let mut found: Vec<(String, PathBuf, Result<Profile, Vec<String>>)> = entries
+    // Plan 34 §2.1: a `<name>.md` file and a `<name>/` folder are both profiles; a name that is both is refused.
+    let mut names: Vec<String> = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|file| file.is_file() && file.extension().is_some_and(|ext| ext == "md"))
-        .map(|file| {
-            let name = file
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let parsed = match std::fs::read(&file) {
-                Ok(bytes) => match std::str::from_utf8(&bytes) {
-                    Ok(text) => parse(&file, &name, text),
-                    Err(_) => Err(vec![format!("{} is not UTF-8", file.display())]),
-                },
-                Err(err) => Err(vec![format!("cannot read {}: {err}", file.display())]),
+        .filter_map(|entry| {
+            let file_name = entry.file_name()?.to_string_lossy().into_owned();
+            if entry.is_dir() {
+                Some(file_name)
+            } else if entry.is_file() && entry.extension().is_some_and(|ext| ext == "md") {
+                entry
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+        .into_iter()
+        .map(|name| {
+            let (file, parsed) = match resolve(root, &name) {
+                Err(why) => (path(root, &name), Err(vec![why])),
+                Ok(file) => {
+                    let parsed = match std::fs::read(&file) {
+                        Ok(bytes) => match std::str::from_utf8(&bytes) {
+                            Ok(text) => parse(&file, &name, text),
+                            Err(_) => Err(vec![format!("{} is not UTF-8", file.display())]),
+                        },
+                        Err(err) => Err(vec![format!("cannot read {}: {err}", file.display())]),
+                    };
+                    (file, parsed)
+                }
             };
             (name, file, parsed)
         })
-        .collect();
-    found.sort_by(|a, b| a.0.cmp(&b.0));
-    found
+        .collect()
 }
 
 /// The one-line summary of a profile: its description, then model or family and needs.
@@ -674,6 +724,12 @@ pub fn new_profile(root: &Path, name: &str) -> Result<PathBuf, String> {
     if file.exists() {
         return Err(format!("{} is already there", file.display()));
     }
+    if folder_of(root, name).exists() {
+        return Err(format!(
+            "{} is already there (a folder profile)",
+            folder_of(root, name).display()
+        ));
+    }
     let servers = crate::nirvana_gui_tools::project_servers(root).unwrap_or_default();
     let text = template(&servers);
     parse(&file, name, &text).map_err(|problems| problems.join("\n"))?;
@@ -741,7 +797,9 @@ pub fn table_problems(
 const USAGE: &str = "usage: herdr profile list
        herdr profile show <name>
        herdr profile new <name>          writes .nirvana/profiles/<name>.md from the template
-       herdr profile check [<name>]      prints every refusal; exit 1 when there is one
+       herdr profile check [<name>]      prints every refusal, a folder profile's cards too; exit 1 when there is one
+       herdr profile teach <name> --from <url|path> [--note \"what to learn\"] [--quote \"the owner's words\"] [--run <run>]
+                                         seats a profile-teach order; its Work Report's card_ops become cards
 A profile is used by `herdr seat run <seat> --profile <name> ...` and `herdr seat pick --profile <name> ...`.";
 
 fn usage_exit() -> ! {
@@ -773,7 +831,8 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         }
         (Some("show"), [name]) => match load(&root, name) {
             Ok(loaded) => {
-                println!("{} · sha256 {}", path(&root, name).display(), loaded.sha);
+                let shown = resolve(&root, name).unwrap_or_else(|_| path(&root, name));
+                println!("{} · sha256 {}", shown.display(), loaded.sha);
                 print!("{}", String::from_utf8_lossy(&loaded.bytes));
                 0
             }
@@ -814,13 +873,18 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             }
             let mut refused = 0;
             for (name, file, parsed) in &chosen {
-                let problems = match (parsed, &table) {
+                let mut problems = match (parsed, &table) {
                     (Ok(profile), Ok(table)) => table_problems(file, profile, table, &servers),
                     (Ok(_), Err(_)) => Vec::new(),
                     (Err(problems), _) => problems.clone(),
                 };
+                // Plan 34 §2.2: every card of a folder profile, one line per problem with its file and line.
+                problems.extend(crate::nirvana_knowledge::check_problems(&root, name));
                 if problems.is_empty() {
-                    println!("{name}: ok");
+                    println!(
+                        "{name}: ok{}",
+                        crate::nirvana_knowledge::count_note(&root, name)
+                    );
                 } else {
                     refused += 1;
                     for problem in problems {
@@ -830,6 +894,7 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             }
             i32::from(refused > 0 || (chosen.is_empty() && !names.is_empty()))
         }
+        (Some("teach"), rest) => crate::nirvana_knowledge::teach_cli(&root, rest),
         _ => usage_exit(),
     };
     std::process::exit(code);

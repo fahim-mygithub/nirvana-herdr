@@ -46,6 +46,7 @@ pub const HISTORICAL_DEFAULTS: &[&str] = &[
     include_str!("nirvana_seats_v3.toml"),
     include_str!("nirvana_seats_v4.toml"),
     include_str!("nirvana_seats_v5.toml"),
+    include_str!("nirvana_seats_v6.toml"),
 ];
 pub const DIR: &str = "nirvana";
 pub const SEATS_FILE: &str = "seats.toml";
@@ -4280,7 +4281,8 @@ mod tests {
                 "chore.memory",
                 "chore.script",
                 "chore.github",
-                "lesson-review"
+                "lesson-review",
+                "profile-teach"
             ]
         );
         assert_eq!(

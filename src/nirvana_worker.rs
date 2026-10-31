@@ -41,10 +41,10 @@ use crate::nirvana_usage::Reading;
 
 /// The Work Report every worker ends with, passed to both CLIs as `--json-schema` (P3: both take it).
 /// `lesson` is O5's: a worker's proposed lesson, which the gate checks before it is written.
-pub const REPORT_SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["status","summary","files","tests","gotchas"],"properties":{"status":{"type":"string","enum":["done","blocked","needs_answer"]},"summary":{"type":"string","minLength":1},"question":{"type":"string"},"files":{"type":"array","items":{"type":"string"}},"tests":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["name","result"],"properties":{"name":{"type":"string"},"result":{"type":"string","enum":["pass","fail","not_run"]}}}},"gotchas":{"type":"array","items":{"type":"string"}},"lesson":{"type":"object","additionalProperties":false,"required":["name","class","steps","evidence"],"properties":{"name":{"type":"string","minLength":1},"class":{"type":"string","minLength":1},"steps":{"type":"string","minLength":1},"evidence":{"type":"string","minLength":1}}},"lesson_ops":{"type":"array","items":{"type":"object","required":["op"],"properties":{"op":{"type":"string","enum":["new","patch","merge"]},"slug":{"type":"string"},"base_sha":{"type":"string"},"name":{"type":"string"},"class":{"type":"string"},"steps":{"type":"string"},"evidence":{"type":"string"},"slugs":{"type":"array","items":{"type":"string"}}}}},"sources":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["url","used_for"],"properties":{"url":{"type":"string","minLength":1},"used_for":{"type":"string","minLength":1}}}}}}"#;
+pub const REPORT_SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["status","summary","files","tests","gotchas"],"properties":{"status":{"type":"string","enum":["done","blocked","needs_answer"]},"summary":{"type":"string","minLength":1},"question":{"type":"string"},"files":{"type":"array","items":{"type":"string"}},"tests":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["name","result"],"properties":{"name":{"type":"string"},"result":{"type":"string","enum":["pass","fail","not_run"]}}}},"gotchas":{"type":"array","items":{"type":"string"}},"lesson":{"type":"object","additionalProperties":false,"required":["name","class","steps","evidence"],"properties":{"name":{"type":"string","minLength":1},"class":{"type":"string","minLength":1},"steps":{"type":"string","minLength":1},"evidence":{"type":"string","minLength":1}}},"lesson_ops":{"type":"array","items":{"type":"object","required":["op"],"properties":{"op":{"type":"string","enum":["new","patch","merge"]},"slug":{"type":"string"},"base_sha":{"type":"string"},"name":{"type":"string"},"class":{"type":"string"},"steps":{"type":"string"},"evidence":{"type":"string"},"slugs":{"type":"array","items":{"type":"string"}}}}},"card_ops":{"type":"array","items":{"type":"object","required":["op"],"properties":{"op":{"type":"string","enum":["new","patch"]},"slug":{"type":"string"},"base_sha":{"type":"string"},"name":{"type":"string"},"when":{"type":"string"},"verdict":{"type":"string","enum":["keep","reject","dead-end"]},"effect":{"type":"string"},"source":{"type":"string"},"date":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"body":{"type":"string"},"evidence":{"type":"string"}}}},"sources":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["url","used_for"],"properties":{"url":{"type":"string","minLength":1},"used_for":{"type":"string","minLength":1}}}}}}"#;
 
 /// The schema's properties, which the check below allows and nothing else.
-pub const REPORT_KEYS: [&str; 9] = [
+pub const REPORT_KEYS: [&str; 10] = [
     "status",
     "summary",
     "question",
@@ -54,6 +54,7 @@ pub const REPORT_KEYS: [&str; 9] = [
     "lesson",
     "sources",
     "lesson_ops",
+    "card_ops",
 ];
 
 /// The keys agy adds to its structured answer (P3: "the response is the object, plus agy's own `toolAction`
@@ -142,12 +143,14 @@ pub fn check_report(report: &Value) -> Result<(), String> {
             ));
         }
     }
-    // Plan 33 §3.3: a lesson review's ops; herdr checks each one when it gates the review.
-    if object.get("lesson_ops").is_some_and(|ops| {
-        !ops.as_array()
-            .is_some_and(|items| items.iter().all(Value::is_object))
-    }) {
-        return Err("lesson_ops is not a list of objects".into());
+    // Plan 33 §3.3: a lesson review's ops; plan 34 §2.5: a teacher's card ops. herdr checks each one at the gate.
+    for key in ["lesson_ops", "card_ops"] {
+        if object.get(key).is_some_and(|ops| {
+            !ops.as_array()
+                .is_some_and(|items| items.iter().all(Value::is_object))
+        }) {
+            return Err(format!("{key} is not a list of objects"));
+        }
     }
     if let Some(sources) = object.get("sources") {
         let Some(items) = sources.as_array() else {
@@ -1582,6 +1585,10 @@ pub fn exec(
                         // Plan 33 review B2: a lesson review costs no orchestrator turn. herdr gates it below, and its
                         // question is no one's to answer: the gate applies nothing that is not `done`.
                         let review = seated.class == crate::nirvana_review::CLASS;
+                        // Plan 34 §2.5: a done teaching order is gated by herdr too, whose checks apply its card ops;
+                        // Nirvana Claude is still woken to say what was kept.
+                        let teach = seated.class == crate::nirvana_knowledge::TEACH_CLASS
+                            && status == "done";
                         let mut kinds = vec![Kind::Delivered {
                             order: order.to_owned(),
                             report: report.clone(),
@@ -1618,6 +1625,12 @@ pub fn exec(
                                 true
                             )
                         )?;
+                        if teach {
+                            match crate::nirvana_gate::gate(project, run, order) {
+                                Ok(ruling) => writeln!(out, "gated: {}", ruling.verdict)?,
+                                Err(why) => writeln!(out, "not gated: {why}")?,
+                            }
+                        }
                         if review {
                             match crate::nirvana_gate::gate(project, run, order) {
                                 Ok(ruling) => writeln!(out, "gated: {}", ruling.verdict)?,
@@ -3380,10 +3393,14 @@ pub fn seat_order_with(
         &crate::nirvana_gui_tools::project_servers(&project.root).unwrap_or_default(),
         &booked.servers,
     );
-    let mut text = if lessons.is_empty() {
+    // Plan 34 §2.3: a folder profile's cards, one line each, after the lessons and offered the same way.
+    let cards = profile
+        .map(|name| crate::nirvana_knowledge::offer(&project.root, &cwd, name))
+        .unwrap_or_default();
+    let mut text = if lessons.is_empty() && cards.is_empty() {
         text
     } else {
-        format!("{}{lessons}", text.trim_end())
+        format!("{}{lessons}{cards}", text.trim_end())
     };
     // Plan 29 §5.3 and review F4: an order granted a server never starts a device; a desktop one batches, reads crops.
     // Plan 31 §2.2: an order with the owner's verified approval may Send once, after an explained slice.

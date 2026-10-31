@@ -3,6 +3,9 @@
 //! Each profile is a row with its description; `e` opens its file through the same `command.invoke` path Preload's
 //! edit uses, `n` asks for a name and runs `herdr profile new`'s template. The rows go after Preload's own, so every
 //! Preload row keeps its place. The files and the parser are `crate::nirvana_profiles`.
+//!
+//! Plan 34 §2.7: a folder profile's row ends with its card count, and `K` opens its `knowledge/` in an edit tab. The
+//! plan says `k`; the panel's `k` is already its vim up (`j`/`k`), so the key is `K`.
 
 use std::path::{Path, PathBuf};
 
@@ -30,7 +33,7 @@ pub(super) fn items(cwd: &Path) -> Vec<Item> {
             provider: Provider::Other(TITLE.to_owned()),
             group: Group::Agents,
             detail: match &parsed {
-                Ok(profile) => profile.description.clone(),
+                Ok(profile) => format!("{}{}", profile.description, cards_note(cwd, &name)),
                 Err(_) => format!("refused: herdr profile check {name}"),
             },
             name,
@@ -42,6 +45,30 @@ pub(super) fn items(cwd: &Path) -> Vec<Item> {
             file: Some(file),
         })
         .collect()
+}
+
+/// A folder profile's card count, ` · 40 cards`; nothing for a profile that is one file.
+fn cards_note(cwd: &Path, name: &str) -> String {
+    crate::nirvana_profiles::knowledge_dir(&root(cwd), name)
+        .map(|dir| {
+            let count = crate::nirvana_knowledge::cards(&dir).len();
+            format!(" \u{b7} {count} card{}", if count == 1 { "" } else { "s" })
+        })
+        .unwrap_or_default()
+}
+
+/// `K` on a profile row: the folder profile's `knowledge/`, made when it is not there yet so the editor's tab has a
+/// folder to start in. Why not, for a profile that is one file.
+pub(super) fn knowledge_folder(cwd: &Path, item: &Item) -> Result<PathBuf, String> {
+    match crate::nirvana_profiles::knowledge_dir(&root(cwd), &item.name) {
+        Some(dir) => std::fs::create_dir_all(&dir)
+            .map(|()| dir.clone())
+            .map_err(|err| format!("cannot make {}: {err}", dir.display())),
+        None => Err(format!(
+            "{0} keeps no knowledge cards: only a folder profile does, .nirvana/profiles/{0}/knowledge/",
+            item.name
+        )),
+    }
 }
 
 /// What a key does to the name being typed after `n`.
@@ -291,6 +318,84 @@ mod tests {
         assert_eq!(items(&dir).len(), 1);
         assert!(items(&dir)[0].on, "the template parses");
         assert!(make(&dir, "slicer").unwrap_err().contains("already there"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Plan 34 §2.7: a folder profile's row says how many cards it keeps, and `K` opens its `knowledge/` in an edit
+    /// tab; on a profile that is one file `K` says why not.
+    #[test]
+    fn p34_a_folder_profile_row_counts_its_cards_and_shift_k_opens_its_knowledge_folder() {
+        let dir = folder("cards");
+        let profiles = dir.join(".nirvana").join("profiles");
+        let knowledge = profiles.join("reel").join("knowledge");
+        std::fs::create_dir_all(&knowledge).unwrap();
+        std::fs::write(
+            profiles.join("reel").join("profile.md"),
+            "---\ndescription: Edits reels.\n---\nYou edit reels.\n",
+        )
+        .unwrap();
+        for slug in ["calm", "hold"] {
+            std::fs::write(
+                knowledge.join(format!("{slug}.md")),
+                "---\nname: n\nwhen: w\nverdict: keep\nsource: s\n---\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            profiles.join("slicer.md"),
+            "---\ndescription: Slices prints.\n---\nYou slice.\n",
+        )
+        .unwrap();
+        let rows = items(&dir);
+        let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
+        assert_eq!(names, ["reel", "slicer"]);
+        assert_eq!(rows[0].detail, "Edits reels. \u{b7} 2 cards");
+        assert_eq!(rows[1].detail, "Slices prints.");
+        assert_eq!(
+            rows[0].file.as_deref(),
+            Some(profiles.join("reel").join("profile.md").as_path())
+        );
+        let mut state = state_in(&dir);
+        state.toggle_preload_panel();
+        let count = {
+            let panel = state.nirvana_preload.as_ref().expect("open");
+            super::super::nirvana_mods::panel_items(
+                panel,
+                &crate::nirvana_preload::view(&panel.cwd),
+            )
+            .len()
+        };
+        // The last row is slicer: K says a one-file profile keeps no cards and opens nothing.
+        state.nirvana_preload.as_mut().unwrap().selected = count - 1;
+        let outcome = press(&mut state, KeyCode::Char('K'));
+        assert!(opened(&outcome).is_empty());
+        let message = state
+            .nirvana_preload
+            .as_ref()
+            .and_then(|panel| panel.message.clone());
+        assert!(
+            message
+                .as_deref()
+                .is_some_and(|m| m.contains("slicer keeps no knowledge cards")),
+            "{message:?}"
+        );
+        // reel: K opens its knowledge folder; k is still the panel's up.
+        let outcome = press(&mut state, KeyCode::Char('k'));
+        assert!(opened(&outcome).is_empty());
+        assert_eq!(state.nirvana_preload.as_ref().unwrap().selected, count - 2);
+        let outcome = press(&mut state, KeyCode::Char('K'));
+        assert_eq!(
+            opened(&outcome),
+            [format!(
+                "{}{}",
+                crate::nirvana::EDIT_DIR_COMMAND,
+                knowledge.display()
+            )]
+        );
+        assert!(
+            state.nirvana_preload.is_none(),
+            "the panel closes, as e does"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

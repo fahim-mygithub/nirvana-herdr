@@ -94,6 +94,14 @@ impl App {
             let file = file.to_owned();
             return self.nirvana_edit_file(id, &params, &file);
         }
+        // Nirvana fork, plan 34 §2.7: the Profiles group's `K` names a folder profile's cards folder after its id.
+        if let Some(dir) = params
+            .command_id
+            .strip_prefix(crate::nirvana::EDIT_DIR_COMMAND)
+        {
+            let dir = dir.to_owned();
+            return self.nirvana_edit_dir(id, &params, &dir);
+        }
         // Nirvana fork, feature 11: the Accounts panel's sign-in names the CLI after its id.
         if let Some(key) = params
             .command_id

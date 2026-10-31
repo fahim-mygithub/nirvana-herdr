@@ -1131,7 +1131,7 @@ pub(super) fn render_panel(
 
     // The keys, then what the last action did; the name being typed after `n` before both.
     let keys =
-        "space switch \u{b7} e edit \u{b7} r restart Claude \u{b7} n new profile \u{b7} esc close";
+        "space switch \u{b7} e edit \u{b7} r restart Claude \u{b7} n new profile \u{b7} K cards \u{b7} esc close";
     let foot_y = bottom.saturating_sub(1);
     let naming = panel
         .naming
@@ -1461,6 +1461,43 @@ impl ClientShellState {
         self.open_in_editor(&file, outcome);
     }
 
+    /// Plan 34 §2.7: `K` on a folder profile's row opens its `knowledge/` in an edit tab.
+    fn preload_knowledge(&mut self, index: usize, outcome: &mut ClientShellInput) {
+        let (Some(item), Some(cwd)) = (
+            self.preload_item(index),
+            self.nirvana_preload.as_ref().map(|panel| panel.cwd.clone()),
+        ) else {
+            return;
+        };
+        if !super::nirvana_profiles::is_profile(&item) {
+            self.preload_say(format!(
+                "{} is not a profile; K opens a folder profile's cards",
+                item.name
+            ));
+            return;
+        }
+        match super::nirvana_profiles::knowledge_folder(&cwd, &item) {
+            Ok(dir) => {
+                let Some(panel) = self.nirvana_preload.as_ref() else {
+                    return;
+                };
+                let params = crate::api::schema::CommandInvokeParams {
+                    command_id: format!("{}{}", crate::nirvana::EDIT_DIR_COMMAND, dir.display()),
+                    workspace_id: Some(panel.workspace_id.clone()),
+                    tab_id: Some(panel.tab_id.clone()),
+                    pane_id: None,
+                    selection: None,
+                };
+                self.push_endpoint_method(
+                    crate::api::schema::Method::CommandInvoke(params),
+                    outcome,
+                );
+                self.nirvana_preload = None;
+            }
+            Err(why) => self.preload_say(why),
+        }
+    }
+
     /// Opens a file in the editor, in a pane the server starts, and closes the panel.
     fn open_in_editor(&mut self, file: &std::path::Path, outcome: &mut ClientShellInput) {
         let Some(panel) = self.nirvana_preload.as_ref() else {
@@ -1541,6 +1578,8 @@ impl ClientShellState {
             KeyCode::Char(' ') | KeyCode::Enter => self.preload_switch(selected),
             KeyCode::Char('e') => self.preload_edit(selected, outcome),
             KeyCode::Char('n') => panel.naming = Some(String::new()),
+            // Plan 34 §2.7: a folder profile's cards; `k` is the panel's up.
+            KeyCode::Char('K') => self.preload_knowledge(selected, outcome),
             KeyCode::Char('p') => {
                 let cwd = panel.cwd.clone();
                 let view = preload::view(&cwd);

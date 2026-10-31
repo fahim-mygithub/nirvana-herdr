@@ -375,6 +375,20 @@ applies the ones that hold.\n\n{RULES}\n## The gate's verdict\n\n",
             .unwrap_or_default(),
         lessons_section(root, subject.class, subject.profile)
     ));
+    // Plan 34 §2.6: a profiled order's review may keep the profile's cards too, under the same checks.
+    let cards = subject
+        .profile
+        .map(|profile| {
+            let stream = std::fs::read_to_string(subject.stream).unwrap_or_default();
+            (
+                profile,
+                crate::nirvana_knowledge::review_section(root, profile, &stream),
+            )
+        })
+        .filter(|(_, section)| !section.is_empty());
+    if let Some((_, section)) = &cards {
+        text.push_str(section);
+    }
     text.push_str(&format!(
         "## Your Work Report\n\nstatus `done`; the summary says what you kept and why, or that nothing is worth keeping; \
 files, tests and gotchas empty lists; and `lesson_ops`, a list of:\n\n\
@@ -384,6 +398,10 @@ files, tests and gotchas empty lists; and `lesson_ops`, a list of:\n\n\
 An empty list keeps nothing. A `lesson` of your own is ignored.\n",
         class = subject.class
     ));
+    if let Some((profile, _)) = cards {
+        text.push('\n');
+        text.push_str(&crate::nirvana_knowledge::ops_format(profile));
+    }
     text
 }
 
@@ -605,6 +623,12 @@ pub fn queue_review(
             stream: &stream,
         },
     );
+    // Plan 34 §2.6 and review B3: the profile's `knowledge/` as it stands now, which the review's gate compares.
+    if let Some(profile) = &profile {
+        if let Err(why) = crate::nirvana_knowledge::write_snap(project, run, &id, profile) {
+            return format!("lesson review not queued: {why}");
+        }
+    }
     queue(
         project,
         run,
@@ -853,8 +877,9 @@ pub fn apply_merge(
     Applied { lines }
 }
 
-/// The Work Report's own check, with `lesson_ops` aside: the worker's schema learns the key from P33b's hunk.
-fn report_axis(report: Option<&Value>) -> Axis {
+/// The Work Report's own check, with `lesson_ops` aside: the worker's schema learns the key from P33b's hunk. Plan 34's
+/// `card_ops` is in the schema's keys, so `check_report` checks it.
+pub(crate) fn report_axis(report: Option<&Value>) -> Axis {
     let Some(report) = report else {
         return Axis::new("report", Mark::Fail, "no Work Report was delivered");
     };
@@ -948,16 +973,30 @@ pub fn gate_review(
     let mut passed = axes[0].mark != Mark::Fail;
     if passed {
         let report = report.unwrap_or(Value::Null);
-        let held = held_back(project, run, &root, &report);
+        // Plan 34 §2.6: a review's card ops are the subject's profile's; its `knowledge/` is held as `lessons/` is.
+        let card_ops = crate::nirvana_knowledge::parse_card_ops(&report);
+        let card_profile = (kind == REVIEW)
+            .then(|| subject_profile(&state, subject))
+            .flatten();
+        let held = held_back(project, run, &root, &report).or_else(|| {
+            card_profile.as_deref().and_then(|profile| {
+                crate::nirvana_knowledge::held_back(project, run, &root, profile)
+            })
+        });
         let ops = parse_ops(&report);
         let at = now();
+        let held_any = held.is_some();
         let applied = if let Some(axis) = held {
             passed = false;
             axes.push(axis);
             Applied { lines: Vec::new() }
         } else if ops.is_empty() {
             Applied {
-                lines: vec![(true, "nothing to keep".into())],
+                lines: if card_ops.is_empty() {
+                    vec![(true, "nothing to keep".into())]
+                } else {
+                    Vec::new()
+                },
             }
         } else if kind == MERGE {
             let shas: BTreeMap<String, String> =
@@ -1005,6 +1044,35 @@ pub fn gate_review(
                 if kept { Mark::Pass } else { Mark::Note },
                 line,
             ));
+        }
+        if !held_any && !card_ops.is_empty() {
+            let lines = if kind == MERGE {
+                vec![(false, "a merge order keeps no card".to_owned())]
+            } else {
+                // Review S2's list, as the lesson ops above read it: the subject's copy and the review's briefs.
+                let herdr_wrote: Vec<String> = [subject, order.as_str(), root.as_str()]
+                    .iter()
+                    .filter_map(|id| state.order(id))
+                    .map(|known| nirvana_gate::order_text(&known.seated))
+                    .filter(|text| !text.trim().is_empty())
+                    .collect();
+                crate::nirvana_knowledge::review_ops(
+                    &project.root,
+                    &report,
+                    card_profile.as_deref(),
+                    &nirvana_gate::stream_text(project, run, subject),
+                    &herdr_wrote,
+                    &order,
+                    run,
+                )
+            };
+            for (kept, line) in lines {
+                axes.push(Axis::new(
+                    "card_op",
+                    if kept { Mark::Pass } else { Mark::Note },
+                    line,
+                ));
+            }
         }
         if report.get("lesson").is_some() {
             axes.push(Axis::new(

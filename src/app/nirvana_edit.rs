@@ -34,6 +34,33 @@ impl App {
         self.nirvana_open_editor_tab(id, params, &path, &argv)
     }
 
+    /// Plan 34 §2.7: the editor in a new tab whose folder is `dir`, a folder profile's `knowledge/`, named after it.
+    pub(crate) fn nirvana_edit_dir(
+        &mut self,
+        id: String,
+        params: &crate::api::schema::CommandInvokeParams,
+        dir: &str,
+    ) -> String {
+        use crate::app::api::responses::encode_error;
+
+        let Some(path) = crate::nirvana::editable_dir(dir) else {
+            return encode_error(id, "not_editable", format!("not a folder: {dir}"));
+        };
+        let Some(argv) = crate::nirvana::terminal_editor_program() else {
+            return encode_error(
+                id,
+                "no_terminal_editor",
+                "no terminal editor found: install micro, or set NIRVANA_EDITOR",
+            );
+        };
+        let name = path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        tracing::info!(dir = %path.display(), editor = %argv[0], "nirvana: opening a profile's cards in a new tab");
+        self.nirvana_open_command_tab(id, params, path, &argv, format!("cards {name}"))
+    }
+
     /// Runs `argv` in a new tab of the panel's space, focused, named after the file.
     fn nirvana_open_editor_tab(
         &mut self,
