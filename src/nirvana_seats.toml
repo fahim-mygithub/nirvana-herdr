@@ -51,6 +51,8 @@ climb_full = 1.00
 # Plan 25 §2: Nirvana Claude starts a fresh session after a run ends only when its context is above this: twice
 # the first turn measured in plan 25 §1 (60.7k), a hypothesis.
 fresh_above = 120000
+# Plan 33 §3.3: lesson reviews a project may queue per UTC day; 0 turns them off. A hypothesis.
+lesson_reviews_per_day = 20
 
 # An order's size scales its expected use and its lease. `use` is a multiple of probe P4's order (one
 # `slugify` function and its tests, about 45k tokens read and 1.3k written): small is that order.
@@ -626,4 +628,23 @@ seats = [
   { seat = "haiku", score = 80 },
   { seat = "flash", score = 78 },
   { seat = "sonnet", score = 82 },
+]
+
+# Plan 33 §3.3 (ledger L3, the owner's "Sure" to a review after every gated order on a cheap seat with a daily
+# cap): one review of each gated order's lessons, after `herdr gate run`. herdr seats it at Efficient, so the
+# rule's own order holds: agy Flash, then Sonnet at low. Scores are priors; the chain is chore's so the record
+# keeps the nine chains of §5.4. The daily cap is [constants] `lesson_reviews_per_day`.
+[[class]]
+id = "lesson-review"
+chain = "chore"
+blast = "bounded"
+effort = "low"
+efficient_effort = "low"
+sota_effort = "low"
+weight = 0.3
+bars = { efficient = 60, balanced = 70, sota = 100 }
+why = "plan 33 §3.3: a cheap review of a gated order's lessons"
+seats = [
+  { seat = "flash", score = 80 },
+  { seat = "sonnet", score = 78 },
 ]

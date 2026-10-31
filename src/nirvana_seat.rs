@@ -45,6 +45,7 @@ pub const HISTORICAL_DEFAULTS: &[&str] = &[
     include_str!("nirvana_seats_v2.toml"),
     include_str!("nirvana_seats_v3.toml"),
     include_str!("nirvana_seats_v4.toml"),
+    include_str!("nirvana_seats_v5.toml"),
 ];
 pub const DIR: &str = "nirvana";
 pub const SEATS_FILE: &str = "seats.toml";
@@ -218,6 +219,11 @@ fn default_fresh_above() -> u64 {
     crate::nirvana_fresh::FRESH_ABOVE
 }
 
+/// Plan 33 §3.3's `lesson_reviews_per_day` when a table written before it leaves the line out.
+fn default_lesson_reviews_per_day() -> u32 {
+    crate::nirvana_review::PER_DAY
+}
+
 /// The rule's numbers (plan 12 §5.3). Each is commented with its source in the default file.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -248,6 +254,9 @@ pub struct Constants {
     /// Plan 25 §2: a fresh session after a run ends only above this context (`nirvana_fresh::trigger`).
     #[serde(default = "default_fresh_above")]
     pub fresh_above: u64,
+    /// Plan 33 §3.3: lesson reviews a project may queue per UTC day; 0 turns them off.
+    #[serde(default = "default_lesson_reviews_per_day")]
+    pub lesson_reviews_per_day: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -806,6 +815,50 @@ pub struct Request {
     pub inherited_override: bool,
     /// Plan 29 §5.2: why only a claude seat may take the order (it needs a project MCP server); `None` for any seat.
     pub claude_only: Option<String>,
+    /// Plan 33 §2.2: the profile the order is seated with; `None` for none.
+    pub profile: Option<Narrow>,
+}
+
+/// Plan 33 §2.2: what a profile asks of the seat rule. "`model` and `family` narrow the candidate seats; they never
+/// skip usage floors, reserves or modes", and "`effort` replaces the class effort".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Narrow {
+    pub name: String,
+    pub model: Option<String>,
+    pub family: Option<String>,
+    pub effort: Option<Effort>,
+}
+
+impl Narrow {
+    /// Why the profile does not take this seat; `None` when it does. A model matches the seat's id, the id at any of
+    /// its efforts, or an agy id without its effort (`gemini-3.8-flash` for `gemini-3.8-flash-{effort}`).
+    pub fn refuses(&self, seat: &Seat) -> Option<String> {
+        if let Some(model) = &self.model {
+            let fits = seat.model == *model
+                || seat.model.strip_suffix("-{effort}") == Some(model.as_str())
+                || seat
+                    .efforts
+                    .iter()
+                    .any(|effort| seat.model_for(*effort) == *model);
+            if !fits {
+                return Some(format!(
+                    "profile {} asks for model {model}; this seat is {}",
+                    self.name, seat.model
+                ));
+            }
+        }
+        if let Some(family) = self
+            .family
+            .as_ref()
+            .filter(|family| **family != seat.family)
+        {
+            return Some(format!(
+                "profile {} asks for family {family}; this seat is {}",
+                self.name, seat.family
+            ));
+        }
+        None
+    }
 }
 
 impl Request {
@@ -820,6 +873,7 @@ impl Request {
             override_seat: None,
             inherited_override: false,
             claude_only: None,
+            profile: None,
         }
     }
 }
@@ -908,6 +962,8 @@ enum SkipKind {
     Need,
     Class,
     Family,
+    /// Plan 33 §2.2: the order's profile asks for another model or family.
+    Profile,
     Floor,
     Headroom,
     Reserve,
@@ -1048,6 +1104,9 @@ pub struct Pick {
     /// Plan 12 O8b: what Jev advised for this order, set by `nirvana_jev_roles` after the rule picked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jev_pick: Option<crate::nirvana_jev_roles::JevPick>,
+    /// Plan 33 §2.2: the profile the pick was narrowed by, kept in the lease so `seat run` seats with the same one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 /// One seat that cleared the bar: the facts Jev weighs (O8b).
@@ -1091,6 +1150,7 @@ pub fn multiplier(passes: u32, orders: u32, prior: f32, shrink: f32) -> f32 {
 /// The effort a class gives a seat (§5.5). The class's effort and blast radius, or the seat's own departure;
 /// SOTA lifts to the class's `sota_effort`; a step down under pressure; max never; then the nearest the seat
 /// offers at or below it.
+#[allow(clippy::too_many_arguments)]
 fn effort_for(
     class: &Class,
     entry: &ClassSeat,
@@ -1099,9 +1159,13 @@ fn effort_for(
     step_down: bool,
     is_override: bool,
     override_effort: Option<Effort>,
+    profile_effort: Option<Effort>,
 ) -> (Effort, Option<String>) {
     let mut note = None;
     let mut want = if let Some(eff) = override_effort {
+        eff
+    } else if let Some(eff) = profile_effort {
+        // Plan 33 §2.2: "`effort` replaces the class effort"; the mode's lift, the step down and the cap still apply.
         eff
     } else {
         entry.effort.unwrap_or_else(|| match mode {
@@ -1270,6 +1334,16 @@ pub fn climb_t(climb: f32, climb_start: f32, climb_full: f32) -> f32 {
 }
 
 pub fn pick(table: &Table, world: &World, request: &Request) -> Result<Pick, NoSeat> {
+    // Plan 33 §2.2: "When no candidate fits, the pick says so, naming the profile."
+    pick_unnamed(table, world, request).map_err(|mut no_seat| {
+        if let Some(profile) = &request.profile {
+            no_seat.reason = format!("with profile {}: {}", profile.name, no_seat.reason);
+        }
+        no_seat
+    })
+}
+
+fn pick_unnamed(table: &Table, world: &World, request: &Request) -> Result<Pick, NoSeat> {
     let Some(class) = table.class(&request.class) else {
         return Err(NoSeat {
             class: request.class.clone(),
@@ -1646,7 +1720,13 @@ fn evaluate(
                     let seat = &table.seats[cand.index];
                     if cand.in_class && cand.skip.is_none() && seat.pool == hot_pool {
                         let entry = class.seats.iter().find(|e| e.seat == seat.id);
-                        let base_effort = entry.and_then(|e| e.effort).unwrap_or(class.effort);
+                        // Plan 33 §2.2: a profile's effort is the base the mode steps down from.
+                        let base_effort = request
+                            .profile
+                            .as_ref()
+                            .and_then(|profile| profile.effort)
+                            .or_else(|| entry.and_then(|e| e.effort))
+                            .unwrap_or(class.effort);
                         let min_effort = class.efficient_effort.unwrap_or(class.effort);
                         let stepped_effort =
                             base_effort.down().unwrap_or(base_effort).max(min_effort);
@@ -1862,6 +1942,15 @@ fn candidate(
         );
         return cand;
     }
+    if let Some(why) = request
+        .profile
+        .as_ref()
+        .and_then(|profile| profile.refuses(seat))
+    {
+        cand.skip = skip(SkipKind::Profile, why);
+        return cand;
+    }
+    let profile_effort = request.profile.as_ref().and_then(|profile| profile.effort);
     let (is_override, override_effort) = match &request.override_seat {
         Some((target, _)) => {
             let (target_id, target_eff) = match target.split_once(':') {
@@ -1884,6 +1973,7 @@ fn candidate(
         step_down,
         is_override,
         override_effort,
+        profile_effort,
     );
     cand.effort = Some(effort);
     cand.effort_note = note;
@@ -1898,6 +1988,7 @@ fn candidate(
                 false,
                 is_override,
                 override_effort,
+                profile_effort,
             )
             .0;
     if table.use_record {
@@ -2193,6 +2284,9 @@ fn build_pick(
     if let Some(note) = &won.record_note {
         reason.push_str(&format!("; {note}"));
     }
+    if let Some(profile) = &request.profile {
+        reason.push_str(&format!("; profile {}", profile.name));
+    }
     if let Some(&next) = beaten.first() {
         let next = &candidates[next];
         let next_seat = &table.seats[next.index];
@@ -2251,6 +2345,7 @@ fn build_pick(
                 .collect()
         },
         jev_pick: None,
+        profile: request.profile.as_ref().map(|profile| profile.name.clone()),
     }
 }
 
@@ -3049,7 +3144,7 @@ pub fn orchestrator_seat(table: &Table, world: &World) -> OrchestratorSeat {
 
 const USAGE: &str = "usage: herdr seat list [--json]
        herdr seat pick --class <class> [--size small|medium|large] [--needs a,b] [--not-family f]
-                       [--mode efficient|balanced|sota] [--book <order>] [--run <id>]
+                       [--mode efficient|balanced|sota] [--book <order>] [--run <id>] [--profile <name>]
                        [--override <seat> --reason \"...\"] [--json]
        herdr seat release <order>
        herdr seat record --json '<line>'
@@ -3751,10 +3846,12 @@ pub(crate) fn pick_args_for(root: &Path, args: &[String]) -> Result<(Table, Pick
         reason: None,
     };
     let request = &mut picked.request;
+    let mut profile: Option<String> = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         let mut value = || iter.next().cloned().unwrap_or_else(|| usage_exit());
         match arg.as_str() {
+            "--profile" => profile = Some(value()),
             "--class" => request.class = value(),
             "--size" => request.size = SizeName::parse(&value()).unwrap_or_else(|| usage_exit()),
             "--needs" => request.needs = list_arg(&value()),
@@ -3768,9 +3865,23 @@ pub(crate) fn pick_args_for(root: &Path, args: &[String]) -> Result<(Table, Pick
             _ => usage_exit(),
         }
     }
+    // Plan 33 §2.2: the profile's class when the flags name none, and its needs joined before plan 29's routing.
+    let profile = profile
+        .map(|name| crate::nirvana_profiles::load(root, &name))
+        .transpose()?;
+    if let Some(loaded) = &profile {
+        if picked.request.class.is_empty() {
+            picked.request.class = loaded.profile.class.clone().unwrap_or_default();
+        }
+        picked.request.needs =
+            crate::nirvana_profiles::joined_needs(&picked.request.needs, &loaded.profile);
+    }
     // Plan 29 §5.1: a need naming one of the project's MCP servers is no seat capability; the order takes a claude seat.
     let needs = crate::nirvana_gui_tools::seat_needs(&table, root, &picked.request.needs)?;
     (picked.request.needs, picked.request.claude_only) = (needs.rest, needs.claude_only);
+    if let Some(loaded) = &profile {
+        crate::nirvana_profiles::narrow(&mut picked.request, &loaded.profile);
+    }
     Ok((table, picked))
 }
 
@@ -4168,7 +4279,8 @@ mod tests {
                 "sweep.mechanical",
                 "chore.memory",
                 "chore.script",
-                "chore.github"
+                "chore.github",
+                "lesson-review"
             ]
         );
         assert_eq!(

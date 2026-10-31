@@ -79,6 +79,7 @@ fn spec_with(owns: &[&str], test: &str, checks: &[&str]) -> Spec {
         test: Some(test.to_owned()),
         checks: checks.iter().map(|s| (*s).to_owned()).collect(),
         serves: Vec::new(),
+        profile: None,
     }
 }
 
@@ -1676,4 +1677,36 @@ fn p31_a_send_back_child_never_inherits_the_send_approval() {
         );
     }
     nirvana_seat::set_test_world(None);
+}
+
+/// Plan 33 §3.2: P33a's contract, `Profile: <name>` at a line's start; a bad name or an indented line is no profile.
+#[test]
+fn p33_the_order_copy_names_its_profile_at_a_lines_start() {
+    assert_eq!(
+        spec("# Slice\nProfile: slicer\n").profile.as_deref(),
+        Some("slicer")
+    );
+    assert_eq!(
+        spec("# Slice\nProfile: `slicer-2`\n").profile.as_deref(),
+        Some("slicer-2")
+    );
+    assert_eq!(spec("# Slice\n  Profile: slicer\n").profile, None);
+    assert_eq!(spec("# Slice\nProfile: Slicer Two\n").profile, None);
+    assert_eq!(spec("## Profile: slicer\n").profile, None);
+}
+
+/// Plan 33 review B1: the gate reads no profile for a lesson review, whose brief quotes the order it reviews.
+#[test]
+fn p33_the_gate_reads_no_profile_for_a_lesson_review() {
+    let dir = temp("p33-review-profile");
+    let file = dir.join("review.md");
+    std::fs::write(&file, "Profile: slicer\n# Lesson review of b1\n").unwrap();
+    let mut order = seated("b1-lr", None);
+    order.order_file = file.display().to_string();
+    assert_eq!(
+        order_profile(&order, &Spec::default()).as_deref(),
+        Some("slicer")
+    );
+    order.class = crate::nirvana_review::CLASS.into();
+    assert_eq!(order_profile(&order, &Spec::default()), None);
 }

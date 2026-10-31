@@ -575,6 +575,14 @@ fn digest_cli() -> std::io::Result<()> {
         let _ = record_session_seat(&home, session_id, model, &launch_effort);
     }
     println!("{}", digest_text(&digest));
+    // Plan 33 §2.5: the project's profiles, outside `DIGEST_MAX_CHARS`: a description cut short is one Nirvana Claude
+    // cannot pick by. At most `DIGEST_PROFILES` lines and a count.
+    if let Some(project) = &project {
+        let lines = crate::nirvana_profiles::digest_lines(&project.root);
+        if !lines.is_empty() {
+            println!("{}", lines.join("\n"));
+        }
+    }
     // Plan 25 §2: after a `/clear` herdr typed, the fresh session starts from the handoff note.
     if let Some(note) = crate::nirvana_fresh::session_start_hook(&hook, project.as_ref()) {
         println!("\n{note}");

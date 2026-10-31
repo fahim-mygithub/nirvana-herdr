@@ -1063,7 +1063,15 @@ pub fn replay(events: &[Event]) -> RunState {
             | Kind::WakeQueued { .. }
             | Kind::Unknown => {}
         }
-        if let Some(line) = queue_line(&event.kind) {
+        // Plan 33 review B2: a lesson review's delivery and question are herdr's to settle (`seat exec` gates it), so
+        // they never reach Nirvana Claude's queue and never cost it a turn.
+        let herdrs = matches!(event.kind, Kind::Delivered { .. } | Kind::Asked { .. })
+            && event
+                .kind
+                .order()
+                .and_then(|order| state.order(order))
+                .is_some_and(|known| known.seated.class == crate::nirvana_review::CLASS);
+        if let Some(line) = queue_line(&event.kind).filter(|_| !herdrs) {
             state.queue.push(QueueItem {
                 seq: event.seq,
                 order: event.kind.order().map(str::to_owned),

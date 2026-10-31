@@ -31,7 +31,11 @@
 //! test: python -m pytest -q -rA tests  one command, run without a shell, in the worker's folder
 //! check: test_mul test_add             names that must appear in the test output
 //! serves: 8770                         ops orders: ports the worker's pane must listen on
+//! Profile: slicer                      the profile the order was seated with (plan 33 §3.2; P33a writes it)
 //! ```
+//!
+//! After a pass or a send-back, one `lesson-review` order of the gated order is seated (plan 33 §3.3,
+//! `nirvana_review`), and gating that order applies its lesson ops.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -137,7 +141,7 @@ pub struct Axis {
 }
 
 impl Axis {
-    fn new(axis: &str, mark: Mark, why: impl Into<String>) -> Self {
+    pub(crate) fn new(axis: &str, mark: Mark, why: impl Into<String>) -> Self {
         Self {
             axis: axis.to_owned(),
             mark,
@@ -164,6 +168,8 @@ pub struct Spec {
     pub test: Option<String>,
     pub checks: Vec<String>,
     pub serves: Vec<u16>,
+    /// Plan 33 §3.2: `Profile: <name>`, the contract with P33a's seating; the last valid one wins.
+    pub profile: Option<String>,
 }
 
 fn words(rest: &str) -> impl Iterator<Item = String> + '_ {
@@ -192,6 +198,11 @@ pub fn spec(text: &str) -> Spec {
         } else if let Some(rest) = line.strip_prefix("serves:") {
             spec.serves
                 .extend(words(rest).filter_map(|port| port.parse::<u16>().ok()));
+        } else if let Some(rest) = line.strip_prefix("Profile:") {
+            let name = rest.trim().trim_matches('`');
+            if crate::nirvana_lessons::valid_profile(name) {
+                spec.profile = Some(name.to_owned());
+            }
         }
     }
     spec
@@ -1414,7 +1425,7 @@ pub struct Heldout {
     pub base_cases: Vec<(String, bool)>,
 }
 
-fn gate_dir(project: &Project, run: &str) -> PathBuf {
+pub(crate) fn gate_dir(project: &Project, run: &str) -> PathBuf {
     project.run_dir(run).join("gate")
 }
 
@@ -1428,7 +1439,11 @@ pub fn read_sidecar(project: &Project, run: &str, order: &str) -> Sidecar {
         })
 }
 
-fn write_sidecar(project: &Project, run: &str, sidecar: &Sidecar) -> std::io::Result<()> {
+pub(crate) fn write_sidecar(
+    project: &Project,
+    run: &str,
+    sidecar: &Sidecar,
+) -> std::io::Result<()> {
     let dir = gate_dir(project, run);
     std::fs::create_dir_all(&dir)?;
     let mut text = serde_json::to_string_pretty(sidecar)?;
@@ -1441,7 +1456,7 @@ fn write_sidecar(project: &Project, run: &str, sidecar: &Sidecar) -> std::io::Re
 
 /// One gate at a time per project (§7.2: "the gate's builds run one at a time"; old Nirvana's three gates inside
 /// four minutes collided on ports, `WinError 10048`). An OS lock under `runs/`, which git ignores.
-struct GateLock(std::fs::File);
+pub(crate) struct GateLock(std::fs::File);
 
 impl Drop for GateLock {
     fn drop(&mut self) {
@@ -1449,7 +1464,7 @@ impl Drop for GateLock {
     }
 }
 
-fn gate_lock(project: &Project) -> std::io::Result<GateLock> {
+pub(crate) fn gate_lock(project: &Project) -> std::io::Result<GateLock> {
     let path = project.dir().join("runs").join(".gate.lock");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1666,11 +1681,11 @@ impl Ruling {
     }
 }
 
-fn order_text(seated: &Seated) -> String {
+pub(crate) fn order_text(seated: &Seated) -> String {
     std::fs::read_to_string(&seated.order_file).unwrap_or_default()
 }
 
-fn stream_text(project: &Project, run: &str, order: &str) -> String {
+pub(crate) fn stream_text(project: &Project, run: &str, order: &str) -> String {
     std::fs::read_to_string(
         project
             .run_dir(run)
@@ -1680,7 +1695,7 @@ fn stream_text(project: &Project, run: &str, order: &str) -> String {
     .unwrap_or_default()
 }
 
-fn axes_values(axes: &[Axis]) -> Vec<Value> {
+pub(crate) fn axes_values(axes: &[Axis]) -> Vec<Value> {
     axes.iter()
         .filter_map(|axis| serde_json::to_value(axis).ok())
         .collect()
@@ -1714,7 +1729,7 @@ fn seat_run_line(
 
 /// Books `id` on `pick` so the `herdr seat run` the orchestrator types gets the same seat (O3 reads a live booking
 /// first).
-fn book(table: &Table, pick: &Pick, id: &str, run: &str) -> std::io::Result<()> {
+pub(crate) fn book(table: &Table, pick: &Pick, id: &str, run: &str) -> std::io::Result<()> {
     let dir = nirvana_seat::dir();
     let _lock = nirvana_seat::Lock::take(&dir)?;
     let path = dir.join(nirvana_seat::LEASES_FILE);
@@ -1769,9 +1784,30 @@ pub fn gate(project: &Project, run: &str, order: &str) -> Result<Ruling, String>
         .clone();
     let sidecar = read_sidecar(project, run, order);
     let table = nirvana_seat::table_for(&project.root).ok();
-    match sidecar.helps.clone() {
+    // Plan 33 review: a lesson review re-seated when its pool ran out carries its first review's sidecar, so its child
+    // is gated as a review and never as a plain order.
+    let helps = sidecar.helps.clone().or_else(|| {
+        (known.seated.class == crate::nirvana_review::CLASS)
+            .then(|| {
+                read_sidecar(
+                    project,
+                    run,
+                    &crate::nirvana_review::review_root(&state, order),
+                )
+                .helps
+            })
+            .flatten()
+    });
+    match helps {
         Some((kind, subject)) if kind == "author" => {
             return gate_author(project, run, &journal, &known, &subject, table.as_ref())
+        }
+        Some((kind, subject))
+            if kind == crate::nirvana_review::REVIEW || kind == crate::nirvana_review::MERGE =>
+        {
+            return crate::nirvana_review::gate_review(
+                project, run, &journal, &known, &kind, &subject,
+            )
         }
         Some((kind, subject)) if kind == "review" => {
             let own = gate_reviewer(&journal, &known, run)?;
@@ -1985,6 +2021,8 @@ fn gate_subject(
             .as_ref()
             .and_then(|report| report.get("lesson"))
         {
+            // Plan 33 §3.1: any project, remote or none; §3.2: the order's own copy names its profile.
+            let profile = order_profile(seated, &spec);
             let verdict = crate::nirvana_lessons::verify_and_write(
                 &project.root,
                 lesson,
@@ -1993,7 +2031,10 @@ fn gate_subject(
                 &order,
                 run,
                 now(),
-                crate::nirvana_lessons::has_github_remote(&project.root),
+                crate::nirvana_lessons::Meta {
+                    profile: profile.as_deref(),
+                    origin: crate::nirvana_lessons::Origin::Worker,
+                },
             );
             axes.push(match verdict {
                 crate::nirvana_lessons::Verdict::Written(path) => {
@@ -2012,6 +2053,15 @@ fn gate_subject(
             });
         }
         let _ = crate::nirvana_lessons::note_gated(&project.root, &stream, &order, true);
+        // Plan 33 §3.3: the cap's refusal is journaled with the verdict, as an axis named `review_skipped`.
+        let review = crate::nirvana_review::wanted(project, state, known, table);
+        if let Err(Some(why)) = &review {
+            axes.push(Axis::new(
+                crate::nirvana_review::SKIPPED,
+                Mark::Note,
+                why.clone(),
+            ));
+        }
         journal
             .append(
                 now(),
@@ -2025,6 +2075,16 @@ fn gate_subject(
             .map_err(|err| err.to_string())?;
         record(project, run, &order);
         next.push(format!("herdr gate merge {order} --run {run}"));
+        if review.is_ok() {
+            next.push(crate::nirvana_review::queue_review(
+                project,
+                run,
+                journal,
+                known,
+                &crate::nirvana_review::Verdict::Pass,
+                table,
+            ));
+        }
         return Ok(Ruling {
             order,
             run: run.to_owned(),
@@ -2034,13 +2094,48 @@ fn gate_subject(
         });
     }
     let _ = crate::nirvana_lessons::note_gated(&project.root, &stream, &order, false);
-    send_back(
+    let reasons: Vec<String> = failing(&axes)
+        .iter()
+        .map(|axis| format!("{}: {}", axis.axis, axis.why))
+        .collect();
+    let review = crate::nirvana_review::wanted(project, state, known, table);
+    if let Err(Some(why)) = &review {
+        axes.push(Axis::new(
+            crate::nirvana_review::SKIPPED,
+            Mark::Note,
+            why.clone(),
+        ));
+    }
+    let mut ruling = send_back(
         project, run, journal, state, known, &root, &root_text, axes, table,
-    )
+    )?;
+    // §3.3: "after `herdr gate run` journals `Gated` (pass) or a send-back"; an `asked` (the cap spent) is neither.
+    if review.is_ok() && ruling.verdict == Outcome::SentBack.word() {
+        ruling.next.push(crate::nirvana_review::queue_review(
+            project,
+            run,
+            journal,
+            known,
+            &crate::nirvana_review::Verdict::SentBack(reasons),
+            table,
+        ));
+    }
+    Ok(ruling)
+}
+
+/// The profile an order was seated with: its own copy's `Profile:` line, else its chain root's. None for a lesson
+/// review, whose brief quotes the order it reviews (plan 33 review B1).
+fn order_profile(seated: &Seated, root_spec: &Spec) -> Option<String> {
+    if seated.class == crate::nirvana_review::CLASS {
+        return None;
+    }
+    spec(&order_text(seated))
+        .profile
+        .or_else(|| root_spec.profile.clone())
 }
 
 /// The record line, once, from the journal as it now stands.
-fn record(project: &Project, run: &str, order: &str) {
+pub(crate) fn record(project: &Project, run: &str, order: &str) {
     let journal = project.journal(run);
     let state = replay(&journal.read().0);
     if let Some(known) = state.order(order) {
@@ -2125,6 +2220,12 @@ fn send_back(
     request.not_family = seated.not_family.clone();
     request.mode = seated.mode;
     request.order = Some(id.clone());
+    // Plan 33 §2.2: "A send-back child and a reseat keep the parent's profile copy", and so its narrowing.
+    if let Err(why) =
+        crate::nirvana_profiles::narrow_for_order(&mut request, &project.run_dir(run), root_text)
+    {
+        return ask(format!("{order} must go back, but {why}"), axes);
+    }
     if let Some(reason) = &seated.override_reason {
         request.override_seat = Some((
             format!("{}:{}", seated.seat, seated.effort.word()),
@@ -2416,7 +2517,7 @@ fn gate_reviewer(journal: &Journal, known: &OrderState, run: &str) -> Result<Rul
 }
 
 /// A reviewer's or author's report need only be well formed: `blocked` is a review's verdict, not a failure.
-fn report_or_verdict(report: Option<&Value>) -> Axis {
+pub(crate) fn report_or_verdict(report: Option<&Value>) -> Axis {
     match report.map(crate::nirvana_worker::check_report) {
         Some(Ok(())) => Axis::new("report", Mark::Pass, "well formed"),
         Some(Err(why)) => Axis::new("report", Mark::Fail, why),
