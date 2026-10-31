@@ -3,6 +3,45 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.45.0: agent profiles per project, and lessons that are kept and reviewed
+
+- **Changed:**
+  - A project may define agent profiles in `.nirvana/profiles/<name>.md`: front matter (description, class, model,
+    family, effort, needs, disallowed_tools) and a persona body of at most 4,000 characters. `herdr seat run
+    --profile <name>` applies one. The run keeps a copy with its sha256, and the order copy carries `Profile:` and
+    `Profile sha256:` lines. Claude gets the body through `--append-system-prompt-file`; agy gets it quoted at the top
+    of its order. A seat the profile refuses stays refused, `--override` included.
+  - Lessons are written in folders with no GitHub remote, and never pushed.
+  - After every gated order herdr queues a `lesson-review` order on a cheap seat (flash, then sonnet), capped by
+    `lesson_reviews_per_day` in the seat table's `[constants]` (20). herdr gates the review itself: no orchestrator
+    turn, no `Asked`. Its `lesson_ops` (`new`, `patch`, `merge`) are applied only when the review is `done`, each with
+    at least 20 characters of evidence that the worker's stream holds and herdr did not write, into a ledger that
+    `herdr lessons rollback` undoes.
+  - A review never takes the reviewed order's profile. It runs in its own folder under the run. A Claude reviewer
+    gets `--disallowedTools` for every writing and network tool, and a review whose lessons folder changed outside a
+    ledger op is failed.
+  - `herdr lessons stats|import|merge|rollback`. `nirvana_seats_v5.toml` joins the historical seat tables.
+  **Because:** the owner, 2026-10-30: "I want to implement the profile agent from Hermes. Essentially give each
+  project level aa designable agent profiles ... Pay particular atention to the self learning after each run", then
+  "Sure" to lessons without a remote and a capped review after every gated order. Plan
+  `nirvana/plans/2026-10-30-33-profiles-and-learning.md`, built on Opus high as P33a and P33b, then one review round.
+  **Measured:**
+  - 3D-Printer Flow workers offered 54 lessons (41 distinct) and 0 were kept, because a write required a GitHub
+    remote. An import dry run would keep 39 of the 54.
+  - Hermes never measures whether a learned skill helped. Nirvana's lesson counters (offered, opened, passed after
+    opened) do, and the review keeps them.
+  - Gates on the merged tree: nextest 4,421 of 4,422, the one failure being the known Windows plugin-path test;
+    clippy clean; the dry run finds 1,912 of 1,912; every `p33a_` and `p33b_` control and the 11 older controls
+    whose lines moved go red alone.
+  - One Sonnet review; its three blockers (a review taking the subject's persona, an orchestrator turn per review,
+    a reviewer able to write) were fixed.
+  - Known limit: an agy reviewer has no tool filter and runs with `--dangerously-skip-permissions`. The lessons
+    snapshot check catches a write to lessons, not a write elsewhere.
+  - Not live-checked yet: a profiled order on each seat, and a review running after a real gated order.
+  - Two merge commits, the build and then the plan branch, where the plan named one per package.
+  **If you remove this:** every order runs as the same generic worker, and what a worker learns is thrown away
+  in any folder without a GitHub remote.
+
 ## alpha 0.44.0: GUI orders reach their servers, a checked Send, and deliveries that retry
 
 - **Changed:**

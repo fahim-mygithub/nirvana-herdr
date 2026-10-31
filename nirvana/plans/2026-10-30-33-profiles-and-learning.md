@@ -1,6 +1,6 @@
 # Feature 33: agent profiles per project, and lessons that are kept
 
-Status: **PLANNED (2026-10-30)**. Two packages in two worktrees, built in parallel. The evidence is the Hermes Agent
+Status: **BUILT (2026-10-30, alpha 0.45.0)**. Was PLANNED (2026-10-30). Two packages in two worktrees, built in parallel. The evidence is the Hermes Agent
 source review and the Nirvana-Herdr map of 2026-10-30, copied to `nirvana/plans/2026-10-30-33-records/`.
 
 ## Ledger
