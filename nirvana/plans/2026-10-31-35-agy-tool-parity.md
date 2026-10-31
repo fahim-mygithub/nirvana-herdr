@@ -13,6 +13,9 @@ for this plan (`2026-10-31-35-records/probes/`, expectations in `EXPECT-PLAN.md`
 | L2 | "Can agy not use bladebro?" | P35c | P35c | §1 probe 2 (it can); §5 P35c tests; §6 live check 1 |
 | L3 | "Have herdr give similar tool abilities if they need it the same way we manage claude tools as preloads and mccp servers." | P35b (servers, rules, skills, denials), P35c (bladebro) | P35b, P35c | §2 parity table; §5 tests; §6 live checks 2-6 |
 | L4 | The native agy session's answer, as the owner pasted it: "Right now, I have a search_web tool enabled for searching the web, rather than an interactive browser tool. If your task involves browsing web pages, inspecting the DOM, or interacting with web applications, you can use the /browser slash command to enable browser automation and interaction capabilities." | §1.4 (why `/browser` is not the way) | orchestrator | §1.4 docs and changelog lines |
+| L5 | "Yes, both CLIs (Recommended)" (answer, 2026-10-31, to R1: should a browser order get bladebro on either CLI, with its own browser home per order) | P35c | P35c | §5 P35c tests; §6 live check 1 |
+| L6 | "Yes, allow (Recommended)" (answer, 2026-10-31, to R4: may orders that need a non-desktop MCP server seat on agy) | P35b | P35b | §5 P35b tests; §6 live checks |
+| L7 | "Keep them" (answer, 2026-10-31, to R3: the owner's global agy plugins) | none | owner | nothing to build |
 
 - Not in scope: desktop servers on agy (exebox, §1.3); teaching orders on agy (plan 34 keeps them on Claude); the seat
   table's scores (R2).
@@ -207,7 +210,7 @@ gets one line in the worker's view.
 
 ## 4. Owner rulings this plan needs
 
-- **R1 (blocks P35c): bladebro for a browser order on either CLI.** herdr's own definition, not the project's
+- **R1 (RULED yes, L5; blocks P35c until P35b merges): bladebro for a browser order on either CLI.** herdr's own definition, not the project's
   `.mcp.json`: `cmd /c bladebro mcp`, `BLADE_HOME=<run>/blade/<order>`, `BLADE_CHROME_FLAGS=--headless=new`,
   `BLADE_LANE=agent`, `BLADE_IDLE_TIMEOUT=60`, `BLADE_NO_UPDATE_CHECK=1`, all from decision 0043's measured recipe. A
   need `browser` or `bladebro` grants it, and `browser` stays a capability for the pick. Recommended: yes. It is
@@ -216,10 +219,10 @@ gets one line in the worker's view.
 - **R2: the seat table.** After P35c, add `browser` to the four agy seats. Rescore `research.web` from the §6 checks,
   not before. Also open: the claude seats carry no `web` capability although their workers have WebSearch and
   WebFetch. I have not changed it, because it moves routing.
-- **R3: the owner's global agy plugins** (chrome-devtools, gemini-api with its MCP server, maps, modern-web). Every
+- **R3 (RULED keep, L7): the owner's global agy plugins** (chrome-devtools, gemini-api with its MCP server, maps, modern-web). Every
   agy worker loads them, and nothing per order can switch them off. Keep them, or disable the unused ones globally.
   That is the owner's own action.
-- **R4: non-desktop server orders may now seat on agy** (for example `bambu` printer control, `moto-reel`). The device
+- **R4 (RULED yes, L6): non-desktop server orders may now seat on agy** (for example `bambu` printer control, `moto-reel`). The device
   and Send lines go with the brief on both CLIs. Recommended: yes. Otherwise P35b keeps `claude_only` for every server,
   and only bladebro and rules reach agy.
 
