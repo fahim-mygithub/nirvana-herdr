@@ -672,6 +672,96 @@ pub fn task_title(title: Option<&str>) -> String {
     }
 }
 
+/// Plan 38: the frames a space's marker cycles through while anything under it is working. The owner, 2026-10-31,
+/// picked "Nirvana sparkle" from a preview of exactly these frames at about four a second. herdr's own space marker
+/// cannot say it: its `status_priority` ranks Done above Working, so a finished Nirvana Claude showed `✓` over a
+/// worker that had run 7m54s (plan 38 §1).
+pub const SPARKLE_FRAMES: [&str; 8] = [
+    "\u{2727}", "\u{2726}", "\u{2736}", "\u{2737}", "\u{2738}", "\u{2737}", "\u{2736}", "\u{2726}",
+];
+/// How long each frame shows: four frames a second.
+pub const SPARKLE_FRAME: Duration = Duration::from_millis(250);
+/// What a frame becomes if the width function the sidebar uses measures it wider than one cell, so the space's name
+/// never moves (herdr's own Working mark).
+pub const SPARKLE_FALLBACK: &str = "\u{25D0}";
+/// `SPARKLE_DRAWN` when the last drawn spaces list had no working space: the timer asks for no repaint.
+const SPARKLE_NOT_DRAWN: usize = usize::MAX;
+
+/// The frame at `elapsed` on the sparkle's clock.
+pub fn sparkle_frame_at(elapsed: Duration) -> usize {
+    (elapsed.as_millis() / SPARKLE_FRAME.as_millis()) as usize % SPARKLE_FRAMES.len()
+}
+
+/// The glyph of frame `index`: the frame, or the fallback when it is not one cell wide.
+pub fn sparkle_glyph(index: usize) -> &'static str {
+    let glyph = SPARKLE_FRAMES[index % SPARKLE_FRAMES.len()];
+    if unicode_width::UnicodeWidthStr::width(glyph) == 1 {
+        glyph
+    } else {
+        SPARKLE_FALLBACK
+    }
+}
+
+/// The frame showing now. One clock for the whole window, started on first use, so every working space shows the
+/// same frame and the list does not shimmer.
+pub fn sparkle_frame() -> usize {
+    #[cfg(test)]
+    if let Some(elapsed) = SPARKLE_TEST_CLOCK.with(std::cell::Cell::get) {
+        return sparkle_frame_at(elapsed);
+    }
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    sparkle_frame_at(EPOCH.get_or_init(Instant::now).elapsed())
+}
+
+#[cfg(not(test))]
+static SPARKLE_DRAWN: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(SPARKLE_NOT_DRAWN);
+
+#[cfg(test)]
+thread_local! {
+    // Thread-local in tests: every test composes the sidebar, and one test's frame must not schedule another's repaint.
+    static SPARKLE_DRAWN_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(SPARKLE_NOT_DRAWN) };
+    static SPARKLE_TEST_CLOCK: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+}
+
+fn sparkle_drawn_swap(value: usize) -> usize {
+    #[cfg(not(test))]
+    return SPARKLE_DRAWN.swap(value, std::sync::atomic::Ordering::AcqRel);
+    #[cfg(test)]
+    return SPARKLE_DRAWN_TEST.with(|drawn| drawn.replace(value));
+}
+
+/// The spaces list says what it drew: `Some(frame)` when at least one space it drew was sparkling, `None` when none
+/// was. Called once per drawn list, so a list scrolled or hidden off the screen schedules nothing.
+pub fn note_sparkle_drawn(frame: Option<usize>) {
+    sparkle_drawn_swap(frame.unwrap_or(SPARKLE_NOT_DRAWN));
+}
+
+/// Whether the window should repaint for the sparkle, asked on every timer tick: only when the last drawn list had a
+/// working space and the clock has moved to another frame since. Answering yes forgets the drawing, so the repaint
+/// must draw a working space again to keep the sparkle going; with nothing working there is no repaint at all.
+/// The window's timer asks it beside the other `take_changed` readers in `client/mod.rs`; that line is plan 36's file
+/// in the P38 build, so it arrives as a hunk (nirvana/plans/2026-10-31-38-records/p38.md) and the allow goes with it.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn take_sparkle_due() -> bool {
+    let drawn = sparkle_drawn_swap(SPARKLE_NOT_DRAWN);
+    if drawn == SPARKLE_NOT_DRAWN {
+        return false;
+    }
+    if drawn == sparkle_frame() {
+        // Same frame still showing: keep the drawing for the next tick.
+        sparkle_drawn_swap(drawn);
+        return false;
+    }
+    true
+}
+
+/// Tests set the sparkle's clock; `None` gives it back to the real clock.
+#[cfg(test)]
+pub fn set_sparkle_clock_for_test(elapsed: Option<Duration>) {
+    SPARKLE_TEST_CLOCK.with(|clock| clock.set(elapsed));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

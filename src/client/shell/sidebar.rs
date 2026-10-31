@@ -338,6 +338,9 @@ pub(crate) fn render_sidebar(
     let show_scrollbar = metrics.max_offset_from_bottom > 0 && body.width > 1;
     let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
     let mut y = body.y;
+    // Plan 38: one frame of the sparkle for the whole list, so working spaces share a phase.
+    let sparkle_frame = crate::nirvana_spaces::sparkle_frame();
+    let mut sparkled = false;
     for (entry_position, entry) in entries.iter().enumerate().skip(*state.workspace_scroll) {
         let Some(workspace) = snapshot.workspaces.get(entry.index) else {
             continue;
@@ -362,6 +365,21 @@ pub(crate) fn render_sidebar(
             break;
         }
         let rect = Rect::new(body.x, y, content_width, row_height);
+        // Plan 38: a space sparkles while anything under it is working.
+        let working = super::nirvana_spaces::space_working(
+            snapshot,
+            workspace,
+            status,
+            state.collapsed_groups,
+            workers,
+        );
+        let marker = super::nirvana_spaces::space_marker(
+            status,
+            working,
+            config.status_indicators,
+            sparkle_frame,
+        );
+        sparkled |= marker.1 == crate::api::schema::AgentStatus::Working;
         let selected = state.selected_workspace_id.is_some_and(|target| {
             target.matches(state.active_endpoint_id, &workspace.workspace_id)
         });
@@ -373,11 +391,11 @@ pub(crate) fn render_sidebar(
         } else if workspace.focused {
             buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
         }
-        render_workspace_rows(
+        render_workspace_rows_with_marker(
             buffer,
             rect,
             status,
-            config.status_indicators,
+            marker,
             entry,
             rows,
             workspace.focused,
@@ -439,6 +457,7 @@ pub(crate) fn render_sidebar(
             .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap);
         y = y.saturating_add(row_height + gap);
     }
+    crate::nirvana_spaces::note_sparkle_drawn(sparkled.then_some(sparkle_frame));
 
     if show_scrollbar {
         let track = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
@@ -793,6 +812,36 @@ pub(in crate::client::shell) fn render_workspace_rows(
     dragged: bool,
     palette: &Palette,
 ) {
+    render_workspace_rows_with_marker(
+        buffer,
+        area,
+        status,
+        (status_icon(status, indicators), status),
+        entry,
+        rows,
+        focused,
+        selected,
+        navigating,
+        dragged,
+        palette,
+    );
+}
+
+/// `render_workspace_rows` with the space's marker given: its glyph and the status whose colour it takes. The local
+/// spaces list passes the plan 38 sparkle here; herdr's endpoint lists keep `render_workspace_rows`.
+pub(in crate::client::shell) fn render_workspace_rows_with_marker(
+    buffer: &mut Buffer,
+    area: Rect,
+    status: crate::api::schema::AgentStatus,
+    marker: (&'static str, crate::api::schema::AgentStatus),
+    entry: &WorkspaceEntry,
+    rows: Vec<Vec<crate::ui::ResolvedToken>>,
+    focused: bool,
+    selected: bool,
+    navigating: bool,
+    dragged: bool,
+    palette: &Palette,
+) {
     for (row_index, row) in rows.iter().enumerate() {
         let y = area.y + row_index as u16;
         if y >= area.bottom() {
@@ -844,8 +893,8 @@ pub(in crate::client::shell) fn render_workspace_rows(
         let spans = crate::ui::resolved_token_spans(
             row,
             (
-                status_icon(status, indicators),
-                Style::default().fg(status_color(status, palette)),
+                marker.0,
+                Style::default().fg(status_color(marker.1, palette)),
             ),
             Style::default().fg(status_color(status, palette)),
             workspace_style,

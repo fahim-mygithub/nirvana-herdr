@@ -419,6 +419,67 @@ pub(super) fn render_space_agents(
     }
 }
 
+/// Plan 38: whether anything under a space is working: one of its agents is Working or Blocked (its Nirvana Claude,
+/// a plain Claude, Codex, agy, a local pane, a seat worker's pane), or it has a live worker row (`workers`, the rows
+/// the list already read this frame). herdr's own space status cannot be asked: it ranks Done above Working. A
+/// collapsed worktree group's parent counts its hidden children's agents, as `displayed_workspace_status` does; their
+/// workers are not read while they are hidden, so they do not count (no new reads for the sparkle).
+pub(super) fn space_working(
+    snapshot: &ClientShellSnapshot,
+    workspace: &ClientShellWorkspace,
+    status: crate::api::schema::AgentStatus,
+    collapsed_groups: &std::collections::HashSet<String>,
+    workers: &[SpaceWorker],
+) -> bool {
+    use crate::api::schema::AgentStatus;
+    let busy = |status: AgentStatus| matches!(status, AgentStatus::Working | AgentStatus::Blocked);
+    if busy(status) || !workers.is_empty() {
+        return true;
+    }
+    let group = workspace
+        .worktree
+        .as_ref()
+        .filter(|worktree| !worktree.is_linked_worktree)
+        .filter(|worktree| collapsed_groups.contains(&worktree.key))
+        .map(|worktree| worktree.key.as_str());
+    let member = |workspace_id: &str| {
+        workspace_id == workspace.workspace_id
+            || group.is_some_and(|key| {
+                snapshot.workspaces.iter().any(|candidate| {
+                    candidate.workspace_id == workspace_id
+                        && candidate
+                            .worktree
+                            .as_ref()
+                            .is_some_and(|member| member.key == key && member.is_linked_worktree)
+                })
+            })
+    };
+    snapshot
+        .agents
+        .iter()
+        .any(|agent| busy(agent.agent_status) && member(&agent.workspace_id))
+}
+
+/// The space's marker and the status whose colour it takes. Working shows the sparkle's `frame` in the working
+/// colour. Blocked keeps herdr's own mark (`×`, red): a space waiting on the owner matters more than one at work.
+/// Anything else is today's marker.
+pub(super) fn space_marker(
+    status: crate::api::schema::AgentStatus,
+    working: bool,
+    indicators: crate::config::StatusIndicatorStyle,
+    frame: usize,
+) -> (&'static str, crate::api::schema::AgentStatus) {
+    use crate::api::schema::AgentStatus;
+    if working && status != AgentStatus::Blocked {
+        (
+            crate::nirvana_spaces::sparkle_glyph(frame),
+            AgentStatus::Working,
+        )
+    } else {
+        (status_icon(status, indicators), status)
+    }
+}
+
 /// Plan 30: a space shows all its live workers up to this many; past it, `WORKERS_CUT_TO` rows and "+N more".
 pub(super) const WORKERS_SHOWN: usize = 4;
 pub(super) const WORKERS_CUT_TO: usize = 3;
@@ -577,5 +638,448 @@ pub(super) fn render_space_workers(
             model_style,
         );
         put_text(buffer, x + 2, y, row.name_end as u16, &row.line, name_style);
+    }
+}
+
+/// Plan 38 (nirvana/plans/2026-10-31-38-space-working-spinner.md): a space sparkles while anything under it is working.
+#[cfg(test)]
+mod sparkle_tests {
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::api::schema::AgentStatus;
+    use crate::nirvana_spaces::{
+        set_sparkle_clock_for_test, sparkle_frame_at, sparkle_glyph, take_sparkle_due, Kind,
+        SPARKLE_FRAME, SPARKLE_FRAMES,
+    };
+    use crate::nirvana_subagents::{
+        set_view_for_test, Subagent, SubagentProvider, SubagentState, SubagentsView,
+    };
+    use crate::protocol::{PaneSurfacePane, SurfaceRect};
+
+    fn agent(pane: &str, workspace: &str, status: AgentStatus, nirvana: bool) -> ClientShellAgent {
+        let mut tokens = vec![
+            ("nirvana_kind".into(), "claude".into()),
+            ("nirvana_model".into(), "Claude Opus 5.5".into()),
+        ];
+        if nirvana {
+            tokens.push(("nirvana_role".into(), "nirvana".into()));
+        }
+        ClientShellAgent {
+            pane_id: pane.into(),
+            workspace_id: workspace.into(),
+            tab_id: "tab_1".into(),
+            name: None,
+            display_agent: None,
+            agent: Some("claude".into()),
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_status: status,
+            state_change_seq: 1,
+            state_labels: Vec::new(),
+            tokens,
+            focused: false,
+            agent_session: None,
+        }
+    }
+
+    /// A live seat order under `pane`, as the owner's screenshot's `quad-pegs…` at 56s.
+    fn live_worker(pane: &str) -> HashMap<String, SubagentsView> {
+        let worker = Subagent {
+            id: "order-quad-pegs".into(),
+            parent_id: None,
+            name: "quad-pegs".into(),
+            description: String::new(),
+            provider: SubagentProvider::Claude,
+            model: "Sonnet 5.5".into(),
+            state: SubagentState::Running,
+            elapsed_secs: 56,
+            tokens: None,
+            ended_at: None,
+            depth: 0,
+            target_pane_id: None,
+            run_id: Some("run-20261031-000000".into()),
+            run_event_time: Some(1000),
+        };
+        HashMap::from([(
+            pane.to_string(),
+            SubagentsView {
+                total_count: 1,
+                subagents: vec![worker],
+                overflow: 0,
+            },
+        )])
+    }
+
+    fn surface() -> PaneSurfaceFrame {
+        let surface_buffer = Buffer::with_lines(["LIVE", "PANE"]);
+        let rect = SurfaceRect {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 2,
+        };
+        PaneSurfaceFrame {
+            boot_id: "boot-1".into(),
+            projection_revision: 1,
+            surface_revision: 1,
+            frame: FrameData::from_ratatui_buffer_with_hyperlinks(&surface_buffer, None, &[]),
+            panes: vec![PaneSurfacePane {
+                pane_id: "pane_1".into(),
+                content_revision: 0,
+                rect,
+                inner_rect: rect,
+                scrollbar_rect: None,
+                scroll: None,
+                focused: true,
+                mouse_reporting: false,
+                sgr_pixel_mouse: false,
+                alternate_screen_active: false,
+                pixel_width: 0,
+                pixel_height: 0,
+            }],
+            splits: Vec::new(),
+            popup: None,
+            graphics: crate::protocol::SurfaceGraphicsScene::default(),
+        }
+    }
+
+    /// One space per `(status, agents)`, named `space-1`, `space-2`, ...
+    fn spaces(list: Vec<(AgentStatus, Vec<ClientShellAgent>)>) -> ClientShellSnapshot {
+        let mut snap = super::super::tests::snapshot();
+        let template = snap.workspaces[0].clone();
+        snap.workspaces.clear();
+        for (index, (status, agents)) in list.into_iter().enumerate() {
+            let mut workspace = template.clone();
+            workspace.workspace_id = format!("ws_{}", index + 1);
+            workspace.number = index + 1;
+            workspace.label = format!("space-{}", index + 1);
+            workspace.focused = index == 0;
+            workspace.agent_status = status;
+            snap.workspaces.push(workspace);
+            snap.agents.extend(agents);
+        }
+        snap
+    }
+
+    /// The first row of each space at the sparkle clock's `at`, with `view` as the panel's cached workers. The symbols
+    /// style, so Done reads `✓` as in the owner's screenshot.
+    fn first_rows(
+        snap: &ClientShellSnapshot,
+        view: Option<HashMap<String, SubagentsView>>,
+        at: Duration,
+    ) -> Vec<String> {
+        first_rows_collapsed(snap, view, at, &[])
+    }
+
+    /// `first_rows` with the worktree groups `collapsed` folded.
+    fn first_rows_collapsed(
+        snap: &ClientShellSnapshot,
+        view: Option<HashMap<String, SubagentsView>>,
+        at: Duration,
+        collapsed: &[&str],
+    ) -> Vec<String> {
+        let (frame, rects) = compose_at(snap, view, at, collapsed);
+        let rows: Vec<Vec<String>> = frame
+            .cells
+            .chunks(frame.width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol.clone()).collect())
+            .collect();
+        rects
+            .iter()
+            .map(|rect| {
+                rows[usize::from(rect.y)][usize::from(rect.x)..usize::from(rect.right())]
+                    .concat()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The composed frame and each space's rectangle.
+    fn compose_at(
+        snap: &ClientShellSnapshot,
+        view: Option<HashMap<String, SubagentsView>>,
+        at: Duration,
+        collapsed: &[&str],
+    ) -> (FrameData, Vec<Rect>) {
+        let mut config = Config::default();
+        config.ui.status_indicators = crate::config::StatusIndicatorStyle::Symbols;
+        set_view_for_test(view);
+        set_sparkle_clock_for_test(Some(at));
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+        state
+            .collapsed_groups
+            .extend(collapsed.iter().map(|key| key.to_string()));
+        // The window shows Done only for an agent it saw working (`endpoint_agent_state`), so each Done agent is
+        // working in the snapshot before.
+        let mut before = snap.clone();
+        for agent in &mut before.agents {
+            if agent.agent_status == AgentStatus::Done {
+                agent.agent_status = AgentStatus::Working;
+            }
+        }
+        state.set_snapshot(Box::new(before));
+        let mut after = snap.clone();
+        after.revision += 1;
+        for agent in &mut after.agents {
+            agent.state_change_seq += 1;
+        }
+        state.set_snapshot(Box::new(after));
+        state.set_pane_surface(surface());
+        let frame = state.compose(106, 30).expect("composed frame").frame;
+        set_view_for_test(None);
+        let rects = state.hits.workspaces.iter().map(|hit| hit.rect).collect();
+        (frame, rects)
+    }
+
+    /// A moment inside frame `index` on the clock.
+    fn at(index: u32) -> Duration {
+        SPARKLE_FRAME * index + Duration::from_millis(10)
+    }
+
+    /// The marker cell: the first cell after the row's one-cell indent.
+    fn marker(row: &str) -> String {
+        row.chars().skip(1).take(1).collect()
+    }
+
+    fn sparkles(row: &str) -> bool {
+        SPARKLE_FRAMES.iter().any(|frame| row.contains(frame))
+    }
+
+    /// §1 and §4: the owner's screenshot. A finished Nirvana Claude made the space read `✓` while its worker ran; a
+    /// working worker pane, or a live worker row, makes it sparkle.
+    #[test]
+    fn a_space_with_a_done_nirvana_claude_and_a_working_worker_sparkles() {
+        let pane = spaces(vec![(
+            AgentStatus::Done,
+            vec![
+                agent("pane_1", "ws_1", AgentStatus::Done, true),
+                agent("pane_2", "ws_1", AgentStatus::Working, false),
+            ],
+        )]);
+        let rows = first_rows(&pane, None, at(4));
+        assert_eq!(marker(&rows[0]), SPARKLE_FRAMES[4], "{rows:?}");
+
+        let worker = spaces(vec![(
+            AgentStatus::Done,
+            vec![agent("pane_1", "ws_1", AgentStatus::Done, true)],
+        )]);
+        let rows = first_rows(&worker, Some(live_worker("pane_1")), at(4));
+        assert_eq!(marker(&rows[0]), SPARKLE_FRAMES[4], "{rows:?}");
+    }
+
+    /// §2.2: the sparkle is in the space's working colour: the colour of its working agent's icon, not its done one's.
+    #[test]
+    fn the_sparkle_takes_the_working_colour() {
+        let snap = spaces(vec![(
+            AgentStatus::Done,
+            vec![
+                agent("pane_1", "ws_1", AgentStatus::Done, true),
+                agent("pane_2", "ws_1", AgentStatus::Working, false),
+            ],
+        )]);
+        let (frame, rects) = compose_at(&snap, None, at(2), &[]);
+        let cell =
+            |x: u16, y: u16| &frame.cells[usize::from(y) * frame.width as usize + usize::from(x)];
+        let space = rects[0];
+        let marker = cell(space.x + 1, space.y);
+        assert_eq!(marker.symbol, SPARKLE_FRAMES[2]);
+        // The agents' rows follow the space's own rows (its name, then its branch), in the snapshot's order, their icon
+        // three cells in (`render_space_agents`).
+        let icons: Vec<&crate::protocol::CellData> = (space.y + 1..space.bottom())
+            .map(|y| cell(space.x + 3, y))
+            .filter(|icon| icon.symbol == Kind::Claude.icon())
+            .collect();
+        let [done_icon, working_icon] = icons[..] else {
+            panic!("two agent rows: {}", icons.len());
+        };
+        assert_eq!(marker.fg, working_icon.fg);
+        assert_ne!(marker.fg, done_icon.fg);
+    }
+
+    /// §2.1: Done, Idle and Unknown are not working; the marker is today's.
+    #[test]
+    fn a_space_with_only_done_and_idle_agents_shows_todays_marker() {
+        let snap = spaces(vec![(
+            AgentStatus::Done,
+            vec![
+                agent("pane_1", "ws_1", AgentStatus::Done, true),
+                agent("pane_2", "ws_1", AgentStatus::Idle, false),
+                agent("pane_3", "ws_1", AgentStatus::Unknown, false),
+            ],
+        )]);
+        for index in 0..8 {
+            let rows = first_rows(&snap, None, at(index));
+            assert_eq!(marker(&rows[0]), "\u{2713}", "{rows:?}");
+            assert!(!sparkles(&rows[0]), "{rows:?}");
+        }
+    }
+
+    /// §2.1: a folded worktree group's parent stands for its hidden children, as herdr's own folded status does: a
+    /// working agent in a hidden child makes the parent sparkle, and only while the group is folded.
+    #[test]
+    fn a_folded_parent_sparkles_for_its_hidden_childs_working_agent() {
+        let snap = spaces(vec![
+            (
+                AgentStatus::Done,
+                vec![agent("pane_1", "ws_1", AgentStatus::Done, true)],
+            ),
+            (
+                AgentStatus::Working,
+                vec![agent("pane_2", "ws_2", AgentStatus::Working, false)],
+            ),
+        ]);
+        // ws_1 the parent checkout, ws_2 its linked worktree; `more` is a second checkout of the same repo, which
+        // herdr lists as a parent of its own, never as the first parent's child.
+        let group = |mut snap: ClientShellSnapshot, linked: &[bool]| {
+            for (workspace, linked) in snap.workspaces.iter_mut().zip(linked) {
+                workspace.worktree = Some(crate::protocol::ClientShellWorktree {
+                    key: "repo".into(),
+                    label: "repo".into(),
+                    is_linked_worktree: *linked,
+                });
+            }
+            snap
+        };
+        let folded = group(snap.clone(), &[false, true]);
+        let rows = first_rows_collapsed(&folded, None, at(3), &["repo"]);
+        assert_eq!(rows.len(), 1, "the child is hidden: {rows:?}");
+        assert_eq!(marker(&rows[0]), SPARKLE_FRAMES[3], "{rows:?}");
+
+        let mut done_child = folded.clone();
+        done_child.agents[1].agent_status = AgentStatus::Idle;
+        done_child.workspaces[1].agent_status = AgentStatus::Idle;
+        let rows = first_rows_collapsed(&done_child, None, at(3), &["repo"]);
+        assert!(!sparkles(&rows[0]), "{rows:?}");
+
+        let mut more = spaces(vec![
+            (
+                AgentStatus::Done,
+                vec![agent("pane_1", "ws_1", AgentStatus::Done, true)],
+            ),
+            (
+                AgentStatus::Idle,
+                vec![agent("pane_2", "ws_2", AgentStatus::Idle, false)],
+            ),
+            (
+                AgentStatus::Working,
+                vec![agent("pane_3", "ws_3", AgentStatus::Working, false)],
+            ),
+        ]);
+        more = group(more, &[false, true, false]);
+        let rows = first_rows_collapsed(&more, None, at(3), &["repo"]);
+        assert_eq!(rows.len(), 2, "two parents, the child hidden: {rows:?}");
+        assert!(
+            !sparkles(&rows[0]),
+            "the other checkout is not a child: {rows:?}"
+        );
+        assert_eq!(marker(&rows[1]), SPARKLE_FRAMES[3], "{rows:?}");
+    }
+
+    /// §2.1: Blocked keeps herdr's own mark, `×`: waiting on the owner matters more than working.
+    #[test]
+    fn a_blocked_space_keeps_its_own_mark() {
+        let snap = spaces(vec![(
+            AgentStatus::Blocked,
+            vec![
+                agent("pane_1", "ws_1", AgentStatus::Blocked, true),
+                agent("pane_2", "ws_1", AgentStatus::Working, false),
+            ],
+        )]);
+        let rows = first_rows(&snap, None, at(0));
+        assert_eq!(marker(&rows[0]), "\u{00D7}", "{rows:?}");
+    }
+
+    /// §2.2: `✧ ✦ ✶ ✷ ✸ ✷ ✶ ✦` in order, four a second, then round again.
+    #[test]
+    fn the_frames_cycle_in_order_on_the_clock() {
+        assert_eq!(
+            SPARKLE_FRAMES,
+            [
+                "\u{2727}", "\u{2726}", "\u{2736}", "\u{2737}", "\u{2738}", "\u{2737}", "\u{2736}",
+                "\u{2726}"
+            ]
+        );
+        assert_eq!(SPARKLE_FRAME, Duration::from_millis(250));
+        assert_eq!(sparkle_frame_at(Duration::from_millis(249)), 0);
+        assert_eq!(sparkle_frame_at(Duration::from_millis(250)), 1);
+        assert_eq!(sparkle_frame_at(Duration::from_secs(2)), 0);
+        let snap = spaces(vec![(
+            AgentStatus::Working,
+            vec![agent("pane_1", "ws_1", AgentStatus::Working, true)],
+        )]);
+        for index in 0..16u32 {
+            let rows = first_rows(&snap, None, at(index));
+            let expected = SPARKLE_FRAMES[index as usize % SPARKLE_FRAMES.len()];
+            assert_eq!(marker(&rows[0]), expected, "frame {index}: {rows:?}");
+        }
+    }
+
+    /// §2.2: one clock, so every working space shows the same frame.
+    #[test]
+    fn two_spaces_share_a_phase() {
+        let snap = spaces(vec![
+            (
+                AgentStatus::Done,
+                vec![
+                    agent("pane_1", "ws_1", AgentStatus::Done, true),
+                    agent("pane_2", "ws_1", AgentStatus::Working, false),
+                ],
+            ),
+            (
+                AgentStatus::Working,
+                vec![agent("pane_3", "ws_2", AgentStatus::Working, true)],
+            ),
+        ]);
+        for index in [0u32, 1, 4] {
+            let rows = first_rows(&snap, None, at(index));
+            let markers: Vec<String> = rows.iter().map(|row| marker(row)).collect();
+            let expected = SPARKLE_FRAMES[index as usize];
+            assert_eq!(markers, [expected, expected], "{rows:?}");
+        }
+    }
+
+    /// §2.3: with nothing working the timer schedules no repaint at all; with a working space it repaints once per new
+    /// frame, and only a drawing that still sparkles keeps it going.
+    #[test]
+    fn no_repaint_is_scheduled_when_nothing_is_working() {
+        let idle = spaces(vec![(
+            AgentStatus::Done,
+            vec![agent("pane_1", "ws_1", AgentStatus::Done, true)],
+        )]);
+        first_rows(&idle, None, at(0));
+        for index in 0..8 {
+            set_sparkle_clock_for_test(Some(at(index)));
+            assert!(!take_sparkle_due(), "frame {index}");
+        }
+
+        let busy = spaces(vec![(
+            AgentStatus::Working,
+            vec![agent("pane_1", "ws_1", AgentStatus::Working, true)],
+        )]);
+        first_rows(&busy, None, at(0));
+        set_sparkle_clock_for_test(Some(at(0)));
+        assert!(!take_sparkle_due(), "the frame drawn is still showing");
+        set_sparkle_clock_for_test(Some(at(1)));
+        assert!(take_sparkle_due(), "the clock moved on");
+        assert!(!take_sparkle_due(), "asked once per drawing");
+
+        // The worker ends: the next drawing settles the marker and stops the timer's repaints.
+        first_rows(&idle, None, at(1));
+        set_sparkle_clock_for_test(Some(at(2)));
+        assert!(!take_sparkle_due());
+        set_sparkle_clock_for_test(None);
+    }
+
+    /// §2.4: every frame is one cell wide by the width function the sidebar uses, so none falls back to `◐`.
+    #[test]
+    fn every_frame_is_one_cell_wide() {
+        for (index, frame) in SPARKLE_FRAMES.iter().enumerate() {
+            assert_eq!(unicode_width::UnicodeWidthStr::width(*frame), 1, "{frame}");
+            assert_eq!(sparkle_glyph(index), *frame);
+        }
     }
 }
