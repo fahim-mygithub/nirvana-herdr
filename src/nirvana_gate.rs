@@ -570,7 +570,8 @@ fn trim_url_tail(token: &str) -> &str {
 
 /// The URLs a shell command fetches. A command is cut at `;`, `|`, `&&` and newlines, and a segment's URLs count only
 /// when the segment itself runs a fetch tool, looked for outside its URLs: `curl a; echo <url>` and
-/// `echo https://curl.se/` fetch nothing.
+/// `echo https://curl.se/` fetch nothing. A segment that runs `gh api` or `gh repo view` also reads the repository it
+/// names (`gh_read_urls`).
 pub fn shell_fetch_urls(cmd: &str) -> Vec<String> {
     let mut urls = Vec::new();
     for segment in cmd.split(['\n', ';', '|']).flat_map(|s| s.split("&&")) {
@@ -582,6 +583,7 @@ pub fn shell_fetch_urls(cmd: &str) -> Vec<String> {
         if command_is_shell_fetch(&rest) {
             urls.extend(tokens);
         }
+        urls.extend(gh_read_urls(segment));
     }
     urls
 }
@@ -595,11 +597,128 @@ pub const SHELL_FETCH_WORDS: &[&str] = &[
     "iwr",
 ];
 
+/// Plan 35 P35a: agy reads pages from Python and PowerShell (370 `python urllib` commands in 78 agy streams, plan 35
+/// §1.2), and none of these was a fetch word, so the sources check sent back reads it could not see. Still per
+/// segment: in the 8 agy send-backs the scripts named their URL on a line of its own, and those stay uncounted.
+pub const SCRIPT_FETCH_WORDS: &[&str] = &[
+    "urlopen(",
+    "urllib.request",
+    "requests.get",
+    "requests.post",
+    "requests.head",
+    "requests.Session",
+    "httpx.get",
+    "httpx.Client",
+    "Invoke-RestMethod",
+];
+
+/// Fetch words that count only as a whole word: `irm` is inside "confirm". `iwr` stays a substring in
+/// `SHELL_FETCH_WORDS`, as before plan 35.
+pub const FETCH_TOKENS: &[&str] = &["irm"];
+
 pub fn command_is_shell_fetch(cmd: &str) -> bool {
     let lower = cmd.to_ascii_lowercase();
     SHELL_FETCH_WORDS
         .iter()
+        .chain(SCRIPT_FETCH_WORDS)
         .any(|word| lower.contains(&word.to_ascii_lowercase()))
+        || FETCH_TOKENS.iter().any(|word| has_token(&lower, word))
+}
+
+/// `word` stands alone in `text`: no letter, digit, `_`, `-` or `.` touches it, and no `$` before it (a variable).
+fn has_token(text: &str, word: &str) -> bool {
+    let joins = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.');
+    text.match_indices(word).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + word.len()..].chars().next();
+        !before.is_some_and(|c| joins(c) || c == '$') && !after.is_some_and(joins)
+    })
+}
+
+/// Plan 35 P35a: `gh api repos/<o>/<n>[/...]` and `gh repo view <o>/<n>` read a repository with no URL in the command
+/// (the ref-dance-apps send-back: 8 of 8 cited read so). Each reads `https://github.com/<o>/<n>` and
+/// `https://api.github.com/repos/<o>/<n>`; `gh api` also reads its own endpoint (asl-report cited `.../license`).
+fn gh_read_urls(segment: &str) -> Vec<String> {
+    let words: Vec<&str> = segment
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c| matches!(c, '"' | '\'' | '(' | ')')))
+        .collect();
+    let repo = |o: &str, n: &str| {
+        vec![
+            format!("https://github.com/{o}/{n}"),
+            format!("https://api.github.com/repos/{o}/{n}"),
+        ]
+    };
+    let mut urls = Vec::new();
+    for at in 0..words.len().saturating_sub(1) {
+        if !matches!(words[at], "gh" | "gh.exe") {
+            continue;
+        }
+        match (words[at + 1], words.get(at + 2).copied()) {
+            ("api", _) => {
+                let Some(endpoint) = gh_api_endpoint(&words[at + 2..]) else {
+                    continue;
+                };
+                let Some(path) = endpoint.trim_start_matches('/').strip_prefix("repos/") else {
+                    continue;
+                };
+                let Some((owner, rest)) = path.split_once('/') else {
+                    continue;
+                };
+                let name_end = rest.find(['/', '?']).unwrap_or(rest.len());
+                let (name, tail) = rest.split_at(name_end);
+                if gh_name(owner) && gh_name(name) {
+                    urls.extend(repo(owner, name));
+                    if !tail.is_empty() {
+                        urls.push(format!("https://api.github.com/repos/{owner}/{name}{tail}"));
+                    }
+                }
+            }
+            ("repo", Some("view")) => {
+                let Some(arg) = words.get(at + 3) else {
+                    continue;
+                };
+                let arg = arg
+                    .strip_prefix("https://")
+                    .or_else(|| arg.strip_prefix("http://"))
+                    .map_or(*arg, |rest| {
+                        let rest = rest.strip_prefix("www.").unwrap_or(rest);
+                        rest.strip_prefix("github.com/").unwrap_or("")
+                    });
+                let arg = arg.trim_end_matches('/');
+                let arg = arg.strip_suffix(".git").unwrap_or(arg);
+                if let Some((owner, name)) = arg.split_once('/') {
+                    if gh_name(owner) && gh_name(name) {
+                        urls.extend(repo(owner, name));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    urls
+}
+
+/// The endpoint of `gh api`: its first word that is neither a flag nor the value of `-X`/`--method`/`-H`/`--header`/
+/// `--hostname`.
+fn gh_api_endpoint<'a>(args: &[&'a str]) -> Option<&'a str> {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if matches!(*arg, "-X" | "--method" | "-H" | "--header" | "--hostname") {
+            args.next();
+        } else if !arg.starts_with('-') {
+            return Some(arg);
+        }
+    }
+    None
+}
+
+/// A GitHub owner or repository name: no `{owner}` placeholder, no shell or path punctuation.
+fn gh_name(word: &str) -> bool {
+    !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 /// Checks if a normalized URL was fetched, read or browsed in the worker stream.

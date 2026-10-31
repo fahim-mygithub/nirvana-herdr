@@ -1710,3 +1710,227 @@ fn p33_the_gate_reads_no_profile_for_a_lesson_review() {
     order.class = crate::nirvana_review::CLASS.into();
     assert_eq!(order_profile(&order, &Spec::default()), None);
 }
+
+// ---- Plan 35 P35a: the sources check sees agy's reads ----
+
+/// The sources axis over one cited URL and a stream of one agy `run_command` (or a Claude Bash call).
+fn p35a_mark(url: &str, stream: &str) -> Mark {
+    let report = serde_json::json!({"sources": [{"url": url, "used_for": "spec"}]});
+    sources_axis("research.web", Some(&report), stream)
+        .expect("axis")
+        .mark
+}
+
+/// Plan 35 P35a item 1: each Python fetch word counts the URLs of its own segment, from agy and from Claude. Each
+/// case holds only its own word, so dropping any one of them fails here.
+#[test]
+fn p35a_python_fetch_words_count_their_segment() {
+    let url = "https://example.com/target";
+    let cases = [
+        format!("python -c \"from urllib import request; print(request.urlopen('{url}').read())\""),
+        format!("python -c \"import urllib.request; r = urllib.request.Request('{url}')\""),
+        format!("python -c \"import requests; print(requests.get('{url}').text)\""),
+        format!("python -c \"import requests; requests.post('{url}', data={{}})\""),
+        format!("python -c \"import requests; print(requests.head('{url}').status_code)\""),
+        format!("python -c \"import requests; print(requests.Session().get('{url}').text)\""),
+        format!("python -c \"import httpx; print(httpx.get('{url}').text)\""),
+        format!("python -c \"import httpx; print(httpx.Client().get('{url}').text)\""),
+    ];
+    for case in &cases {
+        assert_eq!(p35a_mark(url, &agy_run(case)), Mark::Pass, "agy: {case}");
+        assert_eq!(
+            p35a_mark(url, &claude_bash(case, "")),
+            Mark::Pass,
+            "claude: {case}"
+        );
+    }
+}
+
+/// Plan 35 P35a item 1: PowerShell's `Invoke-RestMethod` and `irm` fetch; `iwr` and `Invoke-WebRequest` still do.
+#[test]
+fn p35a_powershell_fetch_words_count_and_irm_as_a_whole_word() {
+    let url = "https://example.com/target";
+    for case in [
+        format!("pwsh -NoProfile -Command \"$c = (Invoke-RestMethod -Uri '{url}'); $c\""),
+        format!("$r = irm {url} -Headers @{{a=1}}"),
+        format!("(irm '{url}').name"),
+        format!("iwr -UseBasicParsing {url}"),
+        format!("Invoke-WebRequest -Uri {url}"),
+    ] {
+        assert_eq!(p35a_mark(url, &agy_run(&case)), Mark::Pass, "{case}");
+    }
+}
+
+/// Plan 35 P35a item 2: `gh api repos/<o>/<n>[/...]` reads the repository's two URLs and its own endpoint, flags
+/// `-X GET` before the endpoint included.
+#[test]
+fn p35a_gh_api_counts_the_repository_and_its_endpoint() {
+    let cmd = "gh api repos/Ai-Rook/dance-scoring/commits/master -q '.commit.committer.date'";
+    for url in [
+        "https://github.com/Ai-Rook/dance-scoring",
+        "https://api.github.com/repos/Ai-Rook/dance-scoring",
+        "https://api.github.com/repos/Ai-Rook/dance-scoring/commits/master",
+    ] {
+        assert_eq!(p35a_mark(url, &agy_run(cmd)), Mark::Pass, "{url}");
+    }
+    let flagged = "gh api -X GET /repos/o/n/license 2>$null || echo none";
+    assert_eq!(
+        p35a_mark(
+            "https://api.github.com/repos/o/n/license",
+            &agy_run(flagged)
+        ),
+        Mark::Pass
+    );
+    assert_eq!(
+        p35a_mark("https://github.com/o/n", &claude_bash(flagged, "")),
+        Mark::Pass
+    );
+}
+
+/// Plan 35 P35a item 2: `gh repo view <o>/<n>` (or its github.com URL) reads the repository's two URLs.
+#[test]
+fn p35a_gh_repo_view_counts_the_repository() {
+    let cmd = "gh repo view MindDock/motion-tracker --json url,stargazerCount; gh repo view https://github.com/lguibr/Mimeflow.git";
+    for url in [
+        "https://github.com/MindDock/motion-tracker",
+        "https://api.github.com/repos/MindDock/motion-tracker",
+        "https://github.com/lguibr/Mimeflow",
+    ] {
+        assert_eq!(p35a_mark(url, &agy_run(cmd)), Mark::Pass, "{url}");
+    }
+    // A search names repositories it does not read.
+    assert_eq!(
+        p35a_mark(
+            "https://github.com/MindDock/motion-tracker",
+            &agy_run("gh search repos MindDock/motion-tracker")
+        ),
+        Mark::Fail
+    );
+}
+
+/// Plan 35 P35a items 1 and 4: still per segment. A URL that a segment only prints (`python` alone fetches nothing),
+/// lists on a line of its own, or puts beside `confirm` or `$irm` (both holding `irm`) does not count. The f-string
+/// case is yt-video-pick's, in the real send-backs below.
+#[test]
+fn p35a_a_url_counts_only_from_a_segment_that_fetches() {
+    let url = "https://example.com/target";
+    assert_eq!(
+        p35a_mark(
+            url,
+            &agy_run(&format!("echo {url}; python -c \"print('{url}')\""))
+        ),
+        Mark::Fail
+    );
+    let listed = format!(
+        "python -c \"\nimport urllib.request\nurls = [\n    '{url}',\n]\nfor u in urls:\n    print(len(urllib.request.urlopen(u).read()))\n\""
+    );
+    assert_eq!(p35a_mark(url, &agy_run(&listed)), Mark::Fail);
+    assert_eq!(
+        p35a_mark(url, &agy_run(&format!("confirm {url}"))),
+        Mark::Fail
+    );
+    assert_eq!(
+        p35a_mark(url, &agy_run(&format!("$irm = '{url}'; Write-Output $irm"))),
+        Mark::Fail
+    );
+}
+
+/// Plan 35 P35a item 3: the probe-2 stream (agy calling bladebro's `act navigate` through `call_mcp_tool`) passes
+/// `https://example.com`.
+#[test]
+fn p35a_the_probe_2_bladebro_stream_passes_example_com() {
+    const PROBE_2: &str = include_str!("fixtures/probe2-bladebro.jsonl");
+    assert_eq!(p35a_mark("https://example.com", PROBE_2), Mark::Pass);
+}
+
+/// Plan 35 P35a items 4 and 5: the 11 sources send-backs in groove-coach (research §4's 9, and yt-breakdown and
+/// yt-breakdown-illit after it), cut to their tool calls with no outputs (record `p35a.md`). The counts are the ones
+/// the build's Python twin of this rule printed on the full streams; master's rule counts 23 of agy's 85.
+#[test]
+fn p35a_real_sources_send_backs_count_what_the_twin_counts() {
+    let fixtures: [(&str, &str, usize, usize); 11] = [
+        (
+            "asl-inspiration",
+            include_str!("fixtures/asl-inspiration.jsonl"),
+            12,
+            10,
+        ),
+        (
+            "asl-report",
+            include_str!("fixtures/asl-report.jsonl"),
+            14,
+            14,
+        ),
+        (
+            "body-extrapolation",
+            include_str!("fixtures/body-extrapolation.jsonl"),
+            20,
+            0,
+        ),
+        (
+            "ref-authoring",
+            include_str!("fixtures/ref-authoring.jsonl"),
+            10,
+            0,
+        ),
+        (
+            "ref-authoring-s1",
+            include_str!("fixtures/ref-authoring-s1.jsonl"),
+            10,
+            0,
+        ),
+        (
+            "ref-dance-apps",
+            include_str!("fixtures/ref-dance-apps.jsonl"),
+            8,
+            8,
+        ),
+        (
+            "repo-breakdown",
+            include_str!("fixtures/repo-breakdown.jsonl"),
+            6,
+            0,
+        ),
+        (
+            "video-breakdown",
+            include_str!("fixtures/video-breakdown.jsonl"),
+            2,
+            0,
+        ),
+        (
+            "yt-breakdown",
+            include_str!("fixtures/yt-breakdown.jsonl"),
+            1,
+            0,
+        ),
+        (
+            "yt-breakdown-illit",
+            include_str!("fixtures/yt-breakdown-illit.jsonl"),
+            3,
+            0,
+        ),
+        (
+            "yt-video-pick",
+            include_str!("fixtures/yt-video-pick.jsonl"),
+            5,
+            0,
+        ),
+    ];
+    for (order, text, cited, counted) in fixtures {
+        let (head, stream) = text.split_once('\n').expect("head line");
+        let head: Value = serde_json::from_str(head).expect("head json");
+        assert_eq!(head["order"], order);
+        let urls: Vec<&str> = head["sources"]
+            .as_array()
+            .expect("sources")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(urls.len(), cited, "{order}");
+        let got = urls
+            .iter()
+            .filter(|url| p35a_mark(url, stream) == Mark::Pass)
+            .count();
+        assert_eq!(got, counted, "{order}");
+    }
+}
