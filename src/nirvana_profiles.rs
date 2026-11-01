@@ -19,7 +19,7 @@
 //!   same copy; the supervisor checks the copy's sha before every start.
 //! - **The worker.** Claude gets `--append-system-prompt-file` with the body and `--disallowedTools`; agy gets the
 //!   body at the top of its order copy, quoted, so a body line can never read as one of the gate's line-start lines
-//!   (`owns:`, `test:`).
+//!   (`owns:`, `test:`), and, from plan 35 §3.4, its `disallowed_tools` as `--settings` deny rules.
 
 use std::path::{Path, PathBuf};
 
@@ -535,9 +535,9 @@ pub fn joined_needs(order: &[String], profile: &Profile) -> Vec<String> {
     needs
 }
 
-/// §2.2: the profile's model and family narrow the seats and its effort replaces the class's. A profile that forbids
-/// tools takes only a claude seat: only the claude argv carries `--disallowedTools`, and a rule a worker never got is
-/// no rule.
+/// §2.2: the profile's model and family narrow the seats and its effort replaces the class's. Plan 35 §3.4: a profile
+/// that forbids a tool with no measured agy rule takes only a claude seat, since a rule a worker never got is no rule;
+/// one whose every tool maps (`nirvana_agy_tools::DENY_TABLE`, `mcp__*`) may seat on agy, denied through `--settings`.
 pub fn narrow(request: &mut nirvana_seat::Request, profile: &Profile) {
     request.profile = Some(nirvana_seat::Narrow {
         name: profile.name.clone(),
@@ -545,11 +545,14 @@ pub fn narrow(request: &mut nirvana_seat::Request, profile: &Profile) {
         family: profile.family.clone(),
         effort: profile.effort,
     });
-    if !profile.disallowed_tools.is_empty() && request.claude_only.is_none() {
+    let unmapped = crate::nirvana_agy_tools::unmapped(&profile.disallowed_tools);
+    if !unmapped.is_empty() && request.claude_only.is_none() {
         request.claude_only = Some(format!(
-            "profile {} forbids tools ({}), and only a claude worker's --disallowedTools enforces that (plan 33 §2.3)",
+            "profile {} forbids tools ({}), and agy has no measured rule for {}, so only a claude worker's \
+             --disallowedTools enforces that (plan 35 §3.4)",
             profile.name,
-            profile.disallowed_tools.join(", ")
+            profile.disallowed_tools.join(", "),
+            unmapped.join(", ")
         ));
     }
 }

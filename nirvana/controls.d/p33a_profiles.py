@@ -94,7 +94,7 @@ CONTROLS = (
     Control("p33a_sha_unchecked", PROFILES,
             "    if sha != profile.sha {", "    if false && sha != profile.sha {", T_CLAUDE, "rust"),
     Control("p33a_disallowed_on_any_seat", PROFILES,
-            "    if !profile.disallowed_tools.is_empty() && request.claude_only.is_none() {",
+            "    if !unmapped.is_empty() && request.claude_only.is_none() {",
             "    if false && request.claude_only.is_none() {", T_CLAUDE, "rust"),
     # §2.3: agy gets the body at the top of its order, quoted so no body line is a gate line.
     Control("p33a_agy_body_unquoted", PROFILES,
