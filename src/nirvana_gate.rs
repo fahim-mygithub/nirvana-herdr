@@ -648,14 +648,199 @@ fn has_token(text: &str, word: &str) -> bool {
     })
 }
 
+/// Plan 35 P35a review round (S2): one segment's code, as long as the segment so offsets agree. Its URLs, its quoted
+/// strings and a `#` comment are blanked: `echo "curl"`, `# requests.get` and `x = "yt-dlp notes"` run nothing. The
+/// quote that opens a shell's `-c`/`-Command`/`/c`/`-e` argument holds the code itself, so it reads as `(`.
+fn segment_code(segment: &str) -> String {
+    let mut text = segment.to_owned();
+    for token in extract_url_tokens(segment) {
+        text = text.replace(token.as_str(), &" ".repeat(token.len()));
+    }
+    let mut bytes = text.into_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        let byte = bytes[at];
+        if byte == b'#' && (at == 0 || bytes[at - 1].is_ascii_whitespace()) {
+            bytes[at..].fill(b' ');
+            break;
+        }
+        if byte != b'"' && byte != b'\'' {
+            at += 1;
+            continue;
+        }
+        let head = String::from_utf8_lossy(&bytes[..at]).to_ascii_lowercase();
+        let flag = head.split_whitespace().next_back().unwrap_or("");
+        if head.ends_with(char::is_whitespace) && matches!(flag, "-c" | "-command" | "/c" | "-e") {
+            bytes[at] = b'(';
+            at += 1;
+            continue;
+        }
+        match bytes[at + 1..].iter().position(|&b| b == byte) {
+            Some(len) => {
+                bytes[at..at + len + 2].fill(b' ');
+                at += len + 2;
+            }
+            None => {
+                bytes[at] = b' ';
+                at += 1;
+            }
+        }
+    }
+    // Only whole characters between ASCII quotes, or from a `#` on, were blanked.
+    String::from_utf8(bytes).unwrap_or_default()
+}
+
+/// The word at `at` of a segment's code is a command it runs: it comes first, or after `(`, `{`, `[`, `&`, `!`, `=`,
+/// `@`, `$(` or a backtick, or after `try`, `do`, `then`, `else`, `sudo`, `time`, `exec`, a shell's `-c`/`-Command`/
+/// `/c`/`-e`, or python's `-m`. A `$` right before it makes it a variable (`$irm`).
+fn command_at(code: &str, at: usize) -> bool {
+    let before = code[..at].trim_end();
+    if code[..at].ends_with('$') {
+        return false;
+    }
+    let rest = before.trim_end_matches(|c: char| c.is_whitespace() || "({[&!=@$`".contains(c));
+    if rest.is_empty() || rest.len() < before.len() {
+        return true;
+    }
+    let prev = rest.rsplit(char::is_whitespace).next().unwrap_or("");
+    [
+        "try", "do", "then", "else", "sudo", "time", "exec", "-m", "-c", "-command", "/c", "-e",
+    ]
+    .contains(&prev.to_ascii_lowercase().as_str())
+}
+
+/// Plan 35 P35a review round (S2): the commands that fetch, each counted only as a command word (`command_at`), so a
+/// file named `curl.txt`, a variable `curl_notes` or an argument `echo curl` fetches nothing. `yt_dlp` is python's
+/// `-m yt_dlp`.
+pub const FETCH_COMMANDS: &[&str] = &[
+    "curl",
+    "wget",
+    "iwr",
+    "irm",
+    "invoke-webrequest",
+    "invoke-restmethod",
+    "yt-dlp",
+    "yt_dlp",
+    "agent-browser",
+    "bladebro",
+];
+
+/// The script calls that fetch, counted in a segment's code (outside its strings and comment) when no letter, digit
+/// or `_` comes before them: `urlopen(` but not `myurlopen(`.
+pub const FETCH_CALLS: &[&str] = &[
+    "urlopen(",
+    "urllib.request.",
+    "requests.get(",
+    "requests.post(",
+    "requests.head(",
+    "requests.session(",
+    "httpx.get(",
+    "httpx.client(",
+    "yt_dlp.",
+    "youtubedl(",
+];
+
+/// A segment led by one of these prints or reads its arguments: `echo urlopen(x)` calls nothing.
+const ARG_COMMANDS: &[&str] = &[
+    "echo",
+    "printf",
+    "write-output",
+    "write-host",
+    "cat",
+    "type",
+    "get-content",
+    "gc",
+];
+
+/// Each place `word` stands in `code` as a command word, `.exe` allowed after it.
+fn command_words<'a>(code: &'a str, word: &'a str) -> impl Iterator<Item = usize> + 'a {
+    code.match_indices(word).filter_map(move |(at, _)| {
+        let after = &code[at + word.len()..];
+        let after = after.strip_prefix(".exe").unwrap_or(after);
+        let joined = after
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+        (!joined && command_at(code, at)).then_some(at)
+    })
+}
+
+/// A segment runs a fetch: a fetch command is one of its command words, or a fetch call stands in its code, or a
+/// python `subprocess` or `os.system` call runs a fetch command (reel-motion-gemini-r2 read Reddit through
+/// `subprocess.check_output(['curl.exe', ...])`).
+fn segment_runs_fetch(segment: &str) -> bool {
+    let code = segment_code(segment).to_ascii_lowercase();
+    if FETCH_COMMANDS
+        .iter()
+        .any(|word| command_words(&code, word).next().is_some())
+    {
+        return true;
+    }
+    let head = code
+        .trim_start_matches(|c: char| c.is_whitespace() || "({[&!@$`".contains(c))
+        .split_whitespace()
+        .next()
+        .unwrap_or("");
+    let calls = |code: &str, call: &str| {
+        code.match_indices(call).any(|(at, _)| {
+            !code[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+    };
+    !ARG_COMMANDS.contains(&head)
+        && (FETCH_CALLS.iter().any(|call| calls(&code, call)) || runs_fetch_child(segment, &code))
+}
+
+/// A `subprocess.<fn>(` or `os.system(`/`os.popen(` call in the code whose first argument, or the first item of its
+/// argument list, is a string led by a fetch command: `['curl.exe', '-s', u]`, `"yt-dlp -j " + u`.
+fn runs_fetch_child(segment: &str, code: &str) -> bool {
+    let raw = segment.to_ascii_lowercase();
+    ["subprocess.", "os.system(", "os.popen("]
+        .iter()
+        .any(|call| {
+            code.match_indices(call).any(|(at, _)| {
+                let rest = &raw[at + call.len()..];
+                let rest = if *call == "subprocess." {
+                    let Some(open) = rest.find('(') else {
+                        return false;
+                    };
+                    if !rest[..open]
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    {
+                        return false;
+                    }
+                    &rest[open + 1..]
+                } else {
+                    rest
+                };
+                let rest = rest
+                    .trim_start()
+                    .strip_prefix(['[', '('])
+                    .unwrap_or(rest.trim_start());
+                let rest = rest.trim_start();
+                let Some(quote) = rest.chars().next().filter(|c| matches!(c, '"' | '\'')) else {
+                    return false;
+                };
+                let word = rest[1..]
+                    .split([quote, ' '])
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches(".exe");
+                FETCH_COMMANDS.contains(&word)
+            })
+        })
+}
+
 /// Plan 35 P35a: `gh api repos/<o>/<n>[/...]` and `gh repo view <o>/<n>` read a repository with no URL in the command
 /// (the ref-dance-apps send-back: 8 of 8 cited read so). Each reads `https://github.com/<o>/<n>` and
 /// `https://api.github.com/repos/<o>/<n>`; `gh api` also reads its own endpoint (asl-report cited `.../license`).
+/// Review round (S1): only a `gh` that is the segment's command word, so `echo gh api repos/o/n`, a `# gh repo view`
+/// comment or the phrase in a string reads nothing.
 fn gh_read_urls(segment: &str) -> Vec<String> {
-    let words: Vec<&str> = segment
-        .split_whitespace()
-        .map(|w| w.trim_matches(|c| matches!(c, '"' | '\'' | '(' | ')')))
-        .collect();
+    let code = segment_code(segment).to_ascii_lowercase();
     let repo = |o: &str, n: &str| {
         vec![
             format!("https://github.com/{o}/{n}"),
@@ -663,13 +848,17 @@ fn gh_read_urls(segment: &str) -> Vec<String> {
         ]
     };
     let mut urls = Vec::new();
-    for at in 0..words.len().saturating_sub(1) {
-        if !matches!(words[at], "gh" | "gh.exe") {
+    for at in command_words(&code, "gh") {
+        let words: Vec<&str> = segment[at..]
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c| matches!(c, '"' | '\'' | '(' | ')')))
+            .collect();
+        let Some(&sub) = words.get(1) else {
             continue;
-        }
-        match (words[at + 1], words.get(at + 2).copied()) {
+        };
+        match (sub, words.get(2).copied()) {
             ("api", _) => {
-                let Some(endpoint) = gh_api_endpoint(&words[at + 2..]) else {
+                let Some(endpoint) = gh_api_endpoint(&words[2..]) else {
                     continue;
                 };
                 let Some(path) = endpoint.trim_start_matches('/').strip_prefix("repos/") else {
@@ -688,7 +877,7 @@ fn gh_read_urls(segment: &str) -> Vec<String> {
                 }
             }
             ("repo", Some("view")) => {
-                let Some(arg) = words.get(at + 3) else {
+                let Some(arg) = words.get(3) else {
                     continue;
                 };
                 let arg = arg
@@ -859,8 +1048,16 @@ pub enum StableId {
 /// The stable id of a cited source, or `None` for any other URL (which keeps the per-segment rule alone).
 pub fn stable_id(url: &str) -> Option<StableId> {
     let url = url.trim();
-    if let Some(path) = url.strip_prefix("file:///") {
-        return Some(StableId::Path(local_path(&path.replace("%20", " "))));
+    if let Some(path) = url.strip_prefix("file://") {
+        // `file:///C:/x` names `C:/x`, `file:///home/x` names `/home/x`.
+        let path = percent_decoded(path);
+        let b = path.as_bytes();
+        let drive = b.len() > 2 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':';
+        return Some(StableId::Path(local_path(if drive {
+            &path[1..]
+        } else {
+            &path
+        })));
     }
     let bytes = url.as_bytes();
     if bytes.len() > 2
@@ -882,47 +1079,72 @@ pub fn stable_id(url: &str) -> Option<StableId> {
         .unwrap_or(&host);
     let (path, query) = path_query.split_once('?').unwrap_or((path_query, ""));
     let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
-    let video = |id: &str| {
-        (id.len() == 11 && id.bytes().all(id_byte)).then(|| StableId::Video(id.to_owned()))
-    };
     match host {
         "youtube.com" => match parts.as_slice() {
             ["watch"] => query
                 .split('&')
                 .find_map(|pair| pair.strip_prefix("v="))
-                .and_then(video),
-            ["shorts" | "embed" | "live", id, ..] => video(id),
+                .and_then(video_id),
+            ["shorts" | "embed" | "live", id, ..] => video_id(id),
             _ => None,
         },
-        "youtu.be" => parts.first().and_then(|id| video(id)),
-        "redd.it" => parts.first().and_then(|id| post(id)),
+        "youtu.be" => parts.first().and_then(|id| video_id(id)),
+        "redd.it" => parts.first().and_then(|id| post_id(id)),
         "reddit.com" => parts
             .iter()
             .position(|p| *p == "comments")
             .and_then(|at| parts.get(at + 1))
-            .and_then(|id| post(id)),
+            .and_then(|id| post_id(id)),
         "github.com" => match parts.as_slice() {
-            [owner, name] => repo(owner, name),
+            [owner, name] => repo_id(owner, name),
             _ => None,
         },
         "api.github.com" => match parts.as_slice() {
-            ["repos", owner, name] => repo(owner, name),
+            ["repos", owner, name] => repo_id(owner, name),
             _ => None,
         },
         _ => None,
     }
 }
 
+/// `%XX` escapes decoded, as a `file://` URL writes a space or a non-ASCII name.
+fn percent_decoded(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let hex = bytes
+            .get(at + 1..at + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[at], hex) {
+            (b'%', Some(byte)) => {
+                out.push(byte);
+                at += 3;
+            }
+            (byte, _) => {
+                out.push(byte);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn id_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')
 }
 
-fn post(id: &str) -> Option<StableId> {
+fn video_id(id: &str) -> Option<StableId> {
+    (id.len() == 11 && id.bytes().all(id_byte)).then(|| StableId::Video(id.to_owned()))
+}
+
+fn post_id(id: &str) -> Option<StableId> {
     (id.len() >= 4 && id.bytes().all(|b| b.is_ascii_alphanumeric()))
         .then(|| StableId::Post(id.to_ascii_lowercase()))
 }
 
-fn repo(owner: &str, name: &str) -> Option<StableId> {
+fn repo_id(owner: &str, name: &str) -> Option<StableId> {
     let name = name.strip_suffix(".git").unwrap_or(name);
     (gh_name(owner) && gh_name(name))
         .then(|| StableId::Repo(format!("{owner}/{name}").to_ascii_lowercase()))
@@ -932,8 +1154,9 @@ fn local_path(path: &str) -> String {
     path.replace('\\', "/").to_lowercase()
 }
 
-/// `id` stands in `text` as itself: for a video id no id character touches it; a post id follows `comments/` or
-/// `redd.it/`; a repository is not part of a longer name.
+/// `id` stands in `text` as itself: for a video id no id character touches it; a post id follows `comments/` in a
+/// reddit.com address, or `redd.it/` (review nit: a GitHub `.../comments/<id>` is not a Reddit post); a repository is
+/// not part of a longer name.
 fn id_in(text: &str, id: &StableId) -> bool {
     let free = |text: &str, at: usize, len: usize, joins: &dyn Fn(char) -> bool| {
         !text[..at].chars().next_back().is_some_and(joins)
@@ -948,10 +1171,17 @@ fn id_in(text: &str, id: &StableId) -> bool {
             ["comments/", "redd.it/"].iter().any(|lead| {
                 let needle = format!("{lead}{p}");
                 lower.match_indices(&needle).any(|(at, _)| {
-                    !lower[at + needle.len()..]
-                        .chars()
+                    let token = lower[..at]
+                        .rsplit(|c: char| {
+                            c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '(' | ',')
+                        })
                         .next()
-                        .is_some_and(|c| c.is_ascii_alphanumeric())
+                        .unwrap_or("");
+                    (*lead == "redd.it/" || token.contains("reddit.com/"))
+                        && !lower[at + needle.len()..]
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_ascii_alphanumeric())
                 })
             })
         }
@@ -970,9 +1200,9 @@ fn id_in(text: &str, id: &StableId) -> bool {
 }
 
 /// What a stream shows the worker read, beyond the per-segment rule: the text of each command that runs a fetch
-/// (looked for outside its URLs, anywhere in the command) and each fetch tool's call, the output of each, and every
-/// path a file-reading tool opened. A stable id counts in a fetch's text or output; a plain URL only in an output,
-/// where the page or its redirect came back (reveal-gemini printed each resolved vertexaisearch URL).
+/// (`segment_runs_fetch` in any of its segments) and each fetch tool's call, the output of each that vouches
+/// (`output_vouches`), and every path a file-reading tool opened. Only a stable id counts here; a plain URL keeps the
+/// per-segment rule (the owner, 2026-10-31: "plain URLs keep the per-segment rule").
 #[derive(Debug, Default)]
 pub struct Reads {
     texts: Vec<String>,
@@ -980,17 +1210,151 @@ pub struct Reads {
     paths: Vec<String>,
 }
 
-/// A whole command runs a fetch: a fetch word outside its URLs, or a `gh` read in one of its segments.
+fn segments(cmd: &str) -> impl Iterator<Item = &str> {
+    cmd.split(['\n', ';', '|']).flat_map(|s| s.split("&&"))
+}
+
+/// agy's stream cuts a long `CommandLine` to its first 512 characters and this mark (66 of reel-motion-gemini-r2's 112
+/// commands), so the call may lie past the cut, unseen.
+const CUT_MARK: char = '\u{2026}';
+
+/// The python modules that fetch: in a cut command, importing one counts as its fetch.
+const FETCH_IMPORTS: &[&str] = &["yt_dlp", "urllib.request", "requests", "httpx"];
+
+/// A whole command runs a fetch: one of its segments does, or runs a `gh` read, or the command is cut (`CUT_MARK`) and
+/// imports a fetch module. A command that is not cut and only imports one fetches nothing.
 fn command_fetches(cmd: &str) -> bool {
-    let mut rest = cmd.to_owned();
-    for token in extract_url_tokens(cmd) {
-        rest = rest.replace(token.as_str(), " ");
-    }
-    command_is_shell_fetch(&rest)
-        || cmd
-            .split(['\n', ';', '|'])
+    segments(cmd).any(|segment| segment_runs_fetch(segment) || !gh_read_urls(segment).is_empty())
+        || (cmd.trim_end().ends_with(CUT_MARK) && segments(cmd).any(imports_fetch))
+}
+
+/// A python `import` or `from ... import` line naming a fetch module.
+fn imports_fetch(segment: &str) -> bool {
+    let code = segment_code(segment);
+    let line = code.trim();
+    let names = if let Some(names) = line.strip_prefix("import ") {
+        names
+    } else if let Some(from) = line.strip_prefix("from ") {
+        from.split(" import ").next().unwrap_or("")
+    } else {
+        return false;
+    };
+    names
+        .split(',')
+        .any(|name| FETCH_IMPORTS.contains(&name.split(" as ").next().unwrap_or("").trim()))
+}
+
+/// Plan 35 P35a review round (S2): the commands whose output is the worker's own files, not a page: they read or list
+/// local files. `cat notes.md; curl -sI x` prints the notes as if they came back.
+const LOCAL_READERS: &[&str] = &[
+    "cat",
+    "type",
+    "get-content",
+    "gc",
+    "head",
+    "tail",
+    "more",
+    "less",
+    "sed",
+    "awk",
+    "grep",
+    "rg",
+    "findstr",
+    "select-string",
+    "sls",
+    "import-csv",
+    "ls",
+    "dir",
+    "get-childitem",
+    "gci",
+    "find",
+    "tree",
+];
+
+/// The script calls that read a local file; `open(` only with no letter, digit, `_` or `.` before it (`urlopen(` and
+/// `Image.open(` are not it).
+const LOCAL_READ_CALLS: &[&str] = &[
+    ".read_text(",
+    ".read_bytes(",
+    "readalltext(",
+    "readalllines(",
+];
+
+/// Plan 35 P35a review round (S2): fetches whose output names ids they never opened: a YouTube search, playlist or
+/// channel, a Reddit search or subreddit listing, the GitHub search API, a web search. A YouTube page fetched over
+/// HTTP is one too (`listing`): the page holds its related videos.
+pub const LISTING_MARKS: &[&str] = &[
+    "ytsearch",
+    "--flat-playlist",
+    "extract_flat",
+    "youtube.com/results",
+    "search_query=",
+    "youtube.com/playlist",
+    "list=",
+    "youtube.com/@",
+    "youtube.com/channel/",
+    "youtube.com/c/",
+    "youtube.com/user/",
+    "youtube.com/feed",
+    "youtubei/",
+    "reddit.com/search",
+    "search.json",
+    "search.rss",
+    "/hot.json",
+    "/new.json",
+    "/top.json",
+    "/rising.json",
+    // and so `api.github.com/search`
+    "github.com/search",
+    "github.com/topics",
+    "gh search",
+    "google.com/search",
+    "bing.com/search",
+    "duckduckgo.com",
+];
+
+/// A segment reads a local file: a reader is one of its command words, or a file read stands in its code.
+fn segment_reads_local(segment: &str) -> bool {
+    let code = segment_code(segment).to_ascii_lowercase();
+    LOCAL_READERS.iter().any(|word| {
+        command_words(&code, word).any(|at| {
+            code[at + word.len()..]
+                .chars()
+                .next()
+                .is_none_or(char::is_whitespace)
+        })
+    }) || LOCAL_READ_CALLS.iter().any(|call| code.contains(call))
+        || code.match_indices("open(").any(|(at, _)| {
+            !code[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.'))
+        })
+}
+
+/// A fetch lists what it did not open: it names a `LISTING_MARKS` page, or a YouTube page with no yt-dlp in the
+/// command (yt-dlp reads the one video; the page's HTML holds its related videos too).
+fn listing(lower: &str) -> bool {
+    LISTING_MARKS.iter().any(|mark| lower.contains(mark))
+        || (["youtube.com/", "youtu.be/"]
+            .iter()
+            .any(|host| lower.contains(host))
+            && !["yt_dlp", "yt-dlp", "youtubedl"]
+                .iter()
+                .any(|word| lower.contains(word)))
+}
+
+/// A fetch's output vouches for the ids in it: the fetch is no listing and names no `file://`, and no pipeline of the
+/// command starts by reading a local file. A reader later in a pipeline reads the fetch (`curl -s u | grep title`).
+fn output_vouches(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    !lower.contains("file://")
+        && !listing(&lower)
+        && !text
+            .split(['\n', ';'])
             .flat_map(|s| s.split("&&"))
-            .any(|segment| !gh_read_urls(segment).is_empty())
+            .filter_map(|pipeline| pipeline.split('|').next())
+            .any(segment_reads_local)
 }
 
 fn json_text(val: &Value) -> String {
@@ -1013,24 +1377,36 @@ pub fn stream_reads(stream: &str) -> Reads {
                     Some("tool_use") => {
                         let input = block.get("input").unwrap_or(&Value::Null);
                         let id = block.get("id").and_then(Value::as_str).unwrap_or("");
-                        let command = input.get("command").and_then(Value::as_str);
-                        if name == "Bash" || name == "PowerShell" {
-                            if let Some(command) = command.filter(|c| command_fetches(c)) {
-                                reads.texts.push(command.to_owned());
-                                fetch_ids.push(id.to_owned());
+                        // Review round (S2): WebFetch's `prompt` is the worker's own text; only its `url` was read.
+                        let text = match name {
+                            "Bash" | "PowerShell" => input
+                                .get("command")
+                                .and_then(Value::as_str)
+                                .filter(|c| command_fetches(c))
+                                .map(str::to_owned),
+                            "WebFetch" => {
+                                input.get("url").and_then(Value::as_str).map(str::to_owned)
                             }
-                        } else if name == "WebFetch"
-                            || (name.starts_with("mcp__")
+                            _ if name.starts_with("mcp__")
                                 && ["browser", "bladebro", "chrome", "playwright"]
                                     .iter()
-                                    .any(|w| name.contains(w)))
-                        {
-                            reads.texts.push(json_text(input));
-                            fetch_ids.push(id.to_owned());
-                        } else if name == "Read" {
-                            if let Some(path) = input.get("file_path").and_then(Value::as_str) {
-                                reads.paths.push(local_path(path));
+                                    .any(|w| name.contains(w)) =>
+                            {
+                                Some(json_text(input))
                             }
+                            "Read" => {
+                                if let Some(path) = input.get("file_path").and_then(Value::as_str) {
+                                    reads.paths.push(local_path(path));
+                                }
+                                None
+                            }
+                            _ => None,
+                        };
+                        if let Some(text) = text {
+                            if output_vouches(&text) {
+                                fetch_ids.push(id.to_owned());
+                            }
+                            reads.texts.push(text);
                         }
                     }
                     Some("tool_result") => {
@@ -1055,13 +1431,10 @@ pub fn stream_reads(stream: &str) -> Reads {
         let tool = step.get("tool_name").and_then(Value::as_str).unwrap_or("");
         let params = &step["tool_info"]["parameters"];
         let output = step["tool_info"]["output"].as_str().unwrap_or("");
-        match tool {
+        let text = match tool {
             "run_command" => {
                 let command = params["CommandLine"].as_str().unwrap_or("");
-                if command_fetches(command) {
-                    reads.texts.push(command.to_owned());
-                    reads.outputs.push(output.to_owned());
-                }
+                command_fetches(command).then(|| command.to_owned())
             }
             "read_file" | "view_file" => {
                 for key in ["Path", "AbsolutePath", "file_path"] {
@@ -1069,18 +1442,23 @@ pub fn stream_reads(stream: &str) -> Reads {
                         reads.paths.push(local_path(path));
                     }
                 }
+                None
             }
-            _ if agy_fetch_tool(tool, params) => {
-                reads.texts.push(json_text(params));
+            _ if agy_fetch_tool(tool, params) => Some(json_text(params)),
+            _ => None,
+        };
+        if let Some(text) = text {
+            if output_vouches(&text) {
                 reads.outputs.push(output.to_owned());
             }
-            _ => {}
+            reads.texts.push(text);
         }
     }
     reads
 }
 
-/// A cited source the stream shows read beyond the per-segment rule (`stream_reads`).
+/// A cited source the stream shows read beyond the per-segment rule (`stream_reads`): its stable id in a fetch's text
+/// or in an output that vouches, or its path opened by a file tool. Any other URL: never here.
 pub fn stable_read(url: &str, reads: &Reads) -> bool {
     match stable_id(url) {
         Some(StableId::Path(path)) => reads.paths.contains(&path),
@@ -1089,15 +1467,7 @@ pub fn stable_read(url: &str, reads: &Reads) -> bool {
             .iter()
             .chain(&reads.outputs)
             .any(|text| id_in(text, &id)),
-        None => {
-            let norm = normalize_url(url);
-            !norm.is_empty()
-                && reads.outputs.iter().any(|output| {
-                    extract_url_tokens(output)
-                        .iter()
-                        .any(|token| normalize_url(token) == norm)
-                })
-        }
+        None => false,
     }
 }
 
@@ -1483,42 +1853,54 @@ fn identity(cwd: &Path) -> Vec<String> {
     }
 }
 
-/// Every path, outside herdr's own folder, with a change the worker has not committed.
+/// Every path, outside herdr's own folder, with a change the worker has not committed. `-z` gives each path as it is:
+/// the quoted form git prints for a non-ASCII name matched no file, so the owned axis dropped it (P35a review S3).
 fn uncommitted(cwd: &Path) -> Result<Vec<String>, String> {
     let status = git(
         cwd,
         &[
             "status",
             "--porcelain=v1",
+            "-z",
             "-uall",
             "--",
             ".",
             ":(exclude).nirvana",
         ],
     )?;
-    Ok(status
-        .lines()
-        .filter(|line| line.len() > 3)
-        .map(|line| {
-            let path = &line[3..];
-            path.rsplit(" -> ")
-                .next()
-                .unwrap_or(path)
-                .trim_matches('"')
-                .to_owned()
-        })
-        .filter(|path| !harness_path(path))
-        .collect())
+    let mut paths = Vec::new();
+    let mut entries = status.split('\0');
+    while let Some(entry) = entries.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        // A rename or copy is `XY <to>`, then its source as an entry of its own.
+        if matches!(entry.as_bytes()[0], b'R' | b'C') {
+            entries.next();
+        }
+        if !harness_path(&entry[3..]) {
+            paths.push(entry[3..].to_owned());
+        }
+    }
+    Ok(paths)
 }
 
-/// A file's size and modification time, or `None` when it is gone.
+/// A file's size and the later of its creation and modification times, or `None` when it is gone. The creation time
+/// counts too: yt-dlp sets a download's modification time to the video's upload date, and `curl -R` and `cp -p` keep
+/// the source's (P35a review S3).
 fn fingerprint(path: &Path) -> Option<(u64, u128)> {
-    let meta = std::fs::metadata(path).ok()?;
-    let modified = meta.modified().ok()?;
-    let nanos = modified
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    Some((meta.len(), nanos))
+    let meta = std::fs::metadata(path)
+        .or_else(|_| std::fs::symlink_metadata(path))
+        .ok()?;
+    let nanos = |time: std::io::Result<std::time::SystemTime>| {
+        time.ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos())
+    };
+    Some((
+        meta.len(),
+        nanos(meta.modified()).max(nanos(meta.created())),
+    ))
 }
 
 fn seat_snapshot_path(project: &Project, run: &str, order: &str) -> PathBuf {
@@ -1554,11 +1936,17 @@ pub fn write_seat_snapshot(
     Ok(dirty.len())
 }
 
+/// Said in the owned axis when the gate had no seat snapshot: until `seat run` writes one, every project-folder
+/// verdict says so, so a missing snapshot cannot read as a pass (CLAUDE.md rule 8).
+pub const NO_SNAPSHOT: &str =
+    "no seat snapshot: counted the files created, changed or deleted since seating";
+
 /// The uncommitted paths an order in the project folder changed, against its chain root's seat snapshot: a path
 /// dirty at seating counts only when its size or time moved since. With no snapshot (an order seated before plan 35),
-/// a path counts when it was modified at or after the root was seated, and a deletion is not counted, because the
-/// gate cannot tell when it happened. With neither a snapshot nor a seating in the journal, the whole dirty tree.
-fn order_changes(subject: &Subject) -> Result<Vec<String>, String> {
+/// a path counts when it was created or modified at or after the root was seated, or is gone: a deletion counts, as
+/// on master, since the gate cannot tell when it happened (review S3). With neither a snapshot nor a seating in the
+/// journal, the whole dirty tree. The note is `NO_SNAPSHOT` when the times decided.
+fn order_changes(subject: &Subject) -> Result<(Vec<String>, Option<&'static str>), String> {
     let dirty = uncommitted(subject.cwd)?;
     let project = Project::at(subject.root);
     let state = replay(&project.journal(subject.run).read().0);
@@ -1567,7 +1955,7 @@ fn order_changes(subject: &Subject) -> Result<Vec<String>, String> {
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Map<String, Value>>(&text).ok());
     if let Some(snapshot) = snapshot {
-        return Ok(dirty
+        let changed = dirty
             .into_iter()
             .filter(|path| {
                 let now = fingerprint(&subject.cwd.join(path))
@@ -1576,18 +1964,20 @@ fn order_changes(subject: &Subject) -> Result<Vec<String>, String> {
                     });
                 snapshot.get(path) != Some(&now)
             })
-            .collect());
+            .collect();
+        return Ok((changed, None));
     }
     let Some(seated_at) = state.order(&root).map(|known| known.seated_at) else {
-        return Ok(dirty);
+        return Ok((dirty, None));
     };
-    Ok(dirty
+    let changed = dirty
         .into_iter()
         .filter(|path| {
             fingerprint(&subject.cwd.join(path))
-                .is_some_and(|(_, nanos)| nanos / 1_000_000_000 >= u128::from(seated_at))
+                .is_none_or(|(_, nanos)| nanos / 1_000_000_000 >= u128::from(seated_at))
         })
-        .collect())
+        .collect();
+    Ok((changed, Some(NO_SNAPSHOT)))
 }
 
 /// Commits the worker's work on its own branch, herdr's folder left out: every change to a tracked file, and each
@@ -1848,11 +2238,18 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
     ));
     axes.push(report_axis(subject.report));
     let changed = match (&base, worktree) {
-        (Some(base), true) => changed_files(subject.cwd, base),
+        (Some(base), true) => changed_files(subject.cwd, base).map(|changed| (changed, None)),
+        // Only an order with no branch comes here: a branch gives a base or returns above.
         _ => order_changes(subject),
     };
     axes.push(match changed {
-        Ok(changed) => owned_axis(subject.class, &changed, &subject.spec.owns),
+        Ok((changed, note)) => {
+            let mut owned = owned_axis(subject.class, &changed, &subject.spec.owns);
+            if let Some(note) = note {
+                owned.why = format!("{} ({note})", owned.why);
+            }
+            owned
+        }
         Err(why) => Axis::new("owned", Mark::Fail, why),
     });
     let listened = if subject.class == "ops.terminal" {
@@ -2073,14 +2470,21 @@ pub fn send_back_brief(
     root_text: &str,
     integration: &str,
 ) -> String {
+    // Review round (S4): the sources text only when there are cited sources to open again (not for "no Work Report"
+    // or "names no sources"), and on a mixed fail after the other axes' instruction, not instead of it.
+    let redo = failing(axes)
+        .iter()
+        .any(|axis| axis.axis == "sources" && !axis.lines.is_empty());
+    let others = failing(axes).iter().any(|axis| axis.axis != "sources");
+    let fix = "fix what the gate found, do not start over.";
+    let opening = match (redo, others) {
+        (true, false) => SOURCES_REDO.to_owned(),
+        (true, true) => format!("{fix} For the sources: {SOURCES_REDO}"),
+        (false, _) => fix.to_owned(),
+    };
     let mut brief = format!(
         "# Send-back {n} of {SEND_BACK_CAP}: {root}\n\nherdr's gate sent back {order}. Its work is in this folder, committed \
-on this branch. You are a new session: {}\n\n## What the gate found\n\n",
-        if failing(axes).iter().any(|axis| axis.axis == "sources") {
-            SOURCES_REDO
-        } else {
-            "fix what the gate found, do not start over."
-        }
+on this branch. You are a new session: {opening}\n\n## What the gate found\n\n"
     );
     for axis in failing(axes) {
         brief.push_str(&format!("- **{}**: {}\n", axis.axis, axis.why));
