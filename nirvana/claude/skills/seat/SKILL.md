@@ -117,9 +117,10 @@ End your turn while workers run; herdr wakes you when an order delivers, asks, f
 
 ## 5. Gate it
 
-herdr gates each `done` delivery itself, before it wakes you, and the wake says
-`<order> gated <verdict>: <reason>`, with no reason on a pass (plan 37 §1.1). A helper's delivery (a reviewer's, a
-held-out author's), a `blocked` one and a gate that waits on a review you gate by hand; `herdr gate run` again names
+herdr gates each `done` or `blocked` delivery itself, before it wakes you, and the wake says
+`<order> gated <verdict>: <reason>`, with no reason on a pass (plan 37 §1.1). A `blocked` delivery is gated for what
+it did deliver and then asked, never sent back, its question opening with the block (plan 37b). A helper's delivery
+(a reviewer's, a held-out author's) and a gate that waits on a review you gate by hand; `herdr gate run` again names
 the next step, a booked reviewer's `herdr seat run` line included, and for an order already sent back or asked it
 gives the child or the question again. A gate that stopped wakes you as `the run asks: herdr's gate of <order>
 stopped`: run it by hand. A cited YouTube video that does not exist fails the sources axis, and its redo goes

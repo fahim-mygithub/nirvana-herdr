@@ -3,6 +3,30 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.52.0: herdr gates blocked deliveries too
+
+- **Changed:**
+  - A worker's `blocked` delivery is gated by herdr at once in `seat exec`, like a `done` one, inside the same panic
+    guard and before the wake. Helpers are still not auto-gated.
+  - A blocked delivery is always `asked`, never sent back and never passed: a redo would hit the same block. The
+    question opens with the block (the summary, plus the report's own question) and names anything else the gate
+    found, such as invented videos. The orchestrator wakes to that one line.
+  - A blocked order costs its seat nothing: the seat record writes `blocked`, which the tally does not count, and no
+    lesson or card is marked as failing a gate. The retro lists blocks as their own gap. A blocked order's `test:`
+    axis is not run.
+  - ROLE.md and the gate and seat skills: herdr gates each `done` or `blocked` delivery; a blocked-asked order is the
+    orchestrator's to resolve first (answer the block, reseat, change the order), the owner's only when it cannot.
+  **Because:** the owner, 2026-11-01: "send it blocked as well for validationg." Plan 37 had left blocked deliveries
+  ungated, and the live check (F6) saw a blocked delivery end with no gate and no wake line. The owner also ruled on
+  a video deleted after a real read: "yes we can delete videos"; the 404 rule stays.
+  **Measured:** gates on master plus this and the 0.51.3 fix together: nextest 4,610 of 4,611, the one failure the
+  known Windows plugin-path test; clippy clean; the dry run finds 2,505 of 2,505; all 38 `p37b_` controls and the
+  older controls whose lines moved go red alone. One Sonnet review, one fix round. A hypothesis: a cheap seat that
+  gives up early by reporting blocked is no longer stepped up and costs its seat nothing; nothing measured yet tells
+  a real block from a give-up.
+  **If you remove this:** a blocked worker's delivery sits unchecked, its block reason reaches nobody until someone
+  gates it by hand, and a block the owner must answer is paid for as a redo.
+
 ## alpha 0.51.3: the wake goes to the orchestrator that seated the order
 
 - **Changed:**

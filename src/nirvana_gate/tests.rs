@@ -736,6 +736,8 @@ fn the_outcome_words_and_what_the_tally_counts() {
         assert_eq!(Outcome::tally(word), Some(false), "{word}");
     }
     assert_eq!(Outcome::tally("reseated"), None);
+    // Plan 37b review S1: an order asked on its own block is the record's `blocked`, and not counted.
+    assert_eq!(Outcome::tally(Outcome::BLOCKED), None);
     let on = |chain: &str, outcome: &str| -> nirvana_seat::RecordLine {
         serde_json::from_value(serde_json::json!({"order":"o","seat":"sonnet","effort":"medium","class":"build.bounded",
             "chain":chain,"outcome":outcome}))
@@ -749,6 +751,7 @@ fn the_outcome_words_and_what_the_tally_counts() {
         line("sent_back"),
         line("reseated"),
         line("asked"),
+        line("blocked"),
         on("subagent", "subagent-done"),
         on("subagent", "subagent-blocked"),
     ]);
@@ -2860,6 +2863,12 @@ struct P37Gated {
     child: Option<OrderState>,
     again: Result<Ruling, String>,
     overrides: u32,
+    /// The orchestrator's queue lines after both gates (plan 37b).
+    queue: Vec<String>,
+    /// Each `gated` event's reason, in journal order (plan 37b review N3).
+    reasons: Vec<Option<String>>,
+    /// The order's record word after the gate (plan 37b review S1).
+    outcome: String,
 }
 
 /// The send-back of a research order seated on `seat`, with `axes`, in a world whose `clis` are refused.
@@ -2868,6 +2877,17 @@ fn p37_gate_fail(
     seat: &str,
     axes: Vec<Axis>,
     clis: BTreeMap<String, String>,
+) -> P37Gated {
+    p37_gate_fail_with(name, seat, axes, clis, None)
+}
+
+/// `p37_gate_fail`, the order first delivering `report` when one is given (plan 37b).
+fn p37_gate_fail_with(
+    name: &str,
+    seat: &str,
+    axes: Vec<Axis>,
+    clis: BTreeMap<String, String>,
+    report: Option<Value>,
 ) -> P37Gated {
     let _guard = crate::nirvana::with_test_home(name);
     let root = repo(name);
@@ -2887,6 +2907,17 @@ fn p37_gate_fail(
     journal
         .append(1, Kind::Seated(Box::new(parent)))
         .expect("seated");
+    if let Some(report) = report {
+        journal
+            .append(
+                2,
+                Kind::Delivered {
+                    order: "res".into(),
+                    report,
+                },
+            )
+            .expect("delivered");
+    }
     // The child is held live, so the send-back starts no worker.
     let _live = crate::nirvana_worker::take_live(&project, run, "res-s1").unwrap();
     let state = replay(&journal.read().0);
@@ -2907,12 +2938,26 @@ fn p37_gate_fail(
     let again = gate(&project, run, "res");
     let overrides = nirvana_seat::load_leases(&nirvana_seat::dir().join(nirvana_seat::LEASES_FILE))
         .map_or(0, |leases| leases.overrides(run));
+    let events = journal.read().0;
+    let after = replay(&events);
+    let outcome = nirvana_run::outcome_word(after.order("res").expect("res"));
+    let queue = after.queue.into_iter().map(|item| item.line).collect();
+    let reasons = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            Kind::Gated { reason, .. } => Some(reason.clone()),
+            _ => None,
+        })
+        .collect();
     nirvana_seat::set_test_world(None);
     P37Gated {
         ruling,
         child,
         again,
         overrides,
+        queue,
+        reasons,
+        outcome,
     }
 }
 
@@ -3098,7 +3143,8 @@ fn p37_a_reseated_or_sent_back_helper_keeps_helps() {
     assert_eq!(helps_of(&project, "r1", &state, "o1"), None);
 }
 
-/// Plan 37 §1.1: `seat exec` gates every done delivery but a helper's; a lesson review whatever it reported.
+/// Plan 37 §1.1: `seat exec` gates every done delivery but a helper's; a lesson review whatever it reported. A
+/// blocked one is plan 37b's (`p37b_herdr_gates_a_blocked_delivery_but_never_a_helpers`).
 #[test]
 fn p37_herdr_gates_each_done_delivery_but_a_helpers() {
     let root = repo("p37-gates");
@@ -3116,13 +3162,6 @@ fn p37_herdr_gates_each_done_delivery_but_a_helpers() {
         "o1",
         "build.bounded",
         "done"
-    ));
-    assert!(!gates_on_delivery(
-        &project,
-        "r1",
-        "o1",
-        "build.bounded",
-        "blocked"
     ));
     assert!(gates_on_delivery(
         &project,
@@ -3148,6 +3187,311 @@ fn p37_herdr_gates_each_done_delivery_but_a_helpers() {
         "review.adversary",
         "done"
     ));
+}
+
+/// Plan 37b (the owner, 2026-11-01: "send it blocked as well for validationg"): `seat exec` gates a blocked delivery
+/// too; a helper's, blocked or done, stays the orchestrator's (not ruled), and a `needs_answer` one is asked already.
+#[test]
+fn p37b_herdr_gates_a_blocked_delivery_but_never_a_helpers() {
+    let root = repo("p37b-gates");
+    let project = Project::at(&root);
+    for class in ["research.web", "build.bounded"] {
+        assert!(gates_on_delivery(&project, "r1", "o1", class, "blocked"));
+        assert!(gates_on_delivery(&project, "r1", "o1", class, "done"));
+        assert!(!gates_on_delivery(
+            &project,
+            "r1",
+            "o1",
+            class,
+            "needs_answer"
+        ));
+    }
+    let journal = project.journal("r1");
+    let mut reviewer = seated("o1-rev1", None);
+    reviewer.class = "review.adversary".into();
+    let mut reseat = seated("o1-rev1-r1", Some("o1-rev1"));
+    reseat.class = "review.adversary".into();
+    reseat.why = Some("reseat".into());
+    let mut author = seated("o1-auth1", None);
+    author.class = "acceptance.author".into();
+    for (n, s) in [reviewer, reseat, author].into_iter().enumerate() {
+        journal
+            .append(n as u64 + 1, Kind::Seated(Box::new(s)))
+            .unwrap();
+    }
+    for (helper, kind) in [("o1-rev1", "review"), ("o1-auth1", "author")] {
+        write_sidecar(
+            &project,
+            "r1",
+            &Sidecar {
+                order: helper.into(),
+                helps: Some((kind.into(), "o1".into())),
+                ..Sidecar::default()
+            },
+        )
+        .unwrap();
+    }
+    for (helper, class) in [
+        ("o1-rev1", "review.adversary"),
+        ("o1-rev1-r1", "review.adversary"),
+        ("o1-auth1", "acceptance.author"),
+    ] {
+        for status in ["blocked", "done"] {
+            assert!(
+                !gates_on_delivery(&project, "r1", helper, class, status),
+                "{helper} {status} was gated"
+            );
+        }
+    }
+}
+
+const P37B_BLOCK: &str = "the dial maker's spec sheet is behind a login";
+
+fn p37b_blocked() -> Value {
+    serde_json::json!({
+        "status": "blocked",
+        "summary": P37B_BLOCK,
+        "files": [],
+        "tests": [],
+        "gotchas": ["https://example.com/specs answers 401"],
+    })
+}
+
+/// Plan 37b: a blocked delivery whose gate finds nothing else is asked, never passed and never sent back. The block
+/// opens the question and is the gated line's reason; the verdict queues once, and a gate by hand queues no more.
+#[test]
+fn p37b_a_blocked_delivery_is_asked_with_its_block_and_queued_once() {
+    let report = p37b_blocked();
+    let axes = vec![report_axis(Some(&report))];
+    assert_eq!(axes[0].mark, Mark::Fail, "{axes:?}");
+    let sent = p37_gate_fail_with("p37b-blocked", "flash", axes, BTreeMap::new(), Some(report));
+    assert_eq!(sent.ruling.verdict, "asked", "{:?}", sent.ruling);
+    assert!(sent.child.is_none());
+    let question = &sent.ruling.next[0];
+    assert!(
+        question.starts_with(&format!(
+            "res is blocked: {P37B_BLOCK}. the gate finds nothing else"
+        )),
+        "{question}"
+    );
+    let again = sent.again.expect("the stored verdict");
+    assert_eq!(again.verdict, "asked");
+    assert_eq!(&again.next[0], question);
+    // Review N3: the gated line's reason is the block behind a 9-character prefix, so it survives the 90-char cut.
+    assert_eq!(sent.reasons, [Some(format!("blocked: {P37B_BLOCK}"))]);
+    // Review S4: one wake entry carries the block, the gate's question; the delivered and gated lines are not queued.
+    let res: Vec<&String> = sent
+        .queue
+        .iter()
+        .filter(|line| line.starts_with("res "))
+        .collect();
+    assert_eq!(res.len(), 1, "{:?}", sent.queue);
+    assert!(
+        res[0].starts_with(&format!("res asks: res is blocked: {P37B_BLOCK}")),
+        "{:?}",
+        sent.queue
+    );
+    // Review S1: the record's word is `blocked`, which the seat's tally does not count.
+    assert_eq!(sent.outcome, Outcome::BLOCKED);
+}
+
+/// Plan 37b: a blocked delivery with invented sources (and a rebase conflict ahead of its report axis) is still
+/// asked: the block wins over the send-back and its step-up, the gated line names the block, not the first failing
+/// axis, and the question names the invented videos beside it.
+#[test]
+fn p37b_a_blocked_delivery_with_invented_sources_is_asked_not_stepped_up() {
+    let report = p37b_blocked();
+    let mut axes = vec![Axis::new("rebase", Mark::Fail, "conflicts").with(vec!["src/a.rs".into()])];
+    axes.push(report_axis(Some(&report)));
+    axes.extend(p37_invented());
+    let sent = p37_gate_fail_with(
+        "p37b-blocked-invented",
+        "flash",
+        axes,
+        BTreeMap::new(),
+        Some(report),
+    );
+    assert_eq!(sent.ruling.verdict, "asked", "{:?}", sent.ruling);
+    assert!(sent.child.is_none(), "{:?}", sent.child);
+    assert_eq!(sent.overrides, 0);
+    let question = &sent.ruling.next[0];
+    assert!(
+        question.starts_with(&format!(
+            "res is blocked: {P37B_BLOCK}. the gate also finds "
+        )),
+        "{question}"
+    );
+    for found in [
+        "rebase: conflicts",
+        "sources: the sources",
+        "1 cited video(s) do not exist",
+    ] {
+        assert!(question.contains(found), "no {found:?} in {question}");
+    }
+    assert_eq!(sent.reasons, [Some(format!("blocked: {P37B_BLOCK}"))]);
+}
+
+/// Plan 37b: the block is the report's summary, with its question when it asks one; only a blocked report has one.
+#[test]
+fn p37b_the_block_is_the_summary_and_its_question() {
+    let mut known = chain_state(&[("o1", None)])
+        .order("o1")
+        .cloned()
+        .expect("o1");
+    assert_eq!(block_reason(&known), None);
+    let mut report = p37b_blocked();
+    known.report = Some(report.clone());
+    assert_eq!(block_reason(&known).as_deref(), Some(P37B_BLOCK));
+    report["question"] = "may I sign in as the owner?".into();
+    known.report = Some(report.clone());
+    assert_eq!(
+        block_reason(&known),
+        Some(format!("{P37B_BLOCK} (may I sign in as the owner?)"))
+    );
+    // Review N2: an empty summary never makes "blocked: ."; the question stands alone, or "no reason given".
+    report["summary"] = "".into();
+    known.report = Some(report.clone());
+    assert_eq!(
+        block_reason(&known).as_deref(),
+        Some("may I sign in as the owner?")
+    );
+    report["question"] = " ".into();
+    known.report = Some(report.clone());
+    assert_eq!(block_reason(&known).as_deref(), Some("no reason given"));
+    report["status"] = "done".into();
+    known.report = Some(report);
+    assert_eq!(block_reason(&known), None);
+}
+
+/// Plan 37b review N4: a blocked report's gate does not run the order's `test:` (its tree is unfinished, and a long
+/// test only delays the wake); the tests axis says so. A done report's gate runs it as before.
+#[test]
+fn p37b_a_blocked_gate_notes_the_test_command_and_does_not_run_it() {
+    let root = repo("p37b-no-test");
+    let cwd = worktree(&root, "mul");
+    work(&cwd);
+    let spec = spec_with(&["calc.py", "test_*.py"], "git ls-files", &["test_mul"]);
+    // The gate writes the test's output to its log only when it ran the test.
+    let gate = |report: &Value, log: &Path| {
+        deterministic(
+            &Subject {
+                root: &root,
+                cwd: &cwd,
+                run: "r1",
+                order: "mul",
+                branch: Some("nirvana/mul"),
+                class: "build.bounded",
+                report: Some(report),
+                spec: &spec,
+                ports: &no_ports,
+            },
+            Some(log),
+        )
+    };
+    let blocked_log = root.join("blocked-g1.log");
+    let det = gate(&p37b_blocked(), &blocked_log);
+    let tests = axis(&det, "tests");
+    assert_eq!(tests.mark, Mark::Note, "{tests:?}");
+    assert_eq!(
+        tests.why,
+        "`git ls-files` not run: the worker reported blocked"
+    );
+    assert!(!blocked_log.exists(), "the test ran");
+    let done_log = root.join("done-g1.log");
+    let det = gate(&done(), &done_log);
+    assert_eq!(axis(&det, "tests").mark, Mark::Pass, "{det:?}");
+    assert!(done_log.exists());
+}
+
+/// Plan 37b review S4: a blocked delivery gated `asked` wakes the orchestrator with one entry, the gate's question,
+/// where it queued three (delivered, gated, asks). A blocked delivery whose gate stopped keeps its delivered line, a
+/// regate still queues nothing, and a done order's cap ask is as it was (its gated line and its question).
+#[test]
+fn p37b_one_blocked_delivery_wakes_with_one_entry() {
+    let event = |seq: u64, kind: Kind| Event {
+        v: V,
+        seq,
+        at: seq,
+        kind,
+    };
+    let delivered = |order: &str, status: &str| Kind::Delivered {
+        order: order.into(),
+        report: serde_json::json!({"status": status, "summary": P37B_BLOCK}),
+    };
+    let gated = |order: &str, reason: &str| Kind::Gated {
+        order: order.into(),
+        verdict: "asked".into(),
+        reason: Some(reason.into()),
+        axes: Vec::new(),
+    };
+    let asked = |order: &str, question: &str| Kind::Asked {
+        order: Some(order.into()),
+        question: question.into(),
+    };
+    let events = vec![
+        event(1, Kind::Seated(Box::new(seated("b1", None)))),
+        event(2, Kind::Seated(Box::new(seated("b2", None)))),
+        event(3, Kind::Seated(Box::new(seated("d1", None)))),
+        event(4, delivered("b1", "blocked")),
+        event(5, gated("b1", &format!("blocked: {P37B_BLOCK}"))),
+        event(
+            6,
+            asked(
+                "b1",
+                &format!("b1 is blocked: {P37B_BLOCK}. the gate finds nothing else"),
+            ),
+        ),
+        event(7, gated("b1", "a later gate")),
+        event(8, delivered("b2", "blocked")),
+        event(9, delivered("d1", "done")),
+        event(10, gated("d1", "sources: invented")),
+        event(11, asked("d1", "d1: 3 send-backs are spent")),
+    ];
+    let lines: Vec<String> = replay(&events)
+        .queue
+        .into_iter()
+        .map(|item| item.line)
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            format!("b1 asks: b1 is blocked: {P37B_BLOCK}. the gate finds nothing else"),
+            format!("b2 delivered blocked: {P37B_BLOCK}"),
+            format!("d1 delivered done: {P37B_BLOCK}"),
+            "d1 gated asked: sources: invented".to_owned(),
+            "d1 asks: d1: 3 send-backs are spent".to_owned(),
+        ]
+    );
+}
+
+/// Plan 37b: ROLE.md and both skills say a blocked delivery is gated and asked, never sent back.
+#[test]
+fn p37b_the_docs_say_a_blocked_delivery_is_gated_and_asked() {
+    let role = include_str!("../../nirvana/claude/ROLE.md");
+    let seat = include_str!("../../nirvana/claude/skills/seat/SKILL.md");
+    let gate = include_str!("../../nirvana/claude/skills/gate/SKILL.md");
+    for text in [role, seat] {
+        assert!(text.contains("herdr gates each `done` or `blocked` delivery itself"));
+        assert!(text.contains("then asked, never sent"), "{text}");
+        assert!(!text.contains("a `blocked` one"), "{text}");
+    }
+    assert!(gate.contains("A `blocked` delivery is never sent back"));
+    // Review S3: a blocked-asked order is the orchestrator's to resolve first, the owner's only when it cannot, and
+    // the gate skill's cap paragraph does not say otherwise.
+    assert!(role.contains("A blocked-asked order is yours to resolve first"));
+    assert!(role.contains("ask the\n   owner only when you cannot"));
+    assert!(gate.contains("a blocked order's question is yours to resolve first"));
+    assert!(gate.contains("take it to the owner only when you cannot"));
+    // Review S4 and N1: ROLE names the one wake line, and item 5 keeps the file's 120 columns.
+    assert!(role.contains("wakes you once as `<order> asks: <order> is blocked: ...`"));
+    let at = role.find("5. herdr gates each").expect("item 5");
+    assert!(
+        p37_item(role, at)
+            .lines()
+            .all(|line| line.chars().count() <= 120),
+        "{}",
+        p37_item(role, at)
+    );
 }
 
 /// The item of a rules list holding byte `at`: from its first line (one that is not indented) through its indented
@@ -3177,7 +3521,7 @@ fn p37_the_agy_brief_rules_are_in_role_and_the_seat_skill_each_naming_its_failur
     for (text, rule, failure) in [
         (
             role,
-            "herdr gates each `done` delivery itself",
+            "herdr gates each `done` or `blocked` delivery itself",
             "1 of 26 deliveries",
         ),
         (
@@ -3233,7 +3577,7 @@ fn p37_the_agy_brief_rules_are_in_role_and_the_seat_skill_each_naming_its_failur
 
 ",
         )
-        .find(|part| part.contains("herdr gates each `done` delivery itself"))
+        .find(|part| part.contains("herdr gates each `done` or `blocked` delivery itself"))
         .expect("the seat skill's gate paragraph");
     assert!(
         gate.contains("one seat up") && gate.contains("trusts nothing"),

@@ -60,8 +60,13 @@ A `note` is said and never blocks. A `wait` means a review or a held-out check i
 ## The send-back loop
 
 A failing axis seats a child `<root>-s<n>` in the same worktree with the reasons, on the seat the rule picks, and
-starts it. At most 3 per order. The fourth failure asks the owner: the order is `asked`, and you answer the owner,
-not the worker. Do not seat the order again by hand to dodge the cap.
+starts it. At most 3 per order. The fourth failure asks the owner: the order is `asked`, and you take the question
+to the owner, not the worker. Do not seat the order again by hand to dodge the cap.
+
+A `blocked` delivery is never sent back: its worker said it cannot go on, so a redo would pay for the same block.
+herdr gates what it did deliver and asks; the question opens with the block and names any other axis that failed
+(plan 37b). Unlike the cap's, a blocked order's question is yours to resolve first: answer the block, reseat it, or
+change the order; take it to the owner only when you cannot. It costs the seat nothing in the record.
 
 When the child delivers, `herdr gate run <child>`. Its branch holds the root's work and its own.
 

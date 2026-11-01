@@ -163,8 +163,8 @@ CONTROLS = (
     # Plan 37 gates every done delivery through `nirvana_gate::gates_on_delivery`, which has no line of teaching's
     # own; the sabotage adds one that leaves teaching orders out and nothing else.
     Control("p34a_exec_teach_not_gated", GATE,
-            '        || (status == "done"\n            && helps_of(',
-            '        || (status == "done"\n            && class != crate::nirvana_knowledge::TEACH_CLASS\n'
+            '        || (matches!(status, "done" | "blocked")\n            && helps_of(',
+            '        || (matches!(status, "done" | "blocked")\n            && class != crate::nirvana_knowledge::TEACH_CLASS\n'
             '            && helps_of(', T_EXEC, "rust"),
     # The Work Report carries card_ops: the check and the schema.
     Control("p34a_report_card_ops_unchecked", WORKER,

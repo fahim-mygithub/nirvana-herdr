@@ -306,7 +306,13 @@ fn p33_a_review_is_queued_after_a_send_back_with_its_reasons() {
     let _home = quiet("review-send-back");
     let root = repo("review-send-back");
     let project = Project::at(&root);
-    delivered(&root, "r1", "b2", done("blocked"), "nothing", None);
+    // Plan 37b: a blocked delivery is asked, never sent back, so the send-back comes from a committed file the order
+    // does not own (an uncommitted one is left out of the gate's commit, a note).
+    delivered(&root, "r1", "b2", done("done"), "nothing", None);
+    let cwd = root.join(".nirvana").join("worktrees").join("b2");
+    std::fs::write(cwd.join("unowned.py"), "x = 1\n").expect("unowned");
+    git(&cwd, &["add", "unowned.py"]);
+    git(&cwd, &["commit", "-q", "-m", "unowned"]);
     let ruling = nirvana_gate::gate(&project, "r1", "b2").expect("gate");
     assert_eq!(ruling.verdict, "sent_back", "{ruling:?}");
     assert!(
@@ -320,7 +326,7 @@ fn p33_a_review_is_queued_after_a_send_back_with_its_reasons() {
     let state = state_of(&root, "r1");
     let brief = std::fs::read_to_string(&state.order("b2-lr").expect("review").seated.order_file)
         .expect("brief");
-    assert!(brief.contains("sent back, for:\n\n- report:"), "{brief}");
+    assert!(brief.contains("sent back, for:\n\n- owned:"), "{brief}");
 }
 
 #[test]

@@ -89,7 +89,7 @@ pub fn gap_key(text: &str) -> String {
 /// One gap found in one run's journal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Found {
-    /// send_back, send_back_cap, rate_limit, stall, crash_loop, reseat, override, no_seat, failed, gotcha.
+    /// send_back, send_back_cap, blocked, rate_limit, stall, crash_loop, reseat, override, no_seat, failed, gotcha.
     pub kind: String,
     pub gap: String,
     pub seq: u64,
@@ -169,11 +169,34 @@ pub fn gaps(text: &str) -> Vec<Found> {
         let class = seated.map_or("an", |s| s.class.as_str());
         match &event.kind {
             Kind::Gated {
-                verdict, reason, ..
+                order,
+                verdict,
+                reason,
+                ..
             } if verdict == "sent_back" || verdict == "asked" => {
                 let reason = reason.clone().unwrap_or_else(|| "no reason given".into());
                 let axis = reason.split(':').next().map(str::trim).map(str::to_owned);
-                if verdict == "asked" {
+                // Plan 37b review S2: a blocked delivery is asked at once and spends no send-back. Its block is the
+                // owner's or the orchestrator's input, not a miss with a clear cause, so it graduates only by recurring.
+                let blocked = state
+                    .order(order)
+                    .and_then(|known| known.report.as_ref())
+                    .and_then(|report| report.get("status"))
+                    .and_then(Value::as_str)
+                    == Some("blocked");
+                if verdict == "asked" && blocked {
+                    let block = reason
+                        .strip_prefix("blocked: ")
+                        .unwrap_or(&reason)
+                        .to_owned();
+                    push(
+                        "blocked",
+                        format!("a {class} worker was blocked: {block}"),
+                        false,
+                        axis,
+                        block,
+                    );
+                } else if verdict == "asked" {
                     push(
                         "send_back_cap",
                         format!("the gate spent its send-backs on a {class} order: {reason}"),
@@ -735,6 +758,11 @@ pub fn draft(key: &str, rows: &[&Row], record: &[RecordLine]) -> Proposal {
             format!("Seat {class} orders while a pool's window has room, or defer them before it runs out."),
             format!("{class} orders keep finding no seat."),
         ),
+        "blocked" => (
+            "skills/seat/SKILL.md".to_owned(),
+            format!("Give {class} orders up front what their workers keep being blocked on: {}", first.cause),
+            format!("{class} workers keep stopping on the same block, each a question for the orchestrator."),
+        ),
         "gotcha" => (
             "skills/seat/SKILL.md".to_owned(),
             format!("Add to {class} orders: {}", first.gap.trim_start_matches("a worker's gotcha: ")),
@@ -1209,6 +1237,50 @@ mod tests {
             .expect("gated");
         let summary = retro_with(&project, "r1", &[]).expect("retro");
         assert_eq!(summary.proposed.len(), 1, "{summary:?}");
+    }
+
+    /// Plan 37b review S2: a blocked delivery's `asked` spent no send-back, so the retro calls it a block, not the cap
+    /// spent, and one does not graduate alone; a cap-asked order is still the tagged miss.
+    #[test]
+    fn p37b_a_blocked_ask_is_a_block_not_the_send_back_cap() {
+        let root = temp("p37b-blocked");
+        let project = Project::at(&root);
+        let journal = project.journal("r1");
+        journal
+            .append(100, Kind::Seated(Box::new(seated("a"))))
+            .expect("seated");
+        journal
+            .append(
+                150,
+                Kind::Delivered {
+                    order: "a".into(),
+                    report: serde_json::json!({"status":"blocked","summary":"the spec sheet is behind a login"}),
+                },
+            )
+            .expect("delivered");
+        journal
+            .append(
+                160,
+                Kind::Gated {
+                    order: "a".into(),
+                    verdict: "asked".into(),
+                    reason: Some("blocked: the spec sheet is behind a login".into()),
+                    axes: Vec::new(),
+                },
+            )
+            .expect("gated");
+        let found = gaps(&std::fs::read_to_string(&journal.path).expect("journal"));
+        let kinds: Vec<(&str, bool)> = found
+            .iter()
+            .map(|found| (found.kind.as_str(), found.outcome_tagged))
+            .collect();
+        assert_eq!(kinds, [("blocked", false)], "{found:?}");
+        assert_eq!(
+            found[0].gap,
+            "a build.bounded worker was blocked: the spec sheet is behind a login"
+        );
+        let summary = retro_with(&project, "r1", &[]).expect("retro");
+        assert!(summary.proposed.is_empty(), "{summary:?}");
     }
 
     #[test]

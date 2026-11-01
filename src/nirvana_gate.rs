@@ -22,7 +22,8 @@
 //! of another family (decision 0017), whose verdict comes back as its Work Report.
 //!
 //! A failing axis is a **send-back**: a child order `<root>-s<n>` in the same worktree with the reasons, at most 3 per
-//! order; the fourth failure **asks** the owner. Old Nirvana's decision 0010: a continuation is a child order.
+//! order; the fourth failure **asks** the owner. Old Nirvana's decision 0010: a continuation is a child order. A
+//! `blocked` delivery is never sent back: it asks, the block first (plan 37b).
 //!
 //! The order file's gate lines, each at the start of a line, anywhere in the order, any number of times:
 //!
@@ -114,11 +115,20 @@ impl Outcome {
         Self::ALL.into_iter().find(|outcome| outcome.word() == word)
     }
 
+    /// Plan 37b review S1: the record's word for an order asked on its worker's own block. Its journal verdict stays
+    /// `asked`; the record says `blocked`, which the tally does not count: a login wall is the owner's input, not the
+    /// seat's failure. A worker that gave up early is not counted either: S3's hypothesis, unmeasured (nothing yet
+    /// tells a real block from a give-up).
+    pub const BLOCKED: &'static str = "blocked";
+
     /// What the seat record's tally counts (decision 0029's blend): `Some(true)` a pass, `Some(false)` a failure,
     /// `None` not counted. A re-seat is not counted: the pool's window ran out, which says nothing of the seat's
-    /// work, and its child's own line carries the outcome. A word this herdr does not know (O2's "sent back", a
-    /// later word) counts as a failure, as O2 counted it.
+    /// work, and its child's own line carries the outcome. Nor is a `blocked` one (`BLOCKED`). A word this herdr does
+    /// not know (O2's "sent back", a later word) counts as a failure, as O2 counted it.
     pub fn tally(word: &str) -> Option<bool> {
+        if word == Self::BLOCKED {
+            return None;
+        }
         match Self::parse(word) {
             Some(Self::Pass) => Some(true),
             Some(Self::Reseated) => None,
@@ -2390,7 +2400,15 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
     };
     det.head = rev(subject.cwd, "HEAD");
     det.base = base.clone();
-    let run = subject.spec.test.as_deref().map(|test| {
+    // Plan 37b review N4: a blocked worker's tree is unfinished, and its gate asks whatever the tests say; running a
+    // long `test:` there only delays the wake (a broken environment may be the block itself).
+    let blocked = subject
+        .report
+        .and_then(|report| report.get("status"))
+        .and_then(Value::as_str)
+        == Some("blocked");
+    let test = subject.spec.test.as_deref().filter(|_| !blocked);
+    let run = test.map(|test| {
         let run = run_command(subject.cwd, test, Duration::from_secs(TEST_TIMEOUT_S));
         if let Some(log) = log {
             if let Some(parent) = log.parent() {
@@ -2400,11 +2418,18 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
         }
         run
     });
-    axes.push(tests_axis(
-        subject.spec.test.as_deref(),
-        run.as_ref(),
-        &subject.spec.checks,
-    ));
+    axes.push(match subject.spec.test.as_deref() {
+        Some(test) if blocked => Axis::new(
+            "tests",
+            Mark::Note,
+            format!("`{test}` not run: the worker reported blocked"),
+        ),
+        _ => tests_axis(
+            subject.spec.test.as_deref(),
+            run.as_ref(),
+            &subject.spec.checks,
+        ),
+    });
     axes.push(report_axis(subject.report));
     let changed = match (&base, worktree) {
         (Some(base), true) => changed_files(subject.cwd, base).map(|changed| (changed, None)),
@@ -3256,8 +3281,13 @@ fn gate_subject(
             next,
         });
     }
-    let _ = crate::nirvana_lessons::note_gated(&project.root, &stream, &order, false);
-    if let Some(profile) = &card_profile {
+    // Plan 37b review S1: a block is the owner's or the orchestrator's to answer, so the lessons and cards the worker
+    // opened are not counted as failing after it (a give-up counts nothing too: S3's hypothesis, unmeasured).
+    let blocked = block_reason(known).is_some();
+    if !blocked {
+        let _ = crate::nirvana_lessons::note_gated(&project.root, &stream, &order, false);
+    }
+    if let Some(profile) = card_profile.as_ref().filter(|_| !blocked) {
         let _ =
             crate::nirvana_knowledge::note_gated(&project.root, profile, &stream, &order, false);
     }
@@ -3310,6 +3340,54 @@ pub(crate) fn record(project: &Project, run: &str, order: &str) {
     }
 }
 
+/// Plan 37b: the block a `blocked` Work Report gives, its summary and its question when it has one; None for any other
+/// status. A lesson review and a helper never reach here: `gate` routes them before `gate_subject`.
+fn block_reason(known: &OrderState) -> Option<String> {
+    let report = known.report.as_ref()?;
+    if report.get("status").and_then(Value::as_str) != Some("blocked") {
+        return None;
+    }
+    let summary = report
+        .get("summary")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let question = report
+        .get("question")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|question| !question.is_empty() && *question != summary);
+    // Review N2: an empty block never reads "blocked: ." (`check_report` asks for a summary, so this is unlikely).
+    Some(match question {
+        Some(question) if summary.is_empty() => question.to_owned(),
+        Some(question) => format!("{summary} ({question})"),
+        None if summary.is_empty() => "no reason given".to_owned(),
+        None => summary.to_owned(),
+    })
+}
+
+/// The question a gated blocked delivery asks: the block first (the wake's line keeps 120 characters), then what the
+/// gate found in what the worker did deliver.
+fn blocked_question(order: &str, block: &str, axes: &[Axis]) -> String {
+    let found: Vec<String> = failing(axes)
+        .iter()
+        .filter(|axis| axis.axis != "report")
+        .map(|axis| format!("{}: {}", axis.axis, axis.why))
+        .collect();
+    let invented = invented_videos(axes).len();
+    let gate = match (found.is_empty(), invented) {
+        (true, _) => "the gate finds nothing else wrong in what it delivered".to_owned(),
+        (false, 0) => format!("the gate also finds {}", found.join("; ")),
+        (false, n) => format!(
+            "the gate also finds {} ({n} cited video(s) do not exist)",
+            found.join("; ")
+        ),
+    };
+    format!(
+        "{order} is blocked: {block}. {gate}. herdr redoes no blocked order: answer the block, change the order, or drop it?"
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn send_back(
     project: &Project,
@@ -3323,7 +3401,14 @@ fn send_back(
     table: Option<&Table>,
 ) -> Result<Ruling, String> {
     let order = known.id().to_owned();
-    let reason = reason_line(&axes);
+    let block = block_reason(known);
+    // Plan 37b: a blocked order's gated line names its block, whichever axis failed first. Review N3: as `blocked:`
+    // and not the report axis's `report: the worker reported blocked: `, whose 37 characters left the block 53 of the
+    // line's 90.
+    let reason = block
+        .as_ref()
+        .map(|block| format!("blocked: {block}"))
+        .or_else(|| reason_line(&axes));
     let ask = |question: String, axes: Vec<Axis>| -> Result<Ruling, String> {
         journal
             .transact(now(), |_| {
@@ -3353,6 +3438,14 @@ fn send_back(
             next: vec![question],
         })
     };
+    // Plan 37b (the owner, 2026-11-01: "send it blocked as well for validationg"): a blocked delivery is gated for
+    // what it did deliver, and then asked, never sent back. A send-back is the same order again, on the rule's seat or
+    // one up, with "fix what the gate found": it pays a redo of a worker that said it cannot go on, and the block's
+    // question goes unanswered. When the gate also fails another axis (invented sources, an unowned file) the block
+    // still wins, and the question names what the gate found beside it.
+    if let Some(block) = &block {
+        return ask(blocked_question(&order, block, &axes), axes);
+    }
     let (id, n) = match plan_send_back(state, &order) {
         SendBack::Ask => {
             return ask(
@@ -3730,6 +3823,8 @@ then `herdr seat run <seat> --order \"{}\" --order-id {id} --run {run} --class r
 /// `done` delivery but a helper's (a reviewer of another family, a held-out author): gating one of those starts its
 /// subject's next step, which the orchestrator sequences. A lesson review is gated whatever it reported (plan 33
 /// review B2). MotoProject, 2026-10-23 to 31: 1 of 26 deliveries was gated, and an invented source went unread.
+/// Plan 37b: a `blocked` delivery too (the owner, 2026-11-01: "send it blocked as well for validationg"); its gate
+/// asks and never sends back (`send_back`). A `needs_answer` one is `asked` already, which the gate does not rule on.
 pub fn gates_on_delivery(
     project: &Project,
     run: &str,
@@ -3738,7 +3833,7 @@ pub fn gates_on_delivery(
     status: &str,
 ) -> bool {
     class == crate::nirvana_review::CLASS
-        || (status == "done"
+        || (matches!(status, "done" | "blocked")
             && helps_of(project, run, &replay(&project.journal(run).read().0), order).is_none())
 }
 

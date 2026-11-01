@@ -2513,7 +2513,8 @@ fn p35b_an_agy_research_child_brief_gets_the_sources_line_once() {
 
 /// Plan 37 §1.1 (L3, "Yes, after the fixes"): `seat exec` gates an ordinary done delivery itself, with the same
 /// call it makes for a lesson review, and only then wakes Nirvana Claude, so the wake reads a journal that already
-/// holds the verdict and gating costs no orchestrator turn. A `blocked` delivery is left to the orchestrator.
+/// holds the verdict and gating costs no orchestrator turn. A `blocked` delivery is plan 37b's
+/// (`p37b_exec_gates_a_blocked_delivery_and_its_wake_keeps_the_block`).
 #[cfg(windows)]
 #[test]
 fn p37_exec_gates_an_ordinary_done_delivery_before_the_wake() {
@@ -2525,17 +2526,12 @@ fn p37_exec_gates_an_ordinary_done_delivery_before_the_wake() {
     let project = Project::at(home.path.join("project"));
     project.ensure().unwrap();
     std::fs::write(project.root.join("done.jsonl"), LIVE_HAIKU).unwrap();
-    let blocked = LIVE_HAIKU
-        .replace(r#"\"status\":\"done\""#, r#"\"status\":\"blocked\""#)
-        .replace(r#""status":"done""#, r#""status":"blocked""#);
-    assert!(!blocked.contains(r#""status":"done""#));
-    std::fs::write(project.root.join("blocked.jsonl"), blocked).unwrap();
     std::fs::write(project.root.join("order.md"), "# Research\n").unwrap();
     let run = "r1";
     let journal = project.journal(run);
     journal.append(1, opened()).unwrap();
     // A send-back's child is held live, so the gate starts no worker.
-    let _children: Vec<_> = ["o1-s1", "o2-s1"]
+    let _children: Vec<_> = ["o1-s1"]
         .iter()
         .map(|child| take_live(&project, run, child).unwrap().unwrap())
         .collect();
@@ -2592,11 +2588,6 @@ fn p37_exec_gates_an_ordinary_done_delivery_before_the_wake() {
     assert!(state.order("o1-s1").is_some());
     let digest = nirvana_run::digest(run, &state.queue);
     assert!(digest.contains("o1 gated sent_back: "), "{digest}");
-    // Blocked: delivered, not gated.
-    let (code, view) = exec_with("o2", "blocked.jsonl");
-    assert_eq!(code, 0, "{view}");
-    assert!(!view.contains("gated:"), "{view}");
-    assert_eq!(seq("o2", true), None);
     // Review N1: a gate that panics is journaled as the run's question and the wake still goes.
     crate::nirvana_gate::TEST_GATE_PANICS.set(true);
     let before = journal.read().0.len();
@@ -2618,5 +2609,128 @@ fn p37_exec_gates_an_ordinary_done_delivery_before_the_wake() {
         matches!((asked, woke), (Some(a), Some(w)) if a < w),
         "asked at {asked:?}, woken at {woke:?}"
     );
+    nirvana_seat::set_test_world(None);
+}
+
+/// Plan 37b (the owner, 2026-11-01: "send it blocked as well for validationg"): `seat exec` gates a blocked delivery
+/// before the wake, as it does a done one. Its verdict is `asked`, and the block reason is in what the orchestrator
+/// wakes to: one line, the gate's question (review S4). A helper's blocked delivery is not gated.
+#[cfg(windows)]
+#[test]
+fn p37b_exec_gates_a_blocked_delivery_and_its_wake_keeps_the_block() {
+    const BLOCK: &str = "BLOCK the spec sheet is behind a login";
+    let home = crate::nirvana::with_test_home("p37b-exec-blocked");
+    let seats = home.path.join("nirvana").join(nirvana_seat::SEATS_FILE);
+    std::fs::create_dir_all(seats.parent().unwrap()).unwrap();
+    std::fs::write(&seats, nirvana_seat::DEFAULT).unwrap();
+    nirvana_seat::set_test_world(Some(BTreeMap::new()));
+    let project = Project::at(home.path.join("project"));
+    project.ensure().unwrap();
+    let blocked = LIVE_HAIKU
+        .replace(r#"\"status\":\"done\""#, r#"\"status\":\"blocked\""#)
+        .replace(r#""status":"done""#, r#""status":"blocked""#)
+        .replace("Added sub(a, b) returning a - b to calc.py", BLOCK);
+    assert!(!blocked.contains(r#""status":"done""#));
+    assert!(blocked.contains(BLOCK));
+    std::fs::write(project.root.join("blocked.jsonl"), blocked).unwrap();
+    std::fs::write(project.root.join("order.md"), "# Research\n").unwrap();
+    let run = "r1";
+    let journal = project.journal(run);
+    journal.append(1, opened()).unwrap();
+    // A send-back's child is held live, so a gate that sent it back would start no worker.
+    let _child = take_live(&project, run, "o2-s1").unwrap().unwrap();
+    let exec_with = |order: &str, class: &str| -> (i32, String) {
+        let mut s = seated(order);
+        s.seat = "sonnet".into();
+        s.cli = "claude".into();
+        s.model = "claude-sonnet-5-5".into();
+        s.effort = Effort::Medium;
+        s.pool = "max".into();
+        s.class = class.into();
+        s.chain = Some("research".into());
+        s.not_family = Vec::new();
+        s.cwd = project.root.display().to_string();
+        s.order_file = project.root.join("order.md").display().to_string();
+        journal.append(2, Kind::Seated(Box::new(s))).unwrap();
+        TEST_COMMAND.with_borrow_mut(|slot| {
+            *slot = Some(vec![
+                "cmd.exe".into(),
+                "/c".into(),
+                "type blocked.jsonl".into(),
+            ]);
+        });
+        let mut out = Vec::new();
+        let code = exec(&project, run, order, None, &mut out).unwrap();
+        TEST_COMMAND.with_borrow_mut(|slot| *slot = None);
+        (code, String::from_utf8_lossy(&out).into_owned())
+    };
+    let (code, view) = exec_with("o2", "research.web");
+    assert_eq!(code, 0, "{view}");
+    assert!(view.contains("gated: asked"), "{view}");
+    let events = journal.read().0;
+    let gated = events
+        .iter()
+        .find(|event| matches!(&event.kind, Kind::Gated { order, .. } if order == "o2"))
+        .map(|event| event.seq)
+        .expect("o2 gated");
+    let woke = events
+        .iter()
+        .find(|event| {
+            event.seq > 2 && matches!(event.kind, Kind::WakeQueued { .. } | Kind::Woken { .. })
+        })
+        .map(|event| event.seq)
+        .expect("a wake after the delivery");
+    assert!(gated < woke, "gated at {gated}, woken at {woke}");
+    // A gate by hand gives the stored question and queues nothing more.
+    let again = crate::nirvana_gate::gate(&project, run, "o2").expect("the stored verdict");
+    assert_eq!(again.verdict, "asked");
+    // A second verdict journaled later (a regate) does not queue: the first after the delivery is the one.
+    journal
+        .append(
+            9,
+            Kind::Gated {
+                order: "o2".into(),
+                verdict: "asked".into(),
+                reason: Some("a later gate".into()),
+                axes: Vec::new(),
+            },
+        )
+        .unwrap();
+    let state = replay(&journal.read().0);
+    assert!(
+        state.order("o2-s1").is_none(),
+        "a blocked order was sent back"
+    );
+    let lines: Vec<&str> = state.queue.iter().map(|item| item.line.as_str()).collect();
+    // Review S4: one wake entry carries the block, the gate's question; neither the delivered line, the gated line
+    // nor the regate's is queued.
+    let o2: Vec<&&str> = lines
+        .iter()
+        .filter(|line| line.starts_with("o2 "))
+        .collect();
+    assert_eq!(o2.len(), 1, "{lines:?}");
+    assert!(
+        o2[0].starts_with(&format!("o2 asks: o2 is blocked: {BLOCK}")),
+        "{lines:?}"
+    );
+    // A helper's blocked delivery stays the orchestrator's to gate.
+    crate::nirvana_gate::write_sidecar(
+        &project,
+        run,
+        &crate::nirvana_gate::Sidecar {
+            order: "o2-rev1".into(),
+            helps: Some(("review".into(), "o2".into())),
+            ..crate::nirvana_gate::Sidecar::default()
+        },
+    )
+    .unwrap();
+    let (code, view) = exec_with("o2-rev1", "review.adversary");
+    assert_eq!(code, 0, "{view}");
+    assert!(!view.contains("gated:"), "{view}");
+    assert!(!journal
+        .read()
+        .0
+        .iter()
+        .any(|event| matches!(&event.kind, Kind::Gated { order, .. } if order == "o2-rev1")));
     nirvana_seat::set_test_world(None);
 }

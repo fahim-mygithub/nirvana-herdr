@@ -830,6 +830,8 @@ pub fn replay(events: &[Event]) -> RunState {
     // Plan 37 review S2: the orders delivered and not yet gated. Only the first verdict after a delivery queues, so a
     // wake typed between the delivery and its gate (another order's) cannot drop it, and a regate queues nothing.
     let mut verdict_owed: Vec<String> = Vec::new();
+    // Plan 37b review S4: each blocked delivery not yet gated, its seq, and whether its gate asked.
+    let mut blocked_owed: Vec<(String, u64, bool)> = Vec::new();
     for event in events {
         state.last_seq = state.last_seq.max(event.seq);
         state.last_at = Some(state.last_at.map_or(event.at, |at| at.max(event.at)));
@@ -1109,19 +1111,48 @@ pub fn replay(events: &[Event]) -> RunState {
                 .order()
                 .and_then(|order| state.order(order))
                 .is_some_and(|known| known.seated.class == crate::nirvana_review::CLASS);
+        // Plan 37b review S4: a blocked delivery queued three lines that each carried the block (delivered, gated
+        // asked, asks). Its gate's question is the one kept: it opens with the block, names what else the gate found,
+        // and is what the orchestrator answers; 120 characters to the gated line's 90. The delivered line stays queued
+        // until that question comes, so a gate that stopped still leaves the block in the wake.
         let owed = match &event.kind {
-            Kind::Delivered { order, .. } => {
+            Kind::Delivered { order, report } => {
                 verdict_owed.push(order.clone());
+                blocked_owed.retain(|(owed, ..)| owed != order);
+                if report.get("status").and_then(Value::as_str) == Some("blocked") {
+                    blocked_owed.push((order.clone(), event.seq, false));
+                }
                 true
             }
-            Kind::Gated { order, .. } => {
+            Kind::Gated { order, verdict, .. } => {
                 let first = verdict_owed.iter().any(|owed| owed == order);
                 verdict_owed.retain(|owed| owed != order);
+                let blocked_ask = first
+                    && verdict == crate::nirvana_gate::Outcome::Asked.word()
+                    && blocked_owed.iter().any(|(owed, ..)| owed == order);
+                // The gate's question follows its `asked` in the same transaction; any other verdict ends the wait.
+                for entry in blocked_owed.iter_mut().filter(|(owed, ..)| owed == order) {
+                    entry.2 = blocked_ask;
+                }
+                blocked_owed.retain(|(owed, _, asked)| owed != order || *asked);
                 // A lesson review's verdict is herdr's to read, as its delivery is.
                 first
+                    && !blocked_ask
                     && state
                         .order(order)
                         .is_some_and(|known| known.seated.class != crate::nirvana_review::CLASS)
+            }
+            Kind::Asked {
+                order: Some(order), ..
+            } => {
+                let delivered: Vec<u64> = blocked_owed
+                    .iter()
+                    .filter(|(owed, _, asked)| owed == order && *asked)
+                    .map(|(_, seq, _)| *seq)
+                    .collect();
+                blocked_owed.retain(|(owed, _, asked)| owed != order || !*asked);
+                state.queue.retain(|item| !delivered.contains(&item.seq));
+                true
             }
             _ => true,
         };
@@ -2152,6 +2183,16 @@ pub fn receipt_text(receipt: &Receipt) -> String {
 pub fn outcome_word(order: &OrderState) -> String {
     use crate::nirvana_gate::Outcome;
     if let Some(verdict) = order.verdict.as_deref().and_then(Outcome::parse) {
+        // Plan 37b review S1: asked on its own block, which the seat's tally does not count.
+        let blocked = order
+            .report
+            .as_ref()
+            .and_then(|report| report.get("status"))
+            .and_then(Value::as_str)
+            == Some("blocked");
+        if verdict == Outcome::Asked && blocked {
+            return Outcome::BLOCKED.into();
+        }
         return verdict.word().into();
     }
     // O3's two arms are kept as they were written; its controls find them.
