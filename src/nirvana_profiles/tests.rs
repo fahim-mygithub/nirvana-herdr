@@ -898,3 +898,79 @@ fn p33_an_override_onto_a_seat_the_profile_refuses_is_refused() {
     );
     assert_eq!(over("sonnet").expect("sonnet").seat, "sonnet");
 }
+
+// ---- plan 35 P35b: a denying profile on agy ----
+
+/// §3.4: a profile whose every tool maps to a measured agy rule seats on agy, denied through `--settings`; one with an
+/// unmapped tool stays claude-only, and fails an agy order outright, naming the tool.
+#[test]
+fn p35b_a_profile_denying_mapped_tools_seats_on_agy_and_an_unmapped_one_does_not() {
+    let (_home, project) = project("p35b-agy-deny");
+    let text =
+        "---\ndescription: Sweeps without writing.\nclass: sweep.mechanical\nfamily: google\n\
+                disallowed_tools: [Write, Bash, mcp__bambu__print]\n---\nSweep only.\n";
+    write_profile(&project, "reader", text);
+    let profile = parsed(text);
+    let mut ask = Request::new("sweep.mechanical");
+    narrow(&mut ask, &profile);
+    assert_eq!(ask.claude_only, None);
+    let seat = rule_seat(&project, "sweep.mechanical", &profile);
+    assert_eq!(seat.cli, "agy", "{}", seat.seat);
+    std::fs::write(
+        project.root.join("order.md"),
+        "# Sweep the docs\nowns: docs/*.md\n",
+    )
+    .unwrap();
+    let _live = nirvana_worker::take_live(&project, "r1", "a1")
+        .unwrap()
+        .unwrap();
+    nirvana_worker::seat_order_with(
+        &project,
+        &request(&project, "a1", &seat.seat),
+        Some("reader"),
+    )
+    .unwrap();
+    let seated = seated_of(&project, "a1");
+    let run_dir = project.run_dir("r1");
+    assert_eq!(
+        nirvana_worker::with_profile(vec!["agy".into()], &run_dir, &seated).unwrap(),
+        ["agy"]
+    );
+    assert_eq!(
+        nirvana_worker::agy_denials(&run_dir, &seated).unwrap(),
+        ["write_file(*)", "command(*)", "mcp(bambu/print)"]
+    );
+    // An unmapped tool: claude-only at the seat, and an agy worker of it never starts.
+    let unmapped = parsed(&text.replace("mcp__bambu__print", "WebSearch"));
+    let mut ask = Request::new("sweep.mechanical");
+    narrow(&mut ask, &unmapped);
+    let why = ask.claude_only.unwrap_or_default();
+    assert!(
+        why.starts_with("profile slicer forbids tools (Write, Bash, WebSearch), and agy has no measured rule for WebSearch"),
+        "{why}"
+    );
+    let copy = copy_path(&run_dir, "reader", &sha256_hex(text.as_bytes()));
+    let changed = text.replace("mcp__bambu__print", "WebSearch");
+    std::fs::write(&copy, &changed).unwrap();
+    let mut moved = seated.clone();
+    let order = std::fs::read_to_string(&seated.order_file)
+        .unwrap()
+        .replace(
+            &sha256_hex(text.as_bytes()),
+            &sha256_hex(changed.as_bytes()),
+        );
+    std::fs::write(&seated.order_file, order).unwrap();
+    std::fs::rename(
+        &copy,
+        copy_path(&run_dir, "reader", &sha256_hex(changed.as_bytes())),
+    )
+    .unwrap();
+    moved.cli = "agy".into();
+    let why = nirvana_worker::with_profile(vec!["agy".into()], &run_dir, &moved).unwrap_err();
+    assert_eq!(
+        why,
+        "a1 was seated with profile reader on agy, and agy cannot be denied WebSearch: no measured agy rule \
+         matches (plan 35 §3.4)"
+    );
+    nirvana_seat::set_test_world(None);
+}

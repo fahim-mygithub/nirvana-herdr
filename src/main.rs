@@ -34,6 +34,7 @@ mod logging;
 mod metadata_tokens;
 mod nirvana;
 mod nirvana_accounts;
+mod nirvana_agy_tools;
 mod nirvana_board;
 mod nirvana_claude;
 mod nirvana_fresh;

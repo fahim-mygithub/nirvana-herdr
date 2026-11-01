@@ -3,6 +3,54 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.49.0: agy workers get Claude workers' tools, and the sources check sees agy's reads
+
+- **Changed:**
+  - An agy order gets its own tools folder, `<run>/agy/<order>/`, passed with `--add-dir`, and a deny file
+    `<run>/agy/<order>.settings.json` passed with `--settings`. Both are made only when needed (an order with neither
+    keeps its argv byte for byte) and removed when the worker ends, before each attempt, at `seat exec` for orders no
+    longer live, and by `herdr seat cleanup`.
+  - The folder holds the order's MCP servers, translated into `.agents/mcp_config.json` (`url` becomes `serverUrl`).
+    A server is refused on agy only when it is a desktop server or a definition agy cannot take. It also holds the
+    project's CLAUDE.md as `AGENTS.md` when the project has no agy rules of its own, and the `.claude/skills` folders.
+  - Claude tool denials map to agy rules (`write_file(*)`, `command(*)`, `mcp(<s>/<t>)`, ...). A name with no agy
+    rule, Edit and NotebookEdit among them, keeps the order on claude. agy may never write its own tools folder or
+    deny file.
+  - An agy research or media brief carries: "Never cite a URL you did not open in this session. Open each one in a
+    command of its own (curl, yt_dlp, or bladebro when you have it) before citing it; a URL built inside a script is
+    not seen as read."
+  - An agy result fails on `finished_reason` `print_timeout`, `interrupted` or `error`, or any reason without SUCCESS.
+  - The sources check counts agy's reads: Python, PowerShell and `gh` fetches, each only as a command word; a
+    YouTube video id, Reddit post id or GitHub repo inside a fetching command or its output, but not from a listing,
+    search or local read; Claude WebFetch by its `url` only. A plain URL counts only in a segment that fetches it.
+  - The owned axis counts only the order's own changes in the project folder: `seat run` writes a snapshot of the
+    dirty files at seating, and without one a time-based fallback (max of created and modified, deletions counted,
+    non-ASCII paths kept) runs with a note. `Owns:` reads in any case.
+  - A sources send-back says none of the cited sources is trusted, only when it cited some, and adds to the other
+    axes' instruction on a mixed fail.
+  **Because:** the owner, 2026-10-31: "I feel like there is a gap between running agy natively vs having Claude Spawn
+  an agy agent", "Have herdr give similar tool abilities if they need it the same way we manage claude tools as
+  preloads and mccp servers", and the ruling "Accept it (Recommended)" on stable ids. Measured on MotoProject: a seated
+  agy had no MCP servers, never read CLAUDE.md, and the gate missed its python reads (8 of 12 send-backs); `r2`, real
+  on 22 of 22, was sent back on sources and on 3,958 files it never touched. Plan
+  `nirvana/plans/2026-10-31-35-agy-tool-parity.md` P35a and P35b, built on Opus high, one Sonnet review each, one fix
+  round each (P35a two).
+  **Measured:**
+  - Probes on agy 1.4.12: an `--add-dir` folder's skills, AGENTS.md and stdio and http servers are all loaded, and
+    `write_file`, `command`, `read_file` and `mcp(...)` deny rules hold.
+  - Sources counted on real streams, master against this build: `r2` 0 to 22 of 22; groove-coach's 8 agy send-backs
+    23 to 60 of 81; the fabricated order 0 to 0 of 12. reveal-gemini (9 of 18) and body-extrapolation (1 of 20) lose
+    URLs typed inside scripts, which the plain-URL rule does not count.
+  - Gates on master plus both packages: nextest 4,534 of 4,535, the one failure the known Windows plugin-path test;
+    clippy clean; the dry run finds 2,313 of 2,313; all 169 `p35a_` and `p35b_` controls and the 16 older controls
+    whose lines moved go red alone.
+  - Known limits: agy's stream cuts a command at 512 characters, and in a cut command a fetch import counts as the
+    fetch, so a padded command could pass; a link-listing page other than the named kinds still vouches for its ids;
+    the seat-snapshot call has no test of its own; the skill cap and rules budget are hypotheses. Not live-checked:
+    plan §6.
+  **If you remove this:** an agy worker runs without the order's servers, rules or skills, a real agy delivery is
+  sent back for reads the gate cannot see, and a project-folder order is blamed for every dirty file in the tree.
+
 ## alpha 0.48.0: a space sparkles while anything under it is working
 
 - **Changed:**

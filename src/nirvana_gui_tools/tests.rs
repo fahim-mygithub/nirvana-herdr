@@ -87,23 +87,60 @@ fn a_need_names_a_server_exactly_and_never_a_capability() {
     );
 }
 
+fn defs() -> Map<String, Value> {
+    defined(MCP_JSON).unwrap()
+}
+
 #[test]
-fn only_a_claude_seat_takes_a_server_order_and_a_desktop_server_says_why() {
-    assert_eq!(claude_only(&[]), None);
-    let desktop = claude_only(&words(&["bambu", "bambu-studio-beta"])).unwrap();
+fn only_a_claude_seat_takes_a_desktop_server_order_and_says_why() {
+    assert_eq!(claude_only(&[], &defs()), None);
+    let desktop = claude_only(&words(&["bambu", "bambu-studio-beta"]), &defs()).unwrap();
     assert!(
         desktop
             .starts_with("bambu-studio-beta drives a desktop window and agy panes cannot see it"),
         "{desktop}"
     );
-    assert!(claude_only(&words(&["xtool"]))
+    assert!(claude_only(&words(&["xtool"]), &defs())
         .unwrap()
         .starts_with("xtool drives a desktop window"));
-    let other = claude_only(&words(&["bambu"])).unwrap();
-    assert!(
-        other.starts_with("only a claude worker takes a per-order --mcp-config, for bambu"),
-        "{other}"
+}
+
+/// Plan 35 P35b (R4): a non-desktop server no longer keeps an order on claude; a definition agy cannot take does.
+#[test]
+fn p35b_a_non_desktop_server_order_may_seat_on_agy_unless_agy_cannot_take_its_definition() {
+    assert_eq!(claude_only(&words(&["bambu"]), &defs()), None);
+    assert_eq!(
+        claude_only(&words(&["cosplay_flow", "bambu"]), &defs()),
+        None
     );
+    let odd: Map<String, Value> = serde_json::from_str(
+        r#"{"v": {"command": "x", "env": {"TOKEN": "${TOKEN}"}}, "s": {"type": "sse", "url": "http://h/sse"},
+            "k": {"command": "x", "disabled": true}, "h": {"type": "http", "url": "http://h/mcp"}}"#,
+    )
+    .unwrap();
+    let why = |name: &str| claude_only(&words(&[name]), &odd).unwrap_or_default();
+    assert!(
+        why("v").starts_with("only a claude worker can take v: v uses ${...}"),
+        "{}",
+        why("v")
+    );
+    assert!(
+        why("s").contains("s is type sse, which no agy probe measured"),
+        "{}",
+        why("s")
+    );
+    assert!(why("k").contains("the key \"disabled\""), "{}", why("k"));
+    assert_eq!(claude_only(&words(&["h"]), &odd), None);
+    // Through `seat_needs`, the public path the seat rule reads.
+    let home = crate::nirvana::with_test_home("p35b-seat-needs");
+    let root = project(&home.path, Some(MCP_JSON));
+    let read = seat_needs(&table(), &root, &words(&["code", "bambu"])).unwrap();
+    assert_eq!((read.servers, read.claude_only), (words(&["bambu"]), None));
+    let desktop = seat_needs(&table(), &root, &words(&["xtool"])).unwrap();
+    assert!(desktop
+        .claude_only
+        .unwrap()
+        .starts_with("xtool drives a desktop window"));
 }
 
 #[test]
@@ -115,7 +152,7 @@ fn a_desktop_server_order_skips_every_agy_seat_and_is_refused_without_a_claude_s
         let plain = nirvana_seat::pick(&table, &world, &Request::new(&class));
         agy_won |= plain.as_ref().is_ok_and(|pick| pick.cli == "agy");
         let mut request = Request::new(&class);
-        request.claude_only = claude_only(&words(&["bambu-studio-beta"]));
+        request.claude_only = claude_only(&words(&["bambu-studio-beta"]), &defs());
         if let Ok(pick) = nirvana_seat::pick(&table, &world, &request) {
             assert_eq!(pick.cli, "claude", "{class} seated {} on agy", pick.seat);
         }
@@ -127,7 +164,7 @@ fn a_desktop_server_order_skips_every_agy_seat_and_is_refused_without_a_claude_s
     out.clis
         .insert("claude".into(), "claude not signed in".into());
     let mut request = Request::new("build.bounded");
-    request.claude_only = claude_only(&words(&["bambu-studio-beta"]));
+    request.claude_only = claude_only(&words(&["bambu-studio-beta"]), &defs());
     let no = nirvana_seat::pick(&table, &out, &request).unwrap_err();
     assert!(
         no.reason
@@ -266,6 +303,7 @@ fn a_worker_gets_its_orders_config_file_and_only_a_claude_server_order_does() {
     let argv = order_argv(
         today.clone(),
         &root,
+        &root,
         &run_dir,
         "o1",
         &needs,
@@ -303,6 +341,7 @@ fn a_worker_gets_its_orders_config_file_and_only_a_claude_server_order_does() {
         order_argv(
             today.clone(),
             &root,
+            &root,
             &run_dir,
             "o2",
             &words(&["code"]),
@@ -312,17 +351,48 @@ fn a_worker_gets_its_orders_config_file_and_only_a_claude_server_order_does() {
         .unwrap(),
         today
     );
+    // An agy worker with no server need: today's argv. With a desktop server (plan 35: the rest reach agy) it fails.
     let agy = vec!["agy".to_owned(), "--print=x".to_owned()];
+    let code = words(&["code"]);
     assert_eq!(
-        order_argv(agy.clone(), &root, &run_dir, "o3", &needs, caps(), &mut out).unwrap(),
+        order_argv(
+            agy.clone(),
+            &root,
+            &root,
+            &run_dir,
+            "o3",
+            &code,
+            caps(),
+            &mut out
+        )
+        .unwrap(),
         agy
     );
+    let why = order_argv(
+        agy.clone(),
+        &root,
+        &root,
+        &run_dir,
+        "o4",
+        &needs,
+        caps(),
+        &mut out,
+    )
+    .unwrap_err();
+    assert!(
+        why.starts_with(
+            "o4 was seated for MCP server xtool and cannot get it: xtool drives a desktop window"
+        ),
+        "{why}"
+    );
+    assert!(!crate::nirvana_agy_tools::tools_dir(&run_dir, "o4").exists());
     assert!(out.is_empty());
     assert!(!run_dir.join("mcp").join("o2.json").exists());
     // seats.toml refused at launch: the needs `.mcp.json` names are the servers, and one line says so.
     let mut out = Vec::new();
     let argv = order_argv(
         today.clone(),
+        &root,
         &root,
         &run_dir,
         "o5",
@@ -354,6 +424,7 @@ fn an_order_that_cannot_get_its_server_at_launch_does_not_start() {
         let mut out = Vec::new();
         let got = order_argv(
             claude_argv(),
+            &root,
             &root,
             &run_dir,
             order,
