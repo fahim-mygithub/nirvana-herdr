@@ -1406,6 +1406,55 @@ fn profiled_delivery(name: &str) -> (Project, PathBuf) {
     (project, dir)
 }
 
+/// Plan 37b review S1: a blocked delivery is asked on the block, which is the owner's or the orchestrator's to
+/// answer, so it costs the seat and what the worker opened nothing: the record says `blocked` and the tally does not
+/// count it, and neither the card nor the lesson the worker read is counted as opened before a failure.
+#[test]
+fn p37b_a_blocked_gate_costs_the_seat_the_cards_and_the_lessons_nothing() {
+    let _home = quiet("p37b-blocked-cards");
+    let (project, dir) = profiled_delivery("p37b-blocked");
+    // A lesson the worker opened: its slug is the card's file name, which the stream reads.
+    let lessons = nirvana_lessons::dir(&project.root);
+    std::fs::create_dir_all(&lessons).unwrap();
+    std::fs::write(
+        lessons.join(nirvana_lessons::INDEX),
+        serde_json::json!({"v": 1, "lessons": {"calm-long-shots": {"name": "Calm", "class": "build.bounded",
+            "description": "Calm", "order": "o0", "run": "r0", "written_at": 1}}})
+        .to_string(),
+    )
+    .unwrap();
+    project
+        .journal("r1")
+        .append(
+            4,
+            Kind::Delivered {
+                order: "b1".into(),
+                report: serde_json::json!({"status":"blocked","summary":"the spec sheet is behind a login",
+                    "files":[],"tests":[],"gotchas":[]}),
+            },
+        )
+        .unwrap();
+    let ruling = nirvana_gate::gate(&project, "r1", "b1").expect("gate");
+    assert_eq!(ruling.verdict, "asked", "{ruling:?}");
+    assert_eq!(
+        read_index(&dir).cards["calm-long-shots"].counters,
+        Counters::default(),
+        "the card"
+    );
+    assert_eq!(
+        nirvana_lessons::read_index(&project.root).lessons["calm-long-shots"].counters,
+        Counters::default(),
+        "the lesson"
+    );
+    let record = nirvana_seat::read_record(&nirvana_seat::dir().join(nirvana_seat::RECORD_FILE));
+    let line = record
+        .iter()
+        .find(|line| line.order == "b1")
+        .expect("b1's record line");
+    assert_eq!(line.outcome, Outcome::BLOCKED);
+    assert!(nirvana_seat::tally(&record).is_empty(), "{record:?}");
+}
+
 #[test]
 fn p34_the_gate_counts_the_cards_a_profiled_order_opened_and_its_review_keeps_cards_under_the_same_checks(
 ) {

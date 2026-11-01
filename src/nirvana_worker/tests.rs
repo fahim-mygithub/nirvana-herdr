@@ -2613,9 +2613,8 @@ fn p37_exec_gates_an_ordinary_done_delivery_before_the_wake() {
 }
 
 /// Plan 37b (the owner, 2026-11-01: "send it blocked as well for validationg"): `seat exec` gates a blocked delivery
-/// before the wake, as it does a done one. Its verdict is `asked`, queued once, and the block reason is in what the
-/// orchestrator wakes to: the delivered line, the gated line and the question. A helper's blocked delivery is not
-/// gated.
+/// before the wake, as it does a done one. Its verdict is `asked`, and the block reason is in what the orchestrator
+/// wakes to: one line, the gate's question (review S4). A helper's blocked delivery is not gated.
 #[cfg(windows)]
 #[test]
 fn p37b_exec_gates_a_blocked_delivery_and_its_wake_keeps_the_block() {
@@ -2703,21 +2702,17 @@ fn p37b_exec_gates_a_blocked_delivery_and_its_wake_keeps_the_block() {
         "a blocked order was sent back"
     );
     let lines: Vec<&str> = state.queue.iter().map(|item| item.line.as_str()).collect();
-    let gated_lines: Vec<&&str> = lines
+    // Review S4: one wake entry carries the block, the gate's question; neither the delivered line, the gated line
+    // nor the regate's is queued.
+    let o2: Vec<&&str> = lines
         .iter()
-        .filter(|line| line.starts_with("o2 gated "))
+        .filter(|line| line.starts_with("o2 "))
         .collect();
-    assert_eq!(gated_lines.len(), 1, "{lines:?}");
-    for line in [
-        format!("o2 delivered blocked: {BLOCK}"),
-        format!("o2 gated asked: report: the worker reported blocked: {BLOCK}"),
-        format!("o2 asks: o2 is blocked: {BLOCK}"),
-    ] {
-        assert!(
-            lines.iter().any(|queued| queued.starts_with(&line)),
-            "no {line:?} in {lines:?}"
-        );
-    }
+    assert_eq!(o2.len(), 1, "{lines:?}");
+    assert!(
+        o2[0].starts_with(&format!("o2 asks: o2 is blocked: {BLOCK}")),
+        "{lines:?}"
+    );
     // A helper's blocked delivery stays the orchestrator's to gate.
     crate::nirvana_gate::write_sidecar(
         &project,

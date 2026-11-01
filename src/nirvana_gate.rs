@@ -115,11 +115,20 @@ impl Outcome {
         Self::ALL.into_iter().find(|outcome| outcome.word() == word)
     }
 
+    /// Plan 37b review S1: the record's word for an order asked on its worker's own block. Its journal verdict stays
+    /// `asked`; the record says `blocked`, which the tally does not count: a login wall is the owner's input, not the
+    /// seat's failure. A worker that gave up early is not counted either: S3's hypothesis, unmeasured (nothing yet
+    /// tells a real block from a give-up).
+    pub const BLOCKED: &'static str = "blocked";
+
     /// What the seat record's tally counts (decision 0029's blend): `Some(true)` a pass, `Some(false)` a failure,
     /// `None` not counted. A re-seat is not counted: the pool's window ran out, which says nothing of the seat's
-    /// work, and its child's own line carries the outcome. A word this herdr does not know (O2's "sent back", a
-    /// later word) counts as a failure, as O2 counted it.
+    /// work, and its child's own line carries the outcome. Nor is a `blocked` one (`BLOCKED`). A word this herdr does
+    /// not know (O2's "sent back", a later word) counts as a failure, as O2 counted it.
     pub fn tally(word: &str) -> Option<bool> {
+        if word == Self::BLOCKED {
+            return None;
+        }
         match Self::parse(word) {
             Some(Self::Pass) => Some(true),
             Some(Self::Reseated) => None,
@@ -2391,7 +2400,15 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
     };
     det.head = rev(subject.cwd, "HEAD");
     det.base = base.clone();
-    let run = subject.spec.test.as_deref().map(|test| {
+    // Plan 37b review N4: a blocked worker's tree is unfinished, and its gate asks whatever the tests say; running a
+    // long `test:` there only delays the wake (a broken environment may be the block itself).
+    let blocked = subject
+        .report
+        .and_then(|report| report.get("status"))
+        .and_then(Value::as_str)
+        == Some("blocked");
+    let test = subject.spec.test.as_deref().filter(|_| !blocked);
+    let run = test.map(|test| {
         let run = run_command(subject.cwd, test, Duration::from_secs(TEST_TIMEOUT_S));
         if let Some(log) = log {
             if let Some(parent) = log.parent() {
@@ -2401,11 +2418,18 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
         }
         run
     });
-    axes.push(tests_axis(
-        subject.spec.test.as_deref(),
-        run.as_ref(),
-        &subject.spec.checks,
-    ));
+    axes.push(match subject.spec.test.as_deref() {
+        Some(test) if blocked => Axis::new(
+            "tests",
+            Mark::Note,
+            format!("`{test}` not run: the worker reported blocked"),
+        ),
+        _ => tests_axis(
+            subject.spec.test.as_deref(),
+            run.as_ref(),
+            &subject.spec.checks,
+        ),
+    });
     axes.push(report_axis(subject.report));
     let changed = match (&base, worktree) {
         (Some(base), true) => changed_files(subject.cwd, base).map(|changed| (changed, None)),
@@ -3257,8 +3281,13 @@ fn gate_subject(
             next,
         });
     }
-    let _ = crate::nirvana_lessons::note_gated(&project.root, &stream, &order, false);
-    if let Some(profile) = &card_profile {
+    // Plan 37b review S1: a block is the owner's or the orchestrator's to answer, so the lessons and cards the worker
+    // opened are not counted as failing after it (a give-up counts nothing too: S3's hypothesis, unmeasured).
+    let blocked = block_reason(known).is_some();
+    if !blocked {
+        let _ = crate::nirvana_lessons::note_gated(&project.root, &stream, &order, false);
+    }
+    if let Some(profile) = card_profile.as_ref().filter(|_| !blocked) {
         let _ =
             crate::nirvana_knowledge::note_gated(&project.root, profile, &stream, &order, false);
     }
@@ -3328,8 +3357,11 @@ fn block_reason(known: &OrderState) -> Option<String> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|question| !question.is_empty() && *question != summary);
+    // Review N2: an empty block never reads "blocked: ." (`check_report` asks for a summary, so this is unlikely).
     Some(match question {
+        Some(question) if summary.is_empty() => question.to_owned(),
         Some(question) => format!("{summary} ({question})"),
+        None if summary.is_empty() => "no reason given".to_owned(),
         None => summary.to_owned(),
     })
 }
@@ -3370,15 +3402,12 @@ fn send_back(
 ) -> Result<Ruling, String> {
     let order = known.id().to_owned();
     let block = block_reason(known);
-    // Plan 37b: a blocked order's gated line names its block, whichever axis failed first, so the wake shows it.
+    // Plan 37b: a blocked order's gated line names its block, whichever axis failed first. Review N3: as `blocked:`
+    // and not the report axis's `report: the worker reported blocked: `, whose 37 characters left the block 53 of the
+    // line's 90.
     let reason = block
         .as_ref()
-        .and_then(|_| {
-            failing(&axes)
-                .into_iter()
-                .find(|axis| axis.axis == "report")
-        })
-        .map(|axis| format!("{}: {}", axis.axis, axis.why))
+        .map(|block| format!("blocked: {block}"))
         .or_else(|| reason_line(&axes));
     let ask = |question: String, axes: Vec<Axis>| -> Result<Ruling, String> {
         journal

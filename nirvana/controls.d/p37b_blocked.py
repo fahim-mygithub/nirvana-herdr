@@ -8,6 +8,7 @@ RUN = "src/nirvana_run.rs"
 ROLE = "nirvana/claude/ROLE.md"
 SEAT_SKILL = "nirvana/claude/skills/seat/SKILL.md"
 GATE_SKILL = "nirvana/claude/skills/gate/SKILL.md"
+RETRO = "src/nirvana_retro.rs"
 
 T_GATES = "p37b_herdr_gates_a_blocked_delivery_but_never_a_helpers"
 T_ASK = "p37b_a_blocked_delivery_is_asked_with_its_block_and_queued_once"
@@ -15,10 +16,16 @@ T_INVENTED = "p37b_a_blocked_delivery_with_invented_sources_is_asked_not_stepped
 T_EXEC = "p37b_exec_gates_a_blocked_delivery_and_its_wake_keeps_the_block"
 T_BLOCK = "p37b_the_block_is_the_summary_and_its_question"
 T_DOCS = "p37b_the_docs_say_a_blocked_delivery_is_gated_and_asked"
+# Review round.
+T_OUTCOME = "the_outcome_words_and_what_the_tally_counts"
+T_CARDS = "p37b_a_blocked_gate_costs_the_seat_the_cards_and_the_lessons_nothing"
+T_RETRO = "p37b_a_blocked_ask_is_a_block_not_the_send_back_cap"
+T_ONE = "p37b_one_blocked_delivery_wakes_with_one_entry"
+T_NO_TEST = "p37b_a_blocked_gate_notes_the_test_command_and_does_not_run_it"
 
 ARM = '        || (matches!(status, "done" | "blocked")\n'
 ASKS = "    if let Some(block) = &block {\n"
-REPORT_FIRST = '                .find(|axis| axis.axis == "report")\n'
+BLOCK_REASON = '        .map(|block| format!("blocked: {block}"))\n'
 
 CONTROLS = (
     # Which deliveries `seat exec` gates: a blocked one, never a helper's, never a needs_answer one.
@@ -47,8 +54,8 @@ CONTROLS = (
             "    if let Some(block) = block.as_ref().filter(|_| invented_videos(&axes).is_empty()) {\n",
             T_INVENTED, "rust"),
     # The block is kept: the gated line's reason, the question's opening, the report's own question.
-    Control("p37b_reason_first_axis", GATE, REPORT_FIRST, REPORT_FIRST.replace('"report"', '"never"'),
-            T_INVENTED, "rust"),
+    # Review N3: as `blocked: <block>`, not the report axis's 37-character prefix nor the first failing axis.
+    Control("p37b_reason_first_axis", GATE, BLOCK_REASON, "        .and(None::<String>)\n", T_INVENTED, "rust"),
     Control("p37b_question_no_block", GATE, '"{order} is blocked: {block}. {gate}.', '"{order} is blocked. {gate}.',
             T_ASK, "rust"),
     Control("p37b_question_no_finding", GATE, '        .filter(|axis| axis.axis != "report")\n',
@@ -68,11 +75,57 @@ CONTROLS = (
     Control("p37b_role_gated", ROLE, "5. herdr gates each `done` or `blocked` delivery itself",
             "5. herdr gates each `done` delivery itself", T_DOCS, "rust"),
     Control("p37b_role_asked", ROLE, "then asked, never sent", "then sent", T_DOCS, "rust"),
-    Control("p37b_role_left_by_hand", ROLE, "(a\n   helper's, a gate waiting on a review)",
-            "(a\n   helper's, a `blocked` one, a gate waiting on a review)", T_DOCS, "rust"),
+    Control("p37b_role_left_by_hand", ROLE, "(a helper's, a gate waiting on a review)",
+            "(a helper's, a `blocked` one, a gate waiting on a review)", T_DOCS, "rust"),
     Control("p37b_seat_gated", SEAT_SKILL, "herdr gates each `done` or `blocked` delivery itself",
             "herdr gates each `done` delivery itself", T_DOCS, "rust"),
     Control("p37b_seat_asked", SEAT_SKILL, "then asked, never sent back", "then sent back", T_DOCS, "rust"),
     Control("p37b_gate_skill_never_sent_back", GATE_SKILL, "A `blocked` delivery is never sent back",
             "A `blocked` delivery is sent back", T_DOCS, "rust"),
+    # Review S1: a blocked-asked order costs the seat nothing (the record's word, the tally) and counts no lesson or
+    # card the worker opened as failing after it.
+    Control("p37b_blocked_tallied", GATE, "        if word == Self::BLOCKED {\n", "        if false {\n",
+            T_OUTCOME, "rust"),
+    Control("p37b_blocked_record_asked", RUN, "        if verdict == Outcome::Asked && blocked {\n",
+            "        if false {\n", T_CARDS, "rust"),
+    Control("p37b_blocked_counts_lessons", GATE,
+            "    if !blocked {\n        let _ = crate::nirvana_lessons::note_gated(",
+            "    if true {\n        let _ = crate::nirvana_lessons::note_gated(", T_CARDS, "rust"),
+    Control("p37b_blocked_counts_cards", GATE, "card_profile.as_ref().filter(|_| !blocked)", "card_profile.as_ref()",
+            T_CARDS, "rust"),
+    # Review S2: the retro calls it a block, untagged, never the send-back cap spent.
+    Control("p37b_retro_block_is_cap", RETRO, '                if verdict == "asked" && blocked {\n',
+            "                if false {\n", T_RETRO, "rust"),
+    Control("p37b_retro_block_tagged", RETRO,
+            '                        "blocked",\n                        format!("a {class} worker was blocked: {block}"),\n'
+            "                        false,\n",
+            '                        "blocked",\n                        format!("a {class} worker was blocked: {block}"),\n'
+            "                        true,\n", T_RETRO, "rust"),
+    # Review S4: one wake entry, the question; a stopped gate's delivered line kept; a done order's cap ask as it was.
+    Control("p37b_blocked_gated_line_queued", RUN, "                    && !blocked_ask\n", "", T_ONE, "rust"),
+    Control("p37b_blocked_delivered_line_kept", RUN,
+            "                state.queue.retain(|item| !delivered.contains(&item.seq));\n", "", T_ONE, "rust"),
+    Control("p37b_any_ask_collapses", RUN,
+            "                    && verdict == crate::nirvana_gate::Outcome::Asked.word()\n"
+            "                    && blocked_owed.iter().any(|(owed, ..)| owed == order);\n",
+            "                    && verdict == crate::nirvana_gate::Outcome::Asked.word();\n", T_ONE, "rust"),
+    Control("p37b_exec_three_lines", RUN, "                    && !blocked_ask\n", "", T_EXEC, "rust"),
+    # Review S3: ROLE.md and the gate skill say a blocked-asked order is the orchestrator's to resolve first.
+    Control("p37b_role_resolve_first", ROLE, "A blocked-asked order is yours to resolve first",
+            "A blocked-asked order is the owner's", T_DOCS, "rust"),
+    Control("p37b_gate_skill_resolve_first", GATE_SKILL, "a blocked order's question is yours to resolve first",
+            "a blocked order's question is the owner's", T_DOCS, "rust"),
+    # Review N1: ROLE.md's item 5 keeps 120 columns.
+    Control("p37b_role_unwrapped", ROLE, "you gate with\n   `herdr gate run`", "you gate with `herdr gate run`",
+            T_DOCS, "rust"),
+    # Review N2: an empty block never reads "blocked: .".
+    Control("p37b_empty_block", GATE, '        None if summary.is_empty() => "no reason given".to_owned(),\n', "",
+            T_BLOCK, "rust"),
+    Control("p37b_empty_summary_question", GATE,
+            "        Some(question) if summary.is_empty() => question.to_owned(),\n", "", T_BLOCK, "rust"),
+    # Review N4: a blocked report's gate does not run the `test:` command, and its tests axis says so.
+    Control("p37b_blocked_runs_test", GATE, "    let test = subject.spec.test.as_deref().filter(|_| !blocked);\n",
+            "    let test = subject.spec.test.as_deref();\n", T_NO_TEST, "rust"),
+    Control("p37b_blocked_tests_axis", GATE, "        Some(test) if blocked => Axis::new(\n",
+            "        Some(test) if false => Axis::new(\n", T_NO_TEST, "rust"),
 )

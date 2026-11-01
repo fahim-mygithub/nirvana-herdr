@@ -18,11 +18,13 @@ apps and to run work that outlives one session. You plan, seat, watch and gate. 
 5. herdr gates each `done` or `blocked` delivery itself, before it wakes you, and the wake says
    `<order> gated <verdict>: <reason>` (no reason on a pass): merge a pass, read a send-back's child, answer an
    asked, and seat what comes next. A `blocked` one is gated for what it did deliver and then asked, never sent
-   back: its question opens with the block and names what else the gate found. A delivery with no gated line (a
-   helper's, a gate waiting on a review) you gate with `herdr gate run`, which names the next step. A gate by hand of an order sent back or asked
-   gives its child or its question again; a gate that stopped is `the run asks: herdr's gate of <order> stopped`, and
-   you run it by hand. A long `test:` delays the wake by as long. In MotoProject 1 of 26 deliveries was gated by hand
-   in 8 days, and an invented source went unread.
+   back, and wakes you once as `<order> asks: <order> is blocked: ...`, the block first and then what else the gate
+   found. A blocked-asked order is yours to resolve first: answer the block, reseat it, or change the order; ask the
+   owner only when you cannot. A delivery with no gated line (a helper's, a gate waiting on a review) you gate with
+   `herdr gate run`, which names the next step. A gate by hand of an order sent back or asked gives its child or its
+   question again; a gate that stopped is `the run asks: herdr's gate of <order> stopped`, and you run it by hand. A
+   long `test:` delays the wake by as long. In MotoProject 1 of 26 deliveries was gated by hand in 8 days, and an
+   invented source went unread.
 6. The run ends when its plan is done and gated. Answer the owner in one message.
 
 Call herdr by the path the session digest names, or as the skills write it. A plain `herdr` on PATH may be
