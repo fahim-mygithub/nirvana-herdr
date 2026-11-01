@@ -301,4 +301,73 @@ mod tests {
         );
         shutdown_test_runtimes(&mut app);
     }
+
+    /// Upstream sync review S2: upstream 3f5032c9 holds a pane appearance change until the matching background
+    /// arrives, and a pane opened during the hold must describe the held background. The command tab (editor,
+    /// cards, sign-in) is the one Nirvana spawn; it reads `pane_host_terminal_appearance()`, not the field.
+    #[tokio::test]
+    async fn a_command_tab_opened_during_an_appearance_hold_answers_with_the_held_appearance() {
+        use crate::terminal_theme::{HostAppearance, RgbColor, TerminalTheme};
+
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("hold")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        // The hold as theme_sync/tests.rs sets it: a Dark background, Dark, then Light before its background.
+        app.set_host_terminal_theme(TerminalTheme {
+            background: Some(RgbColor {
+                r: 17,
+                g: 17,
+                b: 17,
+            }),
+            ..app.state.host_terminal_theme
+        });
+        app.set_host_terminal_appearance_state(Some(HostAppearance::Dark), true);
+        app.set_host_terminal_appearance_state(Some(HostAppearance::Light), true);
+        assert!(app.pending_host_appearance_deadline.is_some(), "a hold");
+        assert_eq!(
+            app.state.host_terminal_appearance,
+            Some(HostAppearance::Light)
+        );
+
+        let params = crate::api::schema::CommandInvokeParams {
+            command_id: format!("{}antigravity", crate::nirvana::ACCOUNT_LOGIN_COMMAND),
+            workspace_id: None,
+            tab_id: None,
+            pane_id: None,
+            selection: None,
+        };
+        let response = app.nirvana_open_command_tab(
+            "req".into(),
+            &params,
+            std::env::temp_dir(),
+            &[exiting_test_command().to_owned()],
+            "log in Antigravity".into(),
+        );
+        assert!(response.contains("\"ok\""), "{response}");
+        let pane_id = app.state.workspaces[0].tabs[1].root_pane;
+        let terminal_id = app
+            .state
+            .terminal_id_for_pane(0, pane_id)
+            .expect("the command tab's terminal");
+        assert_eq!(
+            app.terminal_runtimes
+                .get(&terminal_id)
+                .expect("the command tab's runtime")
+                .test_process_pty_bytes(b"\x1b[?996n"),
+            [bytes::Bytes::from_static(
+                HostAppearance::Dark.color_scheme_report()
+            )],
+            "the new tab answers with the held (Dark) appearance, not the pending Light"
+        );
+        shutdown_test_runtimes(&mut app);
+    }
 }
