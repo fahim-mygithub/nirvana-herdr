@@ -942,3 +942,415 @@ fn p31_measure_the_hint_on_recorded_orders() {
     }
     println!("orders {orders}, gui {gui}, flagged {flagged}, flagged gui {flagged_gui}");
 }
+
+// ---- plan 35 P35c: bladebro for browser orders, on both CLIs ----
+
+/// The answer `nirvana_bladebro::installed` gives this thread's tests; restored when dropped.
+struct Installed;
+impl Installed {
+    fn set(answer: bool) -> Self {
+        crate::nirvana_bladebro::TEST_INSTALLED.set(Some(answer));
+        Self
+    }
+}
+impl Drop for Installed {
+    fn drop(&mut self) {
+        crate::nirvana_bladebro::TEST_INSTALLED.set(None);
+    }
+}
+
+fn agy_argv() -> Vec<String> {
+    argv(&LaunchSpec {
+        cli: "agy".into(),
+        model: "gemini-3.8-flash-low".into(),
+        effort: Effort::Low,
+        prompt: "Do the work order in o.md.".into(),
+        resume: None,
+        print_timeout_s: 600,
+    })
+    .unwrap()
+}
+
+/// A project `.mcp.json` that defines a `bladebro` of its own, beside a token-holding server.
+const WITH_BLADEBRO: &str = r#"{"mcpServers": {"bladebro": {"command": "npx", "args": ["bladebro", "mcp"]}, "bambu": {"command": "node", "env": {"BAMBU_TOKEN": "fake-not-real"}}}}"#;
+
+/// R1: `bladebro` is herdr's server, never a project's of that name, and no capability: the seat rule never reads it,
+/// so `--needs bladebro` seats anywhere, and `browser` stays a capability for the pick.
+#[test]
+fn p35c_the_bladebro_need_is_herdrs_and_the_seat_rule_never_reads_it() {
+    let home = crate::nirvana::with_test_home("p35c-seat-needs");
+    let table = table();
+    let root = project(&home.path, Some(WITH_BLADEBRO));
+    let read = seat_needs(&table, &root, &words(&["code", "bladebro", "browser"])).unwrap();
+    assert_eq!(read.rest, words(&["code", "browser"]));
+    assert!(read.servers.is_empty());
+    assert_eq!(read.claude_only, None);
+    let caps = capabilities(&table);
+    assert!(caps.contains(&"browser") && !caps.contains(&"bladebro"));
+    assert_eq!(
+        seated_servers(&words(&["bladebro", "bambu"]), &caps),
+        words(&["bambu"])
+    );
+    assert!(servers_among(&words(&["bladebro"]), &caps, &words(&["bladebro"])).is_empty());
+    // A `.mcp.json` that does not parse refuses a server need, never `bladebro`.
+    std::fs::write(root.join(MCP_FILE), "{").unwrap();
+    assert_eq!(
+        seat_needs(&table, &root, &words(&["code", "bladebro"])).unwrap(),
+        Needs {
+            rest: words(&["code"]),
+            ..Needs::default()
+        }
+    );
+    // `herdr seat pick --needs bladebro` on a class agy wins: an agy seat, no unknown word.
+    let seats = home.path.join("nirvana").join(nirvana_seat::SEATS_FILE);
+    std::fs::create_dir_all(seats.parent().unwrap()).unwrap();
+    std::fs::write(&seats, nirvana_seat::DEFAULT).unwrap();
+    std::fs::write(root.join(MCP_FILE), WITH_BLADEBRO).unwrap();
+    let args = words(&["--class", "research.web", "--needs", "bladebro"]);
+    let (table, picked) = nirvana_seat::pick_args_for(&root, &args).unwrap();
+    assert!(
+        picked.request.needs.is_empty(),
+        "{:?}",
+        picked.request.needs
+    );
+    assert!(nirvana_seat::unknown_words(&table, &picked.request.needs, &[]).is_empty());
+    let chosen = nirvana_seat::pick(&table, &World::default(), &picked.request).unwrap();
+    assert_eq!(chosen.cli, "agy", "{}", chosen.seat);
+}
+
+/// Item 1, claude: the order's `--mcp-config` holds herdr's bladebro (beside its servers, or alone), approved with
+/// `mcp__bladebro__*`, its home made; the project's own `bladebro` entry is never the one given.
+#[test]
+fn p35c_a_claude_browser_order_gets_bladebro_in_its_mcp_config() {
+    let _installed = Installed::set(true);
+    let home = crate::nirvana::with_test_home("p35c-claude-argv");
+    let root = project(&home.path, Some(WITH_BLADEBRO));
+    let run_dir = root.join(".nirvana").join("runs").join("r1");
+    let caps = || Ok(vec!["code", "browser"]);
+    let today = claude_argv();
+    let file = order_config_path(&run_dir, "o1");
+    let blade = crate::nirvana_bladebro::home(&run_dir, "o1");
+    // bladebro alone.
+    let mut out = Vec::new();
+    let got = order_argv(
+        today.clone(),
+        &root,
+        &root,
+        &run_dir,
+        "o1",
+        &words(&["browser"]),
+        caps(),
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(&got[..today.len()], &today[..]);
+    assert_eq!(
+        &got[today.len()..],
+        [
+            "--mcp-config".to_owned(),
+            file.display().to_string(),
+            "--allowedTools".to_owned(),
+            "mcp__bladebro__*".to_owned()
+        ]
+    );
+    let written: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(
+        written,
+        serde_json::json!({"mcpServers": {"bladebro": crate::nirvana_bladebro::definition(&blade)}})
+    );
+    assert!(blade.is_dir());
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "MCP servers for this order: bladebro\n"
+    );
+    // Beside a server, with `bladebro` named as a need: both, the project's bladebro entry left out.
+    let mut out = Vec::new();
+    let got = order_argv(
+        today.clone(),
+        &root,
+        &root,
+        &run_dir,
+        "o2",
+        &words(&["bladebro", "bambu"]),
+        caps(),
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(
+        got.last().map(String::as_str),
+        Some("mcp__bambu__*,mcp__bladebro__*")
+    );
+    let written: Value =
+        serde_json::from_str(&std::fs::read_to_string(order_config_path(&run_dir, "o2")).unwrap())
+            .unwrap();
+    assert_eq!(
+        written["mcpServers"]["bambu"]["env"]["BAMBU_TOKEN"],
+        "fake-not-real"
+    );
+    let blade2 = crate::nirvana_bladebro::home(&run_dir, "o2");
+    assert_eq!(
+        written["mcpServers"]["bladebro"],
+        crate::nirvana_bladebro::definition(&blade2)
+    );
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "MCP servers for this order: bambu, bladebro\n"
+    );
+    // The shell gets the same home the server has (item 2).
+    let env = crate::nirvana_bladebro::worker_env(&got);
+    assert!(
+        env.contains(&("BLADE_HOME".to_owned(), blade2.display().to_string())),
+        "{env:?}"
+    );
+    // No browser need: today's argv, no file, no home.
+    let mut out = Vec::new();
+    assert_eq!(
+        order_argv(
+            today.clone(),
+            &root,
+            &root,
+            &run_dir,
+            "o3",
+            &words(&["code"]),
+            caps(),
+            &mut out
+        )
+        .unwrap(),
+        today
+    );
+    assert!(!order_config_path(&run_dir, "o3").exists());
+    assert!(!crate::nirvana_bladebro::home(&run_dir, "o3").exists());
+    assert!(out.is_empty());
+}
+
+/// Item 1, agy: herdr's bladebro goes into the order's tools folder, translated, with its home; the tools folder then
+/// reaches the argv with `--add-dir`, and the shell gets the same home.
+#[test]
+fn p35c_an_agy_browser_order_gets_bladebro_in_its_tools_folder() {
+    let _installed = Installed::set(true);
+    let home = crate::nirvana::with_test_home("p35c-agy-argv");
+    let root = project(&home.path, None);
+    let run_dir = root.join(".nirvana").join("runs").join("r1");
+    let today = agy_argv();
+    let mut out = Vec::new();
+    let got = order_argv(
+        today.clone(),
+        &root,
+        &root,
+        &run_dir,
+        "a1",
+        &words(&["bladebro"]),
+        Ok(vec!["code"]),
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(got, today);
+    let tools = crate::nirvana_agy_tools::tools_dir(&run_dir, "a1");
+    let written: Value = serde_json::from_str(
+        &std::fs::read_to_string(tools.join(crate::nirvana_agy_tools::MCP_CONFIG)).unwrap(),
+    )
+    .unwrap();
+    let blade = crate::nirvana_bladebro::home(&run_dir, "a1");
+    let mut expected = crate::nirvana_bladebro::definition(&blade);
+    expected["cwd"] = Value::from(crate::nirvana_agy_tools::plain_path(&root));
+    assert_eq!(
+        written,
+        serde_json::json!({"mcpServers": {"bladebro": expected}})
+    );
+    assert!(blade.is_dir());
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "MCP servers for this order: bladebro\n"
+    );
+    let order_file = root.join("o.md").display().to_string();
+    let order = crate::nirvana_agy_tools::Order {
+        root: &root,
+        cwd: &root,
+        run_dir: &run_dir,
+        order: "a1",
+        order_file: &order_file,
+        deny: Vec::new(),
+    };
+    let mut out = Vec::new();
+    let argv = crate::nirvana_agy_tools::with_tools(got, &order, &mut out).unwrap();
+    let at = argv
+        .iter()
+        .position(|arg| arg == "--add-dir")
+        .expect("--add-dir");
+    assert_eq!(argv[at + 1], crate::nirvana_agy_tools::plain_path(&tools));
+    let env = crate::nirvana_bladebro::worker_env(&argv);
+    assert!(
+        env.contains(&("BLADE_HOME".to_owned(), blade.display().to_string())),
+        "{env:?}"
+    );
+    assert!(
+        env.contains(&("BLADE_LANE".to_owned(), "agent".to_owned())),
+        "{env:?}"
+    );
+    // No browser need: nothing written, no home.
+    let mut out = Vec::new();
+    assert_eq!(
+        order_argv(
+            today.clone(),
+            &root,
+            &root,
+            &run_dir,
+            "a2",
+            &words(&["code"]),
+            Ok(vec!["code"]),
+            &mut out
+        )
+        .unwrap(),
+        today
+    );
+    assert!(!crate::nirvana_agy_tools::tools_dir(&run_dir, "a2").exists());
+    assert!(!crate::nirvana_bladebro::home(&run_dir, "a2").exists());
+}
+
+/// Item 1 and decision 0043 item 6: bladebro not on PATH grants nothing on either CLI, and the view says so once.
+#[test]
+fn p35c_bladebro_not_on_path_grants_nothing_and_says_so() {
+    let _installed = Installed::set(false);
+    let home = crate::nirvana::with_test_home("p35c-missing");
+    let root = project(&home.path, Some(MCP_JSON));
+    let run_dir = root.join(".nirvana").join("runs").join("r1");
+    for (order, today) in [("c1", claude_argv()), ("a1", agy_argv())] {
+        let mut out = Vec::new();
+        let got = order_argv(
+            today.clone(),
+            &root,
+            &root,
+            &run_dir,
+            order,
+            &words(&["browser"]),
+            Ok(vec!["browser"]),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(got, today, "{order}");
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!("{}\n", crate::nirvana_bladebro::MISSING_LINE)
+        );
+        assert!(!crate::nirvana_bladebro::home(&run_dir, order).exists());
+        assert!(!order_config_path(&run_dir, order).exists());
+        assert!(!crate::nirvana_agy_tools::tools_dir(&run_dir, order).exists());
+    }
+    // With a server beside it, the server is still given.
+    let mut out = Vec::new();
+    let got = order_argv(
+        claude_argv(),
+        &root,
+        &root,
+        &run_dir,
+        "c2",
+        &words(&["browser", "bambu"]),
+        Ok(vec!["browser"]),
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(got.last().map(String::as_str), Some("mcp__bambu__*"));
+}
+
+/// Item 4: the order's bladebro home goes with its other tool files when the worker ends.
+#[test]
+fn p35c_the_bladebro_home_goes_with_the_orders_config() {
+    let _installed = Installed::set(true);
+    let home = crate::nirvana::with_test_home("p35c-remove");
+    let root = project(&home.path, None);
+    let run_dir = root.join(".nirvana").join("runs").join("r1");
+    let mut out = Vec::new();
+    order_argv(
+        claude_argv(),
+        &root,
+        &root,
+        &run_dir,
+        "o1",
+        &words(&["browser"]),
+        Ok(vec!["browser"]),
+        &mut out,
+    )
+    .unwrap();
+    let blade = crate::nirvana_bladebro::home(&run_dir, "o1");
+    std::fs::create_dir_all(blade.join("profile")).unwrap();
+    std::fs::write(blade.join("profile").join("Cookies"), "x").unwrap();
+    let mut out = Vec::new();
+    remove_order_config(&run_dir, "o1", &mut out);
+    assert!(!blade.exists());
+    assert!(!order_config_path(&run_dir, "o1").exists());
+    assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+}
+
+/// Owed from the plan 35 merge (P35a): `seat run` of an order in the project folder writes the seat snapshot the
+/// owned axis reads, naming the files dirty at seating. Without the call the gate counts the whole dirty tree.
+#[test]
+fn p35c_seat_run_in_the_project_folder_writes_the_seat_snapshot() {
+    use crate::nirvana_run::Project;
+    let home = crate::nirvana::with_test_home("p35c-seat-snapshot");
+    let seats = home.path.join("nirvana").join(nirvana_seat::SEATS_FILE);
+    std::fs::create_dir_all(seats.parent().unwrap()).unwrap();
+    std::fs::write(&seats, nirvana_seat::DEFAULT).unwrap();
+    let project = Project::at(home.path.join("project"));
+    project.ensure().unwrap();
+    let git = |args: &[&str]| {
+        let done = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&project.root)
+            .output()
+            .unwrap();
+        assert!(
+            done.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    std::fs::write(
+        project.root.join("dirty.txt"),
+        "the owner's work in progress\n",
+    )
+    .unwrap();
+    let order_file = project.root.join("order.md");
+    std::fs::write(&order_file, "# Find the dial specs\n").unwrap();
+    nirvana_seat::set_test_world(Some(std::collections::BTreeMap::new()));
+    let table = nirvana_seat::table_for(&project.root).unwrap();
+    let seat = nirvana_seat::pick(
+        &table,
+        &nirvana_seat::live_world(&table),
+        &nirvana_seat::Request::new("research.web"),
+    )
+    .unwrap()
+    .seat;
+    let request = crate::nirvana_worker::SeatRequest {
+        seat,
+        order_file: order_file.clone(),
+        order: "s1".into(),
+        run: "r1".into(),
+        class: Some("research.web".into()),
+        size: None,
+        needs: Vec::new(),
+        not_family: Vec::new(),
+        mode: None,
+        effort: None,
+        reason: None,
+        worktree: false,
+        auto: false,
+        send_ok: None,
+    };
+    // A live lock: the seat is journaled and no worker is started.
+    let _live = crate::nirvana_worker::take_live(&project, "r1", "s1")
+        .unwrap()
+        .unwrap();
+    let seated = crate::nirvana_worker::seat_order(&project, &request);
+    nirvana_seat::set_test_world(None);
+    seated.unwrap();
+    let snapshot = project
+        .run_dir("r1")
+        .join("gate")
+        .join("s1.seat-dirty.json");
+    let text = std::fs::read_to_string(&snapshot)
+        .unwrap_or_else(|err| panic!("{}: {err}", snapshot.display()));
+    let read: Map<String, Value> = serde_json::from_str(&text).unwrap();
+    assert!(read.contains_key("dirty.txt"), "{text}");
+    assert!(read.contains_key("order.md"), "{text}");
+}

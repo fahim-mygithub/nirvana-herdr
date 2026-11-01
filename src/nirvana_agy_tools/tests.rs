@@ -712,4 +712,9 @@ fn p35b_the_leftover_orders_are_read_from_both_folders() {
     std::fs::write(run_dir.join("mcp").join("c1.json"), "{}").unwrap();
     std::fs::write(run_dir.join("mcp").join("notes.txt"), "x").unwrap();
     assert_eq!(leftover_orders(&run_dir), words(&["a1", "a2", "c1"]));
+    // Plan 35 P35c item 4: a bladebro home left alone is a leftover too; a stray file there is not an order.
+    std::fs::create_dir_all(crate::nirvana_bladebro::home(&run_dir, "b1")).unwrap();
+    std::fs::create_dir_all(crate::nirvana_bladebro::home(&run_dir, "c1")).unwrap();
+    std::fs::write(run_dir.join("blade").join("notes.txt"), "x").unwrap();
+    assert_eq!(leftover_orders(&run_dir), words(&["a1", "a2", "b1", "c1"]));
 }

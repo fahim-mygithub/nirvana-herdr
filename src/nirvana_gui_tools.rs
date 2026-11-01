@@ -111,10 +111,17 @@ fn defined(text: &str) -> Result<Map<String, Value>, String> {
     }
 }
 
-/// The needs that name one of `servers`, once each: matched exactly, and never a word some seat has as a capability.
+/// Plan 35 P35c (R1): the need `bladebro` is herdr's own server (`nirvana_bladebro`), never a project's `.mcp.json`
+/// entry of that name, so it is no project server need and no seat capability: it seats anywhere.
+fn is_bladebro(need: &str, capabilities: &[&str]) -> bool {
+    need == crate::nirvana_bladebro::SERVER && !capabilities.contains(&need)
+}
+
+/// The needs that name one of `servers`, once each: matched exactly, and never a word some seat has as a capability,
+/// nor `bladebro` (herdr's own).
 pub fn servers_among(needs: &[String], capabilities: &[&str], servers: &[String]) -> Vec<String> {
     let mut named: Vec<String> = Vec::new();
-    for need in needs {
+    for need in needs.iter().filter(|need| !is_bladebro(need, capabilities)) {
         if !capabilities.contains(&need.as_str()) && servers.contains(need) && !named.contains(need)
         {
             named.push(need.clone());
@@ -204,6 +211,12 @@ pub struct Needs {
 /// (review F5: it read as an unknown need); an order whose needs are all capabilities is not refused by it.
 pub fn seat_needs(table: &Table, root: &Path, needs: &[String]) -> Result<Needs, String> {
     let words = capabilities(table);
+    // Plan 35 P35c: `bladebro` is granted by herdr at launch (`nirvana_bladebro`), so the seat rule never reads it.
+    let needs: Vec<String> = needs
+        .iter()
+        .filter(|need| !is_bladebro(need, &words))
+        .cloned()
+        .collect();
     let definitions = match project_definitions(root) {
         Ok(definitions) => definitions,
         Err(why) => {
@@ -212,14 +225,14 @@ pub fn seat_needs(table: &Table, root: &Path, needs: &[String]) -> Result<Needs,
                     "{why}, so the need {need} names none of its servers"
                 )),
                 None => Ok(Needs {
-                    rest: needs.to_vec(),
+                    rest: needs,
                     ..Needs::default()
                 }),
             };
         }
     };
     let servers: Vec<String> = definitions.keys().cloned().collect();
-    let named = servers_among(needs, &words, &servers);
+    let named = servers_among(&needs, &words, &servers);
     if let Some(why) = key_clash(&named, &servers) {
         return Err(why);
     }
@@ -236,10 +249,11 @@ pub fn seat_needs(table: &Table, root: &Path, needs: &[String]) -> Result<Needs,
 }
 
 /// The servers an order was seated for: its needs that no seat has as a capability, once each. At seat time the
-/// unknown-word check refused every such need that named no server (§5.1), so each one left names a server.
+/// unknown-word check refused every such need that named no server (§5.1), so each one left names a server. Plan 35
+/// P35c: `bladebro` is herdr's own, granted apart (`nirvana_bladebro`).
 pub fn seated_servers(needs: &[String], capabilities: &[&str]) -> Vec<String> {
     let mut servers: Vec<String> = Vec::new();
-    for need in needs {
+    for need in needs.iter().filter(|need| !is_bladebro(need, capabilities)) {
         if !capabilities.contains(&need.as_str()) && !servers.contains(need) {
             servers.push(need.clone());
         }
@@ -304,22 +318,33 @@ fn read_seated(root: &Path, servers: &[String]) -> Result<(String, Vec<String>),
 
 /// Writes the order's config for `servers`, read from `<root>/.mcp.json` now. Review F3: a server the order was seated
 /// for that the file no longer defines, a file gone or not parsing, is an error, never a config without it.
+/// Plan 35 P35c: `order_argv` writes through `seated_config` and `write_config`, to add bladebro; the tests' entry.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn write_order_config(
     root: &Path,
     run_dir: &Path,
     order: &str,
     servers: &[String],
 ) -> Result<PathBuf, String> {
+    write_config(run_dir, order, &seated_config(root, servers)?)
+}
+
+/// The per-order config for `servers`, read from `<root>/.mcp.json` now (review F3, as `write_order_config`).
+fn seated_config(root: &Path, servers: &[String]) -> Result<Value, String> {
     let (text, names) = read_seated(root, servers)?;
     if let Some(why) = key_clash(servers, &names) {
         return Err(why);
     }
-    let config = order_config(&text, servers)?;
+    order_config(&text, servers)
+}
+
+/// Writes `config` as the order's `<run_dir>/mcp/<order>.json`, the owner's alone where `std` can say so.
+fn write_config(run_dir: &Path, order: &str, config: &Value) -> Result<PathBuf, String> {
     let file = order_config_path(run_dir, order);
     let dir = file.parent().unwrap_or(run_dir);
     std::fs::create_dir_all(dir)
         .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
-    let body = serde_json::to_string_pretty(&config).map_err(|err| err.to_string())?;
+    let body = serde_json::to_string_pretty(config).map_err(|err| err.to_string())?;
     write_private(&file, format!("{body}\n").as_bytes())
         .map_err(|err| format!("cannot write {}: {err}", file.display()))?;
     Ok(file)
@@ -341,9 +366,10 @@ pub(crate) fn write_private(file: &Path, body: &[u8]) -> std::io::Result<()> {
 
 /// Review F2: the order's config goes when its worker process ends, whatever the outcome; a restart or a reseat
 /// writes it again. A remove that fails says so in one line of the worker's view. Plan 35 §3.2: an agy order's tools
-/// folder and deny file go with it.
+/// folder and deny file go with it, and P35c item 4: its bladebro home.
 pub fn remove_order_config(run_dir: &Path, order: &str, out: &mut dyn Write) {
     crate::nirvana_agy_tools::remove(run_dir, order, out);
+    crate::nirvana_bladebro::remove_home(run_dir, order, out);
     let file = order_config_path(run_dir, order);
     match std::fs::remove_file(&file) {
         Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
@@ -363,6 +389,10 @@ pub fn remove_order_config(run_dir: &Path, order: &str, out: &mut dyn Write) {
 /// `cwd` is the worker's folder, whose own `.agents/mcp_config.json` agy loads anyway. Review F3: an order that cannot
 /// get a server it was seated for gets an error, and the supervisor fails it rather than start it without. With
 /// seats.toml refused, the needs `.mcp.json` names are read as servers.
+///
+/// Plan 35 P35c item 1: an order granted bladebro (`nirvana_bladebro::grant`) gets herdr's definition beside its
+/// servers, with its own `BLADE_HOME` made here, on either CLI; with no server need it gets bladebro alone. Not on PATH
+/// grants nothing and says so in one line.
 #[allow(clippy::too_many_arguments)]
 pub fn order_argv(
     argv: Vec<String>,
@@ -393,7 +423,15 @@ pub fn order_argv(
                 .collect()
         }
     };
-    if servers.is_empty() {
+    let blade = match crate::nirvana_bladebro::grant(cli.unwrap_or_default(), needs) {
+        crate::nirvana_bladebro::Grant::Yes => Some(crate::nirvana_bladebro::home(run_dir, order)),
+        crate::nirvana_bladebro::Grant::Missing => {
+            let _ = writeln!(out, "{}", crate::nirvana_bladebro::MISSING_LINE);
+            None
+        }
+        crate::nirvana_bladebro::Grant::No => None,
+    };
+    if servers.is_empty() && blade.is_none() {
         return Ok(argv);
     }
     let cannot = |why: String| {
@@ -402,27 +440,65 @@ pub fn order_argv(
             servers.join(", ")
         )
     };
-    if agy {
-        let (text, _) = read_seated(root, &servers).map_err(cannot)?;
-        let all =
-            defined(&text).map_err(|why| cannot(format!("{MCP_FILE} does not parse ({why})")))?;
-        // Plan 29 §5.2 holds on agy: a desktop server never goes to a worker that cannot see its window, and a
-        // definition agy cannot take fails the order as a server gone would.
-        if let Some(why) = claude_only(&servers, &all) {
-            return Err(cannot(why));
+    let no_bladebro =
+        |why: String| format!("{order} was granted bladebro and cannot get it: {why}");
+    let bladebro = match &blade {
+        Some(home) => {
+            std::fs::create_dir_all(home)
+                .map_err(|err| no_bladebro(format!("cannot create {}: {err}", home.display())))?;
+            Some(crate::nirvana_bladebro::definition(home))
         }
-        let chosen: Map<String, Value> = servers
-            .iter()
-            .filter_map(|server| Some((server.clone(), all.get(server)?.clone())))
-            .collect();
+        None => None,
+    };
+    if agy {
+        let mut chosen: Map<String, Value> = Map::new();
+        if !servers.is_empty() {
+            let (text, _) = read_seated(root, &servers).map_err(cannot)?;
+            let all = defined(&text)
+                .map_err(|why| cannot(format!("{MCP_FILE} does not parse ({why})")))?;
+            // Plan 29 §5.2 holds on agy: a desktop server never goes to a worker that cannot see its window, and a
+            // definition agy cannot take fails the order as a server gone would.
+            if let Some(why) = claude_only(&servers, &all) {
+                return Err(cannot(why));
+            }
+            chosen = servers
+                .iter()
+                .filter_map(|server| Some((server.clone(), all.get(server)?.clone())))
+                .collect();
+        }
+        if let Some(definition) = bladebro {
+            chosen.insert(crate::nirvana_bladebro::SERVER.to_owned(), definition);
+        }
         let written = crate::nirvana_agy_tools::write_servers(&chosen, cwd, run_dir, order, out)
-            .map_err(cannot)?;
+            .map_err(|why| match &blade {
+                Some(_) if servers.is_empty() => no_bladebro(why),
+                _ => cannot(why),
+            })?;
         if !written.is_empty() {
             let _ = writeln!(out, "MCP servers for this order: {}", written.join(", "));
         }
         return Ok(argv);
     }
-    let file = write_order_config(root, run_dir, order, &servers).map_err(cannot)?;
+    let mut config = if servers.is_empty() {
+        serde_json::json!({ "mcpServers": {} })
+    } else {
+        seated_config(root, &servers).map_err(cannot)?
+    };
+    let alone = servers.is_empty();
+    let mut granted = servers.clone();
+    if let Some(definition) = bladebro {
+        config["mcpServers"][crate::nirvana_bladebro::SERVER] = definition;
+        granted.push(crate::nirvana_bladebro::SERVER.to_owned());
+    }
+    let file = write_config(run_dir, order, &config).map_err(|why| {
+        if alone {
+            no_bladebro(why)
+        } else {
+            cannot(why)
+        }
+    })?;
+    // The servers granted, bladebro among them: the line and `--allowedTools` name each.
+    let servers = granted;
     let _ = writeln!(out, "MCP servers for this order: {}", servers.join(", "));
     Ok(with_servers(argv, &file, &servers))
 }

@@ -643,8 +643,8 @@ pub fn remove(run_dir: &Path, order: &str, out: &mut dyn Write) {
     }
 }
 
-/// Review round S4: the orders that have a tools folder, a deny file or a plan 29 MCP file in `run_dir`, by name,
-/// once each. Each can hold a server's token until it is removed.
+/// Review round S4: the orders that have a tools folder, a deny file, a plan 29 MCP file or (P35c) a bladebro home in
+/// `run_dir`, by name, once each. Each can hold a server's token until it is removed.
 pub fn leftover_orders(run_dir: &Path) -> Vec<String> {
     let names = |dir: PathBuf, suffix: &'static str, dirs: bool| {
         std::fs::read_dir(dir)
@@ -660,8 +660,16 @@ pub fn leftover_orders(run_dir: &Path) -> Vec<String> {
                 }
             })
     };
+    // Plan 35 P35c item 4: a bladebro home is a browser profile, cookies and all; the checks once leaked 144 GB of them.
+    let homes = std::fs::read_dir(run_dir.join(crate::nirvana_bladebro::DIR))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| entry.file_name().into_string().ok());
     let mut orders: Vec<String> = names(run_dir.join(DIR), ".settings.json", true)
         .chain(names(run_dir.join("mcp"), ".json", false))
+        .chain(homes)
         .collect();
     orders.sort();
     orders.dedup();
