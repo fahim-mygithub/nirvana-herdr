@@ -148,13 +148,14 @@ fn p35b_an_agy_server_order_gets_its_servers_in_the_tools_folder_and_f3_holds() 
     let today = agy_argv(&file);
     let caps = || Ok(vec!["code"]);
     let mut out = Vec::new();
-    let got = crate::nirvana_gui_tools::order_argv(
+    let got = crate::nirvana_gui_tools::order_argv_seated(
         today.clone(),
         &root,
         &root,
         &run_dir,
         "o1",
         &words(&["code", "bambu", "reel"]),
+        &crate::nirvana_bladebro::Seat::default(),
         caps(),
         &mut out,
     )
@@ -181,13 +182,14 @@ fn p35b_an_agy_server_order_gets_its_servers_in_the_tools_folder_and_f3_holds() 
     )
     .unwrap();
     let mut out = Vec::new();
-    crate::nirvana_gui_tools::order_argv(
+    crate::nirvana_gui_tools::order_argv_seated(
         today.clone(),
         &root,
         &cwd,
         &run_dir,
         "o2",
         &words(&["bambu", "reel"]),
+        &crate::nirvana_bladebro::Seat::default(),
         caps(),
         &mut out,
     )
@@ -214,13 +216,14 @@ fn p35b_an_agy_server_order_gets_its_servers_in_the_tools_folder_and_f3_holds() 
     // F3 on agy: a definition changed since the seat to one agy cannot take, a server gone, a desktop server.
     let launch = |order: &str, needs: &[&str]| {
         let mut out = Vec::new();
-        crate::nirvana_gui_tools::order_argv(
+        crate::nirvana_gui_tools::order_argv_seated(
             today.clone(),
             &root,
             &root,
             &run_dir,
             order,
             &words(needs),
+            &crate::nirvana_bladebro::Seat::default(),
             caps(),
             &mut out,
         )
@@ -234,13 +237,14 @@ fn p35b_an_agy_server_order_gets_its_servers_in_the_tools_folder_and_f3_holds() 
     .unwrap();
     let wt = root.join("wt2");
     let mut out = Vec::new();
-    crate::nirvana_gui_tools::order_argv(
+    crate::nirvana_gui_tools::order_argv_seated(
         today.clone(),
         &root,
         &wt,
         &run_dir,
         "o6",
         &words(&["bambu", "reel"]),
+        &crate::nirvana_bladebro::Seat::default(),
         caps(),
         &mut out,
     )
@@ -712,4 +716,9 @@ fn p35b_the_leftover_orders_are_read_from_both_folders() {
     std::fs::write(run_dir.join("mcp").join("c1.json"), "{}").unwrap();
     std::fs::write(run_dir.join("mcp").join("notes.txt"), "x").unwrap();
     assert_eq!(leftover_orders(&run_dir), words(&["a1", "a2", "c1"]));
+    // Plan 35 P35c item 4: a bladebro home left alone is a leftover too; a stray file there is not an order.
+    std::fs::create_dir_all(crate::nirvana_bladebro::home(&run_dir, "b1")).unwrap();
+    std::fs::create_dir_all(crate::nirvana_bladebro::home(&run_dir, "c1")).unwrap();
+    std::fs::write(run_dir.join("blade").join("notes.txt"), "x").unwrap();
+    assert_eq!(leftover_orders(&run_dir), words(&["a1", "a2", "b1", "c1"]));
 }

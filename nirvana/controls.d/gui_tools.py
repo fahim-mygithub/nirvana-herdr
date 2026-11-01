@@ -97,7 +97,7 @@ CONTROLS = (
             '                "seats.toml is refused ({why}); the needs {MCP_FILE} names are read as its servers"\n',
             '                "{why}"\n', T_ORDER, "rust"),
     Control("p29_order_empty_config_written", GUI,
-            "    if servers.is_empty() {\n        return Ok(argv);\n    }\n    let cannot = |why: String| {",
+            "    if servers.is_empty() && blade.is_none() {\n        return Ok(argv);\n    }\n    let cannot = |why: String| {",
             "    let cannot = |why: String| {", T_ORDER, "rust"),
     # §5.3 and review F4: every server order's brief says never start a device; a desktop one batches too.
     Control("p29_brief_no_device_line", GUI,

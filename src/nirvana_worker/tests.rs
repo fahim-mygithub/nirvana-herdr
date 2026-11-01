@@ -2198,6 +2198,155 @@ fn p35b_seat_run_gives_an_agy_research_order_the_sources_line() {
     nirvana_seat::set_test_world(None);
 }
 
+// ---- plan 35 P35c ----
+
+/// Plan 35 P35c items 2 and 4 through `herdr seat exec`: a worker granted bladebro has the order's `BLADE_HOME` in its
+/// shell, on agy and on claude, and the home is gone when it ends; a worker with no grant has none, nor one whose
+/// brief, written at seating, does not name bladebro (review round S3).
+#[cfg(windows)]
+#[test]
+fn p35c_exec_lays_the_orders_blade_env_over_the_workers_shell_and_removes_the_home() {
+    crate::nirvana_bladebro::TEST_INSTALLED.set(Some(true));
+    let (_home, project, base) = p35b_project("p35c-exec-env", false, &[]);
+    let run = "r1";
+    let run_dir = project.run_dir(run);
+    let journal = project.journal(run);
+    journal.append(1, opened()).unwrap();
+    let exec_with = |order: &str, cli: &str, needs: &[&str], told: bool| -> String {
+        let mut seated = base.clone();
+        seated.order = order.into();
+        seated.needs = needs.iter().map(|need| (*need).to_owned()).collect();
+        // The brief as seating writes it (H6): the bladebro line when told, which the launch reads back (H7).
+        seated.order_file = project
+            .root
+            .join(format!("{order}.md"))
+            .display()
+            .to_string();
+        let told = if told {
+            format!("# Read the page\n\n{}", crate::nirvana_lean::BROWSER_LINE)
+        } else {
+            "# Read the page\n".to_owned()
+        };
+        std::fs::write(&seated.order_file, told).unwrap();
+        if cli == "claude" {
+            seated.seat = "sonnet".into();
+            seated.cli = "claude".into();
+            seated.model = "claude-sonnet-5-5".into();
+            seated.pool = "max".into();
+        }
+        journal.append(2, Kind::Seated(Box::new(seated))).unwrap();
+        let seen = format!("{order}.env.txt");
+        TEST_COMMAND.with_borrow_mut(|slot| {
+            *slot = Some(vec![
+                "cmd.exe".into(),
+                "/c".into(),
+                format!("(echo [%BLADE_HOME%] [%BLADE_LANE%])> {seen} & type recorded.jsonl"),
+            ]);
+        });
+        let mut out = Vec::new();
+        exec(&project, run, order, None, &mut out).unwrap();
+        TEST_COMMAND.with_borrow_mut(|slot| *slot = None);
+        std::fs::read_to_string(project.root.join(&seen)).unwrap()
+    };
+    for (order, cli) in [("a1", "agy"), ("c1", "claude")] {
+        let home = crate::nirvana_bladebro::home(&run_dir, order);
+        assert_eq!(
+            exec_with(order, cli, &["browser"], true).trim(),
+            format!("[{}] [agent]", home.display()),
+            "{cli}"
+        );
+        assert!(!home.exists(), "{cli}");
+    }
+    // No grant: cmd echoes the unset names back.
+    assert_eq!(
+        exec_with("a2", "agy", &[], false).trim(),
+        "[%BLADE_HOME%] [%BLADE_LANE%]"
+    );
+    // P35c review round S3: a brief written without the line gets no grant at launch, on either CLI, and no home.
+    for (order, cli) in [("a3", "agy"), ("c3", "claude")] {
+        assert_eq!(
+            exec_with(order, cli, &["browser"], false).trim(),
+            "[%BLADE_HOME%] [%BLADE_LANE%]",
+            "{cli}"
+        );
+        assert!(
+            !crate::nirvana_bladebro::home(&run_dir, order).exists(),
+            "{cli}"
+        );
+    }
+    crate::nirvana_bladebro::TEST_INSTALLED.set(None);
+}
+
+/// Plan 35 P35c review round, H6 through `herdr seat run`: the brief's line is decided as the launch decides the
+/// grant. A browser order on agy is told to use bladebro; one seated with a profile that denies it, or whose workspace
+/// names a bladebro of its own, is not.
+#[test]
+fn p35c_seat_run_writes_the_bladebro_line_only_where_the_launch_grants_it() {
+    crate::nirvana_bladebro::TEST_INSTALLED.set(Some(true));
+    let (_home, project) = p29_project("p35c-seat-brief");
+    let table = nirvana_seat::table_for(&project.root).unwrap();
+    let seat = nirvana_seat::pick(
+        &table,
+        &nirvana_seat::live_world(&table),
+        &nirvana_seat::Request::new("research.web"),
+    )
+    .unwrap();
+    assert_eq!(seat.cli, "agy", "{}", seat.seat);
+    let order_file = project.root.join("order.md");
+    std::fs::write(&order_file, "# Read the page\n").unwrap();
+    let request = |order: &str| SeatRequest {
+        seat: seat.seat.clone(),
+        order_file: order_file.clone(),
+        order: order.into(),
+        run: "r1".into(),
+        class: Some("research.web".into()),
+        size: None,
+        needs: vec!["bladebro".into()],
+        not_family: Vec::new(),
+        mode: None,
+        effort: None,
+        reason: None,
+        worktree: false,
+        auto: false,
+        send_ok: None,
+    };
+    // Each order is held live, so `seat_order` starts no worker.
+    let _live: Vec<_> = ["b1", "b2", "b3"]
+        .iter()
+        .map(|order| take_live(&project, "r1", order).unwrap().unwrap())
+        .collect();
+    let brief = |order: &str| {
+        let state = replay(&project.journal("r1").read().0);
+        std::fs::read_to_string(&state.order(order).unwrap().seated.order_file).unwrap()
+    };
+    let line = crate::nirvana_lean::BROWSER_LINE;
+    seat_order(&project, &request("b1")).unwrap();
+    assert!(brief("b1").contains(line), "{}", brief("b1"));
+    // A profile that denies bladebro whole.
+    let profile = "---\ndescription: Reads pages without a browser.\nclass: research.web\n\
+                   disallowed_tools: [mcp__bladebro__*]\n---\nRead only.\n";
+    std::fs::create_dir_all(crate::nirvana_profiles::folder(&project.root)).unwrap();
+    std::fs::write(
+        crate::nirvana_profiles::path(&project.root, "reader"),
+        profile,
+    )
+    .unwrap();
+    seat_order_with(&project, &request("b2"), Some("reader")).unwrap();
+    assert!(!brief("b2").contains(line), "{}", brief("b2"));
+    // The workspace's own bladebro.
+    let native = project.root.join(crate::nirvana_agy_tools::MCP_CONFIG);
+    std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+    std::fs::write(
+        &native,
+        r#"{"mcpServers": {"bladebro": {"command": "bladebro"}}}"#,
+    )
+    .unwrap();
+    seat_order(&project, &request("b3")).unwrap();
+    assert!(!brief("b3").contains(line), "{}", brief("b3"));
+    crate::nirvana_bladebro::TEST_INSTALLED.set(None);
+    nirvana_seat::set_test_world(None);
+}
+
 // ---- plan 35 P35b review round ----
 
 /// S4 and S2 through `herdr seat exec`: the supervisor sweeps the tool files of an ended order of any run, keeps those

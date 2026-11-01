@@ -351,13 +351,19 @@ fn with_order_servers(
     out: &mut dyn Write,
 ) -> Result<Vec<String>, String> {
     let table = nirvana_seat::table();
-    crate::nirvana_gui_tools::order_argv(
+    let run_dir = project.run_dir(run);
+    // Plan 35 P35c review round: what seating left, read back for the grant: the profile's deny list, and whether
+    // the brief names bladebro (one reading, S3).
+    let seat =
+        crate::nirvana_bladebro::Seat::read(&run_dir, &seated.class, Path::new(&seated.order_file));
+    crate::nirvana_gui_tools::order_argv_seated(
         argv,
         &project.root,
         Path::new(&seated.cwd),
-        &project.run_dir(run),
+        &run_dir,
         &seated.order,
         &seated.needs,
+        &seat,
         table
             .as_ref()
             .map(crate::nirvana_gui_tools::capabilities)
@@ -1361,6 +1367,11 @@ fn run_attempt(
         for (key, value) in CLAUDE_ENV {
             command.env(key, value);
         }
+    }
+    // Plan 35 P35c item 2: a worker granted bladebro has its server's `BLADE_*` in its own shell too, read from the
+    // config its argv names, so a shell `bladebro` uses the order's home, never `~/.blade` (decision 0043's fix round).
+    for (key, value) in crate::nirvana_bladebro::worker_env(argv) {
+        command.env(key, value);
     }
     #[cfg(windows)]
     {
@@ -3643,8 +3654,14 @@ pub fn seat_order_with(
     }
     // Plan 25 §5: a browser order's worker batches its steps, so only the result reaches the model.
     // `booked.cli` is the booked seat's CLI (`seats.toml`'s `cli`), the one `seat exec` starts.
+    // Plan 35 P35c review round: the line is decided as the launch decides the grant, with the profile's deny list
+    // and the worker's folder (an agy workspace's own bladebro), and the class no longer counts (N1).
+    let denied = loaded
+        .as_ref()
+        .map(|loaded| loaded.profile.disallowed_tools.clone())
+        .unwrap_or_default();
     let text =
-        crate::nirvana_lean::with_browser_line(text, &booked.cli, &booked.class, &request.needs);
+        crate::nirvana_lean::with_bladebro_line(text, &booked.cli, &request.needs, &denied, &cwd);
     // Plan 33 §2.3: the `Profile:` lines at the top, and for agy the body above the order.
     let text = match (&profiled, &loaded) {
         (Some((found, _)), Some(loaded)) => {

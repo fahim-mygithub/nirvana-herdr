@@ -53,7 +53,9 @@ owner's words where they matter. Then:
   project's `.mcp.json` server, so its worker gets the server's tools. An order that may press Send adds
   `--send-ok "<the owner's words>"`, copied exactly from the owner's prompt of the last 6 hours (4 words or more);
   herdr refuses a quote it cannot find, and a send-back or reseat never inherits it.
-  `--needs browser` or `--needs bladebro` gives the worker bladebro, a headless browser with its own profile, on a claude or an agy seat; `browser` also limits the pick to the seats that list it, `bladebro` does not.
+  `--needs browser` or `--needs bladebro` gives the worker bladebro, a headless browser with its own profile, on a
+  claude or an agy seat; `browser` also limits the pick to the seats that list it, `bladebro` does not. A profile
+  that denies `mcp__bladebro__*` wins, and so does an agy workspace whose own `.agents/mcp_config.json` names one.
   An order picked with `--profile <name>` is run with the same `--profile <name>`: herdr copies the profile into the
   run, gives the worker its persona (a system prompt on Claude, the top of the order on agy), and a send-back or
   reseat keeps the copy. Design one with `herdr profile new <name>`, then `herdr profile check <name>`.

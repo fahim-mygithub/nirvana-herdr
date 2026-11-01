@@ -3,6 +3,33 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.51.0: a browser order gets bladebro on claude and on agy
+
+- **Changed:**
+  - An order that needs `browser` or `bladebro`, as a whole word in any case, gets bladebro as an MCP server on
+    either CLI: on claude in its own `--mcp-config`, approved with `mcp__bladebro__*`; on agy in its tools folder.
+    The server runs `cmd /c bladebro mcp` with its own `BLADE_HOME=<run>/blade/<order>`, headless, the agent lane,
+    a 60 s idle timeout and no update check. The worker's shell gets the same `BLADE_*` keys and no others.
+  - Nothing is granted, with one line in the worker's view, when bladebro is not on PATH, when the profile denies
+    `mcp__bladebro` or `mcp__bladebro__*`, or when an agy workspace already names its own bladebro.
+  - One function decides the grant at seating and at launch. The launch reads the brief and the profile copy back
+    and grants only when both agree; a mismatch is said in one line.
+  - The brief's browser line follows the grant on any CLI. `--needs bladebro` seats anywhere, since bladebro is
+    herdr's own server and never a project's `.mcp.json` entry.
+  - The home is removed with the order's other tool files, 3 tries 1 s apart, and swept with leftover orders.
+  **Because:** plan `nirvana/plans/2026-10-31-35-agy-tool-parity.md` P35c and decision 0043: no seated worker had a
+  browser, so page work was read through curl or not at all. Built on Opus high, one Sonnet review, one fix round.
+  **Measured:**
+  - Probes: a claude worker and an agy worker each listed bladebro's 5 tools, called it, got "Example Domain" back,
+    and saw their own `BLADE_HOME`; both exited 0 (claude 35.2 s, agy 17.3 s), with 0 processes left naming the
+    probe folder 15 s after.
+  - Gates on master plus plans 37 and 35c together: nextest 4,570 of 4,571, the one failure the known Windows
+    plugin-path test; clippy clean; the dry run finds 2,438 of 2,438; all 61 `p35c_` controls and the older controls
+    whose lines moved go red alone.
+  - Known limits: a denial of a single bladebro tool is unmeasured; bladebro warms a new profile by visiting three
+    sites, which the next fix release turns off. Not live-checked: plan 35 §6.
+  **If you remove this:** a seated worker has no browser, and page work falls back to curl.
+
 ## alpha 0.50.0: every delivery is gated, invented sources are caught, and agy briefs say how to read
 
 - **Changed:**

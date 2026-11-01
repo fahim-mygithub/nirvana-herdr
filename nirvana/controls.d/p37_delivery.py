@@ -19,6 +19,7 @@ T_EXEC = "p37_exec_gates_an_ordinary_done_delivery_before_the_wake"
 T_LINE = "p37_a_gate_by_hand_gives_a_booked_reviewers_line_again"
 T_DOCS = "p37_the_agy_brief_rules_are_in_role_and_the_seat_skill_each_naming_its_failure"
 T_STEPUP = "p37_step_up_takes_the_next_stronger_seat_of_the_class"
+T_P33_EXEC = "p33_a_delivered_review_is_gated_by_herdr_with_no_orchestrator_turn"
 T_TEMPLATE = "p37_profile_new_from_web_researcher_writes_the_template"
 
 RUN = "src/nirvana_run.rs"
@@ -222,4 +223,6 @@ CONTROLS = (
     # (a wake with an empty queue types nothing, and the review's own delivery never queues); the p37 record holds
     # the hunk for `nirvana_review/tests.rs` and its control.
     Control("p37_exec_never_wakes", WORKER, WAKE, WAKE.replace("if !review {", "if review {"), T_EXEC, "rust"),
+    # Review N8, applied at the merge: a lesson review's delivery wakes no one, with a line already queued.
+    Control("p37_review_wakes", WORKER, WAKE, WAKE.replace("if !review {", "if true {"), T_P33_EXEC, "rust"),
 )

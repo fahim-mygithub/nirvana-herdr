@@ -1,6 +1,6 @@
 # Feature 35: agy workers get the tools Claude workers get
 
-Status: **P35a and P35b BUILT (2026-11-01, alpha 0.49.0); P35c next.** Was PLANNED (2026-10-31). Three packages. P35a and P35b start in parallel on master `9304a821` (alpha 0.46.0).
+Status: **BUILT (2026-11-01): P35a and P35b alpha 0.49.0, P35c alpha 0.51.0.** Was PLANNED (2026-10-31). Three packages. P35a and P35b start in parallel on master `9304a821` (alpha 0.46.0).
 P35c starts after P35b merges and after the owner rules on R1.
 The evidence is the agy research of 2026-10-31 (`2026-10-31-35-records/agy-research.md`, its scripts and probe streams), two plan probes run
 for this plan (`2026-10-31-35-records/probes/`, expectations in `EXPECT-PLAN.md`, written before each run), and the code read on master.

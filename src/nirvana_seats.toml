@@ -491,7 +491,7 @@ efficient_effort = "low"
 sota_effort = "medium"
 weight = 0.5
 bars = { efficient = 68, balanced = 80, sota = 100 }
-why = "plan 19 §4: agy searches and reads URLs"
+why = "plan 35: agy searches with search_web and reads pages with bladebro when granted, else shell fetches; rescore after §6"
 seats = [
   { seat = "flash", score = 84 },
   { seat = "argon", score = 84 },

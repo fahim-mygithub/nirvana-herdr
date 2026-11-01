@@ -779,55 +779,6 @@ CONTROLS = (
         'pub const BROWSER_LINE: &str = "Use bladebro to read each page.";\n',
         T_BROWSER, 'rust',
     ),
-    # §5 bladebro by name is a browser
-    Control(
-        'p25_browser_names', L,
-        'pub const BROWSERS: [&str; 3] = ["browser", "agent-browser", "bladebro"];\n',
-        'pub const BROWSERS: [&str; 2] = ["browser", "agent-browser"];\n',
-        T_BROWSER, 'rust',
-    ),
-    # §5 a browser named in any case
-    Control(
-        'p25_browser_case', L,
-        '            .map(str::to_ascii_lowercase)\n',
-        '            .map(str::to_owned)\n',
-        T_BROWSER, 'rust',
-    ),
-    # review nit: a name counts as a whole token, so no-browser is not a browser
-    Control(
-        'p25_browser_whole_token', L,
-        '            .any(|token| BROWSERS.contains(&token.as_str()))\n',
-        '            .any(|token| BROWSERS.iter().any(|name| token.contains(name)))\n',
-        T_BROWSER, 'rust',
-    ),
-    # review nit: a need is split on commas and whitespace
-    Control(
-        'p25_browser_split', L,
-        "        text.split(|c: char| c == ',' || c.is_whitespace())\n",
-        "        text.split(|c: char| c == ';')\n",
-        T_BROWSER, 'rust',
-    ),
-    # review nit: only on the claude seat (decision 0043 grants bladebro to headless Claude orders only)
-    Control(
-        'p25_browser_claude_seat', L,
-        '    if cli != BROWSER_CLI {\n',
-        '    if false && cli != BROWSER_CLI {\n',
-        T_BROWSER, 'rust',
-    ),
-    # review nit: the claude seat's CLI is `claude`
-    Control(
-        'p25_browser_cli_name', L,
-        'pub const BROWSER_CLI: &str = "claude";\n',
-        'pub const BROWSER_CLI: &str = "agy";\n',
-        T_BROWSER, 'rust',
-    ),
-    # §5 the order's needs count, not only its class
-    Control(
-        'p25_browser_needs', L,
-        '    (names_browser(class) || needs.iter().any(|need| names_browser(need))).then_some(BROWSER_LINE)\n',
-        '    names_browser(class).then_some(BROWSER_LINE)\n',
-        T_BROWSER, 'rust',
-    ),
     # §5 a browser order's brief holds the line
     Control(
         'p25_browser_brief', L,
@@ -838,8 +789,8 @@ CONTROLS = (
     # review nit: the brief asks with the seat's CLI
     Control(
         'p25_browser_brief_cli', L,
-        '    if let Some(line) = browser_line(cli, class, needs) {\n',
-        '    if let Some(line) = browser_line(BROWSER_CLI, class, needs) {\n',
+        '    if let Some(line) = browser_line(cli, needs, denied, cwd) {\n',
+        '    if let Some(line) = browser_line("codex", needs, denied, cwd) {\n',
         T_BRIEF, 'rust',
     ),
     # review B1, rule 1: no open run whose orchestrator_pane is this pane

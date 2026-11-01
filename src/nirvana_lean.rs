@@ -81,33 +81,46 @@ pub fn with_cuts(mut args: Vec<String>, cuts: &[&str]) -> Vec<String> {
     }
 }
 
-/// §5's line, given to a browser order's worker.
+/// §5's line, given to a worker granted bladebro.
 pub const BROWSER_LINE: &str = "Use bladebro `run` to batch steps; read the result, not each page.";
 
-/// The names that make an order a browser order, as whole tokens.
-pub const BROWSERS: [&str; 3] = ["browser", "agent-browser", "bladebro"];
-
-/// The seat CLI the line is for: decision 0043 grants bladebro to headless Claude orders only, so another seat's
-/// worker would be told to use a tool it does not have.
-pub const BROWSER_CLI: &str = "claude";
-
-/// §5: the line for an order on a `claude` seat whose class or `needs` name a browser, else `None`. A name counts as
-/// a whole token, split on commas and whitespace and lower-cased (review nit: `no-browser` is not a browser). Pure.
-pub fn browser_line(cli: &str, class: &str, needs: &[String]) -> Option<&'static str> {
-    let names_browser = |text: &str| {
-        text.split(|c: char| c == ',' || c.is_whitespace())
-            .map(str::to_ascii_lowercase)
-            .any(|token| BROWSERS.contains(&token.as_str()))
-    };
-    if cli != BROWSER_CLI {
-        return None;
-    }
-    (names_browser(class) || needs.iter().any(|need| names_browser(need))).then_some(BROWSER_LINE)
+/// §5 and plan 35 P35c item 3: the line for a worker granted bladebro (`nirvana_bladebro::grant`), whatever its CLI,
+/// and for no one else. An order that asks for a browser where `bladebro` is not on PATH gets
+/// `nirvana_bladebro::MISSING_LINE` instead (decision 0043 item 6). Until plan 35 the line went to every claude
+/// browser order, naming a tool no claude worker had (§1.1). P35c review round: `denied` (the profile's
+/// `disallowed_tools`) and `cwd` (an agy workspace's own `bladebro`) are read as the launch reads them, by the same
+/// `nirvana_bladebro::grant`, so a denied order is never told to use the tool.
+pub fn browser_line(
+    cli: &str,
+    needs: &[String],
+    denied: &[String],
+    cwd: &std::path::Path,
+) -> Option<&'static str> {
+    line_of(crate::nirvana_bladebro::grant(cli, needs, denied, cwd))
 }
 
-/// The worker's brief with §5's line after it when the order is a browser order; unchanged otherwise.
-pub fn with_browser_line(mut brief: String, cli: &str, class: &str, needs: &[String]) -> String {
-    if let Some(line) = browser_line(cli, class, needs) {
+/// The brief's line for a grant: the tool's for one given, the missing one's for one not on PATH, and none for an
+/// order denied it, one whose agy workspace has its own, or one that never asked.
+fn line_of(grant: crate::nirvana_bladebro::Grant) -> Option<&'static str> {
+    match grant {
+        crate::nirvana_bladebro::Grant::Yes => Some(BROWSER_LINE),
+        crate::nirvana_bladebro::Grant::Missing => Some(crate::nirvana_bladebro::MISSING_LINE),
+        crate::nirvana_bladebro::Grant::Denied => None,
+        crate::nirvana_bladebro::Grant::Native => None,
+        crate::nirvana_bladebro::Grant::No => None,
+    }
+}
+
+/// The worker's brief with §5's line after it when the order is granted bladebro; unchanged otherwise. Only a need
+/// grants the tool the line names (P35c item 3), so the class is no parameter (review round N1).
+pub fn with_bladebro_line(
+    mut brief: String,
+    cli: &str,
+    needs: &[String],
+    denied: &[String],
+    cwd: &std::path::Path,
+) -> String {
+    if let Some(line) = browser_line(cli, needs, denied, cwd) {
         brief.push_str("\n\n");
         brief.push_str(line);
     }
@@ -185,72 +198,108 @@ mod tests {
         );
     }
 
-    /// §5 test: "the brief for a browser order holds the line; a build order's brief does not."
+    /// A folder with no `.agents/mcp_config.json` of its own.
+    fn none() -> std::path::PathBuf {
+        std::env::temp_dir().join("p35c-lean-no-workspace")
+    }
+
+    /// The answer `installed` gives this thread's tests; restored when dropped.
+    struct Installed;
+    impl Installed {
+        fn set(answer: bool) -> Self {
+            crate::nirvana_bladebro::TEST_INSTALLED.set(Some(answer));
+            Self
+        }
+    }
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            crate::nirvana_bladebro::TEST_INSTALLED.set(None);
+        }
+    }
+
+    /// §5 test: "the brief for a browser order holds the line; a build order's brief does not." Plan 35 P35c item 3:
+    /// the line goes to a worker granted bladebro on either CLI, and to no one else.
     #[test]
     fn only_a_browser_order_gets_the_bladebro_line() {
-        let claude = BROWSER_CLI;
-        assert_eq!(
-            browser_line(claude, "research.web", &strings(&["browser"])),
-            Some(BROWSER_LINE)
-        );
-        assert_eq!(
-            browser_line(claude, "research.web", &strings(&["Bladebro"])),
-            Some(BROWSER_LINE)
-        );
-        assert_eq!(
-            browser_line(claude, "ops.terminal", &strings(&["agent-browser"])),
-            Some(BROWSER_LINE)
-        );
-        // A need that lists several names, split on commas and whitespace.
-        assert_eq!(
-            browser_line(claude, "research.web", &strings(&["image, BROWSER"])),
-            Some(BROWSER_LINE)
-        );
-        assert_eq!(
-            browser_line(claude, "research.web", &strings(&["pdf bladebro"])),
-            Some(BROWSER_LINE)
-        );
-        assert_eq!(browser_line(claude, "browser", &[]), Some(BROWSER_LINE));
-        // Review nit: a token that only holds a browser's name is not one.
-        for need in ["no-browser", "browsers", "bladebro2", "web-browser-free"] {
+        let _installed = Installed::set(true);
+        for cli in ["claude", "agy"] {
+            for needs in [
+                &["browser"][..],
+                &["Bladebro"],
+                &["image, BROWSER"],
+                &["pdf bladebro"],
+                &["code", "browser"],
+            ] {
+                assert_eq!(
+                    browser_line(cli, &strings(needs), &[], &none()),
+                    Some(BROWSER_LINE),
+                    "{cli} {needs:?}"
+                );
+            }
+            // Review nit: a token that only holds a browser's name is not one.
+            for need in [
+                "no-browser",
+                "browsers",
+                "bladebro2",
+                "web-browser-free",
+                "context_1m",
+            ] {
+                assert_eq!(
+                    browser_line(cli, &strings(&[need]), &[], &none()),
+                    None,
+                    "{cli} {need}"
+                );
+            }
+            assert_eq!(browser_line(cli, &[], &[], &none()), None, "{cli}");
+            // agent-browser is not bladebro: it grants nothing, so it gets no line naming bladebro.
             assert_eq!(
-                browser_line(claude, "research.web", &strings(&[need])),
+                browser_line(cli, &strings(&["agent-browser"]), &[], &none()),
                 None,
-                "{need}"
+                "{cli}"
             );
         }
-        assert_eq!(browser_line(claude, "research.browser", &[]), None);
-        assert_eq!(browser_line(claude, "build.bounded", &[]), None);
+        // A CLI that gets no bladebro is not told to use it.
         assert_eq!(
-            browser_line(claude, "research.web", &strings(&["context_1m"])),
+            browser_line("codex", &strings(&["browser"]), &[], &none()),
             None
         );
-        // Decision 0043: bladebro is the claude seat's; an agy worker is not told to use it.
-        assert_eq!(
-            browser_line("agy", "research.web", &strings(&["browser"])),
-            None
-        );
-        assert_eq!(BROWSER_CLI, "claude");
         assert_eq!(
             BROWSER_LINE,
             "Use bladebro `run` to batch steps; read the result, not each page."
         );
     }
 
+    /// Plan 35 P35c item 1 and decision 0043 item 6: an order that asks for a browser where bladebro is not on PATH is
+    /// told so in one line, and never the line naming the tool it lacks.
+    #[test]
+    fn p35c_a_browser_order_without_bladebro_on_path_is_told_so() {
+        let _installed = Installed::set(false);
+        for cli in ["claude", "agy"] {
+            assert_eq!(
+                browser_line(cli, &strings(&["browser"]), &[], &none()),
+                Some(crate::nirvana_bladebro::MISSING_LINE)
+            );
+            assert_eq!(browser_line(cli, &strings(&["code"]), &[], &none()), None);
+        }
+    }
+
     #[test]
     fn a_browser_orders_brief_holds_the_line_and_a_build_orders_does_not() {
+        let _installed = Installed::set(true);
         let order = "Class: research.web\nOrder: o1\nRun: r1\n\nFind the price.".to_owned();
-        let browser = with_browser_line(
-            order.clone(),
-            BROWSER_CLI,
-            "research.web",
-            &strings(&["browser"]),
-        );
-        assert_eq!(browser, format!("{order}\n\n{BROWSER_LINE}"));
-        let build = with_browser_line(order.clone(), BROWSER_CLI, "build.bounded", &[]);
-        assert_eq!(build, order);
-        assert!(!build.contains("bladebro"));
-        let agy = with_browser_line(order.clone(), "agy", "research.web", &strings(&["browser"]));
-        assert_eq!(agy, order);
+        for cli in ["claude", "agy"] {
+            let browser =
+                with_bladebro_line(order.clone(), cli, &strings(&["browser"]), &[], &none());
+            assert_eq!(browser, format!("{order}\n\n{BROWSER_LINE}"));
+            let build = with_bladebro_line(order.clone(), cli, &[], &[], &none());
+            assert_eq!(build, order);
+            assert!(!build.contains("bladebro"));
+            // Review round: a profile denying bladebro whole is never told to use it.
+            let denied = strings(&["Write", "mcp__bladebro__*"]);
+            assert_eq!(
+                with_bladebro_line(order.clone(), cli, &strings(&["browser"]), &denied, &none()),
+                order
+            );
+        }
     }
 }

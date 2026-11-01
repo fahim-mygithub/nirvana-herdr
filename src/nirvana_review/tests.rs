@@ -770,6 +770,17 @@ fn p33_a_delivered_review_is_gated_by_herdr_with_no_orchestrator_turn() {
             Some("slicer"),
         );
         nirvana_gate::gate(&project, run, subject).expect("gate");
+        // Plan 37 review N8: a line already waits in the queue, so a wake would act on it; the review's delivery
+        // still wakes no one.
+        journal
+            .append(
+                crate::nirvana_run::now(),
+                Kind::Asked {
+                    order: None,
+                    question: format!("queued before {subject}'s review"),
+                },
+            )
+            .unwrap();
         let id = review_id(subject);
         let review = state_of(&root, run)
             .order(&id)
@@ -788,6 +799,18 @@ fn p33_a_delivered_review_is_gated_by_herdr_with_no_orchestrator_turn() {
         let mut out = Vec::new();
         crate::nirvana_worker::exec(&project, run, &id, None, &mut out).expect("exec");
         crate::nirvana_worker::TEST_COMMAND.with_borrow_mut(|slot| *slot = None);
+        let events = journal.read().0;
+        let delivered_at = events
+            .iter()
+            .position(|event| matches!(&event.kind, Kind::Delivered { order, .. } if *order == id))
+            .expect("delivered");
+        assert!(
+            !events[delivered_at..]
+                .iter()
+                .any(|event| matches!(event.kind, Kind::WakeQueued { .. } | Kind::Woken { .. })),
+            "a lesson review woke the orchestrator: {}",
+            String::from_utf8_lossy(&out)
+        );
         let argv = journal
             .read()
             .0
