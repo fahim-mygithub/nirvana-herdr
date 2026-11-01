@@ -3,6 +3,31 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.51.3: the wake goes to the orchestrator that seated the order
+
+- **Changed:**
+  - A run follows its orchestrator. A `seat run` from a pane that herdr shows to run Nirvana Claude, other than
+    the run's current orchestrator pane, journals `orchestrator_moved`, and the wake, the fresh-session rule and the
+    subagent rows use the latest pane. A pane that runs anything else, or that herdr cannot read, takes nothing. A
+    worker's own `seat run` never moves the run. A pane the run once had stays guarded from a fresh-session clear
+    while the run is open.
+  - A wake whose pane is gone says so: "the orchestrator's pane wH:p1 is gone: herdr no longer has it", read from
+    herdr's `pane_not_found`, instead of "herdr could not say what runs in it". A queued wake is retried as before,
+    so the first retry after a move types into the new pane. A wake still types only into Nirvana Claude.
+  **Because:** the owner, 2026-11-01: "This agent claims that where were gemini agents running and will reutnr back
+  with report but it seems like it never did". In 3D-Printer-Flow-xtool's run `f2u-setup`, opened on 2026-10-23 in
+  `wH:p1`, a new Nirvana Claude seated two research orders; both delivered and passed at 12:29, and every wake was
+  queued against the old pane, as 4 had been on 2026-10-30. The orchestrator heard nothing until 12:42.
+  **Measured:** gates on master plus this fix and plan 37b together: nextest 4,610 of 4,611, the one failure the known
+  Windows plugin-path test; clippy clean; the dry run finds 2,505 of 2,505; all 27 `wake_` controls and the older
+  controls whose lines moved go red alone. One Sonnet review, one fix round. Two orchestrators seating into one run
+  in turn is unsupported: each wake goes to the latest. The incident's pane being gone is inferred from the code
+  path; the run moves on its next `seat run` from Nirvana Claude's pane.
+  **If you remove this:** a run reused from a new window or after a restart wakes a pane that no longer exists, and
+  the orchestrator that promised a report never hears that the work is done.
+- **Also:** the live checks of plans 35 §6 and 37 §4 are recorded in `nirvana/plans/live-checks-2026-11-01.md`: all
+  nine pass on a private herdr session, with findings F1-F8 for the owner.
+
 ## alpha 0.51.2: upstream herdr sync (herdrdev/herdr master ee5bfb50)
 
 - **Changed:** herdr's 13 commits since our last sync are merged: clipboard helpers bounded so a hung one cannot

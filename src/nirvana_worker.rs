@@ -2615,31 +2615,49 @@ fn herdr_command(args: &[&str]) -> std::process::Command {
 
 /// Runs this herdr with `args` against the server the caller's pane belongs to; the answer's JSON.
 pub(crate) fn herdr_json(args: &[&str]) -> Result<Value, String> {
+    herdr_json_coded(args).map_err(|(_, why)| why)
+}
+
+/// `herdr_json` with herdr's error `code` beside the message, `None` when herdr printed no error response: a wake
+/// tells a gone pane (`pane_not_found`) from a herdr that did not answer (fix wake-pane).
+pub(crate) fn herdr_json_coded(args: &[&str]) -> Result<Value, (Option<String>, String)> {
     let out = herdr_command(args)
         .output()
-        .map_err(|err| format!("herdr {}: {err}", args.join(" ")))?;
+        .map_err(|err| (None, format!("herdr {}: {err}", args.join(" "))))?;
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let value: Option<Value> = serde_json::from_str(text.trim()).ok();
     if !out.status.success() {
-        // herdr prints an error response on stderr (`pane close` of a gone pane, 2026-10-18).
-        let errors: Option<Value> =
-            serde_json::from_str(String::from_utf8_lossy(&out.stderr).trim()).ok();
-        let why = value
-            .as_ref()
-            .or(errors.as_ref())
-            .and_then(|value| value.pointer("/error/message"))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                format!(
-                    "{} {}",
-                    text.trim(),
-                    String::from_utf8_lossy(&out.stderr).trim()
-                )
-            });
-        return Err(why);
+        return Err(herdr_error(&text, &String::from_utf8_lossy(&out.stderr)));
     }
-    value.ok_or_else(|| format!("herdr {}: not JSON: {}", args.join(" "), text.trim()))
+    value.ok_or_else(|| {
+        (
+            None,
+            format!("herdr {}: not JSON: {}", args.join(" "), text.trim()),
+        )
+    })
+}
+
+/// A failed herdr call's error code and message, from its stdout or stderr. Pure.
+pub(crate) fn herdr_error(stdout: &str, stderr: &str) -> (Option<String>, String) {
+    // herdr prints an error response on stderr (`pane close` of a gone pane, 2026-10-18).
+    let value: Option<Value> = serde_json::from_str(stdout.trim()).ok();
+    let errors: Option<Value> = serde_json::from_str(stderr.trim()).ok();
+    // Wake-pane review N1: the one that holds an error response, stdout first; JSON on stdout with no `error` must not
+    // hide stderr's `pane_not_found`.
+    let error = [value.as_ref(), errors.as_ref()]
+        .into_iter()
+        .flatten()
+        .find(|value| value.get("error").is_some());
+    let code = error
+        .and_then(|value| value.pointer("/error/code"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let why = error
+        .and_then(|value| value.pointer("/error/message"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{} {}", stdout.trim(), stderr.trim()));
+    (code, why)
 }
 
 /// For the verbs that answer with nothing on success (`pane run` printed no JSON, measured 2026-10-18).
@@ -2681,15 +2699,10 @@ fn find_str<'a>(value: &'a Value, pointers: &[&str]) -> Option<&'a str> {
 
 /// The orchestrator's pane as a wake sees it.
 pub fn pane_view(pane: &str) -> nirvana_run::PaneView {
-    let info = herdr_json(&["pane", "get", pane]).ok();
+    let (info, program) = pane_get(pane);
     let status = info.as_ref().and_then(|value| {
         find_str(value, &["/result/pane/agent_status", "/pane/agent_status"]).map(str::to_owned)
     });
-    let program = info
-        .as_ref()
-        .map_or(nirvana_run::PaneProgram::Unknown, |info| {
-            program_of(pane, info)
-        });
     let prompt = herdr_text(&[
         "pane", "read", pane, "--source", "visible", "--format", "ansi",
     ])
@@ -2702,9 +2715,35 @@ pub fn pane_view(pane: &str) -> nirvana_run::PaneView {
     }
 }
 
+/// `pane get`'s answer and what runs in the pane; a pane herdr no longer has is `Gone` (fix wake-pane).
+fn pane_get(pane: &str) -> (Option<Value>, nirvana_run::PaneProgram) {
+    pane_get_with(pane, herdr_json_coded)
+}
+
+/// `pane_get` with herdr's calls passed in, so a test needs no herdr.
+pub(crate) fn pane_get_with(
+    pane: &str,
+    herdr: impl Fn(&[&str]) -> Result<Value, (Option<String>, String)>,
+) -> (Option<Value>, nirvana_run::PaneProgram) {
+    match herdr(&["pane", "get", pane]) {
+        Ok(info) => {
+            let program = program_of(pane, &info, &herdr);
+            (Some(info), program)
+        }
+        Err((code, _)) => (
+            None,
+            nirvana_run::PaneProgram::of_get_error(pane, code.as_deref()),
+        ),
+    }
+}
+
 /// What runs in the pane (`nirvana_run::pane_program`), from `pane get`'s answer and `pane process-info`.
-fn program_of(pane: &str, info: &Value) -> nirvana_run::PaneProgram {
-    let Ok(process) = herdr_json(&["pane", "process-info", "--pane", pane]) else {
+fn program_of(
+    pane: &str,
+    info: &Value,
+    herdr: impl Fn(&[&str]) -> Result<Value, (Option<String>, String)>,
+) -> nirvana_run::PaneProgram {
+    let Ok(process) = herdr(&["pane", "process-info", "--pane", pane]) else {
         return nirvana_run::PaneProgram::Unknown;
     };
     let plugin = crate::nirvana::home().map(|home| crate::nirvana_launch::plugin_dir(&home));
@@ -2715,10 +2754,7 @@ fn program_of(pane: &str, info: &Value) -> nirvana_run::PaneProgram {
 /// runs Nirvana Claude, read again just before (`nirvana_run::type_if_nirvana`). The runner's only other typing
 /// is `open_pane`'s `pane run`, into the shell of the pane that same call created.
 pub fn type_prompt(pane: &str, text: &str) -> Result<(), String> {
-    let program = herdr_json(&["pane", "get", pane])
-        .map_or(nirvana_run::PaneProgram::Unknown, |info| {
-            program_of(pane, &info)
-        });
+    let (_, program) = pane_get(pane);
     nirvana_run::type_if_nirvana(&program, || {
         herdr_json(&["agent", "prompt", pane, text])
             .map(|_| ())
@@ -3263,6 +3299,38 @@ pub fn seating(
     Ok(kinds)
 }
 
+/// `seating` with the run's move to `mover` first (fix wake-pane): the events to write, and the order as it already
+/// is when the run knows it. `mover` is a pane the function `mover` showed runs Nirvana Claude. A repeated `seat run`
+/// of a known order still moves the run (review N5): a resumed orchestrator in a new pane re-issues the order ids it
+/// had, and its wakes must reach it. Under the journal's lock, so the move is decided on the events it follows.
+pub fn seating_from(
+    events: &[Event],
+    seated: &Seated,
+    opened: Kind,
+    mover: Option<&str>,
+) -> (Vec<Kind>, Option<Box<nirvana_run::OrderState>>) {
+    let moved = mover.and_then(|pane| nirvana_run::orchestrator_move(&replay(events), Some(pane)));
+    match seating(events, seated, opened) {
+        Ok(kinds) => (moved.into_iter().chain(kinds).collect(), None),
+        Err(known) => (moved.into_iter().collect(), Some(known)),
+    }
+}
+
+/// The pane a `seat run` from `caller` (its `HERDR_PANE_ID`) may move the run to, or `None` (review S1). Only a pane
+/// `program` says runs Nirvana Claude takes the run; `Unknown`, `Other` and `Gone` do not, so a `seat run` typed in a
+/// shell or a plain Claude Code pane never takes the run from a live orchestrator, and a herdr that does not answer
+/// keeps the run where it was. `program` is asked only when the journal, read before the lock, says a move is due,
+/// so a seat from the orchestrator's own pane costs no herdr call. Outside the lock: `program` calls herdr.
+pub fn mover(
+    events: &[Event],
+    caller: Option<&str>,
+    program: impl FnOnce(&str) -> nirvana_run::PaneProgram,
+) -> Option<String> {
+    nirvana_run::orchestrator_move(&replay(events), caller)?;
+    let pane = caller?;
+    (program(pane) == nirvana_run::PaneProgram::NirvanaClaude).then(|| pane.to_owned())
+}
+
 /// Books the order on the seat (the rule must agree, or the caller gives a reason: an override, 3 a run). The tests'
 /// entry; `seat_order_with` books through `book_with`.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -3700,19 +3768,24 @@ pub fn seat_order_with(
         send_ok,
     };
     let (pools, pools_basis) = nirvana_run::cached_pools();
+    let caller = std::env::var("HERDR_PANE_ID").ok();
+    let moves_to = mover(&journal.read().0, caller.as_deref(), |pane| {
+        pane_get(pane).1
+    });
     let opened = Kind::Opened {
         project: project.root.display().to_string(),
-        orchestrator_pane: std::env::var("HERDR_PANE_ID").ok(),
+        orchestrator_pane: caller,
         auto: request.auto,
         pools,
         pools_basis,
     };
     let (written, first) = journal
         .transact(now(), |events: &[Event]| {
-            Ok(match seating(events, &seated, opened) {
-                Ok(kinds) => (kinds, None),
-                Err(known) => (Vec::new(), Some(existing(&request.run, &known, false))),
-            })
+            let (kinds, known) = seating_from(events, &seated, opened, moves_to.as_deref());
+            Ok((
+                kinds,
+                known.map(|known| existing(&request.run, &known, false)),
+            ))
         })
         .map_err(io)?;
     if let Some(first) = first {

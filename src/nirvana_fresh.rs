@@ -179,32 +179,22 @@ pub fn forget(home: &Path, pane: &str) {
 
 // ---- the trigger (the Stop hook) ----
 
-/// The run that `pane` last ended, and when: the ended runs whose `opened` names the pane as the orchestrator's
-/// (`herdr seat run` records its `HERDR_PANE_ID`), the latest end first.
+/// The run that `pane` last ended, and when: the ended runs whose orchestrator is the pane (`herdr seat run` records
+/// its `HERDR_PANE_ID`, and a run follows the latest pane that seats into it), the latest end first.
 pub fn last_end_of<'a>(pane: &str, runs: &'a [(String, RunState)]) -> Option<(&'a str, u64)> {
     runs.iter()
-        .filter(|(_, state)| {
-            state
-                .opened
-                .as_ref()
-                .and_then(|opened| opened.orchestrator_pane.as_deref())
-                == Some(pane)
-        })
+        .filter(|(_, state)| state.orchestrator_pane.as_deref() == Some(pane))
         .filter_map(|(run, state)| Some((run.as_str(), state.ended.as_ref()?.0)))
         .max_by_key(|(_, at)| *at)
 }
 
-/// A run `pane` opened that has not ended (review B1: a fresh start never clears in the middle of a run).
+/// A run that has not ended whose orchestrator `pane` is or was (review B1: a fresh start never clears in the middle
+/// of a run). Wake-pane review S2: a pane the run moved away from still counts, since a live Nirvana Claude may sit
+/// there; it fails safe, as an open run left open by mistake does (`open_blocks`).
 pub fn open_of<'a>(pane: &str, runs: &'a [(String, RunState)]) -> Option<&'a str> {
     runs.iter()
         .filter(|(_, state)| state.ended.is_none())
-        .find(|(_, state)| {
-            state
-                .opened
-                .as_ref()
-                .and_then(|opened| opened.orchestrator_pane.as_deref())
-                == Some(pane)
-        })
+        .find(|(_, state)| state.orchestrator_panes.iter().any(|held| held == pane))
         .map(|(run, _)| run.as_str())
 }
 

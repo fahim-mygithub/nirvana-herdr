@@ -124,8 +124,8 @@ CONTROLS = (
     # §2 the run this pane ended: other panes' runs do not count
     Control(
         'p25_last_end_this_pane', F,
-        '                == Some(pane)\n        })\n        .filter_map(',
-        '                != None\n        })\n        .filter_map(',
+        '        .filter(|(_, state)| state.orchestrator_pane.as_deref() == Some(pane))\n        .filter_map(',
+        '        .filter(|(_, state)| state.orchestrator_pane.as_deref().is_some())\n        .filter_map(',
         T_LAST_END, 'rust',
     ),
     # §2 the run this pane last ended: the latest end
@@ -810,8 +810,8 @@ CONTROLS = (
     # review B1, rule 1: an open run of this pane, not another's
     Control(
         'p25_open_of_this_pane', F,
-        '                == Some(pane)\n        })\n        .map(|(run, _)| run.as_str())\n',
-        '                != None\n        })\n        .map(|(run, _)| run.as_str())\n',
+        '        .find(|(_, state)| state.orchestrator_panes.iter().any(|held| held == pane))\n        .map(',
+        '        .find(|(_, state)| !state.orchestrator_panes.is_empty())\n        .map(',
         T_OPEN, 'rust',
     ),
     # review B1, rule 1, end to end: the Stop hook reads this pane's open run
