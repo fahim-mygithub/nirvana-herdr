@@ -68,6 +68,9 @@ pub const OEMBED_TIMEOUT_S: u64 = 4;
 /// Calls per gate. reel-motion-gemini-r2 cited 10 videos, the most measured; a cap keeps a long list from holding the
 /// gate lock for minutes.
 pub const OEMBED_CALLS_PER_GATE: usize = 20;
+/// All calls of one gate together (review N3): 20 slow answers inside the 4 s timeout would hold the gate lock 80 s.
+/// A hypothesis, as the timeout is; a call never waits past what is left of it.
+pub const OEMBED_BUDGET_S: u64 = 30;
 
 // ---- the outcome words ----
 
@@ -1597,14 +1600,17 @@ pub fn cited_videos(report: Option<&Value>) -> Vec<String> {
     ids
 }
 
-/// The sources axis with each cited video asked about, at most `cap` calls: a missing one fails the axis naming its
-/// id; anything the check could not settle is the second value, a `videos` note, never a fail.
+/// The sources axis with each cited video asked about, at most `cap` calls inside `budget` in all: a missing one
+/// fails the axis naming its id; anything the check could not settle is the second value, a `videos` note, never a
+/// fail. `ask` is given the time left, which bounds its own call.
 pub fn check_videos(
     mut axis: Axis,
     report: Option<&Value>,
-    ask: &mut dyn FnMut(&str) -> Video,
+    ask: &mut dyn FnMut(&str, Duration) -> Video,
     cap: usize,
+    budget: Duration,
 ) -> (Axis, Option<Axis>) {
+    let started = Instant::now();
     let ids = cited_videos(report);
     let (mut found, mut missing, mut unsettled) = (0, Vec::new(), Vec::new());
     let mut unreachable = false;
@@ -1620,7 +1626,15 @@ pub fn check_videos(
             unsettled.push(format!("{id}: not checked, oEmbed was unreachable"));
             continue;
         }
-        match ask(id) {
+        let left = budget.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            unsettled.push(format!(
+                "{id}: not checked, the gate's {} s for oEmbed were spent",
+                budget.as_secs()
+            ));
+            continue;
+        }
+        match ask(id, left) {
             Video::Exists => found += 1,
             Video::Missing => missing.push(id.clone()),
             Video::Other(status) => unsettled.push(format!("{id}: oEmbed answered {status}")),
@@ -2420,8 +2434,9 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
             Some(base) => check_videos(
                 axis,
                 subject.report,
-                &mut |id| oembed(&base, id, Duration::from_secs(OEMBED_TIMEOUT_S)),
+                &mut |id, left| oembed(&base, id, left.min(Duration::from_secs(OEMBED_TIMEOUT_S))),
                 OEMBED_CALLS_PER_GATE,
+                Duration::from_secs(OEMBED_BUDGET_S),
             ),
             None => (axis, None),
         };
@@ -2632,6 +2647,12 @@ open, and redo each claim that rests on a dropped source.";
 pub const INVENTED_REDO: &str = "the gate found cited videos that do not exist, so nothing from the first try is \
 trusted: not its sources, its notes or its claims. Do the order again from the start, and cite only what you opened \
 in this session.";
+/// Review N4: the same finding when other axes failed too. Plan 35's S4 holds (the other axes' instruction stays, the
+/// sources text is added): a rebase or a held-out case only makes sense on the work as it stands, so the order is not
+/// started over, but nothing the first try took from its sources stands.
+pub const INVENTED_SOURCES: &str = "the gate found cited videos that do not exist, so nothing of the first try's \
+sources is trusted: drop every source it cited and every claim that rests on one, and find them again, citing only \
+what you opened in this session.";
 
 pub fn send_back_brief(
     order: &str,
@@ -2648,9 +2669,11 @@ pub fn send_back_brief(
         .any(|axis| axis.axis == "sources" && !axis.lines.is_empty());
     let others = failing(axes).iter().any(|axis| axis.axis != "sources");
     let fix = "fix what the gate found, do not start over.";
+    let invented = !invented_videos(axes).is_empty();
     let opening = match (redo, others) {
-        // Plan 37 §1.3: an invented video starts the order over, whatever else failed.
-        _ if !invented_videos(axes).is_empty() => INVENTED_REDO.to_owned(),
+        // Plan 37 §1.3: an invented video starts the order over; on a mixed fail it is the sources' text (review N4).
+        _ if invented && !others => INVENTED_REDO.to_owned(),
+        _ if invented => format!("{fix} For the sources: {INVENTED_SOURCES}"),
         (true, false) => SOURCES_REDO.to_owned(),
         (true, true) => format!("{fix} For the sources: {SOURCES_REDO}"),
         (false, _) => fix.to_owned(),
@@ -2840,9 +2863,19 @@ fn live_ports(pane: Option<&str>) -> Result<Vec<u16>, String> {
     Ok(pane_ports(shell, &processes, &listeners))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Review N1's hook: the next gate on this thread panics once it holds the lock.
+    pub(crate) static TEST_GATE_PANICS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Gates one order. The caller holds nothing; this takes the project's gate lock.
 pub fn gate(project: &Project, run: &str, order: &str) -> Result<Ruling, String> {
     let _lock = gate_lock(project).map_err(|err| err.to_string())?;
+    #[cfg(test)]
+    if TEST_GATE_PANICS.replace(false) {
+        panic!("a test's gate panic");
+    }
     let journal = project.journal(run);
     let state = replay(&journal.read().0);
     let known = state
@@ -2853,7 +2886,7 @@ pub fn gate(project: &Project, run: &str, order: &str) -> Result<Ruling, String>
     let table = nirvana_seat::table_for(&project.root).ok();
     // Plan 33 review: a lesson review re-seated when its pool ran out carries its first review's sidecar, so its child
     // is gated as a review and never as a plain order.
-    let helps = sidecar.helps.clone().or_else(|| {
+    let helps = helps_of(project, run, &state, order).or_else(|| {
         (known.seated.class == crate::nirvana_review::CLASS)
             .then(|| {
                 read_sidecar(
@@ -2907,6 +2940,17 @@ pub fn gate(project: &Project, run: &str, order: &str) -> Result<Ruling, String>
             })
         }
         Phase::Gated if known.verdict.as_deref() == Some("pass") => {}
+        // Review S2: an order gated sent_back or asked is ruled on already; a gate by hand (the wake that carried the
+        // verdict was missed, or the orchestrator wants it again) gives the stored verdict, with the child or the
+        // question, and journals nothing.
+        Phase::Gated
+            if matches!(
+                known.verdict.as_deref(),
+                Some(verdict) if verdict == Outcome::SentBack.word() || verdict == Outcome::Asked.word()
+            ) =>
+        {
+            return Ok(stored_ruling(&state, &known, run, sidecar))
+        }
         phase => {
             return Err(format!(
                 "{order} is {}{}: the gate rules on a delivered order",
@@ -2944,6 +2988,43 @@ fn trees_moved(project: &Project, run: &str, known: &OrderState, sidecar: &Sidec
         &format!("refs/heads/{}", integration_branch(run)),
     );
     last.head != head || last.base != tip
+}
+
+/// The ruling a sent_back or asked order already has, from the journal: a send-back's latest child and where it
+/// stands, or the question asked.
+fn stored_ruling(
+    state: &nirvana_run::RunState,
+    known: &OrderState,
+    run: &str,
+    sidecar: Sidecar,
+) -> Ruling {
+    let order = known.id();
+    let verdict = known.verdict.clone().unwrap_or_default();
+    let next = if verdict == Outcome::SentBack.word() {
+        let child = state.orders.iter().rev().find(|child| {
+            child.seated.parent.as_deref() == Some(order)
+                && child.seated.why.as_deref() == Some("send_back")
+        });
+        match child {
+            Some(child) => format!(
+                "{} seated on {} {} ({}): the send-back of {order}, already made",
+                child.id(),
+                child.seated.seat,
+                child.seated.effort.word(),
+                child.phase.word()
+            ),
+            None => format!("{order} was sent back and the journal holds no child of it"),
+        }
+    } else {
+        known.why.clone().unwrap_or_default()
+    };
+    Ruling {
+        order: order.to_owned(),
+        run: run.to_owned(),
+        verdict,
+        axes: sidecar.last.map(|det| det.axes).unwrap_or_default(),
+        next: vec![next],
+    }
 }
 
 fn gate_subject(
@@ -3337,8 +3418,27 @@ fn send_back(
         request.override_seat = Some((up.clone(), reason.clone()));
         request.inherited_override = true;
     }
+    // Review S1: a delivery with invented sources is never redone on the seat that invented them, nor on the rule's
+    // pick (for research.web the cheap seat that invented reel-motion-gemini's 12). With no seat above it, or the one
+    // above refused, the owner is asked: keeping the order's own seat would hand the redo to the inventor.
+    let invented_ask = |why: String| {
+        format!(
+            "{order} must go back: {} cited video(s) do not exist, and {why}; herdr redoes invented sources neither on \
+the seat that invented them nor on the rule's pick. Take it over, wait for a stronger seat, or seat the redo by hand \
+with `herdr seat run`?",
+            invented.len()
+        )
+    };
+    if !invented.is_empty() && step_up.is_none() {
+        return ask(
+            invented_ask(format!(
+                "no seat of {} stands above {}",
+                seated.class, seated.seat
+            )),
+            axes,
+        );
+    }
     let inherited_reason = step_reason.clone().or(seated.override_reason.clone());
-    let refused_seat = step_up.clone().unwrap_or_else(|| seated.seat.clone());
     let mut world = nirvana_seat::live_world(table);
     let leases_path = nirvana_seat::dir().join(nirvana_seat::LEASES_FILE);
     if let Ok(leases) = nirvana_seat::load_leases(&leases_path) {
@@ -3348,13 +3448,23 @@ fn send_back(
     let (pick, why_seated, child_override_reason) =
         match nirvana_seat::pick(table, &world, &request) {
             Ok(pick) => (pick, None, inherited_reason),
+            Err(no_seat) if !invented.is_empty() => {
+                return ask(
+                    invented_ask(format!(
+                        "the seat above it, {}, is refused: {}",
+                        step_up.as_deref().unwrap_or_default(),
+                        no_seat.reason
+                    )),
+                    axes,
+                )
+            }
             Err(no_seat) if request.inherited_override => {
                 let mut fallback_request = request.clone();
                 fallback_request.override_seat = None;
                 fallback_request.inherited_override = false;
                 match nirvana_seat::pick(table, &world, &fallback_request) {
                     Ok(pick) => {
-                        let seat_name = &refused_seat;
+                        let seat_name = &seated.seat;
                         let why = format!(
                             "inherited override {} refused: {}; the rule picked",
                             seat_name, no_seat.reason
@@ -3628,7 +3738,31 @@ pub fn gates_on_delivery(
     status: &str,
 ) -> bool {
     class == crate::nirvana_review::CLASS
-        || (status == "done" && read_sidecar(project, run, order).helps.is_none())
+        || (status == "done"
+            && helps_of(project, run, &replay(&project.journal(run).read().0), order).is_none())
+}
+
+/// Whom an order helps, `(kind, subject)`: its own sidecar's, else the parent's it was re-seated or sent back from
+/// (review N7: a reviewer re-seated when its pool ran out has no sidecar of its own, and was gated as a plain order).
+pub fn helps_of(
+    project: &Project,
+    run: &str,
+    state: &nirvana_run::RunState,
+    order: &str,
+) -> Option<(String, String)> {
+    let mut current = order.to_owned();
+    // A chain is finite, but a journal written by hand could loop; no real chain is near this long.
+    for _ in 0..64 {
+        if let Some(helps) = read_sidecar(project, run, &current).helps {
+            return Some(helps);
+        }
+        let seated = &state.order(&current)?.seated;
+        match (&seated.parent, seated.why.as_deref()) {
+            (Some(parent), Some("send_back" | "reseat")) => current = parent.clone(),
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// A reviewer's own gate: its report is well formed. Its verdict is its subject's review axis.

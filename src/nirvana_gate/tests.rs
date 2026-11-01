@@ -2655,6 +2655,8 @@ fn p37_report(ids: &[&str]) -> Value {
     serde_json::json!({"status": "done", "summary": "s", "files": [], "tests": [], "gotchas": [], "sources": sources})
 }
 
+const BUDGET: Duration = Duration::from_secs(OEMBED_BUDGET_S);
+
 /// L4: "a 404 fails, an unreachable check is a note". A 200 passes, a 404 fails naming the id, another status and a
 /// timeout only add a note, and after a timeout the calls left are not made.
 #[test]
@@ -2677,10 +2679,16 @@ fn p37_the_existence_check_fails_a_404_passes_a_200_and_only_notes_a_timeout() {
             "2 source(s) cited, each verified in stream",
         )
     };
-    let mut ask = |id: &str| oembed(&base, id, short);
+    let mut ask = |id: &str, _: Duration| oembed(&base, id, short);
     // A 200 and a 404: the axis fails, naming the missing id only.
     let report = p37_report(&[P37_REAL, P37_FAKE]);
-    let (axis, note) = check_videos(pass(), Some(&report), &mut ask, OEMBED_CALLS_PER_GATE);
+    let (axis, note) = check_videos(
+        pass(),
+        Some(&report),
+        &mut ask,
+        OEMBED_CALLS_PER_GATE,
+        BUDGET,
+    );
     assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
     assert_eq!(axis.lines, vec![format!("{NO_SUCH_VIDEO}{P37_FAKE}")]);
     assert!(note.is_none(), "{note:?}");
@@ -2690,7 +2698,13 @@ fn p37_the_existence_check_fails_a_404_passes_a_200_and_only_notes_a_timeout() {
     );
     // Only 200s: the axis passes and says what was checked.
     let report = p37_report(&[P37_REAL]);
-    let (axis, note) = check_videos(pass(), Some(&report), &mut ask, OEMBED_CALLS_PER_GATE);
+    let (axis, note) = check_videos(
+        pass(),
+        Some(&report),
+        &mut ask,
+        OEMBED_CALLS_PER_GATE,
+        BUDGET,
+    );
     assert_eq!(axis.mark, Mark::Pass, "{axis:?}");
     assert!(
         axis.why.ends_with("1 cited video(s) exist on YouTube"),
@@ -2700,7 +2714,13 @@ fn p37_the_existence_check_fails_a_404_passes_a_200_and_only_notes_a_timeout() {
     assert!(note.is_none());
     // A 401, then a timeout, then a 404 never asked: no fail, one note naming all three.
     let report = p37_report(&[P37_GONE, P37_SLOW, P37_FAKE]);
-    let (axis, note) = check_videos(pass(), Some(&report), &mut ask, OEMBED_CALLS_PER_GATE);
+    let (axis, note) = check_videos(
+        pass(),
+        Some(&report),
+        &mut ask,
+        OEMBED_CALLS_PER_GATE,
+        BUDGET,
+    );
     assert_eq!(axis.mark, Mark::Pass, "{axis:?}");
     let note = note.expect("a note");
     assert_eq!((note.axis.as_str(), note.mark), ("videos", Mark::Note));
@@ -2716,14 +2736,46 @@ fn p37_the_existence_check_fails_a_404_passes_a_200_and_only_notes_a_timeout() {
     let (axis, note) = check_videos(
         pass(),
         Some(&report),
-        &mut |_| {
+        &mut |_, _| {
             calls += 1;
             Video::Exists
         },
         1,
+        BUDGET,
     );
     assert_eq!((calls, axis.mark), (1, Mark::Pass));
     assert!(note.expect("note").lines[0].contains("over the cap of 1"));
+    // Review N3: the calls of one gate share a budget; each is told what is left, and none is made once it is spent.
+    let mut lefts = Vec::new();
+    let (_, note) = check_videos(
+        pass(),
+        Some(&report),
+        &mut |_, left| {
+            lefts.push(left);
+            Video::Exists
+        },
+        OEMBED_CALLS_PER_GATE,
+        BUDGET,
+    );
+    assert!(note.is_none(), "{note:?}");
+    assert!(
+        lefts.len() == 2 && lefts.iter().all(|left| *left <= BUDGET),
+        "{lefts:?}"
+    );
+    let (axis, note) = check_videos(
+        pass(),
+        Some(&report),
+        &mut |_, _| unreachable!("the budget is spent"),
+        OEMBED_CALLS_PER_GATE,
+        Duration::ZERO,
+    );
+    assert_eq!(axis.mark, Mark::Pass, "{axis:?}");
+    let note = note.expect("a note");
+    assert_eq!(note.lines.len(), 2, "{note:?}");
+    assert!(
+        note.lines[0].ends_with("s for oEmbed were spent"),
+        "{note:?}"
+    );
 }
 
 /// Through `deterministic`, as a gate runs it: the stand-in is asked and a 404 fails the sources axis. With no
@@ -2788,12 +2840,41 @@ fn p37_send_back(
     seat: &str,
     lines: Vec<String>,
 ) -> (String, Option<String>, String, u32) {
+    let axes = vec![Axis::new("sources", Mark::Fail, "the sources").with(lines)];
+    let sent = p37_gate_fail(name, seat, axes, BTreeMap::new());
+    assert_eq!(sent.ruling.verdict, "sent_back", "{:?}", sent.ruling);
+    let child = sent.child.expect("child");
+    let brief = std::fs::read_to_string(&child.seated.order_file).expect("brief");
+    (
+        child.seated.seat,
+        child.seated.override_reason,
+        brief,
+        sent.overrides,
+    )
+}
+
+/// What one failing gate of a research order made: its ruling, the child if one was seated, a second gate of the
+/// order by hand, and the run's override count after.
+struct P37Gated {
+    ruling: Ruling,
+    child: Option<OrderState>,
+    again: Result<Ruling, String>,
+    overrides: u32,
+}
+
+/// The send-back of a research order seated on `seat`, with `axes`, in a world whose `clis` are refused.
+fn p37_gate_fail(
+    name: &str,
+    seat: &str,
+    axes: Vec<Axis>,
+    clis: BTreeMap<String, String>,
+) -> P37Gated {
     let _guard = crate::nirvana::with_test_home(name);
     let root = repo(name);
     let project = Project::at(&root);
     let run = "r1";
     let journal = project.journal(run);
-    nirvana_seat::set_test_world(Some(BTreeMap::new()));
+    nirvana_seat::set_test_world(Some(clis));
     let table = nirvana_seat::parse(nirvana_seat::DEFAULT).expect("table");
     let mut parent = seated("res", None);
     parent.class = "research.web".into();
@@ -2810,7 +2891,6 @@ fn p37_send_back(
     let _live = crate::nirvana_worker::take_live(&project, run, "res-s1").unwrap();
     let state = replay(&journal.read().0);
     let known = state.order("res").expect("order").clone();
-    let axes = vec![Axis::new("sources", Mark::Fail, "the sources").with(lines)];
     let ruling = send_back(
         &project,
         run,
@@ -2823,22 +2903,17 @@ fn p37_send_back(
         Some(&table),
     )
     .expect("send_back");
-    assert_eq!(ruling.verdict, "sent_back", "{ruling:?}");
-    let child = replay(&journal.read().0)
-        .order("res-s1")
-        .expect("child")
-        .clone();
-    let brief = std::fs::read_to_string(&child.seated.order_file).expect("brief");
+    let child = replay(&journal.read().0).order("res-s1").cloned();
+    let again = gate(&project, run, "res");
     let overrides = nirvana_seat::load_leases(&nirvana_seat::dir().join(nirvana_seat::LEASES_FILE))
-        .expect("leases")
-        .overrides(run);
+        .map_or(0, |leases| leases.overrides(run));
     nirvana_seat::set_test_world(None);
-    (
-        child.seated.seat,
-        child.seated.override_reason,
-        brief,
+    P37Gated {
+        ruling,
+        child,
+        again,
         overrides,
-    )
+    }
 }
 
 /// L5: "Step up one seat". reel-motion-gemini's redo went back to the flash-low seat that invented its sources; a
@@ -2883,6 +2958,144 @@ fn p37_an_ordinary_send_back_keeps_the_rules_seat() {
     assert_eq!(reason, None);
     assert!(brief.contains(SOURCES_REDO), "{brief}");
     assert!(!brief.contains(INVENTED_REDO), "{brief}");
+}
+
+fn p37_invented() -> Vec<Axis> {
+    vec![Axis::new("sources", Mark::Fail, "the sources")
+        .with(vec![format!("{NO_SUCH_VIDEO}{P37_FAKE}")])]
+}
+
+/// Review S2 (a): a gate by hand of an order already sent back gives the stored verdict and its child, not an error,
+/// and seats nothing more.
+#[test]
+fn p37_a_gate_by_hand_of_a_sent_back_order_gives_its_child() {
+    let sent = p37_gate_fail("p37-again-sent", "flash", p37_invented(), BTreeMap::new());
+    assert_eq!(sent.ruling.verdict, "sent_back");
+    let again = sent.again.expect("the stored verdict");
+    assert_eq!((again.verdict.as_str(), again.exit()), ("sent_back", 1));
+    assert!(
+        again.next[0].starts_with("res-s1 seated on argon"),
+        "{:?}",
+        again.next
+    );
+}
+
+/// Review S1: invented sources on the strongest seat of the class (argon has none above it) are not redone on the
+/// rule's pick, the cheap seat that invented reel-motion-gemini's: the owner is asked, and a gate by hand gives
+/// the same question.
+#[test]
+fn p37_invented_sources_with_no_seat_above_ask() {
+    let sent = p37_gate_fail("p37-no-above", "argon", p37_invented(), BTreeMap::new());
+    assert_eq!(sent.ruling.verdict, "asked", "{:?}", sent.ruling);
+    assert!(sent.child.is_none());
+    let question = &sent.ruling.next[0];
+    assert!(
+        question.contains("no seat of research.web stands above argon"),
+        "{question}"
+    );
+    let again = sent.again.expect("the stored verdict");
+    assert_eq!(again.verdict, "asked");
+    assert_eq!(&again.next[0], question);
+}
+
+/// Review S1: the stepped seat refused (agy signed out) never falls back to the rule's pick: the owner is asked.
+#[test]
+fn p37_invented_sources_whose_step_is_refused_ask() {
+    let clis = BTreeMap::from([("agy".to_owned(), "agy is signed out".to_owned())]);
+    let sent = p37_gate_fail("p37-step-refused", "flash", p37_invented(), clis);
+    assert_eq!(sent.ruling.verdict, "asked", "{:?}", sent.ruling);
+    assert!(sent.child.is_none());
+    assert!(
+        sent.ruling.next[0].contains("the seat above it, argon, is refused"),
+        "{:?}",
+        sent.ruling.next
+    );
+}
+
+/// Review N4: on a mixed fail plan 35's rule holds: the other axes' instruction stays, the invented-sources text is
+/// added, and nothing of the first try's sources is trusted; alone, the order starts over.
+#[test]
+fn p37_a_mixed_fail_with_invented_videos_keeps_the_fix_and_distrusts_the_sources() {
+    let mut axes = p37_invented();
+    axes.push(Axis::new("rebase", Mark::Fail, "conflicts").with(vec!["src/a.rs".into()]));
+    let mixed = send_back_brief(
+        "o1",
+        "o1",
+        1,
+        &axes,
+        "# o1
+",
+        "nirvana/r1",
+    );
+    assert!(
+        mixed.contains(&format!(
+            "fix what the gate found, do not start over. For the sources: {INVENTED_SOURCES}"
+        )),
+        "{mixed}"
+    );
+    assert!(!mixed.contains(INVENTED_REDO), "{mixed}");
+    assert!(mixed.contains("git rebase nirvana/r1"), "{mixed}");
+    let alone = send_back_brief(
+        "o1",
+        "o1",
+        1,
+        &p37_invented(),
+        "# o1
+",
+        "nirvana/r1",
+    );
+    assert!(alone.contains(INVENTED_REDO), "{alone}");
+    assert!(!alone.contains("do not start over"), "{alone}");
+}
+
+/// Review N7: a reviewer re-seated when its pool ran out, and a send-back of a held-out author, still help their
+/// subject: `seat exec` does not gate them as plain orders, and `helps_of` follows the chain to the sidecar.
+#[test]
+fn p37_a_reseated_or_sent_back_helper_keeps_helps() {
+    let root = repo("p37-helps");
+    let project = Project::at(&root);
+    let journal = project.journal("r1");
+    let mut reviewer = seated("o1-rev1", None);
+    reviewer.class = "review.adversary".into();
+    let mut reseat = seated("o1-rev1-r1", Some("o1-rev1"));
+    reseat.class = "review.adversary".into();
+    reseat.why = Some("reseat".into());
+    let mut author = seated("o1-auth1", None);
+    author.class = "acceptance.author".into();
+    let mut sent = seated("o1-auth1-s1", Some("o1-auth1"));
+    sent.class = "acceptance.author".into();
+    for (n, s) in [reviewer, reseat, author, sent].into_iter().enumerate() {
+        journal
+            .append(n as u64 + 1, Kind::Seated(Box::new(s)))
+            .unwrap();
+    }
+    for (helper, kind) in [("o1-rev1", "review"), ("o1-auth1", "author")] {
+        write_sidecar(
+            &project,
+            "r1",
+            &Sidecar {
+                order: helper.into(),
+                helps: Some((kind.into(), "o1".into())),
+                ..Sidecar::default()
+            },
+        )
+        .unwrap();
+    }
+    let state = replay(&journal.read().0);
+    for (child, kind) in [("o1-rev1-r1", "review"), ("o1-auth1-s1", "author")] {
+        assert_eq!(
+            helps_of(&project, "r1", &state, child),
+            Some((kind.to_owned(), "o1".to_owned()))
+        );
+        assert!(!gates_on_delivery(
+            &project,
+            "r1",
+            child,
+            "review.adversary",
+            "done"
+        ));
+    }
+    assert_eq!(helps_of(&project, "r1", &state, "o1"), None);
 }
 
 /// Plan 37 §1.1: `seat exec` gates every done delivery but a helper's; a lesson review whatever it reported.
@@ -2983,7 +3196,7 @@ fn p37_the_agy_brief_rules_are_in_role_and_the_seat_skill_each_naming_its_failur
         (skill, "/.rss", "10 failed Reddit reads"),
         (
             skill,
-            "bladebro when the order needs a browser",
+            "bladebro when the order was seated with `--needs bladebro`",
             "no YouTube connector",
         ),
         (
@@ -3026,6 +3239,16 @@ fn p37_the_agy_brief_rules_are_in_role_and_the_seat_skill_each_naming_its_failur
         gate.contains("one seat up") && gate.contains("trusts nothing"),
         "{gate}"
     );
+    // Review S3: both say what the wake's line is, as `nirvana_run`'s queue writes it
+    // (`p37_the_first_verdict_after_a_delivery_queues_whatever_was_woken` pins that side).
+    for text in [role, skill] {
+        assert!(
+            text.contains("`<order> gated <verdict>: <reason>`"),
+            "{text}"
+        );
+    }
+    // Review N5: bladebro is promised to an agy worker only when its order was seated with `--needs bladebro`.
+    assert!(!skill.contains("when the order needs a browser"));
     for row in [
         "- [ ] the verify line",
         "- [ ] lowercase `owns:`",

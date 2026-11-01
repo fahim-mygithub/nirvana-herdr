@@ -2441,10 +2441,33 @@ fn p37_exec_gates_an_ordinary_done_delivery_before_the_wake() {
         Some("sent_back")
     );
     assert!(state.order("o1-s1").is_some());
+    let digest = nirvana_run::digest(run, &state.queue);
+    assert!(digest.contains("o1 gated sent_back: "), "{digest}");
     // Blocked: delivered, not gated.
     let (code, view) = exec_with("o2", "blocked.jsonl");
     assert_eq!(code, 0, "{view}");
     assert!(!view.contains("gated:"), "{view}");
     assert_eq!(seq("o2", true), None);
+    // Review N1: a gate that panics is journaled as the run's question and the wake still goes.
+    crate::nirvana_gate::TEST_GATE_PANICS.set(true);
+    let before = journal.read().0.len();
+    let (code, view) = exec_with("o3", "done.jsonl");
+    assert!(!crate::nirvana_gate::TEST_GATE_PANICS.get());
+    assert_eq!(code, 0, "{view}");
+    assert!(
+        view.contains("not gated: herdr's gate of o3 stopped"),
+        "{view}"
+    );
+    let after = journal.read().0;
+    let asked = after[before..].iter().position(|event| {
+        matches!(&event.kind, Kind::Asked { order: None, question } if question.contains("herdr gate run o3"))
+    });
+    let woke = after[before..]
+        .iter()
+        .position(|event| matches!(event.kind, Kind::WakeQueued { .. } | Kind::Woken { .. }));
+    assert!(
+        matches!((asked, woke), (Some(a), Some(w)) if a < w),
+        "asked at {asked:?}, woken at {woke:?}"
+    );
     nirvana_seat::set_test_world(None);
 }

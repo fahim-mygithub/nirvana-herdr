@@ -15,10 +15,13 @@ apps and to run work that outlives one session. You plan, seat, watch and gate. 
 2. For each order: `herdr seat pick`, then start it on the seat it returns. The `seat` skill says how.
 3. Workers run in parallel. End your turn while they run; between turns no model runs and herdr watches.
 4. herdr wakes you when an order ends, asks, fails or stalls.
-5. herdr gates each `done` delivery itself and the wake says `<order> gated <verdict>`: merge a pass, read a
-   send-back's child, and seat what comes next. A delivery with no gated line (a helper's, a `blocked` one, a gate
-   waiting on a review) you gate with `herdr gate run`, which names the next step; you may regate any order by hand.
-   In MotoProject 1 of 26 deliveries was gated by hand in 8 days, and an invented source went unread.
+5. herdr gates each `done` delivery itself, before it wakes you, and the wake says
+   `<order> gated <verdict>: <reason>` (no reason on a pass): merge a pass, read a send-back's child, answer an
+   asked, and seat what comes next. A delivery with no gated line (a helper's, a `blocked` one, a gate waiting on a
+   review) you gate with `herdr gate run`, which names the next step. A gate by hand of an order sent back or asked
+   gives its child or its question again; a gate that stopped is `the run asks: herdr's gate of <order> stopped`, and
+   you run it by hand. A long `test:` delays the wake by as long. In MotoProject 1 of 26 deliveries was gated by hand
+   in 8 days, and an invented source went unread.
 6. The run ends when its plan is done and gated. Answer the owner in one message.
 
 Call herdr by the path the session digest names, or as the skills write it. A plain `herdr` on PATH may be

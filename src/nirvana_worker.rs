@@ -1823,9 +1823,33 @@ pub fn exec(
                             )
                         )?;
                         if gates {
-                            match crate::nirvana_gate::gate(project, run, order) {
-                                Ok(ruling) => writeln!(out, "gated: {}", ruling.verdict)?,
-                                Err(why) => writeln!(out, "not gated: {why}")?,
+                            // Review N1: the wake below is the orchestrator's only news of this delivery, so a panic
+                            // in the gate is caught, journaled as the run's question, and the wake still goes.
+                            let gated =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    crate::nirvana_gate::gate(project, run, order)
+                                }));
+                            match gated {
+                                Ok(Ok(ruling)) => writeln!(out, "gated: {}", ruling.verdict)?,
+                                Ok(Err(why)) => writeln!(out, "not gated: {why}")?,
+                                Err(panic) => {
+                                    let what = panic
+                                        .downcast_ref::<&str>()
+                                        .map(|text| (*text).to_owned())
+                                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                                        .unwrap_or_else(|| "no message".into());
+                                    let question = format!(
+                                        "herdr's gate of {order} stopped ({what}); gate it by hand: `herdr gate run {order} --run {run}`"
+                                    );
+                                    let _ = journal.append(
+                                        now(),
+                                        Kind::Asked {
+                                            order: None,
+                                            question: question.clone(),
+                                        },
+                                    );
+                                    writeln!(out, "not gated: {question}")?;
+                                }
                             }
                         }
                         // A lesson review's verdict is no one's to read (plan 33 review B2).

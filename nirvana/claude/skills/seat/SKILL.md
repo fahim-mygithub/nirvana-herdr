@@ -53,6 +53,7 @@ owner's words where they matter. Then:
   project's `.mcp.json` server, so its worker gets the server's tools. An order that may press Send adds
   `--send-ok "<the owner's words>"`, copied exactly from the owner's prompt of the last 6 hours (4 words or more);
   herdr refuses a quote it cannot find, and a send-back or reseat never inherits it.
+  `--needs browser` or `--needs bladebro` gives the worker bladebro, a headless browser with its own profile, on a claude or an agy seat; `browser` also limits the pick to the seats that list it, `bladebro` does not.
   An order picked with `--profile <name>` is run with the same `--profile <name>`: herdr copies the profile into the
   run, gives the worker its persona (a system prompt on Claude, the top of the order on agy), and a send-back or
   reseat keeps the copy. Design one with `herdr profile new <name>`, then `herdr profile check <name>`.
@@ -77,8 +78,8 @@ brief as the floor.
    redirect, resolved with `curl -sI` and its `Location`; YouTube by
    `python -m yt_dlp --skip-download --print "%(id)s|%(title)s|%(channel)s" <url>` (`--write-auto-subs` for a
    transcript); Reddit by `curl -s -A "<ua>" <thread>/.rss`, waiting out a 429; any other page one `curl` each, or
-   bladebro when the order needs a browser. agy has no YouTube connector: r2 was promised one, and spent 9 steps
-   finding the method and about 10 failed Reddit reads.
+   bladebro when the order was seated with `--needs bladebro`. agy has no YouTube connector: r2 was promised one,
+   and spent 9 steps finding the method and about 10 failed Reddit reads.
 3. "Done means" ends with a command whose output goes into `tests`: for research, one last command re-opening every
    cited id (`python -m yt_dlp --skip-download --print id <url>...`). reel-motion-gemini graded its own prose check
    "pass" after opening nothing.
@@ -114,11 +115,14 @@ End your turn while workers run; herdr wakes you when an order delivers, asks, f
 
 ## 5. Gate it
 
-herdr gates each `done` delivery itself, before it wakes you, and the wake says `<order> gated <verdict>` (plan 37
-§1.1). A helper's delivery (a reviewer's, a held-out author's), a `blocked` one and a gate that waits on a review you
-gate by hand; `herdr gate run` again names the next step, a booked reviewer's `herdr seat run` line included. A
-cited YouTube video that does not exist fails the sources axis, and its redo goes one seat up with a brief that
-trusts nothing from the first try.
+herdr gates each `done` delivery itself, before it wakes you, and the wake says
+`<order> gated <verdict>: <reason>`, with no reason on a pass (plan 37 §1.1). A helper's delivery (a reviewer's, a
+held-out author's), a `blocked` one and a gate that waits on a review you gate by hand; `herdr gate run` again names
+the next step, a booked reviewer's `herdr seat run` line included, and for an order already sent back or asked it
+gives the child or the question again. A gate that stopped wakes you as `the run asks: herdr's gate of <order>
+stopped`: run it by hand. A cited YouTube video that does not exist fails the sources axis, and its redo goes
+one seat up with a brief that trusts nothing from the first try; when no stronger seat is open herdr asks you instead
+of redoing it on the seat that invented it.
 
 - `herdr gate run <order> --run <run>`: rules on a delivered order. Exit 0 passed; 1 sent back or asked, with the
   reason; 4 waits for a review or a held-out check.

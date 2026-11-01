@@ -1000,6 +1000,14 @@ fn p37_profile_new_from_web_researcher_writes_the_template() {
         let flat = profile.body.replace('\n', " ");
         assert!(flat.contains(&rule), "no {rule:?} in {}", profile.body);
     }
+    // Review N6: the body is paid on every call, so it holds rules only; the incidents are in the seat skill.
+    for incident in ["reel-motion-gemini", "r2 ", "v12-smudge-fix", "MotoProject"] {
+        assert!(
+            !profile.body.contains(incident),
+            "{incident:?} in {}",
+            profile.body
+        );
+    }
     assert!(
         new_profile_from(&project.root, "web-researcher", "web-researcher")
             .unwrap_err()

@@ -183,16 +183,17 @@ CONTROLS = (
             "    if seated.class == crate::nirvana_review::CLASS {\n        return None;\n    }\n",
             "    if seated.class == \"never\" {\n        return None;\n    }\n", T_GATE_PROFILE, "rust"),
     # B2: herdr gates a delivered review itself; no wake, no question, no queue line; ops only on `done`.
-    Control("p33b_review_left_to_orchestrator", WORKER,
-            "                        if review {\n                            match crate::nirvana_gate::gate(",
-            "                        if false {\n                            match crate::nirvana_gate::gate(",
+    # Plan 37 moved the choice into `nirvana_gate::gates_on_delivery`, which `seat exec` asks.
+    Control("p33b_review_left_to_orchestrator", GATE,
+            "    class == crate::nirvana_review::CLASS\n        || (status",
+            "    false\n        || (status",
             T_EXEC, "rust"),
     Control("p33b_review_asks", WORKER,
             '                        if status == "needs_answer" && !review {\n',
             '                        if status == "needs_answer" {\n', T_EXEC, "rust"),
     Control("p33b_review_queued", RUN,
-            "        if let Some(line) = queue_line(&event.kind).filter(|_| !herdrs) {\n",
-            "        if let Some(line) = queue_line(&event.kind).filter(|_| herdrs || true) {\n", T_EXEC, "rust"),
+            "        if let Some(line) = queue_line(&event.kind).filter(|_| !herdrs && owed) {\n",
+            "        if let Some(line) = queue_line(&event.kind).filter(|_| (herdrs || true) && owed) {\n", T_EXEC, "rust"),
     Control("p33b_review_applies_when_not_done", REVIEW,
             '    if status != "done" {\n', "    if false {\n", T_EXEC, "rust"),
     # B3: its own folder, every writing tool denied on claude, and the folder check.

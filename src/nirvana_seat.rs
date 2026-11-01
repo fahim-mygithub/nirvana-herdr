@@ -1403,7 +1403,7 @@ fn pick_unnamed(table: &Table, world: &World, request: &Request) -> Result<Pick,
 /// seat of the same class: the class's own score first, then the seat's output price at `now`, so a tie in the
 /// score goes to the dearer model (research.web scores flash and argon 84 each; flash low invented
 /// reel-motion-gemini's sources and argon medium's redo was real, MotoProject 2026-10-23 and 31). `None` when no
-/// enabled seat of the class stands above `seat`: the redo then takes the rule's pick.
+/// enabled seat of the class stands above `seat`: the gate then asks, never the rule's pick (review S1).
 pub fn step_up(table: &Table, class: &str, seat: &str, now: u64) -> Option<String> {
     let class = table.class(class)?;
     let strength = |entry: &ClassSeat| -> Option<(f32, f64)> {
