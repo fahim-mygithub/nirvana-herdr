@@ -1710,3 +1710,886 @@ fn p33_the_gate_reads_no_profile_for_a_lesson_review() {
     order.class = crate::nirvana_review::CLASS.into();
     assert_eq!(order_profile(&order, &Spec::default()), None);
 }
+
+// ---- Plan 35 P35a: the sources check sees agy's reads ----
+
+/// The sources axis over one cited URL and a stream of one agy `run_command` (or a Claude Bash call).
+fn p35a_mark(url: &str, stream: &str) -> Mark {
+    let report = serde_json::json!({"sources": [{"url": url, "used_for": "spec"}]});
+    sources_axis("research.web", Some(&report), stream)
+        .expect("axis")
+        .mark
+}
+
+/// Plan 35 P35a item 1: each Python fetch word counts the URLs of its own segment, from agy and from Claude. Each
+/// case holds only its own word, so dropping any one of them fails here.
+#[test]
+fn p35a_python_fetch_words_count_their_segment() {
+    let url = "https://example.com/target";
+    let cases = [
+        format!("python -c \"from urllib import request; print(request.urlopen('{url}').read())\""),
+        format!("python -c \"import urllib.request; r = urllib.request.Request('{url}')\""),
+        format!("python -c \"import requests; print(requests.get('{url}').text)\""),
+        format!("python -c \"import requests; requests.post('{url}', data={{}})\""),
+        format!("python -c \"import requests; print(requests.head('{url}').status_code)\""),
+        format!("python -c \"import requests; print(requests.Session().get('{url}').text)\""),
+        format!("python -c \"import httpx; print(httpx.get('{url}').text)\""),
+        format!("python -c \"import httpx; print(httpx.Client().get('{url}').text)\""),
+    ];
+    for case in &cases {
+        assert_eq!(p35a_mark(url, &agy_run(case)), Mark::Pass, "agy: {case}");
+        assert_eq!(
+            p35a_mark(url, &claude_bash(case, "")),
+            Mark::Pass,
+            "claude: {case}"
+        );
+    }
+}
+
+/// Plan 35 P35a item 1: PowerShell's `Invoke-RestMethod` and `irm` fetch; `iwr` and `Invoke-WebRequest` still do.
+#[test]
+fn p35a_powershell_fetch_words_count_and_irm_as_a_whole_word() {
+    let url = "https://example.com/target";
+    for case in [
+        format!("pwsh -NoProfile -Command \"$c = (Invoke-RestMethod -Uri '{url}'); $c\""),
+        format!("$r = irm {url} -Headers @{{a=1}}"),
+        format!("(irm '{url}').name"),
+        format!("iwr -UseBasicParsing {url}"),
+        format!("Invoke-WebRequest -Uri {url}"),
+    ] {
+        assert_eq!(p35a_mark(url, &agy_run(&case)), Mark::Pass, "{case}");
+    }
+}
+
+/// Plan 35 P35a item 2: `gh api repos/<o>/<n>[/...]` reads the repository's two URLs and its own endpoint, flags
+/// `-X GET` before the endpoint included.
+#[test]
+fn p35a_gh_api_counts_the_repository_and_its_endpoint() {
+    let cmd = "gh api repos/Ai-Rook/dance-scoring/commits/master -q '.commit.committer.date'";
+    for url in [
+        "https://github.com/Ai-Rook/dance-scoring",
+        "https://api.github.com/repos/Ai-Rook/dance-scoring",
+        "https://api.github.com/repos/Ai-Rook/dance-scoring/commits/master",
+    ] {
+        assert_eq!(p35a_mark(url, &agy_run(cmd)), Mark::Pass, "{url}");
+    }
+    let flagged = "gh api -X GET /repos/o/n/license 2>$null || echo none";
+    assert_eq!(
+        p35a_mark(
+            "https://api.github.com/repos/o/n/license",
+            &agy_run(flagged)
+        ),
+        Mark::Pass
+    );
+    assert_eq!(
+        p35a_mark("https://github.com/o/n", &claude_bash(flagged, "")),
+        Mark::Pass
+    );
+}
+
+/// Plan 35 P35a item 2: `gh repo view <o>/<n>` (or its github.com URL) reads the repository's two URLs.
+#[test]
+fn p35a_gh_repo_view_counts_the_repository() {
+    let cmd = "gh repo view MindDock/motion-tracker --json url,stargazerCount; gh repo view https://github.com/lguibr/Mimeflow.git";
+    for url in [
+        "https://github.com/MindDock/motion-tracker",
+        "https://api.github.com/repos/MindDock/motion-tracker",
+        "https://github.com/lguibr/Mimeflow",
+    ] {
+        assert_eq!(p35a_mark(url, &agy_run(cmd)), Mark::Pass, "{url}");
+    }
+    // The stable id would count these URLs anyway (the repository named in a gh read), so the mapping itself is
+    // checked where the per-segment rule uses it.
+    let urls = shell_fetch_urls(cmd);
+    for url in [
+        "https://github.com/MindDock/motion-tracker",
+        "https://api.github.com/repos/MindDock/motion-tracker",
+        "https://github.com/lguibr/Mimeflow",
+        "https://api.github.com/repos/lguibr/Mimeflow",
+    ] {
+        assert!(urls.contains(&url.to_owned()), "{url}: {urls:?}");
+    }
+    // A search names repositories it does not read.
+    assert_eq!(
+        p35a_mark(
+            "https://github.com/MindDock/motion-tracker",
+            &agy_run("gh search repos MindDock/motion-tracker")
+        ),
+        Mark::Fail
+    );
+}
+
+/// Plan 35 P35a items 1 and 4: still per segment. A URL that a segment only prints (`python` alone fetches nothing),
+/// lists on a line of its own, or puts beside `confirm` or `$irm` (both holding `irm`) does not count. The f-string
+/// case is yt-video-pick's, in the real send-backs below.
+#[test]
+fn p35a_a_url_counts_only_from_a_segment_that_fetches() {
+    let url = "https://example.com/target";
+    assert_eq!(
+        p35a_mark(
+            url,
+            &agy_run(&format!("echo {url}; python -c \"print('{url}')\""))
+        ),
+        Mark::Fail
+    );
+    let listed = format!(
+        "python -c \"\nimport urllib.request\nurls = [\n    '{url}',\n]\nfor u in urls:\n    print(len(urllib.request.urlopen(u).read()))\n\""
+    );
+    assert_eq!(p35a_mark(url, &agy_run(&listed)), Mark::Fail);
+    assert_eq!(
+        p35a_mark(url, &agy_run(&format!("confirm {url}"))),
+        Mark::Fail
+    );
+    assert_eq!(
+        p35a_mark(url, &agy_run(&format!("$irm = '{url}'; Write-Output $irm"))),
+        Mark::Fail
+    );
+}
+
+/// Plan 35 P35a item 3: the probe-2 stream (agy calling bladebro's `act navigate` through `call_mcp_tool`) passes
+/// `https://example.com`.
+#[test]
+fn p35a_the_probe_2_bladebro_stream_passes_example_com() {
+    const PROBE_2: &str = include_str!("fixtures/probe2-bladebro.jsonl");
+    assert_eq!(p35a_mark("https://example.com", PROBE_2), Mark::Pass);
+}
+
+/// Each fixture's cited sources, and how many of them the sources check counts.
+fn p35a_counts(fixture: &str) -> (usize, usize) {
+    let (head, stream) = fixture.split_once('\n').expect("head line");
+    let head: Value = serde_json::from_str(head).expect("head json");
+    let urls: Vec<&str> = head["sources"]
+        .as_array()
+        .expect("sources")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let counted = urls
+        .iter()
+        .filter(|url| p35a_mark(url, stream) == Mark::Pass)
+        .count();
+    (urls.len(), counted)
+}
+
+/// Plan 35 P35a items 4 and 5, and the MotoProject round: the 11 sources send-backs in groove-coach (research §4's 9,
+/// and yt-breakdown and yt-breakdown-illit after it), cut to their tool calls with each output's lines that hold a URL
+/// or a cited id (record `p35a.md`). Review round: the counts are the real gate's on the full streams too (the same
+/// for all 18); body-extrapolation's 19 lost were plain URLs counted only from outputs (B1). master counts 23 of agy's 85.
+#[test]
+fn p35a_real_sources_send_backs_count_what_the_twin_counts() {
+    let fixtures: [(&str, &str, usize, usize); 11] = [
+        (
+            "asl-inspiration",
+            include_str!("fixtures/asl-inspiration.jsonl"),
+            12,
+            10,
+        ),
+        (
+            "asl-report",
+            include_str!("fixtures/asl-report.jsonl"),
+            14,
+            14,
+        ),
+        (
+            "body-extrapolation",
+            include_str!("fixtures/body-extrapolation.jsonl"),
+            20,
+            1,
+        ),
+        (
+            "ref-authoring",
+            include_str!("fixtures/ref-authoring.jsonl"),
+            10,
+            10,
+        ),
+        (
+            "ref-authoring-s1",
+            include_str!("fixtures/ref-authoring-s1.jsonl"),
+            10,
+            10,
+        ),
+        (
+            "ref-dance-apps",
+            include_str!("fixtures/ref-dance-apps.jsonl"),
+            8,
+            8,
+        ),
+        (
+            "repo-breakdown",
+            include_str!("fixtures/repo-breakdown.jsonl"),
+            6,
+            0,
+        ),
+        (
+            "video-breakdown",
+            include_str!("fixtures/video-breakdown.jsonl"),
+            2,
+            2,
+        ),
+        (
+            "yt-breakdown",
+            include_str!("fixtures/yt-breakdown.jsonl"),
+            1,
+            0,
+        ),
+        (
+            "yt-breakdown-illit",
+            include_str!("fixtures/yt-breakdown-illit.jsonl"),
+            3,
+            0,
+        ),
+        (
+            "yt-video-pick",
+            include_str!("fixtures/yt-video-pick.jsonl"),
+            5,
+            5,
+        ),
+    ];
+    for (order, text, cited, counted) in fixtures {
+        assert_eq!(p35a_counts(text), (cited, counted), "{order}");
+    }
+}
+
+/// The MotoProject round (orchestrator, 2026-10-31): agy research orders in MotoProject, cut the same way. r2 read
+/// through `yt_dlp`, Python URL lists and Reddit `.rss`; master and the per-segment rule counted 0 of its 22. The
+/// fabricated reel-motion-gemini stays at 0 of 12, and so does its copy with one added step that prints the notes
+/// file holding every cited URL (the analysis's sabotage, `control_fab_cat.jsonl`): no fetch, so no read. Review
+/// round: reveal-gemini's 8 lost were plain URLs counted only from outputs (B1); r2 keeps 22 through its
+/// `subprocess` curl or its cut commands' imports (either alone keeps 22); imp-gemini-aspect needs the cut rule for 5.
+#[test]
+fn p35a_motoproject_streams_count_what_the_twin_counts() {
+    let fixtures: [(&str, &str, usize, usize); 7] = [
+        (
+            "reel-motion-gemini-r2",
+            include_str!("fixtures/moto-reel-motion-gemini-r2.jsonl"),
+            22,
+            22,
+        ),
+        (
+            "reel-motion-gemini",
+            include_str!("fixtures/moto-reel-motion-gemini.jsonl"),
+            12,
+            0,
+        ),
+        (
+            "fab-cat",
+            include_str!("fixtures/moto-fab-cat.jsonl"),
+            12,
+            0,
+        ),
+        (
+            "reveal-gemini",
+            include_str!("fixtures/moto-reveal-gemini.jsonl"),
+            18,
+            9,
+        ),
+        (
+            "imp-gemini-aspect",
+            include_str!("fixtures/moto-imp-gemini-aspect.jsonl"),
+            17,
+            17,
+        ),
+        (
+            "v13-drone-research",
+            include_str!("fixtures/moto-v13-drone-research.jsonl"),
+            12,
+            2,
+        ),
+        (
+            "v12-smudge-map",
+            include_str!("fixtures/moto-v12-smudge-map.jsonl"),
+            12,
+            12,
+        ),
+    ];
+    for (order, text, cited, counted) in fixtures {
+        assert_eq!(p35a_counts(text), (cited, counted), "{order}");
+    }
+}
+
+/// An agy `run_command` step with its output.
+fn agy_run_out(command: &str, output: &str) -> String {
+    serde_json::json!({
+        "step_update": {
+            "step_type": "tool",
+            "state": "DONE",
+            "tool_name": "run_command",
+            "tool_info": {"parameters": {"CommandLine": command}, "output": output}
+        }
+    })
+    .to_string()
+}
+
+/// The MotoProject round: what has a stable id, and what does not.
+#[test]
+fn p35a_stable_ids_are_video_post_repository_and_path() {
+    let video = |id: &str| Some(StableId::Video(id.to_owned()));
+    assert_eq!(
+        stable_id("https://www.youtube.com/watch?v=U24jDyYnU3A&t=3"),
+        video("U24jDyYnU3A")
+    );
+    assert_eq!(
+        stable_id("https://youtube.com/shorts/v9SaLex6pn0"),
+        video("v9SaLex6pn0")
+    );
+    assert_eq!(
+        stable_id("https://youtu.be/5-HTPj-tS54"),
+        video("5-HTPj-tS54")
+    );
+    assert_eq!(
+        stable_id("https://www.reddit.com/r/Insta360/comments/1qdd4qr/keyframe_ramping/"),
+        Some(StableId::Post("1qdd4qr".into()))
+    );
+    assert_eq!(
+        stable_id("https://github.com/MindDock/motion-tracker"),
+        Some(StableId::Repo("minddock/motion-tracker".into()))
+    );
+    assert_eq!(
+        stable_id("https://api.github.com/repos/o/n"),
+        Some(StableId::Repo("o/n".into()))
+    );
+    assert_eq!(
+        stable_id("file:///D:/MotoProject/scripts/post.py"),
+        Some(StableId::Path("d:/motoproject/scripts/post.py".into()))
+    );
+    // Review nit: a Unix path keeps its `/`, and any `%XX` escape is decoded.
+    assert_eq!(
+        stable_id("file:///home/x/notes.md"),
+        Some(StableId::Path("/home/x/notes.md".into()))
+    );
+    assert_eq!(
+        stable_id("file:///C:/My%20Notes/caf%C3%A9.md"),
+        Some(StableId::Path("c:/my notes/caf\u{e9}.md".into()))
+    );
+    // A page inside a repository, a search, a short id and any other site keep the per-segment rule alone.
+    for url in [
+        "https://github.com/o/n/blob/main/x.py",
+        "https://www.youtube.com/results?search_query=hiking",
+        "https://www.youtube.com/watch?v=short",
+        "https://example.com/watch?v=U24jDyYnU3A",
+    ] {
+        assert_eq!(stable_id(url), None, "{url}");
+    }
+}
+
+/// The MotoProject round: a stable id counts anywhere in a command that runs a fetch (`yt_dlp` included) or in its
+/// output. A command that fetches nothing vouches for nothing, whatever it prints, and a longer id is not the cited
+/// one. Review round (B1): a plain URL never counts from an output.
+#[test]
+fn p35a_a_stable_id_counts_in_a_fetching_command_or_its_output() {
+    let video = "https://www.youtube.com/watch?v=U24jDyYnU3A";
+    let listed = "python -c \"import yt_dlp\nids = [\n  'U24jDyYnU3A',\n]\nfor i in ids:\n  yt_dlp.YoutubeDL().extract_info(i, download=False)\"";
+    assert_eq!(p35a_mark(video, &agy_run(listed)), Mark::Pass);
+    let post = "https://www.reddit.com/r/Insta360/comments/1qdd4qr/keyframe_ramping/";
+    let rss = "python -c \"import urllib.request\nu = 'https://www.reddit.com/r/Insta360/comments/1qdd4qr/keyframe_ramping/.rss'\nprint(urllib.request.urlopen(u).read()[:99])\"";
+    assert_eq!(p35a_mark(post, &agy_run(rss)), Mark::Pass);
+    // A resolved redirect's output names the video it led to (reveal-gemini's `LOC |` lines).
+    let redirect =
+        "curl -sI https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQF";
+    let location = format!("location: {video}\n");
+    assert_eq!(
+        p35a_mark(video, &agy_run_out(redirect, &location)),
+        Mark::Pass
+    );
+    // Claude: the same through a Bash call and its result.
+    let claude = |command: &str, result: &str| {
+        format!(
+            "{}\n{}",
+            serde_json::json!({"type": "assistant", "message": {"content": [{
+                "type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": command}
+            }]}}),
+            serde_json::json!({"type": "user", "message": {"content": [{
+                "type": "tool_result", "tool_use_id": "t1", "content": result
+            }]}})
+        )
+    };
+    assert_eq!(p35a_mark(video, &claude(redirect, &location)), Mark::Pass);
+    // A Bash call that fetches nothing vouches for nothing in its result.
+    assert_eq!(
+        p35a_mark(video, &claude("ls downloads", &location)),
+        Mark::Fail
+    );
+
+    // Printing the notes is not a read: no fetch word in the command.
+    let plain = "https://example.com/blog/hooks";
+    let notes = agy_run_out("type notes.md", &format!("{video}\n{post}\n{plain}\n"));
+    for url in [video, post, plain] {
+        assert_eq!(p35a_mark(url, &notes), Mark::Fail, "{url}");
+    }
+    assert_eq!(p35a_mark(video, &agy_run("echo U24jDyYnU3A")), Mark::Fail);
+    // A plain URL in a fetching command's text, outside the segment that fetches, still does not count.
+    assert_eq!(
+        p35a_mark(
+            plain,
+            &agy_run(&format!("curl -s https://other.org/a; echo {plain}"))
+        ),
+        Mark::Fail
+    );
+    // A longer id or post id is another source.
+    assert_eq!(
+        p35a_mark(video, &agy_run("yt-dlp --print title xU24jDyYnU3A")),
+        Mark::Fail
+    );
+    assert_eq!(
+        p35a_mark(
+            post,
+            &agy_run("curl -s https://www.reddit.com/comments/1qdd4qrx/.rss")
+        ),
+        Mark::Fail
+    );
+}
+
+/// Review round (B1): a plain URL never counts from a fetch's output, which is the owner's "plain URLs keep the
+/// per-segment rule". Each case is the review's: an echo after a fetch, the notes printed beside a fetch, the notes
+/// fetched as `file://`, and a real resolved redirect (the URL resolved is not the URL fetched).
+#[test]
+fn p35a_a_plain_url_never_counts_from_an_output() {
+    let (a, b) = ("https://a.org/x", "https://b.org/y");
+    let echoed = agy_run_out(
+        &format!("curl -sI https://example.com; echo {a} {b}"),
+        &format!("HTTP/1.1 200 OK\n{a} {b}\n"),
+    );
+    let cat = agy_run_out(
+        "cat notes.md; curl -sI https://example.com",
+        &format!("# notes\n{a}\n{b}\nHTTP/1.1 200 OK\n"),
+    );
+    let file = agy_run_out(
+        "curl -s file:///C:/proj/notes.md",
+        &format!("# notes\n{a}\n{b}\n"),
+    );
+    let resolved = agy_run_out(
+        "curl -sI https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQF",
+        &format!("location: {a}\n"),
+    );
+    for (case, stream) in [
+        ("echo", &echoed),
+        ("cat", &cat),
+        ("file", &file),
+        ("resolved", &resolved),
+    ] {
+        assert_eq!(p35a_mark(a, stream), Mark::Fail, "{case}");
+    }
+}
+
+/// Review round (S2): a fetch word counts only as a command word, never inside a comment, a string or an argument,
+/// so a command that fetches nothing cannot vouch for the ids typed in it. A real fetch still does, in each of the
+/// shapes agy wrote: an assignment, a subexpression, a `subprocess` argv (reel-motion-gemini-r2's `curl.exe`) and
+/// `os.system`.
+#[test]
+fn p35a_a_fetch_word_counts_only_as_a_command_word() {
+    let video = "https://www.youtube.com/watch?v=U24jDyYnU3A";
+    for case in [
+        "echo U24jDyYnU3A # yt-dlp",
+        "echo \"curl\" U24jDyYnU3A",
+        "Write-Output curl U24jDyYnU3A",
+        "type curl.txt; echo U24jDyYnU3A",
+        "$curl_notes = 'U24jDyYnU3A'",
+        "$curl = 'U24jDyYnU3A'",
+        "python -c \"curl_count = 0\nprint('U24jDyYnU3A')\"",
+        "python -c \"import requests  # requests.get(u) comes next\nids = ['U24jDyYnU3A']\nprint(*ids)\"",
+        "python -c \"x = 'requests.get(u)'\nprint('U24jDyYnU3A')\"",
+        "echo urlopen(U24jDyYnU3A)",
+        "python -c \"import subprocess\nsubprocess.run(['echo', 'curl', 'U24jDyYnU3A'])\"",
+        "python -c \"import yt_dlp\nprint('U24jDyYnU3A')\"",
+    ] {
+        assert_eq!(p35a_mark(video, &agy_run(case)), Mark::Fail, "{case}");
+    }
+    for case in [
+        "$u = 'https://www.youtube.com/watch?v=' + 'U24jDyYnU3A'; $r = Invoke-WebRequest -Uri $u",
+        "(irm \"https://noembed.com/embed?id=U24jDyYnU3A\").title",
+        "python -c \"import subprocess\nout = subprocess.check_output(['curl.exe', '-s', 'https://noembed.com/embed?v=U24jDyYnU3A'])\"",
+        "python -c \"import os\nos.system('yt-dlp -j U24jDyYnU3A')\"",
+        "pwsh -NoProfile -Command \"Invoke-RestMethod https://noembed.com/embed?v=U24jDyYnU3A\"",
+    ] {
+        assert_eq!(p35a_mark(video, &agy_run(case)), Mark::Pass, "{case}");
+    }
+}
+
+/// Review round (S2): agy cuts a long `CommandLine` at 512 characters and an ellipsis, so the call can lie past the
+/// cut (66 of reel-motion-gemini-r2's 112 commands). In a cut command an import of a fetch module counts; in a whole
+/// command it does not.
+#[test]
+fn p35a_a_cut_command_counts_its_fetch_import() {
+    let video = "https://www.youtube.com/watch?v=U24jDyYnU3A";
+    let head = "@'\nimport yt_dlp, json, sys\nyt_urls = [\n    'https://www.youtube.com/watch?v=U24jDyYnU3A',\n    'https://www.youtube.com/watch?v=";
+    assert_eq!(
+        p35a_mark(video, &agy_run(&format!("{head}\u{2026}"))),
+        Mark::Pass
+    );
+    assert_eq!(p35a_mark(video, &agy_run(head)), Mark::Fail);
+    assert_eq!(
+        p35a_mark(
+            video,
+            &agy_run("@'\nimport json\nids = ['U24jDyYnU3A',\u{2026}")
+        ),
+        Mark::Fail
+    );
+}
+
+/// Review round (S2): a fetch whose output lists ids it never opened vouches only for the ids typed in it: a YouTube
+/// search or `--flat-playlist`, a Reddit `search.json`, the GitHub search API, and a watch page's related videos. A
+/// local reader's or a `file://` fetch's output vouches for nothing.
+#[test]
+fn p35a_a_listing_or_a_local_read_does_not_vouch_for_its_output() {
+    let video = "https://www.youtube.com/watch?v=U24jDyYnU3A";
+    let post = "https://www.reddit.com/r/hiking/comments/1dffk22/action_cams/";
+    let repo = "https://github.com/MindDock/motion-tracker";
+    let listings = [
+        ("python -m yt_dlp -J \"ytsearch5:hiking\"", video),
+        ("yt-dlp --flat-playlist -J https://vimeo.com/channels/staffpicks", video),
+        ("yt-dlp -J https://www.youtube.com/@bestthree60/videos", video),
+        (
+            "curl -s \"https://www.reddit.com/r/hiking/search.json?q=action+cam&restrict_sr=1\"",
+            post,
+        ),
+        (
+            "curl -s \"https://api.github.com/search/repositories?q=motion+tracker\"",
+            repo,
+        ),
+        ("curl -sL https://www.youtube.com/watch?v=AAAAAAAAAAA", video),
+        ("cat notes.md; curl -sI https://example.com", video),
+        ("curl -s file:///C:/proj/notes.md", video),
+        (
+            "python -c \"import urllib.request\nprint(open('notes.md').read())\nurllib.request.urlopen('https://example.com')\"",
+            video,
+        ),
+    ];
+    let output = format!(
+        "{{\"id\": \"U24jDyYnU3A\", \"permalink\": \"https://www.reddit.com/r/hiking/comments/1dffk22/action_cams/\", \
+\"full_name\": \"MindDock/motion-tracker\"}}\n{video}\n"
+    );
+    for (command, url) in listings {
+        assert_eq!(
+            p35a_mark(url, &agy_run_out(command, &output)),
+            Mark::Fail,
+            "{command}"
+        );
+    }
+    // A reader later in a pipeline reads the fetch, not a file.
+    assert_eq!(
+        p35a_mark(
+            video,
+            &agy_run_out(
+                "curl -sI https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZ | grep -i location",
+                &format!("location: {video}\n")
+            )
+        ),
+        Mark::Pass
+    );
+    // The watch page fetched vouches for its own id, typed in the command; yt-dlp's read of one video for its output.
+    assert_eq!(
+        p35a_mark(
+            "https://youtu.be/AAAAAAAAAAA",
+            &agy_run_out(
+                "curl -sL https://www.youtube.com/watch?v=AAAAAAAAAAA",
+                &output
+            )
+        ),
+        Mark::Pass
+    );
+    assert_eq!(
+        p35a_mark(
+            video,
+            &agy_run_out(
+                "yt-dlp -j https://youtu.be/BBBBBBBBBBB",
+                &format!("{{\"webpage_url\": \"{video}\"}}")
+            )
+        ),
+        Mark::Pass
+    );
+}
+
+/// Review round (S2): Claude's WebFetch counts only its `url`, not the ids typed in its `prompt`; a browser MCP call
+/// (bladebro) counts its input.
+#[test]
+fn p35a_claude_webfetch_counts_its_url_and_a_browser_mcp_call_its_input() {
+    let video = "https://www.youtube.com/watch?v=U24jDyYnU3A";
+    let call = |name: &str, input: Value| {
+        serde_json::json!({"type": "assistant", "message": {"content": [{
+            "type": "tool_use", "id": "w1", "name": name, "input": input
+        }]}})
+        .to_string()
+    };
+    let prompted = call(
+        "WebFetch",
+        serde_json::json!({"url": "https://example.com/x", "prompt": "summarise U24jDyYnU3A and 1dffk22"}),
+    );
+    assert_eq!(p35a_mark(video, &prompted), Mark::Fail);
+    let fetched = call(
+        "WebFetch",
+        serde_json::json!({"url": "https://youtu.be/U24jDyYnU3A", "prompt": "summarise"}),
+    );
+    assert_eq!(p35a_mark(video, &fetched), Mark::Pass);
+    let bladebro = call(
+        "mcp__bladebro__act",
+        serde_json::json!({"action": "navigate", "url": "https://m.youtube.com/watch?v=U24jDyYnU3A"}),
+    );
+    assert_eq!(p35a_mark(video, &bladebro), Mark::Pass);
+}
+
+/// Review round (S1): a `gh` read counts only when `gh` is the segment's command word.
+#[test]
+fn p35a_gh_counts_only_as_a_command_word() {
+    let url = "https://github.com/o/n";
+    for case in [
+        "echo gh api repos/o/n",
+        "python -c \"x = 1\n# gh repo view o/n\nprint(x)\"",
+        "python -c \"cmd = 'gh api repos/o/n'\nprint(cmd)\"",
+        "Write-Output 'gh repo view o/n'",
+    ] {
+        assert_eq!(p35a_mark(url, &agy_run(case)), Mark::Fail, "{case}");
+    }
+    for case in [
+        "$meta = gh api repos/o/n --jq .description",
+        "Set-Location C:\\proj\ngh repo view o/n --json url",
+        "(gh api \"repos/o/n/readme\").content",
+    ] {
+        assert_eq!(p35a_mark(url, &agy_run(case)), Mark::Pass, "{case}");
+    }
+}
+
+/// Review (tests): a repository id is not part of a longer name, `.git` after it is the same repository, and a
+/// longer suffix is not; the host prefixes a cited URL may carry still give its id; a post id stands in a reddit.com
+/// address, so a GitHub `comments/<id>` is not it.
+#[test]
+fn p35a_repo_and_post_ids_keep_their_bounds() {
+    let fetch = |rest: &str| agy_run(&format!("curl -sI https://example.com; echo {rest}"));
+    let repo = "https://github.com/foo/bar";
+    assert_eq!(p35a_mark(repo, &fetch("foo/bar.git")), Mark::Pass);
+    for longer in ["foo/bar-baz", "myfoo/bar", "foo/bar.github", "foo/bar_2"] {
+        assert_eq!(p35a_mark(repo, &fetch(longer)), Mark::Fail, "{longer}");
+    }
+    let post = "https://www.reddit.com/r/x/comments/abcd12/slug/";
+    assert_eq!(
+        p35a_mark(
+            post,
+            &agy_run("curl -s https://api.github.com/repos/o/n/issues/1/comments/abcd12")
+        ),
+        Mark::Fail
+    );
+    assert_eq!(
+        p35a_mark(
+            post,
+            &agy_run("curl -s https://old.reddit.com/r/x/comments/abcd12/.rss")
+        ),
+        Mark::Pass
+    );
+    for (url, id) in [
+        (
+            "https://m.youtube.com/watch?v=U24jDyYnU3A",
+            StableId::Video("U24jDyYnU3A".into()),
+        ),
+        (
+            "https://music.youtube.com/watch?v=U24jDyYnU3A",
+            StableId::Video("U24jDyYnU3A".into()),
+        ),
+        (
+            "https://old.reddit.com/r/x/comments/abcd12/",
+            StableId::Post("abcd12".into()),
+        ),
+        (
+            "https://embed.reddit.com/r/x/comments/abcd12/",
+            StableId::Post("abcd12".into()),
+        ),
+        (
+            "https://www.github.com/Foo/Bar",
+            StableId::Repo("foo/bar".into()),
+        ),
+    ] {
+        assert_eq!(stable_id(url), Some(id), "{url}");
+    }
+}
+
+/// The MotoProject round: `yt_dlp`, `yt-dlp` and `YoutubeDL` are fetch words, per segment as well.
+#[test]
+fn p35a_yt_dlp_is_a_fetch_word() {
+    let url = "https://vimeo.com/76979871";
+    for case in [
+        format!("python -m yt_dlp --skip-download {url}"),
+        format!("yt-dlp -j {url}"),
+        format!("python -c \"print(YoutubeDL().extract_info('{url}'))\""),
+    ] {
+        assert_eq!(p35a_mark(url, &agy_run(&case)), Mark::Pass, "{case}");
+    }
+}
+
+/// The MotoProject round: a `file:///` source counts when a file tool opened that path, the case and separators
+/// aside; a shell `type` of it does not.
+#[test]
+fn p35a_a_file_source_counts_against_read_file() {
+    let url = "file:///D:/MotoProject/scripts/post.py";
+    let agy = serde_json::json!({"step_update": {"step_type": "tool", "state": "DONE", "tool_name": "read_file",
+        "tool_info": {"parameters": {"Path": "D:\\MotoProject\\scripts\\post.py"}}}})
+    .to_string();
+    assert_eq!(p35a_mark(url, &agy), Mark::Pass);
+    let claude = serde_json::json!({"type": "assistant", "message": {"content": [{
+        "type": "tool_use", "id": "r1", "name": "Read", "input": {"file_path": "d:/motoproject/scripts/post.py"}
+    }]}})
+    .to_string();
+    assert_eq!(p35a_mark(url, &claude), Mark::Pass);
+    assert_eq!(
+        p35a_mark(url, &agy_run("type D:\\MotoProject\\scripts\\post.py")),
+        Mark::Fail
+    );
+    assert_eq!(
+        p35a_mark("file:///D:/MotoProject/scripts/other.py", &agy),
+        Mark::Fail
+    );
+}
+
+/// The MotoProject round: reel-motion-gemini's `Owns:` line was read as "the order names no owned file".
+#[test]
+fn p35a_the_owns_key_is_read_in_any_case() {
+    for line in ["owns: a.py", "Owns: a.py", "OWNS: a.py"] {
+        assert_eq!(spec(line).owns, vec!["a.py".to_owned()], "{line}");
+    }
+    assert!(spec("ownsx: a.py").owns.is_empty());
+}
+
+/// The MotoProject round: a sources send-back trusts nothing the worker cited; any other keeps "do not start over".
+/// Review round (S4): a sources fail with nothing cited to open (no Work Report) keeps it too, and a mixed fail keeps
+/// it and adds the sources text.
+#[test]
+fn p35a_a_sources_send_back_says_no_cited_source_is_trusted() {
+    let cited = Axis::new(
+        "sources",
+        Mark::Fail,
+        "2 source(s) cited that were not fetched, read or browsed",
+    )
+    .with(vec!["https://a.org/x".into(), "https://b.org/y".into()]);
+    let tests = Axis::new("tests", Mark::Fail, "1 failing");
+    let brief = |axes: &[Axis]| send_back_brief("o", "o", 1, axes, "# o\n", "nirvana-integrate/r1");
+    let only = brief(std::slice::from_ref(&cited));
+    assert!(only.contains(SOURCES_REDO), "{only}");
+    assert!(!only.contains("do not start over"), "{only}");
+    let mixed = brief(&[cited, tests.clone()]);
+    assert!(mixed.contains(SOURCES_REDO), "{mixed}");
+    assert!(mixed.contains("do not start over"), "{mixed}");
+    let alone = brief(&[tests]);
+    assert!(alone.contains("do not start over"), "{alone}");
+    assert!(!alone.contains(SOURCES_REDO), "{alone}");
+    for why in [
+        "no sources: no Work Report was delivered",
+        "no sources: the Work Report names no sources",
+    ] {
+        let none = brief(&[Axis::new("sources", Mark::Fail, why)]);
+        assert!(none.contains("do not start over"), "{none}");
+        assert!(!none.contains(SOURCES_REDO), "{none}");
+    }
+}
+
+/// The owned axis of an order in the project folder, gated with no branch.
+fn p35a_root_owned(root: &Path, order: &str, owns: &[&str]) -> Axis {
+    let spec = spec_with(owns, "git ls-files", &[]);
+    let det = deterministic(
+        &Subject {
+            root,
+            cwd: root,
+            run: "r1",
+            order,
+            branch: None,
+            class: "build.bounded",
+            report: Some(&done()),
+            spec: &spec,
+            ports: &no_ports,
+        },
+        None,
+    );
+    axis(&det, "owned").clone()
+}
+
+fn p35a_seat_in_root(root: &Path, order: &str, at: u64) {
+    let mut order_seated = seated(order, None);
+    order_seated.cwd = root.display().to_string();
+    Project::at(root)
+        .journal("r1")
+        .append(at, Kind::Seated(Box::new(order_seated)))
+        .expect("seated");
+}
+
+/// The MotoProject round: reel-motion-gemini-r2 ran in the project folder and was sent back for "3958 file(s) changed
+/// that the order does not own", the whole dirty tree. With the seat snapshot, only what the order changed counts: a
+/// file dirty before seating counts only when the order changes it again, a new unowned file still fails, and so
+/// does a clean tracked file the order deletes.
+#[test]
+fn p35a_the_owned_axis_in_the_project_folder_counts_only_the_orders_changes() {
+    let root = repo("p35a-owned-snap");
+    std::fs::write(root.join("README.md"), "dirty before seating\n").unwrap();
+    std::fs::write(root.join("stray.txt"), "untracked before seating\n").unwrap();
+    std::fs::remove_file(root.join("test_calc.py")).unwrap();
+    let project = Project::at(&root);
+    p35a_seat_in_root(&root, "root-order", now());
+    assert_eq!(
+        write_seat_snapshot(&project, "r1", "root-order", &root),
+        Ok(3)
+    );
+    std::fs::write(root.join("calc.py"), "def add(a, b):\n    return b + a\n").unwrap();
+    let owned = p35a_root_owned(&root, "root-order", &["calc.py"]);
+    assert_eq!(owned.mark, Mark::Pass, "{owned:?}");
+    assert!(owned.why.starts_with("1 changed file"), "{owned:?}");
+    assert!(!owned.why.contains(NO_SNAPSHOT), "{owned:?}");
+
+    // The order changes a file that was already dirty, and makes a new one: both are its own, unowned.
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(
+        root.join("README.md"),
+        "dirty before seating, and changed by the order\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("new.txt"), "the order's\n").unwrap();
+    let owned = p35a_root_owned(&root, "root-order", &["calc.py"]);
+    assert_eq!(owned.mark, Mark::Fail, "{owned:?}");
+    assert_eq!(
+        owned.lines,
+        vec!["README.md".to_owned(), "new.txt".to_owned()]
+    );
+}
+
+/// The MotoProject round: an order seated before the snapshot existed (r2 itself) counts a dirty file only when it was
+/// created or modified at or after its seating. Review round (S3): a deletion counts again, as on master; a file the
+/// order wrote with an old modification time (yt-dlp's upload date) counts by its creation time; a non-ASCII name
+/// counts; and the axis says the snapshot was missing.
+#[test]
+fn p35a_with_no_snapshot_the_owned_axis_counts_files_modified_since_seating() {
+    let root = repo("p35a-owned-mtime");
+    let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+    let age = |path: &Path| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+    };
+    for name in ["README.md", "stray.txt"] {
+        std::fs::write(root.join(name), "dirty an hour before seating\n").unwrap();
+        age(&root.join(name));
+    }
+    // Seating is in whole seconds: a second later, nothing made before it reads as made at or after it.
+    std::thread::sleep(Duration::from_millis(1100));
+    p35a_seat_in_root(&root, "old-order", now());
+    std::fs::write(root.join("calc.py"), "def add(a, b):\n    return b + a\n").unwrap();
+    let owned = p35a_root_owned(&root, "old-order", &["calc.py"]);
+    assert_eq!(owned.mark, Mark::Pass, "{owned:?}");
+    assert!(owned.why.starts_with("1 changed file"), "{owned:?}");
+    assert!(owned.why.contains(NO_SNAPSHOT), "{owned:?}");
+
+    std::fs::remove_file(root.join("test_calc.py")).unwrap();
+    std::fs::create_dir_all(root.join("notes")).unwrap();
+    std::fs::write(root.join("notes").join("caf\u{e9}.md"), "the order's\n").unwrap();
+    std::fs::write(root.join("clip.mp4"), "downloaded with the upload date\n").unwrap();
+    age(&root.join("clip.mp4"));
+    let owned = p35a_root_owned(&root, "old-order", &["calc.py"]);
+    assert_eq!(owned.mark, Mark::Fail, "{owned:?}");
+    let mut expected = vec!["notes/caf\u{e9}.md", "test_calc.py"];
+    // A platform with no creation time sees only the modification time.
+    if std::fs::metadata(root.join("clip.mp4"))
+        .and_then(|meta| meta.created())
+        .is_ok()
+    {
+        expected.insert(0, "clip.mp4");
+    }
+    let mut lines = owned.lines.clone();
+    lines.sort();
+    assert_eq!(lines, expected, "{owned:?}");
+}
