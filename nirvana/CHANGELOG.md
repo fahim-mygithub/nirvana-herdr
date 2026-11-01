@@ -3,6 +3,21 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.51.2: upstream herdr sync (herdrdev/herdr master ee5bfb50)
+
+- **Changed:** herdr's 13 commits since our last sync are merged: clipboard helpers bounded so a hung one cannot
+  freeze herdr, the saved layout kept when panes die during host shutdown, a slow server's socket kept on a connect
+  timeout, pane appearance changes sent only after the matching background, newer stable releases on the preview
+  channel, opencode and kilo under XDG_CONFIG_HOME, hermes detection, a tcsh ready marker, and test and CI changes.
+  The two conflicts (`src/app/mod.rs` fields and initializers, `src/app/runtime.rs` deadlines) keep both sides.
+  Nirvana's editor tab now reads the pane appearance through upstream's new helper, like every other pane spawn.
+  Upstream removed the root `CLAUDE.md` symlink; on this machine it was a 9-byte text file, so nothing was lost.
+  **Because:** the fork follows herdr's fixes; the sync was queued as its own fix merge.
+  **Measured:** nextest 4,589 of 4,590, the one failure the Windows plugin-path test, shown to fail alone on master
+  5fd98b52 too; clippy clean; the dry run finds 2,441 of 2,441; the new `sync_command_tab_held_appearance` control
+  and the three loop-deadline controls go red alone. One Sonnet review (no blockers), one fix round.
+  **If you remove this:** the fork misses herdr's own fixes, and the editor tab can open with a stale appearance.
+
 ## alpha 0.51.1: bladebro skips its profile warm-up and prints plain output
 
 - **Changed:** every bladebro definition, and so every worker shell that shares its `BLADE_*` keys, adds
