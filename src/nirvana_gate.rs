@@ -1911,8 +1911,6 @@ fn seat_snapshot_path(project: &Project, run: &str, order: &str) -> PathBuf {
 /// its size and time, so the owned axis counts only what the order changed. reel-motion-gemini-r2 ran in the project
 /// folder and was sent back for "3958 file(s) changed that the order does not own": the whole dirty tree, none of
 /// it its own. `seat run` calls this for an order with no worktree, before the worker starts.
-// `seat run` calls it once the plan 35 P35a hunk for `nirvana_worker.rs` lands; until then only the tests do.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn write_seat_snapshot(
     project: &Project,
     run: &str,

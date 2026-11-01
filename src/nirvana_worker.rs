@@ -3675,6 +3675,14 @@ pub fn seat_order_with(
     if let Some(first) = first {
         return Ok(first);
     }
+    // Plan 35 P35a: the project folder's dirty files at seating, so the owned axis counts only this order's changes.
+    if seated.worktree.is_none() {
+        if let Err(why) =
+            crate::nirvana_gate::write_seat_snapshot(project, &request.run, &seated.order, &cwd)
+        {
+            eprintln!("herdr: no seat snapshot for {}: {why}", seated.order);
+        }
+    }
     let worker = launch_worker(project, &request.run, &seated).map_err(|why| (1, why))?;
     Ok(serde_json::json!({
         "order": seated.order,
