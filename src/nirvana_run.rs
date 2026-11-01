@@ -416,6 +416,17 @@ pub enum Kind {
         context: Option<u64>,
         note_tokens: u64,
     },
+    /// Fix wake-pane (owner, 2026-11-01: "it never did" report back): a `seat run` came from a pane other than the
+    /// run's orchestrator pane, so the run follows it. Run f2u-setup was opened from `wH:p1` on 2026-10-23; on
+    /// 2026-11-01 a Nirvana Claude in another space seated two orders into it, and all three wakes after their
+    /// delivery queued on the gone `wH:p1` (seq 1440, 1449, 1461) until the owner's own prompt 12 minutes later. A new
+    /// kind, not a second `opened`: `opened` is the run's start and its pools, which readers take as the first one, and
+    /// a herdr before this one reads this line as `Unknown` and keeps the first pane, as it did.
+    OrchestratorMoved {
+        pane: String,
+        #[serde(default)]
+        from: Option<String>,
+    },
     /// A kind a later herdr wrote: kept in the file, skipped by this replay.
     #[serde(other)]
     Unknown,
@@ -444,6 +455,7 @@ impl Kind {
             | Self::WakeQueued { .. }
             | Self::ModeChanged { .. }
             | Self::Fresh { .. }
+            | Self::OrchestratorMoved { .. }
             | Self::Unknown => None,
         }
     }
@@ -681,6 +693,9 @@ pub struct Opened {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct RunState {
     pub opened: Option<Opened>,
+    /// The pane a wake types into: `opened`'s, or the latest `orchestrator_moved`'s (fix wake-pane). Every reader of
+    /// "this run's orchestrator" reads this, never `opened.orchestrator_pane`, which stays the pane the run began in.
+    pub orchestrator_pane: Option<String>,
     pub orders: Vec<OrderState>,
     /// `herdr run end`: its time and the pools then.
     pub ended: Option<(u64, Vec<Reading>, Option<String>)>,
@@ -833,6 +848,7 @@ pub fn replay(events: &[Event]) -> RunState {
                 pools_basis,
             } => {
                 if state.opened.is_none() {
+                    state.orchestrator_pane = orchestrator_pane.clone();
                     state.opened = Some(Opened {
                         at: event.at,
                         project: project.clone(),
@@ -1016,6 +1032,7 @@ pub fn replay(events: &[Event]) -> RunState {
                 }
             }
             Kind::ModeChanged { from, to, .. } => state.modes.push((event.at, *from, *to)),
+            Kind::OrchestratorMoved { pane, .. } => state.orchestrator_pane = Some(pane.clone()),
             Kind::Stalled {
                 order,
                 stalls,
@@ -1115,6 +1132,28 @@ pub fn replay(events: &[Event]) -> RunState {
     let through = state.woken_through;
     state.queue.retain(|item| item.seq > through);
     state
+}
+
+/// Fix wake-pane: the `orchestrator_moved` event a `seat run` from `pane` (its `HERDR_PANE_ID`) writes into an opened
+/// run, or `None`: the run is not opened yet (its `opened` names the pane), the pane is unknown (a `seat run` outside
+/// herdr), it is already the orchestrator's, or it is one of the run's own worker panes. A worker that runs `seat run`
+/// is not the orchestrator, and no wake may move to it; the wake's own rule (it types only into Nirvana Claude)
+/// still holds for whatever pane this names. Pure.
+pub fn orchestrator_move(state: &RunState, pane: Option<&str>) -> Option<Kind> {
+    let pane = pane.filter(|pane| !pane.is_empty())?;
+    state.opened.as_ref()?;
+    if state.orchestrator_pane.as_deref() == Some(pane)
+        || state
+            .orders
+            .iter()
+            .any(|order| order.pane.as_deref() == Some(pane))
+    {
+        return None;
+    }
+    Some(Kind::OrchestratorMoved {
+        pane: pane.to_owned(),
+        from: state.orchestrator_pane.clone(),
+    })
 }
 
 // ---- decisions herdr makes without a model ----
@@ -1293,7 +1332,14 @@ pub enum PaneProgram {
     NirvanaClaude,
     /// Anything else, with what herdr saw.
     Other(String),
+    /// Fix wake-pane: herdr answered `pane get` with `pane_not_found`; the pane is named. Never typed into, as
+    /// `Unknown`, but said apart from it: on 2026-11-01 the gone `wH:p1` read as "herdr could not say what runs in it"
+    /// seven times in one run's journal, which hid that the run had lost its orchestrator.
+    Gone(String),
 }
+
+/// herdr's error code for a pane it does not have (`app/api/panes.rs`, `pane_not_found`).
+pub const PANE_NOT_FOUND: &str = "pane_not_found";
 
 impl PaneProgram {
     pub fn why(&self) -> String {
@@ -1301,6 +1347,17 @@ impl PaneProgram {
             Self::Unknown => "herdr could not say what runs in it".into(),
             Self::NirvanaClaude => "it runs Nirvana Claude".into(),
             Self::Other(why) => why.clone(),
+            Self::Gone(pane) => format!("herdr no longer has pane {pane}"),
+        }
+    }
+
+    /// What a failed `pane get` of `pane` says runs in it: `Gone` for herdr's `pane_not_found`, else `Unknown` (herdr
+    /// did not answer, or answered another error). Pure.
+    pub fn of_get_error(pane: &str, code: Option<&str>) -> Self {
+        if code == Some(PANE_NOT_FOUND) {
+            Self::Gone(pane.to_owned())
+        } else {
+            Self::Unknown
         }
     }
 }
@@ -1430,6 +1487,11 @@ pub fn wake_decision(
         return Wake::Queue("the run has no orchestrator pane".into());
     };
     // Before the busy rule, and for an urgent stop too: a pane that is not Nirvana Claude is never typed into.
+    if let PaneProgram::Gone(pane) = &view.program {
+        return Wake::Queue(format!(
+            "the orchestrator's pane {pane} is gone: herdr no longer has it; a seat run from Nirvana Claude's pane moves the run there"
+        ));
+    }
     if view.program != PaneProgram::NirvanaClaude {
         return Wake::Queue(format!(
             "the orchestrator's pane does not run Nirvana Claude: {}",
@@ -2902,10 +2964,7 @@ fn wake_once(
     if state.ended.is_some() {
         return Ok(("the run has ended".into(), false, false));
     }
-    let pane = state
-        .opened
-        .as_ref()
-        .and_then(|opened| opened.orchestrator_pane.clone());
+    let pane = state.orchestrator_pane.clone();
     let view = pane.as_deref().map(view_of);
     let verdict = wake_decision(run, &state, view.as_ref(), now(), urgent);
     match verdict {

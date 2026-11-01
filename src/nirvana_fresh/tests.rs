@@ -1555,3 +1555,29 @@ fn the_owners_own_bang_fresh_keeps_their_record() {
     assert!(owner_prompt_since(&asked, at).is_err());
     assert!(recheck(&stop, now, None, Ok(&asked)).is_err());
 }
+
+/// Fix wake-pane: a run another pane seated into is that pane's, for the fresh start's end and open-run rules; the
+/// pane that opened it no longer holds it.
+#[test]
+fn wake_pane_a_run_moved_to_another_pane_is_that_panes_for_the_fresh_start() {
+    let root = scratch("wake-pane");
+    let project = Project::at(&root);
+    let moved = run(&project, "a", "p1", None);
+    moved
+        .append(
+            20,
+            Kind::OrchestratorMoved {
+                pane: "p2".into(),
+                from: Some("p1".into()),
+            },
+        )
+        .unwrap();
+    let runs = run_states(&project);
+    assert_eq!(open_of("p2", &runs), Some("a"));
+    assert_eq!(open_of("p1", &runs), None);
+    moved.append(300, ended()).unwrap();
+    let runs = run_states(&project);
+    assert_eq!(last_end_of("p2", &runs), Some(("a", 300)));
+    assert_eq!(last_end_of("p1", &runs), None);
+    let _ = std::fs::remove_dir_all(&root);
+}

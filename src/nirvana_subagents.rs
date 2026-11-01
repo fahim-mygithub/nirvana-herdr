@@ -994,11 +994,8 @@ pub fn read_seat_orders(
             }
         }
         let run_state = crate::nirvana_run::replay(&events);
-        let is_our_orch = run_state
-            .opened
-            .as_ref()
-            .and_then(|o| o.orchestrator_pane.as_deref())
-            == Some(orchestrator_pane_id);
+        // Fix wake-pane: the run's current orchestrator, which follows the latest pane that seated into it.
+        let is_our_orch = run_state.orchestrator_pane.as_deref() == Some(orchestrator_pane_id);
         if !is_our_orch {
             continue;
         }
@@ -2591,6 +2588,86 @@ mod tests {
             .count();
         assert_eq!(finished_count, 0, "ended run hides all finished rows");
 
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Fix wake-pane: a run another orchestrator seated into is listed under that orchestrator's pane, not the
+    /// pane that opened it.
+    #[test]
+    fn wake_pane_seat_orders_follow_the_run_to_its_new_orchestrator() {
+        use crate::nirvana_run::{Event, Kind, Seated};
+        let temp = std::env::temp_dir().join(format!(
+            "nirvana_test_wake_pane_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let run_dir = temp.join(".nirvana").join("runs").join("f2u-setup");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let seated = Seated {
+            order: "dial-colour-automation".to_string(),
+            seat: "flash".to_string(),
+            cli: "agy".to_string(),
+            model: "gemini-3.8-flash-medium".to_string(),
+            effort: crate::nirvana_seat::Effort::Medium,
+            pool: "gemini".to_string(),
+            class: "research.web".to_string(),
+            chain: None,
+            size: crate::nirvana_seat::SizeName::Medium,
+            mode: crate::nirvana_seat::Mode::Balanced,
+            needs: Vec::new(),
+            not_family: Vec::new(),
+            reason: "r".to_string(),
+            override_reason: None,
+            order_file: "f".to_string(),
+            cwd: "cwd".to_string(),
+            worktree: None,
+            branch: None,
+            parent: None,
+            why: None,
+            rule_pick: None,
+            bar_dropped: None,
+            step_down: None,
+            use_basis: None,
+            expected: std::collections::BTreeMap::new(),
+            jev_pick: None,
+            send_ok: None,
+        };
+        let kinds = vec![
+            Kind::Opened {
+                project: "proj".into(),
+                orchestrator_pane: Some("wH:p1".into()),
+                auto: true,
+                pools: Vec::new(),
+                pools_basis: None,
+            },
+            Kind::OrchestratorMoved {
+                pane: "wS:p1".into(),
+                from: Some("wH:p1".into()),
+            },
+            Kind::Seated(Box::new(seated)),
+        ];
+        let mut lines = String::new();
+        for (seq, kind) in (1..).zip(kinds) {
+            let event = Event {
+                v: 1,
+                seq,
+                at: 1000 + seq,
+                kind,
+            };
+            lines.push_str(&serde_json::to_string(&event).unwrap());
+            lines.push('\n');
+        }
+        std::fs::write(run_dir.join("journal.jsonl"), &lines).unwrap();
+        let names = |pane: &str| -> Vec<String> {
+            read_seat_orders(&temp, pane, 2000)
+                .into_iter()
+                .map(|s| s.name)
+                .collect()
+        };
+        assert_eq!(names("wS:p1"), vec!["dial-colour-automation".to_owned()]);
+        assert!(names("wH:p1").is_empty());
         let _ = std::fs::remove_dir_all(&temp);
     }
 }
