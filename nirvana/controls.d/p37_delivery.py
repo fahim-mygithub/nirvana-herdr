@@ -31,7 +31,7 @@ T_REFUSED = "p37_invented_sources_whose_step_is_refused_ask"
 T_MIXED = "p37_a_mixed_fail_with_invented_videos_keeps_the_fix_and_distrusts_the_sources"
 T_HELPS = "p37_a_reseated_or_sent_back_helper_keeps_helps"
 
-GATED_ARM = ('        || (status == "done"\n'
+GATED_ARM = ('        || (matches!(status, "done" | "blocked")\n'
              '            && helps_of(project, run, &replay(&project.journal(run).read().0), order).is_none())')
 STEP_SET = "        request.override_seat = Some((up.clone(), reason.clone()));\n"
 OWED_FIRST = "                let first = verdict_owed.iter().any(|owed| owed == order);\n"
@@ -94,11 +94,10 @@ CONTROLS = (
             ".min_by(|(_, a), (_, b)| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)))",
             ".max_by(|(_, a), (_, b)| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)))", T_STEPUP, "rust"),
     # Item 1 (L3): which deliveries `seat exec` gates, and that it gates before it wakes.
-    Control("p37_blocked_gated", GATE, GATED_ARM, GATED_ARM.replace('status == "done"', 'status != "x"'),
-            T_GATES, "rust"),
+    # p37_blocked_gated (a blocked delivery was not gated) is gone: plan 37b gates one (p37b_blocked.py).
     Control("p37_helpers_gated", GATE, GATED_ARM, GATED_ARM.replace(".is_none())", ".is_none() || true)"),
             T_GATES, "rust"),
-    Control("p37_done_not_gated", GATE, GATED_ARM, GATED_ARM.replace('status == "done"', 'status == "never"'),
+    Control("p37_done_not_gated", GATE, GATED_ARM, GATED_ARM.replace('"done" | "blocked"', '"never" | "blocked"'),
             T_GATES, "rust"),
     Control("p37_exec_no_gate", WORKER,
             "                        if gates {\n", "                        if false {\n", T_EXEC, "rust"),
@@ -120,7 +119,7 @@ CONTROLS = (
             "class: research.web\\n\\\n# A profile", "class: research.read\\n\\\n# A profile", T_TEMPLATE, "rust"),
     # Item 4 (L2): each rule in ROLE.md and the seat skill, and the failure each names.
     Control("p37_role_gate_rule", ROLE,
-            "5. herdr gates each `done` delivery itself", "5. Gate each `done` delivery yourself", T_DOCS, "rust"),
+            "5. herdr gates each `done` or `blocked` delivery itself", "5. Gate each `done` delivery yourself", T_DOCS, "rust"),
     Control("p37_role_gate_failure", ROLE,
             "In MotoProject 1 of 26 deliveries", "In MotoProject some deliveries", T_DOCS, "rust"),
     Control("p37_role_brief_failure", ROLE,

@@ -185,8 +185,8 @@ CONTROLS = (
     # B2: herdr gates a delivered review itself; no wake, no question, no queue line; ops only on `done`.
     # Plan 37 moved the choice into `nirvana_gate::gates_on_delivery`, which `seat exec` asks.
     Control("p33b_review_left_to_orchestrator", GATE,
-            "    class == crate::nirvana_review::CLASS\n        || (status",
-            "    false\n        || (status",
+            "    class == crate::nirvana_review::CLASS\n        || (matches!(status",
+            "    false\n        || (matches!(status",
             T_EXEC, "rust"),
     Control("p33b_review_asks", WORKER,
             '                        if status == "needs_answer" && !review {\n',

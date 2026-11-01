@@ -63,6 +63,10 @@ A failing axis seats a child `<root>-s<n>` in the same worktree with the reasons
 starts it. At most 3 per order. The fourth failure asks the owner: the order is `asked`, and you answer the owner,
 not the worker. Do not seat the order again by hand to dodge the cap.
 
+A `blocked` delivery is never sent back: its worker said it cannot go on, so a redo would pay for the same block.
+herdr gates what it did deliver and asks; the question opens with the block and names any other axis that failed
+(plan 37b).
+
 When the child delivers, `herdr gate run <child>`. Its branch holds the root's work and its own.
 
 ## The reviewer (load-bearing orders)

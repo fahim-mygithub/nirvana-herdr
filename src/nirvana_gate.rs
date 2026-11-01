@@ -22,7 +22,8 @@
 //! of another family (decision 0017), whose verdict comes back as its Work Report.
 //!
 //! A failing axis is a **send-back**: a child order `<root>-s<n>` in the same worktree with the reasons, at most 3 per
-//! order; the fourth failure **asks** the owner. Old Nirvana's decision 0010: a continuation is a child order.
+//! order; the fourth failure **asks** the owner. Old Nirvana's decision 0010: a continuation is a child order. A
+//! `blocked` delivery is never sent back: it asks, the block first (plan 37b).
 //!
 //! The order file's gate lines, each at the start of a line, anywhere in the order, any number of times:
 //!
@@ -3310,6 +3311,51 @@ pub(crate) fn record(project: &Project, run: &str, order: &str) {
     }
 }
 
+/// Plan 37b: the block a `blocked` Work Report gives, its summary and its question when it has one; None for any other
+/// status. A lesson review and a helper never reach here: `gate` routes them before `gate_subject`.
+fn block_reason(known: &OrderState) -> Option<String> {
+    let report = known.report.as_ref()?;
+    if report.get("status").and_then(Value::as_str) != Some("blocked") {
+        return None;
+    }
+    let summary = report
+        .get("summary")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let question = report
+        .get("question")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|question| !question.is_empty() && *question != summary);
+    Some(match question {
+        Some(question) => format!("{summary} ({question})"),
+        None => summary.to_owned(),
+    })
+}
+
+/// The question a gated blocked delivery asks: the block first (the wake's line keeps 120 characters), then what the
+/// gate found in what the worker did deliver.
+fn blocked_question(order: &str, block: &str, axes: &[Axis]) -> String {
+    let found: Vec<String> = failing(axes)
+        .iter()
+        .filter(|axis| axis.axis != "report")
+        .map(|axis| format!("{}: {}", axis.axis, axis.why))
+        .collect();
+    let invented = invented_videos(axes).len();
+    let gate = match (found.is_empty(), invented) {
+        (true, _) => "the gate finds nothing else wrong in what it delivered".to_owned(),
+        (false, 0) => format!("the gate also finds {}", found.join("; ")),
+        (false, n) => format!(
+            "the gate also finds {} ({n} cited video(s) do not exist)",
+            found.join("; ")
+        ),
+    };
+    format!(
+        "{order} is blocked: {block}. {gate}. herdr redoes no blocked order: answer the block, change the order, or drop it?"
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn send_back(
     project: &Project,
@@ -3323,7 +3369,17 @@ fn send_back(
     table: Option<&Table>,
 ) -> Result<Ruling, String> {
     let order = known.id().to_owned();
-    let reason = reason_line(&axes);
+    let block = block_reason(known);
+    // Plan 37b: a blocked order's gated line names its block, whichever axis failed first, so the wake shows it.
+    let reason = block
+        .as_ref()
+        .and_then(|_| {
+            failing(&axes)
+                .into_iter()
+                .find(|axis| axis.axis == "report")
+        })
+        .map(|axis| format!("{}: {}", axis.axis, axis.why))
+        .or_else(|| reason_line(&axes));
     let ask = |question: String, axes: Vec<Axis>| -> Result<Ruling, String> {
         journal
             .transact(now(), |_| {
@@ -3353,6 +3409,14 @@ fn send_back(
             next: vec![question],
         })
     };
+    // Plan 37b (the owner, 2026-11-01: "send it blocked as well for validationg"): a blocked delivery is gated for
+    // what it did deliver, and then asked, never sent back. A send-back is the same order again, on the rule's seat or
+    // one up, with "fix what the gate found": it pays a redo of a worker that said it cannot go on, and the block's
+    // question goes unanswered. When the gate also fails another axis (invented sources, an unowned file) the block
+    // still wins, and the question names what the gate found beside it.
+    if let Some(block) = &block {
+        return ask(blocked_question(&order, block, &axes), axes);
+    }
     let (id, n) = match plan_send_back(state, &order) {
         SendBack::Ask => {
             return ask(
@@ -3730,6 +3794,8 @@ then `herdr seat run <seat> --order \"{}\" --order-id {id} --run {run} --class r
 /// `done` delivery but a helper's (a reviewer of another family, a held-out author): gating one of those starts its
 /// subject's next step, which the orchestrator sequences. A lesson review is gated whatever it reported (plan 33
 /// review B2). MotoProject, 2026-10-23 to 31: 1 of 26 deliveries was gated, and an invented source went unread.
+/// Plan 37b: a `blocked` delivery too (the owner, 2026-11-01: "send it blocked as well for validationg"); its gate
+/// asks and never sends back (`send_back`). A `needs_answer` one is `asked` already, which the gate does not rule on.
 pub fn gates_on_delivery(
     project: &Project,
     run: &str,
@@ -3738,7 +3804,7 @@ pub fn gates_on_delivery(
     status: &str,
 ) -> bool {
     class == crate::nirvana_review::CLASS
-        || (status == "done"
+        || (matches!(status, "done" | "blocked")
             && helps_of(project, run, &replay(&project.journal(run).read().0), order).is_none())
 }
 
