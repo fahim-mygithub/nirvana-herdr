@@ -25,6 +25,15 @@ T_PLAIN = "p35b_exec_an_agy_order_with_nothing_to_add_starts_with_todays_argv"
 T_REVIEW = "p35b_an_agy_lesson_review_is_denied_commands_and_writes"
 T_LINE = "p35b_seat_run_gives_an_agy_research_order_the_sources_line"
 T_PROFILE = "p35b_a_profile_denying_mapped_tools_seats_on_agy_and_an_unmapped_one_does_not"
+# The review round (records/p35b.md "Review round").
+T_CAP = "p35b_a_skill_over_the_cap_is_left_out_and_the_skills_together_have_a_cap"
+T_LINK = "p35b_a_linked_skill_is_left_out_with_a_line"
+T_WALK = "p35b_the_workspace_walk_stops_at_a_checkout_and_reaches_the_root_below_one"
+T_VERBATIM = "p35b_a_verbatim_path_is_named_one_way"
+T_LEFTOVERS = "p35b_the_leftover_orders_are_read_from_both_folders"
+T_SWEEP = "p35b_exec_sweeps_the_tool_files_ended_orders_left_and_journals_an_unknown_finish"
+T_CLEANUP = "p35b_seat_cleanup_removes_the_orders_tool_files"
+T_CHILD = "p35b_an_agy_research_child_brief_gets_the_sources_line_once"
 
 CONTROLS = (
     # Item 2 and R4: a non-desktop server no longer keeps an order on claude; a definition agy cannot take does.
@@ -55,8 +64,8 @@ CONTROLS = (
     Control("p35b_agy_order_argv_skipped", GUI,
             '    let agy = cli == Some("agy");\n', "    let agy = false;\n", T_ORDER, "rust"),
     Control("p35b_servers_untranslated", AGY,
-            "        chosen.insert(server.clone(), translate(definition));\n",
-            "        chosen.insert(server.clone(), definition.clone());\n", T_ORDER, "rust"),
+            "        let mut agy = translate(definition);\n",
+            "        let mut agy = definition.clone();\n", T_ORDER, "rust"),
     Control("p35b_workspace_dup_kept", AGY,
             "        if native.contains(server) {\n", "        if false && native.contains(server) {\n",
             T_ORDER, "rust"),
@@ -72,12 +81,12 @@ CONTROLS = (
             "    let tools = tools_dir", T_NOTHING, "rust"),
     # Items 1, 3 and 5: the rules copy, the --add-dir, the write deny on the tools folder, the prompt, the flags' place.
     Control("p35b_add_dir_left_out", AGY,
-            '        flags.extend(["--add-dir".to_owned(), tools.display().to_string()]);\n', "", T_RULES, "rust"),
+            '        flags.extend(["--add-dir".to_owned(), plain_path(&tools)]);\n', "", T_RULES, "rust"),
     Control("p35b_tools_deny_missing", AGY,
-            '        deny.push(format!("write_file({}/)", rule_path(&tools)));\n', "", T_RULES, "rust"),
+            '        add(&mut deny, format!("write_file({}/)", rule_path(&tools)));\n', "", T_RULES, "rust"),
     Control("p35b_rule_path_backslash", AGY,
-            "    let text = path.display().to_string().replace('\\\\', \"/\");\n",
-            "    let text = path.display().to_string();\n", T_RULES, "rust"),
+            "    plain_path(path).replace('\\\\', \"/\")\n",
+            "    plain_path(path)\n", T_RULES, "rust"),
     Control("p35b_prompt_unchanged", AGY,
             "                first_line(order.order_file, order.cwd, &tools)\n",
             "                crate::nirvana_worker::first_line(order.order_file)\n", T_RULES, "rust"),
@@ -94,15 +103,17 @@ CONTROLS = (
     Control("p35b_imports_unsaid", AGY,
             "    let imports = if has_imports(body) {\n", "    let imports = if false {\n", T_RULES, "rust"),
     Control("p35b_rules_over_own", AGY,
-            "        if has_agy_rules(at) {\n", "        if false && has_agy_rules(at) {\n", T_OWN, "rust"),
+            "        .any(|dir| has_agy_rules(dir))\n", "        .any(|dir| false && has_agy_rules(dir))\n", T_OWN,
+            "rust"),
     Control("p35b_budget_silent", AGY,
             "        if text.len() > RULES_BUDGET_BYTES {\n", "        if false {\n", T_LONG, "rust"),
     # Item 5: the project's skills, copied whole, never over the workspace's own.
     Control("p35b_skills_not_copied", AGY,
-            "        copy_folder(&from, &to)\n", "        Ok::<(), std::io::Error>(())\n", T_SKILLS, "rust"),
+            "        copy_folder(from, &target).map_err(|err| {\n",
+            "        Ok::<(), std::io::Error>(()).map_err(|err| {\n", T_SKILLS, "rust"),
     Control("p35b_skills_over_workspace", AGY,
-            '        .filter(|(name, _)| !cwd.join(".agents").join("skills").join(name).exists())\n',
-            "        .filter(|_| true)\n", T_SKILLS, "rust"),
+            '            .any(|dir| dir.join(".agents").join("skills").join(&name).exists())\n',
+            "            .any(|_| false)\n", T_SKILLS, "rust"),
     # Item 4: denials. The mapping is never widened; mcp tool and server forms; a review's and a profile's rules.
     Control("p35b_deny_widened", AGY,
             '    let rest = tool.strip_prefix("mcp__")?;\n',
@@ -111,7 +122,7 @@ CONTROLS = (
             '    let (server, name) = rest.split_once("__").unwrap_or((rest, "*"));\n',
             '    let (server, name) = (rest, "*");\n', T_DENY, "rust"),
     Control("p35b_settings_not_written", AGY,
-            '        flags.extend(["--settings".to_owned(), file.display().to_string()]);\n', "",
+            '    flags.extend(["--settings".to_owned(), plain_path(&file)]);\n', "",
             T_DENY_FILE, "rust"),
     Control("p35b_review_not_denied", WORKER,
             "        return Ok(crate::nirvana_agy_tools::REVIEW_DENIED\n            .map(str::to_owned)\n            .to_vec());\n",
@@ -134,8 +145,8 @@ CONTROLS = (
             '    ((class.starts_with("research.") || class.starts_with("media.")))\n', T_SOURCES, "rust"),
     # Item 6: finished_reason fails the result.
     Control("p35b_finished_ignored", WORKER,
-            "                .and_then(Value::as_str)\n                .map(|reason| format!(\"agy finished with {reason:?}, status {status:?}\"));\n",
-            "                .and_then(|_| None::<&str>)\n                .map(|reason| format!(\"agy finished with {reason:?}, status {status:?}\"));\n",
+            "                .and_then(Value::as_str)\n                .filter(|reason| AGY_UNFINISHED",
+            "                .and_then(|_| None::<&str>)\n                .filter(|reason| AGY_UNFINISHED",
             T_FINISHED, "rust"),
     # Items 1 and 7: the folder goes when the worker ends (failed too), a stale one never reaches a start, and an
     # error after the servers were written removes them.
@@ -148,11 +159,83 @@ CONTROLS = (
             "        .and_then(|argv| with_agy_tools(argv, project, &run_dir, &seated, out))\n", "",
             T_EXEC, "rust"),
     Control("p35b_exec_stale_kept", WORKER,
-            "        crate::nirvana_gui_tools::remove_order_config(&run_dir, &seated.order, out);\n        // Plan 29 review F3",
-            "        // Plan 29 review F3", T_EXEC, "rust"),
+            "        crate::nirvana_gui_tools::remove_order_config(&run_dir, &seated.order, out);\n        ensure_sources_line(",
+            "        ensure_sources_line(", T_EXEC, "rust"),
     Control("p35b_exec_error_keeps", WORKER,
             "                crate::nirvana_gui_tools::remove_order_config(&run_dir, &seated.order, out);\n                end_failed(",
             "                end_failed(", T_EXEC, "rust"),
+    # The review round. S1: a stdio server with no cwd gets the worker's folder; one with its own keeps it.
+    Control("p35b_cwd_not_written", AGY,
+            '            if object.contains_key("command") && !object.contains_key("cwd") {\n',
+            "            if false {\n", T_ORDER, "rust"),
+    Control("p35b_cwd_overwritten", AGY,
+            '            if object.contains_key("command") && !object.contains_key("cwd") {\n',
+            '            if object.contains_key("command") {\n', T_ORDER, "rust"),
+    # S2: only the three named reasons, or a string beside another status, fail; another one is a journaled note.
+    Control("p35b_finished_any_string", WORKER,
+            '                .filter(|reason| AGY_UNFINISHED.contains(reason) || status != "SUCCESS")\n',
+            "                .filter(|_| true)\n", T_FINISHED, "rust"),
+    Control("p35b_finished_status_ignored", WORKER,
+            '                .filter(|reason| AGY_UNFINISHED.contains(reason) || status != "SUCCESS")\n',
+            "                .filter(|reason| AGY_UNFINISHED.contains(reason))\n", T_FINISHED, "rust"),
+    Control("p35b_finished_note_silent", WORKER,
+            "        (ok && !AGY_UNFINISHED.contains(&reason)).then(|| {\n",
+            "        (false && !AGY_UNFINISHED.contains(&reason)).then(|| {\n", T_FINISHED, "rust"),
+    Control("p35b_finished_note_unjournaled", WORKER,
+            "                            why: note,\n", "                            why: None,\n", T_SWEEP, "rust"),
+    # S3: Edit has no agy rule, and the deny file's folder is denied.
+    Control("p35b_edit_mapped", AGY,
+            '    ("Write", "write_file(*)"),\n', '    ("Edit", "write_file(*)"),\n', T_DENY, "rust"),
+    Control("p35b_agy_folder_undenied", AGY,
+            '        format!("write_file({}/)", rule_path(&order.run_dir.join(DIR))),\n',
+            '        String::from("command(*)"),\n', T_RULES, "rust"),
+    # S4: the sweep runs at start, takes the agy and mcp files, and spares an order that wants a worker or is live.
+    Control("p35b_sweep_skipped", WORKER,
+            "    sweep_leftovers(project, run, order, out);\n", "", T_SWEEP, "rust"),
+    Control("p35b_sweep_wanting", WORKER,
+            "                .is_some_and(|known| known.phase.wants_worker())\n",
+            "                .is_some_and(|_| false)\n", T_SWEEP, "rust"),
+    Control("p35b_sweep_live_ignored", WORKER,
+            "                || live(project, &other, &name)\n", "", T_SWEEP, "rust"),
+    Control("p35b_leftover_mcp_missed", AGY,
+            '        .chain(names(run_dir.join("mcp"), ".json", false))\n', "", T_LEFTOVERS, "rust"),
+    # S5: seat cleanup removes the order's files; the per-skill and the total caps.
+    Control("p35b_cleanup_keeps_files", WORKER,
+            "    crate::nirvana_gui_tools::remove_order_config(&project.run_dir(run), order, out);\n", "",
+            T_CLEANUP, "rust"),
+    Control("p35b_skill_cap_ignored", AGY,
+            "        if bytes > per_skill {\n", "        if false {\n", T_CAP, "rust"),
+    Control("p35b_skills_total_ignored", AGY,
+            "        if copied + bytes > total {\n", "        if false {\n", T_CAP, "rust"),
+    # S6: a server part with `_` or `.`, a tool part with `__` or a leading `_`, names no one agy server for sure.
+    Control("p35b_flattened_server_mapped", AGY,
+            "            .all(|c| c.is_ascii_alphanumeric() || c == '-');\n",
+            "            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));\n", T_DENY, "rust"),
+    Control("p35b_split_tool_mapped", AGY,
+            '            && !name.contains("__")\n', "", T_DENY, "rust"),
+    Control("p35b_underscore_tool_mapped", AGY,
+            "            && !name.starts_with('_')\n", "", T_DENY, "rust"),
+    # Nits: rules once each; one path text; links; the walk; imports; a child brief's sources line.
+    Control("p35b_dedup_adjacent", AGY,
+            "        if !deny.contains(&rule) {\n", "        if deny.last() != Some(&rule) {\n", T_DENY_FILE, "rust"),
+    Control("p35b_add_dir_verbatim", AGY,
+            '    match text.strip_prefix(r"\\\\?\\") {\n', "    match None::<&str> {\n", T_VERBATIM, "rust"),
+    Control("p35b_link_followed", AGY,
+            '        if kind.is_symlink() && entry.path().join("SKILL.md").is_file() {\n',
+            "        if false {\n", T_LINK, "rust"),
+    Control("p35b_linked_root_followed", AGY,
+            "    if is_link(&from) {\n", "    if false {\n", T_LINK, "rust"),
+    Control("p35b_walk_past_git", AGY,
+            '        if at == root || !at.starts_with(root) || at.join(".git").exists() {\n',
+            "        if at == root || !at.starts_with(root) {\n", T_WALK, "rust"),
+    Control("p35b_root_skills_ignored", AGY,
+            "    let workspace = workspace_dirs(cwd, root);\n", "    let workspace = vec![cwd.to_path_buf()];\n",
+            T_WALK, "rust"),
+    Control("p35b_types_node_import", AGY,
+            "                    .is_some_and(|last| last.trim_start_matches('.').contains('.'))\n",
+            "                    .is_some_and(|_| true)\n", T_WALK, "rust"),
+    Control("p35b_child_line_twice", WORKER,
+            "    if text.contains(line) {\n        return;\n    }\n", "", T_CHILD, "rust"),
     Control("p35b_exec_adds_to_nothing", AGY,
             "    let used = std::fs::read_dir(&tools).is_ok_and(|mut entries| entries.next().is_some());\n",
             "    let used = true;\n", T_PLAIN, "rust"),

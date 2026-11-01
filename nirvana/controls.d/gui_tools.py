@@ -8,7 +8,7 @@ GATE = "src/nirvana_gate.rs"
 
 T_NAMES = "the_server_names_are_the_keys_of_mcp_servers"
 T_AMONG = "a_need_names_a_server_exactly_and_never_a_capability"
-T_WHY = "only_a_claude_seat_takes_a_server_order_and_a_desktop_server_says_why"
+T_WHY = "only_a_claude_seat_takes_a_desktop_server_order_and_says_why"
 T_PICK = "a_desktop_server_order_skips_every_agy_seat_and_is_refused_without_a_claude_seat"
 T_SEAT_NEEDS = "seat_needs_takes_the_server_needs_out_and_reads_the_projects_mcp_json"
 T_CONFIG = "the_order_config_holds_only_the_named_servers_copied_whole"
@@ -42,13 +42,14 @@ CONTROLS = (
     Control("p29_among_repeats", GUI,
             "        if !capabilities.contains(&need.as_str()) && servers.contains(need) && !named.contains(need)\n",
             "        if !capabilities.contains(&need.as_str()) && servers.contains(need)\n", T_AMONG, "rust"),
-    # §5.2: a server order is claude-only, and a desktop server names the window.
+    # §5.2, as plan 35 P35b changed it: no server keeps an order off agy, and a desktop server names the window.
     Control("p29_why_none_for_servers", GUI,
-            "    if servers.is_empty() {\n        return None;\n    }\n",
-            "    if !servers.is_empty() {\n        return None;\n    }\n", T_WHY, "rust"),
+            "pub fn claude_only(servers: &[String], defined: &Map<String, Value>) -> Option<String> {\n",
+            "pub fn claude_only(servers: &[String], defined: &Map<String, Value>) -> Option<String> {\n"
+            "    if servers.is_empty() {\n        return Some(String::new());\n    }\n", T_WHY, "rust"),
     Control("p29_why_no_desktop", GUI,
-            "            .find(|server| DESKTOP_SERVERS.contains(&server.as_str()))\n",
-            "            .find(|server| server.is_empty())\n", T_WHY, "rust"),
+            "        .find(|server| DESKTOP_SERVERS.contains(&server.as_str()))\n    {\n",
+            "        .find(|server| server.is_empty())\n    {\n", T_WHY, "rust"),
     # §5.2: the seat rule skips every non-claude seat for such an order; no claude seat refuses it with the reason.
     Control("p29_pick_ignores_claude_only", SEAT,
             '        .filter(|_| seat.cli != "claude")\n',
@@ -84,8 +85,8 @@ CONTROLS = (
             '        "--mcp-config".to_owned(),\n', '        "--mcp-configs".to_owned(),\n', T_ARGV, "rust"),
     # §5.1 and §5.4: the worker's file under the run, its argv, the line; agy, no server, or an error: today's argv.
     Control("p29_order_agy_too", GUI,
-            '    if needs.is_empty() || argv.first().map(String::as_str) != Some("claude") {\n',
-            "    if needs.is_empty() {\n", T_ORDER, "rust"),
+            '    if needs.is_empty() || !matches!(cli, Some("claude" | "agy")) {\n',
+            '    if needs.is_empty() || cli != Some("claude") {\n', T_ORDER, "rust"),
     Control("p29_order_wrong_dir", GUI,
             '    run_dir.join("mcp").join(format!("{order}.json"))\n',
             '    run_dir.join(format!("{order}.json"))\n', T_ORDER, "rust"),
@@ -96,8 +97,8 @@ CONTROLS = (
             '                "seats.toml is refused ({why}); the needs {MCP_FILE} names are read as its servers"\n',
             '                "{why}"\n', T_ORDER, "rust"),
     Control("p29_order_empty_config_written", GUI,
-            "    if servers.is_empty() {\n        return Ok(argv);\n    }\n    let file = write_order_config(",
-            "    let file = write_order_config(", T_ORDER, "rust"),
+            "    if servers.is_empty() {\n        return Ok(argv);\n    }\n    let cannot = |why: String| {",
+            "    let cannot = |why: String| {", T_ORDER, "rust"),
     # §5.3 and review F4: every server order's brief says never start a device; a desktop one batches too.
     Control("p29_brief_no_device_line", GUI,
             "\n    text.push_str(DEVICE_LINE);\n    if servers\n", "\n    if servers\n", T_BRIEF, "rust"),

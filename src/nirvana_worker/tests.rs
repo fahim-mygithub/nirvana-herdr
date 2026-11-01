@@ -1900,6 +1900,7 @@ fn p35b_an_agy_result_with_a_finished_reason_fails_naming_it() {
     for (reason, ok) in [
         (Value::Null, true),
         (Value::from("print_timeout"), false),
+        (Value::from("interrupted"), false),
         (Value::from("error"), false),
     ] {
         let mut cut = stream.clone();
@@ -1914,7 +1915,23 @@ fn p35b_an_agy_result_with_a_finished_reason_fails_naming_it() {
                 );
             }
         }
+        assert_eq!(cut.finished_note(), None, "{reason}");
     }
+    // Review round S2: another string with SUCCESS is read as finished, with one note; with any other status it fails.
+    let mut later = stream.clone();
+    later.result.as_mut().unwrap()["finished_reason"] = Value::from("stop");
+    assert!(later.report().is_ok());
+    assert_eq!(
+        later.finished_note().unwrap(),
+        "agy finished with \"stop\" and status SUCCESS; herdr knows only print_timeout, interrupted, error as \
+         unfinished, so it read the turn as finished (plan 35 §3.6)"
+    );
+    later.result.as_mut().unwrap()["status"] = Value::from("FAILED");
+    assert_eq!(
+        later.report().unwrap_err(),
+        "agy finished with \"stop\", status \"FAILED\""
+    );
+    assert_eq!(later.finished_note(), None);
 }
 
 /// A project under a test home with the default seats, `.mcp.json` defining a non-desktop `bambu`, and a CLAUDE.md
@@ -2179,4 +2196,168 @@ fn p35b_seat_run_gives_an_agy_research_order_the_sources_line() {
     );
     assert!(!brief("c1").contains(SOURCES_LINE), "{}", brief("c1"));
     nirvana_seat::set_test_world(None);
+}
+
+// ---- plan 35 P35b review round ----
+
+/// S4 and S2 through `herdr seat exec`: the supervisor sweeps the tool files of an ended order of any run, keeps those
+/// of an order that still wants a worker, and journals a `finished_reason` it does not know with the order's end.
+#[cfg(windows)]
+#[test]
+fn p35b_exec_sweeps_the_tool_files_ended_orders_left_and_journals_an_unknown_finish() {
+    let (_home, project, base) = p35b_project("p35b-sweep", false, &[]);
+    let later = LIVE_FLASH.replacen(
+        "\"status\":\"SUCCESS\",",
+        "\"status\":\"SUCCESS\",\"finished_reason\":\"stop\",",
+        1,
+    );
+    assert_ne!(later, LIVE_FLASH);
+    std::fs::write(project.root.join("recorded.jsonl"), later).unwrap();
+    // Run r0: `gone` and `held` ended, `waits` is still seated; all three left their files. A supervisor still holds
+    // `held` (its last removals not done yet).
+    let old = project.journal("r0");
+    old.append(1, opened()).unwrap();
+    for name in ["gone", "held", "waits"] {
+        let mut seated = base.clone();
+        seated.order = name.into();
+        old.append(2, Kind::Seated(Box::new(seated))).unwrap();
+    }
+    for name in ["gone", "held"] {
+        old.append(
+            3,
+            Kind::Ended {
+                order: Some(name.into()),
+                outcome: "failed".into(),
+                why: Some("herdr was killed".into()),
+                exit: None,
+                pools: Vec::new(),
+                pools_basis: None,
+            },
+        )
+        .unwrap();
+    }
+    let _held = take_live(&project, "r0", "held").unwrap().unwrap();
+    let r0 = project.run_dir("r0");
+    let leave = |order: &str| {
+        let tools = crate::nirvana_agy_tools::tools_dir(&r0, order).join(".agents");
+        std::fs::create_dir_all(&tools).unwrap();
+        std::fs::write(tools.join("mcp_config.json"), "{}").unwrap();
+        std::fs::write(crate::nirvana_agy_tools::settings_path(&r0, order), "{}").unwrap();
+        std::fs::create_dir_all(r0.join("mcp")).unwrap();
+        std::fs::write(r0.join("mcp").join(format!("{order}.json")), "{}").unwrap();
+    };
+    leave("gone");
+    leave("held");
+    leave("waits");
+    let journal = project.journal("r1");
+    journal.append(1, opened()).unwrap();
+    journal
+        .append(2, Kind::Seated(Box::new(base.clone())))
+        .unwrap();
+    TEST_COMMAND.with_borrow_mut(|slot| {
+        *slot = Some(vec![
+            "cmd.exe".into(),
+            "/c".into(),
+            "type recorded.jsonl".into(),
+        ]);
+    });
+    let mut out = Vec::new();
+    let code = exec(&project, "r1", "o1", None, &mut out).unwrap();
+    TEST_COMMAND.with_borrow_mut(|slot| *slot = None);
+    let view = String::from_utf8_lossy(&out).into_owned();
+    assert_eq!(code, 0, "{view}");
+    assert_eq!(
+        crate::nirvana_agy_tools::leftover_orders(&r0),
+        ["held".to_owned(), "waits".to_owned()]
+    );
+    assert!(
+        view.contains(
+            "removed the MCP and agy tool files gone of run r0 left behind after it ended"
+        ),
+        "{view}"
+    );
+    assert!(!view.contains("files waits"), "{view}");
+    let why = journal
+        .read()
+        .0
+        .into_iter()
+        .find_map(|event| match event.kind {
+            Kind::Ended {
+                order: Some(o),
+                outcome,
+                why,
+                ..
+            } if o == "o1" => Some((outcome, why)),
+            _ => None,
+        });
+    let (outcome, why) = why.expect("ended");
+    assert_eq!(outcome, "delivered");
+    assert!(
+        why.as_deref()
+            .is_some_and(|why| why.starts_with("agy finished with \"stop\" and status SUCCESS")),
+        "{why:?}"
+    );
+    assert!(view.contains("agy finished with \"stop\""), "{view}");
+    nirvana_seat::set_test_world(None);
+}
+
+/// S5: `herdr seat cleanup` removes the order's tool files, through `cleanup`, which `cleanup_cli` calls.
+#[test]
+fn p35b_seat_cleanup_removes_the_orders_tool_files() {
+    let (_home, project, seated) = p35b_project("p35b-cleanup", false, &[]);
+    let journal = project.journal("r1");
+    journal.append(1, opened()).unwrap();
+    journal
+        .append(2, Kind::Seated(Box::new(seated.clone())))
+        .unwrap();
+    let run_dir = project.run_dir("r1");
+    let tools = crate::nirvana_agy_tools::tools_dir(&run_dir, "o1");
+    std::fs::create_dir_all(&tools).unwrap();
+    std::fs::write(tools.join("AGENTS.md"), "rules\n").unwrap();
+    std::fs::write(
+        crate::nirvana_agy_tools::settings_path(&run_dir, "o1"),
+        "{}",
+    )
+    .unwrap();
+    std::fs::create_dir_all(run_dir.join("mcp")).unwrap();
+    std::fs::write(run_dir.join("mcp").join("o1.json"), "{}").unwrap();
+    let mut out = Vec::new();
+    assert!(cleanup(&project, "r1", &journal, "o1", &mut out).unwrap());
+    assert!(crate::nirvana_agy_tools::leftover_orders(&run_dir).is_empty());
+    assert!(
+        String::from_utf8_lossy(&out).ends_with("o1: cleaned up; its branch (none) stays\n"),
+        "{}",
+        String::from_utf8_lossy(&out)
+    );
+    assert!(!cleanup(&project, "r1", &journal, "nobody", &mut Vec::new()).unwrap());
+    nirvana_seat::set_test_world(None);
+}
+
+/// Nit: an agy research attempt whose brief came from a claude parent gets the sources line once; claude never does.
+#[test]
+fn p35b_an_agy_research_child_brief_gets_the_sources_line_once() {
+    use crate::nirvana_agy_tools::SOURCES_LINE;
+    let dir = temp_dir("p35b_child_sources");
+    let mut child = seated("c1");
+    child.class = "research.web".into();
+    child.order_file = dir.join("c1.md").display().to_string();
+    std::fs::write(&child.order_file, "# Continue the dial specs").unwrap();
+    let mut out = Vec::new();
+    ensure_sources_line(&child, &mut out);
+    ensure_sources_line(&child, &mut out);
+    assert_eq!(
+        std::fs::read_to_string(&child.order_file).unwrap(),
+        format!("# Continue the dial specs\n\n{SOURCES_LINE}\n")
+    );
+    let mut claude = child.clone();
+    claude.cli = "claude".into();
+    claude.order_file = dir.join("k1.md").display().to_string();
+    std::fs::write(&claude.order_file, "# Continue\n").unwrap();
+    ensure_sources_line(&claude, &mut out);
+    assert_eq!(
+        std::fs::read_to_string(&claude.order_file).unwrap(),
+        "# Continue\n"
+    );
+    assert!(out.is_empty());
+    let _ = std::fs::remove_dir_all(dir);
 }

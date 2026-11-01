@@ -41,16 +41,13 @@ fn order<'a>(root: &'a Path, cwd: &'a Path, run_dir: &'a Path, file: &'a str) ->
 #[test]
 fn p35b_each_claude_tool_maps_to_its_measured_agy_rule_and_any_other_is_refused() {
     assert_eq!(
-        deny_rules(&words(&[
-            "Bash",
-            "PowerShell",
-            "Write",
-            "Edit",
-            "NotebookEdit",
-            "Read"
-        ]))
-        .unwrap(),
+        deny_rules(&words(&["Bash", "PowerShell", "Write", "Read"])).unwrap(),
         words(&["command(*)", "write_file(*)", "read_file(*)"])
+    );
+    // Review round S3: no probe saw `write_file(*)` stop agy's `edit_file`, so Edit and NotebookEdit have no rule.
+    assert_eq!(
+        unmapped(&words(&["Write", "Edit", "NotebookEdit"])),
+        words(&["Edit", "NotebookEdit"])
     );
     assert_eq!(
         deny_rule("mcp__bambu__print").as_deref(),
@@ -58,6 +55,10 @@ fn p35b_each_claude_tool_maps_to_its_measured_agy_rule_and_any_other_is_refused(
     );
     assert_eq!(deny_rule("mcp__bambu__*").as_deref(), Some("mcp(bambu/*)"));
     assert_eq!(deny_rule("mcp__bambu").as_deref(), Some("mcp(bambu/*)"));
+    assert_eq!(
+        deny_rule("mcp__moto-reel__get_clip").as_deref(),
+        Some("mcp(moto-reel/get_clip)")
+    );
     // Unmeasured: a tool with no row, a pattern argument, an odd server name.
     for tool in [
         "WebSearch",
@@ -68,6 +69,14 @@ fn p35b_each_claude_tool_maps_to_its_measured_agy_rule_and_any_other_is_refused(
         "mcp__",
         "mcp__a b__x",
         "bash",
+        // Review round S6: a server part with `_` may be Claude's flattening of `.`, a space or `_`, and `__` splits
+        // two ways, so neither names one agy server for sure.
+        "mcp__my_server__t",
+        "mcp__cosplay_flow",
+        "mcp__my.server__t",
+        "mcp__a__b__c",
+        "mcp__a___t",
+        "mcp__a__t.x",
     ] {
         assert_eq!(deny_rule(tool), None, "{tool}");
     }
@@ -156,7 +165,7 @@ fn p35b_an_agy_server_order_gets_its_servers_in_the_tools_folder_and_f3_holds() 
     assert_eq!(
         written,
         serde_json::json!({"mcpServers": {
-            "bambu": {"command": "node", "env": {"BAMBU_TOKEN": "fake-not-real"}},
+            "bambu": {"command": "node", "env": {"BAMBU_TOKEN": "fake-not-real"}, "cwd": plain_path(&root)},
             "reel": {"serverUrl": "http://127.0.0.1:9/mcp"}}})
     );
     assert_eq!(
@@ -217,6 +226,34 @@ fn p35b_an_agy_server_order_gets_its_servers_in_the_tools_folder_and_f3_holds() 
         )
         .unwrap_err()
     };
+    // Review round S1: a stdio server's own `cwd` is kept; one with none gets the worker's folder (the cwd given).
+    std::fs::write(
+        root.join(".mcp.json"),
+        r#"{"mcpServers": {"bambu": {"command": "node", "args": ["tools/s.js"], "cwd": "D:/own"}, "reel": {"command": "uv", "args": ["run", "r.py"]}}}"#,
+    )
+    .unwrap();
+    let wt = root.join("wt2");
+    let mut out = Vec::new();
+    crate::nirvana_gui_tools::order_argv(
+        today.clone(),
+        &root,
+        &wt,
+        &run_dir,
+        "o6",
+        &words(&["bambu", "reel"]),
+        caps(),
+        &mut out,
+    )
+    .unwrap();
+    let written: Value = serde_json::from_str(
+        &std::fs::read_to_string(tools_dir(&run_dir, "o6").join(MCP_CONFIG)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(written["mcpServers"]["bambu"]["cwd"], "D:/own");
+    assert_eq!(
+        written["mcpServers"]["reel"]["cwd"],
+        Value::from(plain_path(&wt))
+    );
     std::fs::write(
         root.join(".mcp.json"),
         r#"{"mcpServers": {"bambu": {"command": "node", "env": {"T": "${TOKEN}"}}, "xtool": {"command": "uv"}}}"#,
@@ -313,8 +350,13 @@ fn p35b_a_project_with_only_claude_md_gives_agy_its_rules_and_the_prompt_names_b
     let deny: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
     assert_eq!(
         deny,
-        serde_json::json!({"permissions": {"deny": [format!("write_file({}/)", rule_path(&tools))]}})
+        serde_json::json!({"permissions": {"deny": [
+            format!("write_file({}/)", rule_path(&tools)),
+            format!("write_file({}/)", rule_path(&run_dir.join(DIR))),
+        ]}})
     );
+    // Review round S3: the deny file is under `<run>/agy/`, which the second rule covers.
+    assert!(settings.starts_with(run_dir.join(DIR)));
     assert!(!rule_path(&tools).contains('\\'));
     // A continuation keeps its own line.
     let resumed = argv(&LaunchSpec {
@@ -407,7 +449,7 @@ fn p35b_the_projects_claude_skills_are_copied_whole_unless_the_workspace_has_the
     std::fs::create_dir_all(skills.join("notes")).unwrap();
     std::fs::create_dir_all(root.join(".agents").join("skills").join("probe")).unwrap();
     assert_eq!(
-        claude_skills(&root, &root),
+        claude_skills(&root, &root, &mut Vec::new()),
         vec![("seat".to_owned(), skills.join("seat"))]
     );
     let file = root.join("o.md").display().to_string();
@@ -459,8 +501,18 @@ fn p35b_a_denied_order_gets_its_rules_in_the_settings_file_and_no_add_dir() {
     let deny: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
     assert_eq!(
         deny,
-        serde_json::json!({"permissions": {"deny": ["command(*)", "write_file(*)"]}})
+        serde_json::json!({"permissions": {"deny": [
+            "command(*)".to_owned(),
+            "write_file(*)".to_owned(),
+            format!("write_file({}/)", rule_path(&run_dir.join(DIR))),
+        ]}})
     );
+    // Review round nit: a rule given twice, not side by side, is written once.
+    let mut twice = order(&root, &root, &run_dir, &file);
+    twice.deny = words(&["command(*)", "write_file(*)", "command(*)"]);
+    with_tools(today.clone(), &twice, &mut out).unwrap();
+    let deny: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(deny["permissions"]["deny"].as_array().unwrap().len(), 3);
 }
 
 #[test]
@@ -502,4 +554,162 @@ fn p35b_only_an_agy_research_or_media_order_gets_the_sources_line() {
     assert_eq!(sources_line("agy", "media.video"), Some(SOURCES_LINE));
     assert_eq!(sources_line("claude", "research.web"), None);
     assert_eq!(sources_line("agy", "build.bounded"), None);
+}
+
+// ---- the review round (records/p35b.md "Review round") ----
+
+/// S5: a skill over `SKILL_MAX_BYTES` is left out of a real `with_tools` with one line; the total cap holds too.
+#[test]
+fn p35b_a_skill_over_the_cap_is_left_out_and_the_skills_together_have_a_cap() {
+    let (_home, root, run_dir) = project("p35b-skill-cap");
+    let skills = root.join(".claude").join("skills");
+    for name in ["big", "small"] {
+        std::fs::create_dir_all(skills.join(name)).unwrap();
+        std::fs::write(
+            skills.join(name).join("SKILL.md"),
+            format!("---\nname: {name}\n---\n"),
+        )
+        .unwrap();
+    }
+    // A sparse file: the cap reads the length, so no 4 MiB is written.
+    std::fs::File::create(skills.join("big").join("blob.bin"))
+        .unwrap()
+        .set_len(SKILL_MAX_BYTES)
+        .unwrap();
+    let file = root.join("o.md").display().to_string();
+    let mut out = Vec::new();
+    with_tools(
+        agy_argv(&file),
+        &order(&root, &root, &run_dir, &file),
+        &mut out,
+    )
+    .unwrap();
+    let copied = tools_dir(&run_dir, "o1").join(".agents").join("skills");
+    assert!(copied.join("small").join("SKILL.md").is_file());
+    assert!(!copied.join("big").exists());
+    let line = String::from_utf8(out).unwrap();
+    assert!(
+        line.starts_with("the skill big is left out: its folder holds ")
+            && line.ends_with(&format!(" bytes, over {SKILL_MAX_BYTES}\n")),
+        "{line}"
+    );
+    assert_eq!(line.lines().count(), 1);
+    // The total: with a 10-byte budget, the first 6-byte skill goes and the second does not.
+    let from = root.join("caps");
+    let list: Vec<(String, PathBuf)> = ["a", "b"]
+        .iter()
+        .map(|name| {
+            std::fs::create_dir_all(from.join(name)).unwrap();
+            std::fs::write(from.join(name).join("SKILL.md"), "six b\n").unwrap();
+            ((*name).to_owned(), from.join(name))
+        })
+        .collect();
+    let to = root.join("caps-out");
+    let mut out = Vec::new();
+    copy_skills(&list, &to, 100, 10, &mut out).unwrap();
+    assert!(to.join("a").join("SKILL.md").is_file());
+    assert!(!to.join("b").exists());
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "the skill b is left out: with it the skills would hold 12 bytes, over 10\n"
+    );
+}
+
+/// Nit: a linked skill folder, or a linked `.claude/skills`, is not followed, each with one line.
+#[cfg(windows)]
+#[test]
+fn p35b_a_linked_skill_is_left_out_with_a_line() {
+    let (_home, root, _run_dir) = project("p35b-skill-link");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("SKILL.md"), "---\nname: away\n---\n").unwrap();
+    let skills = root.join(".claude").join("skills");
+    std::fs::create_dir_all(&skills).unwrap();
+    let junction = |link: &Path, target: &Path| {
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+    junction(&skills.join("away"), &outside);
+    let mut out = Vec::new();
+    assert!(claude_skills(&root, &root, &mut out).is_empty());
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "the skill away is left out: it is a link, which herdr does not follow\n"
+    );
+    let cwd = root.join("sub");
+    std::fs::create_dir_all(cwd.join(".claude")).unwrap();
+    junction(&cwd.join(".claude").join("skills"), &skills);
+    let mut out = Vec::new();
+    assert!(claude_skills(&cwd, &root, &mut out).is_empty());
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        format!(
+            "{} is a link, so herdr copies no skill from it\n",
+            cwd.join(".claude").join("skills").display()
+        )
+    );
+}
+
+/// Nits: the walk stops at a checkout's own `.git`, so an untracked root `AGENTS.md` does not leave a worktree worker
+/// with no rules; a root `.agents/skills/<name>` counts for a cwd below it; `@types/node` is no import.
+#[test]
+fn p35b_the_workspace_walk_stops_at_a_checkout_and_reaches_the_root_below_one() {
+    let (_home, root, _run_dir) = project("p35b-walk");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::write(root.join("AGENTS.md"), "untracked\n").unwrap();
+    std::fs::write(root.join("CLAUDE.md"), "root rule\n").unwrap();
+    let worktree = root.join(".nirvana").join("worktrees").join("o1");
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::write(worktree.join(".git"), "gitdir: elsewhere\n").unwrap();
+    std::fs::write(worktree.join("CLAUDE.md"), "tracked rule\n").unwrap();
+    assert_eq!(workspace_dirs(&worktree, &root), vec![worktree.clone()]);
+    assert_eq!(
+        claude_rules(&worktree, &root),
+        Some(worktree.join("CLAUDE.md"))
+    );
+    // A plain folder below the root walks up to it, and the root's own rules count.
+    let sub = root.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    assert_eq!(workspace_dirs(&sub, &root), vec![sub.clone(), root.clone()]);
+    assert_eq!(claude_rules(&sub, &root), None);
+    let skills = root.join(".claude").join("skills").join("s");
+    std::fs::create_dir_all(&skills).unwrap();
+    std::fs::write(skills.join("SKILL.md"), "---\nname: s\n---\n").unwrap();
+    assert_eq!(claude_skills(&sub, &root, &mut Vec::new()).len(), 1);
+    std::fs::create_dir_all(root.join(".agents").join("skills").join("s")).unwrap();
+    assert!(claude_skills(&sub, &root, &mut Vec::new()).is_empty());
+    assert!(!has_imports("npm i @types/node, then run"));
+    assert!(has_imports("See @docs/more.md."));
+    assert!(has_imports("@~/.claude/mine.md"));
+}
+
+/// Nit: the `--add-dir` text and the rule's path come from one text, without a `\\?\` prefix.
+#[test]
+fn p35b_a_verbatim_path_is_named_one_way() {
+    assert_eq!(plain_path(Path::new(r"\\?\C:\p\runs")), r"C:\p\runs");
+    assert_eq!(rule_path(Path::new(r"\\?\C:\p\runs")), "C:/p/runs");
+    assert_eq!(
+        plain_path(Path::new(r"\\?\UNC\host\share")),
+        r"\\?\UNC\host\share"
+    );
+}
+
+/// S4: the orders a run's `agy/` and `mcp/` folders hold files for, once each.
+#[test]
+fn p35b_the_leftover_orders_are_read_from_both_folders() {
+    let (_home, _root, run_dir) = project("p35b-leftovers");
+    assert!(leftover_orders(&run_dir).is_empty());
+    std::fs::create_dir_all(tools_dir(&run_dir, "a1")).unwrap();
+    std::fs::write(settings_path(&run_dir, "a1"), "{}").unwrap();
+    std::fs::write(settings_path(&run_dir, "a2"), "{}").unwrap();
+    std::fs::create_dir_all(run_dir.join("mcp")).unwrap();
+    std::fs::write(run_dir.join("mcp").join("c1.json"), "{}").unwrap();
+    std::fs::write(run_dir.join("mcp").join("notes.txt"), "x").unwrap();
+    assert_eq!(leftover_orders(&run_dir), words(&["a1", "a2", "c1"]));
 }

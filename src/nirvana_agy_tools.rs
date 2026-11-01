@@ -29,20 +29,24 @@ pub const MCP_CONFIG: &str = ".agents/mcp_config.json";
 /// `--dangerously-skip-permissions`:
 /// - `command(*)`: P35b probe 2, "Permission denied for unsandboxed(echo P35B-CMD)". The terminal sandbox is off on
 ///   this machine, so agy checks a command as `unsandboxed(...)`, and `command(*)` denies it.
-/// - `write_file(*)`: plan probe 2.
+/// - `write_file(*)`: plan probe 2, against agy's `write_file` tool.
 /// - `read_file(*)`: P35b probe 2. In that probe a write in the worker's own folder was refused too, with
 ///   `read_file(*)` and a path rule in the same file; which one refused it was not separated, so a `Read` denial on agy
 ///   may also deny writes. It never denies less than Claude's.
-pub const DENY_TABLE: [(&str, &str); 6] = [
+///
+/// `Edit` and `NotebookEdit` have no row (review round S3). The model's file tools are `write_file` and `edit_file`
+/// (review probe 5: it named exactly these two and had no notebook tool), and no probe saw `write_file(*)` deny an
+/// `edit_file` call. A rule that may leave edits open is no `Edit` denial, so such a profile stays on claude.
+pub const DENY_TABLE: [(&str, &str); 4] = [
     ("Bash", "command(*)"),
     ("PowerShell", "command(*)"),
     ("Write", "write_file(*)"),
-    ("Edit", "write_file(*)"),
-    ("NotebookEdit", "write_file(*)"),
     ("Read", "read_file(*)"),
 ];
 
-/// Plan 33 review B3 on agy (§3.4): a lesson reviewer reads and answers, so it may neither run nor write.
+/// Plan 33 review B3 on agy (§3.4): a lesson reviewer reads and answers, so it may neither run nor write. Whether
+/// `write_file(*)` also stops `edit_file` is unmeasured (`DENY_TABLE`); the gate's check of the lessons folder stays
+/// the backstop, as it is for a tool Claude Code adds later.
 pub const REVIEW_DENIED: [&str; 2] = ["command(*)", "write_file(*)"];
 
 /// The keys of a `.mcp.json` server herdr carries to agy. Any other key refuses the server on agy: dropping it could
@@ -57,6 +61,11 @@ pub const RULES_BUDGET_BYTES: usize = 80_000;
 /// The most of one skill folder herdr copies. A skill past it is left out with one line: a copy runs before every
 /// attempt. A hypothesis; no project here has a skill near it.
 pub const SKILL_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The most herdr copies of all the skills together (review round nit: a per-skill cap alone lets many skills copy
+/// before every attempt). Skills are copied by name; one that would pass the total is left out with one line. A
+/// hypothesis, like `SKILL_MAX_BYTES`.
+pub const SKILLS_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 /// §5 P35b item 3: the line an agy research or media order gets after its `sources` line. P35a teaches the gate to see
 /// shell fetches; a URL built inside a script (`watch?v={vid}`) it still cannot see. The MotoProject analysis of
@@ -75,28 +84,50 @@ pub fn settings_path(run_dir: &Path, order: &str) -> PathBuf {
     run_dir.join(DIR).join(format!("{order}.settings.json"))
 }
 
+/// A path as herdr hands it to agy, without the `\\?\` a canonical Windows path carries. The argv's `--add-dir` and
+/// the rule that denies writes there come from this one text, so they never name the folder two ways.
+pub fn plain_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_owned(),
+        _ => text,
+    }
+}
+
 /// A path as an agy rule names it: forward slashes, the drive letter kept. P35b probe 1 measured
 /// `write_file(C:/.../tools/)` denying a write there; the docs' drive-stripped form was not separated (probe 2).
 pub fn rule_path(path: &Path) -> String {
-    let text = path.display().to_string().replace('\\', "/");
-    text.strip_prefix("//?/").map(str::to_owned).unwrap_or(text)
+    plain_path(path).replace('\\', "/")
 }
 
 /// The agy rule for one Claude Code tool name, or `None` when no measured rule matches it. `mcp__<s>__<t>` becomes
 /// `mcp(<s>/<t>)`, and `mcp__<s>__*` or `mcp__<s>` becomes `mcp(<s>/*)` (P35b probe 3 measured both forms).
+///
+/// Review round S6: Claude names a server's tools by the server's name with every character but a letter, a digit
+/// and `-` made `_` (`nirvana_preload::tool_server_key`), while agy names it by its `.mcp.json` key. A server part of
+/// only letters, digits and `-` is its key exactly, whatever the project defines. One with `_` may come from `.`, a
+/// space or `_`, and `a__b__t` splits two ways, so either is refused, as is a tool part that starts with `_` or holds
+/// `__` (`mcp__a___t` is server `a` and tool `_t`, or `a_` and `t`). Resolving against the project's keys instead
+/// would need the root in `nirvana_profiles::narrow`, whose callers in `nirvana_seat` and `nirvana_gate` do not pass
+/// it; a seat rule and an exec that read the name two ways would seat an order the exec then fails.
 pub fn deny_rule(tool: &str) -> Option<String> {
     if let Some((_, rule)) = DENY_TABLE.iter().find(|(name, _)| *name == tool) {
         return Some((*rule).to_owned());
     }
     let rest = tool.strip_prefix("mcp__")?;
     let (server, name) = rest.split_once("__").unwrap_or((rest, "*"));
-    let plain = |part: &str| {
-        !part.is_empty()
-            && part
+    let key = !server.is_empty()
+        && server
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-');
+    let tool_part = name == "*"
+        || (!name.is_empty()
+            && !name.starts_with('_')
+            && !name.contains("__")
+            && name
                 .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-    };
-    (plain(server) && (name == "*" || plain(name))).then(|| format!("mcp({server}/{name})"))
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')));
+    (key && tool_part).then(|| format!("mcp({server}/{name})"))
 }
 
 /// The tools of `tools` no measured agy rule matches.
@@ -239,7 +270,17 @@ pub fn write_servers(
             );
             continue;
         }
-        chosen.insert(server.clone(), translate(definition));
+        let mut agy = translate(definition);
+        // Review round S1: a stdio server with no `cwd` gets the worker's folder written in, the folder a claude
+        // worker starts it from, so a project-relative script runs the same on both. Review probe 4 measured that an
+        // add-dir server's `cwd` is honoured (a relative script found only there answered); one without starts in
+        // agy's own cwd, which is the worker's folder today, so this pins what is now true by accident.
+        if let Some(object) = agy.as_object_mut() {
+            if object.contains_key("command") && !object.contains_key("cwd") {
+                object.insert("cwd".to_owned(), Value::from(plain_path(cwd)));
+            }
+        }
+        chosen.insert(server.clone(), agy);
     }
     if chosen.is_empty() {
         return Ok(Vec::new());
@@ -275,20 +316,33 @@ pub fn has_agy_rules(dir: &Path) -> bool {
         })
 }
 
-/// §3.5: the `CLAUDE.md` to give an agy worker as rules, or `None`. None when the cwd, walking up to the project
-/// root, has agy rules of its own, or when neither the cwd nor the root has a `CLAUDE.md`.
-pub fn claude_rules(cwd: &Path, root: &Path) -> Option<PathBuf> {
+/// The folders whose agy rules and skills the worker's workspace is taken to hold: the cwd, then each parent up to
+/// the project root. The walk stops at a folder holding `.git` (review round nit): a worktree is its own checkout, so
+/// an untracked `AGENTS.md` in the root is not in it, and finding it there left the worker with no rules at all. When
+/// the cwd is outside the root (none is today), the root is checked too.
+pub fn workspace_dirs(cwd: &Path, root: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
     let mut dir = Some(cwd);
     while let Some(at) = dir {
-        if has_agy_rules(at) {
-            return None;
-        }
-        if at == root || !at.starts_with(root) {
+        dirs.push(at.to_path_buf());
+        if at == root || !at.starts_with(root) || at.join(".git").exists() {
             break;
         }
         dir = at.parent();
     }
-    if !cwd.starts_with(root) && has_agy_rules(root) {
+    if !cwd.starts_with(root) {
+        dirs.push(root.to_path_buf());
+    }
+    dirs
+}
+
+/// §3.5: the `CLAUDE.md` to give an agy worker as rules, or `None`. None when a workspace folder
+/// (`workspace_dirs`) has agy rules of its own, or when neither the cwd nor the root has a `CLAUDE.md`.
+pub fn claude_rules(cwd: &Path, root: &Path) -> Option<PathBuf> {
+    if workspace_dirs(cwd, root)
+        .iter()
+        .any(|dir| has_agy_rules(dir))
+    {
         return None;
     }
     [cwd, root]
@@ -297,13 +351,19 @@ pub fn claude_rules(cwd: &Path, root: &Path) -> Option<PathBuf> {
         .find(|file| file.is_file())
 }
 
-/// Whether a rules text holds a Claude Code `@path` import, which agy does not follow.
+/// Whether a rules text holds a Claude Code `@path` import, which agy does not follow. The word names a file: its
+/// last part has an extension (`@AGENTS.md`, `@docs/more.md`, `@~/.claude/x.md`), so `@types/node` is no import.
 pub fn has_imports(text: &str) -> bool {
     text.split_whitespace().any(|word| {
         word.strip_prefix('@').is_some_and(|rest| {
+            let rest = rest.trim_end_matches([',', ';', ':', ')', '.']);
             rest.chars()
                 .next()
                 .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '/' | '~' | '_'))
+                && rest
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|last| last.trim_start_matches('.').contains('.'))
         })
     })
 }
@@ -321,9 +381,15 @@ pub fn rules_text(source: &Path, body: &str) -> String {
     )
 }
 
+fn is_link(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
 /// The project's Claude skills, `<cwd>/.claude/skills/<name>/SKILL.md` (the root's when the cwd has none), each with
-/// its folder, by name. A skill the workspace's `.agents/skills/` has already is left out: agy loads that one.
-pub fn claude_skills(cwd: &Path, root: &Path) -> Vec<(String, PathBuf)> {
+/// its folder, by name. A skill a workspace folder's `.agents/skills/` has already (`workspace_dirs`) is left out:
+/// agy loads that one. Links are not followed, each with one line: a linked skill folder, or a `.claude/skills` that
+/// is itself a link, could copy from outside the project.
+pub fn claude_skills(cwd: &Path, root: &Path, out: &mut dyn Write) -> Vec<(String, PathBuf)> {
     let from = [cwd, root]
         .iter()
         .map(|dir| dir.join(".claude").join("skills"))
@@ -331,18 +397,86 @@ pub fn claude_skills(cwd: &Path, root: &Path) -> Vec<(String, PathBuf)> {
     let Some(from) = from else {
         return Vec::new();
     };
+    if is_link(&from) {
+        let _ = writeln!(
+            out,
+            "{} is a link, so herdr copies no skill from it",
+            from.display()
+        );
+        return Vec::new();
+    }
     let Ok(entries) = std::fs::read_dir(&from) else {
         return Vec::new();
     };
-    let mut skills: Vec<(String, PathBuf)> = entries
-        .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .filter(|entry| entry.path().join("SKILL.md").is_file())
-        .filter_map(|entry| Some((entry.file_name().into_string().ok()?, entry.path())))
-        .filter(|(name, _)| !cwd.join(".agents").join("skills").join(name).exists())
-        .collect();
+    let workspace = workspace_dirs(cwd, root);
+    let mut skills: Vec<(String, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_symlink() && entry.path().join("SKILL.md").is_file() {
+            let _ = writeln!(
+                out,
+                "the skill {} is left out: it is a link, which herdr does not follow",
+                entry.file_name().to_string_lossy()
+            );
+            continue;
+        }
+        if !kind.is_dir() || !entry.path().join("SKILL.md").is_file() {
+            continue;
+        }
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if workspace
+            .iter()
+            .any(|dir| dir.join(".agents").join("skills").join(&name).exists())
+        {
+            continue;
+        }
+        skills.push((name, entry.path()));
+    }
     skills.sort();
     skills
+}
+
+/// Copies `skills` into `<to>/<name>/`, in order, leaving out with one line each a skill past `per_skill` bytes or one
+/// that would take the copy past `total`.
+pub fn copy_skills(
+    skills: &[(String, PathBuf)],
+    to: &Path,
+    per_skill: u64,
+    total: u64,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    let mut copied = 0u64;
+    for (name, from) in skills {
+        let bytes = folder_bytes(from);
+        if bytes > per_skill {
+            let _ = writeln!(
+                out,
+                "the skill {name} is left out: its folder holds {bytes} bytes, over {per_skill}"
+            );
+            continue;
+        }
+        if copied + bytes > total {
+            let _ = writeln!(
+                out,
+                "the skill {name} is left out: with it the skills would hold {} bytes, over {total}",
+                copied + bytes
+            );
+            continue;
+        }
+        let target = to.join(name);
+        copy_folder(from, &target).map_err(|err| {
+            format!(
+                "cannot copy the skill {name} to {}: {err}",
+                target.display()
+            )
+        })?;
+        copied += bytes;
+    }
+    Ok(())
 }
 
 /// The bytes under `dir`, files only, links not followed.
@@ -392,15 +526,16 @@ pub fn first_line(order_file: &str, cwd: &Path, tools: &Path) -> String {
     format!(
         "Do the work order in {order_file}. Your folder is {}; work only there. {} holds herdr's tool config: never \
          write there. End with the Work Report your output schema asks for.",
-        cwd.display(),
-        tools.display()
+        plain_path(cwd),
+        plain_path(tools)
     )
 }
 
 /// §3.1: an agy worker's argv with its tools folder and deny file. Writes the rules (§3.5) and the skills into the
 /// tools folder, beside the servers file `order_argv` wrote. When the folder holds anything the argv gets
 /// `--add-dir <tools>`, the deny file gets `write_file(<tools>/)`, and a first start's prompt names both folders
-/// (§3.3). When there is nothing to add the argv comes back as it went in. Any other CLI's argv is untouched.
+/// (§3.3). Any deny file also denies `write_file(<run>/agy/)`, which holds it. When there is nothing to add the argv
+/// comes back as it went in. Any other CLI's argv is untouched.
 pub fn with_tools(
     mut argv: Vec<String>,
     order: &Order,
@@ -424,31 +559,40 @@ pub fn with_tools(
         }
         write_file(&tools.join("AGENTS.md"), text.as_bytes(), false)?;
     }
-    for (name, from) in claude_skills(order.cwd, order.root) {
-        let bytes = folder_bytes(&from);
-        if bytes > SKILL_MAX_BYTES {
-            let _ = writeln!(
-                out,
-                "the skill {name} is left out: its folder holds {bytes} bytes, over {SKILL_MAX_BYTES}"
-            );
-            continue;
-        }
-        let to = tools.join(".agents").join("skills").join(&name);
-        copy_folder(&from, &to)
-            .map_err(|err| format!("cannot copy the skill {name} to {}: {err}", to.display()))?;
-    }
+    copy_skills(
+        &claude_skills(order.cwd, order.root, out),
+        &tools.join(".agents").join("skills"),
+        SKILL_MAX_BYTES,
+        SKILLS_MAX_BYTES,
+        out,
+    )?;
     let used = std::fs::read_dir(&tools).is_ok_and(|mut entries| entries.next().is_some());
-    let mut deny = order.deny.clone();
-    if used {
-        deny.push(format!("write_file({}/)", rule_path(&tools)));
+    // Once each, wherever a rule repeats (a plain `dedup` kept a repeat that was not next to its first).
+    let mut deny: Vec<String> = Vec::new();
+    let add = |deny: &mut Vec<String>, rule: String| {
+        if !deny.contains(&rule) {
+            deny.push(rule);
+        }
+    };
+    for rule in &order.deny {
+        add(&mut deny, rule.clone());
     }
-    deny.dedup();
+    if used {
+        add(&mut deny, format!("write_file({}/)", rule_path(&tools)));
+    }
     if !used && deny.is_empty() {
         return Ok(argv);
     }
+    // Review round S3: the deny file sits beside the tools folder, so `write_file(<tools>/)` does not cover it. The
+    // folder form of `<run>/agy/` covers it and every other order's tools folder; probe 1 measured that form with the
+    // file written directly inside, as the deny file is.
+    add(
+        &mut deny,
+        format!("write_file({}/)", rule_path(&order.run_dir.join(DIR))),
+    );
     let mut flags: Vec<String> = Vec::new();
     if used {
-        flags.extend(["--add-dir".to_owned(), tools.display().to_string()]);
+        flags.extend(["--add-dir".to_owned(), plain_path(&tools)]);
         let today = format!(
             "--print={}",
             crate::nirvana_worker::first_line(order.order_file)
@@ -460,14 +604,11 @@ pub fn with_tools(
             );
         }
     }
-    if !deny.is_empty() {
-        let file = settings_path(order.run_dir, order.order);
-        let body =
-            serde_json::to_string_pretty(&serde_json::json!({"permissions": {"deny": deny}}))
-                .map_err(|err| err.to_string())?;
-        write_file(&file, format!("{body}\n").as_bytes(), false)?;
-        flags.extend(["--settings".to_owned(), file.display().to_string()]);
-    }
+    let file = settings_path(order.run_dir, order.order);
+    let body = serde_json::to_string_pretty(&serde_json::json!({"permissions": {"deny": deny}}))
+        .map_err(|err| err.to_string())?;
+    write_file(&file, format!("{body}\n").as_bytes(), false)?;
+    flags.extend(["--settings".to_owned(), plain_path(&file)]);
     // agy takes its prompt as the one token `--print=<line>`, last; the flags go before it.
     let at = argv
         .iter()
@@ -500,6 +641,31 @@ pub fn remove(run_dir: &Path, order: &str, out: &mut dyn Write) {
             );
         }
     }
+}
+
+/// Review round S4: the orders that have a tools folder, a deny file or a plan 29 MCP file in `run_dir`, by name,
+/// once each. Each can hold a server's token until it is removed.
+pub fn leftover_orders(run_dir: &Path) -> Vec<String> {
+    let names = |dir: PathBuf, suffix: &'static str, dirs: bool| {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(move |entry| {
+                let name = entry.file_name().into_string().ok()?;
+                match name.strip_suffix(suffix) {
+                    Some(order) if !suffix.is_empty() => Some(order.to_owned()),
+                    None if dirs && entry.file_type().is_ok_and(|kind| kind.is_dir()) => Some(name),
+                    _ => None,
+                }
+            })
+    };
+    let mut orders: Vec<String> = names(run_dir.join(DIR), ".settings.json", true)
+        .chain(names(run_dir.join("mcp"), ".json", false))
+        .collect();
+    orders.sort();
+    orders.dedup();
+    orders
 }
 
 /// §5 P35b item 3: `SOURCES_LINE` for an agy worker's research or media order.
