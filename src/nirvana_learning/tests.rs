@@ -360,6 +360,15 @@ pub(crate) fn fixture(root: &Path, now: u64) {
     for order in ["a-lr", "b-lr", "c-lr", "d-lr", "e-lr", "f-lr"] {
         seat(order, now - 40);
     }
+    // Review S1: f-lr ran out and was reseated; its child is the same review, which the cap counted once, and only the
+    // child is gated.
+    let mut child = seated("f-lr-r1", review::CLASS);
+    child.parent = Some("f-lr".into());
+    child.why = Some("reseat".into());
+    journal
+        .append(now - 35, Kind::Seated(Box::new(child)))
+        .expect("seated");
+    review::set_used_for_test(root, now, 6);
     let gate = |order: &str, at: u64, verdict: &str, axes: &[Axis]| {
         journal
             .append(at, gated(order, verdict, axes))
@@ -399,7 +408,7 @@ pub(crate) fn fixture(root: &Path, now: u64) {
         )],
     );
     gate(
-        "f-lr",
+        "f-lr-r1",
         now - 15,
         "pass",
         &[
@@ -516,7 +525,12 @@ fn p36_the_view_reads_lessons_ledgers_profiles_today_and_waiting_from_a_fixture_
 
     // Today: six reviews seated today against the table's cap, the yesterday one and the build order left out.
     let today = &view.today;
-    assert_eq!((today.reviews.len(), today.cap), (6, 7));
+    assert_eq!((today.reviews.len(), today.used, today.cap), (6, 6, 7));
+    assert!(
+        today.reviews.iter().all(|r| r.order != "f-lr-r1"),
+        "a reseat child is its parent's review: {:?}",
+        today.reviews
+    );
     assert_eq!(
         (
             today.gated(),
@@ -773,7 +787,9 @@ fn p36_the_cache_reads_on_a_thread_of_its_own() {
         0,
         "the caller's thread read nothing"
     );
-    // A lesson added later shows after the next check.
+    // A lesson added later shows after the next check, and raises the repaint flag. The project lookup raised it
+    // already, so it is taken first.
+    let _ = take_changed();
     let mut index = nirvana_lessons::read_index(&root);
     index.lessons.insert(
         "new-one".into(),
@@ -833,5 +849,393 @@ fn p36_recent_changes_stop_at_the_newest_twelve() {
         (view.changes[0].id.as_str(), view.changes[11].id.as_str()),
         ("op-15", "op-4")
     );
+    // Review N7: no lesson in the index, and `herdr lessons stats` still prints its lines.
+    let empty = nirvana_lessons::read_index(&root);
+    assert!(empty.lessons.is_empty());
+    assert_eq!(view.stats, nirvana_lessons::stats_lines(&empty));
+    assert!(!view.stats.is_empty());
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A project with one run whose journal holds `events`, seated and gated at `now`.
+fn journal_project(name: &str, now: u64, events: Vec<Kind>) -> PathBuf {
+    let root = temp(name);
+    let journal = Project::at(&root).journal("r1");
+    std::fs::create_dir_all(journal.dir()).expect("run");
+    for (n, kind) in events.into_iter().enumerate() {
+        journal.append(now + n as u64, kind).expect("event");
+    }
+    root
+}
+
+fn child(order: &str, parent: &str, why: &str) -> Kind {
+    let mut child = seated(order, review::CLASS);
+    child.parent = Some(parent.into());
+    child.why = Some(why.into());
+    Kind::Seated(Box::new(child))
+}
+
+/// Review S1: a reseat or send-back child carries its parent's review on. The review is counted once, and the latest
+/// `gated` event of the chain rules it; the parent never reads "not gated yet" once its child was gated.
+#[test]
+fn p36_a_reseat_or_send_back_child_is_its_parents_review() {
+    let _home = crate::nirvana::with_test_home("p36-chain");
+    let now = crate::nirvana_run::now();
+    let root = journal_project(
+        "chain",
+        now - 100,
+        vec![
+            Kind::Seated(Box::new(seated("r-lr", review::CLASS))),
+            child("r-lr-r1", "r-lr", "reseat"),
+            child("r-lr-r2", "r-lr-r1", "reseat"),
+            gated(
+                "r-lr-r2",
+                "pass",
+                &[Axis::new("lesson_op", Mark::Pass, "op-1: new a")],
+            ),
+            Kind::Seated(Box::new(seated("s-lr", review::CLASS))),
+            gated(
+                "s-lr",
+                "sent back",
+                &[Axis::new(
+                    "report",
+                    Mark::Fail,
+                    "no Work Report was delivered",
+                )],
+            ),
+            child("s-lr-2", "s-lr", "send_back"),
+            gated(
+                "s-lr-2",
+                "pass",
+                &[
+                    Axis::new("lesson_op", Mark::Pass, "op-2: patched a"),
+                    Axis::new("lesson_op", Mark::Pass, "op-3: new b"),
+                ],
+            ),
+            // A follow-up seated with a parent for another reason is a review of its own.
+            child("t-lr", "r-lr", "follow_up"),
+        ],
+    );
+    let today = load(&root, now).today;
+    let ruled: Vec<(String, Ruled, usize)> = today
+        .reviews
+        .iter()
+        .map(|r| (r.order.clone(), r.ruled, r.applied))
+        .collect();
+    assert_eq!(
+        ruled,
+        [
+            ("r-lr".to_owned(), Ruled::Done, 1),
+            ("s-lr".to_owned(), Ruled::Done, 2),
+            ("t-lr".to_owned(), Ruled::Waiting, 0),
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Review S1: the square's number is the cap's own count, on the cap's UTC day.
+#[test]
+fn p36_the_count_is_the_one_the_cap_holds() {
+    let _home = crate::nirvana::with_test_home("p36-used");
+    let root = temp("used");
+    let now = crate::nirvana_run::now();
+    fixture(&root, now);
+    review::set_used_for_test(&root, now, 9);
+    let today = load(&root, now).today;
+    assert_eq!((today.used, today.reviews.len()), (9, 6));
+    assert_eq!(
+        today.used,
+        review::used_today(&root, now),
+        "the cap's own reader"
+    );
+    assert!(
+        review::cap_refusal(&root, 9, now).is_some(),
+        "the cap holds the same 9"
+    );
+    assert_eq!(load(&root, now + 86_400).today.used, 0, "a new UTC day");
+    // A review queued shows at the next check: the count's file is written by rename into `runs/`
+    // (`nirvana_seat::write_atomic`), whose folder the stamp holds. Measured in the review round: a stamp line for the
+    // file itself changed nothing.
+    let first = stamp(&root, now);
+    review::set_used_for_test(&root, now, 10);
+    assert_ne!(stamp(&root, now), first);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=p36",
+            "-c",
+            "user.email=p36@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn same(a: &Path, b: &Path) -> bool {
+    a.display().to_string().to_lowercase() == b.display().to_string().to_lowercase()
+}
+
+/// Review S2: the project is the one `herdr lessons` reads, from a subfolder and from a worktree.
+#[test]
+fn p36_the_project_is_the_one_herdr_lessons_reads() {
+    let _home = crate::nirvana::with_test_home("p36-root");
+    let root = temp("root");
+    let now = crate::nirvana_run::now();
+    git(&root, &["init", "-q"]);
+    git(&root, &["commit", "-q", "--allow-empty", "-m", "start"]);
+    fixture(&root, now);
+    let sub = root.join("prints").join("parts");
+    std::fs::create_dir_all(&sub).expect("subfolder");
+    let found = project_root(&sub);
+    assert!(same(&found, &root), "subfolder: {found:?}");
+    // A worker's worktree: herdr sets `$NIRVANA_PROJECT` to the project in its pane.
+    let worker = Project::at(&root).worktrees_dir().join("o1");
+    git(
+        &root,
+        &["worktree", "add", "-q", &worker.display().to_string()],
+    );
+    let found = project_root(&worker.join("."));
+    assert!(same(&found, &root), "worker worktree: {found:?}");
+    // Any other worktree is its own top level, as `herdr lessons` run there reads it.
+    let other = temp("root-other");
+    let _ = std::fs::remove_dir(&other);
+    git(
+        &root,
+        &["worktree", "add", "-q", &other.display().to_string()],
+    );
+    let found = project_root(&other);
+    assert!(same(&found, &other), "own worktree: {found:?}");
+    // No git: the folder itself.
+    let plain = temp("root-plain");
+    assert!(same(&project_root(&plain), &plain));
+
+    // The cache finds it on its thread: a pane in the subfolder sees the project's lessons.
+    set_live_for_test(true);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let view = loop {
+        if let Some(view) = cached(&sub) {
+            break view;
+        }
+        assert!(Instant::now() < deadline, "no view in 20 s");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(same(&view.root, &root), "{:?}", view.root);
+    assert_eq!(view.live, 11);
+    assert_eq!(reads_on_this_thread(), 0);
+    set_live_for_test(false);
+    git(
+        &root,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            &worker.display().to_string(),
+        ],
+    );
+    git(
+        &root,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            &other.display().to_string(),
+        ],
+    );
+    for dir in [&root, &other, &plain] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// Review N5: a cache thread that panics leaves the square able to read again, for the project lookup and the read.
+#[test]
+fn p36_a_panicking_cache_thread_does_not_freeze_the_square() {
+    let _home = crate::nirvana::with_test_home("p36-panic");
+    set_live_for_test(true);
+    let now = crate::nirvana_run::now();
+    let wait_for = |folder: &Path| {
+        let deadline = Instant::now() + REFRESH + Duration::from_secs(15);
+        loop {
+            if let Some(view) = cached(folder) {
+                break view;
+            }
+            assert!(Instant::now() < deadline, "the square froze");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    for (n, resolving) in [true, false].into_iter().enumerate() {
+        let root = temp(&format!("panic-{n}"));
+        fixture(&root, now);
+        if resolving {
+            panic_for_test(None, Some(root.clone()));
+        } else {
+            panic_for_test(Some(root.clone()), None);
+        }
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_millis(300) {
+            assert_eq!(cached(&root), None);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic_for_test(None, None);
+        assert_eq!(wait_for(&root).live, 11, "resolving {resolving}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    set_live_for_test(false);
+}
+
+/// Review S4: a re-read parses only the journal and the `knowledge/` folder whose stat changed.
+#[test]
+fn p36_a_re_read_parses_only_what_changed() {
+    let _home = crate::nirvana::with_test_home("p36-memo");
+    let root = temp("memo");
+    let now = crate::nirvana_run::now();
+    fixture(&root, now);
+    let journal = Project::at(&root).journal("r2");
+    std::fs::create_dir_all(journal.dir()).expect("run");
+    journal
+        .append(
+            now - 5,
+            Kind::Seated(Box::new(seated("g-lr", review::CLASS))),
+        )
+        .expect("seated");
+    let mut memo = Memo::default();
+    let first = load_with(&root, now, &mut memo);
+    assert_eq!(memo.reads, 3, "two journals and one knowledge folder");
+    assert_eq!(first, load(&root, now));
+    let again = load_with(&root, now, &mut memo);
+    assert_eq!((memo.reads, &again), (3, &first), "nothing changed");
+    journal
+        .append(
+            now - 1,
+            gated(
+                "g-lr",
+                "pass",
+                &[Axis::new("lesson_op", Mark::Pass, "op-9: new g")],
+            ),
+        )
+        .expect("gated");
+    let grown = load_with(&root, now, &mut memo);
+    assert_eq!(memo.reads, 4, "the journal that grew");
+    assert_eq!(grown, load(&root, now));
+    assert_eq!(grown.today.applied(), first.today.applied() + 1);
+    let card = profile_files::knowledge_dir(&root, PROFILE)
+        .expect("dir")
+        .join("stray.md");
+    std::fs::write(&card, card_text_edited()).expect("card");
+    let edited = load_with(&root, now, &mut memo);
+    assert_eq!(memo.reads, 5, "the folder whose card changed");
+    assert_eq!(edited, load(&root, now));
+    assert_eq!(edited.profiles[1].warnings, first.profiles[1].warnings + 1);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn card_text_edited() -> String {
+    card("Stray", "dead-end")
+}
+
+/// Review S3: an undo's words go to the panel that started it, by ticket; an older one's never answer a newer one.
+#[test]
+fn p36_an_undo_answers_only_its_own_ticket() {
+    let _home = crate::nirvana::with_test_home("p36-ticket");
+    let root = temp("ticket");
+    let now = crate::nirvana_run::now();
+    fixture(&root, now);
+    let view = load(&root, now);
+    let find = |source: Source, id: &str| {
+        view.changes
+            .iter()
+            .find(|c| c.source == source && c.id == id)
+            .expect("change")
+            .clone()
+    };
+    let wait = |ticket: u64| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(done) = take_undo(ticket) {
+                break done;
+            }
+            assert!(Instant::now() < deadline, "no answer for {ticket}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let first = start_undo(root.clone(), find(Source::Lessons, "op-2"));
+    // The first undo's panel closed: nobody takes its words. They are there when the second starts.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while nirvana_lessons::ledger(&root).len() < 6 {
+        assert!(Instant::now() < deadline, "the first undo did not run");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    let card = find(Source::Profile(PROFILE.into()), "op-3");
+    hold_undo_for_test(&root, "op-3", true);
+    let second = start_undo(root.clone(), card);
+    assert_ne!(first, second);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(take_undo(second), None, "the second is still running");
+    hold_undo_for_test(&root, "op-3", false);
+    let said = wait(second).expect("card undone");
+    assert!(said.contains("op-3"), "{said}");
+    assert_eq!(take_undo(first), None, "the older words went with it");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Review S4's measurement, run by hand on a copy of a real project: `P36_BENCH_ROOT=<copy> cargo nextest run
+/// --run-ignored only p36_bench_`. Each round appends a line to one journal, as a running order does, and times the
+/// re-read the cache thread does on a changed stamp.
+#[test]
+#[ignore]
+fn p36_bench_reread_after_one_journal_grows() {
+    let Some(root) = std::env::var_os("P36_BENCH_ROOT").map(PathBuf::from) else {
+        return;
+    };
+    let _home = crate::nirvana::with_test_home("p36-bench");
+    let now = crate::nirvana_run::now();
+    let runs = listed(&Project::at(&root).dir().join("runs"));
+    let journal = runs
+        .iter()
+        .map(|run| run.join(crate::nirvana_run::JOURNAL))
+        .find(|j| j.is_file())
+        .expect("a journal");
+    let grow = || {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&journal)
+            .expect("open");
+        file.write_all(b"\n").expect("grow");
+    };
+    let mut memo = Memo::default();
+    let started = Instant::now();
+    let first = load_with(&root, now, &mut memo);
+    let cold = started.elapsed();
+    let rounds = 20;
+    // Before review S4: every journal parsed again on each changed stamp, as `load` with nothing remembered does.
+    let started = Instant::now();
+    for _ in 0..rounds {
+        grow();
+        assert_eq!(load(&root, now).today, first.today);
+    }
+    let before = started.elapsed() / rounds;
+    // After: only the journal that grew.
+    let started = Instant::now();
+    for _ in 0..rounds {
+        grow();
+        assert_eq!(load_with(&root, now, &mut memo).today, first.today);
+    }
+    let after = started.elapsed() / rounds;
+    println!(
+        "p36 bench: {} runs, cold load {cold:?}, re-read after one journal grows: everything {before:?}, with the memo {after:?}, a round over {rounds}",
+        runs.len(),
+    );
 }

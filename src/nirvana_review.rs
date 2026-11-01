@@ -130,17 +130,33 @@ fn change_state<R>(root: &Path, change: impl FnOnce(&mut State) -> R) -> std::io
     Ok(out)
 }
 
+/// The reviews the cap has counted on the UTC day of `at`: what `cap_refusal` holds against the cap. Plan 36 review
+/// S1: the Learning square shows this number, not a count of journal seats, which a reseat child would double.
+pub fn used_today(root: &Path, at: u64) -> u32 {
+    let state = read_state(root);
+    if state.day == at / 86_400 {
+        state.queued
+    } else {
+        0
+    }
+}
+
+/// Plan 36's tests: the cap's count as `queue` leaves it after `queued` reviews on the day of `at`.
+#[cfg(test)]
+pub fn set_used_for_test(root: &Path, at: u64, queued: u32) {
+    change_state(root, |state| {
+        state.day = at / 86_400;
+        state.queued = queued;
+    })
+    .expect("lesson review state");
+}
+
 /// Why no review is queued now, when the cap says so; `None` while it has room.
 pub fn cap_refusal(root: &Path, cap: u32, at: u64) -> Option<String> {
     if cap == 0 {
         return Some("lesson reviews are off (lesson_reviews_per_day = 0)".into());
     }
-    let state = read_state(root);
-    let used = if state.day == at / 86_400 {
-        state.queued
-    } else {
-        0
-    };
+    let used = used_today(root, at);
     (used >= cap).then(|| {
         format!("{used} lesson reviews today reach the daily cap of {cap} (lesson_reviews_per_day)")
     })

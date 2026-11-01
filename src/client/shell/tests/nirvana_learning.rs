@@ -172,7 +172,7 @@ fn p36_the_learning_square_sits_after_preload_and_before_memory_and_git() {
         None,
         None,
         None,
-        Some(&view),
+        Some(Some(&view)),
         OpenPanel::None,
         &palette,
     );
@@ -203,6 +203,7 @@ fn p36_the_square_reads_lessons_and_reviews_against_the_cap_wide_and_narrow() {
     // No review today: no mark; one live lesson reads singular.
     let mut quiet = view.clone();
     quiet.today.reviews.clear();
+    quiet.today.used = 0;
     quiet.live = 1;
     set_view_for_test(Some(quiet));
     let row = strip(&mut state, 200);
@@ -217,11 +218,15 @@ fn p36_the_square_reads_lessons_and_reviews_against_the_cap_wide_and_narrow() {
     }));
     let row = strip(&mut state, 200);
     assert!(row.contains("Learning no lessons yet \u{25BE}"), "{row:?}");
-    // Before the first read the square is not drawn.
-    set_view_for_test(None);
+    // Review S1: the number is the cap's count, not the journals' seats; the panel holds the same one.
+    let mut counted = view.clone();
+    counted.today.used = 9;
+    set_view_for_test(Some(counted));
     let row = strip(&mut state, 200);
-    assert!(!row.contains("Learning"), "{row:?}");
-    assert_eq!(state.hits.nirvana_learning.width, 0);
+    assert!(row.contains("review 9/20"), "{row:?}");
+    open(&mut state);
+    let text = rows_of(&mut state, 200, 80).join("\n");
+    assert!(text.contains("reviews 9/20 this UTC day"), "{text}");
     done(root);
 }
 
@@ -240,7 +245,7 @@ fn p36_the_panel_shows_every_section_from_a_fixture_project() {
         format!("Learning \u{b7} {folder}"),
         // Today, in the plan's order of sections.
         "Today".to_owned(),
-        "reviews 6/20 \u{b7} 5 gated: 3 done \u{b7} 1 held back \u{b7} 1 failed \u{b7} 1 not gated yet".to_owned(),
+        "reviews 6/20 this UTC day \u{b7} 5 gated: 3 done \u{b7} 1 held back \u{b7} 1 failed \u{b7} 1 not gated yet".to_owned(),
         "ops 1 applied \u{b7} 3 refused".to_owned(),
         "2\u{d7} the evidence is N characters; a quote of at least N proves something".to_owned(),
         "1\u{d7} the evidence is not in oN's stream".to_owned(),
@@ -265,6 +270,8 @@ fn p36_the_panel_shows_every_section_from_a_fixture_project() {
         format!("1 card herdr does not know is never offered: herdr profile check {PROFILE} --adopt"),
         "Waiting".to_owned(),
         "print: 10 live lessons, merged at the next herdr run end".to_owned(),
+        // Review N6: opening writes nothing, but a hand edit holds the next review back.
+        "enter open (hand edits hold the next review back)".to_owned(),
     ] {
         assert!(text.contains(&want), "{want:?} not in\n{text}");
     }
@@ -318,15 +325,27 @@ fn p36_u_asks_first_and_then_rolls_back_exactly_that_row() {
         panel.message.as_deref(),
         Some("op-5 is a rollback, which herdr does not undo")
     );
-    // u then y rolls back the patch, and only it.
+    // Review S5: Enter, the panel's open key, and a second u do not answer the question.
     select(&mut state, &format!("op-2 patch {PATCHED}"));
     key(&mut state, KeyCode::Char('u'));
+    for code in [KeyCode::Enter, KeyCode::Char('u')] {
+        let outcome = key(&mut state, code);
+        assert!(invoked(&outcome).is_empty(), "{code:?} opens nothing");
+        let panel = state.nirvana_learning.as_ref().expect("panel");
+        assert!(
+            panel.confirming.is_some() && !panel.busy(),
+            "{code:?} still asks"
+        );
+    }
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(nirvana_ledger_len(&root), ledger, "nothing rolled back");
+    // u then y rolls back the patch, and only it.
     key(&mut state, KeyCode::Char('y'));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let said = loop {
         let _ = rows_of(&mut state, 200, 80);
         let panel = state.nirvana_learning.as_ref().expect("panel");
-        if !panel.busy {
+        if !panel.busy() {
             break panel.message.clone().unwrap_or_default();
         }
         assert!(
@@ -411,10 +430,9 @@ fn p36_drawing_reads_no_file_and_browsing_writes_nothing() {
     let mut state = state_in(&root);
     set_live_for_test(true);
     let (before, home_before) = (tree(&root), tree(&home.path));
-    // The real cache: the square shows once its thread has read, and the drawing thread never reads.
+    // The real cache: the square shows its value once its thread has read, and the drawing thread never reads.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while state.hits.nirvana_learning.width == 0 {
-        let _ = rows_of(&mut state, 200, 60);
+    while !strip(&mut state, 200).contains("Learning 11 lessons") {
         assert!(
             std::time::Instant::now() < deadline,
             "the square never showed"
@@ -526,5 +544,150 @@ fn p36_the_open_learning_panel_is_not_painted_over_by_its_agent() {
             "written straight to the screen only with no panel open"
         );
     }
+    done(root);
+}
+
+/// Review N4: before the first read the square is drawn with a placeholder, so the squares after it do not move when
+/// the read lands, and a click opens the panel at once.
+#[test]
+fn p36_the_square_holds_its_place_before_the_first_read() {
+    let _home = crate::nirvana::with_test_home("p36-placeholder");
+    let root = temp("placeholder");
+    let mut state = state_in(&root);
+    set_view_for_test(None);
+    set_live_for_test(true);
+    let row = strip(&mut state, 200);
+    assert!(row.contains("Learning \u{2026}"), "{row:?}");
+    let square = state.hits.nirvana_learning;
+    assert!(square.width > 0);
+    assert_eq!(square.x, state.hits.nirvana_preload.right() + 1);
+    click(&mut state, square.x + 1, square.y);
+    assert_eq!(state.open_panel(), OpenPanel::Learning);
+    let text = rows_of(&mut state, 200, 60).join("\n");
+    assert!(text.contains("reading .nirvana/lessons"), "{text}");
+    set_live_for_test(false);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+fn selected_text(state: &mut ClientShellState) -> String {
+    let rows = rows_of(state, 200, 80);
+    let selected = state.nirvana_learning.as_ref().expect("panel").selected;
+    let hits = state.hits.nirvana_learning_panel.clone();
+    let (rect, _) = hits
+        .rows
+        .iter()
+        .find(|(_, index)| *index == selected)
+        .expect("selected row drawn");
+    rows[rect.y as usize].clone()
+}
+
+/// Review N2: the highlight follows its row when a refresh adds a row above it.
+#[test]
+fn p36_the_highlight_follows_its_row_through_a_refresh() {
+    let _home = crate::nirvana::with_test_home("p36-follow");
+    let (mut state, root, view) = fixture_state("follow");
+    open(&mut state);
+    select(&mut state, &format!("op-2 patch {PATCHED}"));
+    let mut grown = view.clone();
+    let mut newest = grown.changes[0].clone();
+    newest.id = "op-6".into();
+    newest.op = "new".into();
+    newest.slugs = vec!["fresh".into()];
+    newest.at += 10;
+    grown.changes.insert(0, newest);
+    set_view_for_test(Some(grown));
+    let text = selected_text(&mut state);
+    assert!(text.contains(&format!("op-2 patch {PATCHED}")), "{text:?}");
+    // A key still moves it from there.
+    key(&mut state, KeyCode::Char('j'));
+    assert!(selected_text(&mut state).contains("op-1 new"));
+    done(root);
+}
+
+/// Review N3: the wheel moves the selection inside the open panel.
+#[test]
+fn p36_the_wheel_moves_the_selection() {
+    let _home = crate::nirvana::with_test_home("p36-wheel");
+    let (mut state, root, _) = fixture_state("wheel");
+    open(&mut state);
+    let _ = rows_of(&mut state, 200, 80);
+    let area = state.hits.nirvana_learning_panel.area;
+    let wheel = |state: &mut ClientShellState, kind: MouseEventKind| {
+        state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+            kind,
+            column: area.x + 4,
+            row: area.y + 3,
+            modifiers: KeyModifiers::empty(),
+        })])
+    };
+    let selected =
+        |state: &ClientShellState| state.nirvana_learning.as_ref().expect("panel").selected;
+    for _ in 0..3 {
+        wheel(&mut state, MouseEventKind::ScrollDown);
+    }
+    assert_eq!(selected(&state), 3);
+    wheel(&mut state, MouseEventKind::ScrollUp);
+    assert_eq!(selected(&state), 2);
+    assert!(
+        state.nirvana_learning.is_some(),
+        "the wheel does not close it"
+    );
+    done(root);
+}
+
+/// Review S3: an undo started in a panel that closed never answers the next panel's undo.
+#[test]
+fn p36_a_closed_panels_undo_never_answers_the_next_one() {
+    let _home = crate::nirvana::with_test_home("p36-stale");
+    let (mut state, root, _) = fixture_state("stale");
+    let ledger = nirvana_ledger_len(&root);
+    open(&mut state);
+    select(&mut state, &format!("op-2 patch {PATCHED}"));
+    key(&mut state, KeyCode::Char('u'));
+    key(&mut state, KeyCode::Char('y'));
+    key(&mut state, KeyCode::Esc);
+    // The first undo lands while no panel waits on it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while nirvana_ledger_len(&root) == ledger {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the first undo did not run"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    open(&mut state);
+    crate::nirvana_learning::hold_undo_for_test(&root, "op-3", true);
+    select(&mut state, "op-3 new no-jump-cuts");
+    key(&mut state, KeyCode::Char('u'));
+    key(&mut state, KeyCode::Char('y'));
+    for _ in 0..10 {
+        let _ = rows_of(&mut state, 200, 80);
+        let panel = state.nirvana_learning.as_ref().expect("panel");
+        assert!(
+            panel.busy() && panel.message.is_none(),
+            "the first undo's words answered the second: {:?}",
+            panel.message
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    crate::nirvana_learning::hold_undo_for_test(&root, "op-3", false);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let said = loop {
+        let _ = rows_of(&mut state, 200, 80);
+        let panel = state.nirvana_learning.as_ref().expect("panel");
+        if !panel.busy() {
+            break panel.message.clone().unwrap_or_default();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the second undo did not finish"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert!(
+        said.contains("rolled back op-3 (new of no-jump-cuts)"),
+        "{said}"
+    );
     done(root);
 }

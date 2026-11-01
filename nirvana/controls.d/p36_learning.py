@@ -26,6 +26,18 @@ T_OPEN = "p36_enter_opens_the_lesson_or_card_in_the_edit_tab"
 T_DRAW = "p36_drawing_reads_no_file_and_browsing_writes_nothing"
 T_ONE = "p36_one_panel_is_open_at_a_time_with_the_learning_panel_among_them"
 T_PATCH = "p36_the_open_learning_panel_is_not_painted_over_by_its_agent"
+# The review round (nirvana/plans/2026-10-31-36-records/p36.md, "Review round").
+T_CHAIN = "p36_a_reseat_or_send_back_child_is_its_parents_review"
+T_USED = "p36_the_count_is_the_one_the_cap_holds"
+T_ROOT = "p36_the_project_is_the_one_herdr_lessons_reads"
+T_PANIC = "p36_a_panicking_cache_thread_does_not_freeze_the_square"
+T_MEMO = "p36_a_re_read_parses_only_what_changed"
+T_TICKET = "p36_an_undo_answers_only_its_own_ticket"
+T_STALE = "p36_a_closed_panels_undo_never_answers_the_next_one"
+T_HOLD = "p36_the_square_holds_its_place_before_the_first_read"
+T_FOLLOW = "p36_the_highlight_follows_its_row_through_a_refresh"
+T_WHEEL = "p36_the_wheel_moves_the_selection"
+REVIEW = "src/nirvana_review.rs"
 PATCH = "src/client/shell/surface_patch.rs"
 SHELL = "src/client/shell/"
 
@@ -52,23 +64,24 @@ CONTROLS = (
             "    all.truncate(CHANGES_SHOWN);\n", "    all.truncate(usize::MAX);\n", T_CAP, "rust"),
     # §1.2 Profiles: cards, the ones herdr does not know (nirvana_knowledge::known, made pub(crate)), warnings, refused.
     Control("p36_unknown_uncounted", LEARN,
-            "                        if !knowledge::known(&index, &rows, &slug, &sha) {\n",
-            "                        if false {\n", T_VIEW, "rust"),
+            "                if !knowledge::known(&index, &rows, &slug, &sha) {\n",
+            "                if false {\n", T_VIEW, "rust"),
     Control("p36_known_always", KNOW,
             "    adopted || ledgered\n", "    adopted || ledgered || true\n", T_VIEW, "rust"),
     Control("p36_warning_uncounted", LEARN,
-            "                        if card.verdict.warns() {\n", "                        if false {\n", T_VIEW, "rust"),
+            "                if card.verdict.warns() {\n", "                if false {\n", T_VIEW, "rust"),
     Control("p36_refused_uncounted", LEARN,
-            "                    Err(_) => row.refused += 1,\n", "                    Err(_) => {}\n", T_VIEW, "rust"),
+            "            Err(_) => row.refused += 1,\n", "            Err(_) => {}\n", T_VIEW, "rust"),
     # §1.2 Today: reviews of class lesson-review seated today, against the cap the table holds.
     Control("p36_today_any_class", LEARN,
-            "                Kind::Seated(s) if s.class == review::CLASS && day_of(event.at) == day => {\n",
-            "                Kind::Seated(s) if day_of(event.at) == day => {\n", T_VIEW, "rust"),
+            "            Kind::Seated(s) if s.class == review::CLASS => {\n",
+            "            Kind::Seated(s) => {\n", T_VIEW, "rust"),
     Control("p36_today_any_day", LEARN,
-            "                Kind::Seated(s) if s.class == review::CLASS && day_of(event.at) == day => {\n",
-            "                Kind::Seated(s) if s.class == review::CLASS => {\n", T_VIEW, "rust"),
+            "            if parent.is_some() || day_of(*at) != day {\n",
+            "            if parent.is_some() {\n", T_VIEW, "rust"),
     Control("p36_today_journal_skipped", LEARN,
-            "        if day_of(written) < day {\n", "        if day_of(written) <= day {\n", T_VIEW, "rust"),
+            "        if modified != 0 && day_of((modified / 1_000_000_000) as u64) < day {\n",
+            "        if modified != 0 && day_of((modified / 1_000_000_000) as u64) <= day {\n", T_VIEW, "rust"),
     Control("p36_held_read_as_failed", LEARN,
             "        .any(|a| a.mark == Mark::Fail && HELD_AXES.contains(&a.axis.as_str()));\n",
             "        .any(|_| false);\n", T_VIEW, "rust"),
@@ -120,11 +133,10 @@ CONTROLS = (
             "    let due = entry.checked_at.is_none_or(|at| at.elapsed() >= REFRESH);\n",
             "    let due = entry.checked_at.is_none();\n", T_CACHE, "rust"),
     Control("p36_cache_never_rereads", LEARN,
-            "    let view = (known.as_ref() != Some(&stamp)).then(|| load(folder, now));\n",
-            "    let view = known.is_none().then(|| load(folder, now));\n", T_CACHE, "rust"),
+            "    if known.as_ref() != Some(&stamp) {\n", "    if known.is_none() {\n", T_CACHE, "rust"),
     Control("p36_strip_reads_on_draw", COMPOSE,
-            "                    .and_then(|tab| crate::nirvana_learning::cached(&tab.folder));\n",
-            "                    .map(|tab| crate::nirvana_learning::load(&tab.folder, crate::nirvana_run::now()));\n",
+            "                    .and_then(|tab| crate::nirvana_learning::square(&tab.folder));\n",
+            "                    .map(|tab| Some(crate::nirvana_learning::load_with(&tab.folder, crate::nirvana_run::now(), &mut Default::default())));\n",
             T_DRAW, "rust"),
     # §1.1 the square: after Preload, before Memory and Git; its words, wide and narrow; the mark.
     Control("p36_learning_gap", MODS,
@@ -215,4 +227,90 @@ CONTROLS = (
     Control("p36_git_keeps_learning", SHELL + "nirvana_git.rs",
             "        self.nirvana_learning = None;\n        self.nirvana_preload = None;\n",
             "        self.nirvana_preload = None;\n", T_ONE, "rust"),
+    # Review S1: a reseat or send-back child is its parent's review, ruled by the chain's latest gate; the count is the
+    # cap's own.
+    Control("p36_child_counted_as_review", LEARN,
+            "            if parent.is_some() || day_of(*at) != day {\n", "            if day_of(*at) != day {\n",
+            T_CHAIN, "rust"),
+    Control("p36_child_counted_in_fixture", LEARN,
+            "            if parent.is_some() || day_of(*at) != day {\n", "            if day_of(*at) != day {\n",
+            T_VIEW, "rust"),
+    Control("p36_any_child_carries_on", LEARN,
+            "                        .is_some_and(|why| CARRIES_ON.contains(&why))\n",
+            "                        .is_some_and(|_| true)\n", T_CHAIN, "rust"),
+    Control("p36_send_back_not_carried", LEARN,
+            'const CARRIES_ON: [&str; 2] = ["reseat", "send_back"];\n',
+            'const CARRIES_ON: [&str; 2] = ["reseat", "none"];\n', T_CHAIN, "rust"),
+    Control("p36_chain_not_followed", LEARN,
+            "                    Some(parent) => current = parent,\n", "                    Some(_) => break,\n",
+            T_CHAIN, "rust"),
+    Control("p36_chain_first_gate_rules", LEARN,
+            "            if last.get(&root).is_none_or(|(seen, _, _)| *at >= *seen) {\n",
+            "            if last.get(&root).is_none() {\n", T_CHAIN, "rust"),
+    Control("p36_used_not_the_caps", LEARN,
+            "        used: review::used_today(&project.root, now),\n", "        used: 6,\n", T_USED, "rust"),
+    Control("p36_square_counts_seats", SQUARE,
+            "    let used = today.used;\n", "    let used = today.reviews.len() as u32;\n", T_VALUE, "rust"),
+    Control("p36_panel_counts_seats", SQUARE,
+            "            today.used,\n            today.cap,\n", "            today.reviews.len(),\n            today.cap,\n",
+            T_VALUE, "rust"),
+    Control("p36_cap_count_not_shared", REVIEW,
+            "    let used = used_today(root, at);\n", "    let used = 0;\n", T_USED, "rust"),
+    # Review N1: the cap's day is UTC.
+    Control("p36_utc_day_unsaid", SQUARE,
+            '            "reviews {}/{} this UTC day ', '            "reviews {}/{} today ', T_PANEL, "rust"),
+    # Review S2: the project `herdr lessons` reads, from a subfolder and a worktree, found on the cache thread.
+    Control("p36_root_is_the_folder", LEARN, "    let top = (out.code == 0)\n", "    let top = (out.code == 999)\n",
+            T_ROOT, "rust"),
+    Control("p36_worker_worktree_own_root", LEARN,
+            '        .filter(|dir| dir.file_name().is_some_and(|n| n == "worktrees"))\n',
+            "        .filter(|_| false)\n", T_ROOT, "rust"),
+    Control("p36_cache_keys_the_pane_folder", LEARN,
+            "    done.root = Some(project_root(&done.folder));\n", "    done.root = Some(done.folder.clone());\n",
+            T_ROOT, "rust"),
+    # Review S3: an undo answers only its own ticket.
+    Control("p36_undo_takes_oldest", LEARN,
+            "    let done = map.remove(&ticket)?;\n", "    let done = map.pop_first().map(|(_, done)| done)?;\n",
+            T_TICKET, "rust"),
+    Control("p36_panel_takes_oldest", LEARN,
+            "    let done = map.remove(&ticket)?;\n", "    let done = map.pop_first().map(|(_, done)| done)?;\n",
+            T_STALE, "rust"),
+    Control("p36_panel_takes_another_ticket", COMPOSE,
+            "                    if let Some(result) = crate::nirvana_learning::take_undo(ticket) {\n",
+            "                    if let Some(result) = crate::nirvana_learning::take_undo(ticket.saturating_sub(1).max(1)) {\n",
+            T_STALE, "rust"),
+    # Review S4: only the journal and the knowledge folder whose stat changed are read again, and never a stale one.
+    Control("p36_memo_forgets_journals", LEARN,
+            "            Some((key, digest)) if key == (modified, size) => digest,\n",
+            "            Some((key, digest)) if false && key == (modified, size) => digest,\n", T_MEMO, "rust"),
+    Control("p36_memo_keeps_grown_journal", LEARN,
+            "            Some((key, digest)) if key == (modified, size) => digest,\n",
+            "            Some((_, digest)) => digest,\n", T_MEMO, "rust"),
+    Control("p36_memo_forgets_cards", LEARN,
+            "                Some((seen, row)) if seen == key && row.name == name => row,\n",
+            "                Some((seen, row)) if false && seen == key && row.name == name => row,\n", T_MEMO, "rust"),
+    Control("p36_memo_keeps_edited_cards", LEARN,
+            "                Some((seen, row)) if seen == key && row.name == name => row,\n",
+            "                Some((_, row)) if row.name == name => row,\n", T_MEMO, "rust"),
+    # Review S5: y only.
+    Control("p36_enter_confirms", SQUARE,
+            "                KeyCode::Char('y') => self.learning_confirm_undo(),\n",
+            "                KeyCode::Char('y') | KeyCode::Enter => self.learning_confirm_undo(),\n", T_U, "rust"),
+    Control("p36_u_twice_confirms", SQUARE,
+            "                KeyCode::Char('y') => self.learning_confirm_undo(),\n",
+            "                KeyCode::Char('y' | 'u') => self.learning_confirm_undo(),\n", T_U, "rust"),
+    # Review N2-N7.
+    Control("p36_highlight_by_index", SQUARE, "            panel.selected = at;\n", "", T_FOLLOW, "rust"),
+    Control("p36_wheel_ignored", SQUARE,
+            "            MouseEventKind::ScrollDown => Some(true),\n", "            MouseEventKind::ScrollDown => None,\n",
+            T_WHEEL, "rust"),
+    Control("p36_no_placeholder", LEARN, "    Some(cached(folder))\n", "    cached(folder).map(Some)\n", T_HOLD, "rust"),
+    Control("p36_read_never_clears", LEARN, "        entry.reading = false;\n", "", T_PANIC, "rust"),
+    Control("p36_lookup_never_forgets", LEARN, "                cache.roots.remove(&self.folder);\n", "", T_PANIC, "rust"),
+    Control("p36_footer_silent_on_edits", SQUARE, "enter open (hand edits hold the next review back)", "enter open",
+            T_PANEL, "rust"),
+    Control("p36_stats_skipped_when_empty", LEARN,
+            "        stats: nirvana_lessons::stats_lines(&index),\n",
+            "        stats: if index.lessons.is_empty() { Vec::new() } else { nirvana_lessons::stats_lines(&index) },\n",
+            T_CAP, "rust"),
 )

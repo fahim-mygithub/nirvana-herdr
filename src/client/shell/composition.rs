@@ -255,9 +255,9 @@ impl ClientShellState {
                 // Plan 16: the Git square.
                 let git = super::nirvana_git::git_tab(snapshot)
                     .and_then(|tab| crate::nirvana_git::cached(&tab.folder));
-                // Plan 36: the Learning square; the last view, never a read.
+                // Plan 36: the Learning square; the last view, never a read, and a placeholder before the first.
                 let learning = super::nirvana_learning::learning_tab(snapshot)
-                    .and_then(|tab| crate::nirvana_learning::cached(&tab.folder));
+                    .and_then(|tab| crate::nirvana_learning::square(&tab.folder));
                 let strip = super::nirvana_mods::render_strip(
                     &mut buffer,
                     layout.nirvana_mods,
@@ -268,7 +268,7 @@ impl ClientShellState {
                     seats.as_ref().map(Option::as_ref),
                     jobs.as_ref(),
                     git.as_ref(),
-                    learning.as_ref(),
+                    learning.as_ref().map(Option::as_ref),
                     self.open_panel(),
                     &self.config.palette,
                 );
@@ -956,10 +956,11 @@ impl ClientShellState {
                     layout.pane_surface.width,
                     layout.pane_surface.bottom().saturating_sub(top),
                 );
-                // A finished undo hands its words back here: a map read, no I/O.
-                if panel.busy {
-                    if let Some(result) = crate::nirvana_learning::take_undo(&panel.folder) {
-                        panel.busy = false;
+                // A finished undo hands its words back here: a map read, no I/O. Only this panel's own undo
+                // answers it (review S3).
+                if let Some(ticket) = panel.undoing {
+                    if let Some(result) = crate::nirvana_learning::take_undo(ticket) {
+                        panel.undoing = None;
                         panel.message = Some(match result {
                             Ok(text) => text,
                             Err(why) => format!("not undone: {why}"),

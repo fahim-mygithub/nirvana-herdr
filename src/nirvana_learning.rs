@@ -10,15 +10,20 @@
 //!   a lesson's liveness, a card's knownness or the cap.
 //! - **It writes nothing.** The seat table is parsed from its file (or herdr's default), never through
 //!   `nirvana_seat::table`, whose `read_or_create` writes the file when it is missing.
+//! - **The project is the one `herdr lessons` reads** (`project_root`): the pane's git top level, or the project of a
+//!   worker's worktree; found once per folder, on a thread (review S2).
 //! - **A cached view, like `nirvana_git::cached`.** `cached` returns the last view and, at most every `REFRESH`,
 //!   starts a thread that stats the folders the view is made from; only a changed stat (mtime or size), or a new UTC
-//!   day, reads them again. Drawing never reads a file.
+//!   day, reads them again, and then only the journals and `knowledge/` folders that changed (`Memo`, review S4).
+//!   Drawing never reads a file.
+//! - **Today's count is the cap's** (`nirvana_review::used_today`); the journals say what each review came to, a
+//!   reseat or send-back child counted with its parent (review S1).
 //! - **Undo** (`start_undo`) runs `nirvana_lessons::rollback` or `nirvana_knowledge::rollback`, the functions behind
 //!   `herdr lessons rollback` and `herdr kb rollback`, on a thread: both take a file lock a running gate may hold.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -144,6 +149,9 @@ pub struct Review {
 pub struct Today {
     /// The UTC day, as days since 1970, which the cap counts (`nirvana_review::cap_refusal`).
     pub day: u64,
+    /// The reviews the cap counted today (`nirvana_review::used_today`): the square's number, held against `cap`.
+    pub used: u32,
+    /// The reviews seated today, from the journals: what the panel says each came to.
     pub reviews: Vec<Review>,
     /// `lesson_reviews_per_day`.
     pub cap: u32,
@@ -277,46 +285,115 @@ fn ruling(verdict: &str, axes: &[Value]) -> (Ruled, usize, usize, Vec<String>) {
     (ruled, applied, reasons.len(), reasons)
 }
 
+/// What one journal says about lesson reviews. Review S4: kept in `Memo` by the journal's stat, so the journal a
+/// running order appends to is the only one parsed again.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Digest {
+    /// `(order, at, parent)` of each `seated` event of class `lesson-review`; `parent` only for a reseat or
+    /// send-back child, which carries its parent's review on and is not a review of its own.
+    seated: Vec<(String, u64, Option<String>)>,
+    /// `(order, at, verdict, axes)` of each `gated` event of an order seated above it.
+    gated: Vec<(String, u64, String, Vec<Value>)>,
+}
+
+/// The `why` of a child that goes on with its parent's order (`nirvana_worker`'s reseat, `nirvana_gate::send_back`).
+const CARRIES_ON: [&str; 2] = ["reseat", "send_back"];
+
+fn digest(path: &Path) -> Digest {
+    let (events, _) = crate::nirvana_run::Journal::new(path.to_path_buf()).read();
+    let mut out = Digest::default();
+    for event in &events {
+        match &event.kind {
+            Kind::Seated(s) if s.class == review::CLASS => {
+                let parent = s.parent.clone().filter(|_| {
+                    s.why
+                        .as_deref()
+                        .is_some_and(|why| CARRIES_ON.contains(&why))
+                });
+                out.seated.push((s.order.clone(), event.at, parent));
+            }
+            Kind::Gated {
+                order,
+                verdict,
+                axes,
+                ..
+            } if out.seated.iter().any(|(o, _, _)| o == order) => {
+                out.gated
+                    .push((order.clone(), event.at, verdict.clone(), axes.clone()));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// `(path, modified ns, size)`: one file's stat, as `Stamp` holds it.
+type FileStat = (PathBuf, u128, u64);
+
+/// What the cache thread keeps between reads of one project, by each file's stat (review S4).
+#[derive(Debug, Default)]
+pub struct Memo {
+    journals: HashMap<PathBuf, ((u128, u64), Digest)>,
+    /// Each profile's `knowledge/`, by the stat of every file in it, with the row read from it.
+    profiles: HashMap<PathBuf, (Vec<FileStat>, ProfileRow)>,
+    /// Journals parsed and `knowledge/` folders read, for the tests.
+    pub reads: usize,
+}
+
 /// §1.2 "Today", from the journals of the runs written today. A review is counted on the day it was seated, which is
-/// the day the cap counts it (`nirvana_review::queue` counts it just before the `seated` event).
-pub fn today(project: &Project, cap: u32, now: u64) -> Today {
+/// the day the cap counts it (`nirvana_review::queue` counts it just before the `seated` event); a reseat or
+/// send-back child is the same review, which the latest `gated` event of its chain rules (review S1).
+pub fn today(project: &Project, cap: u32, now: u64, memo: &mut Memo) -> Today {
     let day = day_of(now);
     let mut reviews: Vec<Review> = Vec::new();
     let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
+    let mut kept = HashMap::new();
     for run in project.runs() {
-        let journal = project.journal(&run);
+        let path = project.journal(&run).path;
+        let Some((_, modified, size)) = stat(&path) else {
+            continue;
+        };
         // A journal last written before today holds no review seated today.
-        let written = std::fs::metadata(&journal.path)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
-            .map_or(u64::MAX, |d| d.as_secs());
-        if day_of(written) < day {
+        if modified != 0 && day_of((modified / 1_000_000_000) as u64) < day {
             continue;
         }
-        let (events, _) = journal.read();
-        let mut seated: Vec<String> = Vec::new();
-        let mut gated: HashMap<String, (u64, String, Vec<Value>)> = HashMap::new();
-        for event in &events {
-            match &event.kind {
-                Kind::Seated(s) if s.class == review::CLASS && day_of(event.at) == day => {
-                    seated.push(s.order.clone());
+        let digest = match memo.journals.remove(&path) {
+            Some((key, digest)) if key == (modified, size) => digest,
+            _ => {
+                memo.reads += 1;
+                digest(&path)
+            }
+        };
+        let parents: HashMap<&str, &str> = digest
+            .seated
+            .iter()
+            .filter_map(|(order, _, parent)| Some((order.as_str(), parent.as_deref()?)))
+            .collect();
+        let root_of = |order: &str| -> String {
+            let mut current = order;
+            // A journal is the run's own record, but a loop in it must not hang the thread.
+            for _ in 0..=parents.len() {
+                match parents.get(current) {
+                    Some(parent) => current = parent,
+                    None => break,
                 }
-                Kind::Gated {
-                    order,
-                    verdict,
-                    axes,
-                    ..
-                } => {
-                    gated.insert(order.clone(), (event.at, verdict.clone(), axes.clone()));
-                }
-                _ => {}
+            }
+            current.to_owned()
+        };
+        let mut last: HashMap<String, (u64, &str, &[Value])> = HashMap::new();
+        for (order, at, verdict, axes) in &digest.gated {
+            let root = root_of(order);
+            if last.get(&root).is_none_or(|(seen, _, _)| *at >= *seen) {
+                last.insert(root, (*at, verdict.as_str(), axes.as_slice()));
             }
         }
-        for order in seated {
-            let review = match gated.get(&order) {
+        for (order, at, parent) in &digest.seated {
+            if parent.is_some() || day_of(*at) != day {
+                continue;
+            }
+            let review = match last.get(order) {
                 None => Review {
-                    order,
+                    order: order.clone(),
                     ruled: Ruled::Waiting,
                     gated_at: None,
                     applied: 0,
@@ -328,7 +405,7 @@ pub fn today(project: &Project, cap: u32, now: u64) -> Today {
                         *reasons.entry(reason_key(&why)).or_default() += 1;
                     }
                     Review {
-                        order,
+                        order: order.clone(),
                         ruled,
                         gated_at: Some(*at),
                         applied,
@@ -338,11 +415,15 @@ pub fn today(project: &Project, cap: u32, now: u64) -> Today {
             };
             reviews.push(review);
         }
+        kept.insert(path, ((modified, size), digest));
     }
+    // Journals of runs gone, or last written before today, leave the memo.
+    memo.journals = kept;
     let mut reasons: Vec<(String, usize)> = reasons.into_iter().collect();
     reasons.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     Today {
         day,
+        used: review::used_today(&project.root, now),
         reviews,
         cap,
         reasons,
@@ -409,8 +490,9 @@ fn changes(root: &Path, profiles: &[ProfileRow]) -> Vec<Change> {
     all
 }
 
-fn profiles(root: &Path) -> Vec<ProfileRow> {
-    profile_files::list(root)
+fn profiles(root: &Path, memo: &mut Memo) -> Vec<ProfileRow> {
+    let mut kept = HashMap::new();
+    let rows = profile_files::list(root)
         .into_iter()
         .map(|(name, _, _)| {
             let Some(dir) = profile_files::knowledge_dir(root, &name) else {
@@ -419,30 +501,48 @@ fn profiles(root: &Path) -> Vec<ProfileRow> {
                     ..ProfileRow::default()
                 };
             };
-            let (index, rows) = (knowledge::read_index(&dir), knowledge::ledger(&dir));
-            let mut row = ProfileRow {
-                name,
-                knowledge: Some(dir.clone()),
-                ..ProfileRow::default()
-            };
-            for (slug, file, parsed) in knowledge::cards(&dir) {
-                row.cards += 1;
-                match parsed {
-                    Err(_) => row.refused += 1,
-                    Ok(card) => {
-                        let sha = knowledge::card_sha(&file).unwrap_or_default();
-                        if !knowledge::known(&index, &rows, &slug, &sha) {
-                            row.unknown += 1;
-                        }
-                        if card.verdict.warns() {
-                            row.warnings += 1;
-                        }
-                    }
+            // Review S4: the cards, their shas, the index and the ledger are read again only when a file in
+            // `knowledge/` changed, was added or went.
+            let key: Vec<(PathBuf, u128, u64)> =
+                listed(&dir).iter().filter_map(|path| stat(path)).collect();
+            let row = match memo.profiles.remove(&dir) {
+                Some((seen, row)) if seen == key && row.name == name => row,
+                _ => {
+                    memo.reads += 1;
+                    profile_row(name, &dir)
                 }
-            }
+            };
+            kept.insert(dir, (key, row.clone()));
             row
         })
-        .collect()
+        .collect();
+    memo.profiles = kept;
+    rows
+}
+
+fn profile_row(name: String, dir: &Path) -> ProfileRow {
+    let (index, rows) = (knowledge::read_index(dir), knowledge::ledger(dir));
+    let mut row = ProfileRow {
+        name,
+        knowledge: Some(dir.to_path_buf()),
+        ..ProfileRow::default()
+    };
+    for (slug, file, parsed) in knowledge::cards(dir) {
+        row.cards += 1;
+        match parsed {
+            Err(_) => row.refused += 1,
+            Ok(card) => {
+                let sha = knowledge::card_sha(&file).unwrap_or_default();
+                if !knowledge::known(&index, &rows, &slug, &sha) {
+                    row.unknown += 1;
+                }
+                if card.verdict.warns() {
+                    row.warnings += 1;
+                }
+            }
+        }
+    }
+    row
 }
 
 #[cfg(test)]
@@ -456,10 +556,38 @@ pub fn reads_on_this_thread() -> usize {
     READS.with(std::cell::Cell::get)
 }
 
-/// The whole view of `root`, read now. Off the draw path only: `cached` calls it on a thread of its own.
+#[cfg(test)]
+static PANIC_LOADING: Mutex<Option<PathBuf>> = Mutex::new(None);
+#[cfg(test)]
+static PANIC_RESOLVING: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Review N5's test: the cache thread's read of `root` (or the project lookup of `folder`) panics while this is set.
+#[cfg(test)]
+pub fn panic_for_test(loading: Option<PathBuf>, resolving: Option<PathBuf>) {
+    *PANIC_LOADING.lock().unwrap_or_else(|e| e.into_inner()) = loading;
+    *PANIC_RESOLVING.lock().unwrap_or_else(|e| e.into_inner()) = resolving;
+}
+
+/// The whole view of `root`, read now with nothing remembered: the tests' reader.
+#[cfg(test)]
 pub fn load(root: &Path, now: u64) -> LearningView {
+    load_with(root, now, &mut Memo::default())
+}
+
+/// The whole view of `root`, read now, parsing again only the journals and `knowledge/` folders whose stat changed
+/// since `memo` saw them. Off the draw path only: `cached` calls it on a thread of its own.
+pub fn load_with(root: &Path, now: u64, memo: &mut Memo) -> LearningView {
     #[cfg(test)]
     READS.with(|reads| reads.set(reads.get() + 1));
+    #[cfg(test)]
+    if PANIC_LOADING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_deref()
+        == Some(root)
+    {
+        panic!("p36 test: loading {} panics", root.display());
+    }
     let project = Project::at(root);
     let index = nirvana_lessons::read_index(root);
     let mut lessons: Vec<LessonRow> = index
@@ -476,17 +604,14 @@ pub fn load(root: &Path, now: u64) -> LearningView {
         })
         .collect();
     lessons.sort_by(|a, b| b.live.cmp(&a.live).then_with(|| a.slug.cmp(&b.slug)));
-    let profiles = profiles(root);
+    let profiles = profiles(root, memo);
     LearningView {
         root: root.to_path_buf(),
         live: lessons.iter().filter(|l| l.live).count(),
-        stats: if index.lessons.is_empty() {
-            Vec::new()
-        } else {
-            nirvana_lessons::stats_lines(&index)
-        },
+        // Review N7: `herdr lessons stats` prints its lines for an empty index too.
+        stats: nirvana_lessons::stats_lines(&index),
         lessons,
-        today: today(&project, cap(), now),
+        today: today(&project, cap(), now, memo),
         changes: changes(root, &profiles),
         waiting: review::crowded(root),
         profiles,
@@ -534,6 +659,7 @@ pub fn stamp(root: &Path, now: u64) -> Stamp {
         lessons.join(nirvana_lessons::INDEX),
         lessons.join(nirvana_lessons::LEDGER),
         profile_files::folder(root),
+        // Also the folder the cap's count is renamed into (`nirvana_review::queue`), so a queued review reads again.
         project.dir().join("runs"),
         seat::dir().join(seat::SEATS_FILE),
     ];
@@ -552,6 +678,61 @@ pub fn stamp(root: &Path, now: u64) -> Stamp {
     }
 }
 
+// ---- the project a pane is in (review S2) ----
+
+/// A wait for `git rev-parse`, which the Git square's reads bound the same way.
+const GIT_WAIT: Duration = Duration::from_secs(5);
+
+/// The project `herdr lessons` reads for a pane whose folder is `folder`: `$NIRVANA_PROJECT`, else the git top level,
+/// else the folder (`nirvana_run::Project::from_env`). The client cannot read a pane's environment, so the one case
+/// where herdr sets `$NIRVANA_PROJECT` is read from the path: a worker pane's (`nirvana_worker::pane_env`), whose
+/// folder is its worktree, `<project>/.nirvana/worktrees/<order>` (`Project::worktrees_dir`). Any other worktree is its
+/// own top level, as `herdr lessons` run there reads it. One `git` per folder, on the cache thread.
+pub fn project_root(folder: &Path) -> PathBuf {
+    #[cfg(test)]
+    if PANIC_RESOLVING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_deref()
+        == Some(folder)
+    {
+        panic!("p36 test: resolving {} panics", folder.display());
+    }
+    let out = crate::nirvana_git::run_cmd(
+        folder,
+        "git",
+        &["rev-parse", "--show-toplevel"],
+        GIT_WAIT,
+        &[],
+    );
+    // `run_cmd` puts stderr first; the top level is stdout's one line.
+    let top = (out.code == 0)
+        .then(|| out.text.lines().rev().find(|l| !l.trim().is_empty()))
+        .flatten()
+        .map(|top| {
+            let top = top.trim();
+            // git prints `C:/Users/...` on Windows, as `from_env` turns it.
+            PathBuf::from(if cfg!(windows) {
+                top.replace('/', "\\")
+            } else {
+                top.to_owned()
+            })
+        });
+    let Some(top) = top else {
+        return folder.to_path_buf();
+    };
+    let worker = top
+        .parent()
+        .filter(|dir| dir.file_name().is_some_and(|n| n == "worktrees"))
+        .and_then(Path::parent)
+        .filter(|dir| {
+            dir.file_name()
+                .is_some_and(|n| n == crate::nirvana_run::DIR)
+        })
+        .and_then(Path::parent);
+    worker.map_or(top.clone(), Path::to_path_buf)
+}
+
 // ---- the cache ----
 
 #[derive(Default)]
@@ -561,9 +742,19 @@ struct Entry {
     reading: bool,
     checked_at: Option<Instant>,
     asked_at: Option<Instant>,
+    /// Taken by the reading thread and handed back with its view.
+    memo: Option<Memo>,
 }
 
-static ENTRIES: Mutex<Option<HashMap<PathBuf, Entry>>> = Mutex::new(None);
+#[derive(Default)]
+struct Cache {
+    /// Each pane folder asked about: the project it is in (`None` while its thread looks), and when it was asked.
+    roots: HashMap<PathBuf, (Option<PathBuf>, Instant)>,
+    /// Each project's view, by its root.
+    entries: HashMap<PathBuf, Entry>,
+}
+
+static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
 static CHANGED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
@@ -589,17 +780,28 @@ pub fn take_changed() -> bool {
     CHANGED.swap(false, Ordering::AcqRel)
 }
 
-/// Reads `folder` again on the next `cached`, whatever its stamp: after an undo.
-pub fn invalidate(folder: &Path) {
-    let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(entry) = guard.as_mut().and_then(|map| map.get_mut(folder)) {
+/// Reads the project `root` again on the next `cached`, whatever its stamp: after an undo.
+pub fn invalidate(root: &Path) {
+    let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(entry) = guard.as_mut().and_then(|cache| cache.entries.get_mut(root)) {
         entry.stamp = None;
         entry.checked_at = None;
     }
 }
 
-/// The last view of `folder`, `None` before its first read. At most every `REFRESH` it starts a thread that stats the
-/// folder and reads it again when the stamp changed. Called while drawing: it reads no file.
+/// What the strip draws for a pane in `folder`: `Some(None)` before the first read, which draws a placeholder
+/// (review N4). Tests that set no view and did not ask for the live cache get `None`, no square.
+pub fn square(folder: &Path) -> Option<Option<LearningView>> {
+    #[cfg(test)]
+    if TEST_VIEW.with_borrow(Option::is_none) && !TEST_LIVE.with(std::cell::Cell::get) {
+        return None;
+    }
+    Some(cached(folder))
+}
+
+/// The last view of the project a pane in `folder` is in, `None` before its first read. The first call starts a
+/// thread that finds the project (`project_root`); after it, at most every `REFRESH`, a thread stats the project and
+/// reads it again when the stamp changed. Called while drawing: it reads no file.
 pub fn cached(folder: &Path) -> Option<LearningView> {
     #[cfg(test)]
     {
@@ -610,30 +812,94 @@ pub fn cached(folder: &Path) -> Option<LearningView> {
             return None;
         }
     }
-    let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
-    let map = guard.get_or_insert_with(HashMap::new);
-    map.retain(|_, entry| entry.asked_at.is_some_and(|at| at.elapsed() < FORGET_AFTER));
-    let entry = map.entry(folder.to_path_buf()).or_default();
-    entry.asked_at = Some(Instant::now());
+    let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let cache = guard.get_or_insert_with(Cache::default);
+    let now = Instant::now();
+    cache
+        .roots
+        .retain(|_, (_, at)| now.duration_since(*at) < FORGET_AFTER);
+    cache
+        .entries
+        .retain(|_, entry| entry.asked_at.is_some_and(|at| at.elapsed() < FORGET_AFTER));
+    let root = match cache.roots.get_mut(folder) {
+        Some((root, at)) => {
+            *at = now;
+            root.clone()?
+        }
+        None => {
+            cache.roots.insert(folder.to_path_buf(), (None, now));
+            let folder = folder.to_path_buf();
+            std::thread::spawn(move || resolve(folder));
+            return None;
+        }
+    };
+    let entry = cache.entries.entry(root.clone()).or_default();
+    entry.asked_at = Some(now);
     let due = entry.checked_at.is_none_or(|at| at.elapsed() >= REFRESH);
     if due && !entry.reading {
         entry.reading = true;
-        let (folder, known) = (folder.to_path_buf(), entry.stamp.clone());
-        std::thread::spawn(move || refresh(&folder, known));
+        let (known, memo) = (entry.stamp.clone(), entry.memo.take().unwrap_or_default());
+        std::thread::spawn(move || refresh(root, known, memo));
     }
     entry.view.clone()
 }
 
-fn refresh(folder: &Path, known: Option<Stamp>) {
-    let now = crate::nirvana_run::now();
-    let stamp = stamp(folder, now);
-    let view = (known.as_ref() != Some(&stamp)).then(|| load(folder, now));
-    let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(entry) = guard.as_mut().and_then(|map| map.get_mut(folder)) {
+/// Hands a project lookup's answer back, or, when the thread panicked first, forgets the folder so the next draw
+/// looks again (review N5).
+struct Resolved {
+    folder: PathBuf,
+    root: Option<PathBuf>,
+}
+
+impl Drop for Resolved {
+    fn drop(&mut self) {
+        let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(cache) = guard.as_mut() else {
+            return;
+        };
+        match self.root.take() {
+            Some(root) => {
+                if let Some((slot, _)) = cache.roots.get_mut(&self.folder) {
+                    *slot = Some(root);
+                }
+                // The next draw starts the first read.
+                CHANGED.store(true, Ordering::Release);
+            }
+            None => {
+                cache.roots.remove(&self.folder);
+            }
+        }
+    }
+}
+
+fn resolve(folder: PathBuf) {
+    let mut done = Resolved { folder, root: None };
+    done.root = Some(project_root(&done.folder));
+}
+
+/// Hands a read back to its entry, and clears `reading` whatever happened, a panic included (review N5): a thread
+/// that never came back left the square frozen on its last view.
+struct Read {
+    root: PathBuf,
+    stamp: Option<Stamp>,
+    view: Option<LearningView>,
+    memo: Option<Memo>,
+}
+
+impl Drop for Read {
+    fn drop(&mut self) {
+        let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(entry) = guard
+            .as_mut()
+            .and_then(|cache| cache.entries.get_mut(&self.root))
+        else {
+            return;
+        };
         entry.reading = false;
         entry.checked_at = Some(Instant::now());
-        if let Some(view) = view {
-            entry.stamp = Some(stamp);
+        entry.memo = self.memo.take();
+        if let Some(view) = self.view.take() {
+            entry.stamp = self.stamp.take();
             if entry.view.as_ref() != Some(&view) {
                 entry.view = Some(view);
                 CHANGED.store(true, Ordering::Release);
@@ -642,10 +908,40 @@ fn refresh(folder: &Path, known: Option<Stamp>) {
     }
 }
 
+fn refresh(root: PathBuf, known: Option<Stamp>, mut memo: Memo) {
+    let mut done = Read {
+        root,
+        stamp: None,
+        view: None,
+        memo: None,
+    };
+    let now = crate::nirvana_run::now();
+    let stamp = stamp(&done.root, now);
+    if known.as_ref() != Some(&stamp) {
+        done.view = Some(load_with(&done.root, now, &mut memo));
+        done.stamp = Some(stamp);
+    }
+    done.memo = Some(memo);
+}
+
 // ---- undo (§1.3) ----
 
-/// What an undo's thread hands back, per folder, until the panel takes it.
-static UNDONE: Mutex<Option<HashMap<PathBuf, Result<String, String>>>> = Mutex::new(None);
+/// What each undo's thread hands back, by its ticket, until the panel that started it takes it.
+static UNDONE: Mutex<BTreeMap<u64, Result<String, String>>> = Mutex::new(BTreeMap::new());
+static TICKETS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+static HELD: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
+
+/// Review S3's test: an undo of `(root, id)` waits while it is held.
+#[cfg(test)]
+pub fn hold_undo_for_test(root: &Path, id: &str, held: bool) {
+    let mut list = HELD.lock().unwrap_or_else(|e| e.into_inner());
+    list.retain(|(r, i)| !(r == root && i == id));
+    if held {
+        list.push((root.to_path_buf(), id.to_owned()));
+    }
+}
 
 /// The rollback `herdr lessons rollback <id>` or `herdr kb rollback --profile <name> <id>` runs, for `change`.
 pub fn undo(root: &Path, change: &Change, at: u64) -> Result<String, String> {
@@ -655,27 +951,43 @@ pub fn undo(root: &Path, change: &Change, at: u64) -> Result<String, String> {
     }
 }
 
-/// Runs `undo` on its own thread and returns at once; `take_undo` hands its words back.
-pub fn start_undo(root: PathBuf, change: Change) {
+/// Runs `undo` on its own thread and returns at once with its ticket; `take_undo(ticket)` hands its words back, so an
+/// undo a closed panel started never answers the next panel's (review S3).
+pub fn start_undo(root: PathBuf, change: Change) -> u64 {
+    let ticket = TICKETS.fetch_add(1, Ordering::AcqRel) + 1;
     std::thread::spawn(move || {
-        let done = undo(&root, &change, crate::nirvana_run::now());
+        #[cfg(test)]
+        while HELD
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|(r, i)| r == &root && i == &change.id)
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            undo(&root, &change, crate::nirvana_run::now())
+        }))
+        .unwrap_or_else(|_| {
+            Err("the undo stopped before it finished; read the ledger before trying again".into())
+        });
         invalidate(&root);
         UNDONE
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get_or_insert_with(HashMap::new)
-            .insert(root, done);
+            .insert(ticket, done);
         CHANGED.store(true, Ordering::Release);
     });
+    ticket
 }
 
-/// A finished undo's words for `root`: a map read, no I/O.
-pub fn take_undo(root: &Path) -> Option<Result<String, String>> {
-    UNDONE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_mut()
-        .and_then(|map| map.remove(root))
+/// The words of the undo with `ticket`, once it finished: a map read, no I/O. Older tickets' words, which no panel
+/// waits on any more, go with it.
+pub fn take_undo(ticket: u64) -> Option<Result<String, String>> {
+    let mut map = UNDONE.lock().unwrap_or_else(|e| e.into_inner());
+    let done = map.remove(&ticket)?;
+    map.retain(|seen, _| *seen > ticket);
+    Some(done)
 }
 
 #[cfg(test)]

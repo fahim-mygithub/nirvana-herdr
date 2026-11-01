@@ -370,7 +370,7 @@ pub(super) fn render_strip(
     seats: Option<Option<&crate::nirvana_seats_square::View>>,
     jobs: Option<&crate::nirvana_job::JobsView>,
     git: Option<&crate::nirvana_git::GitView>,
-    learning: Option<&crate::nirvana_learning::LearningView>,
+    learning: Option<Option<&crate::nirvana_learning::LearningView>>,
     open: OpenPanel,
     palette: &Palette,
 ) -> StripHits {
@@ -492,14 +492,19 @@ pub(super) fn render_strip(
             area.y,
             right,
             "Learning",
-            &super::nirvana_learning::learning_value(learning, narrow),
+            // Review N4: drawn before the first read too, so Memory and Git do not slide right once it lands, and the
+            // square opens its panel at once.
+            &learning.map_or_else(
+                || super::nirvana_learning::READING.to_owned(),
+                |learning| super::nirvana_learning::learning_value(learning, narrow),
+            ),
             palette.subtext0,
-            &learning_marks(learning),
+            &learning.map(learning_marks).unwrap_or_default(),
             open == OpenPanel::Learning,
             palette,
         );
     }
-    // The square drawn last before Memory and Git: Learning once read, else Preload.
+    // The square drawn last before Memory and Git: Learning when drawn, else Preload.
     let before = if hits.learning.width > 0 {
         hits.learning
     } else {

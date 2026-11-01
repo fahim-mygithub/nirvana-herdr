@@ -19,6 +19,8 @@ pub(super) const NARROW_STRIP: u16 = 100;
 pub(super) const LEARNING_WIDTH: u16 = 96;
 /// The square's mark: the Git square's failed-CI mark, so a wrong turn reads the same in both.
 pub(super) const WENT_WRONG: &str = "\u{2717}";
+/// The square's value before the first read of its project.
+pub(super) const READING: &str = "\u{2026}";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct LearningTab {
@@ -27,7 +29,8 @@ pub(super) struct LearningTab {
     pub(super) tab_id: String,
 }
 
-/// §1: "The project is the tab's folder, as the Git square finds it."
+/// §1: "The project is the tab's folder, as the Git square finds it." This is the pane's folder; the project it is in
+/// is found off the draw path (`crate::nirvana_learning::project_root`, review S2).
 pub(super) fn learning_tab(snapshot: &ClientShellSnapshot) -> Option<LearningTab> {
     let agent = super::nirvana_mods::strip_agent(snapshot)?;
     Some(LearningTab {
@@ -42,7 +45,8 @@ pub(super) fn learning_tab(snapshot: &ClientShellSnapshot) -> Option<LearningTab
 /// failed or had every op refused.
 pub(super) fn learning_value(view: &LearningView, narrow: bool) -> String {
     let today = &view.today;
-    let used = today.reviews.len();
+    // Review S1: the cap's own count, which a reseat child does not double.
+    let used = today.used;
     let mut value = if view.lessons.is_empty() {
         if narrow { "none yet" } else { "no lessons yet" }.to_owned()
     } else if narrow {
@@ -107,15 +111,16 @@ fn lines(view: &LearningView, now: u64) -> Vec<Line> {
     let mut out = Vec::new();
     let today = &view.today;
     out.push(Line::Head("Today"));
-    if today.reviews.is_empty() {
+    // Review N1: the cap's day starts at 00:00 UTC, which is not the owner's midnight.
+    if today.reviews.is_empty() && today.used == 0 {
         out.push(Line::Text(format!(
-            "no lesson review today \u{b7} cap {} a day",
+            "no lesson review this UTC day \u{b7} cap {} a day",
             today.cap
         )));
     } else {
         out.push(Line::Text(format!(
-            "reviews {}/{} \u{b7} {} gated: {} done \u{b7} {} held back \u{b7} {} failed \u{b7} {} not gated yet",
-            today.reviews.len(),
+            "reviews {}/{} this UTC day \u{b7} {} gated: {} done \u{b7} {} held back \u{b7} {} failed \u{b7} {} not gated yet",
+            today.used,
             today.cap,
             today.gated(),
             today.count(Ruled::Done),
@@ -258,18 +263,53 @@ pub(super) fn items(view: &LearningView) -> Vec<Item> {
         .collect()
 }
 
+/// What a row is, whatever its place: the highlight stays on it when a refresh adds a row above it (review N2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum RowKey {
+    Change(Source, String),
+    Lesson(String),
+    Profile(String),
+}
+
+fn key_of(view: &LearningView, item: Item) -> Option<RowKey> {
+    Some(match item {
+        Item::Change(i) => {
+            let change = view.changes.get(i)?;
+            RowKey::Change(change.source.clone(), change.id.clone())
+        }
+        Item::Lesson(i) => RowKey::Lesson(view.lessons.get(i)?.slug.clone()),
+        Item::Profile(i) => RowKey::Profile(view.profiles.get(i)?.name.clone()),
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LearningPanel {
+    /// The pane's folder, which `cached` finds the project of; the view's `root` is the project.
     pub(super) folder: PathBuf,
     pub(super) workspace_id: String,
     pub(super) tab_id: String,
     /// An index into `items`.
     pub(super) selected: usize,
+    /// The row `selected` was on at the last draw; `None` after a key or a click moved it.
+    pub(super) selected_key: Option<RowKey>,
     pub(super) scroll: usize,
     /// §1.3: the change `u` asked about; the answer rolls back this row, whatever the ledger shows meanwhile.
     pub(super) confirming: Option<Change>,
-    pub(super) busy: bool,
+    /// The ticket of the undo this panel started and waits on (`crate::nirvana_learning::start_undo`).
+    pub(super) undoing: Option<u64>,
     pub(super) message: Option<String>,
+}
+
+impl LearningPanel {
+    pub(super) fn busy(&self) -> bool {
+        self.undoing.is_some()
+    }
+
+    /// A key or a click moved the selection: the next draw keeps the index and remembers its row.
+    fn moved(&mut self, selected: usize) {
+        self.selected = selected;
+        self.selected_key = None;
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -309,13 +349,30 @@ pub(super) fn render_learning_panel(
     let height = (body.len() as u16 + 4).min(area.height.saturating_sub(1));
     let rect = Rect::new(area.x + 1, area.y + 1, panel_width, height);
     hits.area = rect;
-    let title = format!(" Learning \u{b7} {} ", folder_name(&panel.folder));
+    let title = format!(
+        " Learning \u{b7} {} ",
+        folder_name(view.map_or(&panel.folder, |view| &view.root))
+    );
     hits.close = draw_frame(buffer, rect, &title, palette);
     let x = rect.x + 2;
     let body_height = usize::from(rect.height.saturating_sub(4)).max(1);
 
-    let count = items(shown).len();
+    let listed = items(shown);
+    if let Some(key) = &panel.selected_key {
+        if let Some(at) = listed
+            .iter()
+            .position(|item| key_of(shown, *item).as_ref() == Some(key))
+        {
+            panel.selected = at;
+        }
+    }
+    let count = listed.len();
     panel.selected = panel.selected.min(count.saturating_sub(1));
+    if view.is_some() {
+        panel.selected_key = listed
+            .get(panel.selected)
+            .and_then(|item| key_of(shown, *item));
+    }
     // The line the selected row is on, so the scroll keeps it in sight.
     let mut seen = 0;
     let selected_line = body.iter().position(|line| {
@@ -417,8 +474,10 @@ pub(super) fn render_learning_panel(
             muted,
         );
     } else {
-        let keys = "j/k move \u{b7} enter open \u{b7} u undo a change \u{b7} esc close";
-        let text = match (&panel.message, panel.busy) {
+        // Review N6: opening is no write, but a hand edit of a lesson or card holds the next review back
+        // (`lessons_folder`, `knowledge_folder`).
+        let keys = "j/k move \u{b7} enter open (hand edits hold the next review back) \u{b7} u undo \u{b7} esc close";
+        let text = match (&panel.message, panel.busy()) {
             (Some(message), _) => message.clone(),
             (None, true) => "undoing\u{2026}".into(),
             (None, false) => keys.into(),
@@ -429,7 +488,7 @@ pub(super) fn render_learning_panel(
             foot_y,
             inner as u16,
             &fit(&text, inner),
-            if panel.message.is_some() || panel.busy {
+            if panel.message.is_some() || panel.busy() {
                 base.fg(palette.yellow)
             } else {
                 muted
@@ -459,9 +518,10 @@ impl ClientShellState {
             workspace_id: tab.workspace_id,
             tab_id: tab.tab_id,
             selected: 0,
+            selected_key: None,
             scroll: 0,
             confirming: None,
-            busy: false,
+            undoing: None,
             message: None,
         });
     }
@@ -559,19 +619,24 @@ impl ClientShellState {
 
     /// The answer: the rollback of exactly the row asked about, on a thread.
     pub(super) fn learning_confirm_undo(&mut self) {
+        // The project the row came from: the folder's, found once, so the view read now has the same root.
+        let root = self.learning_view().map(|view| view.root);
         let Some(panel) = self.nirvana_learning.as_mut() else {
             return;
         };
         let Some(change) = panel.confirming.take() else {
             return;
         };
-        if panel.busy {
+        if panel.busy() {
             panel.message = Some("an undo is still running".into());
             return;
         }
-        panel.busy = true;
+        let Some(root) = root else {
+            panel.message = Some("not undone: the project is not read yet".into());
+            return;
+        };
         panel.message = None;
-        crate::nirvana_learning::start_undo(panel.folder.clone(), change);
+        panel.undoing = Some(crate::nirvana_learning::start_undo(root, change));
     }
 
     pub(super) fn route_learning_key(
@@ -585,24 +650,26 @@ impl ClientShellState {
             return;
         };
         if panel.confirming.is_some() {
+            // Review S5: `y` only. Enter opens everywhere else in the panel, so a habitual Enter after `u` must not
+            // roll a lesson back.
             match key.code {
-                KeyCode::Char('y' | 'u') | KeyCode::Enter => self.learning_confirm_undo(),
+                KeyCode::Char('y') => self.learning_confirm_undo(),
                 KeyCode::Char('n') | KeyCode::Esc => panel.confirming = None,
                 _ => {}
             }
             outcome.repaint = true;
             return;
         }
-        if !panel.busy {
+        if !panel.busy() {
             panel.message = None;
         }
         let selected = panel.selected;
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.nirvana_learning = None,
-            KeyCode::Up | KeyCode::Char('k') => panel.selected = selected.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => panel.selected = (selected + 1).min(last),
-            KeyCode::Home => panel.selected = 0,
-            KeyCode::End => panel.selected = last,
+            KeyCode::Up | KeyCode::Char('k') => panel.moved(selected.saturating_sub(1)),
+            KeyCode::Down | KeyCode::Char('j') => panel.moved((selected + 1).min(last)),
+            KeyCode::Home => panel.moved(0),
+            KeyCode::End => panel.moved(last),
             KeyCode::Enter | KeyCode::Char('o') => self.learning_open(outcome),
             KeyCode::Char('u') => self.learning_ask_undo(),
             _ => {}
@@ -635,9 +702,29 @@ impl ClientShellState {
                 .find(|(rect, _)| super::contains(*rect, point))
             {
                 if let Some(panel) = self.nirvana_learning.as_mut() {
-                    panel.selected = *index;
+                    panel.moved(*index);
                     panel.message = None;
                 }
+            }
+            outcome.repaint = true;
+        }
+        // Review N3: the wheel moves the selection, which the draw keeps in sight; the list can be hundreds of rows.
+        let step = match mouse.kind {
+            MouseEventKind::ScrollUp => Some(false),
+            MouseEventKind::ScrollDown => Some(true),
+            _ => None,
+        };
+        if let Some(down) = step {
+            let last = self
+                .learning_view()
+                .map_or(0, |view| items(&view).len().saturating_sub(1));
+            if let Some(panel) = self.nirvana_learning.as_mut() {
+                let selected = panel.selected;
+                panel.moved(if down {
+                    (selected + 1).min(last)
+                } else {
+                    selected.saturating_sub(1)
+                });
             }
             outcome.repaint = true;
         }
