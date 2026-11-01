@@ -786,6 +786,16 @@ fn queue_line(kind: &Kind) -> Option<String> {
             Some(why) => format!("{order} ended {outcome}: {}", short(why, 90)),
             None => format!("{order} ended {outcome}"),
         },
+        // Plan 37 §1.1: `seat exec` gates a done delivery before it wakes Nirvana Claude; the wake carries the verdict.
+        Kind::Gated {
+            order,
+            verdict,
+            reason,
+            ..
+        } => match reason {
+            Some(reason) => format!("{order} gated {verdict}: {}", short(reason, 90)),
+            None => format!("{order} gated {verdict}"),
+        },
         _ => return None,
     })
 }
@@ -798,6 +808,9 @@ pub fn replay(events: &[Event]) -> RunState {
     };
     let mut wake_open = false;
     let mut streak = 0u32;
+    // Plan 37 review S2: the orders delivered and not yet gated. Only the first verdict after a delivery queues, so a
+    // wake typed between the delivery and its gate (another order's) cannot drop it, and a regate queues nothing.
+    let mut verdict_owed: Vec<String> = Vec::new();
     for event in events {
         state.last_seq = state.last_seq.max(event.seq);
         state.last_at = Some(state.last_at.map_or(event.at, |at| at.max(event.at)));
@@ -1071,7 +1084,23 @@ pub fn replay(events: &[Event]) -> RunState {
                 .order()
                 .and_then(|order| state.order(order))
                 .is_some_and(|known| known.seated.class == crate::nirvana_review::CLASS);
-        if let Some(line) = queue_line(&event.kind).filter(|_| !herdrs) {
+        let owed = match &event.kind {
+            Kind::Delivered { order, .. } => {
+                verdict_owed.push(order.clone());
+                true
+            }
+            Kind::Gated { order, .. } => {
+                let first = verdict_owed.iter().any(|owed| owed == order);
+                verdict_owed.retain(|owed| owed != order);
+                // A lesson review's verdict is herdr's to read, as its delivery is.
+                first
+                    && state
+                        .order(order)
+                        .is_some_and(|known| known.seated.class != crate::nirvana_review::CLASS)
+            }
+            _ => true,
+        };
+        if let Some(line) = queue_line(&event.kind).filter(|_| !herdrs && owed) {
             state.queue.push(QueueItem {
                 seq: event.seq,
                 order: event.kind.order().map(str::to_owned),

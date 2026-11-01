@@ -746,10 +746,24 @@ fn an_unfinished_run_with_no_live_worker_and_no_next_step_is_a_dead_end() {
             axes: Vec::new(),
         },
     ));
+    // Plan 37 review S2: the first verdict after a delivery queues even after a wake that covered the delivery (a
+    // gate by hand once the auto-gate failed, or a wake typed while `seat exec` gated); read, the run is done.
+    assert!(check(&replay(&events), &never, T0)
+        .expect("the verdict queued")
+        .contains("herdr run notice"));
+    events.push(ev(
+        10,
+        T0 + 30,
+        Kind::Woken {
+            via: "notice".into(),
+            through: 9,
+            digest: String::new(),
+        },
+    ));
     let all_done = check(&replay(&events), &never, T0).expect_err("dead end");
     assert!(all_done.contains("herdr run end"), "{all_done}");
     events.push(ev(
-        10,
+        11,
         T0 + 31,
         Kind::Ended {
             order: None,
@@ -1640,4 +1654,59 @@ fn p31_the_retry_backs_off_from_30_s_to_5_minutes() {
     assert_eq!(gaps, vec![30, 60, 120, 240, 300, 300]);
     clear_retry(Some(&home.path), &project, "r1");
     assert!(take_due_retries(&home.path, u64::MAX).is_empty());
+}
+
+/// Plan 37 review S2: a wake typed between a delivery and its gate (another order's, while `seat exec` gated this
+/// one) leaves the verdict queued, and digested; a regate by hand queues nothing a second time; a lesson review's
+/// verdict never queues.
+#[test]
+fn p37_the_first_verdict_after_a_delivery_queues_whatever_was_woken() {
+    let gated = |seq: u64, verdict: &str| {
+        ev(
+            seq,
+            T0 + 30,
+            Kind::Gated {
+                order: "sub".into(),
+                verdict: verdict.into(),
+                reason: Some("sources: 2 cited video(s) do not exist on YouTube".into()),
+                axes: Vec::new(),
+            },
+        )
+    };
+    let mut events = delivered_run();
+    events.push(ev(
+        8,
+        T0 + 20,
+        Kind::Woken {
+            via: "notice".into(),
+            through: 7,
+            digest: String::new(),
+        },
+    ));
+    events.push(gated(9, "sent_back"));
+    let state = replay(&events);
+    let lines: Vec<&str> = state.queue.iter().map(|item| item.line.as_str()).collect();
+    assert_eq!(
+        lines,
+        vec!["sub gated sent_back: sources: 2 cited video(s) do not exist on YouTube"]
+    );
+    assert!(digest("r1", &state.queue).contains("sub gated sent_back: "));
+    events.push(gated(10, "pass"));
+    assert_eq!(
+        replay(&events).queue.len(),
+        1,
+        "{:?}",
+        replay(&events).queue
+    );
+    // A lesson review: neither its delivery nor its verdict reaches the queue.
+    let mut review = delivered_run();
+    if let Kind::Seated(seated) = &mut review[1].kind {
+        seated.class = crate::nirvana_review::CLASS.into();
+    }
+    review.push(gated(8, "pass"));
+    assert!(
+        replay(&review).queue.is_empty(),
+        "{:?}",
+        replay(&review).queue
+    );
 }

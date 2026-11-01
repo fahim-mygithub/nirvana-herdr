@@ -1772,10 +1772,16 @@ pub fn exec(
                         // Plan 33 review B2: a lesson review costs no orchestrator turn. herdr gates it below, and its
                         // question is no one's to answer: the gate applies nothing that is not `done`.
                         let review = seated.class == crate::nirvana_review::CLASS;
-                        // Plan 34 §2.5: a done teaching order is gated by herdr too, whose checks apply its card ops;
-                        // Nirvana Claude is still woken to say what was kept.
-                        let teach = seated.class == crate::nirvana_knowledge::TEACH_CLASS
-                            && status == "done";
+                        // Plan 34 §2.5: a done teaching order is gated by herdr too, whose checks apply its card ops.
+                        // Plan 37 §1.1 (L3): so is every other done delivery but a helper's, before the wake, so
+                        // the wake carries the verdict and gating costs Nirvana Claude no turn.
+                        let gates = crate::nirvana_gate::gates_on_delivery(
+                            project,
+                            run,
+                            order,
+                            &seated.class,
+                            &status,
+                        );
                         let mut kinds = vec![Kind::Delivered {
                             order: order.to_owned(),
                             report: report.clone(),
@@ -1816,18 +1822,38 @@ pub fn exec(
                                 true
                             )
                         )?;
-                        if teach {
-                            match crate::nirvana_gate::gate(project, run, order) {
-                                Ok(ruling) => writeln!(out, "gated: {}", ruling.verdict)?,
-                                Err(why) => writeln!(out, "not gated: {why}")?,
+                        if gates {
+                            // Review N1: the wake below is the orchestrator's only news of this delivery, so a panic
+                            // in the gate is caught, journaled as the run's question, and the wake still goes.
+                            let gated =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    crate::nirvana_gate::gate(project, run, order)
+                                }));
+                            match gated {
+                                Ok(Ok(ruling)) => writeln!(out, "gated: {}", ruling.verdict)?,
+                                Ok(Err(why)) => writeln!(out, "not gated: {why}")?,
+                                Err(panic) => {
+                                    let what = panic
+                                        .downcast_ref::<&str>()
+                                        .map(|text| (*text).to_owned())
+                                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                                        .unwrap_or_else(|| "no message".into());
+                                    let question = format!(
+                                        "herdr's gate of {order} stopped ({what}); gate it by hand: `herdr gate run {order} --run {run}`"
+                                    );
+                                    let _ = journal.append(
+                                        now(),
+                                        Kind::Asked {
+                                            order: None,
+                                            question: question.clone(),
+                                        },
+                                    );
+                                    writeln!(out, "not gated: {question}")?;
+                                }
                             }
                         }
-                        if review {
-                            match crate::nirvana_gate::gate(project, run, order) {
-                                Ok(ruling) => writeln!(out, "gated: {}", ruling.verdict)?,
-                                Err(why) => writeln!(out, "not gated: {why}")?,
-                            }
-                        } else {
+                        // A lesson review's verdict is no one's to read (plan 33 review B2).
+                        if !review {
                             let _ = nirvana_run::wake(project, run, false);
                         }
                         // Plan 26 §2: A worker that delivers done closes its own pane through herdr

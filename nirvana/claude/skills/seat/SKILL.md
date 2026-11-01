@@ -53,6 +53,7 @@ owner's words where they matter. Then:
   project's `.mcp.json` server, so its worker gets the server's tools. An order that may press Send adds
   `--send-ok "<the owner's words>"`, copied exactly from the owner's prompt of the last 6 hours (4 words or more);
   herdr refuses a quote it cannot find, and a send-back or reseat never inherits it.
+  `--needs browser` or `--needs bladebro` gives the worker bladebro, a headless browser with its own profile, on a claude or an agy seat; `browser` also limits the pick to the seats that list it, `bladebro` does not.
   An order picked with `--profile <name>` is run with the same `--profile <name>`: herdr copies the profile into the
   run, gives the worker its persona (a system prompt on Claude, the top of the order on agy), and a send-back or
   reseat keeps the copy. Design one with `herdr profile new <name>`, then `herdr profile check <name>`.
@@ -64,6 +65,45 @@ owner's words where they matter. Then:
   outcome under them when it stops. A spawn that names no model or effort, or that would break your reserve on `max`,
   is refused by the `PreToolUse` hook.
 
+### An agy research or media order
+
+agy reads no `CLAUDE.md` and grades a check written as prose itself. Each rule names the MotoProject failure it
+answers (`nirvana/plans/2026-10-31-35-records/moto-gemini-briefs.md`). herdr's own sources line stays under the
+brief as the floor.
+
+1. The verify line, word for word: "Never cite a URL from memory or from a search result. Cite only what you opened
+   in this session; drop what you couldn't open." reel-motion-gemini's brief lacked it and its 12 sources were
+   invented; the 4 briefs with it cited 47 sources, all real, one on the same flash-low seat.
+2. A read method per kind of source, naming only tools the worker has: a `search_web` link is a vertexaisearch
+   redirect, resolved with `curl -sI` and its `Location`; YouTube by
+   `python -m yt_dlp --skip-download --print "%(id)s|%(title)s|%(channel)s" <url>` (`--write-auto-subs` for a
+   transcript); Reddit by `curl -s -A "<ua>" <thread>/.rss`, waiting out a 429; any other page one `curl` each, or
+   bladebro when the order was seated with `--needs bladebro`. agy has no YouTube connector: r2 was promised one,
+   and spent 9 steps finding the method and about 10 failed Reddit reads.
+3. "Done means" ends with a command whose output goes into `tests`: for research, one last command re-opening every
+   cited id (`python -m yt_dlp --skip-download --print id <url>...`). reel-motion-gemini graded its own prose check
+   "pass" after opening nothing.
+4. `owns:` in lowercase, one line per path: the gate ignored reel-motion-gemini's `Owns:` until P35a.
+5. The project rules the order touches, quoted word for word: the E: rule for working files lived only in the
+   reel-editor profile, and r2 left 6 mp4s on C:.
+6. Where working files go, and that long steps run in the foreground ("a draft render takes about N min; run it in
+   the foreground; never wait on a background task"): v12-smudge-fix waited on its own background render and
+   stalled 600 s.
+7. The current state as absolute paths (the current plan file, the latest report) and the owner's words verbatim:
+   reel-motion-gemini asked about a 10-slide post weeks after the reel became 13 slides of video.
+8. Explore, read, write, verify, in that order: find candidates, open each, write the file, run the done-check.
+   reel-motion-gemini searched and wrote, and opened nothing.
+
+The checklist, before `herdr seat run`:
+- [ ] class line, and `--profile web-researcher` when the project has it
+- [ ] lowercase `owns:`
+- [ ] the owner's words verbatim, and the current state as absolute paths
+- [ ] the project rules quoted
+- [ ] the verify line
+- [ ] a read method per source type, only real tools
+- [ ] where working files go, and foreground only
+- [ ] a "done means" that ends in a command whose output goes in `tests`
+
 ## 4. Read it
 
 End your turn while workers run; herdr wakes you when an order delivers, asks, fails or stalls.
@@ -74,6 +114,15 @@ End your turn while workers run; herdr wakes you when an order delivers, asks, f
 - `herdr seat stop <order>`: stops it with a checkpoint; never rerun an interrupted step blindly.
 
 ## 5. Gate it
+
+herdr gates each `done` delivery itself, before it wakes you, and the wake says
+`<order> gated <verdict>: <reason>`, with no reason on a pass (plan 37 §1.1). A helper's delivery (a reviewer's, a
+held-out author's), a `blocked` one and a gate that waits on a review you gate by hand; `herdr gate run` again names
+the next step, a booked reviewer's `herdr seat run` line included, and for an order already sent back or asked it
+gives the child or the question again. A gate that stopped wakes you as `the run asks: herdr's gate of <order>
+stopped`: run it by hand. A cited YouTube video that does not exist fails the sources axis, and its redo goes
+one seat up with a brief that trusts nothing from the first try; when no stronger seat is open herdr asks you instead
+of redoing it on the seat that invented it.
 
 - `herdr gate run <order> --run <run>`: rules on a delivered order. Exit 0 passed; 1 sent back or asked, with the
   reason; 4 waits for a review or a held-out check.

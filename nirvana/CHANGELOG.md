@@ -3,6 +3,32 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.50.0: every delivery is gated, invented sources are caught, and agy briefs say how to read
+
+- **Changed:**
+  - A worker that delivers `done` is gated by herdr at once, in `seat exec`, before the orchestrator wakes. A gate
+    that panics is journaled as the run's own question, and the wake still goes. Blocked deliveries and helpers are
+    not auto-gated.
+  - The first verdict after a delivery is queued for the orchestrator as `<order> gated <verdict>: <reason>`. A later
+    gate of the same order, or a lesson review's verdict, is not. A gate by hand of an order already sent back or
+    asked returns the stored verdict and journals nothing.
+  - Cited YouTube videos are checked with oEmbed: 4 s a call, 30 s in all, at most 20 calls. A video that does not
+    exist is an invented source. An invented-only fail steps the order up to a stronger seat, or asks when none is
+    open or the step is refused. A mixed fail keeps the fix instruction and adds that the sources are not trusted.
+  - Reseated and sent-back helpers keep the order they help.
+  - ROLE.md and the seat SKILL.md give the verdict line as the digest prints it, and how an agy worker reads a page.
+    A `web-researcher` profile template is added.
+  **Because:** plan `nirvana/plans/2026-10-31-37-agy-delivery-checks.md`, from the MotoProject analysis of
+  2026-10-31: agy deliveries sat ungated until the orchestrator thought to gate them, and invented videos passed.
+  Built on Opus high, one Sonnet review, one fix round.
+  **Measured:**
+  - Gates on master plus plans 37 and 35c together: nextest 4,570 of 4,571, the one failure the known Windows
+    plugin-path test; clippy clean; the dry run finds 2,438 of 2,438; all 71 `p37_` controls and the older controls
+    whose lines moved go red alone.
+  - The owner ruled "404 fails": a video deleted after a real read fails as invented. The 4 s and 30 s numbers are
+    hypotheses. Not live-checked: plan 37 §4.
+  **If you remove this:** a delivery waits ungated until someone asks, and a worker that invents its videos passes.
+
 ## alpha 0.49.0: agy workers get Claude workers' tools, and the sources check sees agy's reads
 
 - **Changed:**

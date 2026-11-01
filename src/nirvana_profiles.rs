@@ -716,8 +716,66 @@ your work. At most {BODY_MAX} characters: this is paid on every call of the work
     )
 }
 
+/// Plan 37 §1.5: the templates `herdr profile new <name> --from <template>` writes, so a method learned once is
+/// carried by `--profile` instead of retyped into every brief (MotoProject: 0 of 35 orders carried a profile, and the
+/// Oct 23 "REAL URLs ONLY" method never became a standing rule).
+pub const TEMPLATES: [&str; 1] = ["web-researcher"];
+
+/// The `web-researcher` body: rules 1-3 and 7 of the MotoProject brief analysis
+/// (`nirvana/plans/2026-10-31-35-records/moto-gemini-briefs.md` §3). Rule 4 is not here: P35a fixed the sources rule
+/// it worked around. Untested as profile text (the analysis's risk): check it on the next research order. The body
+/// holds the rules only (review N6: a body is paid on every call); the MotoProject failure behind each rule is in the
+/// seat skill's agy subsection.
+pub const WEB_RESEARCHER: &str = "---\n\
+description: Web research on agy or Claude: open every source in this session, cite only what was opened, check it.\n\
+class: research.web\n\
+# A profile never grants a Send: that is per order, `herdr seat run --send-ok`.\n\
+---\n\
+You research the web for this project. Your Work Report's sources are only pages and videos you opened in this \
+session.\n\
+\n\
+1. Never cite a URL from memory or from a search result. Cite only what you opened in this session; drop what you \
+could not open.\n\
+2. Read each kind of source with a tool you really have:\n\
+   - a search result link that is a vertexaisearch redirect: resolve it with `curl -sI <link>` and use its \
+`Location`;\n\
+   - YouTube: `python -m yt_dlp --skip-download --print \"%(id)s|%(title)s|%(channel)s\" <url>`, and \
+`--write-auto-subs` when you need the transcript;\n\
+   - Reddit: `curl -s -A \"<a browser user agent>\" <thread>/.rss`; on a 429, wait for the reset;\n\
+   - any other page: one `curl` per page, or the browser tool when your order gives you one.\n\
+   There is no YouTube connector: say so and use yt_dlp.\n\
+3. Done means a command, and its output goes into `tests`: last, re-open every cited id or URL in one command \
+(`python -m yt_dlp --skip-download --print id <url> <url>...`, `curl -sI` for pages) and paste what it printed. A \
+check written as prose is not a check.\n\
+4. Put downloads and working files where the order's project rules say, never in your own scratch folder, and run \
+every long step in the foreground; never wait on a background task.\n";
+
+/// The text of a template by its name.
+pub fn template_text(name: &str) -> Option<&'static str> {
+    match name {
+        "web-researcher" => Some(WEB_RESEARCHER),
+        _ => None,
+    }
+}
+
+/// `herdr profile new <name> --from <template>`: a template herdr ships, never over a file already there.
+pub fn new_profile_from(root: &Path, name: &str, from: &str) -> Result<PathBuf, String> {
+    let text = template_text(from).ok_or_else(|| {
+        format!(
+            "no template {from:?}; the templates: {}",
+            TEMPLATES.join(", ")
+        )
+    })?;
+    write_new(root, name, text)
+}
+
 /// `herdr profile new <name>`: the template, never over a file already there.
 pub fn new_profile(root: &Path, name: &str) -> Result<PathBuf, String> {
+    let servers = crate::nirvana_gui_tools::project_servers(root).unwrap_or_default();
+    write_new(root, name, &template(&servers))
+}
+
+fn write_new(root: &Path, name: &str, text: &str) -> Result<PathBuf, String> {
     if !valid_name(name) {
         return Err(format!(
             "{name:?}: a profile's name is 1 to {NAME_MAX} of [a-z0-9-]"
@@ -733,9 +791,7 @@ pub fn new_profile(root: &Path, name: &str) -> Result<PathBuf, String> {
             folder_of(root, name).display()
         ));
     }
-    let servers = crate::nirvana_gui_tools::project_servers(root).unwrap_or_default();
-    let text = template(&servers);
-    parse(&file, name, &text).map_err(|problems| problems.join("\n"))?;
+    parse(&file, name, text).map_err(|problems| problems.join("\n"))?;
     let dir = folder(root);
     std::fs::create_dir_all(&dir)
         .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
@@ -800,6 +856,8 @@ pub fn table_problems(
 const USAGE: &str = "usage: herdr profile list
        herdr profile show <name>
        herdr profile new <name>          writes .nirvana/profiles/<name>.md from the template
+       herdr profile new <name> --from <template>
+                                         writes it from a template herdr ships: web-researcher
        herdr profile check [<name>]      prints every refusal, a folder profile's cards too; exit 1 when there is one
        herdr profile check <name> --adopt
                                          records the cards you wrote by hand as they stand, so they are offered
@@ -856,6 +914,18 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
                 1
             }
         },
+        (Some("new"), [name, flag, from]) if flag == "--from" => {
+            match new_profile_from(&root, name, from) {
+                Ok(file) => {
+                    println!("{}", file.display());
+                    0
+                }
+                Err(why) => {
+                    eprintln!("herdr profile new: {why}");
+                    1
+                }
+            }
+        }
         (Some("check"), [name, flag]) if flag == "--adopt" => {
             // Plan 34 P34a review B1: the owner's one step for cards written by hand; then the check, as without it.
             match crate::nirvana_knowledge::adopt(&root, name) {

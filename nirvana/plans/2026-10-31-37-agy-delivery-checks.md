@@ -1,6 +1,6 @@
 # Feature 37: every delivery is gated, invented sources are caught, and agy briefs say how to read
 
-Status: **PLANNED (2026-10-31)**. Starts after plan 35's P35a and P35b merge (it edits their files). The evidence is
+Status: **BUILT (2026-11-01, alpha 0.50.0)**. Was PLANNED (2026-10-31). Started after plan 35's P35a and P35b merge (it edits their files). The evidence is
 the MotoProject analysis of 2026-10-31, `nirvana/plans/2026-10-31-35-records/moto-gemini.md`, and plan 35's records.
 
 ## Ledger
