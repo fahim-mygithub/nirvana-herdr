@@ -60,6 +60,14 @@ const KEPT_LINES: usize = 40;
 const AUTHOR_TRIES: usize = 2;
 /// `herdr gate run` exits with this while a review or a held-out check is still to come.
 pub const WAIT_EXIT: i32 = 4;
+/// Plan 37 §1.2 (L4): YouTube's oEmbed, asked whether each cited video exists. MotoProject, 2026-10-31: 6 of 6
+/// invented ids answered 404 and 48 of 48 real ids 200. Reddit is not asked: it answered 403 and 429.
+pub const OEMBED_URL: &str = "https://www.youtube.com/oembed";
+/// Per call. A hypothesis: no latency of the 54 measured calls was kept.
+pub const OEMBED_TIMEOUT_S: u64 = 4;
+/// Calls per gate. reel-motion-gemini-r2 cited 10 videos, the most measured; a cap keeps a long list from holding the
+/// gate lock for minutes.
+pub const OEMBED_CALLS_PER_GATE: usize = 20;
 
 // ---- the outcome words ----
 
@@ -1531,6 +1539,155 @@ pub fn sources_axis(class: &str, report: Option<&Value>, stream: &str) -> Option
     }
 }
 
+// ---- plan 37 §1.2: do the cited videos exist ----
+
+/// What YouTube's oEmbed said of one video id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Video {
+    Exists,
+    /// 404: the only answer that fails (L4, "a 404 fails").
+    Missing,
+    /// Any other status: a note (an embedding-disabled or private video is not an invented one).
+    Other(u16),
+    /// A timeout or a network error: a note, and the calls left are not made, since the next would wait as long.
+    Unreachable(String),
+}
+
+/// The line a missing video adds to the sources axis; `invented_videos` reads it back for the send-back.
+pub const NO_SUCH_VIDEO: &str = "no such video on YouTube (oEmbed 404): ";
+
+/// One oEmbed call. No redirect is followed: a 3xx is an answer of its own, a note.
+pub fn oembed(base: &str, id: &str, timeout: Duration) -> Video {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(timeout)
+        .redirects(0)
+        .build();
+    let watch = format!("https://www.youtube.com/watch?v={id}");
+    match agent
+        .get(base)
+        .query("url", &watch)
+        .query("format", "json")
+        .call()
+    {
+        Ok(response) if response.status() == 200 => Video::Exists,
+        Ok(response) => Video::Other(response.status()),
+        Err(ureq::Error::Status(404, _)) => Video::Missing,
+        Err(ureq::Error::Status(status, _)) => Video::Other(status),
+        Err(ureq::Error::Transport(transport)) => Video::Unreachable(transport.kind().to_string()),
+    }
+}
+
+/// The video ids a Work Report cites, each once, in the order cited.
+pub fn cited_videos(report: Option<&Value>) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    let sources = report
+        .and_then(|report| report.get("sources"))
+        .and_then(Value::as_array);
+    for url in sources
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("url").and_then(Value::as_str))
+    {
+        if let Some(StableId::Video(id)) = stable_id(url) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    ids
+}
+
+/// The sources axis with each cited video asked about, at most `cap` calls: a missing one fails the axis naming its
+/// id; anything the check could not settle is the second value, a `videos` note, never a fail.
+pub fn check_videos(
+    mut axis: Axis,
+    report: Option<&Value>,
+    ask: &mut dyn FnMut(&str) -> Video,
+    cap: usize,
+) -> (Axis, Option<Axis>) {
+    let ids = cited_videos(report);
+    let (mut found, mut missing, mut unsettled) = (0, Vec::new(), Vec::new());
+    let mut unreachable = false;
+    for (n, id) in ids.iter().enumerate() {
+        if n >= cap {
+            unsettled.push(format!(
+                "{} cited video(s) over the cap of {cap} calls were not checked",
+                ids.len() - cap
+            ));
+            break;
+        }
+        if unreachable {
+            unsettled.push(format!("{id}: not checked, oEmbed was unreachable"));
+            continue;
+        }
+        match ask(id) {
+            Video::Exists => found += 1,
+            Video::Missing => missing.push(id.clone()),
+            Video::Other(status) => unsettled.push(format!("{id}: oEmbed answered {status}")),
+            Video::Unreachable(why) => {
+                unreachable = true;
+                unsettled.push(format!("{id}: oEmbed unreachable: {why}"));
+            }
+        }
+    }
+    if found > 0 {
+        axis.why = format!("{}; {found} cited video(s) exist on YouTube", axis.why);
+    }
+    if !missing.is_empty() {
+        let said = format!("{} cited video(s) do not exist on YouTube", missing.len());
+        axis.why = if axis.mark == Mark::Fail {
+            format!("{}; {said}", axis.why)
+        } else {
+            said
+        };
+        axis.mark = Mark::Fail;
+        axis.lines
+            .extend(missing.iter().map(|id| format!("{NO_SUCH_VIDEO}{id}")));
+    }
+    let note = (!unsettled.is_empty()).then(|| {
+        Axis::new(
+            "videos",
+            Mark::Note,
+            format!(
+                "the existence of {} cited video(s) was not settled; that never fails",
+                unsettled.len()
+            ),
+        )
+        .with(unsettled)
+    });
+    (axis, note)
+}
+
+/// The ids a failing sources axis found missing: plan 37 §1.3's step-up reads them.
+pub fn invented_videos(axes: &[Axis]) -> Vec<String> {
+    failing(axes)
+        .iter()
+        .filter(|axis| axis.axis == "sources")
+        .flat_map(|axis| &axis.lines)
+        .filter_map(|line| line.strip_prefix(NO_SUCH_VIDEO))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's stand-in oEmbed server (127.0.0.1); with none set, a test build asks nothing.
+    static TEST_OEMBED: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_oembed(base: Option<String>) {
+    TEST_OEMBED.with_borrow_mut(|slot| *slot = base);
+}
+
+/// Where the gate asks. A test build never reaches the network: only a stand-in it was given.
+fn oembed_base() -> Option<String> {
+    #[cfg(test)]
+    return TEST_OEMBED.with_borrow(Clone::clone);
+    #[cfg(not(test))]
+    Some(OEMBED_URL.to_owned())
+}
+
 /// The ports listened on in the tree under the pane's shell, from one process table and one listener table:
 /// `nirvana_servers`'s own walk (feature 4), so a server counts here exactly when the sidebar shows it.
 pub fn pane_ports(
@@ -2258,7 +2415,18 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
     axes.push(served_axis(subject.class, &subject.spec.serves, listened));
     let stream = stream_text(&Project::at(subject.root), subject.run, subject.order);
     if let Some(axis) = sources_axis(subject.class, subject.report, &stream) {
+        // Plan 37 §1.2: reel-motion-gemini's six YouTube ids were invented, and only a reader caught it, 8 days late.
+        let (axis, note) = match oembed_base() {
+            Some(base) => check_videos(
+                axis,
+                subject.report,
+                &mut |id| oembed(&base, id, Duration::from_secs(OEMBED_TIMEOUT_S)),
+                OEMBED_CALLS_PER_GATE,
+            ),
+            None => (axis, None),
+        };
         axes.push(axis);
+        axes.extend(note);
     }
     det.axes = axes;
     det
@@ -2459,6 +2627,11 @@ fn original(text: &str) -> String {
 pub const SOURCES_REDO: &str = "none of the sources you cited is trusted, because the gate saw no read of them. Open \
 each one again in this session, with a command or tool of its own, before you cite it; drop every source you cannot \
 open, and redo each claim that rests on a dropped source.";
+/// Plan 37 §1.3 (L5): a cited video that does not exist was invented, so the first try's notes and claims are no
+/// better than its sources. reel-motion-gemini's send-back kept its file and was stopped as stale (2026-10-31).
+pub const INVENTED_REDO: &str = "the gate found cited videos that do not exist, so nothing from the first try is \
+trusted: not its sources, its notes or its claims. Do the order again from the start, and cite only what you opened \
+in this session.";
 
 pub fn send_back_brief(
     order: &str,
@@ -2476,6 +2649,8 @@ pub fn send_back_brief(
     let others = failing(axes).iter().any(|axis| axis.axis != "sources");
     let fix = "fix what the gate found, do not start over.";
     let opening = match (redo, others) {
+        // Plan 37 §1.3: an invented video starts the order over, whatever else failed.
+        _ if !invented_videos(axes).is_empty() => INVENTED_REDO.to_owned(),
         (true, false) => SOURCES_REDO.to_owned(),
         (true, true) => format!("{fix} For the sources: {SOURCES_REDO}"),
         (false, _) => fix.to_owned(),
@@ -2889,6 +3064,11 @@ fn gate_subject(
                     Mark::Wait,
                     format!("{id} has not delivered its verdict"),
                 ));
+                // Plan 37 §1.1: `seat exec` gates a delivery itself, so the line that starts a booked reviewer was
+                // printed to no one; a gate by hand gives it again while the reviewer is not seated.
+                if state.order(&id).is_none() {
+                    next.push(booked_review_line(project, run, known, &id, table));
+                }
             }
             ReviewState::Verdict(id, report) => {
                 // The reviewer's own gate, when it was not gated by name: its report is well formed.
@@ -3139,6 +3319,26 @@ fn send_back(
         ));
         request.inherited_override = true;
     }
+    // Plan 37 §1.3 (L5): a cited video that does not exist steps the redo up one seat. herdr's re-pick put
+    // reel-motion-gemini's redo on the same flash-low seat that invented its sources (MotoProject, 2026-10-31). The
+    // step is herdr's, so it counts against no run's overrides, and a later send-back of the child keeps it.
+    let invented = invented_videos(&axes);
+    let step_up = (!invented.is_empty())
+        .then(|| nirvana_seat::step_up(table, &seated.class, &seated.seat, now()))
+        .flatten();
+    let step_reason = step_up.as_ref().map(|up| {
+        format!(
+            "step up from {} to {up}: {} cited video(s) do not exist (plan 37 §1.3)",
+            seated.seat,
+            invented.len()
+        )
+    });
+    if let (Some(up), Some(reason)) = (&step_up, &step_reason) {
+        request.override_seat = Some((up.clone(), reason.clone()));
+        request.inherited_override = true;
+    }
+    let inherited_reason = step_reason.clone().or(seated.override_reason.clone());
+    let refused_seat = step_up.clone().unwrap_or_else(|| seated.seat.clone());
     let mut world = nirvana_seat::live_world(table);
     let leases_path = nirvana_seat::dir().join(nirvana_seat::LEASES_FILE);
     if let Ok(leases) = nirvana_seat::load_leases(&leases_path) {
@@ -3147,14 +3347,14 @@ fn send_back(
     }
     let (pick, why_seated, child_override_reason) =
         match nirvana_seat::pick(table, &world, &request) {
-            Ok(pick) => (pick, None, seated.override_reason.clone()),
+            Ok(pick) => (pick, None, inherited_reason),
             Err(no_seat) if request.inherited_override => {
                 let mut fallback_request = request.clone();
                 fallback_request.override_seat = None;
                 fallback_request.inherited_override = false;
                 match nirvana_seat::pick(table, &world, &fallback_request) {
                     Ok(pick) => {
-                        let seat_name = &seated.seat;
+                        let seat_name = &refused_seat;
                         let why = format!(
                             "inherited override {} refused: {}; the rule picked",
                             seat_name, no_seat.reason
@@ -3378,6 +3578,57 @@ fn request_review(
         "review.adversary",
         (!same).then_some(family.as_str()),
     ))
+}
+
+/// The `herdr seat run` line of a reviewer booked and never seated, from its booking; without a live booking, how to
+/// seat it by hand.
+fn booked_review_line(
+    project: &Project,
+    run: &str,
+    known: &OrderState,
+    id: &str,
+    table: Option<&Table>,
+) -> String {
+    let file = project.orders_dir().join(format!("{id}.md"));
+    let leases = nirvana_seat::load_leases(&nirvana_seat::dir().join(nirvana_seat::LEASES_FILE));
+    let Some(lease) = leases
+        .ok()
+        .and_then(|leases| leases.live(id, now()).cloned())
+    else {
+        return format!(
+            "{id}'s booking is gone: `herdr seat pick --class review.adversary --not-family {} --book {id} --run {run}`, \
+then `herdr seat run <seat> --order \"{}\" --order-id {id} --run {run} --class review.adversary`",
+            family_of(table, &known.seated.seat),
+            file.display()
+        );
+    };
+    let family = family_of(table, &known.seated.seat);
+    let same = family_of(table, &lease.seat) == family;
+    format!(
+        "herdr seat run {} --order \"{}\" --order-id {id} --run {run} --class review.adversary{}",
+        lease.seat,
+        file.display(),
+        if same {
+            String::new()
+        } else {
+            format!(" --not-family {family}")
+        }
+    )
+}
+
+/// Plan 37 §1.1 (L3): which deliveries `seat exec` gates itself, so that gating costs Nirvana Claude no turn. Every
+/// `done` delivery but a helper's (a reviewer of another family, a held-out author): gating one of those starts its
+/// subject's next step, which the orchestrator sequences. A lesson review is gated whatever it reported (plan 33
+/// review B2). MotoProject, 2026-10-23 to 31: 1 of 26 deliveries was gated, and an invented source went unread.
+pub fn gates_on_delivery(
+    project: &Project,
+    run: &str,
+    order: &str,
+    class: &str,
+    status: &str,
+) -> bool {
+    class == crate::nirvana_review::CLASS
+        || (status == "done" && read_sidecar(project, run, order).helps.is_none())
 }
 
 /// A reviewer's own gate: its report is well formed. Its verdict is its subject's review axis.

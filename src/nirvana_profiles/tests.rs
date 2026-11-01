@@ -974,3 +974,39 @@ fn p35b_a_profile_denying_mapped_tools_seats_on_agy_and_an_unmapped_one_does_not
     );
     nirvana_seat::set_test_world(None);
 }
+
+/// Plan 37 §1.5: `herdr profile new <name> --from web-researcher` writes herdr's template, which parses as a
+/// research.web profile whose body holds the brief analysis's rules 1-3 and 7; an unknown template is refused, and
+/// so is a file already there.
+#[test]
+fn p37_profile_new_from_web_researcher_writes_the_template() {
+    let (_home, project) = project("p37-template");
+    let file = new_profile_from(&project.root, "web-researcher", "web-researcher").unwrap();
+    assert_eq!(file, path(&project.root, "web-researcher"));
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(text, WEB_RESEARCHER);
+    let profile = parse(&file, "web-researcher", &text).expect("parses");
+    assert_eq!(profile.class.as_deref(), Some("research.web"));
+    assert!(profile.body.chars().count() <= BODY_MAX);
+    for rule in [
+        "Never cite a URL from memory or from a search result.",
+        "python -m yt_dlp --skip-download --print",
+        "/.rss",
+        "There is no YouTube connector",
+        "Done means a command, and its output goes into `tests`",
+        "run \nevery long step in the foreground",
+    ] {
+        let rule = rule.replace(" \n", " ");
+        let flat = profile.body.replace('\n', " ");
+        assert!(flat.contains(&rule), "no {rule:?} in {}", profile.body);
+    }
+    assert!(
+        new_profile_from(&project.root, "web-researcher", "web-researcher")
+            .unwrap_err()
+            .ends_with("is already there")
+    );
+    let unknown = new_profile_from(&project.root, "other", "no-such").unwrap_err();
+    assert!(unknown.contains("no template \"no-such\""), "{unknown}");
+    assert!(!path(&project.root, "other").exists());
+    assert_eq!(template_text("web-researcher"), Some(WEB_RESEARCHER));
+}

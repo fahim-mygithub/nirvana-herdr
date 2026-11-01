@@ -2361,3 +2361,90 @@ fn p35b_an_agy_research_child_brief_gets_the_sources_line_once() {
     assert!(out.is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Plan 37 §1.1 (L3, "Yes, after the fixes"): `seat exec` gates an ordinary done delivery itself, with the same
+/// call it makes for a lesson review, and only then wakes Nirvana Claude, so the wake reads a journal that already
+/// holds the verdict and gating costs no orchestrator turn. A `blocked` delivery is left to the orchestrator.
+#[cfg(windows)]
+#[test]
+fn p37_exec_gates_an_ordinary_done_delivery_before_the_wake() {
+    let home = crate::nirvana::with_test_home("p37-exec-gate");
+    let seats = home.path.join("nirvana").join(nirvana_seat::SEATS_FILE);
+    std::fs::create_dir_all(seats.parent().unwrap()).unwrap();
+    std::fs::write(&seats, nirvana_seat::DEFAULT).unwrap();
+    nirvana_seat::set_test_world(Some(BTreeMap::new()));
+    let project = Project::at(home.path.join("project"));
+    project.ensure().unwrap();
+    std::fs::write(project.root.join("done.jsonl"), LIVE_HAIKU).unwrap();
+    let blocked = LIVE_HAIKU
+        .replace(r#"\"status\":\"done\""#, r#"\"status\":\"blocked\""#)
+        .replace(r#""status":"done""#, r#""status":"blocked""#);
+    assert!(!blocked.contains(r#""status":"done""#));
+    std::fs::write(project.root.join("blocked.jsonl"), blocked).unwrap();
+    std::fs::write(project.root.join("order.md"), "# Research\n").unwrap();
+    let run = "r1";
+    let journal = project.journal(run);
+    journal.append(1, opened()).unwrap();
+    // A send-back's child is held live, so the gate starts no worker.
+    let _children: Vec<_> = ["o1-s1", "o2-s1"]
+        .iter()
+        .map(|child| take_live(&project, run, child).unwrap().unwrap())
+        .collect();
+    let exec_with = |order: &str, recorded: &str| -> (i32, String) {
+        let mut s = seated(order);
+        s.seat = "sonnet".into();
+        s.cli = "claude".into();
+        s.model = "claude-sonnet-5-5".into();
+        s.effort = Effort::Medium;
+        s.pool = "max".into();
+        s.class = "research.web".into();
+        s.chain = Some("research".into());
+        s.not_family = Vec::new();
+        s.cwd = project.root.display().to_string();
+        s.order_file = project.root.join("order.md").display().to_string();
+        journal.append(2, Kind::Seated(Box::new(s))).unwrap();
+        TEST_COMMAND.with_borrow_mut(|slot| {
+            *slot = Some(vec![
+                "cmd.exe".into(),
+                "/c".into(),
+                format!("type {recorded}"),
+            ]);
+        });
+        let mut out = Vec::new();
+        let code = exec(&project, run, order, None, &mut out).unwrap();
+        TEST_COMMAND.with_borrow_mut(|slot| *slot = None);
+        (code, String::from_utf8_lossy(&out).into_owned())
+    };
+    let seq = |order: &str, gated: bool| {
+        journal
+            .read()
+            .0
+            .into_iter()
+            .find_map(|event| match &event.kind {
+                Kind::Gated { order: o, .. } if gated && o == order => Some(event.seq),
+                Kind::WakeQueued { .. } | Kind::Woken { .. } if !gated && event.seq > 2 => {
+                    Some(event.seq)
+                }
+                _ => None,
+            })
+    };
+    let (code, view) = exec_with("o1", "done.jsonl");
+    assert_eq!(code, 0, "{view}");
+    // The report names no sources, so the gate sends it back; its verdict is in the journal before any wake.
+    assert!(view.contains("gated: sent_back"), "{view}");
+    let gated = seq("o1", true).expect("o1 gated");
+    let woke = seq("o1", false).expect("a wake after the delivery");
+    assert!(gated < woke, "gated at {gated}, woken at {woke}");
+    let state = replay(&journal.read().0);
+    assert_eq!(
+        state.order("o1").and_then(|o| o.verdict.as_deref()),
+        Some("sent_back")
+    );
+    assert!(state.order("o1-s1").is_some());
+    // Blocked: delivered, not gated.
+    let (code, view) = exec_with("o2", "blocked.jsonl");
+    assert_eq!(code, 0, "{view}");
+    assert!(!view.contains("gated:"), "{view}");
+    assert_eq!(seq("o2", true), None);
+    nirvana_seat::set_test_world(None);
+}

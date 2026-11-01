@@ -2593,3 +2593,498 @@ fn p35a_with_no_snapshot_the_owned_axis_counts_files_modified_since_seating() {
     lines.sort();
     assert_eq!(lines, expected, "{owned:?}");
 }
+
+// ---- plan 37: cited videos are checked, and invented ones step the redo up ----
+
+const P37_REAL: &str = "real0000000";
+const P37_FAKE: &str = "fake0000000";
+const P37_SLOW: &str = "slow0000000";
+const P37_GONE: &str = "gone0000000";
+
+/// A stand-in oEmbed on 127.0.0.1, never the network: 200 for `P37_REAL`, 404 for `P37_FAKE`, 401 for `P37_GONE`,
+/// and `P37_SLOW` answered only after 3 s. Each request is answered on its own thread; the server lives with the test.
+fn p37_oembed() -> String {
+    use std::io::Write as _;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let base = format!("http://{}/oembed", listener.local_addr().expect("addr"));
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut stream = stream;
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                    head.push(byte[0]);
+                }
+                let line = String::from_utf8_lossy(&head)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_owned();
+                let status = if line.contains(P37_REAL) {
+                    "200 OK"
+                } else if line.contains(P37_FAKE) {
+                    "404 Not Found"
+                } else if line.contains(P37_GONE) {
+                    "401 Unauthorized"
+                } else if line.contains(P37_SLOW) {
+                    std::thread::sleep(Duration::from_secs(3));
+                    "200 OK"
+                } else {
+                    "400 Bad Request"
+                };
+                let body = "{}";
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
+        }
+    });
+    base
+}
+
+fn p37_report(ids: &[&str]) -> Value {
+    let sources: Vec<Value> = ids
+        .iter()
+        .map(|id| {
+            serde_json::json!({"url": format!("https://www.youtube.com/watch?v={id}"), "used_for": "x"})
+        })
+        .collect();
+    serde_json::json!({"status": "done", "summary": "s", "files": [], "tests": [], "gotchas": [], "sources": sources})
+}
+
+/// L4: "a 404 fails, an unreachable check is a note". A 200 passes, a 404 fails naming the id, another status and a
+/// timeout only add a note, and after a timeout the calls left are not made.
+#[test]
+fn p37_the_existence_check_fails_a_404_passes_a_200_and_only_notes_a_timeout() {
+    // A gate outside the tests asks YouTube itself, over https; these calls go to the stand-in only.
+    assert_eq!(OEMBED_URL, "https://www.youtube.com/oembed");
+    let base = p37_oembed();
+    let short = Duration::from_millis(800);
+    assert_eq!(oembed(&base, P37_REAL, short), Video::Exists);
+    assert_eq!(oembed(&base, P37_FAKE, short), Video::Missing);
+    assert_eq!(oembed(&base, P37_GONE, short), Video::Other(401));
+    assert!(matches!(
+        oembed(&base, P37_SLOW, short),
+        Video::Unreachable(_)
+    ));
+    let pass = || {
+        Axis::new(
+            "sources",
+            Mark::Pass,
+            "2 source(s) cited, each verified in stream",
+        )
+    };
+    let mut ask = |id: &str| oembed(&base, id, short);
+    // A 200 and a 404: the axis fails, naming the missing id only.
+    let report = p37_report(&[P37_REAL, P37_FAKE]);
+    let (axis, note) = check_videos(pass(), Some(&report), &mut ask, OEMBED_CALLS_PER_GATE);
+    assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+    assert_eq!(axis.lines, vec![format!("{NO_SUCH_VIDEO}{P37_FAKE}")]);
+    assert!(note.is_none(), "{note:?}");
+    assert_eq!(
+        invented_videos(std::slice::from_ref(&axis)),
+        vec![P37_FAKE.to_owned()]
+    );
+    // Only 200s: the axis passes and says what was checked.
+    let report = p37_report(&[P37_REAL]);
+    let (axis, note) = check_videos(pass(), Some(&report), &mut ask, OEMBED_CALLS_PER_GATE);
+    assert_eq!(axis.mark, Mark::Pass, "{axis:?}");
+    assert!(
+        axis.why.ends_with("1 cited video(s) exist on YouTube"),
+        "{}",
+        axis.why
+    );
+    assert!(note.is_none());
+    // A 401, then a timeout, then a 404 never asked: no fail, one note naming all three.
+    let report = p37_report(&[P37_GONE, P37_SLOW, P37_FAKE]);
+    let (axis, note) = check_videos(pass(), Some(&report), &mut ask, OEMBED_CALLS_PER_GATE);
+    assert_eq!(axis.mark, Mark::Pass, "{axis:?}");
+    let note = note.expect("a note");
+    assert_eq!((note.axis.as_str(), note.mark), ("videos", Mark::Note));
+    assert_eq!(note.lines.len(), 3, "{note:?}");
+    assert!(
+        note.lines[1].starts_with(&format!("{P37_SLOW}: oEmbed unreachable")),
+        "{note:?}"
+    );
+    assert!(note.lines[2].contains("not checked"), "{note:?}");
+    // The cap: calls past it are not made, and the note says how many.
+    let mut calls = 0;
+    let report = p37_report(&[P37_REAL, P37_FAKE]);
+    let (axis, note) = check_videos(
+        pass(),
+        Some(&report),
+        &mut |_| {
+            calls += 1;
+            Video::Exists
+        },
+        1,
+    );
+    assert_eq!((calls, axis.mark), (1, Mark::Pass));
+    assert!(note.expect("note").lines[0].contains("over the cap of 1"));
+}
+
+/// Through `deterministic`, as a gate runs it: the stand-in is asked and a 404 fails the sources axis. With no
+/// stand-in a test build asks nothing.
+#[test]
+fn p37_the_gate_asks_oembed_for_a_research_orders_videos() {
+    let root = repo("p37-det");
+    let spec = Spec::default();
+    let report = p37_report(&[P37_REAL, P37_FAKE]);
+    let streams = root.join(".nirvana/runs/r1/streams");
+    std::fs::create_dir_all(&streams).unwrap();
+    std::fs::write(
+        streams.join("res.jsonl"),
+        agy_run(&format!(
+            "curl -s https://www.youtube.com/watch?v={P37_REAL} https://www.youtube.com/watch?v={P37_FAKE}"
+        )),
+    )
+    .unwrap();
+    let det = || {
+        deterministic(
+            &Subject {
+                root: &root,
+                cwd: &root,
+                run: "r1",
+                order: "res",
+                branch: None,
+                class: "research.web",
+                report: Some(&report),
+                spec: &spec,
+                ports: &no_ports,
+            },
+            None,
+        )
+    };
+    let unasked = det();
+    assert!(
+        !unasked.axes.iter().any(|axis| axis.axis == "videos")
+            && !axis(&unasked, "sources").why.contains("on YouTube"),
+        "{unasked:?}"
+    );
+    set_test_oembed(Some(p37_oembed()));
+    let asked = det();
+    set_test_oembed(None);
+    let sources = axis(&asked, "sources");
+    assert_eq!(sources.mark, Mark::Fail, "{sources:?}");
+    assert!(
+        sources
+            .lines
+            .contains(&format!("{NO_SUCH_VIDEO}{P37_FAKE}")),
+        "{sources:?}"
+    );
+    assert!(
+        !sources.lines.iter().any(|line| line.contains(P37_REAL)),
+        "{sources:?}"
+    );
+}
+
+/// The send-back of a research order whose sources failed, on `seat`, with `lines` on the sources axis: the child's
+/// seat, its override reason, its brief, and the run's override count after.
+fn p37_send_back(
+    name: &str,
+    seat: &str,
+    lines: Vec<String>,
+) -> (String, Option<String>, String, u32) {
+    let _guard = crate::nirvana::with_test_home(name);
+    let root = repo(name);
+    let project = Project::at(&root);
+    let run = "r1";
+    let journal = project.journal(run);
+    nirvana_seat::set_test_world(Some(BTreeMap::new()));
+    let table = nirvana_seat::parse(nirvana_seat::DEFAULT).expect("table");
+    let mut parent = seated("res", None);
+    parent.class = "research.web".into();
+    parent.chain = Some("research".into());
+    parent.seat = seat.into();
+    parent.cli = "agy".into();
+    parent.model = table.seat(seat).expect("seat").model_for(Effort::Low);
+    parent.effort = Effort::Low;
+    parent.cwd = root.display().to_string();
+    journal
+        .append(1, Kind::Seated(Box::new(parent)))
+        .expect("seated");
+    // The child is held live, so the send-back starts no worker.
+    let _live = crate::nirvana_worker::take_live(&project, run, "res-s1").unwrap();
+    let state = replay(&journal.read().0);
+    let known = state.order("res").expect("order").clone();
+    let axes = vec![Axis::new("sources", Mark::Fail, "the sources").with(lines)];
+    let ruling = send_back(
+        &project,
+        run,
+        &journal,
+        &state,
+        &known,
+        "res",
+        "# res\n",
+        axes,
+        Some(&table),
+    )
+    .expect("send_back");
+    assert_eq!(ruling.verdict, "sent_back", "{ruling:?}");
+    let child = replay(&journal.read().0)
+        .order("res-s1")
+        .expect("child")
+        .clone();
+    let brief = std::fs::read_to_string(&child.seated.order_file).expect("brief");
+    let overrides = nirvana_seat::load_leases(&nirvana_seat::dir().join(nirvana_seat::LEASES_FILE))
+        .expect("leases")
+        .overrides(run);
+    nirvana_seat::set_test_world(None);
+    (
+        child.seated.seat,
+        child.seated.override_reason,
+        brief,
+        overrides,
+    )
+}
+
+/// L5: "Step up one seat". reel-motion-gemini's redo went back to the flash-low seat that invented its sources; a
+/// missing video now sends the redo to the next stronger seat of research.web, argon, as herdr's own step (no run
+/// override spent), and its brief trusts nothing from the first try.
+#[test]
+fn p37_a_send_back_for_invented_videos_steps_up_one_seat_and_trusts_nothing() {
+    let (seat, reason, brief, overrides) = p37_send_back(
+        "p37-step-up",
+        "flash",
+        vec![format!("{NO_SUCH_VIDEO}{P37_FAKE}")],
+    );
+    assert_eq!(seat, "argon");
+    assert!(
+        reason
+            .as_deref()
+            .is_some_and(|why| why.starts_with("step up from flash to argon")),
+        "{reason:?}"
+    );
+    assert_eq!(overrides, 0);
+    assert!(brief.contains(INVENTED_REDO), "{brief}");
+    assert!(!brief.contains("do not start over"), "{brief}");
+}
+
+/// Any other sources send-back keeps today's re-pick: the rule's seat, no override, and the sources brief.
+#[test]
+fn p37_an_ordinary_send_back_keeps_the_rules_seat() {
+    let (seat, reason, brief, _) = p37_send_back(
+        "p37-keep",
+        "flash",
+        vec!["https://example.com/not-read".into()],
+    );
+    nirvana_seat::set_test_world(Some(BTreeMap::new()));
+    let table = nirvana_seat::parse(nirvana_seat::DEFAULT).expect("table");
+    let mut request = nirvana_seat::Request::new("research.web");
+    request.size = SizeName::Small;
+    let rule = nirvana_seat::pick(&table, &nirvana_seat::live_world(&table), &request)
+        .expect("pick")
+        .seat;
+    nirvana_seat::set_test_world(None);
+    assert_eq!(seat, rule);
+    assert_eq!(reason, None);
+    assert!(brief.contains(SOURCES_REDO), "{brief}");
+    assert!(!brief.contains(INVENTED_REDO), "{brief}");
+}
+
+/// Plan 37 §1.1: `seat exec` gates every done delivery but a helper's; a lesson review whatever it reported.
+#[test]
+fn p37_herdr_gates_each_done_delivery_but_a_helpers() {
+    let root = repo("p37-gates");
+    let project = Project::at(&root);
+    assert!(gates_on_delivery(
+        &project,
+        "r1",
+        "o1",
+        "research.web",
+        "done"
+    ));
+    assert!(gates_on_delivery(
+        &project,
+        "r1",
+        "o1",
+        "build.bounded",
+        "done"
+    ));
+    assert!(!gates_on_delivery(
+        &project,
+        "r1",
+        "o1",
+        "build.bounded",
+        "blocked"
+    ));
+    assert!(gates_on_delivery(
+        &project,
+        "r1",
+        "o1",
+        crate::nirvana_review::CLASS,
+        "blocked"
+    ));
+    write_sidecar(
+        &project,
+        "r1",
+        &Sidecar {
+            order: "o1-rev1".into(),
+            helps: Some(("review".into(), "o1".into())),
+            ..Sidecar::default()
+        },
+    )
+    .unwrap();
+    assert!(!gates_on_delivery(
+        &project,
+        "r1",
+        "o1-rev1",
+        "review.adversary",
+        "done"
+    ));
+}
+
+/// The item of a rules list holding byte `at`: from its first line (one that is not indented) through its indented
+/// continuation lines.
+fn p37_item(text: &str, at: usize) -> &str {
+    let start = text[..at]
+        .rmatch_indices('\n')
+        .map(|(n, _)| n + 1)
+        .find(|n| !text[*n..].starts_with(' '))
+        .unwrap_or(0);
+    let mut end = text[at..].find('\n').map_or(text.len(), |n| at + n);
+    while let Some(next) = text.get(end + 1..) {
+        if next.starts_with(' ') {
+            end = next.find('\n').map_or(text.len(), |n| end + 1 + n);
+        } else {
+            break;
+        }
+    }
+    &text[start..end]
+}
+
+/// The plan 37 §1.4 rules: each in ROLE.md or the seat skill, each naming the MotoProject failure it answers.
+#[test]
+fn p37_the_agy_brief_rules_are_in_role_and_the_seat_skill_each_naming_its_failure() {
+    let role = include_str!("../../nirvana/claude/ROLE.md");
+    let skill = include_str!("../../nirvana/claude/skills/seat/SKILL.md");
+    for (text, rule, failure) in [
+        (
+            role,
+            "herdr gates each `done` delivery itself",
+            "1 of 26 deliveries",
+        ),
+        (
+            role,
+            "says how to read each source and how done is checked",
+            "invented 12 of 12",
+        ),
+        (role, "Never promise", "YouTube connector"),
+        (role, "--profile web-researcher", "--from web-researcher"),
+        (
+            skill,
+            "Never cite a URL from memory or from a search result.",
+            "invented",
+        ),
+        (skill, "%(id)s|%(title)s|%(channel)s", "9 steps"),
+        (skill, "/.rss", "10 failed Reddit reads"),
+        (
+            skill,
+            "bladebro when the order needs a browser",
+            "no YouTube connector",
+        ),
+        (
+            skill,
+            "ends with a command whose output goes into `tests`",
+            "prose check",
+        ),
+        (skill, "`owns:` in lowercase", "`Owns:`"),
+        (
+            skill,
+            "The project rules the order touches, quoted",
+            "6 mp4s on C:",
+        ),
+        (skill, "long steps run in the foreground", "stalled 600 s"),
+        (
+            skill,
+            "The current state as absolute paths",
+            "10-slide post",
+        ),
+        (skill, "Explore, read, write, verify", "opened nothing"),
+    ] {
+        let at = text
+            .find(rule)
+            .unwrap_or_else(|| panic!("no rule {rule:?}"));
+        let item = p37_item(text, at);
+        assert!(
+            item.contains(failure),
+            "{rule:?} names no {failure:?}: {item}"
+        );
+    }
+    let gate = skill
+        .split(
+            "
+
+",
+        )
+        .find(|part| part.contains("herdr gates each `done` delivery itself"))
+        .expect("the seat skill's gate paragraph");
+    assert!(
+        gate.contains("one seat up") && gate.contains("trusts nothing"),
+        "{gate}"
+    );
+    for row in [
+        "- [ ] the verify line",
+        "- [ ] lowercase `owns:`",
+        "- [ ] a read method per source type, only real tools",
+        "- [ ] a \"done means\" that ends in a command whose output goes in `tests`",
+        "`--profile web-researcher` when the project has it",
+    ] {
+        assert!(skill.contains(row), "no checklist row {row:?}");
+    }
+}
+
+/// Plan 37 §1.1: a gate that books a reviewer waits, and its `herdr seat run` line went to `seat exec`'s view, read by
+/// no one; a gate by hand gives the line again while the reviewer is not seated, and says how when its booking is gone.
+#[test]
+fn p37_a_gate_by_hand_gives_a_booked_reviewers_line_again() {
+    let _home = crate::nirvana::with_test_home("p37-review-line");
+    nirvana_seat::set_test_world(Some(BTreeMap::new()));
+    let root = repo("p37-review-line");
+    let project = Project::at(&root);
+    let cwd = worktree(&root, "lb");
+    work(&cwd);
+    let text = "# Add mul
+
+owns: calc.py test_mul.py
+test: git ls-files
+check: test_mul
+";
+    let order_file = crate::nirvana_worker::write_order(&project, &cwd, "lb", text).expect("order");
+    let journal = project.journal("r1");
+    let mut order = seated("lb", None);
+    order.class = "build.load_bearing".into();
+    order.cwd = cwd.display().to_string();
+    order.worktree = Some(cwd.display().to_string());
+    order.branch = Some("nirvana/lb".into());
+    order.order_file = order_file;
+    journal
+        .append(1, Kind::Seated(Box::new(order)))
+        .expect("seated");
+    journal
+        .append(
+            2,
+            Kind::Delivered {
+                order: "lb".into(),
+                report: done(),
+            },
+        )
+        .expect("delivered");
+    let first = gate(&project, "r1", "lb").expect("gate");
+    assert_eq!(first.verdict, "wait", "{first:?}");
+    let line = first.next.first().expect("the reviewer's line").clone();
+    assert!(line.starts_with("herdr seat run "), "{line}");
+    let again = gate(&project, "r1", "lb").expect("gate again");
+    assert_eq!(again.verdict, "wait", "{again:?}");
+    assert_eq!(again.next, vec![line.clone()]);
+    std::fs::remove_file(nirvana_seat::dir().join(nirvana_seat::LEASES_FILE)).expect("leases");
+    let gone = gate(&project, "r1", "lb").expect("gate with no booking");
+    assert!(
+        gone.next[0].starts_with("lb-rev1's booking is gone"),
+        "{gone:?}"
+    );
+    nirvana_seat::set_test_world(None);
+}

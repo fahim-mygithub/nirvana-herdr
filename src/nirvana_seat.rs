@@ -1399,6 +1399,35 @@ fn pick_unnamed(table: &Table, world: &World, request: &Request) -> Result<Pick,
     }
 }
 
+/// Plan 37 §1.3 (L5, "Step up one seat"): the seat a redo takes after its sources were invented, the next stronger
+/// seat of the same class: the class's own score first, then the seat's output price at `now`, so a tie in the
+/// score goes to the dearer model (research.web scores flash and argon 84 each; flash low invented
+/// reel-motion-gemini's sources and argon medium's redo was real, MotoProject 2026-10-23 and 31). `None` when no
+/// enabled seat of the class stands above `seat`: the redo then takes the rule's pick.
+pub fn step_up(table: &Table, class: &str, seat: &str, now: u64) -> Option<String> {
+    let class = table.class(class)?;
+    let strength = |entry: &ClassSeat| -> Option<(f32, f64)> {
+        let seat = table.seat(&entry.seat).filter(|seat| seat.enabled)?;
+        let price = seat.price_at(now).map_or(0.0, |price| price.output);
+        Some((entry.score, price))
+    };
+    let here = class
+        .seats
+        .iter()
+        .find(|entry| entry.seat == seat)
+        .and_then(strength)?;
+    let above = |(score, price): (f32, f64)| {
+        score > here.0 + EDGE || ((score - here.0).abs() <= EDGE && price > here.1)
+    };
+    class
+        .seats
+        .iter()
+        .filter_map(|entry| Some((entry, strength(entry)?)))
+        .filter(|(entry, at)| entry.seat != seat && above(*at))
+        .min_by(|(_, a), (_, b)| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)))
+        .map(|(entry, _)| entry.seat.clone())
+}
+
 /// One pass of the rule at the class's effort and, when a skip was priced, one effort step down (§5.5).
 fn seat_once(
     table: &Table,
@@ -6570,5 +6599,25 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&proj_eff);
         let _ = std::fs::remove_dir_all(&proj_sota);
+    }
+
+    /// Plan 37 §1.3: the next stronger seat of the class, by the class's score and then the seat's output price:
+    /// research.web scores flash and argon 84 each, and argon's price is the higher; argon has none above it.
+    #[test]
+    fn p37_step_up_takes_the_next_stronger_seat_of_the_class() {
+        let table = parse(DEFAULT).expect("default table");
+        assert_eq!(
+            step_up(&table, "research.web", "flash", NOW).as_deref(),
+            Some("argon")
+        );
+        assert_eq!(step_up(&table, "research.web", "argon", NOW), None);
+        // From a lower score the nearest score above is taken (opus 82), not the top one (84); g-sonnet ties sonnet
+        // on score and price, so it is not above it.
+        assert_eq!(
+            step_up(&table, "research.web", "sonnet", NOW).as_deref(),
+            Some("opus")
+        );
+        assert_eq!(step_up(&table, "research.web", "haiku", NOW), None);
+        assert_eq!(step_up(&table, "no.such.class", "flash", NOW), None);
     }
 }

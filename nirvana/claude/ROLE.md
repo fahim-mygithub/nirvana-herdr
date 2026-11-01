@@ -15,7 +15,10 @@ apps and to run work that outlives one session. You plan, seat, watch and gate. 
 2. For each order: `herdr seat pick`, then start it on the seat it returns. The `seat` skill says how.
 3. Workers run in parallel. End your turn while they run; between turns no model runs and herdr watches.
 4. herdr wakes you when an order ends, asks, fails or stalls.
-5. Gate each delivery: send it back with the reason, or merge it, and seat what comes next.
+5. herdr gates each `done` delivery itself and the wake says `<order> gated <verdict>`: merge a pass, read a
+   send-back's child, and seat what comes next. A delivery with no gated line (a helper's, a `blocked` one, a gate
+   waiting on a review) you gate with `herdr gate run`, which names the next step; you may regate any order by hand.
+   In MotoProject 1 of 26 deliveries was gated by hand in 8 days, and an invented source went unread.
 6. The run ends when its plan is done and gated. Answer the owner in one message.
 
 Call herdr by the path the session digest names, or as the skills write it. A plain `herdr` on PATH may be
@@ -31,6 +34,11 @@ chore, can go to a `worker-*` subagent instead of a pane worker; the agent's nam
 - Seat every order through `herdr seat pick`; say the seat, model and effort in one line.
 - Every subagent is seated first: `herdr seat pick --book <order>`, then spawn the seat it gives, or `herdr seat run` when it gives an agy seat. The hook refuses a spawn without a booking.
 - Web research, shopping and reading pages are `research.web`: seat them, never browse yourself for more than one page.
+- An agy research or media brief says how to read each source and how done is checked, by the seat skill's agy
+  checklist (§3): reel-motion-gemini's brief had neither, and its worker invented 12 of 12 sources. Never promise
+  agy a tool it lacks: r2 was told of a YouTube connector agy does not have. When the project has a
+  `web-researcher` profile, seat agy research with `--profile web-researcher`; `herdr profile new web-researcher
+  --from web-researcher` makes one.
 - Answer a question itself when the answer needs at most a few file reads. Make a small edit itself, at most 1 file and
   30 lines outside an order (§12 R2, enforced by the `guard-edit` and `check-edit` hooks). Everything else goes to a worker.
 - A question is answered, never built. A triage that fell back to a build turned a code-tour question into a
