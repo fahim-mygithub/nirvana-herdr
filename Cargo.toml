@@ -55,6 +55,7 @@ sha2 = "0.10"
 time = { version = "0.3.47", features = ["formatting"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "signal"] }
 toml = "0.8"
+toml_edit = "0.22"
 tracing = "0.1.44"
 # Nirvana fork, feature 9: the one HTTPS POST to Jev (src/nirvana_jev.rs). rustls, so no system TLS library.
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
@@ -65,6 +66,9 @@ schemars = { version = "1.2.1", features = ["derive"] }
 
 [patch.crates-io]
 portable-pty = { path = "vendor/portable-pty" }
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # logind's delay inhibitor lets the server save before host shutdown kills panes.

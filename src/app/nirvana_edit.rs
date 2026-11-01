@@ -129,7 +129,8 @@ impl App {
         let (rows, cols) = self.state.new_pane_size(crate::ui::NewPanePlacement::Alone);
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
         let host_terminal_theme = self.state.host_terminal_theme;
-        let host_terminal_appearance = self.state.host_terminal_appearance;
+        // Upstream 3f5032c9: during an appearance hold a new pane takes the held background's appearance.
+        let host_terminal_appearance = self.pane_host_terminal_appearance();
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return encode_error(id, "workspace_not_found", "workspace not found");
         };
