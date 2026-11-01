@@ -16,6 +16,7 @@ for this plan (`2026-10-31-35-records/probes/`, expectations in `EXPECT-PLAN.md`
 | L5 | "Yes, both CLIs (Recommended)" (answer, 2026-10-31, to R1: should a browser order get bladebro on either CLI, with its own browser home per order) | P35c | P35c | §5 P35c tests; §6 live check 1 |
 | L6 | "Yes, allow (Recommended)" (answer, 2026-10-31, to R4: may orders that need a non-desktop MCP server seat on agy) | P35b | P35b | §5 P35b tests; §6 live checks |
 | L7 | "Keep them" (answer, 2026-10-31, to R3: the owner's global agy plugins) | none | owner | nothing to build |
+| L8 | "Accept it (Recommended)" (answer, 2026-11-01, to: should the sources check count a stable id, a YouTube video id, Reddit post id or GitHub repo, found anywhere in a command that fetches or in its output, widening §5 P35a item 1's per-segment rule; plain URLs keep the per-segment rule) | P35a | P35a | p35a round 2 fixture counts |
 
 - Not in scope: desktop servers on agy (exebox, §1.3); teaching orders on agy (plan 34 keeps them on Claude); the seat
   table's scores (R2).
