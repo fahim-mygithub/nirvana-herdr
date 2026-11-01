@@ -348,7 +348,7 @@ pub fn cards(dir: &Path) -> Vec<(String, PathBuf, Result<Card, Vec<String>>)> {
 /// Review B1: whether herdr knows the card `slug` as it stands, by its sha now. Known when the last ledger row of the
 /// slug left this text (a card op herdr checked), or `herdr profile check --adopt` recorded this sha (the owner's own
 /// card). A card written around herdr, or edited after either, is not known: it is never offered.
-fn known(index: &Index, rows: &[Row], slug: &str, sha: &str) -> bool {
+pub(crate) fn known(index: &Index, rows: &[Row], slug: &str, sha: &str) -> bool {
     let adopted = index
         .cards
         .get(slug)

@@ -99,7 +99,7 @@ CONTROLS = (
     Control("p33b_cap_ignored", REVIEW,
             "    (used >= cap).then(|| {\n", "    (used > cap + 1000).then(|| {\n", T_CAP, "rust"),
     Control("p33b_cap_never_resets", REVIEW,
-            "    let used = if state.day == at / 86_400 {\n", "    let used = if true {\n", T_CAP, "rust"),
+            "    if state.day == at / 86_400 {\n        state.queued\n", "    if true {\n        state.queued\n", T_CAP, "rust"),
     Control("p33b_skip_not_journaled", GATE,
             "                crate::nirvana_review::SKIPPED,\n                Mark::Note,\n",
             "                \"other\",\n                Mark::Note,\n", T_CAP, "rust"),

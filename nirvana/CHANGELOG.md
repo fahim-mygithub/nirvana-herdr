@@ -3,6 +3,36 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.47.0: a Learning square between Preload and Memory
+
+- **Changed:**
+  - The strip has a Learning square after Preload and before Memory and Git: `14 lessons · review 3/20` (live
+    lessons, reviews used today against `lesson_reviews_per_day`), `14 · 3/20` when narrow, `✗` when the last review
+    gated today was held back, failed, or had every op refused. It holds its place before the first read.
+  - Its panel shows Today (each review seated today: done, held back, failed or not gated yet; ops applied and
+    refused with their reasons), Recent changes (both ledgers, newest twelve, undone ops marked), Lessons (the
+    `herdr lessons stats` lines, then one row per lesson), Profiles (cards, warnings, refused, unknown, and the
+    `--adopt` line) and Waiting (classes over the merge line).
+  - Keys: `j`/`k`, arrows, Home/End and the wheel move; Enter or `o` opens the lesson, card or `knowledge/` folder in
+    the edit tab; `u` on a change asks first, and only `y` runs the same rollback `herdr lessons rollback` and
+    `herdr kb rollback` run, for that row's ticket alone.
+  - The review count is the cap's own (`nirvana_review::used_today`): a reseat or send-back child is its parent's
+    review. The project is the root `herdr lessons` reads (`$NIRVANA_PROJECT` or the git top level).
+  - A cache thread re-reads at most every 3 s and only when the files' stamp or the UTC day changed; each journal's
+    parse is kept by path, size and mtime. Drawing reads no file and browsing writes nothing.
+  **Because:** the owner, 2026-10-31: "ensure we have a module that is tracking this beore the git module and after the
+  preload module." Plan `nirvana/plans/2026-10-31-36-learning-square.md`, built on Opus high, one Sonnet review, one
+  fix round.
+  **Measured:**
+  - On a copy of 3D-Printer Flow's 39 journals (1.13 MB), a re-read after one journal grows: 17.1 ms before the
+    review round's parse cache, 7.6 ms after. Cold first read 256 to 311 ms, on the thread.
+  - Gates on master plus plans 36 and 38 together: nextest 4,485 of 4,486, the one failure the known Windows
+    plugin-path test; clippy clean; the dry run finds 2,144 of 2,144; all 93 `p36_` controls, the 35 `p38_` ones and
+    the 14 older controls whose lines moved go red alone.
+  - Not live-checked: the square in a real window, and the strip's width at narrow sizes with every square drawn.
+  **If you remove this:** the learning loop's numbers (lessons kept, reviews used against the cap, refusals, undo)
+  are seen only through `herdr lessons` commands.
+
 ## alpha 0.46.0: profile folders with knowledge cards, search, and teaching
 
 - **Changed:**

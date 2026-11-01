@@ -492,6 +492,7 @@ impl ClientShellState {
         let Some(tab) = self.snapshot.as_deref().and_then(seats_tab) else {
             return;
         };
+        self.nirvana_learning = None;
         self.nirvana_preload = None;
         self.nirvana_running = None;
         self.nirvana_memory = None;

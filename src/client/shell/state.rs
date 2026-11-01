@@ -139,6 +139,10 @@ pub(super) struct ShellHitMap {
     pub(super) nirvana_git: Rect,
     /// Plan 16: the open Git panel's buttons and close box.
     pub(super) nirvana_git_panel: super::nirvana_git::GitHits,
+    /// Plan 36: the strip's Learning square; a click opens its panel.
+    pub(super) nirvana_learning: Rect,
+    /// Plan 36: the open Learning panel's rows, undo buttons and close box.
+    pub(super) nirvana_learning_panel: super::nirvana_learning::LearningHits,
     /// Agent rows rendered in the spaces list (plan 26 S2)
     pub(super) space_agents: Vec<(Rect, String)>,
     pub(super) new_workspace: Rect,
@@ -1027,6 +1031,8 @@ pub(crate) struct ClientShellState {
     pub(super) nirvana_jobs: Option<super::nirvana_jobs::JobsPanel>,
     /// Plan 16: the Git panel, while open.
     pub(super) nirvana_git: Option<super::nirvana_git::GitPanel>,
+    /// Plan 36: the Learning panel, while open.
+    pub(super) nirvana_learning: Option<super::nirvana_learning::LearningPanel>,
     /// Plan 21 §5: The last letter badge set on the window's taskbar button.
     pub(super) last_badge_letter: Option<char>,
 }
@@ -1204,6 +1210,7 @@ impl ClientShellState {
             nirvana_seats: None,
             nirvana_jobs: None,
             nirvana_git: None,
+            nirvana_learning: None,
             nirvana_accounts: None,
             last_badge_letter: None,
         }

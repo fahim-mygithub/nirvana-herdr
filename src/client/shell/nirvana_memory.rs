@@ -191,6 +191,7 @@ impl ClientShellState {
         else {
             return;
         };
+        self.nirvana_learning = None;
         self.nirvana_seats = None;
         self.nirvana_jobs = None;
         self.nirvana_git = None;

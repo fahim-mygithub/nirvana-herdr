@@ -192,6 +192,7 @@ impl ClientShellState {
         if self.nirvana_accounts.take().is_some() {
             return;
         }
+        self.nirvana_learning = None;
         self.nirvana_preload = None;
         self.nirvana_running = None;
         self.nirvana_memory = None;
