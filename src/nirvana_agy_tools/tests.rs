@@ -148,13 +148,14 @@ fn p35b_an_agy_server_order_gets_its_servers_in_the_tools_folder_and_f3_holds() 
     let today = agy_argv(&file);
     let caps = || Ok(vec!["code"]);
     let mut out = Vec::new();
-    let got = crate::nirvana_gui_tools::order_argv(
+    let got = crate::nirvana_gui_tools::order_argv_seated(
         today.clone(),
         &root,
         &root,
         &run_dir,
         "o1",
         &words(&["code", "bambu", "reel"]),
+        &crate::nirvana_bladebro::Seat::default(),
         caps(),
         &mut out,
     )
@@ -181,13 +182,14 @@ fn p35b_an_agy_server_order_gets_its_servers_in_the_tools_folder_and_f3_holds() 
     )
     .unwrap();
     let mut out = Vec::new();
-    crate::nirvana_gui_tools::order_argv(
+    crate::nirvana_gui_tools::order_argv_seated(
         today.clone(),
         &root,
         &cwd,
         &run_dir,
         "o2",
         &words(&["bambu", "reel"]),
+        &crate::nirvana_bladebro::Seat::default(),
         caps(),
         &mut out,
     )
@@ -214,13 +216,14 @@ fn p35b_an_agy_server_order_gets_its_servers_in_the_tools_folder_and_f3_holds() 
     // F3 on agy: a definition changed since the seat to one agy cannot take, a server gone, a desktop server.
     let launch = |order: &str, needs: &[&str]| {
         let mut out = Vec::new();
-        crate::nirvana_gui_tools::order_argv(
+        crate::nirvana_gui_tools::order_argv_seated(
             today.clone(),
             &root,
             &root,
             &run_dir,
             order,
             &words(needs),
+            &crate::nirvana_bladebro::Seat::default(),
             caps(),
             &mut out,
         )
@@ -234,13 +237,14 @@ fn p35b_an_agy_server_order_gets_its_servers_in_the_tools_folder_and_f3_holds() 
     .unwrap();
     let wt = root.join("wt2");
     let mut out = Vec::new();
-    crate::nirvana_gui_tools::order_argv(
+    crate::nirvana_gui_tools::order_argv_seated(
         today.clone(),
         &root,
         &wt,
         &run_dir,
         "o6",
         &words(&["bambu", "reel"]),
+        &crate::nirvana_bladebro::Seat::default(),
         caps(),
         &mut out,
     )

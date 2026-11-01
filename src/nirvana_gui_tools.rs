@@ -318,8 +318,9 @@ fn read_seated(root: &Path, servers: &[String]) -> Result<(String, Vec<String>),
 
 /// Writes the order's config for `servers`, read from `<root>/.mcp.json` now. Review F3: a server the order was seated
 /// for that the file no longer defines, a file gone or not parsing, is an error, never a config without it.
-/// Plan 35 P35c: `order_argv` writes through `seated_config` and `write_config`, to add bladebro; the tests' entry.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Plan 35 P35c: `order_argv_seated` writes through `seated_config` and `write_config`, to add bladebro, so this is
+/// the tests' entry alone, and is compiled for them alone (review round N4: no merge hunk calls it).
+#[cfg(test)]
 pub fn write_order_config(
     root: &Path,
     run_dir: &Path,
@@ -383,6 +384,33 @@ pub fn remove_order_config(run_dir: &Path, order: &str, out: &mut dyn Write) {
     }
 }
 
+/// `order_argv_seated` with no seat read back, the call `nirvana_worker::with_order_servers` makes until P35c's merge
+/// hunk H7 hands it the order's `Seat`; the merge then removes this (H8).
+#[allow(clippy::too_many_arguments)]
+pub fn order_argv(
+    argv: Vec<String>,
+    root: &Path,
+    cwd: &Path,
+    run_dir: &Path,
+    order: &str,
+    needs: &[String],
+    capabilities: Result<Vec<&str>, String>,
+    out: &mut dyn Write,
+) -> Result<Vec<String>, String> {
+    let seat = crate::nirvana_bladebro::Seat::default();
+    order_argv_seated(
+        argv,
+        root,
+        cwd,
+        run_dir,
+        order,
+        needs,
+        &seat,
+        capabilities,
+        out,
+    )
+}
+
 /// §5.1: the worker's argv with its order's servers, for an order with a server need. A claude argv gets the
 /// per-order `--mcp-config`. Plan 35 §3.2: for an agy argv the same servers are written, translated, into the order's
 /// tools folder, which `nirvana_agy_tools::with_tools` adds with `--add-dir`; the argv comes back unchanged here.
@@ -392,15 +420,18 @@ pub fn remove_order_config(run_dir: &Path, order: &str, out: &mut dyn Write) {
 ///
 /// Plan 35 P35c item 1: an order granted bladebro (`nirvana_bladebro::grant`) gets herdr's definition beside its
 /// servers, with its own `BLADE_HOME` made here, on either CLI; with no server need it gets bladebro alone. Not on PATH
-/// grants nothing and says so in one line.
+/// grants nothing and says so in one line. P35c review round: `seat` is what seating left (`Seat::read`): a profile
+/// that denies bladebro whole, an agy workspace naming its own, or a brief that does not name it grants nothing and
+/// makes no home, each with one line.
 #[allow(clippy::too_many_arguments)]
-pub fn order_argv(
+pub fn order_argv_seated(
     argv: Vec<String>,
     root: &Path,
     cwd: &Path,
     run_dir: &Path,
     order: &str,
     needs: &[String],
+    seat: &crate::nirvana_bladebro::Seat,
     capabilities: Result<Vec<&str>, String>,
     out: &mut dyn Write,
 ) -> Result<Vec<String>, String> {
@@ -423,14 +454,9 @@ pub fn order_argv(
                 .collect()
         }
     };
-    let blade = match crate::nirvana_bladebro::grant(cli.unwrap_or_default(), needs) {
-        crate::nirvana_bladebro::Grant::Yes => Some(crate::nirvana_bladebro::home(run_dir, order)),
-        crate::nirvana_bladebro::Grant::Missing => {
-            let _ = writeln!(out, "{}", crate::nirvana_bladebro::MISSING_LINE);
-            None
-        }
-        crate::nirvana_bladebro::Grant::No => None,
-    };
+    let grant = crate::nirvana_bladebro::grant(cli.unwrap_or_default(), needs, &seat.denied, cwd);
+    let blade = crate::nirvana_bladebro::at_launch(grant, seat.told, cwd, out)
+        .then(|| crate::nirvana_bladebro::home(run_dir, order));
     if servers.is_empty() && blade.is_none() {
         return Ok(argv);
     }

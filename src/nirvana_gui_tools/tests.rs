@@ -300,13 +300,14 @@ fn a_worker_gets_its_orders_config_file_and_only_a_claude_server_order_does() {
     let today = claude_argv();
     let needs = words(&["code", "xtool"]);
     let mut out = Vec::new();
-    let argv = order_argv(
+    let argv = order_argv_seated(
         today.clone(),
         &root,
         &root,
         &run_dir,
         "o1",
         &needs,
+        &crate::nirvana_bladebro::Seat::default(),
         caps(),
         &mut out,
     )
@@ -338,13 +339,14 @@ fn a_worker_gets_its_orders_config_file_and_only_a_claude_server_order_does() {
     // No server need, or an agy worker: today's argv, no file, no line.
     let mut out = Vec::new();
     assert_eq!(
-        order_argv(
+        order_argv_seated(
             today.clone(),
             &root,
             &root,
             &run_dir,
             "o2",
             &words(&["code"]),
+            &crate::nirvana_bladebro::Seat::default(),
             caps(),
             &mut out
         )
@@ -355,26 +357,28 @@ fn a_worker_gets_its_orders_config_file_and_only_a_claude_server_order_does() {
     let agy = vec!["agy".to_owned(), "--print=x".to_owned()];
     let code = words(&["code"]);
     assert_eq!(
-        order_argv(
+        order_argv_seated(
             agy.clone(),
             &root,
             &root,
             &run_dir,
             "o3",
             &code,
+            &crate::nirvana_bladebro::Seat::default(),
             caps(),
             &mut out
         )
         .unwrap(),
         agy
     );
-    let why = order_argv(
+    let why = order_argv_seated(
         agy.clone(),
         &root,
         &root,
         &run_dir,
         "o4",
         &needs,
+        &crate::nirvana_bladebro::Seat::default(),
         caps(),
         &mut out,
     )
@@ -390,13 +394,14 @@ fn a_worker_gets_its_orders_config_file_and_only_a_claude_server_order_does() {
     assert!(!run_dir.join("mcp").join("o2.json").exists());
     // seats.toml refused at launch: the needs `.mcp.json` names are the servers, and one line says so.
     let mut out = Vec::new();
-    let argv = order_argv(
+    let argv = order_argv_seated(
         today.clone(),
         &root,
         &root,
         &run_dir,
         "o5",
         &needs,
+        &crate::nirvana_bladebro::Seat::default(),
         Err("seats.toml is refused".into()),
         &mut out,
     )
@@ -422,13 +427,14 @@ fn an_order_that_cannot_get_its_server_at_launch_does_not_start() {
     let needs = words(&["code", "xtool"]);
     let launch = |order: &str| {
         let mut out = Vec::new();
-        let got = order_argv(
+        let got = order_argv_seated(
             claude_argv(),
             &root,
             &root,
             &run_dir,
             order,
             &needs,
+            &crate::nirvana_bladebro::Seat::default(),
             Ok(vec!["code"]),
             &mut out,
         );
@@ -1032,13 +1038,14 @@ fn p35c_a_claude_browser_order_gets_bladebro_in_its_mcp_config() {
     let blade = crate::nirvana_bladebro::home(&run_dir, "o1");
     // bladebro alone.
     let mut out = Vec::new();
-    let got = order_argv(
+    let got = order_argv_seated(
         today.clone(),
         &root,
         &root,
         &run_dir,
         "o1",
         &words(&["browser"]),
+        &crate::nirvana_bladebro::Seat::default(),
         caps(),
         &mut out,
     )
@@ -1065,13 +1072,14 @@ fn p35c_a_claude_browser_order_gets_bladebro_in_its_mcp_config() {
     );
     // Beside a server, with `bladebro` named as a need: both, the project's bladebro entry left out.
     let mut out = Vec::new();
-    let got = order_argv(
+    let got = order_argv_seated(
         today.clone(),
         &root,
         &root,
         &run_dir,
         "o2",
         &words(&["bladebro", "bambu"]),
+        &crate::nirvana_bladebro::Seat::default(),
         caps(),
         &mut out,
     )
@@ -1105,13 +1113,14 @@ fn p35c_a_claude_browser_order_gets_bladebro_in_its_mcp_config() {
     // No browser need: today's argv, no file, no home.
     let mut out = Vec::new();
     assert_eq!(
-        order_argv(
+        order_argv_seated(
             today.clone(),
             &root,
             &root,
             &run_dir,
             "o3",
             &words(&["code"]),
+            &crate::nirvana_bladebro::Seat::default(),
             caps(),
             &mut out
         )
@@ -1133,13 +1142,14 @@ fn p35c_an_agy_browser_order_gets_bladebro_in_its_tools_folder() {
     let run_dir = root.join(".nirvana").join("runs").join("r1");
     let today = agy_argv();
     let mut out = Vec::new();
-    let got = order_argv(
+    let got = order_argv_seated(
         today.clone(),
         &root,
         &root,
         &run_dir,
         "a1",
         &words(&["bladebro"]),
+        &crate::nirvana_bladebro::Seat::default(),
         Ok(vec!["code"]),
         &mut out,
     )
@@ -1190,13 +1200,14 @@ fn p35c_an_agy_browser_order_gets_bladebro_in_its_tools_folder() {
     // No browser need: nothing written, no home.
     let mut out = Vec::new();
     assert_eq!(
-        order_argv(
+        order_argv_seated(
             today.clone(),
             &root,
             &root,
             &run_dir,
             "a2",
             &words(&["code"]),
+            &crate::nirvana_bladebro::Seat::default(),
             Ok(vec!["code"]),
             &mut out
         )
@@ -1216,13 +1227,14 @@ fn p35c_bladebro_not_on_path_grants_nothing_and_says_so() {
     let run_dir = root.join(".nirvana").join("runs").join("r1");
     for (order, today) in [("c1", claude_argv()), ("a1", agy_argv())] {
         let mut out = Vec::new();
-        let got = order_argv(
+        let got = order_argv_seated(
             today.clone(),
             &root,
             &root,
             &run_dir,
             order,
             &words(&["browser"]),
+            &crate::nirvana_bladebro::Seat::default(),
             Ok(vec!["browser"]),
             &mut out,
         )
@@ -1238,13 +1250,14 @@ fn p35c_bladebro_not_on_path_grants_nothing_and_says_so() {
     }
     // With a server beside it, the server is still given.
     let mut out = Vec::new();
-    let got = order_argv(
+    let got = order_argv_seated(
         claude_argv(),
         &root,
         &root,
         &run_dir,
         "c2",
         &words(&["browser", "bambu"]),
+        &crate::nirvana_bladebro::Seat::default(),
         Ok(vec!["browser"]),
         &mut out,
     )
@@ -1260,13 +1273,14 @@ fn p35c_the_bladebro_home_goes_with_the_orders_config() {
     let root = project(&home.path, None);
     let run_dir = root.join(".nirvana").join("runs").join("r1");
     let mut out = Vec::new();
-    order_argv(
+    order_argv_seated(
         claude_argv(),
         &root,
         &root,
         &run_dir,
         "o1",
         &words(&["browser"]),
+        &crate::nirvana_bladebro::Seat::default(),
         Ok(vec!["browser"]),
         &mut out,
     )
@@ -1353,4 +1367,170 @@ fn p35c_seat_run_in_the_project_folder_writes_the_seat_snapshot() {
     let read: Map<String, Value> = serde_json::from_str(&text).unwrap();
     assert!(read.contains_key("dirty.txt"), "{text}");
     assert!(read.contains_key("order.md"), "{text}");
+}
+
+// ---- plan 35 P35c review round ----
+
+/// Review round trace: a profile that denies bladebro whole wins over the grant on both CLIs, beside a server or
+/// alone: no bladebro in the order's config or tools folder, no `mcp__bladebro__*` approved, no home, one line.
+#[test]
+fn p35c_a_profile_denying_bladebro_gets_no_grant_and_no_home() {
+    let _installed = Installed::set(true);
+    let home = crate::nirvana::with_test_home("p35c-denied-argv");
+    let root = project(&home.path, Some(MCP_JSON));
+    let run_dir = root.join(".nirvana").join("runs").join("r1");
+    for (at, denied) in ["mcp__bladebro__*", "mcp__bladebro"].iter().enumerate() {
+        let seat = crate::nirvana_bladebro::Seat {
+            denied: words(&["Write", denied]),
+            told: Some(false),
+        };
+        for (order, today) in [
+            (format!("c{at}"), claude_argv()),
+            (format!("a{at}"), agy_argv()),
+        ] {
+            let mut out = Vec::new();
+            let got = order_argv_seated(
+                today.clone(),
+                &root,
+                &root,
+                &run_dir,
+                &order,
+                &words(&["browser"]),
+                &seat,
+                Ok(vec!["browser"]),
+                &mut out,
+            )
+            .unwrap();
+            assert_eq!(got, today, "{order}");
+            assert_eq!(
+                String::from_utf8(out).unwrap(),
+                format!("{}\n", crate::nirvana_bladebro::DENIED_LINE),
+                "{order}"
+            );
+            assert!(!crate::nirvana_bladebro::home(&run_dir, &order).exists());
+            assert!(!order_config_path(&run_dir, &order).exists());
+            assert!(!crate::nirvana_agy_tools::tools_dir(&run_dir, &order).exists());
+        }
+    }
+    // Beside a server: the server stays, bladebro does not.
+    let seat = crate::nirvana_bladebro::Seat {
+        denied: words(&["mcp__bladebro__*"]),
+        told: Some(false),
+    };
+    let mut out = Vec::new();
+    let got = order_argv_seated(
+        claude_argv(),
+        &root,
+        &root,
+        &run_dir,
+        "c9",
+        &words(&["browser", "bambu"]),
+        &seat,
+        Ok(vec!["browser"]),
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(got.last().map(String::as_str), Some("mcp__bambu__*"));
+    let written: Value =
+        serde_json::from_str(&std::fs::read_to_string(order_config_path(&run_dir, "c9")).unwrap())
+            .unwrap();
+    assert!(written["mcpServers"].get("bladebro").is_none(), "{written}");
+    assert!(!crate::nirvana_bladebro::home(&run_dir, "c9").exists());
+}
+
+/// Review round S2: an agy order whose workspace `.agents/mcp_config.json` names bladebro gets no home and no herdr
+/// bladebro, and the view says why; its other servers are still given.
+#[test]
+fn p35c_an_agy_workspace_naming_bladebro_gets_no_home() {
+    let _installed = Installed::set(true);
+    let home = crate::nirvana::with_test_home("p35c-native-argv");
+    let root = project(&home.path, Some(MCP_JSON));
+    let run_dir = root.join(".nirvana").join("runs").join("r1");
+    let native = root.join(crate::nirvana_agy_tools::MCP_CONFIG);
+    std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+    std::fs::write(
+        &native,
+        r#"{"mcpServers": {"bladebro": {"command": "bladebro"}}}"#,
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    let got = order_argv_seated(
+        agy_argv(),
+        &root,
+        &root,
+        &run_dir,
+        "a1",
+        &words(&["bladebro", "bambu"]),
+        &crate::nirvana_bladebro::Seat::default(),
+        Ok(vec!["code"]),
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(got, agy_argv());
+    let said = String::from_utf8(out).unwrap();
+    assert!(said.contains("names a bladebro of its own"), "{said}");
+    assert!(
+        said.ends_with("MCP servers for this order: bambu\n"),
+        "{said}"
+    );
+    assert!(!crate::nirvana_bladebro::home(&run_dir, "a1").exists());
+    let tools = crate::nirvana_agy_tools::tools_dir(&run_dir, "a1");
+    let written: Value = serde_json::from_str(
+        &std::fs::read_to_string(tools.join(crate::nirvana_agy_tools::MCP_CONFIG)).unwrap(),
+    )
+    .unwrap();
+    assert!(written["mcpServers"].get("bladebro").is_none(), "{written}");
+    assert!(written["mcpServers"].get("bambu").is_some(), "{written}");
+}
+
+/// Review round S3: a brief written at seating without the bladebro line gets no grant at launch, though bladebro is
+/// on PATH now; a brief with it does.
+#[test]
+fn p35c_a_brief_without_the_line_gets_no_grant_at_launch() {
+    let _installed = Installed::set(true);
+    let home = crate::nirvana::with_test_home("p35c-untold-argv");
+    let root = project(&home.path, None);
+    let run_dir = root.join(".nirvana").join("runs").join("r1");
+    let untold = crate::nirvana_bladebro::Seat {
+        denied: Vec::new(),
+        told: Some(false),
+    };
+    let mut out = Vec::new();
+    let got = order_argv_seated(
+        claude_argv(),
+        &root,
+        &root,
+        &run_dir,
+        "c1",
+        &words(&["browser"]),
+        &untold,
+        Ok(vec!["browser"]),
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(got, claude_argv());
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        format!("{}\n", crate::nirvana_bladebro::UNTOLD_LINE)
+    );
+    assert!(!crate::nirvana_bladebro::home(&run_dir, "c1").exists());
+    let told = crate::nirvana_bladebro::Seat {
+        denied: Vec::new(),
+        told: Some(true),
+    };
+    let mut out = Vec::new();
+    let got = order_argv_seated(
+        claude_argv(),
+        &root,
+        &root,
+        &run_dir,
+        "c2",
+        &words(&["browser"]),
+        &told,
+        Ok(vec!["browser"]),
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(got.last().map(String::as_str), Some("mcp__bladebro__*"));
+    assert!(crate::nirvana_bladebro::home(&run_dir, "c2").is_dir());
 }

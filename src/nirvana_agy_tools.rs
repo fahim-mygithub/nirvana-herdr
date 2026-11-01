@@ -509,7 +509,7 @@ fn copy_folder(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// What an agy order is started with, beyond its servers (which `nirvana_gui_tools::order_argv` writes first).
+/// What an agy order is started with, beyond its servers (which `nirvana_gui_tools::order_argv_seated` writes first).
 pub struct Order<'a> {
     pub root: &'a Path,
     pub cwd: &'a Path,
@@ -532,7 +532,7 @@ pub fn first_line(order_file: &str, cwd: &Path, tools: &Path) -> String {
 }
 
 /// §3.1: an agy worker's argv with its tools folder and deny file. Writes the rules (§3.5) and the skills into the
-/// tools folder, beside the servers file `order_argv` wrote. When the folder holds anything the argv gets
+/// tools folder, beside the servers file `order_argv_seated` wrote. When the folder holds anything the argv gets
 /// `--add-dir <tools>`, the deny file gets `write_file(<tools>/)`, and a first start's prompt names both folders
 /// (§3.3). Any deny file also denies `write_file(<run>/agy/)`, which holds it. When there is nothing to add the argv
 /// comes back as it went in. Any other CLI's argv is untouched.
