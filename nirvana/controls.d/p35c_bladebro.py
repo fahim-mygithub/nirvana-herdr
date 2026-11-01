@@ -47,6 +47,11 @@ CONTROLS = (
             "pub const IDLE_TIMEOUT_S: u64 = 60;\n", "pub const IDLE_TIMEOUT_S: u64 = 600;\n", T_DEF, "rust"),
     Control("p35c_def_update_check", BLADE,
             '        ("BLADE_NO_UPDATE_CHECK", "1".to_owned()),\n', "", T_DEF, "rust"),
+    # Fix 0.51.1, the owner's "Skip warm-up, add PLAIN".
+    Control("p35c_def_warms", BLADE,
+            '        ("BLADE_NO_WARMING", "1".to_owned()),\n', "", T_DEF, "rust"),
+    Control("p35c_def_ansi", BLADE,
+            '        ("BLADE_PLAIN", "1".to_owned()),\n', "", T_DEF, "rust"),
     Control("p35c_def_one_home_for_all", BLADE,
             "    run_dir.join(DIR).join(order)\n", "    run_dir.join(DIR)\n", T_DEF, "rust"),
     # Item 1, R1: the grant, on both CLIs, by whole token in any case, and not on PATH grants nothing.

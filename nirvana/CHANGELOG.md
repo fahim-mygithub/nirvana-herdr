@@ -3,6 +3,21 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.51.1: bladebro skips its profile warm-up and prints plain output
+
+- **Changed:** every bladebro definition, and so every worker shell that shares its `BLADE_*` keys, adds
+  `BLADE_NO_WARMING=1` and `BLADE_PLAIN=1`.
+  **Because:** the owner, 2026-11-01: "Skip warm-up, add PLAIN". A new order's home is a new profile, and bladebro
+  warmed each one by visiting google.com, github.com and wikipedia.org before the order's first page.
+  **Measured:** a stdio probe on a scratch home, navigating to example.com: without the switch the first call took
+  7.3 s, the result said the profile was warmed, stderr printed "profile warmed (3/3 sites visited)" and a `.warmed`
+  file was left; with `BLADE_NO_WARMING=1`, 1.0 s, none of the three. `BLADE_PLAIN` is "no ANSI even on a terminal"
+  in bladebro's manual, so it acts on a shell `bladebro` only; the MCP result was 2,921 bytes with or without it.
+  0 probe processes were left. Gates: nextest 4,570 of 4,571 (the known Windows plugin-path test), clippy clean,
+  the dry run finds 2,440 of 2,440, all 63 `p35c_` controls go red alone, the two new ones among them.
+  **If you remove this:** every browser order spends about 6 s and three visits to unrelated sites before its first
+  page, and a shell `bladebro` writes colour codes into the worker's transcript on a terminal.
+
 ## alpha 0.51.0: a browser order gets bladebro on claude and on agy
 
 - **Changed:**

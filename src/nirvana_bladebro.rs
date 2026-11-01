@@ -13,8 +13,11 @@
 //!   registration measured), `BLADE_HOME` the order's own folder `<run>/blade/<order>` (never `~/.blade`, never the
 //!   owner's Chrome profile), `BLADE_CHROME_FLAGS=--headless=new` (0043: with no flag its Chrome had a window on the
 //!   owner's desktop), `BLADE_LANE=agent` (0043: the real-browser lane drives the owner's browser),
-//!   `BLADE_IDLE_TIMEOUT=60` (0040 ruling 3's backstop; bladebro's default is 600) and `BLADE_NO_UPDATE_CHECK=1`
-//!   (0043: a hypothesis read off the binary). A claude worker gets it in its per-order `--mcp-config` with
+//!   `BLADE_IDLE_TIMEOUT=60` (0040 ruling 3's backstop; bladebro's default is 600), `BLADE_NO_UPDATE_CHECK=1`
+//!   (0043: a hypothesis read off the binary), `BLADE_NO_WARMING=1` (the owner, 2026-11-01, "Skip warm-up": a new
+//!   home's first call visited google.com, github.com and wikipedia.org first, 7.3 s against 1.0 s measured) and
+//!   `BLADE_PLAIN=1` (the owner, "add PLAIN": no ANSI colour in the shell's `bladebro`, per its manual; an MCP
+//!   result is the same 2,921 bytes with or without it). A claude worker gets it in its per-order `--mcp-config` with
 //!   `mcp__bladebro__*` approved; an agy worker in its tools folder (`nirvana_agy_tools`), which plan probe 2 measured.
 //! - **The shell.** The worker's own environment carries the same `BLADE_*` (0043's fix round: the variables reached
 //!   the server only, and a shell `bladebro` used `~/.blade`). `worker_env` reads them back from the config the argv
@@ -241,6 +244,8 @@ pub fn env(home: &Path) -> Vec<(&'static str, String)> {
         ("BLADE_LANE", "agent".to_owned()),
         ("BLADE_IDLE_TIMEOUT", IDLE_TIMEOUT_S.to_string()),
         ("BLADE_NO_UPDATE_CHECK", "1".to_owned()),
+        ("BLADE_NO_WARMING", "1".to_owned()),
+        ("BLADE_PLAIN", "1".to_owned()),
     ]
 }
 

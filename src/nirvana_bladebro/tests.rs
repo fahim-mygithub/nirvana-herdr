@@ -31,6 +31,8 @@ fn p35c_the_definition_is_decision_0043s_recipe_with_the_orders_own_home() {
             "BLADE_LANE": "agent",
             "BLADE_IDLE_TIMEOUT": "60",
             "BLADE_NO_UPDATE_CHECK": "1",
+            "BLADE_NO_WARMING": "1",
+            "BLADE_PLAIN": "1",
         })
     );
     // Only the keys herdr carries: agy's translation refuses any other (plan 35 §3.2), so agy takes it as it is.
