@@ -78,6 +78,7 @@ fn subagent_rows_render_under_agent_in_flat_and_grouped_views() {
                     target_pane_id: None,
                     run_id: None,
                     run_event_time: None,
+                    waiting: false,
                 },
                 Subagent {
                     id: "sub-2".into(),
@@ -94,6 +95,7 @@ fn subagent_rows_render_under_agent_in_flat_and_grouped_views() {
                     target_pane_id: None,
                     run_id: None,
                     run_event_time: None,
+                    waiting: false,
                 },
             ],
             total_count: 2,
@@ -190,6 +192,7 @@ fn marks_and_colours_by_provider() {
                     target_pane_id: None,
                     run_id: None,
                     run_event_time: None,
+                    waiting: false,
                 },
                 Subagent {
                     id: "sub-gemini".into(),
@@ -206,6 +209,7 @@ fn marks_and_colours_by_provider() {
                     target_pane_id: None,
                     run_id: None,
                     run_event_time: None,
+                    waiting: false,
                 },
                 Subagent {
                     id: "sub-local".into(),
@@ -222,6 +226,7 @@ fn marks_and_colours_by_provider() {
                     target_pane_id: None,
                     run_id: None,
                     run_event_time: None,
+                    waiting: false,
                 },
             ],
             total_count: 3,
@@ -314,6 +319,7 @@ fn narrow_and_wide_adaptive_formatting() {
                 target_pane_id: None,
                 run_id: None,
                 run_event_time: None,
+                waiting: false,
             }],
             total_count: 1,
             overflow: 0,
@@ -409,6 +415,7 @@ fn overflow_shows_plus_n_more() {
                 target_pane_id: None,
                 run_id: None,
                 run_event_time: None,
+                waiting: false,
             }],
             total_count: 8,
             overflow: 2,
@@ -471,6 +478,7 @@ fn finished_subagents_dimmed_and_ten_minute_filter() {
                     target_pane_id: None,
                     run_id: None,
                     run_event_time: None,
+                    waiting: false,
                 },
                 Subagent {
                     id: "sub-failed".into(),
@@ -487,6 +495,7 @@ fn finished_subagents_dimmed_and_ten_minute_filter() {
                     target_pane_id: None,
                     run_id: None,
                     run_event_time: None,
+                    waiting: false,
                 },
             ],
             total_count: 2,
@@ -558,6 +567,7 @@ fn click_subagent_row_focuses_target_pane() {
                 target_pane_id: Some("worker_pane_42".into()),
                 run_id: None,
                 run_event_time: None,
+                waiting: false,
             }],
             total_count: 1,
             overflow: 0,
@@ -633,6 +643,7 @@ fn row_lines_calculation() {
             target_pane_id: None,
             run_id: None,
             run_event_time: None,
+            waiting: false,
         },
         Subagent {
             id: "s2".into(),
@@ -649,6 +660,7 @@ fn row_lines_calculation() {
             target_pane_id: None,
             run_id: None,
             run_event_time: None,
+            waiting: false,
         },
     ];
 
@@ -875,6 +887,7 @@ fn group_subagents_by_run_ordering() {
         target_pane_id: None,
         run_id: Some("run-1".into()),
         run_event_time: Some(2000),
+        waiting: false,
     };
     let sub_live_run1_fast = Subagent {
         id: "2".into(),
@@ -891,6 +904,7 @@ fn group_subagents_by_run_ordering() {
         target_pane_id: None,
         run_id: Some("run-1".into()),
         run_event_time: Some(2000),
+        waiting: false,
     };
     let sub_done_run1 = Subagent {
         id: "3".into(),
@@ -907,6 +921,7 @@ fn group_subagents_by_run_ordering() {
         target_pane_id: None,
         run_id: Some("run-1".into()),
         run_event_time: Some(2000),
+        waiting: false,
     };
     let sub_done_run2 = Subagent {
         id: "4".into(),
@@ -923,6 +938,7 @@ fn group_subagents_by_run_ordering() {
         target_pane_id: None,
         run_id: Some("run-2".into()),
         run_event_time: Some(1000),
+        waiting: false,
     };
 
     // run-1 has event time 2000, run-2 has event time 1000 -> run-1 comes first
@@ -969,6 +985,7 @@ fn render_grouped_subagents_under_run_headers() {
                     target_pane_id: Some("worker_pane_1".into()),
                     run_id: Some("p26-clear-sidebar".into()),
                     run_event_time: Some(2000),
+                    waiting: false,
                 },
                 Subagent {
                     id: "w2".into(),
@@ -985,6 +1002,7 @@ fn render_grouped_subagents_under_run_headers() {
                     target_pane_id: Some("worker_pane_closed".into()),
                     run_id: Some("p26-clear-sidebar".into()),
                     run_event_time: Some(2000),
+                    waiting: false,
                 },
             ],
             total_count: 2,
@@ -1123,6 +1141,7 @@ fn subagents_capping_keeps_live_and_counts_cut() {
         target_pane_id: None,
         run_id: Some("run-1".into()),
         run_event_time: Some(2000),
+        waiting: false,
     };
     let live2 = Subagent {
         id: "l2".into(),
@@ -1139,6 +1158,7 @@ fn subagents_capping_keeps_live_and_counts_cut() {
         target_pane_id: None,
         run_id: Some("run-1".into()),
         run_event_time: Some(2000),
+        waiting: false,
     };
     let fin1 = Subagent {
         id: "f1".into(),
@@ -1155,6 +1175,7 @@ fn subagents_capping_keeps_live_and_counts_cut() {
         target_pane_id: None,
         run_id: Some("run-1".into()),
         run_event_time: Some(2000),
+        waiting: false,
     };
     let fin2 = Subagent {
         id: "f2".into(),
@@ -1171,6 +1192,7 @@ fn subagents_capping_keeps_live_and_counts_cut() {
         target_pane_id: None,
         run_id: Some("run-1".into()),
         run_event_time: Some(2000),
+        waiting: false,
     };
 
     let all_subs = vec![live1, live2, fin1, fin2];
@@ -1206,6 +1228,7 @@ fn worker_row_cut_to_fit_at_26_cells_with_studio_gui_mcp_v2() {
                 target_pane_id: None,
                 run_id: Some("run-long".into()),
                 run_event_time: Some(2000),
+                waiting: false,
             }],
             total_count: 1,
             overflow: 0,
@@ -1262,6 +1285,7 @@ fn worker(id: &str, run: Option<&str>, state: SubagentState, at: u64) -> Subagen
         target_pane_id: None,
         run_id: run.map(str::to_owned),
         run_event_time: Some(at),
+        waiting: false,
     }
 }
 

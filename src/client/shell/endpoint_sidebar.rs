@@ -59,6 +59,8 @@ pub(super) fn render_collapsed(
     hits.workspace_max_scroll = max_scroll;
     let mut skip = *state.workspace_scroll;
     let mut y = workspace_area.y;
+    let sparkle_frame = crate::nirvana_spaces::sparkle_frame();
+    let mut sparkled = false;
     for (index, endpoint) in state.endpoints.iter().enumerate() {
         if y >= workspace_area.bottom() {
             break;
@@ -172,17 +174,36 @@ pub(super) fn render_collapsed(
                     })
                     .add_modifier(dim),
             );
+            // Plan 38 review S3: the narrow machines list sparkles too; a stale machine keeps today's marker. The
+            // list is flat, so no group is folded.
+            let marker = if stale {
+                (
+                    status_icon(workspace.agent_status, config.status_indicators),
+                    workspace.agent_status,
+                )
+            } else {
+                super::nirvana_spaces::listed_space_marker(
+                    snapshot,
+                    workspace,
+                    workspace.agent_status,
+                    &HashSet::new(),
+                    endpoint.endpoint_id.is_local(),
+                    config.status_indicators,
+                    sparkle_frame,
+                )
+            };
+            sparkled |= marker.1 == crate::api::schema::AgentStatus::Working;
             put_text(
                 buffer,
                 rect.x.saturating_add(number_width),
                 rect.y,
                 rect.width.saturating_sub(number_width),
-                status_icon(workspace.agent_status, config.status_indicators),
+                marker.0,
                 Style::default()
                     .fg(if stale {
                         palette.overlay0
                     } else {
-                        status_color(workspace.agent_status, palette)
+                        status_color(marker.1, palette)
                     })
                     .add_modifier(dim),
             );
@@ -196,6 +217,7 @@ pub(super) fn render_collapsed(
             y = y.saturating_add(1);
         }
     }
+    crate::nirvana_spaces::note_sparkle_drawn(sparkled.then_some(sparkle_frame));
     if let Some(divider_y) = divider_y {
         put_text(
             buffer,
@@ -398,6 +420,8 @@ pub(super) fn render_expanded(
     let show_scrollbar = metrics.max_offset_from_bottom > 0 && body.width > 1;
     let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
     let mut y = body.y;
+    let sparkle_frame = crate::nirvana_spaces::sparkle_frame();
+    let mut sparkled = false;
     for (row_index, row) in rows.iter().enumerate().skip(*state.workspace_scroll) {
         match row {
             Row::Endpoint(index) => {
@@ -468,11 +492,27 @@ pub(super) fn render_expanded(
                 let selected = state.selected_workspace_id.is_some_and(|target| {
                     target.matches(&endpoint.endpoint_id, &workspace.workspace_id)
                 });
+                // Plan 38 review S3: the machines list sparkles as the spaces list does, but not for a machine
+                // that is not online, whose snapshot is stale.
+                let marker = if endpoint.status == ClientEndpointStatus::Online {
+                    super::nirvana_spaces::listed_space_marker(
+                        snapshot,
+                        workspace,
+                        status,
+                        collapsed_groups,
+                        endpoint.endpoint_id.is_local(),
+                        config.status_indicators,
+                        sparkle_frame,
+                    )
+                } else {
+                    (status_icon(status, config.status_indicators), status)
+                };
+                sparkled |= marker.1 == crate::api::schema::AgentStatus::Working;
                 super::sidebar::render_workspace_rows(
                     buffer,
                     nested,
                     status,
-                    config.status_indicators,
+                    marker,
                     entry,
                     tokens,
                     endpoint_active && workspace.focused,
@@ -510,6 +550,7 @@ pub(super) fn render_expanded(
             }
         }
     }
+    crate::nirvana_spaces::note_sparkle_drawn(sparkled.then_some(sparkle_frame));
     if show_scrollbar {
         let track = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
         hits.workspace_scrollbar = track;

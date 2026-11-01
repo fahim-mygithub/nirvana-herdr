@@ -309,6 +309,9 @@ pub(super) fn render_shell(
                 &mut hits,
             );
         }
+    } else {
+        // Plan 38 review S2: no sidebar drawn, no sparkle shown: the timer's repaints stop.
+        crate::nirvana_spaces::note_sparkle_drawn(None);
     }
     if layout.tab_bar.height > 0 {
         render_tab_bar(

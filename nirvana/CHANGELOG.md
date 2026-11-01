@@ -3,6 +3,34 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.48.0: a space sparkles while anything under it is working
+
+- **Changed:**
+  - The marker before a space's name shows `✧ ✦ ✶ ✷ ✸ ✷ ✶ ✦`, 250 ms a frame, in the working colour, while any
+    agent of the space is Working, or any seated worker listed under it is running. Blocked keeps its red `×`.
+    Done, Idle, Asked and Deferred do not sparkle; the space then shows what it showed before.
+  - Every space animates from one clock, in phase. The spaces list, the narrow sidebar and the machines lists all
+    draw it.
+  - A repaint is due only when a drawing sparkled and the clock moved to another frame (`SparkleGate`); with nothing
+    sparkling there is no extra repaint. The tick is its own statement in `src/client/mod.rs`.
+  **Because:** the owner, 2026-10-31: "if there are agents underneath that project that are still working and are not
+  actively idle have an animated icon represent that similar to teh claude code working icon  but lets choose our own
+  or htis app", and the answer "Nirvana sparkle". The screenshot showed `✓` on spaces with a worker running 56 s and
+  7m54s. Plan `nirvana/plans/2026-10-31-38-space-working-spinner.md`, built on Opus high, one Sonnet review, one fix
+  round.
+  **Measured:**
+  - Two causes, both real: herdr ranks Done above Working, and a seated worker is not a pane of its space, so it
+    never fed the marker.
+  - All eight frames are one cell wide by `unicode-width` 0.2.2. While sparkling, at most one repaint per new frame
+    (about 14 timer wakes a second against 10); the encoder writes only the changed cells.
+  - A seated worker starts sparkling up to about 10 s after it is seated (the subagents poller), and stops up to about
+    2 s after its journal says it ended.
+  - Gates: as 0.47.0, run on both plans together; all 35 `p38_` controls go red alone.
+  - Not live-checked: the glyphs in JetBrains Mono in Windows Terminal. A headless worker that died without a journal
+    event keeps sparkling.
+  **If you remove this:** a finished Nirvana Claude shows `✓` over a worker that is still running, and the owner
+  cannot see which projects are busy.
+
 ## alpha 0.47.0: a Learning square between Preload and Memory
 
 - **Changed:**

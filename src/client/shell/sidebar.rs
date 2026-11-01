@@ -57,6 +57,8 @@ pub(crate) fn render_collapsed_sidebar(
     let active_background = workspace_active_background(palette, selected_workspace_id.is_some());
     render_sidebar_background(buffer, area, palette);
     let (workspace_area, divider_y, detail_area) = collapsed_sidebar_sections(area);
+    let sparkle_frame = crate::nirvana_spaces::sparkle_frame();
+    let mut sparkled = false;
     for (index, workspace) in snapshot
         .workspaces
         .iter()
@@ -93,13 +95,25 @@ pub(crate) fn render_collapsed_sidebar(
             number_style,
         );
         let status = workspace.agent_status;
+        // Plan 38 review S3: the narrow sidebar sparkles as the spaces list does. It lists every space flat, so no
+        // group is folded.
+        let marker = super::nirvana_spaces::listed_space_marker(
+            snapshot,
+            workspace,
+            status,
+            &HashSet::new(),
+            true,
+            config.status_indicators,
+            sparkle_frame,
+        );
+        sparkled |= marker.1 == crate::api::schema::AgentStatus::Working;
         put_text(
             buffer,
             rect.x.saturating_add(2),
             rect.y,
             rect.width.saturating_sub(2),
-            status_icon(status, config.status_indicators),
-            Style::default().fg(status_color(status, palette)),
+            marker.0,
+            Style::default().fg(status_color(marker.1, palette)),
         );
         hits.workspaces.push(WorkspaceHit {
             rect,
@@ -109,6 +123,7 @@ pub(crate) fn render_collapsed_sidebar(
             group_toggle: None,
         });
     }
+    crate::nirvana_spaces::note_sparkle_drawn(sparkled.then_some(sparkle_frame));
 
     if let Some(divider_y) = divider_y {
         put_text(
@@ -338,6 +353,9 @@ pub(crate) fn render_sidebar(
     let show_scrollbar = metrics.max_offset_from_bottom > 0 && body.width > 1;
     let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
     let mut y = body.y;
+    // Plan 38: one frame of the sparkle for the whole list, so working spaces share a phase.
+    let sparkle_frame = crate::nirvana_spaces::sparkle_frame();
+    let mut sparkled = false;
     for (entry_position, entry) in entries.iter().enumerate().skip(*state.workspace_scroll) {
         let Some(workspace) = snapshot.workspaces.get(entry.index) else {
             continue;
@@ -362,6 +380,23 @@ pub(crate) fn render_sidebar(
             break;
         }
         let rect = Rect::new(body.x, y, content_width, row_height);
+        // Plan 38: a space sparkles while anything under it is working.
+        let working = super::nirvana_spaces::space_working(
+            snapshot,
+            workspace,
+            status,
+            state.collapsed_groups,
+            workers,
+        );
+        let marker = super::nirvana_spaces::space_marker(
+            status,
+            working,
+            config.status_indicators,
+            sparkle_frame,
+        );
+        // Working is the sparkle, or `SPARKLE_FALLBACK` for a frame measured wider than a cell, which never changes
+        // and so repaints for nothing at 4 Hz; no frame measures wide today (`every_frame_is_one_cell_wide`).
+        sparkled |= marker.1 == crate::api::schema::AgentStatus::Working;
         let selected = state.selected_workspace_id.is_some_and(|target| {
             target.matches(state.active_endpoint_id, &workspace.workspace_id)
         });
@@ -377,7 +412,7 @@ pub(crate) fn render_sidebar(
             buffer,
             rect,
             status,
-            config.status_indicators,
+            marker,
             entry,
             rows,
             workspace.focused,
@@ -439,6 +474,7 @@ pub(crate) fn render_sidebar(
             .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap);
         y = y.saturating_add(row_height + gap);
     }
+    crate::nirvana_spaces::note_sparkle_drawn(sparkled.then_some(sparkle_frame));
 
     if show_scrollbar {
         let track = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
@@ -780,11 +816,13 @@ pub(in crate::client::shell) fn workspace_rows(
     )
 }
 
+/// A space's rows. `marker` is its glyph and the status whose colour it takes: herdr's own marker, or the plan 38
+/// sparkle (`nirvana_spaces::space_marker`), which every list that draws spaces passes here.
 pub(in crate::client::shell) fn render_workspace_rows(
     buffer: &mut Buffer,
     area: Rect,
     status: crate::api::schema::AgentStatus,
-    indicators: crate::config::StatusIndicatorStyle,
+    marker: (&'static str, crate::api::schema::AgentStatus),
     entry: &WorkspaceEntry,
     rows: Vec<Vec<crate::ui::ResolvedToken>>,
     focused: bool,
@@ -844,8 +882,8 @@ pub(in crate::client::shell) fn render_workspace_rows(
         let spans = crate::ui::resolved_token_spans(
             row,
             (
-                status_icon(status, indicators),
-                Style::default().fg(status_color(status, palette)),
+                marker.0,
+                Style::default().fg(status_color(marker.1, palette)),
             ),
             Style::default().fg(status_color(status, palette)),
             workspace_style,
