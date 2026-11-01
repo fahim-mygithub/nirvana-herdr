@@ -15,17 +15,57 @@ T_B = "wake_pane_the_wake_of_an_order_seated_from_b_types_into_b"
 T_RETRY = "wake_pane_a_queued_wake_is_retried_toward_the_new_pane"
 T_FRESH = "wake_pane_a_run_moved_to_another_pane_is_that_panes_for_the_fresh_start"
 T_SUBAGENTS = "wake_pane_seat_orders_follow_the_run_to_its_new_orchestrator"
+T_ONLY_NC = "wake_pane_only_a_pane_shown_to_run_nirvana_claude_takes_the_run"
+T_REPEAT = "wake_pane_a_repeated_seat_run_from_a_new_pane_still_moves_the_run"
+T_STDERR = "wake_pane_an_error_on_stderr_is_read_past_json_on_stdout"
+
+OPEN_OF = "        .find(|(_, state)| state.orchestrator_panes.iter().any(|held| held == pane))\n"
+MOVER_CHECK = "    (program(pane) == nirvana_run::PaneProgram::NirvanaClaude).then(|| pane.to_owned())\n"
 
 CONTROLS = (
     # Item 1: `seat run` from another pane journals the move.
     Control("wake_seat_run_writes_the_move", WORKER,
-            "            orchestrator_pane.as_deref(),\n        ));\n    }\n    kinds.push(Kind::Seated(",
-            "            None.or(orchestrator_pane.as_deref().and(None)),\n        ));\n    }\n    kinds.push(Kind::Seated(",
+            "    let moved = mover.and_then(|pane| nirvana_run::orchestrator_move(&replay(events), Some(pane)));\n",
+            "    let moved = mover.and_then(|_| None::<Kind>);\n",
             T_MOVE, "rust"),
+    # Review S1: a pane herdr says runs something else (a shell, plain Claude Code) does not take the run.
+    Control("wake_other_pane_no_move", WORKER, MOVER_CHECK,
+            "    matches!(program(pane), nirvana_run::PaneProgram::NirvanaClaude | nirvana_run::PaneProgram::Other(_))\n"
+            "        .then(|| pane.to_owned())\n",
+            T_ONLY_NC, "rust"),
+    # Review S1: a pane herdr cannot answer about does not take the run.
+    Control("wake_unknown_pane_no_move", WORKER, MOVER_CHECK,
+            "    matches!(program(pane), nirvana_run::PaneProgram::NirvanaClaude | nirvana_run::PaneProgram::Unknown)\n"
+            "        .then(|| pane.to_owned())\n",
+            T_ONLY_NC, "rust"),
+    # Review S1: a gone pane does not take the run.
+    Control("wake_gone_pane_no_move", WORKER, MOVER_CHECK,
+            "    matches!(program(pane), nirvana_run::PaneProgram::NirvanaClaude | nirvana_run::PaneProgram::Gone(_))\n"
+            "        .then(|| pane.to_owned())\n",
+            T_ONLY_NC, "rust"),
+    # Review S1: a Nirvana Claude pane does take it.
+    Control("wake_nirvana_pane_moves", WORKER, MOVER_CHECK,
+            "    (program(pane) == nirvana_run::PaneProgram::Unknown).then(|| pane.to_owned())\n",
+            T_ONLY_NC, "rust"),
+    # Review S1: herdr is asked only when the journal says a move is due.
+    Control("wake_mover_asks_only_when_due", WORKER,
+            "    nirvana_run::orchestrator_move(&replay(events), caller)?;\n",
+            "    let _ = events;\n",
+            T_ONLY_NC, "rust"),
+    # Review N5: a repeated seat run of a known order still writes the move.
+    Control("wake_known_order_still_moves", WORKER,
+            "        Err(known) => (moved.into_iter().collect(), Some(known)),\n",
+            "        Err(known) => (moved.into_iter().take(0).collect(), Some(known)),\n",
+            T_REPEAT, "rust"),
+    # Review N1: stderr's error response is read when stdout is JSON with no `error`.
+    Control("wake_stderr_error_past_stdout_json", WORKER,
+            "        .find(|value| value.get(\"error\").is_some());\n",
+            "        .next();\n",
+            T_STDERR, "rust"),
     # Item 1: replay's current pane is the latest move.
     Control("wake_replay_takes_the_latest_move", RUN,
-            "            Kind::OrchestratorMoved { pane, .. } => state.orchestrator_pane = Some(pane.clone()),\n",
-            "            Kind::OrchestratorMoved { .. } => {}\n",
+            "                state.orchestrator_pane = Some(pane.clone());\n",
+            "                let _ = pane;\n",
             T_MOVE, "rust"),
     # Item 1: the same pane writes no move.
     Control("wake_same_pane_no_move", RUN,
@@ -69,10 +109,22 @@ CONTROLS = (
             "                .and_then(|opened| opened.orchestrator_pane.as_deref())\n                == Some(pane)\n        })\n",
             T_FRESH, "rust"),
     # Item 1: the fresh start's open-run reader follows the move.
-    Control("wake_fresh_open_of_follows", FRESH,
+    Control("wake_fresh_open_of_follows", FRESH, OPEN_OF,
+            "        .find(|(_, state)| state.orchestrator_panes.first().is_some_and(|held| held == pane))\n",
+            T_FRESH, "rust"),
+    # Review S2: the open-run guard still holds off the pane the run moved away from.
+    Control("wake_fresh_open_of_keeps_former_panes", FRESH, OPEN_OF,
             "        .find(|(_, state)| state.orchestrator_pane.as_deref() == Some(pane))\n",
-            "        .find(|(_, state)| {\n            state\n                .opened\n                .as_ref()\n"
-            "                .and_then(|opened| opened.orchestrator_pane.as_deref())\n                == Some(pane)\n        })\n",
+            T_FRESH, "rust"),
+    # Review S2: replay keeps every pane the run has had: the moves'.
+    Control("wake_replay_keeps_moved_panes", RUN,
+            "                state.orchestrator_panes.push(pane.clone());\n",
+            "                let _ = &state.orchestrator_panes;\n",
+            T_FRESH, "rust"),
+    # Review S2: and the first `opened`'s.
+    Control("wake_replay_keeps_the_opened_pane", RUN,
+            "                    state.orchestrator_panes.extend(orchestrator_pane.clone());\n",
+            "                    let _ = &state.orchestrator_panes;\n",
             T_FRESH, "rust"),
     # Item 1: the subagents panel's reader follows the move.
     Control("wake_subagents_follow", SUBAGENTS,

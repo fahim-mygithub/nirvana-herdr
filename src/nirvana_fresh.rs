@@ -188,11 +188,13 @@ pub fn last_end_of<'a>(pane: &str, runs: &'a [(String, RunState)]) -> Option<(&'
         .max_by_key(|(_, at)| *at)
 }
 
-/// A run whose orchestrator is `pane` that has not ended (review B1: a fresh start never clears in the middle of a run).
+/// A run that has not ended whose orchestrator `pane` is or was (review B1: a fresh start never clears in the middle
+/// of a run). Wake-pane review S2: a pane the run moved away from still counts, since a live Nirvana Claude may sit
+/// there; it fails safe, as an open run left open by mistake does (`open_blocks`).
 pub fn open_of<'a>(pane: &str, runs: &'a [(String, RunState)]) -> Option<&'a str> {
     runs.iter()
         .filter(|(_, state)| state.ended.is_none())
-        .find(|(_, state)| state.orchestrator_pane.as_deref() == Some(pane))
+        .find(|(_, state)| state.orchestrator_panes.iter().any(|held| held == pane))
         .map(|(run, _)| run.as_str())
 }
 

@@ -696,6 +696,10 @@ pub struct RunState {
     /// The pane a wake types into: `opened`'s, or the latest `orchestrator_moved`'s (fix wake-pane). Every reader of
     /// "this run's orchestrator" reads this, never `opened.orchestrator_pane`, which stays the pane the run began in.
     pub orchestrator_pane: Option<String>,
+    /// Every pane that has been this run's orchestrator, the first first (wake-pane review S2). The fresh start's
+    /// open-run guard reads it: a pane the run moved away from may still hold a live Nirvana Claude that thinks the run
+    /// is its own (two orchestrators on one run, unsupported but not prevented), and a `/clear` there would wipe that.
+    pub orchestrator_panes: Vec<String>,
     pub orders: Vec<OrderState>,
     /// `herdr run end`: its time and the pools then.
     pub ended: Option<(u64, Vec<Reading>, Option<String>)>,
@@ -849,6 +853,7 @@ pub fn replay(events: &[Event]) -> RunState {
             } => {
                 if state.opened.is_none() {
                     state.orchestrator_pane = orchestrator_pane.clone();
+                    state.orchestrator_panes.extend(orchestrator_pane.clone());
                     state.opened = Some(Opened {
                         at: event.at,
                         project: project.clone(),
@@ -1032,7 +1037,10 @@ pub fn replay(events: &[Event]) -> RunState {
                 }
             }
             Kind::ModeChanged { from, to, .. } => state.modes.push((event.at, *from, *to)),
-            Kind::OrchestratorMoved { pane, .. } => state.orchestrator_pane = Some(pane.clone()),
+            Kind::OrchestratorMoved { pane, .. } => {
+                state.orchestrator_pane = Some(pane.clone());
+                state.orchestrator_panes.push(pane.clone());
+            }
             Kind::Stalled {
                 order,
                 stalls,
@@ -1137,8 +1145,8 @@ pub fn replay(events: &[Event]) -> RunState {
 /// Fix wake-pane: the `orchestrator_moved` event a `seat run` from `pane` (its `HERDR_PANE_ID`) writes into an opened
 /// run, or `None`: the run is not opened yet (its `opened` names the pane), the pane is unknown (a `seat run` outside
 /// herdr), it is already the orchestrator's, or it is one of the run's own worker panes. A worker that runs `seat run`
-/// is not the orchestrator, and no wake may move to it; the wake's own rule (it types only into Nirvana Claude)
-/// still holds for whatever pane this names. Pure.
+/// is not the orchestrator, and no wake may move to it. Whether herdr says the pane runs Nirvana Claude is asked
+/// before the journal's lock (`nirvana_worker::mover`, review S1): only such a pane takes the run. Pure.
 pub fn orchestrator_move(state: &RunState, pane: Option<&str>) -> Option<Kind> {
     let pane = pane.filter(|pane| !pane.is_empty())?;
     state.opened.as_ref()?;

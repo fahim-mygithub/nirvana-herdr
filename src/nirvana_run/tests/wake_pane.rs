@@ -15,9 +15,13 @@ fn delivered(order: &str) -> Kind {
     }
 }
 
-/// A `seat run` of `order` from `pane` into the events, as `seat_order_with` writes it under the journal's lock.
+/// A `seat run` of `order` from `pane` into the events, as `seat_order_with` writes it under the journal's lock, from a
+/// pane herdr says runs Nirvana Claude (`nirvana_worker::mover`'s answer).
 fn seat_from(events: &[Event], order: &str, pane: Option<&str>) -> Vec<Kind> {
-    crate::nirvana_worker::seating(events, &seated(order), opened(pane)).expect("a new order")
+    let (kinds, known) =
+        crate::nirvana_worker::seating_from(events, &seated(order), opened(pane), pane);
+    assert!(known.is_none(), "a new order");
+    kinds
 }
 
 fn with_seqs(kinds: Vec<Kind>, start: u64) -> Vec<Event> {
@@ -64,6 +68,8 @@ fn wake_pane_a_seat_run_from_another_pane_moves_the_run_there() {
     // From the same pane again, from outside herdr, or from one of the run's own worker panes: no move.
     assert_eq!(seat_from(&events, "o3", Some("wS:p1")).len(), 1);
     assert_eq!(seat_from(&events, "o3", None).len(), 1);
+    assert_eq!(orchestrator_move(&replay(&events), None), None);
+    assert_eq!(orchestrator_move(&replay(&events), Some("")), None);
     events.push(ev(
         5,
         T0 + 5,
@@ -289,4 +295,117 @@ fn wake_pane_a_queued_wake_is_retried_toward_the_new_pane() {
     assert!(woke, "{verdict}");
     assert_eq!(*typed.borrow(), vec!["wS:p1".to_owned()]);
     assert!(take_due_retries(&home.path, u64::MAX).is_empty());
+}
+
+/// Review S1: only a pane herdr says runs Nirvana Claude takes the run. A `seat run` typed in a shell or a plain Claude
+/// Code pane, or one whose pane herdr cannot answer about, leaves the run with its orchestrator.
+#[test]
+fn wake_pane_only_a_pane_shown_to_run_nirvana_claude_takes_the_run() {
+    use crate::nirvana_worker::mover;
+    let events = with_seqs(seat_from(&[], "o1", Some("wH:p1")), 1);
+    let asked = |program: PaneProgram| {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let moves_to = mover(&events, Some("wS:p1"), |pane| {
+            calls.borrow_mut().push(pane.to_owned());
+            program
+        });
+        (moves_to, calls.into_inner())
+    };
+    let here = vec!["wS:p1".to_owned()];
+    assert_eq!(
+        asked(PaneProgram::NirvanaClaude),
+        (Some("wS:p1".to_owned()), here.clone())
+    );
+    for program in [
+        PaneProgram::Other("its claude has no --agent nirvana".into()),
+        PaneProgram::Other("no claude runs in it".into()),
+        PaneProgram::Unknown,
+        PaneProgram::Gone("wS:p1".into()),
+    ] {
+        assert_eq!(asked(program), (None, here.clone()));
+    }
+    // herdr not answering, through the wake's own `pane get`: `Unknown`, so no move.
+    assert_eq!(
+        mover(&events, Some("wS:p1"), |pane| {
+            crate::nirvana_worker::pane_get_with(pane, |_: &[&str]| {
+                Err((None, "herdr: connection refused".into()))
+            })
+            .1
+        }),
+        None
+    );
+    // herdr is not asked when no move is due: the orchestrator's own pane, no pane, a run not yet opened.
+    let never = |pane: &str| -> PaneProgram { panic!("asked about {pane}") };
+    assert_eq!(mover(&events, Some("wH:p1"), never), None);
+    assert_eq!(mover(&events, None, never), None);
+    assert_eq!(mover(&[], Some("wS:p1"), never), None);
+    // Seated from the Other pane: the seat is written, the run stays with wH:p1.
+    let (kinds, known) = crate::nirvana_worker::seating_from(
+        &events,
+        &seated("o2"),
+        opened(Some("wS:p1")),
+        asked(PaneProgram::Other("a shell".into())).0.as_deref(),
+    );
+    assert!(known.is_none());
+    assert_eq!(kinds.len(), 1);
+    assert!(matches!(kinds[0], Kind::Seated(_)));
+    let mut after = events.clone();
+    after.extend(with_seqs(kinds, 3));
+    assert_eq!(replay(&after).orchestrator_pane.as_deref(), Some("wH:p1"));
+}
+
+/// Review N5: a repeated `seat run` of an order the run knows, from a new Nirvana Claude pane, writes no second seat
+/// but still moves the run: a resumed orchestrator in a new pane re-issues the order ids it had.
+#[test]
+fn wake_pane_a_repeated_seat_run_from_a_new_pane_still_moves_the_run() {
+    let mut events = with_seqs(seat_from(&[], "o1", Some("wH:p1")), 1);
+    let (kinds, known) = crate::nirvana_worker::seating_from(
+        &events,
+        &seated("o1"),
+        opened(Some("wS:p1")),
+        Some("wS:p1"),
+    );
+    assert_eq!(
+        kinds,
+        vec![Kind::OrchestratorMoved {
+            pane: "wS:p1".into(),
+            from: Some("wH:p1".into()),
+        }]
+    );
+    assert_eq!(known.expect("the order as it is").seated.order, "o1");
+    events.extend(with_seqs(kinds, 3));
+    assert_eq!(replay(&events).orchestrator_pane.as_deref(), Some("wS:p1"));
+    // Again from the same pane: nothing to write.
+    let (kinds, known) = crate::nirvana_worker::seating_from(
+        &events,
+        &seated("o1"),
+        opened(Some("wS:p1")),
+        Some("wS:p1"),
+    );
+    assert!(kinds.is_empty() && known.is_some());
+}
+
+/// Review N1: herdr's error response is read from stderr when stdout is JSON with no `error`.
+#[test]
+fn wake_pane_an_error_on_stderr_is_read_past_json_on_stdout() {
+    let stderr = r#"{"id":"cli:pane:get","error":{"code":"pane_not_found","message":"pane wH:p1 not found"}}"#;
+    let want = (
+        Some("pane_not_found".to_owned()),
+        "pane wH:p1 not found".to_owned(),
+    );
+    assert_eq!(
+        crate::nirvana_worker::herdr_error(r#"{"id":"cli:pane:get","result":{}}"#, stderr),
+        want
+    );
+    // stdout's own error response still comes first.
+    assert_eq!(
+        crate::nirvana_worker::herdr_error(
+            r#"{"error":{"code":"server_unavailable","message":"no server"}}"#,
+            stderr
+        ),
+        (
+            Some("server_unavailable".to_owned()),
+            "no server".to_owned()
+        )
+    );
 }

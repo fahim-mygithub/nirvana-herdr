@@ -810,8 +810,8 @@ CONTROLS = (
     # review B1, rule 1: an open run of this pane, not another's
     Control(
         'p25_open_of_this_pane', F,
-        '        .find(|(_, state)| state.orchestrator_pane.as_deref() == Some(pane))\n        .map(',
-        '        .find(|(_, state)| state.orchestrator_pane.as_deref().is_some())\n        .map(',
+        '        .find(|(_, state)| state.orchestrator_panes.iter().any(|held| held == pane))\n        .map(',
+        '        .find(|(_, state)| !state.orchestrator_panes.is_empty())\n        .map(',
         T_OPEN, 'rust',
     ),
     # review B1, rule 1, end to end: the Stop hook reads this pane's open run
