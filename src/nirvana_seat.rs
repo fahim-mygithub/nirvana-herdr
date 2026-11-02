@@ -47,6 +47,15 @@ pub const HISTORICAL_DEFAULTS: &[&str] = &[
     include_str!("nirvana_seats_v4.toml"),
     include_str!("nirvana_seats_v5.toml"),
     include_str!("nirvana_seats_v6.toml"),
+    // v7 is plan 34a's (0.46.0), which plan 35c's `why` line left without a copy here: an install holding it never
+    // upgraded (the owner's did not, read 2026-11-02). v8 is plan 35c's, before plan 35 R2 added `browser` to agy.
+    include_str!("nirvana_seats_v7.toml"),
+    include_str!("nirvana_seats_v8.toml"),
+    // Three defaults that shipped in a commit and had no copy here (review-trim review nit), each byte for byte from
+    // git: v9 plan 33b's (ad601b8d), v10 plan 33's join (c2ad3b39), v11 plan 34a's first commit (b5ab56a3).
+    include_str!("nirvana_seats_v9.toml"),
+    include_str!("nirvana_seats_v10.toml"),
+    include_str!("nirvana_seats_v11.toml"),
 ];
 pub const DIR: &str = "nirvana";
 pub const SEATS_FILE: &str = "seats.toml";
@@ -6774,5 +6783,104 @@ mod tests {
         );
         assert_eq!(step_up(&table, "research.web", "haiku", NOW), None);
         assert_eq!(step_up(&table, "no.such.class", "flash", NOW), None);
+    }
+
+    /// Plan 35 R2 (live check 35.1, F1): every enabled agy seat lists `browser`, so `--needs browser` can seat agy;
+    /// research.web keeps its scores (one order is not a measurement), and its `why` says so.
+    #[test]
+    fn lrs_agy_seats_list_browser_and_a_browser_order_can_seat_agy() {
+        let table = parse(DEFAULT).unwrap();
+        let agy: Vec<&Seat> = table
+            .seats
+            .iter()
+            .filter(|seat| seat.cli == "agy" && seat.enabled)
+            .collect();
+        assert_eq!(
+            agy.iter().map(|seat| seat.id.as_str()).collect::<Vec<_>>(),
+            ["g-opus", "g-sonnet", "argon", "flash"]
+        );
+        for seat in &agy {
+            assert!(
+                seat.capabilities.iter().any(|word| word == "browser"),
+                "{} lacks browser",
+                seat.id
+            );
+        }
+        let mut browser = request("research.web");
+        browser.needs = vec!["browser".into()];
+        let got = chosen(&table, &world(), &browser);
+        assert_eq!(
+            table.seat(&got.seat).map(|seat| seat.cli.as_str()),
+            Some("agy"),
+            "{got:?}"
+        );
+        // Before R2 (the default plan 35c shipped, v8) the same order went to a claude seat, every agy seat lacking it.
+        assert!(HISTORICAL_DEFAULTS.contains(&LRS_V8));
+        let before = parse(LRS_V8).unwrap();
+        let got = chosen(&before, &world(), &browser);
+        assert_eq!(why(&got.runners_up, "flash"), "lacks browser");
+        let web = table.class("research.web").unwrap();
+        let score = |table: &Table, seat: &str| {
+            table
+                .class("research.web")
+                .and_then(|class| class.seats.iter().find(|entry| entry.seat == seat))
+                .map(|entry| entry.score)
+        };
+        for seat in ["flash", "argon", "sonnet", "opus", "g-sonnet"] {
+            assert_eq!(score(&table, seat), score(&before, seat), "{seat} rescored");
+        }
+        assert!(web.why.contains("not rescored"), "{}", web.why);
+        // A desktop server still takes a claude seat: `claude_only` skips agy whatever it lists.
+        let mut desktop = browser.clone();
+        desktop.claude_only = Some("bambu-studio-beta drives a desktop window".into());
+        let got = chosen(&table, &world(), &desktop);
+        assert_eq!(
+            table.seat(&got.seat).map(|seat| seat.cli.as_str()),
+            Some("claude")
+        );
+        assert_eq!(
+            why(&got.runners_up, "flash"),
+            "bambu-studio-beta drives a desktop window"
+        );
+        // The seat skill says `--needs browser` is the way to a browser on agy, and no longer only `bladebro`.
+        let skill = include_str!("../nirvana/claude/skills/seat/SKILL.md");
+        assert!(
+            skill.contains("so `--needs browser` is the way to a browser on agy too"),
+            "{skill}"
+        );
+    }
+
+    const LRS_V8: &str = include_str!("nirvana_seats_v8.toml");
+
+    /// An installed copy of plan 34a's default (v7, which plan 35c left without a copy), of plan 35c's (v8), or of one
+    /// of the three intermediates that had none (v9-v11) upgrades to the default with `browser` on agy, its mode kept
+    /// and the old file backed up. By content, not by index: the next copy shifts no number here.
+    #[test]
+    fn lrs_an_installed_34a_or_35c_default_upgrades_to_r2() {
+        for (n, old) in [
+            (7, include_str!("nirvana_seats_v7.toml")),
+            (8, LRS_V8),
+            (9, include_str!("nirvana_seats_v9.toml")),
+            (10, include_str!("nirvana_seats_v10.toml")),
+            (11, include_str!("nirvana_seats_v11.toml")),
+        ] {
+            assert!(HISTORICAL_DEFAULTS.contains(&old), "v{n} is historical");
+            assert_ne!(old.replace("\r\n", "\n"), DEFAULT.replace("\r\n", "\n"));
+            let dir = temp_dir(&format!("lrs-upgrade-v{n}"));
+            let path = dir.join(SEATS_FILE);
+            let installed = replace_mode_line(old, "mode = \"efficient\"");
+            std::fs::write(&path, &installed).unwrap();
+            let text = read_or_create(&path);
+            assert_eq!(
+                text,
+                replace_mode_line(DEFAULT, "mode = \"efficient\""),
+                "v{n}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.join("backup").join(SEATS_FILE)).unwrap(),
+                installed
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

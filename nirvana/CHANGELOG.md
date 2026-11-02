@@ -3,6 +3,32 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.54.0: a lesson review only when there is something to learn; agy seats take browser orders
+
+- **Changed:**
+  - The gate queues a lesson review only when the order has something to learn. A clean first pass is skipped: a
+    pass on the first try, with no send-back, reseat, block or question in its chain, and a report that offers no
+    gotcha, lesson or surprise. The skip is journaled in the `gated` event as the `review_skipped` axis, with its
+    reason; it does not count against the daily cap.
+  - An order after a question keeps its review: the fresh order that answers a block or a question is read as part
+    of that chain. A blank or empty report item is not something to learn. A cap of 0 still says "lesson reviews are
+    off".
+  - `browser` is in the needs of the agy seats g-opus, g-sonnet, argon and flash, with no rescore, so a
+    `--needs browser` order can seat agy.
+  - An installed seats table that was a past default upgrades to the new one: the 34a and 35c defaults are kept as
+    `nirvana_seats_v7.toml` and `_v8.toml`, and the three that had no copy are taken from git as `_v9` to `_v11`.
+  **Because:** the live checks of 2026-11-01 found that a lesson review ran after every delivery (F8) and that
+  `--needs browser` never picked agy (F1), though agy now has browser tools. The owner, 2026-11-02: "Use your
+  recomendation for all of these".
+  **Measured:** across 17 real reviews, the rule skips 4, all from the live checks, which is 37% of their review
+  tokens, and loses 0 lessons. Gated together with 0.53.0 on one tree: nextest 4,631 of 4,632, the one failure the
+  known Windows plugin-path test; clippy clean; the dry run finds 2,609 of 2,609; all 41 `lrs_` controls and the
+  older controls whose lines moved go red alone. One Sonnet review, one fix round. A hypothesis: the answer link
+  takes the first order seated after a question, so an unrelated order seated first takes the review and the redo
+  reads as a first pass; the journal has no explicit link.
+  **If you remove this:** every delivery pays for a lesson review that has nothing to read, the daily cap runs out
+  on clean passes, and browser orders never reach the agy seats.
+
 ## alpha 0.53.0: sources only when the order asks for the web; a send-back keeps the caller's effort
 
 - **Changed:**

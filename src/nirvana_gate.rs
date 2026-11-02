@@ -3487,8 +3487,15 @@ fn gate_subject(
             let _ =
                 crate::nirvana_knowledge::note_gated(&project.root, profile, &stream, &order, true);
         }
-        // Plan 33 §3.3: the cap's refusal is journaled with the verdict, as an axis named `review_skipped`.
-        let review = crate::nirvana_review::wanted(project, state, known, table);
+        // Plan 33 §3.3: the cap's refusal is journaled with the verdict, as an axis named `review_skipped`; so is a
+        // clean first pass, which has nothing to learn (review-trim-agy-browser 2026-11-02, live checks F8).
+        let review = crate::nirvana_review::wanted_for(
+            project,
+            state,
+            known,
+            &crate::nirvana_review::Verdict::Pass,
+            table,
+        );
         if let Err(Some(why)) = &review {
             axes.push(Axis::new(
                 crate::nirvana_review::SKIPPED,
@@ -3541,7 +3548,13 @@ fn gate_subject(
         .iter()
         .map(|axis| format!("{}: {}", axis.axis, axis.why))
         .collect();
-    let review = crate::nirvana_review::wanted(project, state, known, table);
+    let review = crate::nirvana_review::wanted_for(
+        project,
+        state,
+        known,
+        &crate::nirvana_review::Verdict::SentBack(reasons.clone()),
+        table,
+    );
     if let Err(Some(why)) = &review {
         axes.push(Axis::new(
             crate::nirvana_review::SKIPPED,

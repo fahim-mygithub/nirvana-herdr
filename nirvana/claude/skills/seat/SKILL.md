@@ -54,8 +54,10 @@ owner's words where they matter. Then:
   `--send-ok "<the owner's words>"`, copied exactly from the owner's prompt of the last 6 hours (4 words or more);
   herdr refuses a quote it cannot find, and a send-back or reseat never inherits it.
   `--needs browser` or `--needs bladebro` gives the worker bladebro, a headless browser with its own profile, on a
-  claude or an agy seat; `browser` also limits the pick to the seats that list it, `bladebro` does not. A profile
-  that denies `mcp__bladebro__*` wins, and so does an agy workspace whose own `.agents/mcp_config.json` names one.
+  claude or an agy seat. `browser` also limits the pick to the seats that list it, opus, sonnet and the four agy
+  seats now, so `--needs browser` is the way to a browser on agy too; `bladebro` does not limit the pick. A
+  profile that denies `mcp__bladebro__*` wins, and so does an agy workspace whose own `.agents/mcp_config.json` names
+  one. A desktop server need (`bambu-studio-beta`, `xtool`) still takes a claude seat.
   An order picked with `--profile <name>` is run with the same `--profile <name>`: herdr copies the profile into the
   run, gives the worker its persona (a system prompt on Claude, the top of the order on agy), and a send-back or
   reseat keeps the copy. Design one with `herdr profile new <name>`, then `herdr profile check <name>`.
@@ -80,7 +82,7 @@ brief as the floor.
    redirect, resolved with `curl -sI` and its `Location`; YouTube by
    `python -m yt_dlp --skip-download --print "%(id)s|%(title)s|%(channel)s" <url>` (`--write-auto-subs` for a
    transcript); Reddit by `curl -s -A "<ua>" <thread>/.rss`, waiting out a 429; any other page one `curl` each, or
-   bladebro when the order was seated with `--needs bladebro`. agy has no YouTube connector: r2 was promised one,
+   bladebro when the order was seated with `--needs bladebro` or `--needs browser`. agy has no YouTube connector: r2 was promised one,
    and spent 9 steps finding the method and about 10 failed Reddit reads.
 3. "Done means" ends with a command whose output goes into `tests`: for research, one last command re-opening every
    cited id (`python -m yt_dlp --skip-download --print id <url>...`). reel-motion-gemini graded its own prose check

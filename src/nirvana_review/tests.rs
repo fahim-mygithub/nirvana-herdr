@@ -59,6 +59,13 @@ fn done(status: &str) -> Value {
     serde_json::json!({"status":status,"summary":"added mul","files":["calc.py"],"tests":[{"name":"test_mul","result":"pass"}],"gotchas":[]})
 }
 
+/// `done`, naming a gotcha: a pass the gate reviews (review-trim-agy-browser 2026-11-02: a clean first pass is not).
+fn learned() -> Value {
+    let mut report = done("done");
+    report["gotchas"] = serde_json::json!(["calc.py: mul takes no floats"]);
+    report
+}
+
 /// A profile that would show on a worker that took it: a persona, a model, an effort, a forbidden tool.
 const SLICER: &str = "---\ndescription: Slices prints through the studio server.\nmodel: claude-opus-5-5\neffort: high\n\
 disallowed_tools: [Bash]\n---\nYou slice prints only through the studio server.\n";
@@ -340,7 +347,7 @@ fn p33_over_the_daily_cap_the_review_is_skipped_and_journaled() {
         state.queued = PER_DAY;
     })
     .expect("state");
-    delivered(&root, "r1", "b3", done("done"), "TOTAL 1 passed", None);
+    delivered(&root, "r1", "b3", learned(), "TOTAL 1 passed", None);
     let ruling = nirvana_gate::gate(&project, "r1", "b3").expect("gate");
     assert_eq!(ruling.verdict, "pass");
     assert!(state_of(&root, "r1").order("b3-lr").is_none());
@@ -366,6 +373,7 @@ fn p33_over_the_daily_cap_the_review_is_skipped_and_journaled() {
             &project,
             &state_of(&root, "r1"),
             &review,
+            &Verdict::Pass,
             PER_DAY,
             now() + 86_400
         ),
@@ -601,7 +609,7 @@ fn p33_a_review_of_a_profiled_order_takes_no_profile() {
         &root,
         "r1",
         "b1",
-        done("done"),
+        learned(),
         // The worker read its order file back: the stream holds herdr's own text too.
         "TOTAL 12 passed, 0 failed in 3 s\nowns: calc.py test_mul.py\n",
         Some("slicer"),
@@ -671,7 +679,7 @@ fn p33_a_review_whose_lessons_folder_changed_outside_herdr_applies_nothing() {
         &root,
         "r1",
         "b1",
-        done("done"),
+        learned(),
         "TOTAL 12 passed, 0 failed in 3 s",
         None,
     );
@@ -706,7 +714,7 @@ fn p33_a_review_whose_lessons_folder_changed_outside_herdr_applies_nothing() {
         &root,
         "r1",
         "b2",
-        done("done"),
+        learned(),
         "TOTAL 12 passed, 0 failed in 3 s",
         None,
     );
@@ -771,7 +779,7 @@ fn p33_a_delivered_review_is_gated_by_herdr_with_no_orchestrator_turn() {
             &root,
             run,
             subject,
-            done("done"),
+            learned(),
             "TOTAL 12 passed, 0 failed in 3 s",
             Some("slicer"),
         );
@@ -1035,5 +1043,387 @@ fn p33_run_end_queues_the_merge_of_a_crowded_class_and_the_receipt_prints_origin
     assert!(
         receipt.contains("## Lessons by origin\n\n- worker: 9 lesson(s) · offered 0"),
         "{receipt}"
+    );
+}
+
+// ---- review-trim-agy-browser 2026-11-02 (live checks F8): a review only when there is something to learn ----
+
+/// One order of `chain_state`: `(id, parent, why, verdict)`.
+type Link<'a> = (&'a str, Option<&'a str>, Option<&'a str>, Option<&'a str>);
+
+/// A journal of `orders`, every one delivered `report`, replayed.
+fn chain_state(root: &Path, run: &str, orders: &[Link], report: &Value) -> nirvana_run::RunState {
+    let journal = Project::at(root).journal(run);
+    for (n, (id, parent, why, verdict)) in orders.iter().enumerate() {
+        let at = 10 + 3 * n as u64;
+        let mut seated = seated(id, "build.bounded");
+        seated.parent = parent.map(str::to_owned);
+        seated.why = why.map(str::to_owned);
+        journal
+            .append(at, Kind::Seated(Box::new(seated)))
+            .expect("seated");
+        journal
+            .append(
+                at + 1,
+                Kind::Delivered {
+                    order: (*id).into(),
+                    report: report.clone(),
+                },
+            )
+            .expect("delivered");
+        if let Some(verdict) = verdict {
+            journal
+                .append(
+                    at + 2,
+                    Kind::Gated {
+                        order: (*id).into(),
+                        verdict: (*verdict).into(),
+                        reason: None,
+                        axes: Vec::new(),
+                    },
+                )
+                .expect("gated");
+        }
+    }
+    state_of(root, run)
+}
+
+#[test]
+fn lrs_a_clean_first_pass_is_skipped_before_the_cap_counts_it() {
+    let _home = quiet("lrs-skip");
+    let root = repo("lrs-skip");
+    let project = Project::at(&root);
+    let state = chain_state(&root, "r1", &[("c1", None, None, None)], &done("done"));
+    let known = state.order("c1").expect("c1");
+    let why = wanted_with(&project, &state, known, &Verdict::Pass, PER_DAY, now())
+        .expect_err("a clean first pass is skipped")
+        .expect("with a reason");
+    assert!(
+        why.starts_with("nothing to learn: a first-pass delivery"),
+        "{why}"
+    );
+    // The skip comes before the cap: a spent cap still reads as nothing to learn, and nothing is counted.
+    set_used_for_test(&root, now(), PER_DAY);
+    assert_eq!(
+        wanted_with(&project, &state, known, &Verdict::Pass, PER_DAY, now()),
+        Err(Some(why))
+    );
+    assert_eq!(used_today(&root, now()), PER_DAY);
+    set_used_for_test(&root, now(), 0);
+    // Reviews turned off say so, not "nothing to learn" (review nit).
+    assert_eq!(
+        wanted_with(&project, &state, known, &Verdict::Pass, 0, now()),
+        Err(Some(
+            "lesson reviews are off (lesson_reviews_per_day = 0)".into()
+        ))
+    );
+    // A send-back verdict always has something to learn.
+    assert_eq!(
+        wanted_with(
+            &project,
+            &state,
+            known,
+            &Verdict::SentBack(vec!["owned: x".into()]),
+            PER_DAY,
+            now()
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn lrs_each_report_signal_keeps_the_review() {
+    let _home = quiet("lrs-signals");
+    let root = repo("lrs-signals");
+    for (n, (key, value)) in [
+        (
+            "gotchas",
+            serde_json::json!(["calc.py: mul ignores negatives"]),
+        ),
+        (
+            "lesson",
+            serde_json::json!({"name":"n","class":"build.bounded","steps":"s","evidence":"e"}),
+        ),
+        ("lesson_ops", serde_json::json!([{"op":"new"}])),
+        ("card_ops", serde_json::json!([{"op":"new"}])),
+        // A lesson written as one line of text is a lesson too.
+        ("lesson", serde_json::json!("calc.py: mul takes no floats")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut report = done("done");
+        report[key] = value;
+        let run = format!("r{n}");
+        let state = chain_state(&root, &run, &[("s1", None, None, None)], &report);
+        assert_eq!(
+            idle(&state, state.order("s1").expect("s1"), &Verdict::Pass),
+            None,
+            "a report naming {key} has something to learn"
+        );
+    }
+    // Empty lists and an empty lesson are the clean report's own shape.
+    let mut report = done("done");
+    report["lesson_ops"] = serde_json::json!([]);
+    report["card_ops"] = serde_json::json!([]);
+    report["lesson"] = Value::Null;
+    let state = chain_state(&root, "r9", &[("s1", None, None, None)], &report);
+    assert!(idle(&state, state.order("s1").expect("s1"), &Verdict::Pass).is_some());
+    // A blank says nothing either (review nit): a blank gotcha, a blank lesson line, an empty lesson object.
+    for (n, (key, value)) in [
+        ("gotchas", serde_json::json!([""])),
+        ("gotchas", serde_json::json!(["  ", null])),
+        ("lesson", serde_json::json!("  ")),
+        ("lesson", serde_json::json!({})),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut report = done("done");
+        report[key] = value.clone();
+        let run = format!("b{n}");
+        let state = chain_state(&root, &run, &[("s1", None, None, None)], &report);
+        assert!(
+            idle(&state, state.order("s1").expect("s1"), &Verdict::Pass).is_some(),
+            "{key} = {value} says nothing"
+        );
+    }
+}
+
+#[test]
+fn lrs_a_pass_after_a_send_back_keeps_the_review_through_a_reseat() {
+    let _home = quiet("lrs-chain");
+    let root = repo("lrs-chain");
+    let clean = done("done");
+    // A redo that passes: its chain holds the correction.
+    let state = chain_state(
+        &root,
+        "r1",
+        &[
+            ("o", None, None, Some("sent_back")),
+            ("o-s1", Some("o"), Some("send_back"), None),
+        ],
+        &clean,
+    );
+    assert_eq!(
+        idle(&state, state.order("o-s1").expect("redo"), &Verdict::Pass),
+        None
+    );
+    // The redo's pool ran out and a reseat child delivered: `nirvana_gate::chain` stops at the reseat; this walks on.
+    let state = chain_state(
+        &root,
+        "r2",
+        &[
+            ("o", None, None, Some("sent_back")),
+            ("o-s1", Some("o"), Some("send_back"), None),
+            ("o-s1-r1", Some("o-s1"), Some("reseat"), None),
+        ],
+        &clean,
+    );
+    assert_eq!(
+        idle(
+            &state,
+            state.order("o-s1-r1").expect("reseat"),
+            &Verdict::Pass
+        ),
+        None
+    );
+    // A reseat of a first order is still the first pass.
+    let state = chain_state(
+        &root,
+        "r3",
+        &[
+            ("p", None, None, None),
+            ("p-r1", Some("p"), Some("reseat"), None),
+        ],
+        &clean,
+    );
+    assert!(idle(&state, state.order("p-r1").expect("reseat"), &Verdict::Pass).is_some());
+    // A reseat whose parent was gated other than pass (asked) has something to learn.
+    let state = chain_state(
+        &root,
+        "r4",
+        &[
+            ("q", None, None, Some("asked")),
+            ("q-r1", Some("q"), Some("reseat"), None),
+        ],
+        &clean,
+    );
+    assert_eq!(
+        idle(&state, state.order("q-r1").expect("reseat"), &Verdict::Pass),
+        None
+    );
+}
+
+#[test]
+fn lrs_the_gate_seats_no_review_of_a_clean_first_pass_and_counts_none() {
+    let _home = quiet("lrs-gate");
+    let root = repo("lrs-gate");
+    let project = Project::at(&root);
+    delivered(&root, "r1", "c1", done("done"), "TOTAL 1 passed", None);
+    let ruling = nirvana_gate::gate(&project, "r1", "c1").expect("gate");
+    assert_eq!(ruling.verdict, "pass", "{ruling:?}");
+    assert!(state_of(&root, "r1").order("c1-lr").is_none());
+    assert_eq!(
+        used_today(&root, now()),
+        0,
+        "a skipped review is not counted"
+    );
+    // Said in the `gated` event, as the `review_skipped` axis: the gate asks `wanted_for` with its verdict.
+    let axes = gated_axes(&root, "r1", "c1");
+    let journaled = axes.iter().any(|axis| {
+        axis["axis"] == SKIPPED
+            && axis["why"]
+                .as_str()
+                .is_some_and(|why| why.starts_with("nothing to learn"))
+    });
+    assert!(journaled, "{axes:?} {:?}", ruling.next);
+    // The same delivery naming a gotcha is reviewed, and counted.
+    let mut report = done("done");
+    report["gotchas"] = serde_json::json!(["calc.py: mul ignores negatives"]);
+    delivered(&root, "r1", "c2", report, "TOTAL 1 passed", None);
+    let ruling = nirvana_gate::gate(&project, "r1", "c2").expect("gate");
+    assert!(
+        ruling
+            .next
+            .iter()
+            .any(|line| line.starts_with("c2-lr seated on")),
+        "{:?}",
+        ruling.next
+    );
+    assert_eq!(used_today(&root, now()), 1);
+}
+
+/// `Kind::Asked` of `order`, as the gate's `ask` and a worker's question journal it.
+fn asked(root: &Path, run: &str, at: u64, order: &str) {
+    Project::at(root)
+        .journal(run)
+        .append(
+            at,
+            Kind::Asked {
+                order: Some(order.into()),
+                question: format!("{order}: which file?"),
+            },
+        )
+        .expect("asked");
+}
+
+/// One order seated and delivered `report`, with `parent` and `why`, and no gate.
+fn seat_and_deliver(root: &Path, run: &str, at: u64, link: Link, report: &Value) {
+    let (id, parent, why, _) = link;
+    let journal = Project::at(root).journal(run);
+    let mut seated = seated(id, "build.bounded");
+    seated.parent = parent.map(str::to_owned);
+    seated.why = why.map(str::to_owned);
+    journal
+        .append(at, Kind::Seated(Box::new(seated)))
+        .expect("seated");
+    journal
+        .append(
+            at + 1,
+            Kind::Delivered {
+                order: id.into(),
+                report: report.clone(),
+            },
+        )
+        .expect("delivered");
+}
+
+/// Review S3: a question in the chain, or the run's question that started it, keeps the review. On 0.52.0 a blocked
+/// delivery is asked and its answer is a fresh order with no `parent`: before this, its clean redo read as a first pass.
+#[test]
+fn lrs_a_question_in_the_chain_or_the_one_that_started_it_keeps_the_review() {
+    let _home = quiet("lrs-asked");
+    let root = repo("lrs-asked");
+    let project = Project::at(&root);
+    // The 0.52.0 path, end to end: a blocked delivery is gated asked; the orchestrator seats a fresh redo; it passes
+    // with a clean report and is reviewed.
+    let mut blocked = done("blocked");
+    blocked["summary"] = "calc.py is not in the worktree".into();
+    delivered(&root, "r1", "b1", blocked, "TOTAL 0 passed", None);
+    let ruling = nirvana_gate::gate(&project, "r1", "b1").expect("gate the block");
+    assert_eq!(ruling.verdict, "asked", "{ruling:?}");
+    delivered(&root, "r1", "b2", done("done"), "TOTAL 1 passed", None);
+    let state = state_of(&root, "r1");
+    assert_eq!(state.order("b1").map(|order| order.asked), Some(1));
+    assert_eq!(
+        state.order("b2").and_then(|order| order.answers.as_deref()),
+        Some("b1")
+    );
+    let ruling = nirvana_gate::gate(&project, "r1", "b2").expect("gate the redo");
+    assert_eq!(ruling.verdict, "pass", "{ruling:?}");
+    assert!(
+        ruling
+            .next
+            .iter()
+            .any(|line| line.starts_with("b2-lr seated on")),
+        "{:?}",
+        ruling.next
+    );
+    let clean = done("done");
+    // A worker that asked mid-order and then delivered: its own question, which no later order answers.
+    let journal = project.journal("r2");
+    journal
+        .append(10, Kind::Seated(Box::new(seated("m", "build.bounded"))))
+        .expect("seated");
+    asked(&root, "r2", 11, "m");
+    journal
+        .append(
+            12,
+            Kind::Delivered {
+                order: "m".into(),
+                report: clean.clone(),
+            },
+        )
+        .expect("delivered");
+    seat_and_deliver(&root, "r2", 20, ("n", None, None, None), &clean);
+    let state = state_of(&root, "r2");
+    assert_eq!(
+        idle(&state, state.order("m").expect("m"), &Verdict::Pass),
+        None
+    );
+    assert_eq!(
+        state.order("n").and_then(|order| order.answers.clone()),
+        None
+    );
+    assert!(idle(&state, state.order("n").expect("n"), &Verdict::Pass).is_some());
+    // A gated question: a lesson review seated after it answers nothing; the next fresh order answers it, and so does
+    // its reseat child (the same chain root); an order after that, with the question taken, is a first pass again.
+    seat_and_deliver(&root, "r3", 10, ("q", None, None, None), &clean);
+    asked(&root, "r3", 12, "q");
+    let journal = project.journal("r3");
+    let mut review = seated("q-lr", CLASS);
+    review.why = Some("lesson_review".into());
+    journal
+        .append(13, Kind::Seated(Box::new(review)))
+        .expect("review");
+    seat_and_deliver(&root, "r3", 20, ("z", None, None, None), &clean);
+    seat_and_deliver(
+        &root,
+        "r3",
+        30,
+        ("z-r1", Some("z"), Some("reseat"), None),
+        &clean,
+    );
+    seat_and_deliver(&root, "r3", 40, ("y", None, None, None), &clean);
+    let state = state_of(&root, "r3");
+    assert_eq!(
+        state.order("q-lr").and_then(|order| order.answers.clone()),
+        None
+    );
+    assert_eq!(
+        state.order("z").and_then(|order| order.answers.as_deref()),
+        Some("q")
+    );
+    for order in ["z", "z-r1"] {
+        assert_eq!(
+            idle(&state, state.order(order).expect("answer"), &Verdict::Pass),
+            None,
+            "{order} answers q"
+        );
+    }
+    assert!(
+        idle(&state, state.order("y").expect("y"), &Verdict::Pass).is_some(),
+        "another chain's question is not this order's"
     );
 }
