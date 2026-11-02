@@ -818,6 +818,10 @@ pub struct Request {
     pub claude_only: Option<String>,
     /// Plan 33 §2.2: the profile the order is seated with; `None` for none.
     pub profile: Option<Narrow>,
+    /// A child's re-pick (a send-back, its step-up, a rate-limit reseat): the effort its parent ran at, the caller's
+    /// `--effort` included. It replaces the class's and the profile's effort as the base; the step down under pressure
+    /// still applies to it, read now (live checks 2026-11-01, F3).
+    pub effort: Option<Effort>,
 }
 
 /// Plan 33 §2.2: what a profile asks of the seat rule. "`model` and `family` narrow the candidate seats; they never
@@ -875,6 +879,7 @@ impl Request {
             inherited_override: false,
             claude_only: None,
             profile: None,
+            effort: None,
         }
     }
 }
@@ -1108,6 +1113,10 @@ pub struct Pick {
     /// Plan 33 §2.2: the profile the pick was narrowed by, kept in the lease so `seat run` seats with the same one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// The needs the booking was made with, as given (bladebro and the project's servers included): `seat run` with
+    /// no `--needs` reuses the booking, and its sources line reads them (gsrc review S1). Empty from `pick` itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needs: Vec<String>,
 }
 
 /// One seat that cleared the bar: the facts Jev weighs (O8b).
@@ -1161,9 +1170,16 @@ fn effort_for(
     is_override: bool,
     override_effort: Option<Effort>,
     profile_effort: Option<Effort>,
+    parent_effort: Option<Effort>,
 ) -> (Effort, Option<String>) {
     let mut note = None;
+    // Live checks 2026-11-01 F3: lc4 ran research.read at `--effort low` and its send-back lc4-s1 was seated on flash
+    // medium, the class's effort. A child's base is the parent's effort; an override naming an effort (an inherited
+    // `seat:effort`) still wins, and plan 37's step-up names a seat only, so it keeps the parent's too.
+    let parent = parent_effort.filter(|_| override_effort.is_none());
     let mut want = if let Some(eff) = override_effort {
+        eff
+    } else if let Some(eff) = parent {
         eff
     } else if let Some(eff) = profile_effort {
         // Plan 33 §2.2: "`effort` replaces the class effort"; the mode's lift, the step down and the cap still apply.
@@ -1175,7 +1191,8 @@ fn effort_for(
             Mode::Sota => class.effort,
         })
     };
-    if override_effort.is_none() && mode == Mode::Sota {
+    // The parent's effort already had the mode's lift when it was picked; a caller's lower `--effort` is kept.
+    if override_effort.is_none() && parent.is_none() && mode == Mode::Sota {
         if let Some(lift) = class.sota_effort {
             want = want.max(lift);
         }
@@ -1183,11 +1200,12 @@ fn effort_for(
     if step_down {
         want = want.down().unwrap_or(want);
     }
+    // A parent's effort above high came from an override or the caller: a child keeps it uncapped.
     if let Some(eff) = override_effort {
         if eff > Effort::High {
             note = Some(format!("effort overridden to {}", eff.word()));
         }
-    } else if want > Effort::High {
+    } else if want > Effort::High && parent.is_none() {
         want = Effort::High;
         note = Some("capped at high".to_owned());
     }
@@ -1195,7 +1213,7 @@ fn effort_for(
         .efforts
         .iter()
         .copied()
-        .filter(|effort| is_override || *effort != Effort::Max)
+        .filter(|effort| is_override || parent == Some(Effort::Max) || *effort != Effort::Max)
         .collect();
     let got = offered
         .iter()
@@ -1204,6 +1222,13 @@ fn effort_for(
         .max()
         .or_else(|| offered.iter().copied().min())
         .unwrap_or(want);
+    if let Some(eff) = parent {
+        note = Some(if got == eff {
+            format!("effort {} kept from the parent", eff.word())
+        } else {
+            format!("the parent's effort {}", eff.word())
+        });
+    }
     if got != want {
         let seat_note = format!("{} has no {}; {}", seat.id, want.word(), got.word());
         note = Some(match note {
@@ -1750,11 +1775,11 @@ fn evaluate(
                     let seat = &table.seats[cand.index];
                     if cand.in_class && cand.skip.is_none() && seat.pool == hot_pool {
                         let entry = class.seats.iter().find(|e| e.seat == seat.id);
-                        // Plan 33 §2.2: a profile's effort is the base the mode steps down from.
+                        // Plan 33 §2.2: a profile's effort is the base the mode steps down from; a child's base
+                        // is its parent's effort (F3), so a caller's high steps to medium, never past it.
                         let base_effort = request
-                            .profile
-                            .as_ref()
-                            .and_then(|profile| profile.effort)
+                            .effort
+                            .or_else(|| request.profile.as_ref().and_then(|profile| profile.effort))
                             .or_else(|| entry.and_then(|e| e.effort))
                             .unwrap_or(class.effort);
                         let min_effort = class.efficient_effort.unwrap_or(class.effort);
@@ -2004,6 +2029,7 @@ fn candidate(
         is_override,
         override_effort,
         profile_effort,
+        request.effort,
     );
     cand.effort = Some(effort);
     cand.effort_note = note;
@@ -2019,6 +2045,7 @@ fn candidate(
                 is_override,
                 override_effort,
                 profile_effort,
+                request.effort,
             )
             .0;
     if table.use_record {
@@ -2376,6 +2403,7 @@ fn build_pick(
         },
         jev_pick: None,
         profile: request.profile.as_ref().map(|profile| profile.name.clone()),
+        needs: Vec::new(),
     }
 }
 
@@ -3856,6 +3884,9 @@ fn list_arg(value: &str) -> Vec<String> {
 #[derive(Debug)]
 pub(crate) struct PickArgs {
     pub request: Request,
+    /// `--needs` as given, the profile's joined, before plan 29 routes the servers and bladebro out of `request`:
+    /// what the booking keeps for `seat run`'s sources line (gsrc review S1).
+    pub needs: Vec<String>,
     pub json: bool,
     pub book: Option<String>,
     pub run: Option<String>,
@@ -3869,6 +3900,7 @@ pub(crate) fn pick_args_for(root: &Path, args: &[String]) -> Result<(Table, Pick
     let table = table_for(root)?;
     let mut picked = PickArgs {
         request: default_request(&table),
+        needs: Vec::new(),
         json: false,
         book: None,
         run: None,
@@ -3906,6 +3938,7 @@ pub(crate) fn pick_args_for(root: &Path, args: &[String]) -> Result<(Table, Pick
         picked.request.needs =
             crate::nirvana_profiles::joined_needs(&picked.request.needs, &loaded.profile);
     }
+    picked.needs = picked.request.needs.clone();
     // Plan 29 §5.1: a need naming one of the project's MCP servers is no seat capability; the order takes a claude seat.
     let needs = crate::nirvana_gui_tools::seat_needs(&table, root, &picked.request.needs)?;
     (picked.request.needs, picked.request.claude_only) = (needs.rest, needs.claude_only);
@@ -3921,6 +3954,7 @@ fn pick_cli(args: &[String]) -> std::io::Result<()> {
         table,
         PickArgs {
             mut request,
+            needs,
             json,
             book,
             run,
@@ -4014,6 +4048,7 @@ fn pick_cli(args: &[String]) -> std::io::Result<()> {
                 chosen,
                 true,
             );
+            let chosen = Pick { needs, ..chosen };
             let mut out = serde_json::to_value(&chosen)?;
             let (booked, changed) = book_pick(
                 &mut leases,
@@ -5373,6 +5408,126 @@ mod tests {
         assert_eq!((got.seat.as_str(), got.effort), ("flash", Effort::Low));
         assert!(!got.step_down);
         assert!(!got.reason.contains("step down"), "{}", got.reason);
+    }
+
+    /// Live checks 2026-11-01 F3 and gsrc review S6: a child is picked at its parent's effort, so its windows and use
+    /// basis are that effort's, not patched after the pick. Pressure is read now: a parent's effort that no longer fits
+    /// steps the child down from it (§5.5), and a parent's own step down is kept, its effort the base and never raised
+    /// back, since a raise would spend more on the pool that was pressed.
+    #[test]
+    fn gsrc_a_child_is_picked_at_the_parents_effort_and_pressure_now_steps_it_down() {
+        let table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
+        let mut world = world();
+        agy_out(&mut world);
+        let five = |pick: &Pick| {
+            pick.windows
+                .iter()
+                .find(|window| window.window == "5h")
+                .map(|window| window.expected)
+        };
+        // No pressure: the class gives opus high; a parent at medium passes medium, priced at medium.
+        let rule = chosen(&table, &world, &request("plan"));
+        assert_eq!(
+            (rule.seat.as_str(), rule.effort),
+            ("opus", Effort::High),
+            "{}",
+            rule.reason
+        );
+        let mut child = request("plan");
+        child.effort = Some(Effort::Medium);
+        let got = chosen(&table, &world, &child);
+        assert_eq!(
+            (got.seat.as_str(), got.effort),
+            ("opus", Effort::Medium),
+            "{}",
+            got.reason
+        );
+        assert!(!got.step_down);
+        assert!(
+            got.reason.contains("effort medium kept from the parent"),
+            "{}",
+            got.reason
+        );
+        assert!(
+            got.use_basis
+                .as_deref()
+                .is_some_and(|basis| basis.starts_with("opus at medium")),
+            "{:?}",
+            got.use_basis
+        );
+        assert!(
+            five(&got) < five(&rule),
+            "{:?} {:?}",
+            five(&got),
+            five(&rule)
+        );
+        // Pressure now: 16.8% left, opus high breaks the reserve; a parent at high is stepped down to medium.
+        set(&mut world, "max", "5h", 0.832);
+        child.effort = Some(Effort::High);
+        let got = chosen(&table, &world, &child);
+        assert_eq!(
+            (got.seat.as_str(), got.effort),
+            ("opus", Effort::Medium),
+            "{}",
+            got.reason
+        );
+        assert!(got.step_down);
+        assert!(
+            got.reason.contains("the parent's effort high"),
+            "{}",
+            got.reason
+        );
+    }
+
+    /// F3: a parent's effort is not lifted by SOTA nor capped at high (a caller's or an override's effort), and the
+    /// mode's climb steps a child down one from the parent's effort, never from the class's.
+    #[test]
+    fn gsrc_a_childs_base_is_the_parents_effort_for_the_mode_the_cap_and_the_climb() {
+        let table = table();
+        // Opus's effort, whether it won or ran up: the default world seats plan on Gemini's spare.
+        let opus = |pick: &Pick| {
+            if pick.seat == "opus" {
+                Some(pick.effort)
+            } else {
+                pick.runners_up
+                    .iter()
+                    .find(|loser| loser.seat == "opus")
+                    .and_then(|loser| loser.effort)
+            }
+        };
+        let mut sota = request("plan");
+        sota.mode = Mode::Sota;
+        sota.effort = Some(Effort::Low);
+        assert_eq!(chosen(&table, &world(), &sota).effort, Effort::Low);
+        let el_week = nirvana_usage::elapsed(
+            world()
+                .readings
+                .iter()
+                .find(|r| r.pool == "max" && r.window == "week")
+                .unwrap(),
+        )
+        .unwrap();
+        let at = |climb: f32| {
+            let mut world = world();
+            set(&mut world, "max", "5h", 0.05);
+            set(&mut world, "max", "week", climb * el_week);
+            world
+        };
+        // A cool world (l3's 0.5, no step): a parent at xhigh is not capped at high.
+        let mut xhigh = request("plan");
+        xhigh.effort = Some(Effort::Xhigh);
+        let got = chosen(&table, &at(0.5), &xhigh);
+        assert_eq!(
+            opus(&got),
+            Some(Effort::Xhigh),
+            "{} {:?}",
+            got.reason,
+            got.runners_up
+        );
+        // The climb at 0.85 steps plan's high to medium (l3); a parent at xhigh steps to high, one step from its own.
+        let world_85 = at(0.85);
+        let got = chosen(&table, &world_85, &xhigh);
+        assert_eq!(opus(&got), Some(Effort::High), "{}", got.reason);
     }
 
     #[test]

@@ -40,6 +40,13 @@ chore, can go to a `worker-*` subagent instead of a pane worker; the agent's nam
 - Seat every order through `herdr seat pick`; say the seat, model and effort in one line.
 - Every subagent is seated first: `herdr seat pick --book <order>`, then spawn the seat it gives, or `herdr seat run` when it gives an agy seat. The hook refuses a spawn without a booking.
 - Web research, shopping and reading pages are `research.web`: seat them, never browse yourself for more than one page.
+- herdr asks an order for web sources only when it asks for the web: class `research.web`, a need of `browser`,
+  `bladebro` or `web`, or a URL, a domain or the web named in its text (a lookup word counts unless its sentence
+  names a project file). Any other research or media order that cites nothing and opened no page gets a note, never
+  a send-back; one that opened pages must cite them, and a source it does cite is still checked. lc3 and lc4 were
+  sent back "no sources" and their redos fetched unrelated pages to have one (live checks 2026-11-01). An order that
+  needs a current fact (a price, a release) is `research.web` even when it names no page: herdr cannot tell a
+  memory answer from a looked-up one.
 - An agy research or media brief says how to read each source and how done is checked, by the seat skill's agy
   checklist (§3): reel-motion-gemini's brief had neither, and its worker invented 12 of 12 sources. Never promise
   agy a tool it lacks: r2 was told of a YouTube connector agy does not have. When the project has a

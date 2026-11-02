@@ -168,8 +168,9 @@ CONTROLS = (
     Control(
         'p24_gate_sources_axis_in_deterministic',
         'src/nirvana_gate.rs',
-        '    if let Some(axis) = sources_axis(subject.class, subject.report, &stream) {\n',
-        '    if let Some(axis) = sources_axis(subject.class, subject.report, &stream).filter(|_| false) {\n',
+        # Live checks F2 (gsrc): the call takes the order's web ask.
+        '    if let Some(axis) = sources_axis(subject.class, web, subject.report, &stream) {\n',
+        '    if let Some(axis) = sources_axis(subject.class, web, subject.report, &stream).filter(|_| false) {\n',
         'deterministic_includes_sources_axis_for_research_and_media',
         'rust',
     ),
@@ -186,7 +187,8 @@ CONTROLS = (
     Control(
         'p24_sources_axis_empty_fails',
         'src/nirvana_gate.rs',
-        '        _ => {\n            return Some(Axis::new(\n                "sources",\n                Mark::Fail,\n                "no sources: the Work Report names no sources",\n            ))\n        }\n',
+        # Live checks F2 (gsrc): nothing cited goes through `none_cited`, a fail for an order that asks for the web.
+        '        _ => return Some(none_cited("the Work Report names no sources")),\n',
         '        _ => return Some(Axis::new("sources", Mark::Pass, "no sources")),\n',
         'sources_axis_checks_citations_in_worker_stream',
         'rust',

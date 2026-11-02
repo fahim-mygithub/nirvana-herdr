@@ -2198,6 +2198,8 @@ pub(crate) fn rate_limited(
     request.not_family = seated.not_family.clone();
     request.mode = seated.mode;
     request.order = Some(child.clone());
+    // Live checks 2026-11-01 F3: the reseat is picked at the effort its parent ran at, as a send-back is.
+    request.effort = Some(seated.effort);
     // Plan 33 §2.2: "A send-back child and a reseat keep the parent's profile copy", and so its narrowing.
     let narrowed = crate::nirvana_profiles::narrow_for_order(
         &mut request,
@@ -2461,6 +2463,10 @@ pub struct Booked {
     /// Plan 33 §2.2: the profile the pick was narrowed by, from the lease.
     #[serde(default)]
     pub profile: Option<String>,
+    /// The needs the booking was made with (`Pick::needs`): `seat pick --book --needs browser`, then `seat run` with
+    /// no `--needs` as the seat skill writes it, still asks for the web (gsrc review S1).
+    #[serde(default)]
+    pub needs: Vec<String>,
 }
 
 /// One window of the pick: the order's expected share of it, for the record (expected against real use).
@@ -3424,7 +3430,7 @@ fn book_with(
                 false,
             )
         });
-        let pick = pick.map_err(|no_seat| {
+        let mut pick = pick.map_err(|no_seat| {
             (
                 nirvana_seat::NO_SEAT_EXIT,
                 format!(
@@ -3437,6 +3443,8 @@ fn book_with(
                 ),
             )
         })?;
+        // gsrc review S1: the lease keeps the needs as given, which a `seat run` reusing it reads.
+        pick.needs = request.needs.clone();
         // The fix round's `book_pick`: the override is counted with its time, so the 8-day prune keeps it.
         let (lease, _) = nirvana_seat::book_pick(
             &mut leases,
@@ -3694,6 +3702,18 @@ pub fn seat_order_with(
         &crate::nirvana_gui_tools::project_servers(&project.root).unwrap_or_default(),
         &booked.servers,
     );
+    // Live checks 2026-11-01 F2: a research or media order is asked for its sources only when it asks for the web, read
+    // from the order as written too: herdr's lessons, cards and lines below name pages of their own. The needs are
+    // this run's and the booking's: `seat pick --book --needs browser` then `seat run` with none (review S1).
+    let mut web_needs = request.needs.clone();
+    web_needs.extend(
+        booked
+            .needs
+            .iter()
+            .filter(|need| !request.needs.contains(need))
+            .cloned(),
+    );
+    let sources_line = crate::nirvana_gate::sources_brief_line(&booked.class, &web_needs, &text);
     // Plan 34 §2.3: a folder profile's cards, one line each, after the lessons and offered the same way. A teacher is
     // offered none (P34a review nit: an offer counts toward decay); its brief lists every card, copied into its folder.
     let cards = match profile {
@@ -3712,8 +3732,9 @@ pub fn seat_order_with(
     // Plan 29 §5.3 and review F4: an order granted a server never starts a device; a desktop one batches, reads crops.
     // Plan 31 §2.2: an order with the owner's verified approval may Send once, after an explained slice.
     text = crate::nirvana_gui_tools::with_brief_lines(text, &booked.servers, send_ok.is_some());
-    if booked.class.starts_with("research.") || booked.class.starts_with("media.") {
-        text.push_str("\n\nYour Work Report must include the `sources` array of `{url, used_for}` for each source consulted.");
+    if let Some(line) = sources_line {
+        text.push_str("\n\n");
+        text.push_str(line);
     }
     // Plan 35 §5 P35b item 3: an agy worker reads pages with shell fetches; the gate sees only a URL in its command.
     if let Some(line) = crate::nirvana_agy_tools::sources_line(&booked.cli, &booked.class) {

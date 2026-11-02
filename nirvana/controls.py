@@ -969,9 +969,10 @@ CONTROLS: tuple[Control, ...] = (
             '            want = want.max(lift);',
             '            let _ = lift;',
             'effort_follows_the_class_sota_lifts_plans_and_max_is_never_chosen', "rust"),
+    # gsrc review round: a child's parent effort is not capped, so the line carries `&& parent.is_none()`.
     Control('seat_effort_never_max', 'src/nirvana_seat.rs',
-            '    } else if want > Effort::High {',
-            '    } else if false {',
+            '    } else if want > Effort::High && parent.is_none() {',
+            '    } else if false && parent.is_none() {',
             'effort_follows_the_class_sota_lifts_plans_and_max_is_never_chosen', "rust"),
     Control('seat_effort_clamp', 'src/nirvana_seat.rs',
             '        .filter(|effort| *effort <= want)\n',

@@ -191,6 +191,9 @@ pub struct Spec {
     pub serves: Vec<u16>,
     /// Plan 33 §3.2: `Profile: <name>`, the contract with P33a's seating; the last valid one wins.
     pub profile: Option<String>,
+    /// herdr seated the order with `NO_WEB_SOURCES` (`web_asked` found no web in it): its sources axis is a note when
+    /// it cites nothing and opened no page. False for an order seated before the rule, which keeps the old fail.
+    pub no_web: bool,
 }
 
 fn words(rest: &str) -> impl Iterator<Item = String> + '_ {
@@ -232,6 +235,8 @@ pub fn spec(text: &str) -> Spec {
             if crate::nirvana_lessons::valid_profile(name) {
                 spec.profile = Some(name.to_owned());
             }
+        } else if line.starts_with(NO_WEB_MARK) {
+            spec.no_web = true;
         }
     }
     spec
@@ -1492,31 +1497,258 @@ pub fn stable_read(url: &str, reads: &Reads) -> bool {
     }
 }
 
-/// Plan 24 §5: gate axis for `research.*` and `media.*` classes.
-/// Fails with no sources; fails for each source URL that does not appear in the order's stream
-/// as a fetch, read or browser call. URLs are compared after trimming a trailing `/` and the fragment.
-pub fn sources_axis(class: &str, report: Option<&Value>, stream: &str) -> Option<Axis> {
+// ---- live checks 2026-11-01 F2: sources only when the order asks for the web ----
+
+/// The class that is the web (ROLE.md: "Web research, shopping and reading pages are `research.web`").
+pub const WEB_CLASS: &str = "research.web";
+
+/// The needs that put the web in an order: the two that grant bladebro (`nirvana_bladebro::GRANTING`), and `web`.
+const WEB_NEEDS: [&str; 3] = ["browser", "bladebro", "web"];
+
+/// Words that name the web outright, lowercase: they ask for it wherever they stand. `online` and `google` alone are
+/// left out, since a research order names "online docs" or a Google API as often as it asks for a page.
+const WEB_NAMES: &[&str] = &[
+    "www.",
+    "the web",
+    "web search",
+    "web page",
+    "webpage",
+    "on the internet",
+    "search the internet",
+    "find online",
+    "search online",
+    "look online",
+    "youtube",
+    "youtu.be",
+    "tiktok",
+    "instagram",
+    "reddit",
+    "wikipedia",
+];
+
+/// Words that ask for a lookup (gsrc review S3): the web, unless their sentence points at the project
+/// (`LOCAL_MARKS`), as "look up the commit rule in CLAUDE.md" or "transcribe the podcast at E:/pod.mp3" do. Review
+/// S5: a bare `website` or `internet` matched orders about a site's own code, so only these forms of them count.
+const LOOKUP_WORDS: &[&str] = &[
+    "look up",
+    "search for",
+    "latest price",
+    "current price",
+    "reviews of",
+    "latest episode",
+    "latest video",
+    "'s channel",
+    "podcast",
+    "transcript of",
+    "transcribe the",
+    "official website",
+    "'s website",
+    "website of",
+    "on their website",
+    "on the website",
+];
+
+/// What in a sentence points at the project or the machine rather than the web, lowercase.
+const LOCAL_MARKS: &[&str] = &[
+    ":/", ":\\", "src/", "./", "~/", ".md", ".rs", ".py", ".toml", ".json", ".txt", ".html",
+    ".pdf", ".mp4", ".mp3", ".wav", ".mov", ".mkv", ".m4a", " file", " folder", " repo",
+    "codebase", "the code",
+];
+
+/// A host that is this machine (review S5): `http://localhost:8770/api` in a research order is not the web.
+fn local_host(url: &str) -> bool {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority
+        .rsplit('@')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let host = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or("").to_owned(),
+        None => host.split(':').next().unwrap_or("").to_owned(),
+    };
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host.starts_with("127.")
+        || host == "0.0.0.0"
+        || host == "::1"
+        || host.is_empty()
+}
+
+/// A bare domain with a path at the start of a word, `name.tld/` (review S3): `github.com/org/repo`, `docs.rs/serde`.
+/// A path segment (`nirvana/controls.d/x`), a dotfile (`./x`, `.claude/`) and a version (`v0.52/`) are not.
+fn bare_domain(written: &str) -> Option<&str> {
+    written.split_whitespace().find_map(|word| {
+        let word = word.trim_start_matches(['(', '"', '\'', '`', '<', '[']);
+        let (host, _) = word.split_once('/')?;
+        let labels: Vec<&str> = host.split('.').collect();
+        let tld = labels.last()?;
+        let named = labels.len() >= 2
+            && labels.iter().all(|label| {
+                !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            })
+            && tld.len() >= 2
+            && tld.chars().all(|c| c.is_ascii_alphabetic());
+        named.then_some(host)
+    })
+}
+
+/// `word` in `text` as a word, an `s` after it allowed: no letter or digit runs on into an end of it that is one
+/// (`the web` is not in `the webhook`; `podcasts` holds `podcast`).
+fn has_word(text: &str, word: &str) -> bool {
+    let joins = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+    let (first, last) = (word.chars().next(), word.chars().next_back());
+    text.match_indices(word).any(|(at, _)| {
+        let after = &text[at + word.len()..];
+        let after = after.strip_prefix('s').unwrap_or(after);
+        (!joins(first) || !joins(text[..at].chars().next_back()))
+            && (!joins(last) || !joins(after.chars().next()))
+    })
+}
+
+/// The order's sentences, cut at line ends and at `. `, `? ` and `! ` (so `CLAUDE.md` stays whole).
+fn sentences(lower: &str) -> impl Iterator<Item = &str> {
+    lower
+        .split('\n')
+        .flat_map(|line| line.split(". "))
+        .flat_map(|part| part.split("? "))
+        .flat_map(|part| part.split("! "))
+}
+
+/// herdr's sources line for an order that asks for the web: the Work Report cites what it read (plan 24 §5).
+pub const WEB_SOURCES: &str =
+    "Your Work Report must include the `sources` array of `{url, used_for}` for each source consulted.";
+
+/// The start of `NO_WEB_SOURCES`, short so a re-wrapped order copy still carries it whole on its first line (review
+/// N3); `spec` reads a line starting with it as `no_web`.
+pub const NO_WEB_MARK: &str = "herdr found no web page asked for in this order";
+
+/// herdr's sources line for a research or media order that does not ask for the web. lc4-s1 ran `curl
+/// https://example.com` "as required by the order's sources specification", which was `WEB_SOURCES` in an order that
+/// quoted rules from memory (live checks 2026-11-01, F2). Review S2: an order `web_asked` missed may still need a page,
+/// so the line never talks the worker out of a fetch the answer needs, nor into one it does not.
+pub const NO_WEB_SOURCES: &str = "herdr found no web page asked for in this order, so the gate asks you for no source. \
+If answering needs a page you do not have, open it and cite it in the Work Report's `sources` array (`{url, \
+used_for}`); never open one only to have a source.";
+
+/// Why an order asks for the web, read at seating from its class, its needs and its text as written (before herdr's
+/// lessons, cards and lines, which name pages of their own); `None` when it does not. Live checks 2026-11-01 F2: lc3 (an
+/// MCP call) and lc4 (rules from memory) were sent back "no sources", and both redos fetched a page unrelated to the
+/// order to have one to cite.
+pub fn web_asked(class: &str, needs: &[String], written: &str) -> Option<String> {
+    if class == WEB_CLASS {
+        return Some(format!("the class is {WEB_CLASS}"));
+    }
+    if let Some(need) = needs.iter().find(|need| WEB_NEEDS.contains(&need.as_str())) {
+        return Some(format!("the order needs {need}"));
+    }
+    if let Some(url) = extract_url_tokens(written)
+        .into_iter()
+        .find(|url| !local_host(url))
+    {
+        return Some(format!("the order names {url}"));
+    }
+    if let Some(host) = bare_domain(written) {
+        return Some(format!("the order names {host}/"));
+    }
+    let lower = written.to_lowercase();
+    if let Some(word) = WEB_NAMES.iter().find(|word| has_word(&lower, word)) {
+        return Some(format!("the order says `{}`", word.trim_end_matches('.')));
+    }
+    let lookup = sentences(&lower)
+        .filter(|sentence| !LOCAL_MARKS.iter().any(|mark| sentence.contains(mark)))
+        .find_map(|sentence| LOOKUP_WORDS.iter().find(|word| has_word(sentence, word)));
+    lookup.map(|word| format!("the order says `{word}`"))
+}
+
+/// The sources line herdr puts in a research or media order's brief; `None` for any other class.
+pub fn sources_brief_line(class: &str, needs: &[String], written: &str) -> Option<&'static str> {
     if !class.starts_with("research.") && !class.starts_with("media.") {
         return None;
     }
-    let Some(report) = report else {
-        return Some(Axis::new(
+    Some(match web_asked(class, needs, written) {
+        Some(_) => WEB_SOURCES,
+        None => NO_WEB_SOURCES,
+    })
+}
+
+/// What the gate reads of `web_asked` from the root order: the class again, then herdr's line. An order with
+/// neither line (seated before the rule) asks for the web, as every research order did.
+pub fn web_of(class: &str, spec: &Spec) -> Option<&'static str> {
+    if class == WEB_CLASS {
+        Some("the class is research.web")
+    } else if spec.no_web {
+        None
+    } else {
+        Some("herdr's brief asked it for its sources")
+    }
+}
+
+/// The page reads of `stream_reads` (fetches, URL reads, browser calls), less those whose every URL is this machine
+/// (`curl http://localhost:8770/api`): what a worker opened of the web (gsrc review S4).
+fn page_reads(reads: &Reads) -> Vec<&str> {
+    reads
+        .texts
+        .iter()
+        .filter(|text| {
+            let urls = extract_url_tokens(text);
+            urls.is_empty() || urls.iter().any(|url| !local_host(url))
+        })
+        .map(String::as_str)
+        .collect()
+}
+
+/// Plan 24 §5: gate axis for `research.*` and `media.*` classes.
+/// Fails for each source URL that does not appear in the order's stream as a fetch, read or browser call. URLs are
+/// compared after trimming a trailing `/` and the fragment. Citing nothing fails an order that asks for the web
+/// (`web`, from `web_of`) and an order whose worker opened pages; for any other it is a note (live checks 2026-11-01,
+/// F2, and review S4: what the worker did decides first). Every source cited is checked.
+pub fn sources_axis(
+    class: &str,
+    web: Option<&str>,
+    report: Option<&Value>,
+    stream: &str,
+) -> Option<Axis> {
+    if !class.starts_with("research.") && !class.starts_with("media.") {
+        return None;
+    }
+    let reads = stream_reads(stream);
+    let opened = page_reads(&reads);
+    let none_cited = |why: &str| match web {
+        Some(asked) => Axis::new(
             "sources",
             Mark::Fail,
-            "no sources: no Work Report was delivered",
-        ));
+            format!("no sources: {why} ({asked})"),
+        ),
+        None if !opened.is_empty() => Axis::new(
+            "sources",
+            Mark::Fail,
+            format!(
+                "no sources: {why}, and the worker opened {} page(s): cite what it used",
+                opened.len()
+            ),
+        )
+        .with(
+            opened
+                .iter()
+                .take(5)
+                .map(|text| text.chars().take(200).collect())
+                .collect(),
+        ),
+        None => Axis::new(
+            "sources",
+            Mark::Note,
+            format!("no web asked; none cited and no page opened ({why})"),
+        ),
+    };
+    let Some(report) = report else {
+        return Some(none_cited("no Work Report was delivered"));
     };
     let sources = match report.get("sources").and_then(Value::as_array) {
         Some(s) if !s.is_empty() => s,
-        _ => {
-            return Some(Axis::new(
-                "sources",
-                Mark::Fail,
-                "no sources: the Work Report names no sources",
-            ))
-        }
+        _ => return Some(none_cited("the Work Report names no sources")),
     };
-    let reads = stream_reads(stream);
     let mut missing = Vec::new();
     for item in sources {
         let Some(url) = item.get("url").and_then(Value::as_str) else {
@@ -2453,7 +2685,8 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
     };
     axes.push(served_axis(subject.class, &subject.spec.serves, listened));
     let stream = stream_text(&Project::at(subject.root), subject.run, subject.order);
-    if let Some(axis) = sources_axis(subject.class, subject.report, &stream) {
+    let web = web_of(subject.class, subject.spec);
+    if let Some(axis) = sources_axis(subject.class, web, subject.report, &stream) {
         // Plan 37 §1.2: reel-motion-gemini's six YouTube ids were invented, and only a reader caught it, 8 days late.
         let (axis, note) = match oembed_base() {
             Some(base) => check_videos(
@@ -2679,6 +2912,12 @@ pub const INVENTED_SOURCES: &str = "the gate found cited videos that do not exis
 sources is trusted: drop every source it cited and every claim that rests on one, and find them again, citing only \
 what you opened in this session.";
 
+/// The send-back line for an order seated with `NO_WEB_SOURCES`, whatever axis failed. Review S2: it names the fetch
+/// the fix needs as well as the one it does not.
+pub const NO_WEB_REDO: &str = "herdr found no web page asked for in this order: the gate wants a source from you \
+only for a page you open. If the fix needs a page you do not have, open it and cite it; never open one only to have a \
+source.";
+
 pub fn send_back_brief(
     order: &str,
     root: &str,
@@ -2703,9 +2942,16 @@ pub fn send_back_brief(
         (true, true) => format!("{fix} For the sources: {SOURCES_REDO}"),
         (false, _) => fix.to_owned(),
     };
+    // Live checks 2026-11-01 F2: lc4-s1's brief said "no sources" over an order line asking for them, and its worker
+    // fetched example.com to have one. An order that asks for no web is told the gate wants no source from it.
+    let no_web = if spec(root_text).no_web {
+        format!(" {NO_WEB_REDO}")
+    } else {
+        String::new()
+    };
     let mut brief = format!(
         "# Send-back {n} of {SEND_BACK_CAP}: {root}\n\nherdr's gate sent back {order}. Its work is in this folder, committed \
-on this branch. You are a new session: {opening}\n\n## What the gate found\n\n"
+on this branch. You are a new session: {opening}{no_web}\n\n## What the gate found\n\n"
     );
     for axis in failing(axes) {
         brief.push_str(&format!("- **{}**: {}\n", axis.axis, axis.why));
@@ -3480,6 +3726,9 @@ fn send_back(
     request.not_family = seated.not_family.clone();
     request.mode = seated.mode;
     request.order = Some(id.clone());
+    // Live checks 2026-11-01 F3: the redo is picked at the effort its parent ran at, the caller's `--effort` included,
+    // so the rule prices its windows and its pressure check at that effort (review S6).
+    request.effort = Some(seated.effort);
     // Plan 33 §2.2: "A send-back child and a reseat keep the parent's profile copy", and so its narrowing.
     if let Err(why) =
         crate::nirvana_profiles::narrow_for_order(&mut request, &project.run_dir(run), root_text)

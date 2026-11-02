@@ -26,7 +26,13 @@ serves: 8770                             ops.terminal orders only: the port the 
 - A build or debug order with no `test:` and `check:` lines passes the tests axis on nothing. Name the check that
   proves the order, not the suite: a suite total cannot see a check that never ran.
 - An order of class `build.*`, `fix.*` or `plan` must carry an `owns:` line naming the files it may change; `herdr seat run` refuses with exit 2 without one, and the `owned` axis fails on empty `owns:`. Read-only classes keep the Note.
-- Research and media orders are gated like builds: their Work Report must carry a `sources` array (`url`, `used_for`), verified by the `sources` axis against the worker stream.
+- Research and media orders are gated like builds. An order that asks for the web (class `research.web`, a need of
+  `browser`, `bladebro` or `web`, or a URL, a domain or the web named in its text) must cite its sources in the Work
+  Report's `sources` array (`url`, `used_for`); any other cites the pages it opened, and citing nothing with no page
+  opened is a note.
+  Every source cited is verified by the `sources` axis against the worker stream. A research order that needs the web
+  but says neither is classed `research.web`: lc3 and lc4 were sent back "no sources" for an MCP call and rules
+  from memory, and their redos fetched unrelated pages to cite (live checks 2026-11-01).
 - A server started from a worker's own shell dies with the worker's job object, so an ops order must say how the
   server outlives it. The way this gate was built for, not yet measured live: the order tells the worker to run
   `herdr pane run "$HERDR_PANE_ID" "<server command>"`, which types the command into its own pane's shell to run
@@ -40,7 +46,7 @@ serves: 8770                             ops.terminal orders only: the port the 
 | tests | `test:` exits 0 and every `check:` name is in the filtered output | the filtered lines |
 | report | the Work Report is well formed and its status is `done` | why |
 | owned | every changed file matches an `owns:` pattern (herdr's `.nirvana/` never counts) | the unowned files |
-| sources | research and media orders: cited URLs appear in the worker's stream as fetch, read or browser calls | uncited or unverified URLs |
+| sources | research and media orders: cited URLs appear in the worker's stream as fetch, read or browser calls; one that asks for the web, or whose worker opened a page, cites at least one | unverified URLs, or none cited by an order that asks for the web or opened pages |
 | served | ops orders: each `serves:` port is listened on in the worker's own pane | what it does listen on |
 | heldout | feature-size orders (a build or debug fix, size medium or large): the held-out check passes at the head | the failing case ids only |
 | review | load-bearing orders (plan, build.load_bearing): a reviewer of another family approves | the reviewer's gotchas |

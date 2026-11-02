@@ -80,6 +80,7 @@ fn spec_with(owns: &[&str], test: &str, checks: &[&str]) -> Spec {
         checks: checks.iter().map(|s| (*s).to_owned()).collect(),
         serves: Vec::new(),
         profile: None,
+        no_web: false,
     }
 }
 
@@ -974,18 +975,23 @@ fn owned_axis_empty_owns_fails_for_build_fix_plan_and_notes_for_read_only() {
 
 // ---- Plan 24 §5: sources axis tests ----
 
+/// The sources axis of an order that asks for the web, as every research order did before live checks F2.
+fn web_sources_axis(class: &str, report: Option<&Value>, stream: &str) -> Option<Axis> {
+    sources_axis(class, Some("the test asks for the web"), report, stream)
+}
+
 #[test]
 fn sources_axis_checks_citations_in_worker_stream() {
     // 1. Build class has no sources axis
-    assert_eq!(sources_axis("build.bounded", None, ""), None);
+    assert_eq!(web_sources_axis("build.bounded", None, ""), None);
 
     // 2. Empty sources array or missing report fails for research / media
     let empty_report = serde_json::json!({"sources": []});
-    let axis = sources_axis("research.web", Some(&empty_report), "").expect("axis");
+    let axis = web_sources_axis("research.web", Some(&empty_report), "").expect("axis");
     assert_eq!(axis.mark, Mark::Fail);
     assert!(axis.why.contains("no sources"));
 
-    let no_report = sources_axis("media.video", None, "").expect("axis");
+    let no_report = web_sources_axis("media.video", None, "").expect("axis");
     assert_eq!(no_report.mark, Mark::Fail);
 
     // 3. Cited URL never fetched fails
@@ -995,7 +1001,8 @@ fn sources_axis_checks_citations_in_worker_stream() {
         ]
     });
     let stream_without = "I researched the web using other means.";
-    let axis = sources_axis("research.web", Some(&report_with_url), stream_without).expect("axis");
+    let axis =
+        web_sources_axis("research.web", Some(&report_with_url), stream_without).expect("axis");
     assert_eq!(axis.mark, Mark::Fail);
     assert!(axis.why.contains("not fetched"));
 
@@ -1011,7 +1018,8 @@ fn sources_axis_checks_citations_in_worker_stream() {
         }
     })
     .to_string();
-    let axis = sources_axis("research.web", Some(&report_with_url), &stream_with).expect("axis");
+    let axis =
+        web_sources_axis("research.web", Some(&report_with_url), &stream_with).expect("axis");
     assert_eq!(axis.mark, Mark::Pass);
 }
 
@@ -1044,8 +1052,8 @@ fn sources_axis_b2_real_fetch_calls_and_url_normalization() {
     })
     .to_string();
 
-    let axis1 =
-        sources_axis("research.web", Some(&report), &claude_assistant_text_stream).expect("axis");
+    let axis1 = web_sources_axis("research.web", Some(&report), &claude_assistant_text_stream)
+        .expect("axis");
     assert_eq!(axis1.mark, Mark::Fail);
 
     // 2. The same stream with a WebFetch tool_use of that URL: passes!
@@ -1069,7 +1077,7 @@ fn sources_axis_b2_real_fetch_calls_and_url_normalization() {
         })
     );
     let axis2 =
-        sources_axis("research.web", Some(&report), &claude_web_fetch_stream).expect("axis");
+        web_sources_axis("research.web", Some(&report), &claude_web_fetch_stream).expect("axis");
     assert_eq!(axis2.mark, Mark::Pass);
 
     // 3. An agy stream with read_url_content: passes!
@@ -1086,7 +1094,7 @@ fn sources_axis_b2_real_fetch_calls_and_url_normalization() {
         }
     })
     .to_string();
-    let axis3 = sources_axis("research.web", Some(&report), &agy_stream).expect("axis");
+    let axis3 = web_sources_axis("research.web", Some(&report), &agy_stream).expect("axis");
     assert_eq!(axis3.mark, Mark::Pass);
 
     // 4. http://www.x.com/a/ matches https://x.com/a
@@ -1119,7 +1127,8 @@ fn sources_axis_r2_honest_browsing_and_shell_fetch() {
         }
     })
     .to_string();
-    let axis = sources_axis("research.web", Some(&report), &agy_open_browser_stream).expect("axis");
+    let axis =
+        web_sources_axis("research.web", Some(&report), &agy_open_browser_stream).expect("axis");
     assert_eq!(axis.mark, Mark::Pass);
 
     // 2. a Claude Bash tool_use running `agent-browser open <url>` passes
@@ -1139,8 +1148,8 @@ fn sources_axis_r2_honest_browsing_and_shell_fetch() {
         }
     })
     .to_string();
-    let axis =
-        sources_axis("research.web", Some(&report), &claude_agent_browser_stream).expect("axis");
+    let axis = web_sources_axis("research.web", Some(&report), &claude_agent_browser_stream)
+        .expect("axis");
     assert_eq!(axis.mark, Mark::Pass);
 
     // 3. a Claude Bash tool_use running `echo <url>` fails
@@ -1160,7 +1169,7 @@ fn sources_axis_r2_honest_browsing_and_shell_fetch() {
         }
     })
     .to_string();
-    let axis = sources_axis("research.web", Some(&report), &claude_echo_stream).expect("axis");
+    let axis = web_sources_axis("research.web", Some(&report), &claude_echo_stream).expect("axis");
     assert_eq!(axis.mark, Mark::Fail);
 
     // 4. a browser_subagent whose task names the URL passes
@@ -1177,7 +1186,8 @@ fn sources_axis_r2_honest_browsing_and_shell_fetch() {
         }
     })
     .to_string();
-    let axis = sources_axis("research.web", Some(&report), &browser_subagent_stream).expect("axis");
+    let axis =
+        web_sources_axis("research.web", Some(&report), &browser_subagent_stream).expect("axis");
     assert_eq!(axis.mark, Mark::Pass);
 
     // 5. the earlier cache_read_input_tokens case still fails
@@ -1200,7 +1210,7 @@ fn sources_axis_r2_honest_browsing_and_shell_fetch() {
     })
     .to_string();
     let axis =
-        sources_axis("research.web", Some(&report), &claude_cache_tokens_stream).expect("axis");
+        web_sources_axis("research.web", Some(&report), &claude_cache_tokens_stream).expect("axis");
     assert_eq!(axis.mark, Mark::Fail);
 }
 
@@ -1444,7 +1454,7 @@ fn shell_fetch_counts_only_the_segment_that_fetches_and_only_the_command() {
     let url = "https://example.com/target";
     let report = serde_json::json!({"sources": [{"url": url, "used_for": "spec"}]});
     let mark = |stream: String| {
-        sources_axis("research.web", Some(&report), &stream)
+        web_sources_axis("research.web", Some(&report), &stream)
             .unwrap()
             .mark
     };
@@ -1719,7 +1729,7 @@ fn p33_the_gate_reads_no_profile_for_a_lesson_review() {
 /// The sources axis over one cited URL and a stream of one agy `run_command` (or a Claude Bash call).
 fn p35a_mark(url: &str, stream: &str) -> Mark {
     let report = serde_json::json!({"sources": [{"url": url, "used_for": "spec"}]});
-    sources_axis("research.web", Some(&report), stream)
+    web_sources_axis("research.web", Some(&report), stream)
         .expect("axis")
         .mark
 }
@@ -3654,4 +3664,436 @@ check: test_mul
         "{gone:?}"
     );
     nirvana_seat::set_test_world(None);
+}
+
+// ---- live checks 2026-11-01 F2 and F3: sources only when the order asks for the web; a child keeps the effort ----
+
+/// lc4's order as the orchestrator wrote it, and lc3's: neither asks for the web.
+const GSRC_LC4: &str = "Without opening, reading or listing any file, quote verbatim every numbered rule this \
+project's rules give agents, and name the file the rules say they came from. If you were given no project rules, say \
+exactly that.\n";
+const GSRC_LC3: &str = "List every MCP server and MCP tool you have, by name. Then call the livetools server's lc_ping \
+tool with word \"hi\" and report its exact answer.\n";
+
+fn gsrc_needs(needs: &[&str]) -> Vec<String> {
+    needs.iter().map(|need| (*need).to_owned()).collect()
+}
+
+/// F2: what asks for the web is the class research.web, a need of browser, bladebro or web, or a URL or the web named
+/// in the order as written; lc3 and lc4 ask for none of it, and only research and media orders get a sources line.
+#[test]
+fn gsrc_the_web_is_asked_by_the_class_a_need_or_the_order_text() {
+    let none: Vec<String> = Vec::new();
+    for (class, needs, text, asked) in [
+        ("research.web", &[][..], GSRC_LC4, true),
+        ("research.read", &["browser"][..], GSRC_LC4, true),
+        ("research.read", &["bladebro"][..], GSRC_LC4, true),
+        ("media.video", &["web"][..], GSRC_LC4, true),
+        (
+            "research.read",
+            &[][..],
+            "Summarise https://example.com/spec.\n",
+            true,
+        ),
+        (
+            "research.read",
+            &[][..],
+            "Search the web for the H2C's nozzle sizes.\n",
+            true,
+        ),
+        (
+            "media.video",
+            &[][..],
+            "Describe the YouTube video the owner names.\n",
+            true,
+        ),
+        ("research.read", &[][..], GSRC_LC4, false),
+        ("research.read", &[][..], GSRC_LC3, false),
+        ("research.read", &["video", "xtool"][..], GSRC_LC3, false),
+        (
+            "media.video",
+            &[][..],
+            "Cut E:/clips/a.mp4 at 00:12.\n",
+            false,
+        ),
+    ] {
+        let got = web_asked(class, &gsrc_needs(needs), text);
+        assert_eq!(got.is_some(), asked, "{class} {needs:?} {text:?}: {got:?}");
+        let line = sources_brief_line(class, &gsrc_needs(needs), text);
+        assert_eq!(line, Some(if asked { WEB_SOURCES } else { NO_WEB_SOURCES }));
+    }
+    assert_eq!(
+        web_asked("research.read", &gsrc_needs(&["browser"]), GSRC_LC4).as_deref(),
+        Some("the order needs browser")
+    );
+    assert_eq!(
+        sources_brief_line("build.bounded", &none, "https://x"),
+        None
+    );
+    assert_eq!(sources_brief_line("chore.script", &none, GSRC_LC4), None);
+}
+
+/// Review S3 and S5: each word, an order it catches and one it must not (the record's table). Only research and media
+/// orders get a line, so the orders that must not be caught are research orders about the project or this machine.
+#[test]
+fn gsrc_the_words_catch_lookups_and_skip_local_hosts_and_code() {
+    let none: Vec<String> = Vec::new();
+    for (word, catches, skips) in [
+        (
+            "url",
+            "Summarise https://example.com/spec.",
+            "Call http://localhost:8770/api/runs and list the run ids.",
+        ),
+        (
+            "url 127",
+            "Read http://docs.example.org/a.",
+            "Quote what http://127.0.0.1:8770/health answers.",
+        ),
+        (
+            "url ::1",
+            "Read https://[2001:db8::2]/notes.",
+            "Quote what http://[::1]:8770/health answers.",
+        ),
+        (
+            "domain",
+            "Read github.com/fahim-mygithub/nirvana-herdr/issues and list the open bugs.",
+            "List what nirvana/controls.d/gsrc.py controls.",
+        ),
+        (
+            "domain docs.rs",
+            "Check docs.rs/serde/latest for the derive attributes.",
+            "Read ./src/nirvana_gate.rs and list its consts.",
+        ),
+        (
+            "the web",
+            "Search the web for the H2C's nozzle sizes.",
+            "Summarise the webhook handler's retry rule.",
+        ),
+        (
+            "youtube",
+            "Describe the YouTube video the owner names.",
+            "Describe the clip at E:/clips/a.mp4.",
+        ),
+        (
+            "tiktok",
+            "Summarise the owner's last three TikTok posts.",
+            "Summarise the owner's last three commits.",
+        ),
+        (
+            "look up",
+            "Look up the Bambu H2C's build volume.",
+            "Look up the commit rule in CLAUDE.md and quote it.",
+        ),
+        (
+            "search for",
+            "Search for the xTool F2 Ultra's laser power.",
+            "Search for every caller of seat_once in src/ and list them.",
+        ),
+        (
+            "latest price",
+            "Give the latest price of a 1 kg PLA spool from Bambu.",
+            "Give the latest price row in nirvana/plans/costs.md.",
+        ),
+        (
+            "reviews of",
+            "Collect reviews of the Prusa Core One.",
+            "Collect the reviews of P37 in the plans folder.",
+        ),
+        (
+            "podcast",
+            "Summarise this week's Lex Fridman podcast episode.",
+            "Transcribe the podcast at E:/pod.mp3.",
+        ),
+        (
+            "'s channel",
+            "List the five newest uploads on Veritasium's channel.",
+            "Name the channel the worker sends its rows on in the code.",
+        ),
+        (
+            "transcript of",
+            "Give the transcript of the Veritasium video on the Monty Hall problem.",
+            "Give the transcript of meeting.m4a.",
+        ),
+        (
+            "website",
+            "Read the vendor's website for the warranty terms.",
+            "Explain how the website folder's build script bundles its pages.",
+        ),
+        (
+            "internet",
+            "Find the answer on the internet.",
+            "Explain how the internet-facing port is chosen in the code.",
+        ),
+    ] {
+        let caught = web_asked("research.read", &none, catches);
+        assert!(caught.is_some(), "{word} must catch {catches:?}");
+        let skipped = web_asked("research.read", &none, skips);
+        assert!(
+            skipped.is_none(),
+            "{word} must not catch {skips:?}: {skipped:?}"
+        );
+    }
+    assert_eq!(
+        web_asked(
+            "research.read",
+            &none,
+            "Call http://localhost:8770/a and https://x.org/b."
+        )
+        .as_deref(),
+        Some("the order names https://x.org/b")
+    );
+    // A word is a word: `the web` is not in `the webhook`, and a plural still counts.
+    assert_eq!(
+        web_asked("research.read", &none, "Summarise two podcasts on the H2C."),
+        Some("the order says `podcast`".into())
+    );
+    // A local mark spares only its own sentence: the lookup in the first one still asks for the web.
+    assert_eq!(
+        web_asked(
+            "research.read",
+            &none,
+            "Look up the H2C's build volume. Write it to notes.md."
+        ),
+        Some("the order says `look up`".into())
+    );
+}
+
+/// Review S4: what the worker did decides first. On an order herdr found no web in, a worker that opened pages and
+/// cites none fails; one that opened only this machine, or nothing, gets a note. The remaining gap: a current-fact
+/// order the words miss, answered from memory with no read, passes with a note.
+#[test]
+fn gsrc_a_no_web_order_that_opened_pages_must_cite_them() {
+    let empty = serde_json::json!({"status": "done", "sources": []});
+    let curl = |url: &str| {
+        serde_json::json!({"message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+            "input": {"command": format!("curl -s {url}")}}]}})
+        .to_string()
+    };
+    let fetched = curl("https://www.bambulab.com/en/h2c");
+    let axis = sources_axis("research.read", None, Some(&empty), &fetched).expect("axis");
+    assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+    assert!(axis.why.contains("opened 1 page(s)"), "{axis:?}");
+    assert!(axis.lines[0].contains("bambulab.com"), "{axis:?}");
+    let axis = sources_axis("research.read", None, None, &fetched).expect("axis");
+    assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+    let browsed = serde_json::json!({"message": {"content": [{"type": "tool_use", "id": "t2",
+        "name": "mcp__bladebro__act", "input": {"action": "click", "text": "Specs"}}]}})
+    .to_string();
+    let axis = sources_axis("research.read", None, Some(&empty), &browsed).expect("axis");
+    assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+    let local = curl("http://localhost:8770/api/runs");
+    let axis = sources_axis("research.read", None, Some(&empty), &local).expect("axis");
+    assert_eq!(axis.mark, Mark::Note, "{axis:?}");
+    // The gap, written down: the words miss "cost today", and a memory answer opens nothing.
+    let memory = "What does the Bambu H2C cost today?\n";
+    assert_eq!(web_asked("research.read", &[], memory), None);
+    let answered =
+        serde_json::json!({"status": "done", "summary": "about 2,399 USD", "sources": []});
+    let axis = sources_axis("research.read", None, Some(&answered), "").expect("axis");
+    assert_eq!(axis.mark, Mark::Note, "{axis:?}");
+    // A no-web order that cites the page it opened passes, as any order does.
+    let cited = serde_json::json!({"status": "done",
+        "sources": [{"url": "https://www.bambulab.com/en/h2c", "used_for": "price"}]});
+    let axis = sources_axis("research.read", None, Some(&cited), &fetched).expect("axis");
+    assert_eq!(axis.mark, Mark::Pass, "{axis:?}");
+}
+
+/// F2: an order herdr seated with `NO_WEB_SOURCES` that cites nothing gets a note; one that cites a page it never
+/// opened still fails, and a web order or one seated before the rule still fails on nothing cited.
+#[test]
+fn gsrc_an_order_that_asks_no_web_and_cites_nothing_is_a_note() {
+    let no_web = spec(&format!("{GSRC_LC4}\n\n{NO_WEB_SOURCES} The agy line.\n"));
+    assert!(no_web.no_web);
+    // Review N3: a copy re-wrapped after seating keeps the short mark on its first line.
+    let wrapped = NO_WEB_SOURCES.replacen(" so the gate", "\nso the gate", 1);
+    assert!(spec(&format!("{GSRC_LC4}\n\n{wrapped}\n")).no_web);
+    assert!(!spec(&format!("{GSRC_LC4}\n\n{WEB_SOURCES}\n")).no_web);
+    assert_eq!(web_of("research.read", &no_web), None);
+    // The class wins over the line, and an order with neither line asks for the web, as before the rule.
+    assert!(web_of("research.web", &no_web).is_some());
+    assert!(web_of("research.read", &Spec::default()).is_some());
+    let empty = serde_json::json!({"status": "done", "sources": []});
+    let silent = serde_json::json!({"status": "done"});
+    for report in [Some(&empty), Some(&silent), None] {
+        let axis = sources_axis("research.read", None, report, "").expect("axis");
+        assert_eq!(axis.mark, Mark::Note, "{axis:?}");
+        assert!(axis.why.starts_with("no web asked; none cited"), "{axis:?}");
+        let axis = sources_axis("research.read", Some("asked"), report, "").expect("axis");
+        assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+    }
+    let unread = serde_json::json!({"status": "done", "sources": [{"url": "https://example.com", "used_for": "x"}]});
+    let axis = sources_axis("research.read", None, Some(&unread), "").expect("axis");
+    assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+    assert_eq!(axis.lines, vec!["https://example.com".to_owned()]);
+    // Through the gate's own axes: the note never fails the order.
+    let root = repo("gsrc-det");
+    let det = deterministic(
+        &Subject {
+            root: &root,
+            cwd: &root,
+            run: "r1",
+            order: "lc4",
+            branch: None,
+            class: "research.read",
+            report: Some(&empty),
+            spec: &no_web,
+            ports: &no_ports,
+        },
+        None,
+    );
+    let sources = det
+        .axes
+        .iter()
+        .find(|found| found.axis == "sources")
+        .expect("sources");
+    assert_eq!(sources.mark, Mark::Note, "{sources:?}");
+    assert!(!failing(&det.axes).iter().any(|axis| axis.axis == "sources"));
+}
+
+/// F2: a send-back of an order that asks for no web, on any axis, tells the worker no source is wanted; a web order's
+/// brief does not say it.
+#[test]
+fn gsrc_a_send_back_of_a_no_web_order_wants_no_fetch() {
+    let axes = vec![Axis::new("report", Mark::Fail, "status blocked")];
+    let no_web = format!("{GSRC_LC4}\n\n{NO_WEB_SOURCES}\n");
+    let brief = send_back_brief("lc4", "lc4", 1, &axes, &no_web, "nirvana-integrate/r1");
+    assert!(brief.contains(NO_WEB_REDO), "{brief}");
+    // Review S2: neither line talks a worker out of a fetch the answer needs, nor into one it does not.
+    for line in [NO_WEB_SOURCES, NO_WEB_REDO] {
+        assert!(
+            line.contains("needs a page you do not have, open it and cite it"),
+            "{line}"
+        );
+        assert!(
+            line.contains("never open one only to have a source"),
+            "{line}"
+        );
+        assert!(!line.contains("asks for no web page"), "{line}");
+    }
+    let web = format!("{GSRC_LC4}\n\n{WEB_SOURCES}\n");
+    let brief = send_back_brief("lc4", "lc4", 1, &axes, &web, "nirvana-integrate/r1");
+    assert!(!brief.contains(NO_WEB_REDO), "{brief}");
+}
+
+/// The child a failing gate of `class` on `seat` at `effort` seats, with `axes`.
+fn gsrc_send_back(
+    name: &str,
+    class: &str,
+    seat: &str,
+    effort: Effort,
+    axes: Vec<Axis>,
+) -> (Ruling, Seated) {
+    let _guard = crate::nirvana::with_test_home(name);
+    let root = repo(name);
+    let project = Project::at(&root);
+    let run = "r1";
+    let journal = project.journal(run);
+    nirvana_seat::set_test_world(Some(BTreeMap::new()));
+    let table = nirvana_seat::parse(nirvana_seat::DEFAULT).expect("table");
+    let mut parent = seated("res", None);
+    parent.class = class.into();
+    parent.chain = Some("research".into());
+    parent.seat = seat.into();
+    parent.cli = "agy".into();
+    parent.model = table.seat(seat).expect("seat").model_for(effort);
+    parent.effort = effort;
+    parent.cwd = root.display().to_string();
+    journal
+        .append(1, Kind::Seated(Box::new(parent)))
+        .expect("seated");
+    let _live = crate::nirvana_worker::take_live(&project, run, "res-s1").unwrap();
+    let state = replay(&journal.read().0);
+    let known = state.order("res").expect("order").clone();
+    let ruling = send_back(
+        &project,
+        run,
+        &journal,
+        &state,
+        &known,
+        "res",
+        "# res\n",
+        axes,
+        Some(&table),
+    )
+    .expect("send_back");
+    let child = replay(&journal.read().0)
+        .order("res-s1")
+        .map(|child| child.seated.clone())
+        .expect("child");
+    nirvana_seat::set_test_world(None);
+    (ruling, child)
+}
+
+/// F3: lc4 ran research.read at `--effort low` and its send-back was seated at medium, the class's effort. The child
+/// now runs at the parent's.
+#[test]
+fn gsrc_a_send_back_keeps_the_parents_effort() {
+    // The rule alone gives research.read medium: the test has an effort to keep.
+    nirvana_seat::set_test_world(Some(BTreeMap::new()));
+    let table = nirvana_seat::parse(nirvana_seat::DEFAULT).expect("table");
+    let mut request = nirvana_seat::Request::new("research.read");
+    request.size = SizeName::Small;
+    let rule =
+        nirvana_seat::pick(&table, &nirvana_seat::live_world(&table), &request).expect("pick");
+    nirvana_seat::set_test_world(None);
+    assert_eq!(rule.effort, Effort::Medium, "{}", rule.reason);
+    let axes = vec![Axis::new("report", Mark::Fail, "status blocked")];
+    let (ruling, child) = gsrc_send_back("gsrc-keep", "research.read", "flash", Effort::Low, axes);
+    assert_eq!(child.effort, Effort::Low, "{}", child.reason);
+    let seat = table.seat(&child.seat).expect("seat");
+    assert_eq!(child.model, seat.model_for(Effort::Low));
+    assert!(
+        child.reason.contains("effort low kept from the parent"),
+        "{}",
+        child.reason
+    );
+    assert!(ruling.next[0].contains(" low ("), "{:?}", ruling.next);
+}
+
+/// F3 and plan 37 §1.3: the step-up names a seat, not an effort, so the stronger seat runs at the parent's effort.
+#[test]
+fn gsrc_a_stepped_up_redo_keeps_the_parents_effort() {
+    let axes = vec![Axis::new("sources", Mark::Fail, "the sources")
+        .with(vec![format!("{NO_SUCH_VIDEO}{P37_FAKE}")])];
+    let (_, child) = gsrc_send_back("gsrc-step", "research.web", "flash", Effort::High, axes);
+    assert_eq!(child.seat, "argon", "{}", child.reason);
+    assert_eq!(child.effort, Effort::High, "{}", child.reason);
+}
+
+/// A child whose seat does not offer the parent's effort runs at the nearest it offers below, and the reason says so.
+#[test]
+fn gsrc_a_seat_without_the_parents_effort_keeps_the_picks() {
+    nirvana_seat::set_test_world(Some(BTreeMap::new()));
+    let table = nirvana_seat::parse(nirvana_seat::DEFAULT).expect("table");
+    let mut request = nirvana_seat::Request::new("research.read");
+    request.override_seat = Some(("haiku".into(), "test".into()));
+    request.effort = Some(Effort::High);
+    let pick =
+        nirvana_seat::pick(&table, &nirvana_seat::live_world(&table), &request).expect("pick");
+    nirvana_seat::set_test_world(None);
+    assert_eq!(pick.seat, "haiku");
+    assert_eq!(pick.effort, Effort::Medium);
+    assert!(
+        pick.reason
+            .contains("the parent's effort high; haiku has no high; medium"),
+        "{}",
+        pick.reason
+    );
+}
+
+/// The docs state the sources rule as herdr applies it.
+#[test]
+fn gsrc_the_docs_say_sources_only_when_the_order_asks_for_the_web() {
+    let role = include_str!("../../nirvana/claude/ROLE.md");
+    let gate = include_str!("../../nirvana/claude/skills/gate/SKILL.md");
+    assert!(role.contains("herdr asks an order for web sources only when it asks for the web"));
+    assert!(role.contains("opened no page gets a note, never"));
+    assert!(role.contains(
+        "one that opened pages must cite them, and a source it does cite is still checked"
+    ));
+    assert!(gate.contains("must cite its sources in the Work"));
+    assert!(gate.contains("citing nothing with no page\n  opened is a note"));
+    assert!(gate
+        .contains("one that asks for the web, or whose worker opened a page, cites at least one"));
+    assert!(!gate.contains("their Work Report must carry a `sources` array"));
 }

@@ -3,6 +3,31 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.53.0: sources only when the order asks for the web; a send-back keeps the caller's effort
+
+- **Changed:**
+  - The gate's sources axis asks for cited pages only when the order asks for the web: a web or browser need, a
+    `research.web` class, a URL to a host that is not this machine, a bare domain with a path, a web name, or a
+    lookup word in a sentence that names no project file. Cited sources are always checked, whatever the order.
+  - A no-web order whose worker opened pages and cites none fails the axis, with up to five of the reads listed. One
+    that opened nothing passes with a note. Reads of this machine's own hosts never count.
+  - The worker's brief says which case it is in. The no-web lines say: if the answer needs a page you do not have,
+    open it and cite it; never open one only to have a source.
+  - The needs given when a seat is booked are kept with the booking, so `seat run` sees them when it writes the
+    brief line.
+  - A send-back and a rate-limit reseat pick the child's seat at the caller's effort. The windows, use basis, lease
+    estimate and pressure check are all read at that effort; only an override that names an effort beats it.
+  - ROLE.md and the gate skill: a current fact (a price, a release) is `research.web`; opened pages must be cited.
+  **Because:** the live checks of 2026-11-01 (F2) saw the sources axis demand pages on research orders that never
+  asked for the web, and the redos gamed it by citing example.com. F3: a send-back re-picked at the default effort,
+  dropping the effort the orchestrator chose. The owner, 2026-11-02: "Use your recomendation for all of these".
+  **Measured:** gated together with 0.54.0 on one tree: nextest 4,631 of 4,632, the one failure the known Windows
+  plugin-path test; clippy clean; the dry run finds 2,609 of 2,609; all 63 `gsrc_` controls and the older controls
+  whose lines moved go red alone. One Sonnet review, one fix round. A hypothesis: the word list now catches lookups
+  phrased without a URL; no real order has run on this build.
+  **If you remove this:** no-web research orders are sent back for not citing pages they never needed, redos cite
+  filler pages to pass, and a send-back can drop a high-effort order to the default.
+
 ## alpha 0.52.0: herdr gates blocked deliveries too
 
 - **Changed:**
