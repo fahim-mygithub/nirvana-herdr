@@ -51,6 +51,11 @@ pub const HISTORICAL_DEFAULTS: &[&str] = &[
     // upgraded (the owner's did not, read 2026-11-02). v8 is plan 35c's, before plan 35 R2 added `browser` to agy.
     include_str!("nirvana_seats_v7.toml"),
     include_str!("nirvana_seats_v8.toml"),
+    // Three defaults that shipped in a commit and had no copy here (review-trim review nit), each byte for byte from
+    // git: v9 plan 33b's (ad601b8d), v10 plan 33's join (c2ad3b39), v11 plan 34a's first commit (b5ab56a3).
+    include_str!("nirvana_seats_v9.toml"),
+    include_str!("nirvana_seats_v10.toml"),
+    include_str!("nirvana_seats_v11.toml"),
 ];
 pub const DIR: &str = "nirvana";
 pub const SEATS_FILE: &str = "seats.toml";
@@ -6655,7 +6660,8 @@ mod tests {
             "{got:?}"
         );
         // Before R2 (the default plan 35c shipped, v8) the same order went to a claude seat, every agy seat lacking it.
-        let before = parse(HISTORICAL_DEFAULTS[7]).unwrap();
+        assert!(HISTORICAL_DEFAULTS.contains(&LRS_V8));
+        let before = parse(LRS_V8).unwrap();
         let got = chosen(&before, &world(), &browser);
         assert_eq!(why(&got.runners_up, "flash"), "lacks browser");
         let web = table.class("research.web").unwrap();
@@ -6689,12 +6695,21 @@ mod tests {
         );
     }
 
-    /// An installed copy of plan 34a's default (v7, which plan 35c left without a copy) or of plan 35c's (v8) upgrades
-    /// to the default with `browser` on agy, its mode kept and the old file backed up.
+    const LRS_V8: &str = include_str!("nirvana_seats_v8.toml");
+
+    /// An installed copy of plan 34a's default (v7, which plan 35c left without a copy), of plan 35c's (v8), or of one
+    /// of the three intermediates that had none (v9-v11) upgrades to the default with `browser` on agy, its mode kept
+    /// and the old file backed up. By content, not by index: the next copy shifts no number here.
     #[test]
     fn lrs_an_installed_34a_or_35c_default_upgrades_to_r2() {
-        assert_eq!(HISTORICAL_DEFAULTS.len(), 8);
-        for (n, old) in [(7, HISTORICAL_DEFAULTS[6]), (8, HISTORICAL_DEFAULTS[7])] {
+        for (n, old) in [
+            (7, include_str!("nirvana_seats_v7.toml")),
+            (8, LRS_V8),
+            (9, include_str!("nirvana_seats_v9.toml")),
+            (10, include_str!("nirvana_seats_v10.toml")),
+            (11, include_str!("nirvana_seats_v11.toml")),
+        ] {
+            assert!(HISTORICAL_DEFAULTS.contains(&old), "v{n} is historical");
             assert_ne!(old.replace("\r\n", "\n"), DEFAULT.replace("\r\n", "\n"));
             let dir = temp_dir(&format!("lrs-upgrade-v{n}"));
             let path = dir.join(SEATS_FILE);

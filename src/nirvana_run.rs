@@ -648,6 +648,11 @@ pub struct OrderState {
     pub reseats: u32,
     pub stalls: u32,
     pub send_backs: u32,
+    /// The questions this order asked, its gate's `asked` included: a lesson review reads it (review-trim review S3).
+    pub asked: u32,
+    /// The order whose question was open when this one was seated with no parent: the run's question that started it.
+    /// A blocked delivery is asked (plan 37b) and its answer is a fresh order, which no `parent` links back (review S3).
+    pub answers: Option<String>,
     pub last_checkpoint: Option<String>,
     pub last_rate_limit: Option<(Option<String>, Option<String>, Option<u64>)>,
 }
@@ -819,6 +824,11 @@ fn queue_line(kind: &Kind) -> Option<String> {
     })
 }
 
+/// A reviewer's or a lesson review's class: its question is about another order, and it answers none.
+fn reviews(class: &str) -> bool {
+    class == crate::nirvana_review::CLASS || class == "review.adversary"
+}
+
 /// Rebuilds a run from its events. Pure: the receipt, status, check and resume all read this.
 pub fn replay(events: &[Event]) -> RunState {
     let mut state = RunState {
@@ -832,6 +842,9 @@ pub fn replay(events: &[Event]) -> RunState {
     let mut verdict_owed: Vec<String> = Vec::new();
     // Plan 37b review S4: each blocked delivery not yet gated, its seq, and whether its gate asked.
     let mut blocked_owed: Vec<(String, u64, bool)> = Vec::new();
+    // Review-trim review S3: the orders whose question is open, the oldest first. The next order seated with no parent
+    // answers the oldest; a worker that asked mid-order and then delivered answered its own. Reviews take no part.
+    let mut open_questions: Vec<String> = Vec::new();
     for event in events {
         state.last_seq = state.last_seq.max(event.seq);
         state.last_at = Some(state.last_at.map_or(event.at, |at| at.max(event.at)));
@@ -899,6 +912,11 @@ pub fn replay(events: &[Event]) -> RunState {
                         reseats: 0,
                         stalls: 0,
                         send_backs: 0,
+                        asked: 0,
+                        answers: (seated.parent.is_none()
+                            && !reviews(&seated.class)
+                            && !open_questions.is_empty())
+                        .then(|| open_questions.remove(0)),
                         last_checkpoint: None,
                         last_rate_limit: None,
                     });
@@ -989,6 +1007,7 @@ pub fn replay(events: &[Event]) -> RunState {
                 }
             }
             Kind::Delivered { order, report } => {
+                open_questions.retain(|open| open != order);
                 if let Some(known) = state.order_mut(order) {
                     known.report = Some(report.clone());
                     if !known.phase.terminal() {
@@ -1027,6 +1046,12 @@ pub fn replay(events: &[Event]) -> RunState {
                         known.phase = Phase::Asked;
                     }
                     known.why = Some(question.clone());
+                    known.asked += 1;
+                    if !reviews(&known.seated.class)
+                        && !open_questions.contains(&known.seated.order)
+                    {
+                        open_questions.push(known.seated.order.clone());
+                    }
                 }
             }
             Kind::Woken { via, through, .. } => {

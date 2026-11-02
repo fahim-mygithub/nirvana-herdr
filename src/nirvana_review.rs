@@ -212,6 +212,10 @@ pub fn wanted_with(
     if !nirvana_run::valid_id(&id) {
         return Err(Some(format!("the review's id {id} is not an order id")));
     }
+    // Reviews turned off say so first, whatever the delivery (review-trim review nit).
+    if cap == 0 {
+        return Err(cap_refusal(&project.root, cap, at));
+    }
     // Before the cap: a skipped review is never queued, so it is not counted against `lesson_reviews_per_day`, and
     // the Learning square's `review n/cap` (`used_today`) does not move.
     if let Some(why) = verdict.and_then(|verdict| idle(state, known, verdict)) {
@@ -232,7 +236,8 @@ const SIGNALS: [&str; 4] = ["gotchas", "lesson", "lesson_ops", "card_ops"];
 /// deliveries with an empty report said "nothing to keep". The owner, 2026-11-02, on the recommendation "review only
 /// when there is something to learn": "Use your recomendation for all of these". Something to learn is a verdict
 /// other than a pass, a send-back or a non-pass verdict above this order in its chain (rule 5 of `RULES`: the
-/// strongest signal is a correction), or a report that names any of `SIGNALS`.
+/// strongest signal is a correction), a question asked in its chain or the run's question that started it (review
+/// S3), or a report that names any of `SIGNALS`.
 /// Measured on the journals there were: 4 of the 10 live-check reviews, none of which kept anything; 0 of the 7 in
 /// the two printer projects, whose every subject named gotchas (nirvana/plans/review-trim-agy-browser-2026-11-02.md).
 pub fn idle(
@@ -244,16 +249,18 @@ pub fn idle(
         return None;
     }
     let report = known.report.as_ref();
-    if SIGNALS.iter().any(|key| {
-        report
-            .and_then(|report| report.get(key))
-            .is_some_and(|value| match value {
-                Value::Null => false,
-                Value::Array(items) => !items.is_empty(),
-                Value::Object(fields) => !fields.is_empty(),
-                Value::String(text) => !text.trim().is_empty(),
-                _ => true,
-            })
+    if SIGNALS
+        .iter()
+        .any(|key| report.and_then(|report| report.get(key)).is_some_and(said))
+    {
+        return None;
+    }
+    // Review S3: a question in the order's chain, or the run's question that started the chain, is something to learn
+    // from. A blocked delivery is asked (plan 37b) and its answer is a fresh order with no `parent`, so a clean redo
+    // after a block would read as a first pass; so would a worker that asked mid-order.
+    let root = chain_root(state, known.id());
+    if state.orders.iter().any(|order| {
+        (order.asked > 0 || order.answers.is_some()) && chain_root(state, order.id()) == root
     }) {
         return None;
     }
@@ -282,6 +289,35 @@ pub fn idle(
     Some(
         "nothing to learn: a first-pass delivery whose report names no gotchas, lesson, lesson_ops or card_ops".into(),
     )
+}
+
+/// Whether a report value says anything: a list with any item that says something, a non-empty object, a non-blank
+/// string. A blank gotcha (`[""]`) is no signal (review-trim review nit).
+fn said(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Array(items) => items.iter().any(said),
+        Value::Object(fields) => !fields.is_empty(),
+        Value::String(text) => !text.trim().is_empty(),
+        _ => true,
+    }
+}
+
+/// The first order of `order`'s chain, up through `send_back` and `reseat` parents. Bounded like `idle`'s walk.
+fn chain_root(state: &nirvana_run::RunState, order: &str) -> String {
+    let mut current = order.to_owned();
+    for _ in 0..=state.orders.len() {
+        match state.order(&current).map(|known| &known.seated) {
+            Some(seated) if matches!(seated.why.as_deref(), Some("send_back" | "reseat")) => {
+                match &seated.parent {
+                    Some(parent) => current = parent.clone(),
+                    None => break,
+                }
+            }
+            _ => break,
+        }
+    }
+    current
 }
 
 // ---- the briefs ----

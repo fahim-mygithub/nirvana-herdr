@@ -1124,6 +1124,13 @@ fn lrs_a_clean_first_pass_is_skipped_before_the_cap_counts_it() {
     );
     assert_eq!(used_today(&root, now()), PER_DAY);
     set_used_for_test(&root, now(), 0);
+    // Reviews turned off say so, not "nothing to learn" (review nit).
+    assert_eq!(
+        wanted_with(&project, &state, known, Some(&Verdict::Pass), 0, now()),
+        Err(Some(
+            "lesson reviews are off (lesson_reviews_per_day = 0)".into()
+        ))
+    );
     // The verdict unknown (`wanted`, the gate's call until the hunk lands): reviewed, as before the trim.
     assert_eq!(
         wanted_with(&project, &state, known, None, PER_DAY, now()),
@@ -1158,6 +1165,8 @@ fn lrs_each_report_signal_keeps_the_review() {
         ),
         ("lesson_ops", serde_json::json!([{"op":"new"}])),
         ("card_ops", serde_json::json!([{"op":"new"}])),
+        // A lesson written as one line of text is a lesson too.
+        ("lesson", serde_json::json!("calc.py: mul takes no floats")),
     ]
     .into_iter()
     .enumerate()
@@ -1179,6 +1188,25 @@ fn lrs_each_report_signal_keeps_the_review() {
     report["lesson"] = Value::Null;
     let state = chain_state(&root, "r9", &[("s1", None, None, None)], &report);
     assert!(idle(&state, state.order("s1").expect("s1"), &Verdict::Pass).is_some());
+    // A blank says nothing either (review nit): a blank gotcha, a blank lesson line, an empty lesson object.
+    for (n, (key, value)) in [
+        ("gotchas", serde_json::json!([""])),
+        ("gotchas", serde_json::json!(["  ", null])),
+        ("lesson", serde_json::json!("  ")),
+        ("lesson", serde_json::json!({})),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut report = done("done");
+        report[key] = value.clone();
+        let run = format!("b{n}");
+        let state = chain_state(&root, &run, &[("s1", None, None, None)], &report);
+        assert!(
+            idle(&state, state.order("s1").expect("s1"), &Verdict::Pass).is_some(),
+            "{key} = {value} says nothing"
+        );
+    }
 }
 
 #[test]
@@ -1288,4 +1316,138 @@ fn lrs_the_gate_seats_no_review_of_a_clean_first_pass_and_counts_none() {
         ruling.next
     );
     assert_eq!(used_today(&root, now()), 1);
+}
+
+/// `Kind::Asked` of `order`, as the gate's `ask` and a worker's question journal it.
+fn asked(root: &Path, run: &str, at: u64, order: &str) {
+    Project::at(root)
+        .journal(run)
+        .append(
+            at,
+            Kind::Asked {
+                order: Some(order.into()),
+                question: format!("{order}: which file?"),
+            },
+        )
+        .expect("asked");
+}
+
+/// One order seated and delivered `report`, with `parent` and `why`, and no gate.
+fn seat_and_deliver(root: &Path, run: &str, at: u64, link: Link, report: &Value) {
+    let (id, parent, why, _) = link;
+    let journal = Project::at(root).journal(run);
+    let mut seated = seated(id, "build.bounded");
+    seated.parent = parent.map(str::to_owned);
+    seated.why = why.map(str::to_owned);
+    journal
+        .append(at, Kind::Seated(Box::new(seated)))
+        .expect("seated");
+    journal
+        .append(
+            at + 1,
+            Kind::Delivered {
+                order: id.into(),
+                report: report.clone(),
+            },
+        )
+        .expect("delivered");
+}
+
+/// Review S3: a question in the chain, or the run's question that started it, keeps the review. On 0.52.0 a blocked
+/// delivery is asked and its answer is a fresh order with no `parent`: before this, its clean redo read as a first pass.
+#[test]
+fn lrs_a_question_in_the_chain_or_the_one_that_started_it_keeps_the_review() {
+    let _home = quiet("lrs-asked");
+    let root = repo("lrs-asked");
+    let project = Project::at(&root);
+    // The 0.52.0 path, end to end: a blocked delivery is gated asked; the orchestrator seats a fresh redo; it passes
+    // with a clean report and is reviewed.
+    let mut blocked = done("blocked");
+    blocked["summary"] = "calc.py is not in the worktree".into();
+    delivered(&root, "r1", "b1", blocked, "TOTAL 0 passed", None);
+    let ruling = nirvana_gate::gate(&project, "r1", "b1").expect("gate the block");
+    assert_eq!(ruling.verdict, "asked", "{ruling:?}");
+    delivered(&root, "r1", "b2", done("done"), "TOTAL 1 passed", None);
+    let state = state_of(&root, "r1");
+    assert_eq!(state.order("b1").map(|order| order.asked), Some(1));
+    assert_eq!(
+        state.order("b2").and_then(|order| order.answers.as_deref()),
+        Some("b1")
+    );
+    let ruling = nirvana_gate::gate(&project, "r1", "b2").expect("gate the redo");
+    assert_eq!(ruling.verdict, "pass", "{ruling:?}");
+    assert!(
+        ruling
+            .next
+            .iter()
+            .any(|line| line.starts_with("b2-lr seated on")),
+        "{:?}",
+        ruling.next
+    );
+    let clean = done("done");
+    // A worker that asked mid-order and then delivered: its own question, which no later order answers.
+    let journal = project.journal("r2");
+    journal
+        .append(10, Kind::Seated(Box::new(seated("m", "build.bounded"))))
+        .expect("seated");
+    asked(&root, "r2", 11, "m");
+    journal
+        .append(
+            12,
+            Kind::Delivered {
+                order: "m".into(),
+                report: clean.clone(),
+            },
+        )
+        .expect("delivered");
+    seat_and_deliver(&root, "r2", 20, ("n", None, None, None), &clean);
+    let state = state_of(&root, "r2");
+    assert_eq!(
+        idle(&state, state.order("m").expect("m"), &Verdict::Pass),
+        None
+    );
+    assert_eq!(
+        state.order("n").and_then(|order| order.answers.clone()),
+        None
+    );
+    assert!(idle(&state, state.order("n").expect("n"), &Verdict::Pass).is_some());
+    // A gated question: a lesson review seated after it answers nothing; the next fresh order answers it, and so does
+    // its reseat child (the same chain root); an order after that, with the question taken, is a first pass again.
+    seat_and_deliver(&root, "r3", 10, ("q", None, None, None), &clean);
+    asked(&root, "r3", 12, "q");
+    let journal = project.journal("r3");
+    let mut review = seated("q-lr", CLASS);
+    review.why = Some("lesson_review".into());
+    journal
+        .append(13, Kind::Seated(Box::new(review)))
+        .expect("review");
+    seat_and_deliver(&root, "r3", 20, ("z", None, None, None), &clean);
+    seat_and_deliver(
+        &root,
+        "r3",
+        30,
+        ("z-r1", Some("z"), Some("reseat"), None),
+        &clean,
+    );
+    seat_and_deliver(&root, "r3", 40, ("y", None, None, None), &clean);
+    let state = state_of(&root, "r3");
+    assert_eq!(
+        state.order("q-lr").and_then(|order| order.answers.clone()),
+        None
+    );
+    assert_eq!(
+        state.order("z").and_then(|order| order.answers.as_deref()),
+        Some("q")
+    );
+    for order in ["z", "z-r1"] {
+        assert_eq!(
+            idle(&state, state.order(order).expect("answer"), &Verdict::Pass),
+            None,
+            "{order} answers q"
+        );
+    }
+    assert!(
+        idle(&state, state.order("y").expect("y"), &Verdict::Pass).is_some(),
+        "another chain's question is not this order's"
+    );
 }
