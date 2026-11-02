@@ -3733,12 +3733,180 @@ fn gsrc_the_web_is_asked_by_the_class_a_need_or_the_order_text() {
     assert_eq!(sources_brief_line("chore.script", &none, GSRC_LC4), None);
 }
 
+/// Review S3 and S5: each word, an order it catches and one it must not (the record's table). Only research and media
+/// orders get a line, so the orders that must not be caught are research orders about the project or this machine.
+#[test]
+fn gsrc_the_words_catch_lookups_and_skip_local_hosts_and_code() {
+    let none: Vec<String> = Vec::new();
+    for (word, catches, skips) in [
+        (
+            "url",
+            "Summarise https://example.com/spec.",
+            "Call http://localhost:8770/api/runs and list the run ids.",
+        ),
+        (
+            "url 127",
+            "Read http://docs.example.org/a.",
+            "Quote what http://127.0.0.1:8770/health answers.",
+        ),
+        (
+            "url ::1",
+            "Read https://[2001:db8::2]/notes.",
+            "Quote what http://[::1]:8770/health answers.",
+        ),
+        (
+            "domain",
+            "Read github.com/fahim-mygithub/nirvana-herdr/issues and list the open bugs.",
+            "List what nirvana/controls.d/gsrc.py controls.",
+        ),
+        (
+            "domain docs.rs",
+            "Check docs.rs/serde/latest for the derive attributes.",
+            "Read ./src/nirvana_gate.rs and list its consts.",
+        ),
+        (
+            "the web",
+            "Search the web for the H2C's nozzle sizes.",
+            "Summarise the webhook handler's retry rule.",
+        ),
+        (
+            "youtube",
+            "Describe the YouTube video the owner names.",
+            "Describe the clip at E:/clips/a.mp4.",
+        ),
+        (
+            "tiktok",
+            "Summarise the owner's last three TikTok posts.",
+            "Summarise the owner's last three commits.",
+        ),
+        (
+            "look up",
+            "Look up the Bambu H2C's build volume.",
+            "Look up the commit rule in CLAUDE.md and quote it.",
+        ),
+        (
+            "search for",
+            "Search for the xTool F2 Ultra's laser power.",
+            "Search for every caller of seat_once in src/ and list them.",
+        ),
+        (
+            "latest price",
+            "Give the latest price of a 1 kg PLA spool from Bambu.",
+            "Give the latest price row in nirvana/plans/costs.md.",
+        ),
+        (
+            "reviews of",
+            "Collect reviews of the Prusa Core One.",
+            "Collect the reviews of P37 in the plans folder.",
+        ),
+        (
+            "podcast",
+            "Summarise this week's Lex Fridman podcast episode.",
+            "Transcribe the podcast at E:/pod.mp3.",
+        ),
+        (
+            "'s channel",
+            "List the five newest uploads on Veritasium's channel.",
+            "Name the channel the worker sends its rows on in the code.",
+        ),
+        (
+            "transcript of",
+            "Give the transcript of the Veritasium video on the Monty Hall problem.",
+            "Give the transcript of meeting.m4a.",
+        ),
+        (
+            "website",
+            "Read the vendor's website for the warranty terms.",
+            "Explain how the website folder's build script bundles its pages.",
+        ),
+        (
+            "internet",
+            "Find the answer on the internet.",
+            "Explain how the internet-facing port is chosen in the code.",
+        ),
+    ] {
+        let caught = web_asked("research.read", &none, catches);
+        assert!(caught.is_some(), "{word} must catch {catches:?}");
+        let skipped = web_asked("research.read", &none, skips);
+        assert!(
+            skipped.is_none(),
+            "{word} must not catch {skips:?}: {skipped:?}"
+        );
+    }
+    assert_eq!(
+        web_asked(
+            "research.read",
+            &none,
+            "Call http://localhost:8770/a and https://x.org/b."
+        )
+        .as_deref(),
+        Some("the order names https://x.org/b")
+    );
+    // A word is a word: `the web` is not in `the webhook`, and a plural still counts.
+    assert_eq!(
+        web_asked("research.read", &none, "Summarise two podcasts on the H2C."),
+        Some("the order says `podcast`".into())
+    );
+    // A local mark spares only its own sentence: the lookup in the first one still asks for the web.
+    assert_eq!(
+        web_asked(
+            "research.read",
+            &none,
+            "Look up the H2C's build volume. Write it to notes.md."
+        ),
+        Some("the order says `look up`".into())
+    );
+}
+
+/// Review S4: what the worker did decides first. On an order herdr found no web in, a worker that opened pages and
+/// cites none fails; one that opened only this machine, or nothing, gets a note. The remaining gap: a current-fact
+/// order the words miss, answered from memory with no read, passes with a note.
+#[test]
+fn gsrc_a_no_web_order_that_opened_pages_must_cite_them() {
+    let empty = serde_json::json!({"status": "done", "sources": []});
+    let curl = |url: &str| {
+        serde_json::json!({"message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+            "input": {"command": format!("curl -s {url}")}}]}})
+        .to_string()
+    };
+    let fetched = curl("https://www.bambulab.com/en/h2c");
+    let axis = sources_axis("research.read", None, Some(&empty), &fetched).expect("axis");
+    assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+    assert!(axis.why.contains("opened 1 page(s)"), "{axis:?}");
+    assert!(axis.lines[0].contains("bambulab.com"), "{axis:?}");
+    let axis = sources_axis("research.read", None, None, &fetched).expect("axis");
+    assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+    let browsed = serde_json::json!({"message": {"content": [{"type": "tool_use", "id": "t2",
+        "name": "mcp__bladebro__act", "input": {"action": "click", "text": "Specs"}}]}})
+    .to_string();
+    let axis = sources_axis("research.read", None, Some(&empty), &browsed).expect("axis");
+    assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+    let local = curl("http://localhost:8770/api/runs");
+    let axis = sources_axis("research.read", None, Some(&empty), &local).expect("axis");
+    assert_eq!(axis.mark, Mark::Note, "{axis:?}");
+    // The gap, written down: the words miss "cost today", and a memory answer opens nothing.
+    let memory = "What does the Bambu H2C cost today?\n";
+    assert_eq!(web_asked("research.read", &[], memory), None);
+    let answered =
+        serde_json::json!({"status": "done", "summary": "about 2,399 USD", "sources": []});
+    let axis = sources_axis("research.read", None, Some(&answered), "").expect("axis");
+    assert_eq!(axis.mark, Mark::Note, "{axis:?}");
+    // A no-web order that cites the page it opened passes, as any order does.
+    let cited = serde_json::json!({"status": "done",
+        "sources": [{"url": "https://www.bambulab.com/en/h2c", "used_for": "price"}]});
+    let axis = sources_axis("research.read", None, Some(&cited), &fetched).expect("axis");
+    assert_eq!(axis.mark, Mark::Pass, "{axis:?}");
+}
+
 /// F2: an order herdr seated with `NO_WEB_SOURCES` that cites nothing gets a note; one that cites a page it never
 /// opened still fails, and a web order or one seated before the rule still fails on nothing cited.
 #[test]
 fn gsrc_an_order_that_asks_no_web_and_cites_nothing_is_a_note() {
     let no_web = spec(&format!("{GSRC_LC4}\n\n{NO_WEB_SOURCES} The agy line.\n"));
     assert!(no_web.no_web);
+    // Review N3: a copy re-wrapped after seating keeps the short mark on its first line.
+    let wrapped = NO_WEB_SOURCES.replacen(" so the gate", "\nso the gate", 1);
+    assert!(spec(&format!("{GSRC_LC4}\n\n{wrapped}\n")).no_web);
     assert!(!spec(&format!("{GSRC_LC4}\n\n{WEB_SOURCES}\n")).no_web);
     assert_eq!(web_of("research.read", &no_web), None);
     // The class wins over the line, and an order with neither line asks for the web, as before the rule.
@@ -3790,6 +3958,18 @@ fn gsrc_a_send_back_of_a_no_web_order_wants_no_fetch() {
     let no_web = format!("{GSRC_LC4}\n\n{NO_WEB_SOURCES}\n");
     let brief = send_back_brief("lc4", "lc4", 1, &axes, &no_web, "nirvana-integrate/r1");
     assert!(brief.contains(NO_WEB_REDO), "{brief}");
+    // Review S2: neither line talks a worker out of a fetch the answer needs, nor into one it does not.
+    for line in [NO_WEB_SOURCES, NO_WEB_REDO] {
+        assert!(
+            line.contains("needs a page you do not have, open it and cite it"),
+            "{line}"
+        );
+        assert!(
+            line.contains("never open one only to have a source"),
+            "{line}"
+        );
+        assert!(!line.contains("asks for no web page"), "{line}");
+    }
     let web = format!("{GSRC_LC4}\n\n{WEB_SOURCES}\n");
     let brief = send_back_brief("lc4", "lc4", 1, &axes, &web, "nirvana-integrate/r1");
     assert!(!brief.contains(NO_WEB_REDO), "{brief}");
@@ -3880,23 +4060,22 @@ fn gsrc_a_stepped_up_redo_keeps_the_parents_effort() {
     assert_eq!(child.effort, Effort::High, "{}", child.reason);
 }
 
-/// `keep_effort` on a seat without the parent's effort keeps the pick's and says why.
+/// A child whose seat does not offer the parent's effort runs at the nearest it offers below, and the reason says so.
 #[test]
 fn gsrc_a_seat_without_the_parents_effort_keeps_the_picks() {
     nirvana_seat::set_test_world(Some(BTreeMap::new()));
     let table = nirvana_seat::parse(nirvana_seat::DEFAULT).expect("table");
     let mut request = nirvana_seat::Request::new("research.read");
     request.override_seat = Some(("haiku".into(), "test".into()));
-    let mut pick =
+    request.effort = Some(Effort::High);
+    let pick =
         nirvana_seat::pick(&table, &nirvana_seat::live_world(&table), &request).expect("pick");
     nirvana_seat::set_test_world(None);
     assert_eq!(pick.seat, "haiku");
-    let before = pick.effort;
-    nirvana_seat::keep_effort(&table, &mut pick, Effort::High);
-    assert_eq!(pick.effort, before);
+    assert_eq!(pick.effort, Effort::Medium);
     assert!(
         pick.reason
-            .ends_with("haiku has no high, the parent's effort"),
+            .contains("the parent's effort high; haiku has no high; medium"),
         "{}",
         pick.reason
     );
@@ -3908,9 +4087,13 @@ fn gsrc_the_docs_say_sources_only_when_the_order_asks_for_the_web() {
     let role = include_str!("../../nirvana/claude/ROLE.md");
     let gate = include_str!("../../nirvana/claude/skills/gate/SKILL.md");
     assert!(role.contains("herdr asks an order for web sources only when it asks for the web"));
-    assert!(role.contains("gets a note, never a send-back; a source it does cite is still checked"));
-    assert!(gate.contains("must cite its sources in the Work Report's"));
-    assert!(gate.contains("citing nothing is a note"));
-    assert!(gate.contains("one that asks for the web cites at least one"));
+    assert!(role.contains("opened no page gets a note, never"));
+    assert!(role.contains(
+        "one that opened pages must cite them, and a source it does cite is still checked"
+    ));
+    assert!(gate.contains("must cite its sources in the Work"));
+    assert!(gate.contains("citing nothing with no page\n  opened is a note"));
+    assert!(gate
+        .contains("one that asks for the web, or whose worker opened a page, cites at least one"));
     assert!(!gate.contains("their Work Report must carry a `sources` array"));
 }

@@ -2198,6 +2198,8 @@ pub(crate) fn rate_limited(
     request.not_family = seated.not_family.clone();
     request.mode = seated.mode;
     request.order = Some(child.clone());
+    // Live checks 2026-11-01 F3: the reseat is picked at the effort its parent ran at, as a send-back is.
+    request.effort = Some(seated.effort);
     // Plan 33 §2.2: "A send-back child and a reseat keep the parent's profile copy", and so its narrowing.
     let narrowed = crate::nirvana_profiles::narrow_for_order(
         &mut request,
@@ -2252,11 +2254,7 @@ pub(crate) fn rate_limited(
             Ok(true)
         }
         RateDecision::Reseat { seat } => {
-            let Ok(mut pick) = picked else {
-                return Ok(false);
-            };
-            // Live checks 2026-11-01 F3: the reseat runs at the effort its parent ran at, as a send-back does.
-            nirvana_seat::keep_effort(&table, &mut pick, seated.effort);
+            let Ok(pick) = picked else { return Ok(false) };
             let brief = continuation_brief(project, run, seated, &state, diff.as_deref(), stream)?;
             let booked = book_child(&table, &pick, &child, run)?;
             let child_seated = Seated {
@@ -2465,6 +2463,10 @@ pub struct Booked {
     /// Plan 33 §2.2: the profile the pick was narrowed by, from the lease.
     #[serde(default)]
     pub profile: Option<String>,
+    /// The needs the booking was made with (`Pick::needs`): `seat pick --book --needs browser`, then `seat run` with
+    /// no `--needs` as the seat skill writes it, still asks for the web (gsrc review S1).
+    #[serde(default)]
+    pub needs: Vec<String>,
 }
 
 /// One window of the pick: the order's expected share of it, for the record (expected against real use).
@@ -3428,7 +3430,7 @@ fn book_with(
                 false,
             )
         });
-        let pick = pick.map_err(|no_seat| {
+        let mut pick = pick.map_err(|no_seat| {
             (
                 nirvana_seat::NO_SEAT_EXIT,
                 format!(
@@ -3441,6 +3443,8 @@ fn book_with(
                 ),
             )
         })?;
+        // gsrc review S1: the lease keeps the needs as given, which a `seat run` reusing it reads.
+        pick.needs = request.needs.clone();
         // The fix round's `book_pick`: the override is counted with its time, so the 8-day prune keeps it.
         let (lease, _) = nirvana_seat::book_pick(
             &mut leases,
@@ -3699,9 +3703,17 @@ pub fn seat_order_with(
         &booked.servers,
     );
     // Live checks 2026-11-01 F2: a research or media order is asked for its sources only when it asks for the web, read
-    // from the order as written too: herdr's lessons, cards and lines below name pages of their own.
-    let sources_line =
-        crate::nirvana_gate::sources_brief_line(&booked.class, &request.needs, &text);
+    // from the order as written too: herdr's lessons, cards and lines below name pages of their own. The needs are
+    // this run's and the booking's: `seat pick --book --needs browser` then `seat run` with none (review S1).
+    let mut web_needs = request.needs.clone();
+    web_needs.extend(
+        booked
+            .needs
+            .iter()
+            .filter(|need| !request.needs.contains(need))
+            .cloned(),
+    );
+    let sources_line = crate::nirvana_gate::sources_brief_line(&booked.class, &web_needs, &text);
     // Plan 34 §2.3: a folder profile's cards, one line each, after the lessons and offered the same way. A teacher is
     // offered none (P34a review nit: an offer counts toward decay); its brief lists every card, copied into its folder.
     let cards = match profile {

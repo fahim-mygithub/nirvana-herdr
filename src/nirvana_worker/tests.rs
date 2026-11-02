@@ -2850,3 +2850,118 @@ fn gsrc_a_rate_limited_reseat_keeps_the_parents_effort() {
     assert_eq!(reseated.model, seat.model_for(Effort::Medium));
     nirvana_seat::set_test_world(None);
 }
+
+/// Review S1: the needs a booking was made with reach the sources line. `seat pick --book --needs browser` (or
+/// `bladebro`, which the seat rule never reads), then `seat run` with no `--needs` as the seat skill writes it, is a web
+/// order; the same order booked with no need is not.
+#[test]
+fn gsrc_seat_run_reads_the_needs_the_booking_was_made_with() {
+    use crate::nirvana_gate::{NO_WEB_SOURCES, WEB_SOURCES};
+    let (_home, project) = p29_project("gsrc-booked-needs");
+    std::env::set_var(crate::nirvana_run::PROJECT_ENV, &project.root);
+    let book = |order: &str, needs: &str| {
+        let mut args: Vec<String> = [
+            "pick",
+            "--class",
+            "research.read",
+            "--book",
+            order,
+            "--run",
+            "r1",
+        ]
+        .map(String::from)
+        .to_vec();
+        if !needs.is_empty() {
+            args.extend(["--needs".to_owned(), needs.to_owned()]);
+        }
+        nirvana_seat::cli(&args).unwrap();
+    };
+    for (order, needs) in [("web1", "browser"), ("web2", "bladebro"), ("plain1", "")] {
+        book(order, needs);
+    }
+    std::env::remove_var(crate::nirvana_run::PROJECT_ENV);
+    let leases =
+        nirvana_seat::load_leases(&nirvana_seat::dir().join(nirvana_seat::LEASES_FILE)).unwrap();
+    let now = crate::nirvana_usage::unix(std::time::SystemTime::now());
+    // The written order asks for no web by itself: only the booking's need makes it one.
+    let text = "Check the vendor's pricing page and give each plan's price.\n";
+    assert_eq!(
+        crate::nirvana_gate::web_asked("research.read", &[], text),
+        None
+    );
+    let order_file = project.root.join("order.md");
+    std::fs::write(&order_file, text).unwrap();
+    let _live: Vec<_> = ["web1", "web2", "plain1"]
+        .iter()
+        .map(|order| take_live(&project, "r1", order).unwrap().unwrap())
+        .collect();
+    for order in ["web1", "web2", "plain1"] {
+        let seat = leases.live(order, now).expect(order).seat.clone();
+        seat_order(
+            &project,
+            &SeatRequest {
+                seat,
+                order_file: order_file.clone(),
+                order: order.into(),
+                run: "r1".into(),
+                class: None,
+                size: None,
+                needs: Vec::new(),
+                not_family: Vec::new(),
+                mode: None,
+                effort: None,
+                reason: None,
+                worktree: false,
+                auto: false,
+                send_ok: None,
+            },
+        )
+        .unwrap();
+    }
+    let state = replay(&project.journal("r1").read().0);
+    let brief = |order: &str| {
+        std::fs::read_to_string(&state.order(order).unwrap().seated.order_file).unwrap()
+    };
+    for order in ["web1", "web2"] {
+        assert!(
+            brief(order).contains(WEB_SOURCES),
+            "{order}: {}",
+            brief(order)
+        );
+    }
+    assert!(
+        brief("plain1").contains(NO_WEB_SOURCES),
+        "{}",
+        brief("plain1")
+    );
+    // `seat run --class --needs` books for itself, and its lease keeps the needs as given for a later run.
+    let rule = leases.live("plain1", now).unwrap().seat.clone();
+    let _web3 = take_live(&project, "r1", "web3").unwrap().unwrap();
+    seat_order(
+        &project,
+        &SeatRequest {
+            seat: rule,
+            order_file: order_file.clone(),
+            order: "web3".into(),
+            run: "r1".into(),
+            class: Some("research.read".into()),
+            size: None,
+            needs: vec!["bladebro".into()],
+            not_family: Vec::new(),
+            mode: None,
+            effort: None,
+            reason: None,
+            worktree: false,
+            auto: false,
+            send_ok: None,
+        },
+    )
+    .unwrap();
+    let leases =
+        nirvana_seat::load_leases(&nirvana_seat::dir().join(nirvana_seat::LEASES_FILE)).unwrap();
+    assert_eq!(
+        leases.live("web3", now).expect("web3").pick["needs"],
+        serde_json::json!(["bladebro"])
+    );
+    nirvana_seat::set_test_world(None);
+}
