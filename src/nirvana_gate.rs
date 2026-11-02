@@ -191,6 +191,9 @@ pub struct Spec {
     pub serves: Vec<u16>,
     /// Plan 33 §3.2: `Profile: <name>`, the contract with P33a's seating; the last valid one wins.
     pub profile: Option<String>,
+    /// herdr seated the order with `NO_WEB_SOURCES` (`web_asked` found no web in it): its sources axis is a note when
+    /// it cites nothing. False for an order seated before the rule, which keeps the old fail.
+    pub no_web: bool,
 }
 
 fn words(rest: &str) -> impl Iterator<Item = String> + '_ {
@@ -232,6 +235,8 @@ pub fn spec(text: &str) -> Spec {
             if crate::nirvana_lessons::valid_profile(name) {
                 spec.profile = Some(name.to_owned());
             }
+        } else if line.starts_with(NO_WEB_SOURCES) {
+            spec.no_web = true;
         }
     }
     spec
@@ -1492,29 +1497,112 @@ pub fn stable_read(url: &str, reads: &Reads) -> bool {
     }
 }
 
-/// Plan 24 §5: gate axis for `research.*` and `media.*` classes.
-/// Fails with no sources; fails for each source URL that does not appear in the order's stream
-/// as a fetch, read or browser call. URLs are compared after trimming a trailing `/` and the fragment.
-pub fn sources_axis(class: &str, report: Option<&Value>, stream: &str) -> Option<Axis> {
+// ---- live checks 2026-11-01 F2: sources only when the order asks for the web ----
+
+/// The class that is the web (ROLE.md: "Web research, shopping and reading pages are `research.web`").
+pub const WEB_CLASS: &str = "research.web";
+
+/// The needs that put the web in an order: the two that grant bladebro (`nirvana_bladebro::GRANTING`), and `web`.
+const WEB_NEEDS: [&str; 3] = ["browser", "bladebro", "web"];
+
+/// What in an order as written asks for the web: a URL, or the web named. Lowercase; `online` and `google` are left
+/// out, since a research.read order names "online docs" or a Google API as often as it asks for a page.
+const WEB_WORDS: [&str; 10] = [
+    "http://",
+    "https://",
+    "www.",
+    "the web",
+    "web search",
+    "web page",
+    "webpage",
+    "website",
+    "youtube",
+    "internet",
+];
+
+/// herdr's sources line for an order that asks for the web: the Work Report cites what it read (plan 24 §5).
+pub const WEB_SOURCES: &str =
+    "Your Work Report must include the `sources` array of `{url, used_for}` for each source consulted.";
+
+/// herdr's sources line for a research or media order that does not ask for the web. lc4-s1 ran `curl
+/// https://example.com` "as required by the order's sources specification", which was `WEB_SOURCES` in an order that
+/// quoted rules from memory (live checks 2026-11-01, F2). `spec` reads this line back as `no_web`.
+pub const NO_WEB_SOURCES: &str = "This order asks for no web page, so the gate wants no source from you: put in the \
+Work Report's `sources` array (`{url, used_for}`) only a page you did open for the order, and never open one just to \
+have a source to cite.";
+
+/// Why an order asks for the web, read at seating from its class, its needs and its text as written (before herdr's
+/// lessons, cards and lines, which name pages of their own); `None` when it does not. Live checks 2026-11-01 F2: lc3 (an
+/// MCP call) and lc4 (rules from memory) were sent back "no sources", and both redos fetched a page unrelated to the
+/// order to have one to cite.
+pub fn web_asked(class: &str, needs: &[String], written: &str) -> Option<String> {
+    if class == WEB_CLASS {
+        return Some(format!("the class is {WEB_CLASS}"));
+    }
+    if let Some(need) = needs.iter().find(|need| WEB_NEEDS.contains(&need.as_str())) {
+        return Some(format!("the order needs {need}"));
+    }
+    let lower = written.to_lowercase();
+    WEB_WORDS
+        .iter()
+        .find(|word| lower.contains(*word))
+        .map(|word| format!("the order says `{}`", word.trim_end_matches('.')))
+}
+
+/// The sources line herdr puts in a research or media order's brief; `None` for any other class.
+pub fn sources_brief_line(class: &str, needs: &[String], written: &str) -> Option<&'static str> {
     if !class.starts_with("research.") && !class.starts_with("media.") {
         return None;
     }
-    let Some(report) = report else {
-        return Some(Axis::new(
+    Some(match web_asked(class, needs, written) {
+        Some(_) => WEB_SOURCES,
+        None => NO_WEB_SOURCES,
+    })
+}
+
+/// What the gate reads of `web_asked` from the root order: the class again, then herdr's line. An order with
+/// neither line (seated before the rule) asks for the web, as every research order did.
+pub fn web_of(class: &str, spec: &Spec) -> Option<&'static str> {
+    if class == WEB_CLASS {
+        Some("the class is research.web")
+    } else if spec.no_web {
+        None
+    } else {
+        Some("herdr's brief asked it for its sources")
+    }
+}
+
+/// Plan 24 §5: gate axis for `research.*` and `media.*` classes.
+/// Fails for each source URL that does not appear in the order's stream as a fetch, read or browser call. URLs are
+/// compared after trimming a trailing `/` and the fragment. Citing nothing fails only an order that asks for the web
+/// (`web`, from `web_of`); for any other it is a note (live checks 2026-11-01, F2). Every source cited is checked.
+pub fn sources_axis(
+    class: &str,
+    web: Option<&str>,
+    report: Option<&Value>,
+    stream: &str,
+) -> Option<Axis> {
+    if !class.starts_with("research.") && !class.starts_with("media.") {
+        return None;
+    }
+    let none_cited = |why: &str| match web {
+        Some(asked) => Axis::new(
             "sources",
             Mark::Fail,
-            "no sources: no Work Report was delivered",
-        ));
+            format!("no sources: {why} ({asked})"),
+        ),
+        None => Axis::new(
+            "sources",
+            Mark::Note,
+            format!("no web asked; none cited ({why})"),
+        ),
+    };
+    let Some(report) = report else {
+        return Some(none_cited("no Work Report was delivered"));
     };
     let sources = match report.get("sources").and_then(Value::as_array) {
         Some(s) if !s.is_empty() => s,
-        _ => {
-            return Some(Axis::new(
-                "sources",
-                Mark::Fail,
-                "no sources: the Work Report names no sources",
-            ))
-        }
+        _ => return Some(none_cited("the Work Report names no sources")),
     };
     let reads = stream_reads(stream);
     let mut missing = Vec::new();
@@ -2453,7 +2541,8 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
     };
     axes.push(served_axis(subject.class, &subject.spec.serves, listened));
     let stream = stream_text(&Project::at(subject.root), subject.run, subject.order);
-    if let Some(axis) = sources_axis(subject.class, subject.report, &stream) {
+    let web = web_of(subject.class, subject.spec);
+    if let Some(axis) = sources_axis(subject.class, web, subject.report, &stream) {
         // Plan 37 §1.2: reel-motion-gemini's six YouTube ids were invented, and only a reader caught it, 8 days late.
         let (axis, note) = match oembed_base() {
             Some(base) => check_videos(
@@ -2679,6 +2768,11 @@ pub const INVENTED_SOURCES: &str = "the gate found cited videos that do not exis
 sources is trusted: drop every source it cited and every claim that rests on one, and find them again, citing only \
 what you opened in this session.";
 
+/// The send-back line for an order seated with `NO_WEB_SOURCES`, whatever axis failed.
+pub const NO_WEB_REDO: &str =
+    "This order asks for no web page: the gate does not want a source from you, and \
+opening a page only to cite it is not the fix.";
+
 pub fn send_back_brief(
     order: &str,
     root: &str,
@@ -2703,9 +2797,16 @@ pub fn send_back_brief(
         (true, true) => format!("{fix} For the sources: {SOURCES_REDO}"),
         (false, _) => fix.to_owned(),
     };
+    // Live checks 2026-11-01 F2: lc4-s1's brief said "no sources" over an order line asking for them, and its worker
+    // fetched example.com to have one. An order that asks for no web is told the gate wants no source from it.
+    let no_web = if spec(root_text).no_web {
+        format!(" {NO_WEB_REDO}")
+    } else {
+        String::new()
+    };
     let mut brief = format!(
         "# Send-back {n} of {SEND_BACK_CAP}: {root}\n\nherdr's gate sent back {order}. Its work is in this folder, committed \
-on this branch. You are a new session: {opening}\n\n## What the gate found\n\n"
+on this branch. You are a new session: {opening}{no_web}\n\n## What the gate found\n\n"
     );
     for axis in failing(axes) {
         brief.push_str(&format!("- **{}**: {}\n", axis.axis, axis.why));
@@ -3538,7 +3639,7 @@ with `herdr seat run`?",
         world.leases = leases.leases.clone();
         world.overrides_used = leases.overrides(run);
     }
-    let (pick, why_seated, child_override_reason) =
+    let (mut pick, why_seated, child_override_reason) =
         match nirvana_seat::pick(table, &world, &request) {
             Ok(pick) => (pick, None, inherited_reason),
             Err(no_seat) if !invented.is_empty() => {
@@ -3582,6 +3683,8 @@ with `herdr seat run`?",
                 )
             }
         };
+    // Live checks 2026-11-01 F3: the redo runs at the effort its parent ran at, the caller's `--effort` included.
+    nirvana_seat::keep_effort(table, &mut pick, seated.effort);
     book(table, &pick, &id, run).map_err(|err| err.to_string())?;
     let cwd = PathBuf::from(&seated.cwd);
     let order_file = crate::nirvana_worker::write_order(project, &cwd, &id, &brief)

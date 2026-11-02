@@ -2734,3 +2734,119 @@ fn p37b_exec_gates_a_blocked_delivery_and_its_wake_keeps_the_block() {
         .any(|event| matches!(&event.kind, Kind::Gated { order, .. } if order == "o2-rev1")));
     nirvana_seat::set_test_world(None);
 }
+
+// ---- live checks 2026-11-01 F2 and F3 ----
+
+/// F2: `seat run` asks a research order for its sources only when it asks for the web: lc4's order (rules from
+/// memory) gets `NO_WEB_SOURCES`, the same class with a URL in it gets `WEB_SOURCES`.
+#[test]
+fn gsrc_seat_run_asks_sources_only_of_an_order_that_asks_for_the_web() {
+    use crate::nirvana_gate::{NO_WEB_SOURCES, WEB_SOURCES};
+    let (_home, project) = p29_project("gsrc-sources-line");
+    let table = nirvana_seat::table_for(&project.root).unwrap();
+    let world = nirvana_seat::live_world(&table);
+    let rule = nirvana_seat::pick(&table, &world, &nirvana_seat::Request::new("research.read"))
+        .unwrap()
+        .seat;
+    let seat = |order: &str, text: &str| {
+        let order_file = project.root.join(format!("{order}.md"));
+        std::fs::write(&order_file, text).unwrap();
+        SeatRequest {
+            seat: rule.clone(),
+            order_file,
+            order: order.into(),
+            run: "r1".into(),
+            class: Some("research.read".into()),
+            size: None,
+            needs: Vec::new(),
+            not_family: Vec::new(),
+            mode: None,
+            effort: None,
+            reason: None,
+            worktree: false,
+            auto: false,
+            send_ok: None,
+        }
+    };
+    let _live: Vec<_> = ["lc4", "url"]
+        .iter()
+        .map(|order| take_live(&project, "r1", order).unwrap().unwrap())
+        .collect();
+    seat_order(
+        &project,
+        &seat(
+            "lc4",
+            "Without opening, reading or listing any file, quote every rule.\n",
+        ),
+    )
+    .unwrap();
+    seat_order(
+        &project,
+        &seat("url", "Summarise https://example.com/spec.\n"),
+    )
+    .unwrap();
+    let state = replay(&project.journal("r1").read().0);
+    let brief = |order: &str| {
+        std::fs::read_to_string(&state.order(order).unwrap().seated.order_file).unwrap()
+    };
+    assert!(brief("lc4").contains(NO_WEB_SOURCES), "{}", brief("lc4"));
+    assert!(!brief("lc4").contains(WEB_SOURCES), "{}", brief("lc4"));
+    assert!(brief("url").contains(WEB_SOURCES), "{}", brief("url"));
+    assert!(!brief("url").contains(NO_WEB_SOURCES), "{}", brief("url"));
+    // The gate reads the line back from the order copy.
+    assert!(crate::nirvana_gate::spec(&brief("lc4")).no_web);
+    assert!(!crate::nirvana_gate::spec(&brief("url")).no_web);
+    nirvana_seat::set_test_world(None);
+}
+
+/// F3: a rate-limited reseat runs at the effort its parent ran at, not the class's (sweep.mechanical is low; the
+/// parent ran haiku medium).
+#[test]
+fn gsrc_a_rate_limited_reseat_keeps_the_parents_effort() {
+    let (_home, project) = p29_project("gsrc-reseat-effort");
+    let run = "r1";
+    let journal = project.journal(run);
+    let mut seated = p29_seated(&project, "o1", "haiku");
+    seated.needs = Vec::new();
+    assert_eq!(seated.effort, Effort::Medium);
+    journal.append(1, opened()).unwrap();
+    journal
+        .append(2, Kind::Seated(Box::new(seated.clone())))
+        .unwrap();
+    let child = child_id(&replay(&journal.read().0), "o1");
+    let _live = take_live(&project, run, &child).unwrap().unwrap();
+    let limit = RateLimit {
+        signal: "rate_limit_event".into(),
+        pool: Some("max".into()),
+        window: None,
+        resets_at: None,
+        detail: String::new(),
+    };
+    // The rule alone reseats it at the class's effort: the test has an effort to keep.
+    let table = nirvana_seat::table_for(&project.root).unwrap();
+    let spent = spent_world(&table, nirvana_seat::live_world(&table), &limit, "max");
+    let mut plain = nirvana_seat::Request::new("sweep.mechanical");
+    plain.size = seated.size;
+    assert_eq!(
+        nirvana_seat::pick(&table, &spent, &plain).unwrap().effort,
+        Effort::Low
+    );
+    let mut out = Vec::new();
+    rate_limited(
+        &project,
+        &journal,
+        run,
+        &seated,
+        &limit,
+        &Stream::new("claude"),
+        &mut out,
+    )
+    .unwrap();
+    let view = String::from_utf8_lossy(&out).into_owned();
+    let state = replay(&journal.read().0);
+    let reseated = &state.order(&child).expect(&view).seated;
+    assert_eq!(reseated.effort, Effort::Medium, "{}", reseated.reason);
+    let seat = table.seat(&reseated.seat).expect("seat");
+    assert_eq!(reseated.model, seat.model_for(Effort::Medium));
+    nirvana_seat::set_test_world(None);
+}

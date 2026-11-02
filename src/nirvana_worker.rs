@@ -2252,7 +2252,11 @@ pub(crate) fn rate_limited(
             Ok(true)
         }
         RateDecision::Reseat { seat } => {
-            let Ok(pick) = picked else { return Ok(false) };
+            let Ok(mut pick) = picked else {
+                return Ok(false);
+            };
+            // Live checks 2026-11-01 F3: the reseat runs at the effort its parent ran at, as a send-back does.
+            nirvana_seat::keep_effort(&table, &mut pick, seated.effort);
             let brief = continuation_brief(project, run, seated, &state, diff.as_deref(), stream)?;
             let booked = book_child(&table, &pick, &child, run)?;
             let child_seated = Seated {
@@ -3694,6 +3698,10 @@ pub fn seat_order_with(
         &crate::nirvana_gui_tools::project_servers(&project.root).unwrap_or_default(),
         &booked.servers,
     );
+    // Live checks 2026-11-01 F2: a research or media order is asked for its sources only when it asks for the web, read
+    // from the order as written too: herdr's lessons, cards and lines below name pages of their own.
+    let sources_line =
+        crate::nirvana_gate::sources_brief_line(&booked.class, &request.needs, &text);
     // Plan 34 §2.3: a folder profile's cards, one line each, after the lessons and offered the same way. A teacher is
     // offered none (P34a review nit: an offer counts toward decay); its brief lists every card, copied into its folder.
     let cards = match profile {
@@ -3712,8 +3720,9 @@ pub fn seat_order_with(
     // Plan 29 §5.3 and review F4: an order granted a server never starts a device; a desktop one batches, reads crops.
     // Plan 31 §2.2: an order with the owner's verified approval may Send once, after an explained slice.
     text = crate::nirvana_gui_tools::with_brief_lines(text, &booked.servers, send_ok.is_some());
-    if booked.class.starts_with("research.") || booked.class.starts_with("media.") {
-        text.push_str("\n\nYour Work Report must include the `sources` array of `{url, used_for}` for each source consulted.");
+    if let Some(line) = sources_line {
+        text.push_str("\n\n");
+        text.push_str(line);
     }
     // Plan 35 §5 P35b item 3: an agy worker reads pages with shell fetches; the gate sees only a URL in its command.
     if let Some(line) = crate::nirvana_agy_tools::sources_line(&booked.cli, &booked.class) {

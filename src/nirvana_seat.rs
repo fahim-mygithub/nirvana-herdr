@@ -1428,6 +1428,36 @@ pub fn step_up(table: &Table, class: &str, seat: &str, now: u64) -> Option<Strin
         .map(|(entry, _)| entry.seat.clone())
 }
 
+/// A child's re-pick (a send-back, a rate-limit reseat, plan 37's step-up) at the effort its parent ran at. The rule
+/// gives the class's effort, and the caller's `--effort` is applied after the pick, so a child dropped it: lc4 ran
+/// research.read at `--effort low` and its send-back lc4-s1 was seated on flash medium (live checks 2026-11-01, F3).
+/// `step_up` names a seat and no effort, so a stepped-up child keeps the parent's effort too. A seat that does not
+/// offer it keeps the pick's, and the reason says so.
+pub fn keep_effort(table: &Table, pick: &mut Pick, effort: Effort) {
+    if pick.effort == effort {
+        return;
+    }
+    let Some(seat) = table.seat(&pick.seat) else {
+        return;
+    };
+    if !seat.efforts.contains(&effort) {
+        pick.reason = format!(
+            "{}; {} has no {}, the parent's effort",
+            pick.reason,
+            seat.id,
+            effort.word()
+        );
+        return;
+    }
+    pick.reason = format!(
+        "{}; effort {} kept from the parent",
+        pick.reason,
+        effort.word()
+    );
+    pick.effort = effort;
+    pick.model = seat.model_for(effort);
+}
+
 /// One pass of the rule at the class's effort and, when a skip was priced, one effort step down (§5.5).
 fn seat_once(
     table: &Table,
