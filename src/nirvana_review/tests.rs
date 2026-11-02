@@ -59,6 +59,13 @@ fn done(status: &str) -> Value {
     serde_json::json!({"status":status,"summary":"added mul","files":["calc.py"],"tests":[{"name":"test_mul","result":"pass"}],"gotchas":[]})
 }
 
+/// `done`, naming a gotcha: a pass the gate reviews (review-trim-agy-browser 2026-11-02: a clean first pass is not).
+fn learned() -> Value {
+    let mut report = done("done");
+    report["gotchas"] = serde_json::json!(["calc.py: mul takes no floats"]);
+    report
+}
+
 /// A profile that would show on a worker that took it: a persona, a model, an effort, a forbidden tool.
 const SLICER: &str = "---\ndescription: Slices prints through the studio server.\nmodel: claude-opus-5-5\neffort: high\n\
 disallowed_tools: [Bash]\n---\nYou slice prints only through the studio server.\n";
@@ -340,7 +347,7 @@ fn p33_over_the_daily_cap_the_review_is_skipped_and_journaled() {
         state.queued = PER_DAY;
     })
     .expect("state");
-    delivered(&root, "r1", "b3", done("done"), "TOTAL 1 passed", None);
+    delivered(&root, "r1", "b3", learned(), "TOTAL 1 passed", None);
     let ruling = nirvana_gate::gate(&project, "r1", "b3").expect("gate");
     assert_eq!(ruling.verdict, "pass");
     assert!(state_of(&root, "r1").order("b3-lr").is_none());
@@ -366,6 +373,7 @@ fn p33_over_the_daily_cap_the_review_is_skipped_and_journaled() {
             &project,
             &state_of(&root, "r1"),
             &review,
+            None,
             PER_DAY,
             now() + 86_400
         ),
@@ -601,7 +609,7 @@ fn p33_a_review_of_a_profiled_order_takes_no_profile() {
         &root,
         "r1",
         "b1",
-        done("done"),
+        learned(),
         // The worker read its order file back: the stream holds herdr's own text too.
         "TOTAL 12 passed, 0 failed in 3 s\nowns: calc.py test_mul.py\n",
         Some("slicer"),
@@ -671,7 +679,7 @@ fn p33_a_review_whose_lessons_folder_changed_outside_herdr_applies_nothing() {
         &root,
         "r1",
         "b1",
-        done("done"),
+        learned(),
         "TOTAL 12 passed, 0 failed in 3 s",
         None,
     );
@@ -706,7 +714,7 @@ fn p33_a_review_whose_lessons_folder_changed_outside_herdr_applies_nothing() {
         &root,
         "r1",
         "b2",
-        done("done"),
+        learned(),
         "TOTAL 12 passed, 0 failed in 3 s",
         None,
     );
@@ -771,7 +779,7 @@ fn p33_a_delivered_review_is_gated_by_herdr_with_no_orchestrator_turn() {
             &root,
             run,
             subject,
-            done("done"),
+            learned(),
             "TOTAL 12 passed, 0 failed in 3 s",
             Some("slicer"),
         );
@@ -1036,4 +1044,248 @@ fn p33_run_end_queues_the_merge_of_a_crowded_class_and_the_receipt_prints_origin
         receipt.contains("## Lessons by origin\n\n- worker: 9 lesson(s) · offered 0"),
         "{receipt}"
     );
+}
+
+// ---- review-trim-agy-browser 2026-11-02 (live checks F8): a review only when there is something to learn ----
+
+/// One order of `chain_state`: `(id, parent, why, verdict)`.
+type Link<'a> = (&'a str, Option<&'a str>, Option<&'a str>, Option<&'a str>);
+
+/// A journal of `orders`, every one delivered `report`, replayed.
+fn chain_state(root: &Path, run: &str, orders: &[Link], report: &Value) -> nirvana_run::RunState {
+    let journal = Project::at(root).journal(run);
+    for (n, (id, parent, why, verdict)) in orders.iter().enumerate() {
+        let at = 10 + 3 * n as u64;
+        let mut seated = seated(id, "build.bounded");
+        seated.parent = parent.map(str::to_owned);
+        seated.why = why.map(str::to_owned);
+        journal
+            .append(at, Kind::Seated(Box::new(seated)))
+            .expect("seated");
+        journal
+            .append(
+                at + 1,
+                Kind::Delivered {
+                    order: (*id).into(),
+                    report: report.clone(),
+                },
+            )
+            .expect("delivered");
+        if let Some(verdict) = verdict {
+            journal
+                .append(
+                    at + 2,
+                    Kind::Gated {
+                        order: (*id).into(),
+                        verdict: (*verdict).into(),
+                        reason: None,
+                        axes: Vec::new(),
+                    },
+                )
+                .expect("gated");
+        }
+    }
+    state_of(root, run)
+}
+
+#[test]
+fn lrs_a_clean_first_pass_is_skipped_before_the_cap_counts_it() {
+    let _home = quiet("lrs-skip");
+    let root = repo("lrs-skip");
+    let project = Project::at(&root);
+    let state = chain_state(&root, "r1", &[("c1", None, None, None)], &done("done"));
+    let known = state.order("c1").expect("c1");
+    let why = wanted_with(
+        &project,
+        &state,
+        known,
+        Some(&Verdict::Pass),
+        PER_DAY,
+        now(),
+    )
+    .expect_err("a clean first pass is skipped")
+    .expect("with a reason");
+    assert!(
+        why.starts_with("nothing to learn: a first-pass delivery"),
+        "{why}"
+    );
+    // The skip comes before the cap: a spent cap still reads as nothing to learn, and nothing is counted.
+    set_used_for_test(&root, now(), PER_DAY);
+    assert_eq!(
+        wanted_with(
+            &project,
+            &state,
+            known,
+            Some(&Verdict::Pass),
+            PER_DAY,
+            now()
+        ),
+        Err(Some(why))
+    );
+    assert_eq!(used_today(&root, now()), PER_DAY);
+    set_used_for_test(&root, now(), 0);
+    // The verdict unknown (`wanted`, the gate's call until the hunk lands): reviewed, as before the trim.
+    assert_eq!(
+        wanted_with(&project, &state, known, None, PER_DAY, now()),
+        Ok(())
+    );
+    // A send-back verdict always has something to learn.
+    assert_eq!(
+        wanted_with(
+            &project,
+            &state,
+            known,
+            Some(&Verdict::SentBack(vec!["owned: x".into()])),
+            PER_DAY,
+            now()
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn lrs_each_report_signal_keeps_the_review() {
+    let _home = quiet("lrs-signals");
+    let root = repo("lrs-signals");
+    for (n, (key, value)) in [
+        (
+            "gotchas",
+            serde_json::json!(["calc.py: mul ignores negatives"]),
+        ),
+        (
+            "lesson",
+            serde_json::json!({"name":"n","class":"build.bounded","steps":"s","evidence":"e"}),
+        ),
+        ("lesson_ops", serde_json::json!([{"op":"new"}])),
+        ("card_ops", serde_json::json!([{"op":"new"}])),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut report = done("done");
+        report[key] = value;
+        let run = format!("r{n}");
+        let state = chain_state(&root, &run, &[("s1", None, None, None)], &report);
+        assert_eq!(
+            idle(&state, state.order("s1").expect("s1"), &Verdict::Pass),
+            None,
+            "a report naming {key} has something to learn"
+        );
+    }
+    // Empty lists and an empty lesson are the clean report's own shape.
+    let mut report = done("done");
+    report["lesson_ops"] = serde_json::json!([]);
+    report["card_ops"] = serde_json::json!([]);
+    report["lesson"] = Value::Null;
+    let state = chain_state(&root, "r9", &[("s1", None, None, None)], &report);
+    assert!(idle(&state, state.order("s1").expect("s1"), &Verdict::Pass).is_some());
+}
+
+#[test]
+fn lrs_a_pass_after_a_send_back_keeps_the_review_through_a_reseat() {
+    let _home = quiet("lrs-chain");
+    let root = repo("lrs-chain");
+    let clean = done("done");
+    // A redo that passes: its chain holds the correction.
+    let state = chain_state(
+        &root,
+        "r1",
+        &[
+            ("o", None, None, Some("sent_back")),
+            ("o-s1", Some("o"), Some("send_back"), None),
+        ],
+        &clean,
+    );
+    assert_eq!(
+        idle(&state, state.order("o-s1").expect("redo"), &Verdict::Pass),
+        None
+    );
+    // The redo's pool ran out and a reseat child delivered: `nirvana_gate::chain` stops at the reseat; this walks on.
+    let state = chain_state(
+        &root,
+        "r2",
+        &[
+            ("o", None, None, Some("sent_back")),
+            ("o-s1", Some("o"), Some("send_back"), None),
+            ("o-s1-r1", Some("o-s1"), Some("reseat"), None),
+        ],
+        &clean,
+    );
+    assert_eq!(
+        idle(
+            &state,
+            state.order("o-s1-r1").expect("reseat"),
+            &Verdict::Pass
+        ),
+        None
+    );
+    // A reseat of a first order is still the first pass.
+    let state = chain_state(
+        &root,
+        "r3",
+        &[
+            ("p", None, None, None),
+            ("p-r1", Some("p"), Some("reseat"), None),
+        ],
+        &clean,
+    );
+    assert!(idle(&state, state.order("p-r1").expect("reseat"), &Verdict::Pass).is_some());
+    // A reseat whose parent was gated other than pass (asked) has something to learn.
+    let state = chain_state(
+        &root,
+        "r4",
+        &[
+            ("q", None, None, Some("asked")),
+            ("q-r1", Some("q"), Some("reseat"), None),
+        ],
+        &clean,
+    );
+    assert_eq!(
+        idle(&state, state.order("q-r1").expect("reseat"), &Verdict::Pass),
+        None
+    );
+}
+
+#[test]
+fn lrs_the_gate_seats_no_review_of_a_clean_first_pass_and_counts_none() {
+    let _home = quiet("lrs-gate");
+    let root = repo("lrs-gate");
+    let project = Project::at(&root);
+    delivered(&root, "r1", "c1", done("done"), "TOTAL 1 passed", None);
+    let ruling = nirvana_gate::gate(&project, "r1", "c1").expect("gate");
+    assert_eq!(ruling.verdict, "pass", "{ruling:?}");
+    assert!(state_of(&root, "r1").order("c1-lr").is_none());
+    assert_eq!(
+        used_today(&root, now()),
+        0,
+        "a skipped review is not counted"
+    );
+    // Said once: as the `gated` event's `review_skipped` axis when the gate asks `wanted_for` (the record's hunk), else
+    // as `queue_review`'s line.
+    let axes = gated_axes(&root, "r1", "c1");
+    let journaled = axes.iter().any(|axis| {
+        axis["axis"] == SKIPPED
+            && axis["why"]
+                .as_str()
+                .is_some_and(|why| why.starts_with("nothing to learn"))
+    });
+    let told = ruling
+        .next
+        .iter()
+        .any(|line| line.starts_with("lesson review not queued: nothing to learn"));
+    assert!(journaled != told, "{axes:?} {:?}", ruling.next);
+    // The same delivery naming a gotcha is reviewed, and counted.
+    let mut report = done("done");
+    report["gotchas"] = serde_json::json!(["calc.py: mul ignores negatives"]);
+    delivered(&root, "r1", "c2", report, "TOTAL 1 passed", None);
+    let ruling = nirvana_gate::gate(&project, "r1", "c2").expect("gate");
+    assert!(
+        ruling
+            .next
+            .iter()
+            .any(|line| line.starts_with("c2-lr seated on")),
+        "{:?}",
+        ruling.next
+    );
+    assert_eq!(used_today(&root, now()), 1);
 }

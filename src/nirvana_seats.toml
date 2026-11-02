@@ -187,6 +187,9 @@ use = [
   { effort = "medium", windows = { "5h" = 0.003, week = 0.00038, "week.fable" = 0.00076 }, at = "2026-10-17", basis = "prior: P4 sonnet medium's tokens at fable prices, $0.076, times the max prior; week.fable at twice the week (P6: half the week)" },
 ]
 
+# Plan 35 R2: every agy seat lists `browser`. herdr grants a browser order bladebro on either CLI (plan 35c), and
+# live check 35.1 (2026-11-01) saw agy drive it headless and the gate pass. One order is not a score: research.web
+# keeps its numbers until more orders are measured.
 [[seat]]
 id = "g-opus"
 cli = "agy"
@@ -194,7 +197,7 @@ model = "claude-opus-5-5-{effort}"
 family = "anthropic"
 pool = "google3p"
 efforts = ["low", "medium", "high"]
-capabilities = ["code", "tools", "image", "pdf", "web"]
+capabilities = ["code", "tools", "image", "pdf", "web", "browser"]
 enabled = true
 fallback = true
 prices = [
@@ -213,7 +216,7 @@ model = "claude-sonnet-5-5-{effort}"
 family = "anthropic"
 pool = "google3p"
 efforts = ["low", "medium", "high"]
-capabilities = ["code", "tools", "image", "pdf", "web"]
+capabilities = ["code", "tools", "image", "pdf", "web", "browser"]
 enabled = true
 fallback = true
 prices = [
@@ -232,7 +235,7 @@ model = "gemini-4-argon-{effort}"
 family = "google"
 pool = "argon"
 efforts = ["low", "medium", "high"]
-capabilities = ["code", "tools", "image", "pdf", "web", "image_gen", "video", "audio", "context_1m"]
+capabilities = ["code", "tools", "image", "pdf", "web", "browser", "image_gen", "video", "audio", "context_1m"]
 enabled = true
 # Argon's price doubles on 2026-11-30 (Google blog); cached input 95% off.
 prices = [
@@ -252,7 +255,7 @@ model = "gemini-3.8-flash-{effort}"
 family = "google"
 pool = "gemini"
 efforts = ["low", "medium", "high"]
-capabilities = ["code", "tools", "image", "pdf", "web", "image_gen", "video", "audio", "context_1m"]
+capabilities = ["code", "tools", "image", "pdf", "web", "browser", "image_gen", "video", "audio", "context_1m"]
 enabled = true
 prices = [
   { from = "2026-10-17", input = 0.75, output = 3.75, cache_read = 0.075, cache_write = 0.75, basis = "aggregators, medium confidence (plan 12 §2); cache read at a tenth of input, unverified" },
@@ -491,7 +494,7 @@ efficient_effort = "low"
 sota_effort = "medium"
 weight = 0.5
 bars = { efficient = 68, balanced = 80, sota = 100 }
-why = "plan 35: agy searches with search_web and reads pages with bladebro when granted, else shell fetches; rescore after §6"
+why = "plan 35: agy searches with search_web and reads pages with bladebro when granted, else shell fetches; agy seats list browser since live check 35.1 (one order, so not rescored)"
 seats = [
   { seat = "flash", score = 84 },
   { seat = "argon", score = 84 },

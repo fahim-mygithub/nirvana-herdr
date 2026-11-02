@@ -1399,7 +1399,9 @@ fn profiled_delivery(name: &str) -> (Project, PathBuf) {
             3,
             Kind::Delivered {
                 order: "b1".into(),
-                report: serde_json::json!({"status":"done","summary":"added mul","files":["calc.py"],"tests":[],"gotchas":[]}),
+                // A gotcha, so the pass is reviewed (review-trim-agy-browser 2026-11-02: a clean first pass is not).
+                report: serde_json::json!({"status":"done","summary":"added mul","files":["calc.py"],"tests":[],
+                    "gotchas":["calc.py: mul takes no floats"]}),
             },
         )
         .unwrap();

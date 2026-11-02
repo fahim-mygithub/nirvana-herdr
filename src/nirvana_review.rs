@@ -23,6 +23,9 @@
 //!   reviewer's own `lesson` is never kept.
 //! - **A daily cap**, `lesson_reviews_per_day` per project (default 20). Over it the review is skipped, said in the
 //!   `gated` event as an axis `review_skipped`. A review never reviews a review.
+//! - **Only when there is something to learn** (live checks 2026-11-01 F8, the owner 2026-11-02). A clean first-pass
+//!   delivery, whose report names no gotchas, lesson or ops, is skipped the same way, before the cap counts it
+//!   (`idle`).
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -167,21 +170,35 @@ pub fn review_id(subject: &str) -> String {
     format!("{subject}-lr")
 }
 
-/// Whether the gate queues a review of `known` now. `Err(None)`: none, and nothing to say (it is queued already).
-/// `Err(Some(why))`: skipped, journaled as `review_skipped`.
+/// Whether the gate queues a review of `known` now, not knowing its verdict: every review the cap allows, as before
+/// the trim. The gate's two calls move to `wanted_for` (the record's hunk), and then this has no caller and goes.
+/// `Err(None)`: none, and nothing to say (it is queued already). `Err(Some(why))`: skipped, journaled as
+/// `review_skipped`.
 pub fn wanted(
     project: &Project,
     state: &nirvana_run::RunState,
     known: &OrderState,
     table: Option<&Table>,
 ) -> Result<(), Option<String>> {
-    wanted_with(project, state, known, per_day(table), now())
+    wanted_with(project, state, known, None, per_day(table), now())
+}
+
+/// `wanted`, knowing the verdict the gate is about to journal: a clean first-pass delivery is skipped (`idle`).
+pub fn wanted_for(
+    project: &Project,
+    state: &nirvana_run::RunState,
+    known: &OrderState,
+    verdict: &Verdict,
+    table: Option<&Table>,
+) -> Result<(), Option<String>> {
+    wanted_with(project, state, known, Some(verdict), per_day(table), now())
 }
 
 pub fn wanted_with(
     project: &Project,
     state: &nirvana_run::RunState,
     known: &OrderState,
+    verdict: Option<&Verdict>,
     cap: u32,
     at: u64,
 ) -> Result<(), Option<String>> {
@@ -195,10 +212,76 @@ pub fn wanted_with(
     if !nirvana_run::valid_id(&id) {
         return Err(Some(format!("the review's id {id} is not an order id")));
     }
+    // Before the cap: a skipped review is never queued, so it is not counted against `lesson_reviews_per_day`, and
+    // the Learning square's `review n/cap` (`used_today`) does not move.
+    if let Some(why) = verdict.and_then(|verdict| idle(state, known, verdict)) {
+        return Err(Some(why));
+    }
     match cap_refusal(&project.root, cap, at) {
         Some(why) => Err(Some(why)),
         None => Ok(()),
     }
+}
+
+/// The report keys that say a worker met something worth a lesson: `gotchas` (the schema's required list), its own
+/// `lesson`, and `lesson_ops` / `card_ops`.
+const SIGNALS: [&str; 4] = ["gotchas", "lesson", "lesson_ops", "card_ops"];
+
+/// Why a review of `known` would have nothing to learn from, or `None` when it has something. Live checks
+/// 2026-11-01 F8: every gated order seated a review on flash low, 20k-50k tokens each, and the reviews of first-pass
+/// deliveries with an empty report said "nothing to keep". The owner, 2026-11-02, on the recommendation "review only
+/// when there is something to learn": "Use your recomendation for all of these". Something to learn is a verdict
+/// other than a pass, a send-back or a non-pass verdict above this order in its chain (rule 5 of `RULES`: the
+/// strongest signal is a correction), or a report that names any of `SIGNALS`.
+/// Measured on the journals there were: 4 of the 10 live-check reviews, none of which kept anything; 0 of the 7 in
+/// the two printer projects, whose every subject named gotchas (nirvana/plans/review-trim-agy-browser-2026-11-02.md).
+pub fn idle(
+    state: &nirvana_run::RunState,
+    known: &OrderState,
+    verdict: &Verdict,
+) -> Option<String> {
+    if *verdict != Verdict::Pass {
+        return None;
+    }
+    let report = known.report.as_ref();
+    if SIGNALS.iter().any(|key| {
+        report
+            .and_then(|report| report.get(key))
+            .is_some_and(|value| match value {
+                Value::Null => false,
+                Value::Array(items) => !items.is_empty(),
+                Value::Object(fields) => !fields.is_empty(),
+                Value::String(text) => !text.trim().is_empty(),
+                _ => true,
+            })
+    }) {
+        return None;
+    }
+    // Up the chain the way `nirvana_gate::chain` walks it, and through a reseat (a pool ran out: the same work on
+    // another seat), which `chain` stops at. Bounded, so a loop in a journal cannot hang the gate.
+    let mut current = known.id().to_owned();
+    for _ in 0..=state.orders.len() {
+        let Some(order) = state.order(&current) else {
+            break;
+        };
+        match (order.seated.why.as_deref(), &order.seated.parent) {
+            (Some("send_back"), Some(_)) => return None,
+            (Some("reseat"), Some(parent)) => {
+                if state
+                    .order(parent)
+                    .and_then(|parent| parent.verdict.as_deref())
+                    .is_some_and(|verdict| verdict != Outcome::Pass.word())
+                {
+                    return None;
+                }
+                current = parent.clone();
+            }
+            _ => break,
+        }
+    }
+    Some(
+        "nothing to learn: a first-pass delivery whose report names no gotchas, lesson, lesson_ops or card_ops".into(),
+    )
 }
 
 // ---- the briefs ----
@@ -613,8 +696,17 @@ pub fn queue_review(
         return "lesson review not queued: seats.toml is refused".into();
     };
     let order = known.id();
+    let state = replay(&journal.read().0);
+    // The trim's backstop until the gate asks `wanted_for` itself: a clean first pass seats nothing and counts nothing.
+    // Its `gated` event then holds no `review_skipped` axis; this line is the only word of it.
+    if let Err(why) = wanted_for(project, &state, known, verdict, Some(table)) {
+        return format!(
+            "lesson review not queued: {}",
+            why.unwrap_or_else(|| "it is queued already".into())
+        );
+    }
     let order_text = nirvana_gate::order_text(&known.seated);
-    let profile = subject_profile(&replay(&journal.read().0), order);
+    let profile = subject_profile(&state, order);
     let id = review_id(order);
     // Review B3: the reviewer reads a copy of the stream in its own folder; its file tools stay inside that folder.
     let stream = project
