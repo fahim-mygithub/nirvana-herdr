@@ -896,3 +896,70 @@ fn accounts_row_narrow_drops_chosen_word_then_drops_email_keeping_warning_mark()
     crate::nirvana_accounts::set_accounts_for_test(None);
     crate::nirvana_accounts::set_drift_for_test(None);
 }
+
+/// Plan 39 P39a: Nirvana Remote's row in the servers block, from the state file the server writes.
+fn compose_with_remote(
+    ports: &str,
+    remote: crate::nirvana_remote::FootRow,
+) -> (FrameData, Vec<String>) {
+    crate::nirvana_remote::set_foot_row_for_test(Some(remote));
+    let (_, frame, rows) = compose_with(ports, 106, 40, None);
+    crate::nirvana_remote::set_foot_row_for_test(None);
+    (frame, rows)
+}
+
+#[test]
+fn the_servers_block_leads_with_nirvana_remote_up_on_its_port() {
+    let up = crate::nirvana_remote::FootRow {
+        up: true,
+        text: ":8443".into(),
+    };
+    let (_, rows) = compose_with_remote("8770", up);
+    let (servers_y, _) = row_with(&rows, " servers").expect("servers head");
+    let remote = sidebar(&rows[servers_y + 1]);
+    assert!(
+        remote.starts_with(" \u{25CF} remote") && remote.trim_end().ends_with(":8443"),
+        "remote row: {remote:?}"
+    );
+    let server = sidebar(&rows[servers_y + 2]);
+    assert!(
+        server.trim_end().ends_with(":8770"),
+        "server row: {server:?}"
+    );
+    // The foot grew by the one row: every pool row still shows, and the accounts button is the last row.
+    assert!(
+        row_with(&rows, "Local").is_some(),
+        "the last pool row was cut"
+    );
+    assert_eq!(sidebar(rows.last().unwrap()).trim_end(), " accounts");
+}
+
+#[test]
+fn nirvana_remote_off_says_why_with_no_space_server() {
+    let off = crate::nirvana_remote::FootRow {
+        up: false,
+        text: "HTTPS off".into(),
+    };
+    let (frame, rows) = compose_with_remote("", off);
+    let (servers_y, _) =
+        row_with(&rows, " servers").expect("the block shows for the remote row alone");
+    let remote = sidebar(&rows[servers_y + 1]);
+    assert!(
+        remote.starts_with(" \u{25CB} remote") && remote.trim_end().ends_with("HTTPS off"),
+        "remote row: {remote:?}"
+    );
+    let (usage_y, _) = row_with(&rows, " usage").expect("usage head");
+    assert_eq!(usage_y, servers_y + 2);
+    assert!(
+        row_with(&rows, "Local").is_some(),
+        "the last pool row was cut"
+    );
+    assert_eq!(sidebar(rows.last().unwrap()).trim_end(), " accounts");
+    // The why is drawn in the warning colour.
+    let cell = &frame.cells[(servers_y + 1) * frame.width as usize + 24];
+    let yellow = ClientShellState::new(ClientShellConfig::from_config(&Config::default()))
+        .config
+        .palette
+        .yellow;
+    assert_eq!(cell.fg, crate::protocol::color_to_u32(yellow));
+}

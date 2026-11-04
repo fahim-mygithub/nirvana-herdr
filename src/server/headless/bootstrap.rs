@@ -95,8 +95,14 @@ pub fn run_server() -> io::Result<()> {
         );
         print_ready_message(&api::socket_path(), &client_socket_path());
         server.app.run_plugin_startup_hooks();
+        // Nirvana fork, plan 39 P39a: Nirvana Remote, the phone's page, lives and ends with this server.
+        let remote = crate::nirvana_remote::start(api_tx.clone());
 
-        server.run().await
+        let result = server.run().await;
+        if let Some(remote) = remote {
+            remote.stop().await;
+        }
+        result
     });
 
     rt.shutdown_timeout(Duration::from_millis(100));

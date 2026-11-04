@@ -1,0 +1,100 @@
+/* Nirvana Remote, the phone page. Colours, type, spacing and motion from the approved prototype
+   (https://claude.ai/artifact/3RvheUWNNUHWziP8LKZF8M, plan 39 L2 "This looks good"). Nirvana Dark only.
+   --k scales every duration, as the prototype's speed control did; 1 here. */
+:root {
+  --bg: #121416;
+  --card: #1A1D20;
+  --line: #262B30;
+  --hover: #1F2327;
+  --text: #E9EAEB;
+  --muted: #8D939A;
+  --faint: #7D838A;
+  --soft: #B0B5BA;
+  --teal: #5FB3BC;
+  --teal-deep: #1F6F78;
+  --teal-ink: #E9F7F8;
+  --green: #63B98D;
+  --sleep: #3A4046;
+  --purple: #A995D6;
+  --red: #EC9A92;
+  --k: 1;
+  color-scheme: dark;
+}
+html, body { margin: 0; background: var(--bg); }
+body {
+  color: var(--text);
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 15px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+a { color: var(--teal); }
+a:hover { color: #86CBD2; }
+.mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
+
+/* The app column: the prototype's 390 px frame, fluid from 360 to 430 px (plan 39 §1.4). */
+.nv {
+  position: relative;
+  max-width: 430px;
+  min-height: 100vh;
+  min-height: 100dvh;
+  margin: 0 auto;
+  overflow: hidden;
+}
+.nv button { font: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0; cursor: pointer; text-align: left; }
+.nv button:focus-visible, .nv a:focus-visible, .nv input:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+.nv .press { transition: transform calc(var(--k) * 120ms) ease, background-color calc(var(--k) * 160ms) ease; }
+.nv .press:active { transform: scale(.97); }
+.nv .row:hover { background: var(--hover); }
+
+/* A screen fills the column; the shell gives it one of the three entry classes. */
+.screen { position: absolute; inset: 0; display: flex; flex-direction: column; box-sizing: border-box; }
+.nv .scr-r { animation: inR calc(var(--k) * 360ms) cubic-bezier(.2, .8, .2, 1) both; }
+.nv .scr-l { animation: inL calc(var(--k) * 360ms) cubic-bezier(.2, .8, .2, 1) both; }
+.nv .scr-f { animation: fadeIn calc(var(--k) * 420ms) ease both; }
+.nv .pulse-t { animation: pulseT calc(var(--k) * 1800ms) ease-out infinite; }
+.nv .pulse-p { animation: pulseP calc(var(--k) * 1500ms) ease-out infinite; }
+.nv .shim {
+  background: linear-gradient(90deg, #5FB3BC 0%, #5FB3BC 35%, #D4F0F2 50%, #5FB3BC 65%, #5FB3BC 100%);
+  background-size: 220% 100%; -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: shim calc(var(--k) * 1800ms) linear infinite;
+}
+.nv .msg { animation: msgIn calc(var(--k) * 320ms) cubic-bezier(.2, .8, .2, 1) both; }
+@keyframes inR { from { transform: translateX(38%); opacity: 0 } to { transform: none; opacity: 1 } }
+@keyframes inL { from { transform: translateX(-22%); opacity: 0 } to { transform: none; opacity: 1 } }
+@keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
+@keyframes msgIn { from { transform: translateY(12px) scale(.98); opacity: 0 } to { transform: none; opacity: 1 } }
+@keyframes shim { from { background-position: 120% 0 } to { background-position: -100% 0 } }
+@keyframes pulseT { 0% { box-shadow: 0 0 0 0 rgba(95, 179, 188, .55) } 70% { box-shadow: 0 0 0 8px rgba(95, 179, 188, 0) } 100% { box-shadow: 0 0 0 0 rgba(95, 179, 188, 0) } }
+@keyframes pulseP { 0% { box-shadow: 0 0 0 0 rgba(169, 149, 214, .6) } 70% { box-shadow: 0 0 0 8px rgba(169, 149, 214, 0) } 100% { box-shadow: 0 0 0 0 rgba(169, 149, 214, 0) } }
+/* The prototype's reduced-motion rule, as it was. */
+@media (prefers-reduced-motion: reduce) {
+  .nv * { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
+}
+
+/* Screen 1: your PCs. */
+.pcs { padding: calc(56px + env(safe-area-inset-top, 0px)) 20px calc(28px + env(safe-area-inset-bottom, 0px)); gap: 28px; }
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand-mark { width: 44px; height: 44px; border-radius: 12px; background: var(--teal-deep); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.brand-text { display: flex; flex-direction: column; }
+.brand-name { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
+.brand-sub { font-size: 13px; color: var(--muted); }
+.section { display: flex; flex-direction: column; gap: 10px; }
+.label { font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.card { display: flex; flex-direction: column; background: var(--card); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
+.divider { height: 1px; background: var(--line); margin-left: 40px; }
+.pc { display: flex; align-items: center; gap: 14px; padding: 16px; min-height: 72px; width: 100%; box-sizing: border-box; color: inherit; text-decoration: none; }
+.pc.asleep { opacity: 0.62; }
+.pc-text { display: flex; flex-direction: column; flex-grow: 1; gap: 2px; min-width: 0; }
+.pc-name { font-weight: 600; }
+.pc-line { font-size: 13px; color: var(--muted); }
+.dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; box-sizing: border-box; }
+.dot.nirvana { background: var(--teal); }
+.dot.online { border: 2px solid var(--green); }
+.dot.asleep { background: var(--sleep); }
+.chevron { flex-shrink: 0; }
+.note { font-size: 13px; color: var(--muted); padding: 0 4px; }
+.lock { margin-top: auto; display: flex; gap: 10px; align-items: flex-start; color: var(--muted); font-size: 13px; }
+.lock svg { flex-shrink: 0; margin-top: 1px; }
+.skeleton { height: 72px; background: linear-gradient(90deg, #1A1D20, #1F2327, #1A1D20); background-size: 200% 100%; animation: shim calc(var(--k) * 1800ms) linear infinite; }

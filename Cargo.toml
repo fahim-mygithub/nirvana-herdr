@@ -52,13 +52,18 @@ serde = { version = "1", features = ["derive"] }
 serde_ignored = "0.1.14"
 serde_json = "1"
 sha2 = "0.10"
-time = { version = "0.3.47", features = ["formatting"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "signal"] }
+# Nirvana fork, plan 39 P39a: `parsing` reads Tailscale's `LastSeen` for the PC list (src/nirvana_remote/pcs.rs).
+time = { version = "0.3.47", features = ["formatting", "parsing"] }
+# Nirvana fork, plan 39 P39a: `net` is Nirvana Remote's 127.0.0.1 listener (src/nirvana_remote/http.rs).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "signal", "net"] }
 toml = "0.8"
 toml_edit = "0.22"
 tracing = "0.1.44"
 # Nirvana fork, feature 9: the one HTTPS POST to Jev (src/nirvana_jev.rs). rustls, so no system TLS library.
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
+# Nirvana fork, plan 39 P39a: Nirvana Remote's HTTP/1.1 request parser (src/nirvana_remote/http.rs). hyper's own parser,
+# no dependencies; the server around it is ~150 lines on the tokio already here, where hyper 1 adds eight crates.
+httparse = "1.10"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 unicode-width = "0.2"
 unicode-segmentation = "1.13.1"
@@ -113,6 +118,9 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Pipes",
     "Win32_System_Power",
     "Win32_System_Registry",
+    # Nirvana fork, plan 39 P39a: the Tailscale service's pid, the one process whose identity header Nirvana
+    # Remote trusts (src/nirvana_remote/peer.rs).
+    "Win32_System_Services",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_UI_Input_Ime",
