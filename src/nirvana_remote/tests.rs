@@ -1,23 +1,29 @@
-//! Plan 39 P39a's tests. Every one runs against fakes: a fake Tailscale (its status text and its serve calls), a
-//! fake herdr socket API, a fake peer check and a fake probe. None runs `tailscale`, herdr or Claude (plan 39 §4).
-//! A server a test starts binds 127.0.0.1 on a free port and is stopped by the test.
+//! Plan 39 P39a's tests. Every one runs against fakes: a fake Tailscale (its status text, its serve config and its
+//! held serves), a fake herdr socket API, a fake peer check and a fake probe. None runs `tailscale`, herdr or Claude
+//! (plan 39 §4). A server a test starts binds 127.0.0.1 on a free port and is stopped by the test.
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::net::{IpAddr, SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
 use super::herdr::{self, Herdr, Summary};
 use super::http;
 use super::pcs::{self, Hello, Probe, State};
-use super::peer::{self, PeerCheck};
+use super::peer::{self, PeerCheck, Refusal};
 use super::routes::{self, Site};
-use super::tailscale::{self, Off, Tailscale};
+use super::tailscale::{self, Held, Mount, Off, Tailscale};
 use crate::nirvana_servers::Process;
 
 const OWNER: &str = "owner@example.com";
+const HOST: &str = "desk.example-tail.ts.net:8443";
+/// The owner's phone, as tailscaled names the caller in X-Forwarded-For.
+const PHONE: &str = "100.101.102.103";
+/// This PC's own Tailscale address.
+const DESK_IP: &str = "100.64.0.1";
 
 /// A made-up tailnet: this PC, a laptop without Nirvana, a studio PC with it, a PC asleep, a phone, a PC of
 /// another user and a tagged runner. No real name, address or login.
@@ -26,7 +32,8 @@ fn status_json(state: &str, certs: Value) -> String {
         "BackendState": state,
         "CertDomains": certs,
         "Self": {"HostName": "Desk", "DNSName": "desk.example-tail.ts.net.", "OS": "windows",
-                 "Online": true, "UserID": 11, "LastSeen": "0001-01-01T00:00:00Z"},
+                 "Online": true, "UserID": 11, "LastSeen": "0001-01-01T00:00:00Z",
+                 "TailscaleIPs": [DESK_IP, "fd7a:115c:a1e0::1"]},
         "User": {"11": {"LoginName": OWNER, "DisplayName": "Owner"},
                  "22": {"LoginName": "friend@example.com"}},
         "Peer": {
@@ -51,23 +58,56 @@ fn ready_json() -> String {
     status_json("Running", json!(["desk.example-tail.ts.net"]))
 }
 
+/// Nirvana Remote's own mount on 8443, to `local`, in a foreground session or the background config.
+fn ours(local: u16, foreground: bool) -> String {
+    let config = json!({
+        "TCP": {"8443": {"HTTPS": true}},
+        "Web": {HOST: {"Handlers": {"/": {"Proxy": format!("http://127.0.0.1:{local}")}}}}
+    });
+    if foreground {
+        json!({"Foreground": {"a1b2c3": config}}).to_string()
+    } else {
+        config.to_string()
+    }
+}
+
 struct FakeTailscale {
     status: Mutex<Result<String, String>>,
-    serve_fails: Option<String>,
-    calls: Mutex<Vec<String>>,
+    status_reads: AtomicUsize,
+    /// The node's serve config as `serve status --json` prints it.
+    serve: Arc<Mutex<String>>,
+    hold_fails: Option<String>,
+    /// Whether a hold makes the mount show in `serve status`.
+    hold_shows: bool,
+    /// Whether the last held `tailscale serve` is still running.
+    alive: Arc<AtomicBool>,
+    calls: Arc<Mutex<Vec<String>>>,
 }
 
 impl FakeTailscale {
     fn with(status: Result<String, String>) -> Self {
         Self {
             status: Mutex::new(status),
-            serve_fails: None,
-            calls: Mutex::default(),
+            status_reads: AtomicUsize::new(0),
+            serve: Arc::new(Mutex::new("{}".into())),
+            hold_fails: None,
+            hold_shows: true,
+            alive: Arc::new(AtomicBool::new(true)),
+            calls: Arc::default(),
         }
+    }
+
+    fn serving(self, text: String) -> Self {
+        *self.serve.lock().unwrap() = text;
+        self
     }
 
     fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
+    }
+
+    fn serve_text(&self) -> String {
+        self.serve.lock().unwrap().clone()
     }
 }
 
@@ -77,24 +117,58 @@ impl Default for FakeTailscale {
     }
 }
 
+struct FakeHeld {
+    alive: Arc<AtomicBool>,
+    serve: Arc<Mutex<String>>,
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl Held for FakeHeld {
+    fn ended(&mut self) -> Option<String> {
+        (!self.alive.load(Ordering::SeqCst)).then(|| "tailscale serve ended".to_string())
+    }
+}
+
+impl Drop for FakeHeld {
+    fn drop(&mut self) {
+        // tailscaled deletes a foreground session's mount when its CLI ends.
+        *self.serve.lock().unwrap() = "{}".into();
+        self.calls.lock().unwrap().push("released".into());
+    }
+}
+
 impl Tailscale for FakeTailscale {
     fn status(&self) -> Result<String, String> {
+        self.status_reads.fetch_add(1, Ordering::SeqCst);
         self.status.lock().unwrap().clone()
     }
 
-    fn serve_on(&self, https: u16, local: u16) -> Result<(), String> {
+    fn serve_status(&self) -> Result<String, String> {
+        Ok(self.serve_text())
+    }
+
+    fn hold(&self, https: u16, local: u16) -> Result<Box<dyn Held>, String> {
         self.calls
             .lock()
             .unwrap()
-            .push(format!("on {https} {local}"));
-        match &self.serve_fails {
-            Some(why) => Err(why.clone()),
-            None => Ok(()),
+            .push(format!("hold {https} {local}"));
+        if let Some(why) = &self.hold_fails {
+            return Err(why.clone());
         }
+        self.alive.store(true, Ordering::SeqCst);
+        if self.hold_shows {
+            *self.serve.lock().unwrap() = ours(local, true);
+        }
+        Ok(Box::new(FakeHeld {
+            alive: self.alive.clone(),
+            serve: self.serve.clone(),
+            calls: self.calls.clone(),
+        }))
     }
 
-    fn serve_off(&self, https: u16) -> Result<(), String> {
-        self.calls.lock().unwrap().push(format!("off {https}"));
+    fn clear_background(&self, https: u16) -> Result<(), String> {
+        self.calls.lock().unwrap().push(format!("clear {https}"));
+        *self.serve.lock().unwrap() = "{}".into();
         Ok(())
     }
 }
@@ -130,8 +204,11 @@ fn herdr_fake() -> FakeHerdr {
 struct FakePeer(Result<(), String>);
 
 impl PeerCheck for FakePeer {
-    fn check(&self, _peer: SocketAddr, _local: SocketAddr) -> Result<(), String> {
-        self.0.clone()
+    fn check(&self, _peer: SocketAddr, _local: SocketAddr) -> Result<(), Refusal> {
+        self.0.clone().map_err(|why| Refusal {
+            pid: Some(4242),
+            why,
+        })
     }
 }
 
@@ -170,16 +247,27 @@ fn fixed_now() -> time::OffsetDateTime {
     at(12)
 }
 
+/// A site that knows the owner (and this PC's name and addresses) when `owner` is given, as after a check.
 fn site(ts: Arc<FakeTailscale>, peer: Result<(), String>, owner: Option<&str>) -> Arc<Site> {
-    Arc::new(Site {
-        tailscale: ts,
-        herdr: Arc::new(herdr_fake()),
-        peer: Arc::new(FakePeer(peer)),
-        probe: Arc::new(FakeProbe),
-        owner: RwLock::new(owner.map(str::to_string)),
-        https_port: super::HTTPS_PORT,
-        now: fixed_now,
-    })
+    let site = Site::new(
+        ts,
+        Arc::new(herdr_fake()),
+        Arc::new(FakePeer(peer)),
+        Arc::new(FakeProbe),
+        super::HTTPS_PORT,
+        fixed_now,
+    );
+    if let Some(owner) = owner {
+        *site.owner.write().unwrap() = Some(owner.to_string());
+        *site.me.write().unwrap() = Some(routes::Me {
+            host: HOST.into(),
+            ips: vec![
+                DESK_IP.parse().unwrap(),
+                "fd7a:115c:a1e0::1".parse().unwrap(),
+            ],
+        });
+    }
+    Arc::new(site)
 }
 
 fn runtime() -> tokio::runtime::Runtime {
@@ -206,6 +294,10 @@ impl Drop for Running {
 }
 
 fn serve(site: Arc<Site>) -> Running {
+    serve_with(site, http::Limits::DEFAULT)
+}
+
+fn serve_with(site: Arc<Site>, limits: http::Limits) -> Running {
     let rt = runtime();
     let listener = rt
         .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
@@ -213,18 +305,26 @@ fn serve(site: Arc<Site>) -> Running {
     let addr = listener.local_addr().unwrap();
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let handler: Arc<dyn http::Handler> = site;
-    rt.spawn(http::serve(listener, handler, stopped));
+    rt.spawn(http::serve(listener, handler, limits, stopped));
     Running { rt, addr, stop }
+}
+
+/// The headers tailscaled sets on a request from the owner's phone, without the closing blank line.
+fn proxied(method: &str, path: &str, login: Option<&str>) -> String {
+    let mut head =
+        format!("{method} {path} HTTP/1.1\r\nHost: {HOST}\r\nX-Forwarded-For: {PHONE}\r\n");
+    if let Some(login) = login {
+        head.push_str(&format!("Tailscale-User-Login: {login}\r\n"));
+    }
+    head
 }
 
 /// One raw request; the status code, the head and the body.
 fn get(addr: SocketAddr, path: &str, login: Option<&str>) -> (u16, String, String) {
-    let mut head = format!("GET {path} HTTP/1.1\r\nHost: desk.example-tail.ts.net:8443\r\n");
-    if let Some(login) = login {
-        head.push_str(&format!("Tailscale-User-Login: {login}\r\n"));
-    }
-    head.push_str("\r\n");
-    raw(addr, head.as_bytes())
+    raw(
+        addr,
+        format!("{}\r\n", proxied("GET", path, login)).as_bytes(),
+    )
 }
 
 fn raw(addr: SocketAddr, bytes: &[u8]) -> (u16, String, String) {
@@ -390,10 +490,11 @@ fn a_connection_owner_is_the_process_that_opened_it() {
         Some(std::process::id())
     );
     // The same caller through the real check: this test process is not the Tailscale service.
-    let refused = peer::System.check(peer_addr, local).unwrap_err();
+    let refused = peer::System::new().check(peer_addr, local).unwrap_err();
+    assert_eq!(refused.pid, Some(std::process::id()));
     assert!(
-        refused.contains(&std::process::id().to_string()),
-        "{refused}"
+        refused.why.contains(&std::process::id().to_string()),
+        "{refused:?}"
     );
 }
 
@@ -557,10 +658,11 @@ fn the_page_carries_its_screens_and_the_reduced_motion_rule() {
 fn only_get_and_head_are_answered() {
     let running = serve(site(Arc::default(), Ok(()), Some(OWNER)));
     let post = format!(
-        "POST /api/pcs HTTP/1.1\r\nTailscale-User-Login: {OWNER}\r\nContent-Length: 0\r\n\r\n"
+        "{}Sec-Fetch-Site: same-origin\r\nOrigin: https://{HOST}\r\nContent-Length: 0\r\n\r\n",
+        proxied("POST", "/api/pcs", Some(OWNER))
     );
     assert_eq!(raw(running.addr, post.as_bytes()).0, 405);
-    let head = format!("HEAD / HTTP/1.1\r\nTailscale-User-Login: {OWNER}\r\n\r\n");
+    let head = format!("{}\r\n", proxied("HEAD", "/", Some(OWNER)));
     let (status, head, body) = raw(running.addr, head.as_bytes());
     assert_eq!(status, 200, "{head}");
     assert!(body.is_empty());
@@ -608,6 +710,7 @@ fn supervise_once(
         https_port: 8443,
         state: state.to_path_buf(),
         every: Duration::from_secs(3600),
+        confirm: Duration::from_secs(2),
     };
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let task = rt.spawn(super::supervise(site, config, stopped));
@@ -636,7 +739,16 @@ fn supervise_serves_when_tailscale_is_ready_and_removes_its_serve_on_stop() {
         );
         let calls = ts.calls();
         assert_eq!(calls.len(), 1, "{calls:?}");
-        let local: u16 = calls[0].strip_prefix("on 8443 ").unwrap().parse().unwrap();
+        let local: u16 = calls[0]
+            .strip_prefix("hold 8443 ")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            ts.serve_text(),
+            ours(local, true),
+            "a foreground mount, not --bg"
+        );
         // The listener is up behind the serve, and lets the owner in now that the status named them.
         let (status, _, _) = get(
             SocketAddr::from(([127, 0, 0, 1], local)),
@@ -645,7 +757,8 @@ fn supervise_serves_when_tailscale_is_ready_and_removes_its_serve_on_stop() {
         );
         assert_eq!(status, 200);
     });
-    assert_eq!(ts.calls().last().map(String::as_str), Some("off 8443"));
+    assert_eq!(ts.calls().last().map(String::as_str), Some("released"));
+    assert_eq!(ts.serve_text(), "{}", "the mount goes with the held serve");
     assert!(!state.exists(), "the state file goes with the server");
 }
 
@@ -677,9 +790,8 @@ fn supervise_does_not_serve_with_https_off() {
 #[test]
 fn a_failed_serve_closes_the_listener_and_says_why() {
     let ts = Arc::new(FakeTailscale {
-        status: Mutex::new(Ok(ready_json())),
-        serve_fails: Some("serve config denied".into()),
-        calls: Mutex::default(),
+        hold_fails: Some("serve config denied".into()),
+        ..FakeTailscale::with(Ok(ready_json()))
     });
     let state = temp_state("serve-fails");
     // A known free port, so the test can see it closed again.
@@ -700,7 +812,7 @@ fn a_failed_serve_closes_the_listener_and_says_why() {
     });
     assert_eq!(
         ts.calls(),
-        vec![format!("on 8443 {port}")],
+        vec![format!("hold 8443 {port}")],
         "nothing to turn off"
     );
 }
@@ -720,14 +832,25 @@ fn a_taken_port_says_why_and_serves_nothing() {
 #[test]
 fn only_the_owners_default_server_hosts_nirvana_remote() {
     let none = |_: &str| None;
-    assert_eq!(super::skip_reason(none, None), None);
+    assert_eq!(super::skip_reason(none, None, false), None);
     let socket = |name: &str| (name == "HERDR_SOCKET_PATH").then(|| "x".to_string());
-    assert!(super::skip_reason(socket, None).is_some());
+    assert!(super::skip_reason(socket, None, false).is_some());
     let config = |name: &str| (name == "XDG_CONFIG_HOME").then(|| "x".to_string());
-    assert!(super::skip_reason(config, None).is_some());
+    assert!(super::skip_reason(config, None, false).is_some());
     let off = |name: &str| (name == "NIRVANA_REMOTE").then(|| "off".to_string());
-    assert!(super::skip_reason(off, None).is_some());
-    assert!(super::skip_reason(none, Some("work".into())).is_some());
+    assert!(super::skip_reason(off, None, false).is_some());
+    assert!(super::skip_reason(none, Some("work".into()), false).is_some());
+    // Review round B1: a debug build (herdr-dev) runs it only when asked.
+    assert!(
+        super::skip_reason(none, None, true).is_some(),
+        "a plain debug server"
+    );
+    let on = |name: &str| (name == "NIRVANA_REMOTE").then(|| "on".to_string());
+    assert_eq!(super::skip_reason(on, None, true), None);
+    assert!(
+        super::skip_reason(on, Some("work".into()), true).is_some(),
+        "on does not lift the other gates"
+    );
 }
 
 // --- The sidebar row -------------------------------------------------------------------------------------------
@@ -770,6 +893,7 @@ fn a_signed_out_tailscale_lets_nobody_in() {
         https_port: 8443,
         state: state.clone(),
         every: Duration::from_secs(3600),
+        confirm: Duration::from_secs(2),
     };
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let task = rt.spawn(super::supervise(site.clone(), config, stopped));
@@ -782,4 +906,574 @@ fn a_signed_out_tailscale_lets_nobody_in() {
     assert_eq!(*site.owner.read().unwrap(), None);
     let _ = stop.send(true);
     rt.block_on(task).unwrap();
+}
+
+// --- Review round: the mount (B2, S2, S3) ------------------------------------------------------------------------
+
+#[test]
+fn the_mount_on_8443_is_ours_only_when_it_is_exactly_ours() {
+    let read = |text: &str| tailscale::mount(text, "desk.example-tail.ts.net", 8443, 7790).unwrap();
+    assert_eq!(read("{}"), Mount::Free);
+    assert_eq!(read(&ours(7790, true)), Mount::OursForeground);
+    assert_eq!(read(&ours(7790, false)), Mount::OursBackground);
+    assert!(
+        matches!(read(&ours(7791, false)), Mount::Other(_)),
+        "another port"
+    );
+    let extra = json!({
+        "TCP": {"8443": {"HTTPS": true}},
+        "Web": {HOST: {"Handlers": {"/": {"Proxy": "http://127.0.0.1:7790"},
+                                    "/files": {"Path": "C:\\share"}}}}
+    });
+    assert!(
+        matches!(read(&extra.to_string()), Mount::Other(_)),
+        "a second handler"
+    );
+    let funnel = json!({
+        "TCP": {"8443": {"HTTPS": true}},
+        "Web": {HOST: {"Handlers": {"/": {"Proxy": "http://127.0.0.1:7790"}}}},
+        "AllowFunnel": {HOST: true}
+    });
+    assert!(
+        matches!(read(&funnel.to_string()), Mount::Other(_)),
+        "Funnel on it"
+    );
+    let forward = json!({"TCP": {"8443": {"TCPForward": "127.0.0.1:22"}}});
+    assert!(
+        matches!(read(&forward.to_string()), Mount::Other(_)),
+        "a TCP forward"
+    );
+    let elsewhere = json!({"Foreground": {"s": {
+        "TCP": {"8443": {"HTTPS": true}},
+        "Web": {"other.example-tail.ts.net:8443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:7790"}}}}
+    }}});
+    assert!(
+        matches!(read(&elsewhere.to_string()), Mount::Other(_)),
+        "another name on the port"
+    );
+    // Another port of the owner's is not this one's business.
+    let other_port = json!({"TCP": {"443": {"HTTPS": true}},
+                            "Web": {"desk.example-tail.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:3000"}}}}});
+    assert_eq!(read(&other_port.to_string()), Mount::Free);
+}
+
+#[test]
+fn someone_elses_8443_is_left_alone() {
+    let theirs = json!({
+        "TCP": {"8443": {"HTTPS": true}},
+        "Web": {HOST: {"Handlers": {"/": {"Proxy": "http://127.0.0.1:3000"}}}}
+    })
+    .to_string();
+    let ts = Arc::new(FakeTailscale::with(Ok(ready_json())).serving(theirs.clone()));
+    let state = temp_state("theirs");
+    supervise_once(ts.clone(), 0, &state, |_| {
+        let report = read_report(&state);
+        assert!(!report.up);
+        assert_eq!(report.short, "8443 taken");
+    });
+    assert!(ts.calls().is_empty(), "no hold, no clear: {:?}", ts.calls());
+    assert_eq!(ts.serve_text(), theirs, "their mount untouched");
+}
+
+#[test]
+fn a_live_foreground_mount_of_ours_is_not_taken_over() {
+    let ts = Arc::new(FakeTailscale::with(Ok(ready_json())).serving(ours(0, true)));
+    let state = temp_state("live-fg");
+    supervise_once(ts.clone(), 0, &state, |_| {
+        assert_eq!(read_report(&state).short, "8443 taken");
+    });
+    assert!(ts.calls().is_empty(), "{:?}", ts.calls());
+}
+
+#[test]
+fn a_stale_background_mount_of_ours_is_cleared_before_the_port_is_bound() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let ts = Arc::new(FakeTailscale::with(Ok(ready_json())).serving(ours(port, false)));
+    let state = temp_state("stale-bg");
+    supervise_once(ts.clone(), port, &state, |ts| {
+        assert!(read_report(&state).up);
+        assert_eq!(
+            ts.calls(),
+            vec!["clear 8443".to_string(), format!("hold 8443 {port}")]
+        );
+    });
+}
+
+#[test]
+fn a_stale_background_mount_is_cleared_even_when_the_port_is_taken() {
+    // The dangerous case S2 names: the mount outlived its server and something else now holds the port.
+    let squatter = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = squatter.local_addr().unwrap().port();
+    let ts = Arc::new(FakeTailscale::with(Ok(ready_json())).serving(ours(port, false)));
+    let state = temp_state("stale-squat");
+    supervise_once(ts.clone(), port, &state, |_| {
+        assert_eq!(read_report(&state).short, format!("port {port} busy"));
+    });
+    assert_eq!(ts.calls(), vec!["clear 8443".to_string()]);
+    assert_eq!(ts.serve_text(), "{}");
+}
+
+#[test]
+fn a_mount_that_never_shows_is_a_failed_serve() {
+    let ts = Arc::new(FakeTailscale {
+        hold_shows: false,
+        ..FakeTailscale::with(Ok(ready_json()))
+    });
+    let state = temp_state("never-shows");
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    supervise_once(ts.clone(), port, &state, |ts| {
+        let report = read_report(&state);
+        assert_eq!(report.short, "serve failed", "{report:?}");
+        assert_eq!(
+            ts.calls(),
+            vec![format!("hold 8443 {port}"), "released".to_string()]
+        );
+        assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+    });
+}
+
+/// Poll the state file until `want` holds or 5 s pass.
+fn wait_for(state: &std::path::Path, want: impl Fn(&super::Report) -> bool) -> super::Report {
+    let started = Instant::now();
+    loop {
+        if let Ok(text) = std::fs::read_to_string(state) {
+            if let Ok(report) = serde_json::from_str::<super::Report>(&text) {
+                if want(&report) || started.elapsed() > Duration::from_secs(5) {
+                    return report;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_mount_that_goes_away_turns_the_row_off_and_is_set_again() {
+    let ts = Arc::new(FakeTailscale::with(Ok(ready_json())));
+    let state = temp_state("gone");
+    let _ = std::fs::remove_file(&state);
+    let rt = runtime();
+    let config = super::Config {
+        port: 0,
+        https_port: 8443,
+        state: state.clone(),
+        every: Duration::from_millis(150),
+        confirm: Duration::from_secs(2),
+    };
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let task = rt.spawn(super::supervise(
+        site(ts.clone(), Ok(()), None),
+        config,
+        stopped,
+    ));
+    assert!(wait_for(&state, |report| report.up).up);
+    // `tailscale serve reset`, or the owner's edit: the mount is gone while the CLI still runs.
+    *ts.serve.lock().unwrap() = "{}".into();
+    let gone = wait_for(&state, |report| !report.up);
+    assert_eq!(gone.short, "serve gone", "{gone:?}");
+    assert!(wait_for(&state, |report| report.up).up, "set again");
+    // The CLI holding it ends (tailscaled restarted).
+    ts.alive.store(false, Ordering::SeqCst);
+    let ended = wait_for(&state, |report| !report.up);
+    assert_eq!(ended.short, "serve gone", "{ended:?}");
+    assert!(ended.long.contains("tailscale serve ended"), "{ended:?}");
+    let _ = stop.send(true);
+    rt.block_on(task).unwrap();
+    let holds = ts
+        .calls()
+        .iter()
+        .filter(|call| call.starts_with("hold"))
+        .count();
+    assert!(holds >= 2, "{:?}", ts.calls());
+}
+
+#[test]
+fn the_held_serve_is_foreground_and_asks_nothing() {
+    assert_eq!(
+        tailscale::hold_args(8443, 7790),
+        vec!["serve", "--https=8443", "http://127.0.0.1:7790"]
+    );
+}
+
+#[test]
+fn the_installed_cli_is_preferred_over_path() {
+    let installed = std::path::Path::new("C:\\Program Files")
+        .join("Tailscale")
+        .join("tailscale.exe");
+    assert_eq!(
+        tailscale::program(Some("C:\\Program Files".into()), |path| path == installed),
+        installed
+    );
+    assert_eq!(
+        tailscale::program(Some("C:\\Program Files".into()), |_| false),
+        std::path::PathBuf::from("tailscale")
+    );
+    assert_eq!(
+        tailscale::program(None, |_| true),
+        std::path::PathBuf::from("tailscale")
+    );
+}
+
+// --- Review round: who is let in (S1, S5) --------------------------------------------------------------------------
+
+#[test]
+fn a_request_from_this_pc_itself_is_refused() {
+    let own: Vec<IpAddr> = vec![
+        DESK_IP.parse().unwrap(),
+        "fd7a:115c:a1e0::1".parse().unwrap(),
+    ];
+    assert_eq!(routes::from_another_device(&[PHONE], &own), Ok(()));
+    assert_eq!(
+        routes::from_another_device(&["fd7a:115c:a1e0::9"], &own),
+        Ok(())
+    );
+    assert!(routes::from_another_device(&[DESK_IP], &own).is_err());
+    assert!(routes::from_another_device(&["fd7a:115c:a1e0::1"], &own).is_err());
+    assert!(
+        routes::from_another_device(&["192.168.1.20"], &own).is_err(),
+        "not a tailnet source"
+    );
+    assert!(routes::from_another_device(&[], &own).is_err());
+    assert!(routes::from_another_device(&[PHONE, PHONE], &own).is_err());
+    assert!(routes::from_another_device(&["nope"], &own).is_err());
+    // Over HTTP: the same owner login from this PC's own address is refused.
+    let running = serve(site(Arc::default(), Ok(()), Some(OWNER)));
+    let from_desk = format!(
+        "GET /api/hello HTTP/1.1\r\nHost: {HOST}\r\nX-Forwarded-For: {DESK_IP}\r\nTailscale-User-Login: {OWNER}\r\n\r\n"
+    );
+    assert_eq!(raw(running.addr, from_desk.as_bytes()).0, 403);
+    assert_eq!(get(running.addr, "/api/hello", Some(OWNER)).0, 200);
+}
+
+#[test]
+fn a_request_to_another_name_is_misdirected() {
+    assert_eq!(routes::for_this_pc(&[HOST], Some(HOST)), Ok(()));
+    assert_eq!(
+        routes::for_this_pc(&["DESK.example-tail.ts.net:8443"], Some(HOST)),
+        Ok(())
+    );
+    assert!(routes::for_this_pc(&["evil.example:8443"], Some(HOST)).is_err());
+    assert!(routes::for_this_pc(&["desk.example-tail.ts.net"], Some(HOST)).is_err());
+    assert!(routes::for_this_pc(&[], Some(HOST)).is_err());
+    assert!(routes::for_this_pc(&[HOST], None).is_err());
+    let running = serve(site(Arc::default(), Ok(()), Some(OWNER)));
+    let rebound = format!(
+        "GET / HTTP/1.1\r\nHost: evil.example:8443\r\nX-Forwarded-For: {PHONE}\r\nTailscale-User-Login: {OWNER}\r\n\r\n"
+    );
+    assert_eq!(raw(running.addr, rebound.as_bytes()).0, 421);
+}
+
+#[test]
+fn a_cross_site_request_that_may_change_something_is_refused() {
+    let running = serve(site(Arc::default(), Ok(()), Some(OWNER)));
+    let post = |extra: &str| {
+        let request = format!(
+            "{}{extra}Content-Length: 0\r\n\r\n",
+            proxied("POST", "/api/pcs", Some(OWNER))
+        );
+        raw(running.addr, request.as_bytes()).0
+    };
+    assert_eq!(post(""), 403, "neither header");
+    assert_eq!(post("Sec-Fetch-Site: cross-site\r\n"), 403);
+    assert_eq!(post("Sec-Fetch-Site: same-site\r\n"), 403);
+    assert_eq!(post("Origin: https://evil.example\r\n"), 403);
+    assert_eq!(
+        post("Sec-Fetch-Site: same-origin\r\nOrigin: https://evil.example\r\n"),
+        403
+    );
+    // From the page itself the request passes the check and reaches the method rule.
+    assert_eq!(
+        post(&format!(
+            "Sec-Fetch-Site: same-origin\r\nOrigin: https://{HOST}\r\n"
+        )),
+        405
+    );
+    assert_eq!(post(&format!("Origin: https://{HOST}\r\n")), 405);
+    // A GET is a read, and needs neither.
+    assert_eq!(get(running.addr, "/api/hello", Some(OWNER)).0, 200);
+}
+
+// --- Review round: the HTTP limits (S6, N1, N7) --------------------------------------------------------------------
+
+#[test]
+fn a_head_that_never_finishes_gets_408() {
+    let running = serve_with(
+        site(Arc::default(), Ok(()), Some(OWNER)),
+        http::Limits {
+            read_timeout: Duration::from_millis(300),
+            connections: http::CONNECTIONS,
+        },
+    );
+    let started = Instant::now();
+    let (status, _, _) = raw(running.addr, b"GET / HTTP/1.1\r\nHost: x\r\n");
+    assert_eq!(status, 408);
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn the_33rd_connection_waits_for_a_slot() {
+    let running = serve(site(Arc::default(), Ok(()), Some(OWNER)));
+    let stalled = (0..http::CONNECTIONS)
+        .map(|_| TcpStream::connect(running.addr).unwrap())
+        .collect::<Vec<_>>();
+    std::thread::sleep(Duration::from_millis(300));
+    let mut late = TcpStream::connect(running.addr).unwrap();
+    late.write_all(format!("{}\r\n", proxied("GET", "/api/hello", Some(OWNER))).as_bytes())
+        .unwrap();
+    late.set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    let mut first = [0u8; 1];
+    assert!(
+        late.read(&mut first).is_err(),
+        "answered while every slot was taken"
+    );
+    drop(stalled);
+    late.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut answer = String::new();
+    late.read_to_string(&mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+}
+
+#[test]
+fn every_answer_carries_the_safety_headers() {
+    let running = serve(site(Arc::default(), Ok(()), Some(OWNER)));
+    let refused = serve(site(
+        Arc::default(),
+        Err("pid 4242 (x.exe)".into()),
+        Some(OWNER),
+    ));
+    let answers = [
+        get(running.addr, "/", Some(OWNER)),
+        get(running.addr, "/app.js", Some(OWNER)),
+        get(running.addr, "/api/hello", Some(OWNER)),
+        get(running.addr, "/nope", Some(OWNER)),
+        get(running.addr, "/", Some("friend@example.com")),
+        get(refused.addr, "/", Some(OWNER)),
+    ];
+    assert_eq!(
+        answers
+            .iter()
+            .map(|(status, _, _)| *status)
+            .collect::<Vec<_>>(),
+        vec![200, 200, 200, 404, 403, 403]
+    );
+    for (status, head, _) in &answers {
+        for header in [
+            "Cache-Control: no-store",
+            "X-Content-Type-Options: nosniff",
+            "Referrer-Policy: no-referrer",
+            "Connection: close",
+            "Content-Security-Policy: default-src 'self'",
+        ] {
+            assert!(head.contains(header), "{status} lacks {header}: {head}");
+        }
+    }
+}
+
+#[test]
+fn head_on_an_asset_has_its_length_and_no_body() {
+    let running = serve(site(Arc::default(), Ok(()), Some(OWNER)));
+    for path in ["/app.css", "/app.js", "/pcs.js"] {
+        let (_, _, body) = get(running.addr, path, Some(OWNER));
+        let (status, head, empty) = raw(
+            running.addr,
+            format!("{}\r\n", proxied("HEAD", path, Some(OWNER))).as_bytes(),
+        );
+        assert_eq!(status, 200, "{path}");
+        assert!(
+            head.contains(&format!("Content-Length: {}", body.len())),
+            "{path}: {head}"
+        );
+        assert!(empty.is_empty(), "{path}");
+    }
+}
+
+#[test]
+fn a_request_body_is_drained_not_reset() {
+    // The head first; the body only once the answer is on its way, as a slow upload sends it. A server that closed
+    // without draining has its socket gone by then, so the body draws a reset, and Windows drops the answer the
+    // client had not read yet.
+    let running = serve(site(Arc::default(), Ok(()), Some(OWNER)));
+    let body = vec![b'x'; 48 * 1024];
+    let head = format!(
+        "{}Content-Length: {}
+
+",
+        proxied("POST", "/api/pcs", Some(OWNER)),
+        body.len()
+    );
+    let mut stream = TcpStream::connect(running.addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream.write_all(head.as_bytes()).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let _ = stream.write_all(&body);
+    std::thread::sleep(Duration::from_millis(200));
+    let mut answer = String::new();
+    let read = stream.read_to_string(&mut answer);
+    assert!(read.is_ok(), "{read:?} after {answer:?}");
+    assert!(answer.starts_with("HTTP/1.1 403"), "{answer}");
+    assert!(answer.ends_with("Only the Tailscale account this PC is signed in with can connect."));
+}
+
+// --- Review round: the log and the process snapshot (S4) ---------------------------------------------------------
+
+#[test]
+fn a_refusal_is_logged_once_a_minute_per_caller() {
+    let throttle = routes::Throttle::new(Duration::from_secs(60));
+    let t0 = Instant::now();
+    assert_eq!(throttle.allow("pid 1", t0), Some(0));
+    assert_eq!(throttle.allow("pid 1", t0 + Duration::from_secs(1)), None);
+    assert_eq!(throttle.allow("pid 1", t0 + Duration::from_secs(30)), None);
+    assert_eq!(
+        throttle.allow("pid 2", t0 + Duration::from_secs(1)),
+        Some(0),
+        "another caller"
+    );
+    assert_eq!(
+        throttle.allow("pid 1", t0 + Duration::from_secs(61)),
+        Some(2),
+        "the next line counts what was held back"
+    );
+    // Cycling keys cannot grow the map without end.
+    for key in 0..5000 {
+        let _ = throttle.allow(&format!("k{key}"), t0 + Duration::from_secs(62));
+    }
+    assert_eq!(
+        throttle.allow("pid 9", t0 + Duration::from_secs(62)),
+        None,
+        "full"
+    );
+    assert_eq!(
+        throttle.allow("pid 9", t0 + Duration::from_secs(200)),
+        Some(0),
+        "old keys dropped"
+    );
+}
+
+#[test]
+fn the_process_snapshot_refuses_from_cache_and_trusts_only_fresh() {
+    let reads = AtomicUsize::new(0);
+    let child = std::cell::Cell::new(true);
+    let processes = || {
+        reads.fetch_add(1, Ordering::SeqCst);
+        if child.get() {
+            vec![Process {
+                pid: 8672,
+                parent_pid: 6716,
+                name: "tailscaled.exe".into(),
+            }]
+        } else {
+            Vec::new()
+        }
+    };
+    let snapshot = peer::Snapshot::new(Duration::from_secs(1));
+    let t0 = Instant::now();
+    // A connect loop from pid 4242: one snapshot answers every refusal within the second.
+    for step in 0..10 {
+        let (trusted, _) = snapshot.trusted(
+            4242,
+            Some(6716),
+            &processes,
+            t0 + Duration::from_millis(step * 50),
+        );
+        assert!(!trusted);
+    }
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    // The service's child is trusted only on a fresh read.
+    let (trusted, _) = snapshot.trusted(
+        8672,
+        Some(6716),
+        &processes,
+        t0 + Duration::from_millis(600),
+    );
+    assert!(trusted);
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        2,
+        "read again before trusting"
+    );
+    // The child is gone and its pid reused within the second: the cache still names it, the fresh read does not.
+    child.set(false);
+    let (trusted, _) = snapshot.trusted(
+        8672,
+        Some(6716),
+        &processes,
+        t0 + Duration::from_millis(700),
+    );
+    assert!(!trusted, "old data never lets a caller in");
+    // A second later the cache is read again.
+    let _ = snapshot.trusted(4242, Some(6716), &processes, t0 + Duration::from_secs(3));
+    assert_eq!(reads.load(Ordering::SeqCst), 4);
+}
+
+// --- Review round: one state file owner (S7) and the status cache (N2) -------------------------------------------
+
+#[test]
+fn a_second_server_leaves_the_holders_report_alone() {
+    let state = temp_state("second");
+    let holder = super::Report {
+        up: true,
+        short: ":8443".into(),
+        long: "serving".into(),
+        url: Some("https://desk.example-tail.ts.net:8443/".into()),
+        at: super::unix_now(),
+        pid: 1,
+    };
+    std::fs::write(&state, serde_json::to_string(&holder).unwrap()).unwrap();
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = taken.local_addr().unwrap().port();
+    let ts = Arc::new(FakeTailscale::with(Ok(ready_json())));
+    let rt = runtime();
+    let config = super::Config {
+        port,
+        https_port: 8443,
+        state: state.clone(),
+        every: Duration::from_secs(3600),
+        confirm: Duration::from_secs(2),
+    };
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let task = rt.spawn(super::supervise(
+        site(ts.clone(), Ok(()), None),
+        config,
+        stopped,
+    ));
+    // The check has run once the owner is known.
+    for _ in 0..200 {
+        if ts.status_reads.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(read_report(&state), holder, "the holder's report stands");
+    let _ = stop.send(true);
+    rt.block_on(task).unwrap();
+    assert_eq!(read_report(&state), holder, "and is not removed at stop");
+    // A stale one is anyone's.
+    let stale = super::Report { at: 1, ..holder };
+    std::fs::write(&state, serde_json::to_string(&stale).unwrap()).unwrap();
+    supervise_once(ts, port, &state, |_| {
+        let report = wait_for(&state, |report| report.pid == std::process::id());
+        assert_eq!(report.short, format!("port {port} busy"));
+    });
+}
+
+#[test]
+fn api_pcs_reads_tailscale_once_in_five_seconds() {
+    let ts = Arc::new(FakeTailscale::with(Ok(ready_json())));
+    let running = serve(site(ts.clone(), Ok(()), Some(OWNER)));
+    for _ in 0..3 {
+        assert_eq!(get(running.addr, "/api/pcs", Some(OWNER)).0, 200);
+    }
+    assert_eq!(ts.status_reads.load(Ordering::SeqCst), 1);
 }

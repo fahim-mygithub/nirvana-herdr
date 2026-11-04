@@ -5,14 +5,83 @@
 //! as the process that sent it, and any process of any Windows account can connect to 127.0.0.1, while herdr's own
 //! pipe admits SYSTEM and its owner only (`D:P(A;;GA;;;SY)(A;;GA;;;OW)`, src/platform/windows.rs). So the header is
 //! read only from a connection the Tailscale service's own process tree opened; everything else is refused before
-//! its headers are read. A non-admin cannot start a process under the service, so this check is the pipe's ACL or
-//! tighter.
+//! its headers are read. A non-admin cannot start a process under the service, so a process that dials 127.0.0.1
+//! directly is refused whatever its account.
+//!
+//! That is not the whole claim (review round, S1): tailscaled also serves the mount on this PC's own Tailscale
+//! address, so a local process can reach it through tailscaled and arrive here from the service with the owner's
+//! login. `routes::from_another_device` refuses a request whose Tailscale source is this PC. Until the owner's live
+//! check shows that refusal on a real request, the claim stands at "as tight as any process of the owner's Windows
+//! account" (record p39a, review round).
 
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use crate::nirvana_servers::Process;
+
+/// Why a connection was refused, and the pid that opened it when one was found (the log is limited per pid).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    pub pid: Option<u32>,
+    pub why: String,
+}
 
 pub trait PeerCheck: Send + Sync {
     /// `Ok` when the connection from `peer` to `local` was opened by the Tailscale service; otherwise who did.
-    fn check(&self, peer: SocketAddr, local: SocketAddr) -> Result<(), String>;
+    fn check(&self, peer: SocketAddr, local: SocketAddr) -> Result<(), Refusal>;
+}
+
+/// How long one process snapshot answers a refusal (review round, S4): a connect loop costs one snapshot a second,
+/// not one per connection.
+pub const SNAPSHOT_FOR: Duration = Duration::from_secs(1);
+
+/// The last process snapshot. It may only refuse: a caller it reads as the Tailscale service is read again from a
+/// fresh snapshot before it is trusted, so a pid reused within the second is never let in on old data.
+pub struct Snapshot {
+    every: Duration,
+    last: Mutex<Option<(Instant, Arc<Vec<Process>>)>>,
+}
+
+impl Snapshot {
+    pub fn new(every: Duration) -> Self {
+        Self {
+            every,
+            last: Mutex::new(None),
+        }
+    }
+
+    fn fresh(&self, read: &dyn Fn() -> Vec<Process>, now: Instant) -> Arc<Vec<Process>> {
+        let processes = Arc::new(read());
+        if let Ok(mut last) = self.last.lock() {
+            *last = Some((now, processes.clone()));
+        }
+        processes
+    }
+
+    /// Whether `owner` is the Tailscale service, and the processes the answer was read from.
+    pub fn trusted(
+        &self,
+        owner: u32,
+        service: Option<u32>,
+        read: &dyn Fn() -> Vec<Process>,
+        now: Instant,
+    ) -> (bool, Arc<Vec<Process>>) {
+        let cached = self.last.lock().ok().and_then(|last| {
+            last.as_ref()
+                .filter(|(at, _)| now.saturating_duration_since(*at) < self.every)
+                .map(|(_, processes)| processes.clone())
+        });
+        let Some(cached) = cached else {
+            let processes = self.fresh(read, now);
+            return (is_tailscale(owner, service, &processes), processes);
+        };
+        if !is_tailscale(owner, service, &cached) {
+            return (false, cached);
+        }
+        let processes = self.fresh(read, now);
+        (is_tailscale(owner, service, &processes), processes)
+    }
 }
 
 /// The Windows service name of Tailscale (`sc queryex Tailscale`, measured 2026-11-04: RUNNING, PID 6716).
@@ -22,11 +91,7 @@ pub const SERVICE: &str = "Tailscale";
 pub const DAEMON: &str = "tailscaled.exe";
 
 /// The decision, kept apart from the system reads so a test can drive it.
-pub fn is_tailscale(
-    owner_pid: u32,
-    service_pid: Option<u32>,
-    processes: &[crate::nirvana_servers::Process],
-) -> bool {
+pub fn is_tailscale(owner_pid: u32, service_pid: Option<u32>, processes: &[Process]) -> bool {
     let Some(service_pid) = service_pid.filter(|pid| *pid != 0) else {
         return false;
     };
@@ -41,22 +106,48 @@ pub fn is_tailscale(
 }
 
 /// The real check: the connection table, the service's pid, the process table.
-pub struct System;
+pub struct System {
+    snapshot: Snapshot,
+}
+
+impl System {
+    pub fn new() -> Self {
+        Self {
+            snapshot: Snapshot::new(SNAPSHOT_FOR),
+        }
+    }
+}
+
+impl Default for System {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl PeerCheck for System {
-    fn check(&self, peer: SocketAddr, local: SocketAddr) -> Result<(), String> {
-        let owner = read::connection_owner(peer, local)
-            .ok_or_else(|| format!("no connection row for {peer}"))?;
+    fn check(&self, peer: SocketAddr, local: SocketAddr) -> Result<(), Refusal> {
+        let owner = read::connection_owner(peer, local).ok_or_else(|| Refusal {
+            pid: None,
+            why: format!("no connection row for {peer}"),
+        })?;
         let service = read::service_pid(SERVICE);
-        let processes = crate::nirvana_servers::read::processes();
-        if is_tailscale(owner, service, &processes) {
+        let (trusted, processes) = self.snapshot.trusted(
+            owner,
+            service,
+            &crate::nirvana_servers::read::processes,
+            Instant::now(),
+        );
+        if trusted {
             return Ok(());
         }
         let name = processes
             .iter()
             .find(|process| process.pid == owner)
             .map_or("unknown", |process| process.name.as_str());
-        Err(format!("pid {owner} ({name}), not the Tailscale service"))
+        Err(Refusal {
+            pid: Some(owner),
+            why: format!("pid {owner} ({name}), not the Tailscale service"),
+        })
     }
 }
 

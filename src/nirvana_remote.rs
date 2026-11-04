@@ -7,8 +7,10 @@
 //! One per PC, inside the default herdr server, started and stopped with it. It listens on 127.0.0.1 only;
 //! `tailscale serve` puts it at `https://<pc>.<tailnet>.ts.net:8443/` for the owner's devices and names each caller
 //! in a header (`routes.rs`), trusted only from the Tailscale service's own connection (`peer.rs`). Tailscale off or
-//! signed out, HTTPS off for the tailnet, or the port taken: it does not serve, and the sidebar's servers block says
-//! why from the state file this writes (`foot_row`). No fallback to the home network.
+//! signed out, HTTPS off for the tailnet, the port taken, or anything not its own on 8443: it does not serve, and the
+//! sidebar's servers block says why from the state file this writes (`foot_row`). No fallback to the home network.
+//! The mount is a foreground serve held by a child `tailscale serve` (tailscale.rs): it ends with this server, a
+//! hard kill included, and is checked again every `CHECK_EVERY`.
 
 pub mod herdr;
 pub mod http;
@@ -20,13 +22,13 @@ pub mod tailscale;
 mod tests;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use tailscale::Off;
+use tailscale::{Held, Mount, Off, Tailscale};
 
 /// Where Nirvana Remote listens, 127.0.0.1 only. Fixed, so the one serve config stays right across restarts, and so
 /// a second herdr server on this PC finds it taken instead of serving twice.
@@ -46,12 +48,19 @@ const FOOT_EVERY: Duration = Duration::from_secs(3);
 
 /// Why this server does not host Nirvana Remote, or `None` when it does. Only the default server of the owner's
 /// own config does: the integration tests start real `herdr server` processes with `HERDR_SOCKET_PATH` and
-/// `XDG_CONFIG_HOME` set (36 of them, tests/), and none of those may run a real `tailscale` (plan 39 §4).
+/// `XDG_CONFIG_HOME` set (36 of them, tests/), and none of those may run a real `tailscale` (plan 39 §4). A debug
+/// build (`herdr-dev`, which has its own config dir and sets neither) hosts it only when `NIRVANA_REMOTE=on` asks:
+/// a dev server started first would otherwise take the port and the mount from the installed one (review round, B1).
 pub fn skip_reason(
     var: impl Fn(&str) -> Option<String>,
     session: Option<String>,
+    debug_build: bool,
 ) -> Option<&'static str> {
-    if var("NIRVANA_REMOTE").is_some_and(|value| value.eq_ignore_ascii_case("off")) {
+    let asked = var("NIRVANA_REMOTE");
+    if asked
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("off"))
+    {
         return Some("NIRVANA_REMOTE=off");
     }
     if var(crate::api::SOCKET_PATH_ENV_VAR).is_some() {
@@ -62,6 +71,9 @@ pub fn skip_reason(
     }
     if session.is_some() {
         return Some("a named session's server");
+    }
+    if debug_build && !asked.is_some_and(|value| value.eq_ignore_ascii_case("on")) {
+        return Some("a debug build (NIRVANA_REMOTE=on runs it)");
     }
     None
 }
@@ -75,6 +87,9 @@ pub struct Report {
     pub url: Option<String>,
     /// Unix seconds of the check that wrote it.
     pub at: u64,
+    /// The herdr server that wrote it: only the one holding the port overwrites another's fresh report.
+    #[serde(default)]
+    pub pid: u32,
 }
 
 impl Report {
@@ -82,9 +97,12 @@ impl Report {
         Self {
             up: true,
             short: format!(":{HTTPS_PORT}"),
-            long: format!("serving {url} to this Tailscale account's devices"),
+            // Not "to the owner's devices": a process on this PC may reach the mount too (record p39a, review
+            // round S1), so the line names who the check admits, not where they sit.
+            long: format!("serving {url} to this PC's Tailscale login only"),
             url: Some(url),
             at,
+            pid: std::process::id(),
         }
     }
 
@@ -95,6 +113,7 @@ impl Report {
             long: off.long(),
             url: None,
             at,
+            pid: std::process::id(),
         }
     }
 }
@@ -107,6 +126,21 @@ fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
+}
+
+fn read_state(path: &Path) -> Option<Report> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+/// One owner of the state file (review round, S7): the server holding the port always writes it; another writes
+/// only into a file that is missing, stale or its own, so a second server's "port busy" never covers the first's
+/// "up" and the row does not flicker.
+fn may_write(path: &Path, holding: bool, now: u64) -> bool {
+    holding
+        || read_state(path).is_none_or(|report| {
+            report.pid == std::process::id()
+                || now.saturating_sub(report.at) > STALE_AFTER.as_secs()
+        })
 }
 
 fn write_report(path: &Path, report: &Report) {
@@ -126,6 +160,8 @@ pub struct Config {
     pub https_port: u16,
     pub state: PathBuf,
     pub every: Duration,
+    /// How long a new mount has to show in `serve status` before the serve counts as failed.
+    pub confirm: Duration,
 }
 
 /// `status --json` read, or why not. A missing CLI is its own reason.
@@ -145,24 +181,124 @@ pub fn assess(answer: Result<String, String>) -> Result<tailscale::Status, Off> 
     Ok(status)
 }
 
-struct Serving {
-    task: tokio::task::JoinHandle<()>,
-    stop: tokio::sync::watch::Sender<bool>,
+/// Which mount is Nirvana Remote's: this PC's name, the HTTPS port, the local port.
+#[derive(Clone)]
+struct Key {
+    dns: String,
+    https: u16,
+    local: u16,
 }
 
-impl Serving {
-    async fn end(self) {
-        let _ = self.stop.send(true);
-        let _ = self.task.await;
+impl Key {
+    fn read(&self, ts: &dyn Tailscale) -> Result<Mount, String> {
+        tailscale::mount(&ts.serve_status()?, &self.dns, self.https, self.local)
     }
 }
 
-/// Bind the listener and point `tailscale serve` at it; the URL the phone opens, or why not.
+/// After the hold ends, how long the listener waits for tailscaled to delete the mount.
+const GONE_WAIT: Duration = Duration::from_secs(3);
+const POLL: Duration = Duration::from_millis(100);
+
+struct Serving {
+    task: tokio::task::JoinHandle<()>,
+    stop: tokio::sync::watch::Sender<bool>,
+    held: Option<Box<dyn Held>>,
+    key: Key,
+    url: String,
+}
+
+impl Serving {
+    /// The mount first, then the listener: tailscaled deletes a foreground mount when its `tailscale serve`
+    /// ends, and the port stays held until it has, so the mount never points at a port nobody holds (S2).
+    async fn end(mut self, ts: Arc<dyn Tailscale>) {
+        let held = self.held.take();
+        let key = self.key.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            drop(held);
+            let started = std::time::Instant::now();
+            while started.elapsed() < GONE_WAIT
+                && key.read(ts.as_ref()) == Ok(Mount::OursForeground)
+            {
+                std::thread::sleep(POLL);
+            }
+        })
+        .await;
+        let _ = self.stop.send(true);
+        let _ = self.task.await;
+    }
+
+    /// Whether the mount is still there and still ours (review round, S3): the CLI holding it alive, and
+    /// `serve status` showing it.
+    async fn check(&mut self, ts: Arc<dyn Tailscale>) -> Result<(), String> {
+        if let Some(why) = self.held.as_mut().and_then(|held| held.ended()) {
+            return Err(why);
+        }
+        let key = self.key.clone();
+        match tokio::task::spawn_blocking(move || key.read(ts.as_ref())).await {
+            Ok(Ok(Mount::OursForeground)) => Ok(()),
+            Ok(Ok(Mount::Free)) => Err("serve status no longer has it".into()),
+            Ok(Ok(Mount::Other(why))) => Err(why),
+            Ok(Ok(Mount::OursBackground)) => Err("it was replaced by a background mount".into()),
+            Ok(Err(error)) => Err(format!("serve status could not be read: {error}")),
+            Err(_) => Err("the serve status call panicked".into()),
+        }
+    }
+}
+
+/// Look at what serves on the HTTPS port, clear a stale mount of ours, bind the listener, and hold the mount; the
+/// URL the phone opens, or why not. Nothing that is not Nirvana Remote's own mount is ever changed (B2).
 async fn bring_up(
     site: &Arc<routes::Site>,
     config: &Config,
     status: &tailscale::Status,
-) -> Result<(Serving, String), Off> {
+) -> Result<Serving, Off> {
+    let ts = site.tailscale.clone();
+    let before = Key {
+        dns: status.me.dns.clone(),
+        https: config.https_port,
+        local: config.port,
+    };
+    let look = {
+        let (ts, key) = (ts.clone(), before.clone());
+        move || key.read(ts.as_ref())
+    };
+    let found = tokio::task::spawn_blocking(look.clone())
+        .await
+        .unwrap_or_else(|_| Err("the serve status call panicked".into()))
+        .map_err(Off::Unreadable)?;
+    match found {
+        Mount::Free => {}
+        Mount::Other(why) => return Err(Off::ServeTaken(why)),
+        Mount::OursForeground => {
+            return Err(Off::ServeTaken(format!(
+                "{} is held by another running Nirvana Remote",
+                config.https_port
+            )))
+        }
+        Mount::OursBackground => {
+            // Left by a build that used `--bg`, or typed by hand: it points a trusted ts.net origin at port 7790
+            // whether or not anything of ours holds it (S2), so it goes before the port is bound.
+            let (clear, https) = (ts.clone(), config.https_port);
+            tokio::task::spawn_blocking(move || clear.clear_background(https))
+                .await
+                .unwrap_or_else(|_| Err("the serve call panicked".into()))
+                .map_err(Off::ServeFailed)?;
+            warn!(
+                https,
+                "nirvana remote removed a stale background mount of its own"
+            );
+            let after = tokio::task::spawn_blocking(look)
+                .await
+                .unwrap_or_else(|_| Err("the serve status call panicked".into()))
+                .map_err(Off::Unreadable)?;
+            if after != Mount::Free {
+                return Err(Off::ServeTaken(format!(
+                    "the stale mount on {} did not clear",
+                    config.https_port
+                )));
+            }
+        }
+    }
     let listener = std::net::TcpListener::bind(("127.0.0.1", config.port))
         .map_err(|_| Off::PortInUse(config.port))?;
     let local = listener
@@ -176,18 +312,53 @@ async fn bring_up(
         .map_err(|err| Off::Unreadable(err.to_string()))?;
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let handler: Arc<dyn http::Handler> = site.clone();
-    let task = tokio::spawn(http::serve(listener, handler, stopped));
-    let serving = Serving { task, stop };
-    let ts = site.tailscale.clone();
-    let https = config.https_port;
-    let served = tokio::task::spawn_blocking(move || ts.serve_on(https, local))
-        .await
-        .unwrap_or_else(|_| Err("the serve call panicked".into()));
-    if let Err(error) = served {
-        serving.end().await;
-        return Err(Off::ServeFailed(error));
+    let task = tokio::spawn(http::serve(
+        listener,
+        handler,
+        http::Limits::DEFAULT,
+        stopped,
+    ));
+    let key = Key { local, ..before };
+    let url = format!("https://{}:{}/", key.dns, key.https);
+    let mut serving = Serving {
+        task,
+        stop,
+        held: None,
+        key: key.clone(),
+        url,
+    };
+    let (hold, https, wait) = (ts.clone(), config.https_port, config.confirm);
+    let held = tokio::task::spawn_blocking(move || {
+        let mut held = hold.hold(https, local)?;
+        // The mount counts once tailscaled shows it: the CLI ends with tailscaled's own error when the port is
+        // taken after the look above ("listener already exists for port"), and never overwrites it.
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(why) = held.ended() {
+                return Err(why);
+            }
+            if key.read(hold.as_ref()) == Ok(Mount::OursForeground) {
+                return Ok(held);
+            }
+            if started.elapsed() >= wait {
+                drop(held);
+                return Err("the mount did not show in serve status".into());
+            }
+            std::thread::sleep(POLL);
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Err("the serve call panicked".into()));
+    match held {
+        Ok(held) => {
+            serving.held = Some(held);
+            Ok(serving)
+        }
+        Err(error) => {
+            serving.end(ts).await;
+            Err(Off::ServeFailed(error))
+        }
     }
-    Ok((serving, format!("https://{}:{}/", status.me.dns, https)))
 }
 
 /// Read Tailscale, serve when it lets us, write the state file, and again each `every`, until `stop`.
@@ -196,7 +367,7 @@ pub async fn supervise(
     config: Config,
     mut stop: tokio::sync::watch::Receiver<bool>,
 ) {
-    let mut serving: Option<(Serving, String)> = None;
+    let mut serving: Option<Serving> = None;
     loop {
         let ts = site.tailscale.clone();
         let answer = tokio::task::spawn_blocking(move || ts.status())
@@ -207,13 +378,35 @@ pub async fn supervise(
                 if let Ok(mut owner) = site.owner.write() {
                     *owner = Some(status.owner_login.clone());
                 }
-                match &serving {
-                    Some((_, url)) => Report::up(url.clone(), unix_now()),
+                if let Ok(mut me) = site.me.write() {
+                    *me = Some(routes::Me {
+                        host: format!("{}:{}", status.me.dns, config.https_port),
+                        ips: status.me.ips.clone(),
+                    });
+                }
+                let checked = match serving.as_mut() {
+                    Some(up) => Some(up.check(site.tailscale.clone()).await),
+                    None => None,
+                };
+                match checked {
+                    Some(Ok(())) => Report::up(
+                        serving
+                            .as_ref()
+                            .map_or_else(String::new, |up| up.url.clone()),
+                        unix_now(),
+                    ),
+                    Some(Err(why)) => {
+                        if let Some(gone) = serving.take() {
+                            gone.end(site.tailscale.clone()).await;
+                        }
+                        Report::off(&Off::MountGone(why), unix_now())
+                    }
                     None => match bring_up(&site, &config, &status).await {
-                        Ok((up, url)) => {
-                            info!(%url, "nirvana remote serving");
-                            serving = Some((up, url.clone()));
-                            Report::up(url, unix_now())
+                        Ok(up) => {
+                            info!(url = %up.url, "nirvana remote serving");
+                            let report = Report::up(up.url.clone(), unix_now());
+                            serving = Some(up);
+                            report
                         }
                         Err(off) => Report::off(&off, unix_now()),
                     },
@@ -224,28 +417,30 @@ pub async fn supervise(
                 if let Ok(mut owner) = site.owner.write() {
                     *owner = None;
                 }
+                if let Ok(mut me) = site.me.write() {
+                    *me = None;
+                }
                 Report::off(&off, unix_now())
             }
         };
         if !report.up {
             warn!(why = %report.long, "nirvana remote not serving");
         }
-        write_report(&config.state, &report);
+        if may_write(&config.state, serving.is_some(), report.at) {
+            write_report(&config.state, &report);
+        }
         tokio::select! {
             _ = tokio::time::sleep(config.every) => {}
             _ = stop.wait_for(|stopped| *stopped) => break,
         }
     }
-    if let Some((up, _)) = serving {
-        up.end().await;
-        let ts = site.tailscale.clone();
-        let https = config.https_port;
-        let off = tokio::task::spawn_blocking(move || ts.serve_off(https)).await;
-        if let Ok(Err(error)) = off {
-            warn!(%error, "nirvana remote could not remove its tailscale serve");
-        }
+    if let Some(up) = serving {
+        up.end(site.tailscale.clone()).await;
     }
-    let _ = std::fs::remove_file(&config.state);
+    // Only this server's own report goes with it.
+    if read_state(&config.state).is_some_and(|report| report.pid == std::process::id()) {
+        let _ = std::fs::remove_file(&config.state);
+    }
 }
 
 /// The running Nirvana Remote, stopped when the herdr server stops.
@@ -266,27 +461,28 @@ pub fn start(api_tx: crate::api::ApiRequestSender) -> Option<Remote> {
     if let Some(why) = skip_reason(
         |name| std::env::var(name).ok(),
         crate::session::active_name(),
+        cfg!(debug_assertions),
     ) {
         info!(why, "nirvana remote not started");
         return None;
     }
-    let site = Arc::new(routes::Site {
-        tailscale: Arc::new(tailscale::Cli),
-        herdr: Arc::new(herdr::App {
+    let site = Arc::new(routes::Site::new(
+        Arc::new(tailscale::Cli),
+        Arc::new(herdr::App {
             api_tx,
             next: std::sync::atomic::AtomicU64::new(1),
         }),
-        peer: Arc::new(peer::System),
-        probe: Arc::new(pcs::Https),
-        owner: RwLock::new(None),
-        https_port: HTTPS_PORT,
-        now: time::OffsetDateTime::now_utc,
-    });
+        Arc::new(peer::System::new()),
+        Arc::new(pcs::Https),
+        HTTPS_PORT,
+        time::OffsetDateTime::now_utc,
+    ));
     let config = Config {
         port: LOCAL_PORT,
         https_port: HTTPS_PORT,
         state: state_path(),
         every: CHECK_EVERY,
+        confirm: Duration::from_secs(10),
     };
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let task = tokio::spawn(supervise(site, config, stopped));

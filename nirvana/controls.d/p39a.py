@@ -42,6 +42,28 @@ T_SKIP = "nirvana_remote::tests::only_the_owners_default_server_hosts_nirvana_re
 T_FOOT_ROW = "nirvana_remote::tests::the_foot_row_reads_up_off_and_stale"
 T_FOOT_UP = "client::shell::tests::nirvana_footer::the_servers_block_leads_with_nirvana_remote_up_on_its_port"
 T_FOOT_OFF = "client::shell::tests::nirvana_footer::nirvana_remote_off_says_why_with_no_space_server"
+# Review round (p39a.md, "Review round").
+T_MOUNT = "nirvana_remote::tests::the_mount_on_8443_is_ours_only_when_it_is_exactly_ours"
+T_THEIRS = "nirvana_remote::tests::someone_elses_8443_is_left_alone"
+T_LIVE_FG = "nirvana_remote::tests::a_live_foreground_mount_of_ours_is_not_taken_over"
+T_STALE = "nirvana_remote::tests::a_stale_background_mount_of_ours_is_cleared_before_the_port_is_bound"
+T_STALE_SQUAT = "nirvana_remote::tests::a_stale_background_mount_is_cleared_even_when_the_port_is_taken"
+T_NEVER_SHOWS = "nirvana_remote::tests::a_mount_that_never_shows_is_a_failed_serve"
+T_GONE = "nirvana_remote::tests::a_mount_that_goes_away_turns_the_row_off_and_is_set_again"
+T_HOLD_ARGS = "nirvana_remote::tests::the_held_serve_is_foreground_and_asks_nothing"
+T_CLI_PATH = "nirvana_remote::tests::the_installed_cli_is_preferred_over_path"
+T_SELF = "nirvana_remote::tests::a_request_from_this_pc_itself_is_refused"
+T_HOST = "nirvana_remote::tests::a_request_to_another_name_is_misdirected"
+T_CROSS = "nirvana_remote::tests::a_cross_site_request_that_may_change_something_is_refused"
+T_408 = "nirvana_remote::tests::a_head_that_never_finishes_gets_408"
+T_CAP = "nirvana_remote::tests::the_33rd_connection_waits_for_a_slot"
+T_HEADERS = "nirvana_remote::tests::every_answer_carries_the_safety_headers"
+T_HEAD_LEN = "nirvana_remote::tests::head_on_an_asset_has_its_length_and_no_body"
+T_DRAIN = "nirvana_remote::tests::a_request_body_is_drained_not_reset"
+T_THROTTLE = "nirvana_remote::tests::a_refusal_is_logged_once_a_minute_per_caller"
+T_SNAPSHOT = "nirvana_remote::tests::the_process_snapshot_refuses_from_cache_and_trusts_only_fresh"
+T_ONE_OWNER = "nirvana_remote::tests::a_second_server_leaves_the_holders_report_alone"
+T_STATUS_CACHE = "nirvana_remote::tests::api_pcs_reads_tailscale_once_in_five_seconds"
 
 CONTROLS = (
     # §1.2: only the owner's login; another user's is refused
@@ -61,8 +83,8 @@ CONTROLS = (
             T_UNKNOWN, "rust"),
     # §1.2: every route runs the identity decision
     Control("p39a_identity_on_every_route", ROUTES,
-            "        if let Err(why) = decide(&logins, owner.as_deref()) {\n",
-            "        if let Err(why) = decide(&logins, owner.as_deref()).or(Ok::<(), &str>(())) {\n",
+            "        let checked = decide(&logins, owner.as_deref())\n",
+            "        let checked = Ok::<(), &str>(())\n",
             T_HTTP_403, "rust"),
     # §1.2 trust: a connection not from the Tailscale service is refused before its request is read
     Control("p39a_peer_checked_first", HTTP,
@@ -181,8 +203,8 @@ CONTROLS = (
             T_HELLO, "rust"),
     # §1.4: the page's CSP
     Control("p39a_page_csp", ROUTES,
-            '                response.with("Content-Security-Policy", CSP)\n',
-            "                response\n",
+            '        self.route(peer, &request)\n            .with("Content-Security-Policy", CSP)\n',
+            "        self.route(peer, &request)\n",
             T_PAGE, "rust"),
     # §1.4: the screen 1 file is served
     Control("p39a_page_screen_served", ROUTES,
@@ -216,13 +238,13 @@ CONTROLS = (
             T_HEAD, "rust"),
     # §1.1: tailscale serve points at the port actually bound
     Control("p39a_serve_on_bound_port", ROOT_RS,
-            "    let served = tokio::task::spawn_blocking(move || ts.serve_on(https, local))\n",
-            "    let served = tokio::task::spawn_blocking(move || ts.serve_on(https, local.wrapping_add(1)))\n",
+            "        let mut held = hold.hold(https, local)?;\n",
+            "        let mut held = hold.hold(https, local.wrapping_add(1))?;\n",
             T_SERVES, "rust"),
-    # §1.1: stopped with Nirvana: its serve is removed
+    # §1.1: stopped with Nirvana: its held serve is released, so tailscaled removes the mount
     Control("p39a_serve_off_on_stop", ROOT_RS,
-            "        let off = tokio::task::spawn_blocking(move || ts.serve_off(https)).await;\n",
-            "        let off = tokio::task::spawn_blocking(move || {\n            let _ = (ts, https);\n            Ok::<(), String>(())\n        })\n        .await;\n",
+            "            drop(held);\n            let started = std::time::Instant::now();\n",
+            "            std::mem::forget(held);\n            let started = std::time::Instant::now();\n",
             T_SERVES, "rust"),
     # §1.1: the state file goes with the server
     Control("p39a_state_file_removed", ROOT_RS,
@@ -231,8 +253,8 @@ CONTROLS = (
             T_SERVES, "rust"),
     # §2 failures: a failed serve leaves nothing listening
     Control("p39a_failed_serve_closes", ROOT_RS,
-            "        serving.end().await;\n        return Err(Off::ServeFailed(error));\n",
-            "        std::mem::forget(serving);\n        return Err(Off::ServeFailed(error));\n",
+            "        Err(error) => {\n            serving.end(ts).await;\n",
+            "        Err(error) => {\n            let _ = &ts;\n            std::mem::forget(serving);\n",
             T_SERVE_FAILS, "rust"),
     # §1.1: the fixed port, one Nirvana Remote per PC
     Control("p39a_fixed_port", ROOT_RS,
@@ -279,4 +301,216 @@ CONTROLS = (
             "            + super::nirvana_footer::remote_height(servers.len(), remote.is_some()),\n",
             "            + super::nirvana_footer::remote_height(servers.len(), false),\n",
             T_FOOT_UP, "rust"),
+
+    # --- Review round ---------------------------------------------------------------------------------------------
+    # B1: a debug build does not host it unasked
+    Control("p39a_skip_debug", ROOT_RS,
+            '    if debug_build && !asked.is_some_and(|value| value.eq_ignore_ascii_case("on")) {\n',
+            "    if false && debug_build {\n",
+            T_SKIP, "rust"),
+    # B1: ... and does when NIRVANA_REMOTE=on asks
+    Control("p39a_debug_opt_in", ROOT_RS,
+            '    if debug_build && !asked.is_some_and(|value| value.eq_ignore_ascii_case("on")) {\n',
+            "    if debug_build {\n",
+            T_SKIP, "rust"),
+    # B2: someone else's 8443 is reported, never served over
+    Control("p39a_other_mount_left_alone", ROOT_RS,
+            "        Mount::Other(why) => return Err(Off::ServeTaken(why)),\n",
+            "        Mount::Other(_) => {}\n",
+            T_THEIRS, "rust"),
+    # B2: a live foreground mount of ours (another server's) is not taken over
+    Control("p39a_live_mount_not_taken", ROOT_RS,
+            "        Mount::OursForeground => {\n            return Err(Off::ServeTaken(format!(\n",
+            "        Mount::OursForeground => {}\n        Mount::OursBackground if false => {\n            return Err(Off::ServeTaken(format!(\n",
+            T_LIVE_FG, "rust"),
+    # B2: "ours" is the exact proxy target
+    Control("p39a_mount_exact_target", TS,
+            "                            .is_some_and(|to| to.trim_end_matches('/') == ours)\n",
+            "                            .is_some_and(|_| true)\n",
+            T_MOUNT, "rust"),
+    # B2: "ours" is the one "/" handler, nothing beside it
+    Control("p39a_mount_one_handler", TS,
+            "                handlers.len() == 1\n",
+            "                !handlers.is_empty()\n",
+            T_MOUNT, "rust"),
+    # B2: a mount with Funnel on is not ours
+    Control("p39a_mount_funnel", TS,
+            '        if config["AllowFunnel"][host_port.as_str()].as_bool() == Some(true) {\n',
+            "        if false {\n",
+            T_MOUNT, "rust"),
+    # B2: a TCP forward on the port is not ours
+    Control("p39a_mount_tcp_forward", TS,
+            '    if tcp["TCPForward"].as_str().is_some_and(|to| !to.is_empty()) {\n',
+            "    if false {\n",
+            T_MOUNT, "rust"),
+    # B2/S2: a foreground session's mount is read as foreground
+    Control("p39a_mount_foreground", TS,
+            "            look(session, dns, https, local, true, &mut found);\n",
+            "            look(session, dns, https, local, false, &mut found);\n",
+            T_MOUNT, "rust"),
+    # B2/S2: the held serve has no --bg
+    Control("p39a_hold_no_bg", TS,
+            '        "serve".into(),\n        format!("--https={https}"),\n',
+            '        "serve".into(),\n        "--bg".into(),\n        format!("--https={https}"),\n',
+            T_HOLD_ARGS, "rust"),
+    # B2: a serve counts only once tailscaled shows the mount
+    Control("p39a_mount_confirmed", ROOT_RS,
+            "            if key.read(hold.as_ref()) == Ok(Mount::OursForeground) {\n",
+            "            if true {\n",
+            T_NEVER_SHOWS, "rust"),
+    # S2: a stale background mount of ours is cleared
+    Control("p39a_stale_cleared", ROOT_RS,
+            "            tokio::task::spawn_blocking(move || clear.clear_background(https))\n",
+            "            tokio::task::spawn_blocking(move || {\n                let _ = (clear, https);\n                Ok::<(), String>(())\n            })\n",
+            T_STALE, "rust"),
+    # S2: ... before the port is bound, so a squatter on the port does not keep it
+    Control("p39a_stale_cleared_before_bind", ROOT_RS,
+            "    let found = tokio::task::spawn_blocking(look.clone())\n",
+            '    std::net::TcpListener::bind(("127.0.0.1", config.port)).map_err(|_| Off::PortInUse(config.port))?;\n    let found = tokio::task::spawn_blocking(look.clone())\n',
+            T_STALE_SQUAT, "rust"),
+    # S3: each check reads the mount again
+    Control("p39a_recheck_mount", ROOT_RS,
+            '            Ok(Ok(Mount::Free)) => Err("serve status no longer has it".into()),\n',
+            "            Ok(Ok(Mount::Free)) => Ok(()),\n",
+            T_GONE, "rust"),
+    # S3: ... and sees the CLI holding it end
+    Control("p39a_recheck_cli", ROOT_RS,
+            "        if let Some(why) = self.held.as_mut().and_then(|held| held.ended()) {\n",
+            "        if let Some(why) = self.held.as_mut().and_then(|_| None::<String>) {\n",
+            T_GONE, "rust"),
+    # S3: a gone mount is torn down so the next check sets it again
+    Control("p39a_gone_torn_down", ROOT_RS,
+            "                        if let Some(gone) = serving.take() {\n",
+            "                        if let Some(gone) = None::<Serving> {\n",
+            T_GONE, "rust"),
+    # S4: one refusal line per caller per minute
+    Control("p39a_log_throttled", ROUTES,
+            "            if now.saturating_duration_since(*last) < self.every {\n",
+            "            if false {\n",
+            T_THROTTLE, "rust"),
+    # S4: the throttle's map is bounded
+    Control("p39a_log_keys_bounded", ROUTES,
+            "            if seen.len() >= THROTTLE_KEYS {\n                return None;\n",
+            "            if false {\n                return None;\n",
+            T_THROTTLE, "rust"),
+    # S4: one process snapshot a second answers refusals
+    Control("p39a_snapshot_cached", PEER,
+            "                .filter(|(at, _)| now.saturating_duration_since(*at) < self.every)\n",
+            "                .filter(|_| false)\n",
+            T_SNAPSHOT, "rust"),
+    # S4: a cached snapshot never lets a caller in by itself
+    Control("p39a_snapshot_fresh_to_trust", PEER,
+            "        if !is_tailscale(owner, service, &cached) {\n",
+            "        if true {\n",
+            T_SNAPSHOT, "rust"),
+    # S1: a request from this PC's own Tailscale address is refused
+    Control("p39a_self_refused", ROUTES,
+            "    if own.contains(&ip) {\n",
+            "    if false {\n",
+            T_SELF, "rust"),
+    # S1: a source outside Tailscale's ranges is refused
+    Control("p39a_tailnet_source", ROUTES,
+            "    if !tailnet {\n",
+            "    if false {\n",
+            T_SELF, "rust"),
+    # S1: exactly one X-Forwarded-For
+    Control("p39a_one_source", ROUTES,
+            "    let [from] = from else {\n",
+            "    let [from, ..] = from else {\n",
+            T_SELF, "rust"),
+    # S1: every route runs the source check
+    Control("p39a_source_on_every_route", ROUTES,
+            "            .and_then(|()| from_another_device(&request.header(FROM_HEADER), ips))\n",
+            "            .and_then(|()| from_another_device(&[\"100.101.102.103\"], &[]))\n",
+            T_SELF, "rust"),
+    # S5: only this PC's ts.net name
+    Control("p39a_host_checked", ROUTES,
+            "        [sent] if sent.eq_ignore_ascii_case(host) => Ok(()),\n",
+            "        [_] => Ok(()),\n",
+            T_HOST, "rust"),
+    # S5: a misdirected request is a 421
+    Control("p39a_host_421", ROUTES,
+            '            .and_then(|()| for_this_pc(&request.header("Host"), host).map_err(|why| (421, why)))\n',
+            '            .and_then(|()| for_this_pc(&request.header("Host"), host).map_err(|why| (403, why)))\n',
+            T_HOST, "rust"),
+    # S5: a non-GET without the browser's word on its origin is refused
+    Control("p39a_cross_site_needs_headers", ROUTES,
+            "    if site.is_empty() && origin.is_empty() {\n",
+            "    if false {\n",
+            T_CROSS, "rust"),
+    # S5: Sec-Fetch-Site same-origin
+    Control("p39a_fetch_site_checked", ROUTES,
+            '        _ => return Err("Sec-Fetch-Site is not same-origin"),\n',
+            "        _ => {}\n",
+            T_CROSS, "rust"),
+    # S5: Origin is this PC's page
+    Control("p39a_origin_checked", ROUTES,
+            '        _ => Err("Origin is not this PC\'s page"),\n',
+            "        _ => Ok(()),\n",
+            T_CROSS, "rust"),
+    # S5: every route runs the same-site check
+    Control("p39a_same_site_on_every_route", ROUTES,
+            '            .and_then(|()| same_site(request, host.unwrap_or("")).map_err(|why| (403, why)));\n',
+            ";\n",
+            T_CROSS, "rust"),
+    # S6: a head that never finishes is answered 408 at the timeout
+    Control("p39a_read_timeout", HTTP,
+            "    let request = tokio::time::timeout(read_timeout, async {\n",
+            "    let request = tokio::time::timeout(read_timeout * 100, async {\n",
+            T_408, "rust"),
+    # S6: at most CONNECTIONS at once
+    Control("p39a_connection_cap", HTTP,
+            "    let slots = Arc::new(tokio::sync::Semaphore::new(limits.connections));\n",
+            "    let slots = Arc::new(tokio::sync::Semaphore::new(limits.connections + 1));\n",
+            T_CAP, "rust"),
+    # S6: no-store on every answer
+    Control("p39a_no_store", HTTP,
+            "             Cache-Control: no-store\\r\\n",
+            "             Cache-Control: max-age=60\\r\\n",
+            T_HEADERS, "rust"),
+    # S6: nosniff on every answer
+    Control("p39a_nosniff", HTTP,
+            "X-Content-Type-Options: nosniff\\r\\n",
+            "X-Content-Type-Options: sniff\\r\\n",
+            T_HEADERS, "rust"),
+    # S6: no-referrer on every answer
+    Control("p39a_no_referrer", HTTP,
+            "Referrer-Policy: no-referrer\\r\\n",
+            "Referrer-Policy: origin\\r\\n",
+            T_HEADERS, "rust"),
+    # N7: the CSP on a refused connection too
+    Control("p39a_refused_csp", ROUTES,
+            '        Response::text(403, REFUSED).with("Content-Security-Policy", CSP)\n',
+            "        Response::text(403, REFUSED)\n",
+            T_HEADERS, "rust"),
+    # S6: HEAD keeps the asset's length
+    Control("p39a_head_length", HTTP,
+            "            self.body.len()\n",
+            "            if head_only { 0 } else { self.body.len() }\n",
+            T_HEAD_LEN, "rust"),
+    # N1: the unread body is drained, so the close is not a reset
+    Control("p39a_drain", HTTP,
+            "    let _ = tokio::time::timeout(DRAIN_TIME, async {\n",
+            "    let _ = tokio::time::timeout(Duration::ZERO, async {\n",
+            T_DRAIN, "rust"),
+    # S7: only the holder overwrites another's fresh report
+    Control("p39a_state_one_owner", ROOT_RS,
+            "    holding\n        || read_state(path)",
+            "    true || holding\n        || read_state(path)",
+            T_ONE_OWNER, "rust"),
+    # S7: only its own report is removed at stop
+    Control("p39a_state_removed_only_own", ROOT_RS,
+            "    if read_state(&config.state).is_some_and(|report| report.pid == std::process::id()) {\n",
+            "    if true {\n",
+            T_ONE_OWNER, "rust"),
+    # N2: /api/pcs reuses one status read for STATUS_FOR
+    Control("p39a_status_cached", ROUTES,
+            "                if at.elapsed() < STATUS_FOR {\n",
+            "                if false {\n",
+            T_STATUS_CACHE, "rust"),
+    # N3: the installed CLI before PATH
+    Control("p39a_installed_cli", TS,
+            "        if exists(&installed) {\n",
+            "        if false {\n",
+            T_CLI_PATH, "rust"),
 )
