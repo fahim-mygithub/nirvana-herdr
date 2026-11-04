@@ -16,10 +16,13 @@ later. The look and motion are the approved prototype, https://claude.ai/artifac
 | L6 | "Answer prompts, Open a new space, Usage and servers, Alerts when done" | §2.4-2.7 | P39c-e | §4, §5 |
 | L7 | "Maybe we implement a full login soloution that List PC to connect to." | §1.2, §1.3 | P39a | §4 |
 | L8 | "Tailscale account" (the login) | §1.2 | P39a | §4, §5 |
+| L9 | "Home-screen page (Recommended)" (answer, 2026-11-04, to: a page from the PC added to the home screen, or a native app) | §1.4 | P39b | §5 |
+| L10 | "Start P39a now (Recommended)" (answer, 2026-11-04) | §3 | P39a | §4 |
+| L11 | "Desktop\Pojects only (Recommended)" (answer, 2026-11-04, to: which folders the new-space picker may open) | §2.5 | P39d | §4 |
 
 "Mobile app" in L1 is read as the phone-native page of L5, added to the home screen: no app store, no second
-codebase, one install. A native app is the owner's call to make instead (§6 item 1); nothing below blocks one later,
-since it would call the same API.
+codebase, one install; the owner ruled so (L9). Nothing below blocks a native app later, since it would call the same
+API.
 
 ## 1. The pieces
 
@@ -95,8 +98,7 @@ test starts a real Tailscale, herdr server or Claude.
 4. After P39b: send a message and paste a screenshot to an agent from the phone.
 5. After P39e: add the page to the home screen, turn alerts on, and get the first push.
 
-## 6. Open, for the owner
+## 6. Ruled, 2026-11-04
 
-1. Phone-native page (this plan) or a native app. A native app would need an app store or sideloading and a second
-   codebase; the page reaches the same API.
-2. Which folders the new-space picker may open, beyond `Desktop\Pojects`.
+1. The home-screen page, not a native app (L9).
+2. The new-space picker opens only folders under `C:\Users\fahim\Desktop\Pojects` (L11).
