@@ -1,6 +1,6 @@
 # Feature 28: superpowers only on Sonnet
 
-Status: **PLANNED (2026-10-23)**, to build on a Claude seat (Opus high) at master alpha 0.38.0, beside plan 27.
+Status: **SUPERSEDED (2026-11-04)** by `no-superpowers-2026-11-04.md`: the owner, "I would take out superpowers it doesnt feel needed", and, asked where, "Everywhere"; the Sonnet keep is gone. Was: PLANNED (2026-10-23), to build on a Claude seat (Opus high) at master alpha 0.38.0, beside plan 27.
 
 ## Ledger
 

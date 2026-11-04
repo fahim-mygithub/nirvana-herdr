@@ -42,10 +42,12 @@ use crate::nirvana_preload::Switch;
 
 /// herdr's first presets and name rules, written to `<home>/nirvana/preload.toml` when that is missing.
 pub const DEFAULT: &str = include_str!("nirvana_preload.toml");
-/// The defaults `preload.toml` has shipped with in past releases.
+/// The defaults `preload.toml` has shipped with in past releases. v3 is the last with `superpowers` in `core`; the
+/// owner, 2026-11-04, on superpowers: "Everywhere" (nirvana/plans/no-superpowers-2026-11-04.md).
 pub const HISTORICAL_DEFAULTS: &[&str] = &[
     include_str!("nirvana_preload_v1.toml"),
     include_str!("nirvana_preload_v2.toml"),
+    include_str!("nirvana_preload_v3.toml"),
 ];
 pub const CONFIG_FILE: &str = "preload.toml";
 pub const CATALOG_FILE: &str = "preload-catalog.toml";

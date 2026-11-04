@@ -455,13 +455,9 @@ mod tests {
             let at = argv.iter().position(|a| a == "--settings").unwrap();
             argv[at + 1].clone()
         };
-        // Plan 28: the test home's seat is Opus, so the generated file reaches Claude as the launch file built from
-        // it, with superpowers off.
-        let launch = crate::nirvana_superpowers::launch_settings_path(
-            &home.join("nirvana"),
-            &folder,
-            crate::nirvana_superpowers::Family::Opus,
-        );
+        // Plan 28: the generated file reaches Claude as the launch file built from it, with superpowers off.
+        let launch =
+            crate::nirvana_superpowers::launch_settings_path(&home.join("nirvana"), &folder);
         assert_eq!(settings_of(&resumed), launch.display().to_string());
         let written: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&launch).unwrap()).unwrap();

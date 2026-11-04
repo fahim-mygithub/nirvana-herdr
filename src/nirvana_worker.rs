@@ -293,10 +293,10 @@ pub fn with_preset_settings(mut argv: Vec<String>, settings: Option<&Path>) -> V
     argv
 }
 
-/// Plan 28 §3: the file `with_preset_settings` adds for this worker. On an Opus Claude worker it is the folder's
-/// preset with every superpowers plugin off, or those entries alone when the folder has no preset; on any other it is
-/// the preset, as before. An error keeps the preset and says so in the worker's view, one line: a worker never fails
-/// to start because of this rule.
+/// Plan 28 §3: the file `with_preset_settings` adds for this worker. On a Claude worker, whatever its model (the
+/// owner, 2026-11-04: "Everywhere"), it is the folder's preset with every superpowers plugin off, or those entries
+/// alone when the folder has no preset; on agy it is the preset, as before. An error keeps the preset and says so in
+/// the worker's view, one line: a worker never fails to start because of this rule.
 pub fn worker_settings(
     dir: &Path,
     spec: &LaunchSpec,
@@ -308,7 +308,6 @@ pub fn worker_settings(
     match crate::nirvana_superpowers::worker_settings_in(
         dir,
         &spec.cli,
-        &spec.model,
         folder,
         preset.as_deref(),
         claude_dir,
@@ -326,7 +325,8 @@ pub fn worker_settings(
 }
 
 /// The worker's argv with its settings file: the folder's worker preset (plan 13), with the superpowers rule over it
-/// (plan 28). `dir` is `<home>/nirvana`, given so a test never reaches the installed home.
+/// (plan 28, every model since 2026-11-04). `dir` is `<home>/nirvana`, given so a test never reaches the installed
+/// home.
 pub fn worker_argv(
     dir: &Path,
     spec: &LaunchSpec,
@@ -4186,8 +4186,8 @@ mod preset_tests {
     }
 
     #[test]
-    fn an_opus_claude_worker_starts_with_superpowers_off_and_an_error_keeps_the_preset() {
-        // Plan 28 §3.
+    fn a_claude_worker_on_any_model_starts_with_superpowers_off_and_an_error_keeps_the_preset() {
+        // Plan 28 §3, on every model since the owner's 2026-11-04 "Everywhere".
         let root = std::env::temp_dir().join(format!("nirvana-p28-worker-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("nirvana");
@@ -4197,14 +4197,8 @@ mod preset_tests {
         let opus = spec("claude", "claude-opus-5-5");
         // No preset: a file of the rule's entries alone, added to the argv.
         let settings = worker_settings(&dir, &opus, &folder, None, None, &mut out).expect("a file");
-        assert_eq!(
-            settings,
-            crate::nirvana_superpowers::worker_settings_path(
-                &dir,
-                &folder,
-                crate::nirvana_superpowers::Family::Opus
-            )
-        );
+        let expected = crate::nirvana_superpowers::worker_settings_path(&dir, &folder);
+        assert_eq!(settings, expected);
         let written: Value =
             serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
         assert_eq!(
@@ -4215,11 +4209,11 @@ mod preset_tests {
         let with = with_preset_settings(claude.clone(), Some(&settings));
         assert_eq!(with.iter().filter(|a| *a == "--settings").count(), 1);
         assert_eq!(with.last(), Some(&settings.display().to_string()));
-        // Sonnet with no preset: today's argv, no file.
+        // Sonnet with no preset: the same file, not plan 28's bare argv.
         let sonnet = spec("claude", "claude-sonnet-5-5");
         assert_eq!(
             worker_settings(&dir, &sonnet, &folder, None, None, &mut out),
-            None
+            Some(expected)
         );
         // agy on an Opus model reads no Claude settings: no file.
         let agy = spec("agy", "claude-opus-5-5-high");
@@ -4242,8 +4236,8 @@ mod preset_tests {
     }
 
     #[test]
-    fn the_workers_argv_carries_the_preset_under_the_rule_for_its_own_model() {
-        // Plan 28 §3: what `seat exec` starts, from the folder's worker preset and `spec.model`.
+    fn the_workers_argv_carries_the_preset_under_the_rule_on_every_claude_model() {
+        // Plan 28 §3: what `seat exec` starts, from the folder's worker preset, whatever `spec.model` is.
         let root = std::env::temp_dir().join(format!("nirvana-p28-argv-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("nirvana");
@@ -4267,11 +4261,7 @@ mod preset_tests {
             &mut out,
         )
         .unwrap();
-        let launch = crate::nirvana_superpowers::worker_settings_path(
-            &dir,
-            &project,
-            crate::nirvana_superpowers::Family::Opus,
-        );
+        let launch = crate::nirvana_superpowers::worker_settings_path(&dir, &project);
         assert_eq!(settings_of(&opus), Some(launch.display().to_string()));
         let written: Value =
             serde_json::from_str(&std::fs::read_to_string(&launch).unwrap()).unwrap();
@@ -4291,7 +4281,7 @@ mod preset_tests {
             &mut out,
         )
         .unwrap();
-        assert_eq!(settings_of(&sonnet), Some(preset.display().to_string()));
+        assert_eq!(settings_of(&sonnet), Some(launch.display().to_string()));
         let agy = worker_argv(
             &dir,
             &spec("agy", "claude-opus-5-5-high"),
