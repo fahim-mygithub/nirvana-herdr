@@ -24,6 +24,9 @@ T_CORE = "the_default_presets_parse_in_the_files_order_with_their_core_tags_and_
 T_IS_CORE = "names_rules_and_core_match_as_written"
 T_SEED = "the_name_rules_seed_the_catalog_for_free_and_leave_core_and_the_rest_to_jev"
 T_V3 = "an_installed_default_with_superpowers_in_core_upgrades_to_one_without"
+T_RELAUNCH = "a_restored_nirvana_pane_gets_nirvana_claude_under_its_own_name"
+T_ORPHANS = "a_new_file_removes_the_folders_two_plan_28_files_and_nothing_else"
+NEW = "src/app/nirvana_new.rs"
 
 SONNET_KEEP_LAUNCH = ("            Ok(file) if !seat_model.contains(\"sonnet\") => args[at + 1] = file.display().to_string(),\n"
                       "            Ok(_) => {}\n")
@@ -109,4 +112,33 @@ CONTROLS = (
             'core = ["nirvana", "bladebro", "superpowers", "context7"]\n', T_SEED, "rust"),
     Control("nosp_preload_v3_not_historical", PRESET, '    include_str!("nirvana_preload_v3.toml"),\n', "",
             T_V3, "rust"),
+
+    # Review round. A restored pane whose start keeps every flag but types the plugin's settings, not the launch file.
+    Control("nosp_relaunch_no_launch_file", NEW,
+            "                Some(crate::nirvana_launch::launch_args(\n"
+            "                    &home,\n                    folder,\n                    resume.as_deref(),\n"
+            "                ))\n",
+            "                let _ = resume;\n                Some(kind.args(&home))\n", T_RELAUNCH, "rust"),
+    # Plan 28's two files for the folder go once the new file is written; only those names, only that folder.
+    Control("nosp_orphans_launch_kept", RULE,
+            "    write_json(&path, &merged(&base_value, &entries)?)?;\n    remove_old_family_files(dir, folder);\n"
+            "    Ok(path)\n",
+            "    write_json(&path, &merged(&base_value, &entries)?)?;\n    Ok(path)\n", T_ORPHANS, "rust"),
+    Control("nosp_orphans_worker_kept", RULE,
+            "    write_json(&path, &merged(&base_value, &entries)?)?;\n    remove_old_family_files(dir, folder);\n"
+            "    Ok(Some(path))\n",
+            "    write_json(&path, &merged(&base_value, &entries)?)?;\n    Ok(Some(path))\n", T_ORPHANS, "rust"),
+    Control("nosp_orphans_worker_name", RULE, '            .join(format!("{hash}.opus.worker.settings.json")),\n',
+            '            .join(format!("{hash}.worker.settings.json")),\n', T_ORPHANS, "rust"),
+    Control("nosp_orphans_any_folder", RULE, "    for old in old_family_paths(dir, folder) {\n",
+            "    for old in std::fs::read_dir(dir.join(LAUNCH_DIR)).into_iter().flatten().flatten()"
+            '.map(|e| e.path()).filter(|p| p.to_string_lossy().contains(".opus.")) {\n'
+            "        let _ = folder;\n", T_ORPHANS, "rust"),
+    # A launch that fails removes nothing: the removal comes after the write, not before the read.
+    Control("nosp_orphans_before_write", RULE, "    let base_value =\n        read_json(base)",
+            "    remove_old_family_files(dir, folder);\n    let base_value =\n        read_json(base)",
+            T_ORPHANS, "rust"),
+    Control("nosp_orphans_outside_launch", RULE,
+            '        dir.join(LAUNCH_DIR)\n            .join(format!("{hash}.opus.settings.json")),\n',
+            '        dir.join(format!("{hash}.opus.settings.json")),\n', T_ORPHANS, "rust"),
 )

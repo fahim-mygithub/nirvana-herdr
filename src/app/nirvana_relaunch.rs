@@ -184,10 +184,25 @@ mod tests {
         assert_eq!(typed(&mut receiver), "");
     }
 
+    /// The value typed after `flag`, with the shell's quotes off.
+    fn typed_value(line: &str, flag: &str) -> Option<String> {
+        let (_, rest) = line.split_once(&format!("{flag} "))?;
+        let rest = rest.trim_start();
+        let value = match rest.chars().next()? {
+            quote @ ('\'' | '"') => rest[1..].split(quote).next()?,
+            _ => rest.split_whitespace().next()?,
+        };
+        Some(value.to_owned())
+    }
+
     #[tokio::test]
     async fn a_restored_nirvana_pane_gets_nirvana_claude_under_its_own_name() {
-        let _guard = crate::nirvana::with_test_home("relaunch-start");
+        let guard = crate::nirvana::with_test_home("relaunch-start");
         let folder = std::env::temp_dir();
+        // The plugin's settings, the launch file's base: without them the launch fails open and keeps them.
+        let plugin = crate::nirvana_launch::plugin_dir(&guard.path);
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(plugin.join("settings.json"), "{}").unwrap();
         let (mut app, mut receiver) = app_with_two_spaces(&folder);
         root_terminal(&mut app, 1).nirvana_relaunch = Some("nirvana-2".into());
         assert!(app.nirvana_relaunch_restored(Instant::now()));
@@ -200,6 +215,14 @@ mod tests {
         for flag in ["--plugin-dir", "--agent", "--settings", "--model"] {
             assert!(line.contains(flag), "{flag} not typed: {line:?}");
         }
+        // NOSP review: the one `--settings` is the folder's launch file, superpowers off, as on every Nirvana start.
+        let launch =
+            crate::nirvana_superpowers::launch_settings_path(&guard.path.join("nirvana"), &folder);
+        assert_eq!(
+            typed_value(&line, "--settings"),
+            Some(launch.display().to_string()),
+            "{line:?}"
+        );
         assert_eq!(app.nirvana_relaunch_at, None);
         // Done once: a later tick types nothing more.
         assert!(!app.nirvana_relaunch_restored(Instant::now()));

@@ -113,6 +113,28 @@ pub fn worker_settings_path(dir: &Path, folder: &Path) -> PathBuf {
     ))
 }
 
+/// Plan 28's two files for `folder`, named by the model family (`<hash>.opus.settings.json` and
+/// `<hash>.opus.worker.settings.json`, alpha 0.39.x). Plan 28 wrote a file only for Opus, so these are the only names
+/// it ever wrote. Nothing reads them since the family left the rule.
+pub fn old_family_paths(dir: &Path, folder: &Path) -> [PathBuf; 2] {
+    let hash = crate::nirvana_launch::folder_hash(folder);
+    [
+        dir.join(LAUNCH_DIR)
+            .join(format!("{hash}.opus.settings.json")),
+        dir.join(LAUNCH_DIR)
+            .join(format!("{hash}.opus.worker.settings.json")),
+    ]
+}
+
+/// NOSP review: once the folder's new file is written, its two plan 28 files go, so an installed home does not keep
+/// them forever. Those two exact names in that one folder, nothing else; a file that is not there, or will not go,
+/// is left and the launch goes on.
+fn remove_old_family_files(dir: &Path, folder: &Path) {
+    for old in old_family_paths(dir, folder) {
+        let _ = std::fs::remove_file(old);
+    }
+}
+
 /// Claude Code's config folder, where `plugins/installed_plugins.json` is. `None` in tests: no test reads the
 /// owner's `~/.claude` (plan 28 §4); tests pass a folder of their own to the `*_in` functions.
 pub fn claude_dir() -> Option<PathBuf> {
@@ -180,6 +202,7 @@ pub fn launch_settings_in(
     let entries = entries(&ids_for(claude_dir, folder, &base_value));
     let path = launch_settings_path(dir, folder);
     write_json(&path, &merged(&base_value, &entries)?)?;
+    remove_old_family_files(dir, folder);
     Ok(path)
 }
 
@@ -206,6 +229,7 @@ pub fn worker_settings_in(
     let entries = entries(&ids_for(claude_dir, folder, &base_value));
     let path = worker_settings_path(dir, folder);
     write_json(&path, &merged(&base_value, &entries)?)?;
+    remove_old_family_files(dir, folder);
     Ok(Some(path))
 }
 
@@ -431,6 +455,62 @@ mod tests {
         // A broken preset is an error, so the caller keeps today's argv.
         std::fs::write(&preset, "[").unwrap();
         assert!(worker_settings_in(&dir, "claude", &folder, Some(&preset), None).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_new_file_removes_the_folders_two_plan_28_files_and_nothing_else() {
+        // NOSP review: alpha 0.39.x wrote `<hash>.opus.settings.json` and `<hash>.opus.worker.settings.json`.
+        let root = scratch("orphans");
+        let dir = root.join("nirvana");
+        let folder = root.join("project");
+        let other = root.join("other");
+        std::fs::create_dir_all(&folder).unwrap();
+        let base = dir.join("claude").join("settings.json");
+        std::fs::create_dir_all(base.parent().unwrap()).unwrap();
+        std::fs::write(&base, "{}").unwrap();
+        let launch = dir.join(LAUNCH_DIR);
+        std::fs::create_dir_all(&launch).unwrap();
+        let hash = crate::nirvana_launch::folder_hash(&folder);
+        let seed = |names: &[String]| {
+            for name in names {
+                std::fs::write(launch.join(name), "{}").unwrap();
+            }
+        };
+        let old = [
+            format!("{hash}.opus.settings.json"),
+            format!("{hash}.opus.worker.settings.json"),
+        ];
+        // Kept: another folder's plan 28 files, a name the rule never wrote, and anything outside `launch/`.
+        let other_hash = crate::nirvana_launch::folder_hash(&other);
+        let kept = [
+            format!("{other_hash}.opus.settings.json"),
+            format!("{other_hash}.opus.worker.settings.json"),
+            format!("{hash}.sonnet.settings.json"),
+            format!("{hash}.opus.settings.json.bak"),
+        ];
+        let outside = dir.join(format!("{hash}.opus.settings.json"));
+        std::fs::write(&outside, "{}").unwrap();
+        let gone = |names: &[String]| names.iter().all(|name| !launch.join(name).exists());
+        let there = |names: &[String]| names.iter().all(|name| launch.join(name).is_file());
+        seed(&old);
+        seed(&kept);
+        assert_eq!(
+            old_family_paths(&dir, &folder).to_vec(),
+            old.iter().map(|name| launch.join(name)).collect::<Vec<_>>()
+        );
+        launch_settings_in(&dir, &folder, &base, None).unwrap();
+        assert!(gone(&old), "Nirvana Claude's launch left a plan 28 file");
+        assert!(there(&kept) && outside.is_file());
+        seed(&old);
+        worker_settings_in(&dir, "claude", &folder, None, None).unwrap();
+        assert!(gone(&old), "a Claude worker's launch left a plan 28 file");
+        assert!(there(&kept) && outside.is_file());
+        // A launch that fails writes nothing new, so it removes nothing either; agy writes nothing.
+        seed(&old);
+        assert!(launch_settings_in(&dir, &folder, &dir.join("missing.json"), None).is_err());
+        worker_settings_in(&dir, "agy", &folder, None, None).unwrap();
+        assert!(there(&old));
         let _ = std::fs::remove_dir_all(&root);
     }
 

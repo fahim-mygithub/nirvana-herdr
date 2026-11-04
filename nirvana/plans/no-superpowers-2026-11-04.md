@@ -50,7 +50,7 @@ only reader, and its only job was the Sonnet keep. The file names lose the famil
 - `<hash>.settings.json`, was `<hash>.opus.settings.json`
 - `<hash>.worker.settings.json`, was `<hash>.opus.worker.settings.json`
 
-An installed home keeps its old `.opus.` files until someone deletes them. Nothing writes or reads them any more.
+Nothing reads the old `.opus.` files any more. The review round removes a folder's two when its new file is written (below).
 
 ## Preload
 
@@ -81,7 +81,7 @@ None of them states the old rule as something to follow, so none was changed exc
 
 ## Controls
 
-New controls go in `nirvana/controls.d/nosp.py`, 24 of them.
+New controls go in `nirvana/controls.d/nosp.py`, 24 of them, and 7 more from the review round.
 
 Retired from `superpowers_by_model.py`, 11 controls, because they stated the Sonnet keep or the families it needed:
 
@@ -107,3 +107,17 @@ the error line and the temp name.
 
   Only the names were read. The rule matches the name `superpowers` exactly, as plan 28 did ("superpowers-lab... are
   other plugins"), so these are not turned off. Whether "Everywhere" covers them is the owner's call.
+
+## Review round
+
+The review (`nosp-review.md`, on ada1e596) found no blockers. Each finding was checked against the code first; none
+was wrong.
+
+| Finding | What was done | Test | Control |
+|---|---|---|---|
+| S1: no CHANGELOG entry or version bump | Nothing here. The merge writes the entry and runs `tools/version.py bump feature`, as the order says. | none | none |
+| S2: the restored-pane test passed by failing open | The test now seeds the plugin's `settings.json` and asserts the typed `--settings` value equals `launch_settings_path(...)`. Before, the base was missing, so the launch kept the plugin's path and the test still passed. | `a_restored_nirvana_pane_gets_nirvana_claude_under_its_own_name` | `nosp_relaunch_no_launch_file`: New Nirvana's arm types `kind.args` (every flag kept, plugin settings) |
+| Nit 2: plan 28's files stay forever | Once a folder's new file is written, `remove_old_family_files` deletes that folder's `<hash>.opus.settings.json` and `<hash>.opus.worker.settings.json` from `<home>/nirvana/launch/`. Only those two names, only that folder. Done by both Nirvana Claude's launch and a Claude worker's. A failed launch and an agy worker remove nothing. Plan 28 wrote a file only for Opus, so no `.sonnet.` name ever existed. | `a_new_file_removes_the_folders_two_plan_28_files_and_nothing_else` | `nosp_orphans_launch_kept`, `nosp_orphans_worker_kept`, `nosp_orphans_worker_name`, `nosp_orphans_any_folder`, `nosp_orphans_before_write`, `nosp_orphans_outside_launch` |
+| Nit 1: the fail-open is silent | Kept the fail-open and its one `tracing::warn!`. No herdr notice, and no Servers or Preload line, carries launch warnings today: `launch_args` returns only an argv, and the plan 25 lean cut beside it (`nirvana_lean.rs:78`) fails open the same way, with only a warn. Showing it to the owner would need new UI, which the order rules out. | none | none (unchanged line, still guarded by `p28_launch_error_fails`) |
+| Nit 3: a machine with no superpowers gets the default id off | Recorded only. Harmless, and Opus already did this before. | none | none |
+| Nit 4: a hand-edited `preload.toml` keeps `superpowers` in `core` | Recorded only, for the owner. An edited file is never upgraded, so its own Preload strip keeps superpowers as core. The launch rule does not depend on it. | none | none |
