@@ -11,7 +11,7 @@
 
 version = 1
 # Items tagged "core" are never switched off. Untagged items stay on: a preset only removes what it knows.
-core = ["nirvana", "bladebro", "superpowers", "context7"]
+core = ["nirvana", "bladebro", "context7"]
 # "Open Nirvana" resumes Nirvana Claude's last session in the folder when it was active less than this long ago.
 resume_within_hours = 24
 # A folder's MEMORY.md index over this many tokens is offered for trimming in Preload.

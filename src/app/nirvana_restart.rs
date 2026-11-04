@@ -295,8 +295,9 @@ mod tests {
     }
 
     #[test]
-    fn restart_claude_picks_up_the_superpowers_rule_from_the_mode_it_reads_now() {
-        // Plan 28 §3: Restart Claude goes through launch_args, so Opus gets the launch file and Sonnet today's.
+    fn restart_claude_passes_the_superpowers_launch_file_in_every_mode() {
+        // Plan 28 §3: Restart Claude goes through launch_args. The owner, 2026-11-04: "Everywhere", so the Sonnet
+        // that Efficient seats gets the launch file too, not plan 28's plugin settings.
         let home = std::env::temp_dir().join(format!("test-restart-p28-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let plugin = crate::nirvana_launch::plugin_dir(&home);
@@ -309,25 +310,24 @@ mod tests {
         };
         let old_args = ["--agent".to_string(), "nirvana".to_string()];
         let restart = || restart_argv(Some("nirvana"), &old_args, Some("s-1"), false, &home, cwd);
-        assert_eq!(
-            settings(&restart()),
-            crate::nirvana_superpowers::launch_settings_path(
-                &home.join("nirvana"),
-                cwd,
-                crate::nirvana_superpowers::Family::Opus
-            )
+        let model = |argv: &[String]| {
+            let at = argv.iter().position(|a| a == "--model").unwrap();
+            argv[at + 1].clone()
+        };
+        let launch = crate::nirvana_superpowers::launch_settings_path(&home.join("nirvana"), cwd)
             .display()
-            .to_string()
-        );
+            .to_string();
+        let balanced = restart();
+        assert!(model(&balanced).contains("opus"), "{balanced:?}");
+        assert_eq!(settings(&balanced), launch);
         std::fs::write(
             home.join("nirvana").join("seats.toml"),
             crate::nirvana_seat::DEFAULT.replace("mode = \"balanced\"", "mode = \"efficient\""),
         )
         .unwrap();
-        assert_eq!(
-            settings(&restart()),
-            plugin.join("settings.json").display().to_string()
-        );
+        let efficient = restart();
+        assert!(model(&efficient).contains("sonnet"), "{efficient:?}");
+        assert_eq!(settings(&efficient), launch);
         let _ = std::fs::remove_dir_all(&home);
     }
 

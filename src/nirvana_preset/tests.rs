@@ -136,10 +136,8 @@ fn the_default_presets_parse_in_the_files_order_with_their_core_tags_and_rules()
         names,
         ["3d-print", "photo", "rust", "web", "python", "research", "code", "blank", "general"]
     );
-    assert_eq!(
-        config.core,
-        ["nirvana", "bladebro", "superpowers", "context7"]
-    );
+    // The owner, 2026-11-04, on superpowers: "Everywhere". It is no longer core.
+    assert_eq!(config.core, ["nirvana", "bladebro", "context7"]);
     assert_eq!(config.resume_within_hours, 24.0);
     assert_eq!(config.trim_over_tokens, 4_000);
     // §6.3: auto memory is on for every seeded preset except blank.
@@ -227,6 +225,32 @@ fn unedited_preload_toml_upgrades_itself_and_backs_up_old_default() {
     assert!(
         err.contains("delete it to get herdr's default back"),
         "error tells how to get default back: {err}"
+    );
+}
+
+#[test]
+fn an_installed_default_with_superpowers_in_core_upgrades_to_one_without() {
+    // The owner, 2026-11-04: "Everywhere". An unedited v3 is the last default that lists superpowers as core.
+    let v3 = include_str!("../nirvana_preload_v3.toml");
+    assert!(HISTORICAL_DEFAULTS.contains(&v3), "v3 is historical");
+    assert!(parse_config(v3)
+        .unwrap()
+        .core
+        .contains(&"superpowers".to_owned()));
+    let dir = scratch("upgrade-preload-v3");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join(CONFIG_FILE);
+    std::fs::write(&file, v3).unwrap();
+    let cfg = load_config(&dir).unwrap();
+    assert!(
+        !cfg.core.contains(&"superpowers".to_owned()),
+        "{:?}",
+        cfg.core
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), DEFAULT);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("backup").join(CONFIG_FILE)).unwrap(),
+        v3
     );
 }
 
@@ -843,7 +867,8 @@ fn the_name_rules_seed_the_catalog_for_free_and_leave_core_and_the_rest_to_jev()
         Some("kotlin")
     );
     assert_eq!(catalog.entries["skill:scholar-core"].source, "rule");
-    // Core is never tagged; benchmark, dataviz and github have no rule: Jev's.
+    // Core is never tagged; benchmark, dataviz, github and superpowers have no rule: Jev's. Superpowers left core
+    // on 2026-11-04 (the owner: "Everywhere"), so it is Jev's to tag like any other plugin.
     assert_eq!(tags("mcp:bladebro"), None);
     assert_eq!(tags("plugin:superpowers@superpowers-marketplace"), None);
     let left: Vec<String> = untagged(&config, &catalog, &reading)
@@ -854,6 +879,7 @@ fn the_name_rules_seed_the_catalog_for_free_and_leave_core_and_the_rest_to_jev()
         left,
         [
             "mcp:plugin:github:github",
+            "plugin:superpowers@superpowers-marketplace",
             "skill:benchmark",
             "skill:dataviz"
         ]
@@ -1337,12 +1363,16 @@ fn names_rules_and_core_match_as_written() {
     for core in [
         "mcp:bladebro",
         "mcp:plugin:context7:context7",
-        "plugin:superpowers@claude-plugins-official",
         "plugin:context7@claude-plugins-official",
     ] {
         assert!(is_core(&config, core), "{core}");
     }
     assert!(!is_core(&config, "plugin:nirvana-cc@nirvana-c"));
+    // The owner, 2026-11-04, on superpowers: "Everywhere".
+    assert!(!is_core(
+        &config,
+        "plugin:superpowers@claude-plugins-official"
+    ));
     let mut config_keys = config.clone();
     config_keys.core.push("skill:my-helper".into());
     config_keys.core.push("claude.ai Gmail".into());

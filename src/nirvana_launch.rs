@@ -265,18 +265,17 @@ pub fn launch_args_in(
             args[at + 1] = generated.display().to_string();
         }
     }
-    // Plan 28: on an Opus seat the one `--settings` file becomes the launch file, the file above with every
-    // superpowers plugin off. New Nirvana, the verb's space and Restart Claude all come here, each with its own seat.
+    // Plan 28, and the owner's 2026-11-04 "Everywhere": on every seat model the one `--settings` file becomes the
+    // launch file, the file above with every superpowers plugin off. New Nirvana, the verb's space, Restart Claude and
+    // a restored Nirvana pane all come here.
     if let Some(at) = args.iter().position(|arg| arg == "--settings") {
         match crate::nirvana_superpowers::launch_settings_in(
             &home.join(crate::nirvana_seat::DIR),
             folder,
-            &seat_model,
             Path::new(&args[at + 1]),
             claude_dir,
         ) {
-            Ok(Some(file)) => args[at + 1] = file.display().to_string(),
-            Ok(None) => {}
+            Ok(file) => args[at + 1] = file.display().to_string(),
             Err(why) => tracing::warn!(
                 "nirvana: superpowers stay as the settings say for {seat_model}: {why}"
             ),
@@ -1120,12 +1119,9 @@ mod tests {
         std::fs::write(&generated, r#"{"skillOverrides":{"docx":"off"}}"#).unwrap();
         let args = launch_args(&home, folder, None);
         let at = args.iter().position(|a| a == "--settings").unwrap();
-        // Plan 28: this home's seat is Opus, so the file passed is the generated one with superpowers off.
-        let launch = crate::nirvana_superpowers::launch_settings_path(
-            &home.join("nirvana"),
-            folder,
-            crate::nirvana_superpowers::Family::Opus,
-        );
+        // Plan 28: the file passed is the generated one with superpowers off.
+        let launch =
+            crate::nirvana_superpowers::launch_settings_path(&home.join("nirvana"), folder);
         assert_eq!(args[at + 1], launch.display().to_string());
         let written: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&launch).unwrap()).unwrap();
@@ -1518,11 +1514,8 @@ mod tests {
         let (home, claude) = p28_home("p28-opus");
         let folder = Path::new(r"C:\work\print");
         let args = launch_args_in(&home, folder, Some("abc-123"), Some(&claude));
-        let launch = crate::nirvana_superpowers::launch_settings_path(
-            &home.join("nirvana"),
-            folder,
-            crate::nirvana_superpowers::Family::Opus,
-        );
+        let launch =
+            crate::nirvana_superpowers::launch_settings_path(&home.join("nirvana"), folder);
         assert_eq!(settings_arg(&args), launch.display().to_string());
         let written: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&launch).unwrap()).unwrap();
@@ -1549,8 +1542,9 @@ mod tests {
     }
 
     #[test]
-    fn a_sonnet_seat_launches_with_todays_settings_file_and_writes_nothing() {
-        let (home, claude) = p28_home("p28-sonnet");
+    fn a_sonnet_seat_launches_with_every_superpowers_off_too() {
+        // The owner, 2026-11-04, replacing plan 28's Sonnet keep: "Everywhere". Efficient seats Sonnet.
+        let (home, claude) = p28_home("nosp-sonnet");
         let folder = Path::new(r"C:\work\print");
         std::fs::write(
             home.join("nirvana").join("seats.toml"),
@@ -1558,14 +1552,20 @@ mod tests {
         )
         .unwrap();
         let args = launch_args_in(&home, folder, None, Some(&claude));
+        let at = args.iter().position(|a| a == "--model").unwrap();
+        assert!(args[at + 1].contains("sonnet"), "{args:?}");
+        let launch =
+            crate::nirvana_superpowers::launch_settings_path(&home.join("nirvana"), folder);
+        assert_eq!(settings_arg(&args), launch.display().to_string());
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&launch).unwrap()).unwrap();
         assert_eq!(
-            settings_arg(&args),
-            plugin_dir(&home)
-                .join("settings.json")
-                .display()
-                .to_string()
+            written["enabledPlugins"],
+            serde_json::json!({
+                "superpowers@claude-plugins-official": false,
+                "superpowers@superpowers-marketplace": false,
+            })
         );
-        assert!(!home.join("nirvana").join("launch").exists());
         let _ = std::fs::remove_dir_all(&home);
     }
 

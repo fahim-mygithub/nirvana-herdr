@@ -1,16 +1,17 @@
-//! Nirvana fork, plan 28: superpowers only on Sonnet (nirvana/plans/2026-10-23-28-superpowers-by-model.md).
+//! Nirvana fork: superpowers off on every Claude Nirvana starts (nirvana/plans/no-superpowers-2026-11-04.md).
 //!
-//! The owner, 2026-10-23 (L1): "agents perform poorer with superpowers attached to opus. Given the preload cost of
-//! enabling superpowers if you are using opus level model for planning and building features, do not preload
-//! supoerpowers." And L3: "If were constrained on tokens and have to start planning and building with a sonnet levle
-//! model, superpowers seems to provide osme improvements."
+//! Plan 28 (nirvana/plans/2026-10-23-28-superpowers-by-model.md) turned it off on Opus and kept it on Sonnet, from the
+//! owner, 2026-10-23: "agents perform poorer with superpowers attached to opus" and "If were constrained on tokens and
+//! have to start planning and building with a sonnet levle model, superpowers seems to provide osme improvements."
+//! The owner, 2026-11-04, replaced the Sonnet keep: "I would take out superpowers it doesnt feel needed", and, asked
+//! where: "Everywhere". So the rule no longer reads the model.
 //!
-//! So a Claude Nirvana starts on an Opus model gets every `superpowers` plugin off, through the one `--settings` file
-//! it already passes: Nirvana Claude (`nirvana_launch::launch_args`) and Claude workers (`nirvana_worker`). Sonnet and
-//! every other model get no entry, and the launch is today's. The owner's own Claude panes and the Preload panel are
-//! not touched: the rule writes its own files under `<home>/nirvana/launch/`, never the preset's.
+//! Every Claude Nirvana starts gets every `superpowers` plugin off, through the one `--settings` file it already
+//! passes: Nirvana Claude (`nirvana_launch::launch_args`) and Claude workers (`nirvana_worker`). The owner's own
+//! Claude panes and the Preload panel are not touched: the rule writes its own files under `<home>/nirvana/launch/`,
+//! never the preset's.
 //!
-//! The rule outranks Preload's `core` (which lists `superpowers` as "never switched off") for these launches only:
+//! The rule outranks whatever the user's or the project's settings say for these launches only:
 //! `--settings` is Claude Code's flag-settings layer, above the user's and the project's, and `enabledPlugins` merges
 //! per id, so an id set `false` there is off whatever the user's settings say. That is how the preset's own files turn
 //! a plugin off (plan 13).
@@ -28,47 +29,13 @@ use serde_json::{Map, Value};
 pub const NAME: &str = "superpowers";
 /// The id seen in fixtures and on the owner's machine, used when no file lists one.
 pub const DEFAULT_ID: &str = "superpowers@superpowers-marketplace";
-/// Under `<home>/nirvana`: the files this rule writes, one per folder and family.
+/// Under `<home>/nirvana`: the files this rule writes, one per folder.
 pub const LAUNCH_DIR: &str = "launch";
 
-/// The model families the rule tells apart.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Family {
-    Opus,
-    Sonnet,
-    Other,
-}
-
-impl Family {
-    pub fn word(self) -> &'static str {
-        match self {
-            Self::Opus => "opus",
-            Self::Sonnet => "sonnet",
-            Self::Other => "other",
-        }
-    }
-}
-
-/// The family of a model id (`claude-opus-5-5`), alias (`opus`) or label (`Claude Opus 5.5`). Haiku, Fable, a local
-/// model and an empty string are `Other`.
-pub fn family(model: &str) -> Family {
-    let model = model.to_ascii_lowercase();
-    if model.contains("opus") {
-        Family::Opus
-    } else if model.contains("sonnet") {
-        Family::Sonnet
-    } else {
-        Family::Other
-    }
-}
-
-/// The rule (§2): for an Opus model, every superpowers id off; for any other model, no entry, so superpowers loads
-/// as the user's settings say.
-pub fn entries(model: &str, ids: &[String]) -> Vec<(String, bool)> {
-    match family(model) {
-        Family::Opus => ids.iter().map(|id| (id.clone(), false)).collect(),
-        Family::Sonnet | Family::Other => Vec::new(),
-    }
+/// The rule: every superpowers id off. Plan 28's model families existed only for the Sonnet keep, so they went with
+/// it and the rule takes no model.
+pub fn entries(ids: &[String]) -> Vec<(String, bool)> {
+    ids.iter().map(|id| (id.clone(), false)).collect()
 }
 
 /// The ids among `names` whose name before `@` is `superpowers`, sorted and once each; `DEFAULT_ID` when none is.
@@ -128,23 +95,44 @@ pub fn merged(base: &Value, entries: &[(String, bool)]) -> Result<Value, String>
     Ok(value)
 }
 
-/// `<dir>/launch/<folder hash>.<family>.settings.json`: Nirvana Claude's launch file for the folder (§3).
-pub fn launch_settings_path(dir: &Path, folder: &Path, family: Family) -> PathBuf {
+/// `<dir>/launch/<folder hash>.settings.json`: Nirvana Claude's launch file for the folder (plan 28 §3). Plan 28's
+/// `<folder hash>.opus.settings.json` is no longer written or read.
+pub fn launch_settings_path(dir: &Path, folder: &Path) -> PathBuf {
     dir.join(LAUNCH_DIR).join(format!(
-        "{}.{}.settings.json",
-        crate::nirvana_launch::folder_hash(folder),
-        family.word()
+        "{}.settings.json",
+        crate::nirvana_launch::folder_hash(folder)
     ))
 }
 
-/// `<dir>/launch/<folder hash>.<family>.worker.settings.json`: a Claude worker's, kept apart from Nirvana Claude's
-/// because its base is the worker preset (no `NIRVANA_ORCHESTRATOR` env), not the plugin's settings.
-pub fn worker_settings_path(dir: &Path, folder: &Path, family: Family) -> PathBuf {
+/// `<dir>/launch/<folder hash>.worker.settings.json`: a Claude worker's, kept apart from Nirvana Claude's because its
+/// base is the worker preset (no `NIRVANA_ORCHESTRATOR` env), not the plugin's settings.
+pub fn worker_settings_path(dir: &Path, folder: &Path) -> PathBuf {
     dir.join(LAUNCH_DIR).join(format!(
-        "{}.{}.worker.settings.json",
-        crate::nirvana_launch::folder_hash(folder),
-        family.word()
+        "{}.worker.settings.json",
+        crate::nirvana_launch::folder_hash(folder)
     ))
+}
+
+/// Plan 28's two files for `folder`, named by the model family (`<hash>.opus.settings.json` and
+/// `<hash>.opus.worker.settings.json`, alpha 0.39.x). Plan 28 wrote a file only for Opus, so these are the only names
+/// it ever wrote. Nothing reads them since the family left the rule.
+pub fn old_family_paths(dir: &Path, folder: &Path) -> [PathBuf; 2] {
+    let hash = crate::nirvana_launch::folder_hash(folder);
+    [
+        dir.join(LAUNCH_DIR)
+            .join(format!("{hash}.opus.settings.json")),
+        dir.join(LAUNCH_DIR)
+            .join(format!("{hash}.opus.worker.settings.json")),
+    ]
+}
+
+/// NOSP review: once the folder's new file is written, its two plan 28 files go, so an installed home does not keep
+/// them forever. Those two exact names in that one folder, nothing else; a file that is not there, or will not go,
+/// is left and the launch goes on.
+fn remove_old_family_files(dir: &Path, folder: &Path) {
+    for old in old_family_paths(dir, folder) {
+        let _ = std::fs::remove_file(old);
+    }
 }
 
 /// Claude Code's config folder, where `plugins/installed_plugins.json` is. `None` in tests: no test reads the
@@ -188,7 +176,7 @@ fn temp_path(path: &Path) -> PathBuf {
 
 /// Through a temporary file, so a Claude starting never reads half of it. The temporary name is unique per write, not
 /// per process: the herdr server can launch two Claudes for one folder at once (New Nirvana and a restored pane), and a
-/// shared name would let one launch lose its rename and start Opus with superpowers on (plan 28 review).
+/// shared name would let one launch lose its rename and start with superpowers on (plan 28 review).
 fn write_json(path: &Path, value: &Value) -> Result<(), String> {
     let parent = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent).map_err(|err| format!("{}: {err}", parent.display()))?;
@@ -201,42 +189,35 @@ fn write_json(path: &Path, value: &Value) -> Result<(), String> {
     })
 }
 
-/// Nirvana Claude (§3): the launch file for `model` in `folder`, built from `base`, the file the launch would have
-/// passed. `Ok(None)` when the rule has no entry for the model, so the launch passes `base` as today. A missing or
-/// broken `base` is an error: there is nothing to merge into.
+/// Nirvana Claude (plan 28 §3): the launch file for `folder`, built from `base`, the file the launch would have
+/// passed, on any seat model. A missing or broken `base` is an error: there is nothing to merge into.
 pub fn launch_settings_in(
     dir: &Path,
     folder: &Path,
-    model: &str,
     base: &Path,
     claude_dir: Option<&Path>,
-) -> Result<Option<PathBuf>, String> {
-    let family = family(model);
-    if family != Family::Opus {
-        return Ok(None);
-    }
+) -> Result<PathBuf, String> {
     let base_value =
         read_json(base).ok_or_else(|| format!("{} is missing or not JSON", base.display()))?;
-    let entries = entries(model, &ids_for(claude_dir, folder, &base_value));
-    let path = launch_settings_path(dir, folder, family);
+    let entries = entries(&ids_for(claude_dir, folder, &base_value));
+    let path = launch_settings_path(dir, folder);
     write_json(&path, &merged(&base_value, &entries)?)?;
-    Ok(Some(path))
+    remove_old_family_files(dir, folder);
+    Ok(path)
 }
 
-/// A Claude worker (§3): the file its argv passes. `preset` is the worker preset `with_preset_settings` would have
-/// added. With no entry for the model it is `preset` unchanged; with entries, a launch file holding the preset merged
-/// with them, or the entries alone when the folder has no preset. An agy worker is never touched: its `g-opus` seat's
-/// model names Opus but agy reads no Claude settings (plan 13 §10).
+/// A Claude worker (plan 28 §3): the file its argv passes, on any model. `preset` is the worker preset
+/// `with_preset_settings` would have added; the file holds the preset merged with the rule's entries, or the entries
+/// alone when the folder has no preset. An agy worker is never touched: agy reads no Claude settings (plan 13 §10),
+/// so it keeps `preset` unchanged.
 pub fn worker_settings_in(
     dir: &Path,
     cli: &str,
-    model: &str,
     folder: &Path,
     preset: Option<&Path>,
     claude_dir: Option<&Path>,
 ) -> Result<Option<PathBuf>, String> {
-    let family = family(model);
-    if cli != "claude" || family != Family::Opus {
+    if cli != "claude" {
         return Ok(preset.map(Path::to_path_buf));
     }
     let base_value = match preset {
@@ -245,9 +226,10 @@ pub fn worker_settings_in(
         }
         None => Value::Object(Map::new()),
     };
-    let entries = entries(model, &ids_for(claude_dir, folder, &base_value));
-    let path = worker_settings_path(dir, folder, family);
+    let entries = entries(&ids_for(claude_dir, folder, &base_value));
+    let path = worker_settings_path(dir, folder);
     write_json(&path, &merged(&base_value, &entries)?)?;
+    remove_old_family_files(dir, folder);
     Ok(Some(path))
 }
 
@@ -261,28 +243,19 @@ mod tests {
     }
 
     #[test]
-    fn opus_turns_every_superpowers_off_and_sonnet_and_the_rest_add_nothing() {
-        // §2's table.
+    fn the_rule_turns_every_superpowers_id_off() {
+        // The owner, 2026-11-04: "Everywhere". No model is asked about any more.
         let two = ids(&[
             "superpowers@claude-plugins-official",
             "superpowers@superpowers-marketplace",
         ]);
-        let off = vec![
-            ("superpowers@claude-plugins-official".to_owned(), false),
-            ("superpowers@superpowers-marketplace".to_owned(), false),
-        ];
-        for model in ["claude-opus-5-5", "opus", "Claude Opus 5.5"] {
-            assert_eq!(family(model), Family::Opus, "{model}");
-            assert_eq!(entries(model, &two), off, "{model}");
-        }
-        for model in ["claude-sonnet-5-5", "sonnet"] {
-            assert_eq!(family(model), Family::Sonnet, "{model}");
-            assert!(entries(model, &two).is_empty(), "{model}");
-        }
-        for model in ["claude-haiku-5-5", "claude-fable-5-1", ""] {
-            assert_eq!(family(model), Family::Other, "{model:?}");
-            assert!(entries(model, &two).is_empty(), "{model:?}");
-        }
+        assert_eq!(
+            entries(&two),
+            vec![
+                ("superpowers@claude-plugins-official".to_owned(), false),
+                ("superpowers@superpowers-marketplace".to_owned(), false),
+            ]
+        );
     }
 
     #[test]
@@ -409,21 +382,20 @@ mod tests {
     }
 
     #[test]
-    fn an_opus_launch_writes_the_merged_file_and_sonnet_writes_nothing() {
+    fn a_launch_writes_the_merged_file_at_the_folders_one_path() {
         let root = scratch("launch");
         let dir = root.join("nirvana");
         let folder = Path::new(r"C:\work\print");
         let base = dir.join("claude").join("settings.json");
         std::fs::create_dir_all(base.parent().unwrap()).unwrap();
         std::fs::write(&base, r#"{"env":{"NIRVANA_ORCHESTRATOR":"1"}}"#).unwrap();
-        let path = launch_settings_in(&dir, folder, "claude-opus-5-5", &base, None)
-            .unwrap()
-            .expect("an opus launch has a file");
-        assert_eq!(path, launch_settings_path(&dir, folder, Family::Opus));
+        let path = launch_settings_in(&dir, folder, &base, None).unwrap();
+        assert_eq!(path, launch_settings_path(&dir, folder));
+        // One file per folder: no model family in the name any more.
         assert_eq!(
             path,
             dir.join("launch").join(format!(
-                "{}.opus.settings.json",
+                "{}.settings.json",
                 crate::nirvana_launch::folder_hash(folder)
             ))
         );
@@ -433,21 +405,15 @@ mod tests {
             written,
             json!({"env": {"NIRVANA_ORCHESTRATOR": "1"}, "enabledPlugins": {"superpowers@superpowers-marketplace": false}})
         );
-        for model in ["claude-sonnet-5-5", "claude-haiku-5-5", ""] {
-            assert_eq!(
-                launch_settings_in(&dir, folder, model, &base, None).unwrap(),
-                None
-            );
-        }
         // A base that is gone is an error, so the caller keeps today's argv.
-        assert!(launch_settings_in(&dir, folder, "opus", &dir.join("missing.json"), None).is_err());
+        assert!(launch_settings_in(&dir, folder, &dir.join("missing.json"), None).is_err());
         std::fs::write(&base, "{not json").unwrap();
-        assert!(launch_settings_in(&dir, folder, "opus", &base, None).is_err());
+        assert!(launch_settings_in(&dir, folder, &base, None).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn an_opus_claude_worker_gets_the_rule_with_or_without_a_preset() {
+    fn a_claude_worker_gets_the_rule_with_or_without_a_preset_and_agy_is_untouched() {
         let root = scratch("worker");
         let dir = root.join("nirvana");
         let folder = root.join("project");
@@ -455,19 +421,11 @@ mod tests {
         let preset = dir.join("preload").join("x.worker.settings.json");
         std::fs::create_dir_all(preset.parent().unwrap()).unwrap();
         std::fs::write(&preset, r#"{"skillOverrides":{"docx":"off"}}"#).unwrap();
-        let expected = worker_settings_path(&dir, &folder, Family::Opus);
+        let expected = worker_settings_path(&dir, &folder);
         // Its base is the worker preset, not the plugin's settings, so it never shares Nirvana Claude's file.
-        assert_ne!(expected, launch_settings_path(&dir, &folder, Family::Opus));
+        assert_ne!(expected, launch_settings_path(&dir, &folder));
         // With a preset: the preset merged with the rule.
-        let with = worker_settings_in(
-            &dir,
-            "claude",
-            "claude-opus-5-5",
-            &folder,
-            Some(&preset),
-            None,
-        )
-        .unwrap();
+        let with = worker_settings_in(&dir, "claude", &folder, Some(&preset), None).unwrap();
         assert_eq!(with.as_deref(), Some(expected.as_path()));
         let read = |path: &Path| -> Value {
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
@@ -477,45 +435,89 @@ mod tests {
             json!({"skillOverrides": {"docx": "off"}, "enabledPlugins": {"superpowers@superpowers-marketplace": false}})
         );
         // No preset: the rule's entries alone.
-        let alone = worker_settings_in(&dir, "claude", "opus", &folder, None, None).unwrap();
+        let alone = worker_settings_in(&dir, "claude", &folder, None, None).unwrap();
         assert_eq!(alone.as_deref(), Some(expected.as_path()));
         assert_eq!(
             read(&expected),
             json!({"enabledPlugins": {"superpowers@superpowers-marketplace": false}})
         );
-        // Sonnet: the preset as today, or nothing.
+        // agy reads no Claude settings: the preset as it was, or nothing.
         assert_eq!(
-            worker_settings_in(
-                &dir,
-                "claude",
-                "claude-sonnet-5-5",
-                &folder,
-                Some(&preset),
-                None
-            )
-            .unwrap()
-            .as_deref(),
+            worker_settings_in(&dir, "agy", &folder, Some(&preset), None)
+                .unwrap()
+                .as_deref(),
             Some(preset.as_path())
         );
         assert_eq!(
-            worker_settings_in(&dir, "claude", "claude-sonnet-5-5", &folder, None, None).unwrap(),
-            None
-        );
-        // agy on an Opus model reads no Claude settings: untouched.
-        assert_eq!(
-            worker_settings_in(&dir, "agy", "claude-opus-5-5-high", &folder, None, None).unwrap(),
+            worker_settings_in(&dir, "agy", &folder, None, None).unwrap(),
             None
         );
         // A broken preset is an error, so the caller keeps today's argv.
         std::fs::write(&preset, "[").unwrap();
-        assert!(worker_settings_in(&dir, "claude", "opus", &folder, Some(&preset), None).is_err());
+        assert!(worker_settings_in(&dir, "claude", &folder, Some(&preset), None).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_new_file_removes_the_folders_two_plan_28_files_and_nothing_else() {
+        // NOSP review: alpha 0.39.x wrote `<hash>.opus.settings.json` and `<hash>.opus.worker.settings.json`.
+        let root = scratch("orphans");
+        let dir = root.join("nirvana");
+        let folder = root.join("project");
+        let other = root.join("other");
+        std::fs::create_dir_all(&folder).unwrap();
+        let base = dir.join("claude").join("settings.json");
+        std::fs::create_dir_all(base.parent().unwrap()).unwrap();
+        std::fs::write(&base, "{}").unwrap();
+        let launch = dir.join(LAUNCH_DIR);
+        std::fs::create_dir_all(&launch).unwrap();
+        let hash = crate::nirvana_launch::folder_hash(&folder);
+        let seed = |names: &[String]| {
+            for name in names {
+                std::fs::write(launch.join(name), "{}").unwrap();
+            }
+        };
+        let old = [
+            format!("{hash}.opus.settings.json"),
+            format!("{hash}.opus.worker.settings.json"),
+        ];
+        // Kept: another folder's plan 28 files, a name the rule never wrote, and anything outside `launch/`.
+        let other_hash = crate::nirvana_launch::folder_hash(&other);
+        let kept = [
+            format!("{other_hash}.opus.settings.json"),
+            format!("{other_hash}.opus.worker.settings.json"),
+            format!("{hash}.sonnet.settings.json"),
+            format!("{hash}.opus.settings.json.bak"),
+        ];
+        let outside = dir.join(format!("{hash}.opus.settings.json"));
+        std::fs::write(&outside, "{}").unwrap();
+        let gone = |names: &[String]| names.iter().all(|name| !launch.join(name).exists());
+        let there = |names: &[String]| names.iter().all(|name| launch.join(name).is_file());
+        seed(&old);
+        seed(&kept);
+        assert_eq!(
+            old_family_paths(&dir, &folder).to_vec(),
+            old.iter().map(|name| launch.join(name)).collect::<Vec<_>>()
+        );
+        launch_settings_in(&dir, &folder, &base, None).unwrap();
+        assert!(gone(&old), "Nirvana Claude's launch left a plan 28 file");
+        assert!(there(&kept) && outside.is_file());
+        seed(&old);
+        worker_settings_in(&dir, "claude", &folder, None, None).unwrap();
+        assert!(gone(&old), "a Claude worker's launch left a plan 28 file");
+        assert!(there(&kept) && outside.is_file());
+        // A launch that fails writes nothing new, so it removes nothing either; agy writes nothing.
+        seed(&old);
+        assert!(launch_settings_in(&dir, &folder, &dir.join("missing.json"), None).is_err());
+        worker_settings_in(&dir, "agy", &folder, None, None).unwrap();
+        assert!(there(&old));
         let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Plan 28 review: two writes in one process never share a temporary name.
     #[test]
     fn two_writes_in_one_process_never_share_a_temporary_name() {
-        let path = Path::new("x/launch.opus.settings.json");
+        let path = Path::new("x/launch.settings.json");
         assert_ne!(temp_path(path), temp_path(path));
     }
 }

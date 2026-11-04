@@ -3,6 +3,27 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.54.1: superpowers off on every Nirvana Claude start, Sonnet included
+
+- **Changed:**
+  - Every Claude start Nirvana makes passes the generated settings file with every superpowers plugin id off, on any
+    model: New Nirvana, the verb's space, Restart Claude, a restored pane and Claude workers. Plan 28's Sonnet keep is
+    gone, and so is the model family it read. The generated file keeps the owner's other settings, so a user who turns
+    superpowers back on in their own settings still gets it off in Nirvana.
+  - The generated files lose the family in their names; the folder's two plan 28 `.opus.` files are removed when the
+    new one is written.
+  - Preload's default `core` no longer lists superpowers. An installed file equal to the old default upgrades
+    (`nirvana_preload_v3.toml`); a hand-edited one is left as it is.
+  **Because:** the owner, 2026-11-04: "I would take out superpowers it doesnt feel needed", and, asked where,
+  "Everywhere". The owner's own Claude Code settings had both plugin entries turned off the same day, outside the repo.
+  **Measured:** a hypothesis, as plan 28 was: no without-superpowers arm has been run. The cost side was measured on
+  2026-10-31: about 2.8k preload tokens per start. Gates: nextest 4,633 of 4,634, the one failure the known Windows
+  plugin-path test; clippy clean; the dry run finds 2,614 of 2,614; all 31 `nosp_` controls and the older controls
+  whose lines moved go red alone. One Sonnet review, one fix round. If the settings file cannot be written, Claude
+  still starts, with superpowers as the user's settings say, and only the server log says so.
+  **If you remove this:** Nirvana Claude on Sonnet, and any Claude whose user turns superpowers back on, loads the
+  plugin's hook and skill list at every start again.
+
 ## alpha 0.54.0: a lesson review only when there is something to learn; agy seats take browser orders
 
 - **Changed:**
