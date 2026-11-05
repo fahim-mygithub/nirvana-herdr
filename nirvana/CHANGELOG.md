@@ -3,6 +3,22 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.57.0: Nirvana Remote prompt buttons, Esc, new space and cards (plans 39c and 39d)
+
+- **Changed:** P39c: a blocked Claude's numbered menu shows on the phone as buttons (read by the Running square's
+  own reader); other agents and unreadable menus get the raw screen with 1-9, Enter and Esc; a fixed Esc button. A
+  key goes only from a fixed allow-list, only for the prompt the phone saw (a hash of the whole prompt, re-read before
+  the press), once per prompt and once per Esc within 3 s; Enter is refused on a parsed menu. P39d: a + on screen 2
+  opens a folder picker over `Desktop\Pojects` (names from the server's own listing only, re-checked just before
+  opening) that starts the space by the "Open Nirvana here" path, or names the space already open there ("open, no
+  agent running" when only shells are); a row of Usage, Servers and Running cards from the squares' own data, nothing
+  the PC's squares do not show.
+- **Because:** plan 39 §2.4-2.6; the owner: "Full Nirvana on phone" (L4).
+- **Measured:** 138 `nirvana_remote`/`nirvana_servers` tests twice at the merge (scoped, owner ruling 2026-11-05);
+  every control finds its text once (2876). The 0.56.0 flaky test was not reproduced; `raw()` now names a read error
+  or a short body. Nothing measured yet on a real phone.
+- **If you remove this:** a permission prompt on the PC can only be answered at the PC, and new spaces start only there.
+
 ## alpha 0.56.0: Nirvana Remote spaces, chat, send, paste and upload (plan 39b)
 
 - **Changed:** the phone page gains screen 2 (every space and its agents, live over Server-Sent Events from one shared

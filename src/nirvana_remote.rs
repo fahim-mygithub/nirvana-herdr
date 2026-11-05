@@ -32,6 +32,11 @@ mod tests;
 mod tests_live;
 #[cfg(test)]
 mod tests_prompt;
+// Plan 39 P39d: the new-space picker and the cards.
+pub mod cards;
+pub mod pick;
+#[cfg(test)]
+mod tests_cards;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -501,6 +506,8 @@ pub fn start(api_tx: crate::api::ApiRequestSender) -> Option<Remote> {
     // P39b: where the chat's transcripts may be read from, and the folder session records.
     site.claude_dir = crate::nirvana::claude_config_dir();
     site.nirvana_home = crate::nirvana::home();
+    // P39d: the picker's root under the profile, the verb's preset, the servers block's ports.
+    site.local = pick::Local::live();
     let site = Arc::new(site);
     let config = Config {
         port: LOCAL_PORT,

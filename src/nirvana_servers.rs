@@ -336,6 +336,18 @@ pub fn cached_ports(
     space.ports.clone()
 }
 
+/// Plan 39 P39d: the ports last read for this space, as the servers block draws them, without recording shells.
+/// Nirvana Remote's Servers card runs in this same server process; it reads the cache, it does not drive it.
+pub fn last_ports(workspace_id: &str) -> Vec<u16> {
+    state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .spaces
+        .get(workspace_id)
+        .map(|space| space.ports.clone())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
