@@ -32,7 +32,8 @@
     return svg;
   }
 
-  // The sheet. opened(space, existing) runs once it has closed, with the space herdr named.
+  // The sheet. opened(space, existing, agent) runs once it has closed, with the space herdr named; agent is false
+  // for a space open on the folder with only plain shells, where nothing was started (review S2).
   function open(nv, opened) {
     const h = nv.h;
     const list = h('div', { class: 'folders scroll' }, h('div', { class: 'skeleton round' }));
@@ -50,14 +51,14 @@
         busy = false;
         button.removeAttribute('aria-busy');
         if (!r.ok) { note.textContent = r.data.error || 'The PC did not open it.'; return; }
-        close(() => opened(r.data.space || null, !!r.data.existing));
+        close(() => opened(r.data.space || null, !!r.data.existing, r.data.agent !== false));
       }
       nv.getJson('/api/folders').then((data) => {
         root.textContent = data.root || 'Desktop\\Pojects';
         const rows = (data.folders || []).map((folder) => {
           const button = h('button', { class: 'press row folder', type: 'button' }, folderIcon(),
             h('span', { class: 'folder-name', text: folder.name }),
-            h('span', { class: 'folder-note', text: folder.open ? 'open' : '' }));
+            h('span', { class: 'folder-note', text: !folder.open ? '' : folder.agent ? 'open' : 'open, no agent running' }));
           button.addEventListener('click', () => pick(folder, button));
           return button;
         });

@@ -23,10 +23,18 @@
 //! as the PC would. The window's flash and toast (`:756-757`) are for someone at the PC and are not sent.
 //!
 //! **A folder already open.** When a pane of a space has the folder as its `cwd` (herdr's `pane.list`, compared as
-//! `nirvana_launch::folder_key` compares folders), the answer names that space and nothing is started: the phone
-//! opens it instead of a second one. herdr's own `nirvana_space_on` would focus a space only when Nirvana Claude
-//! runs there, and would open a second space beside a plain shell on the folder; this check covers both. Opens are
-//! one at a time (`Local::opening`), so two taps cannot both find the folder closed.
+//! `nirvana_launch::folder_key` compares folders once both are canonical, `canonical_key`), the answer names that
+//! space and nothing is started: the phone opens it instead of a second one. herdr's own `nirvana_space_on` would
+//! focus a space only when Nirvana Claude runs there, and would open a second space beside a plain shell on the
+//! folder; this check covers both, and says which (`agent`): a space with only plain shells on the folder is "open,
+//! no agent running" on the page (review S2, 2026-11-05), never a bare "open" with no Claude to be found. A space
+//! with Nirvana Claude on the folder wins over one with only a shell. Opens are one at a time (`Local::opening`), so
+//! two taps cannot both find the folder closed.
+//!
+//! **Between the check and the open.** The checks run again right before `command.invoke` (review S1): the preset
+//! before it may take seconds (`OPEN_WALL`, and it may ask Jev), long enough for the folder to be swapped for a
+//! junction. That narrows the window to the time between two syscalls and herdr's own read of the path; it does not
+//! close it, since herdr opens the folder by its path and resolves it again itself.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -216,18 +224,78 @@ pub fn inside(root: &Path, folder: &Path) -> bool {
     }
 }
 
-/// The space whose panes have `folder` as their folder, from a `pane.list` answer.
-pub fn space_on(panes: &Value, folder: &Path) -> Option<String> {
-    let key = crate::nirvana_launch::folder_key(folder);
-    panes["panes"]
-        .as_array()?
+/// `folder_key` of the folder as the disk names it: a `\\?\` prefix taken off, and on a local drive every short
+/// (8.3) name and link read away (`canonicalize`, itself without its `\\?\`). A UNC path is left as written (a server
+/// that is away could hold the read for seconds), and so is a path that cannot be read (review N1, 2026-11-05).
+pub fn canonical_key(path: &Path) -> String {
+    let text = path.display().to_string();
+    let plain = text
+        .strip_prefix(r"\\?\")
+        .filter(|rest| !rest.starts_with(r"UNC\"))
+        .unwrap_or(&text);
+    let bytes = plain.as_bytes();
+    let local = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    let canonical = local
+        .then(|| std::fs::canonicalize(plain).ok())
+        .flatten()
+        .map(|found| found.display().to_string());
+    let named = canonical
+        .as_deref()
+        .map(|found| found.strip_prefix(r"\\?\").unwrap_or(found))
+        .unwrap_or(plain);
+    crate::nirvana_launch::folder_key(Path::new(named))
+}
+
+/// One pane from a `pane.list` answer: its id, its space and its folder's `canonical_key`.
+pub struct PaneOn {
+    pub pane: String,
+    pub space: String,
+    pub key: String,
+}
+
+/// Each pane's folder, read once for every folder a listing asks about.
+pub fn pane_folders(panes: &Value) -> Vec<PaneOn> {
+    let Some(panes) = panes["panes"].as_array() else {
+        return Vec::new();
+    };
+    panes
         .iter()
-        .find(|pane| {
-            pane["cwd"]
-                .as_str()
-                .is_some_and(|cwd| crate::nirvana_launch::folder_key(Path::new(cwd)) == key)
+        .filter_map(|pane| {
+            Some(PaneOn {
+                pane: pane["pane_id"].as_str().unwrap_or("").to_string(),
+                space: pane["workspace_id"].as_str()?.to_string(),
+                key: canonical_key(Path::new(pane["cwd"].as_str()?)),
+            })
         })
-        .and_then(|pane| pane["workspace_id"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// The panes Nirvana Claude runs in, from an `agent.list` answer: an agent named as herdr's `nirvana_space_on` reads
+/// a Nirvana agent (`is_nirvana_agent_name`: `nirvana`, `nirvana-2`, ...).
+pub fn nirvana_panes(agents: &Value) -> Vec<String> {
+    let Some(agents) = agents["agents"].as_array() else {
+        return Vec::new();
+    };
+    agents
+        .iter()
+        .filter(|agent| {
+            agent["name"]
+                .as_str()
+                .is_some_and(crate::nirvana_launch::is_nirvana_agent_name)
+        })
+        .filter_map(|agent| agent["pane_id"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// The space with a pane on `folder`, and whether Nirvana Claude runs in one of its panes there: a space with the
+/// agent first, else the first with any pane there (a plain shell).
+pub fn space_on(panes: &[PaneOn], nirvana: &[String], folder: &Path) -> Option<(String, bool)> {
+    let key = canonical_key(folder);
+    let on: Vec<&PaneOn> = panes.iter().filter(|pane| pane.key == key).collect();
+    if let Some(pane) = on.iter().find(|pane| nirvana.contains(&pane.pane)) {
+        return Some((pane.space.clone(), true));
+    }
+    on.first().map(|pane| (pane.space.clone(), false))
 }
 
 /// The root as the sheet's subtitle shows it.
@@ -287,18 +355,30 @@ impl Site {
             Ok(names) => names,
             Err(_) => return error(409, "Desktop\\Pojects cannot be read on this PC"),
         };
-        let panes = match self.herdr.call("pane.list", json!({})) {
-            Ok(panes) => panes,
+        let (panes, nirvana) = match self.panes_and_agents() {
+            Ok(both) => both,
             Err(why) => return error(502, why),
         };
         let folders: Vec<Value> = names
             .into_iter()
             .map(|name| {
-                let space = space_on(&panes, &root.join(&name));
-                json!({ "name": name, "open": space.is_some(), "space": space })
+                let found = space_on(&panes, &nirvana, &root.join(&name));
+                json!({
+                    "name": name,
+                    "open": found.is_some(),
+                    "space": found.as_ref().map(|found| found.0.clone()),
+                    "agent": found.is_some_and(|found| found.1),
+                })
             })
             .collect();
         Response::json(200, &json!({ "root": root_label(), "folders": folders }))
+    }
+
+    /// herdr's panes (`pane_folders`) and the panes Nirvana Claude runs in (`nirvana_panes`).
+    fn panes_and_agents(&self) -> Result<(Vec<PaneOn>, Vec<String>), String> {
+        let panes = self.herdr.call("pane.list", json!({}))?;
+        let agents = self.herdr.call("agent.list", json!({}))?;
+        Ok((pane_folders(&panes), nirvana_panes(&agents)))
     }
 
     /// `POST /api/folders/open` `{"name"}`: the space on the folder, opened as "Open Nirvana here" opens it, or the
@@ -332,14 +412,21 @@ impl Site {
         let Ok(_one) = self.local.opening.lock() else {
             return error(500, "the picker is broken");
         };
-        let panes = match self.herdr.call("pane.list", json!({})) {
-            Ok(panes) => panes,
+        let (panes, nirvana) = match self.panes_and_agents() {
+            Ok(both) => both,
             Err(why) => return error(502, why),
         };
-        if let Some(space) = space_on(&panes, &folder) {
-            return Response::json(200, &json!({ "space": space, "existing": true }));
+        if let Some((space, agent)) = space_on(&panes, &nirvana, &folder) {
+            return Response::json(
+                200,
+                &json!({ "space": space, "existing": true, "agent": agent }),
+            );
         }
         let preset = (self.local.preset)(&folder);
+        // Again, right before herdr is asked: the preset may have taken seconds (review S1).
+        if !plain_dir(&folder) || !inside(root, &folder) {
+            return error(409, "the folder changed while it was opening");
+        }
         let started = match self.herdr.call(
             "command.invoke",
             json!({ "command_id": crate::nirvana_launch::open_command_id(&folder, false, true) }),
@@ -352,10 +439,8 @@ impl Site {
             .as_str()
             .map(str::to_string)
             .or_else(|| {
-                self.herdr
-                    .call("pane.list", json!({}))
-                    .ok()
-                    .and_then(|panes| space_on(&panes, &folder))
+                let panes = pane_folders(&self.herdr.call("pane.list", json!({})).ok()?);
+                space_on(&panes, &[], &folder).map(|found| found.0)
             });
         Response::json(
             200,

@@ -30,12 +30,15 @@
       const note = h('span', { class: 'note', role: 'status' });
       // The space the last open named: drawn with the new-row motion and scrolled to once the list has it.
       let shown = null;
+      // Spaces an open found on the folder with only plain shells: nothing was started there (review S2).
+      const quiet = new Set();
       let last = null;
       const pickers = window.NirvanaNewSpace;
       const add = pickers && h('button', { class: 'press icon-button new-button', type: 'button',
         'aria-label': 'Open a new space',
-        onclick: () => pickers.open(nv, (space) => {
+        onclick: () => pickers.open(nv, (space, existing, agent) => {
           shown = space;
+          if (space && existing && !agent) quiet.add(space);
           if (last) draw(last);
         }) }, pickers.plusIcon());
       el.append(h('div', { class: 'top' }, back, h('span', { class: 'top-text' }, title, version), add));
@@ -61,7 +64,9 @@
           }, h('span', { class: 'agent-text' },
             h('span', { class: 'agent-name', text: agent.name }),
             h('span', { class: 'agent-line', text: agent.line || '' })), chip(agent.status)));
-          if (!agents.length) agents.push(h('span', { class: 'agent-none', text: 'No agents' }));
+          if (agents.length) quiet.delete(space.id);
+          else agents.push(h('span', { class: 'agent-none',
+            text: quiet.has(space.id) ? 'Open, no agent running. Nothing was started.' : 'No agents' }));
           // A space that came in after the first paint arrives with the prototype's new-row motion, and so does the
           // one a new-space open named, already open or not.
           const fresh = (!first && !seen.has(space.id)) || space.id === shown;

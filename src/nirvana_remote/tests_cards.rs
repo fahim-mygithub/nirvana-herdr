@@ -226,6 +226,11 @@ fn world(name: &str) -> World {
 
 impl World {
     fn site(&self) -> Arc<Site> {
+        self.site_with(Arc::new(|_: &Path| ()))
+    }
+
+    /// The site, with `also` run inside the preset stand-in: what happens on the PC while the verb's preset runs.
+    fn site_with(&self, also: Arc<dyn Fn(&Path) + Send + Sync>) -> Arc<Site> {
         let mut site = Site::new(
             Arc::new(NoTailscale),
             self.herdr.clone(),
@@ -247,6 +252,7 @@ impl World {
                 log.lock()
                     .unwrap()
                     .push(format!("preset {}", folder.display()));
+                also(folder);
                 Some("preset Lean".into())
             }),
             Arc::new(|space: &str| match space {
@@ -550,13 +556,123 @@ fn a_folder_already_open_names_its_space_and_starts_nothing() {
         .clone();
     assert_eq!(groove["open"], true);
     assert_eq!(groove["space"], "w2");
+    // p7 is a plain shell (no agent in agent.list): open, but no agent running (review S2).
+    assert_eq!(groove["agent"], false);
     let (status, answer) = open(running.addr, &json!({"name": "groove-coach"}));
     assert_eq!(status, 200, "{answer}");
-    assert_eq!(answer, json!({"space": "w2", "existing": true}));
+    assert_eq!(
+        answer,
+        json!({"space": "w2", "existing": true, "agent": false})
+    );
     assert!(w.herdr.calls("command.invoke").is_empty());
     assert!(
         w.presets().is_empty(),
         "no preset for a folder already open"
+    );
+}
+
+#[test]
+fn a_folder_with_nirvana_claude_names_that_space_before_a_plain_shells() {
+    let w = world("agent");
+    let folder = w.root.join("groove-coach").display().to_string();
+    // A plain shell in w2 first, then p1, Nirvana Claude ("nirvana" in agent.list) in w1, both on the folder; and p5,
+    // an agent named "flash", on another folder.
+    *w.herdr.panes.lock().unwrap() = vec![
+        json!({"pane_id": "p7", "workspace_id": "w2", "cwd": folder}),
+        json!({"pane_id": "p1", "workspace_id": "w1", "cwd": folder}),
+        json!({"pane_id": "p5", "workspace_id": "w1", "cwd": w.root.join("moto-reel-mcp").display().to_string()}),
+    ];
+    let running = serve(w.site());
+    let (_, folders) = get_json(running.addr, "/api/folders");
+    let row = |name: &str| {
+        folders["folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|folder| folder["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        row("groove-coach"),
+        json!({"name": "groove-coach", "open": true, "space": "w1", "agent": true})
+    );
+    // An agent that is not Nirvana Claude is no Nirvana agent.
+    assert_eq!(row("moto-reel-mcp")["agent"], false);
+    assert_eq!(row("3D-Printer Flow")["open"], false);
+    let (status, answer) = open(running.addr, &json!({"name": "groove-coach"}));
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        answer,
+        json!({"space": "w1", "existing": true, "agent": true})
+    );
+    assert!(w.herdr.calls("command.invoke").is_empty());
+    assert!(w.presets().is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn a_panes_folder_compares_after_both_are_canonical() {
+    use std::os::windows::process::CommandExt;
+    let w = world("canonical");
+    let folder = w.root.join("groove-coach");
+    // herdr may report the verbatim form.
+    let verbatim = format!(r"\\?\{}", folder.display());
+    assert_eq!(
+        pick::canonical_key(Path::new(&verbatim)),
+        pick::canonical_key(&folder)
+    );
+    assert_ne!(
+        pick::canonical_key(&w.root.join("moto-reel-mcp")),
+        pick::canonical_key(&folder)
+    );
+    // And a short (8.3) form.
+    // `raw_arg`: `arg` would quote the quotes, which cmd then reads as part of the path.
+    let short = std::process::Command::new("cmd")
+        .raw_arg(format!(
+            "/C for %I in (\"{}\") do @echo %~sI",
+            folder.display()
+        ))
+        .output()
+        .unwrap();
+    let short = String::from_utf8_lossy(&short.stdout).trim().to_string();
+    // Measured 2026-11-05: this volume makes them (`P3F7CE~1\GROOVE~1`); without one the check below is hollow.
+    assert!(short.contains('~'), "no short name made: {short}");
+    assert_eq!(
+        pick::canonical_key(Path::new(&short)),
+        pick::canonical_key(&folder),
+        "{short}"
+    );
+    *w.herdr.panes.lock().unwrap() =
+        vec![json!({"pane_id": "p7", "workspace_id": "w2", "cwd": verbatim})];
+    let running = serve(w.site());
+    let (status, answer) = open(running.addr, &json!({"name": "groove-coach"}));
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["existing"], true, "{answer}");
+    assert!(w.herdr.calls("command.invoke").is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn a_folder_swapped_for_a_junction_while_its_preset_runs_is_not_opened() {
+    let w = world("swap");
+    let folder = w.root.join("groove-coach");
+    let outside = w.outside.clone();
+    let swapped = folder.clone();
+    let running = serve(w.site_with(Arc::new(move |_: &Path| {
+        std::fs::remove_dir_all(&swapped).unwrap();
+        junction(&swapped, &outside);
+    })));
+    let (status, answer) = open(running.addr, &json!({"name": "groove-coach"}));
+    assert_eq!(status, 409, "{answer}");
+    assert_eq!(
+        w.presets(),
+        vec![format!("preset {}", folder.display())],
+        "resolve passed, then the preset ran"
+    );
+    assert!(
+        w.herdr.calls("command.invoke").is_empty(),
+        "the junction's target is not opened"
     );
 }
 
@@ -925,6 +1041,13 @@ fn the_page_has_the_cards_and_the_new_space_sheet() {
         "a changed list reads the cards again"
     );
     assert!(spaces.contains("pickers.open(nv,"));
+    // Review S2: a folder open with only plain shells says so, on the sheet and on the space it names.
+    assert!(newspace.contains("'open, no agent running'"));
+    assert!(newspace.contains("!!r.data.existing, r.data.agent !== false"));
+    assert!(spaces.contains("'Open, no agent running. Nothing was started.'"));
+    // Review N3: a page shown again reads the cards at once, and stops listening when it closes.
+    assert!(cards.contains("document.addEventListener('visibilitychange', shown);"));
+    assert!(cards.contains("document.removeEventListener('visibilitychange', shown);"));
     assert!(spaces.contains("'aria-label': 'Open a new space'"));
     for (name, text) in [
         ("cards", &cards),

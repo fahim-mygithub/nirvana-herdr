@@ -86,9 +86,15 @@
       clearTimeout(timer);
       timer = setTimeout(read, SETTLE);
     }
-    const every = setInterval(() => { if (document.visibilityState === 'visible') read(); }, REREAD);
+    function shown() { if (document.visibilityState === 'visible') read(); }
+    const every = setInterval(shown, REREAD);
+    // A phone unlocked between two rereads reads at once, not up to REREAD later (review N3).
+    document.addEventListener('visibilitychange', shown);
     read();
-    return { el, refresh, close() { over = true; clearTimeout(timer); clearInterval(every); } };
+    return { el, refresh, close() {
+      over = true; clearTimeout(timer); clearInterval(every);
+      document.removeEventListener('visibilitychange', shown);
+    } };
   }
 
   window.NirvanaCards = { mount };

@@ -24,6 +24,10 @@ T_SERVERS = _T + "the_servers_card_leads_with_remote_then_each_spaces_ports"
 T_RUNNING = _T + "the_running_card_counts_agents_at_work_in_the_squares_words"
 T_TOKEN = _T + "the_running_card_reads_only_a_transcript_under_claudes_folder"
 T_PAGE = _T + "the_page_has_the_cards_and_the_new_space_sheet"
+# Review round, 2026-11-05
+T_AGENT = _T + "a_folder_with_nirvana_claude_names_that_space_before_a_plain_shells"
+T_CANON = _T + "a_panes_folder_compares_after_both_are_canonical"
+T_SWAP = _T + "a_folder_swapped_for_a_junction_while_its_preset_runs_is_not_opened"
 
 CONTROLS = (
     # §2.5, L11: the root is Desktop\Pojects under the profile
@@ -80,18 +84,18 @@ CONTROLS = (
             T_JUNCTION, "rust"),
     # A pane's folder compares as folder_key compares (case, separators)
     Control("p39d_space_on_key", PICK,
-            "                .is_some_and(|cwd| crate::nirvana_launch::folder_key(Path::new(cwd)) == key)\n",
-            "                .is_some_and(|cwd| cwd == key)\n",
+            "                key: canonical_key(Path::new(pane[\"cwd\"].as_str()?)),\n",
+            "                key: pane[\"cwd\"].as_str()?.to_string(),\n",
             T_EXISTING, "rust"),
     # The listing marks a folder already open
     Control("p39d_list_marks_open", PICK,
-            "                let space = space_on(&panes, &root.join(&name));\n",
-            "                let space = None::<String>;\n",
+            "                let found = space_on(&panes, &nirvana, &root.join(&name));\n",
+            "                let found = None::<(String, bool)>;\n",
             T_EXISTING, "rust"),
     # A folder already open names that space and starts nothing
     Control("p39d_existing_no_start", PICK,
-            "        if let Some(space) = space_on(&panes, &folder) {\n",
-            "        if let Some(space) = None::<String> {\n",
+            "        if let Some((space, agent)) = space_on(&panes, &nirvana, &folder) {\n",
+            "        if let Some((space, agent)) = None::<(String, bool)> {\n",
             T_EXISTING, "rust"),
     # The verb's path: the preset is applied
     Control("p39d_preset_applied", PICK,
@@ -101,6 +105,10 @@ CONTROLS = (
     # The verb's order: the preset before the open
     Control("p39d_preset_before_open", PICK,
             "        let preset = (self.local.preset)(&folder);\n"
+            "        // Again, right before herdr is asked: the preset may have taken seconds (review S1).\n"
+            "        if !plain_dir(&folder) || !inside(root, &folder) {\n"
+            "            return error(409, \"the folder changed while it was opening\");\n"
+            "        }\n"
             "        let started = match self.herdr.call(\n"
             "            \"command.invoke\",\n"
             "            json!({ \"command_id\": crate::nirvana_launch::open_command_id(&folder, false, true) }),\n"
@@ -108,6 +116,10 @@ CONTROLS = (
             "            Ok(started) => started,\n"
             "            Err(why) => return error(502, why),\n"
             "        };\n",
+            "        // Again, right before herdr is asked: the preset may have taken seconds (review S1).\n"
+            "        if !plain_dir(&folder) || !inside(root, &folder) {\n"
+            "            return error(409, \"the folder changed while it was opening\");\n"
+            "        }\n"
             "        let started = match self.herdr.call(\n"
             "            \"command.invoke\",\n"
             "            json!({ \"command_id\": crate::nirvana_launch::open_command_id(&folder, false, true) }),\n"
@@ -234,5 +246,56 @@ CONTROLS = (
     Control("p39d_page_running_route", CARDS_JS,
             "nv.getJson('/api/cards/running')",
             "nv.getJson('/api/cards/runnin')",
+            T_PAGE, "rust"),
+    # Review S1: the checks run again right before command.invoke. One control for the pair: a junction swapped in
+    # fails both `plain_dir` and `inside`, so taking away either one alone leaves the test green (hollow).
+    Control("p39d_recheck_before_invoke", PICK,
+            "        if !plain_dir(&folder) || !inside(root, &folder) {\n",
+            "        if false {\n",
+            T_SWAP, "rust"),
+    # Review S2: a space with Nirvana Claude on the folder is told from one with only a plain shell
+    Control("p39d_space_on_agent", PICK,
+            "    if let Some(pane) = on.iter().find(|pane| nirvana.contains(&pane.pane)) {\n",
+            "    if let Some(pane) = on.iter().find(|_| false) {\n",
+            T_AGENT, "rust"),
+    # Review S2: only an agent named as Nirvana Claude is (`nirvana`, `nirvana-2`), not any agent
+    Control("p39d_nirvana_name", PICK,
+            "                .is_some_and(crate::nirvana_launch::is_nirvana_agent_name)\n",
+            "                .is_some()\n",
+            T_AGENT, "rust"),
+    # Review S2: the open answer says whether an agent runs there
+    Control("p39d_answer_agent", PICK,
+            '                &json!({ "space": space, "existing": true, "agent": agent }),\n',
+            '                &json!({ "space": space, "existing": true, "agent": true }),\n',
+            T_EXISTING, "rust"),
+    # Review S2: the listing says whether an agent runs there
+    Control("p39d_list_agent", PICK,
+            '                    "agent": found.is_some_and(|found| found.1),\n',
+            '                    "agent": found.is_some(),\n',
+            T_EXISTING, "rust"),
+    # Review S2: the sheet says "open, no agent running", not a bare "open"
+    Control("p39d_page_no_agent_note", NEWSPACE_JS,
+            "folder.agent ? 'open' : 'open, no agent running'",
+            "folder.agent ? 'open' : 'open'",
+            T_PAGE, "rust"),
+    # Review S2: the space an open named says nothing was started there
+    Control("p39d_page_quiet_space", SPACES_JS,
+            "'Open, no agent running. Nothing was started.'",
+            "'No agents'",
+            T_PAGE, "rust"),
+    # Review N1: a local path is canonicalised (8.3 names read away)
+    Control("p39d_canonical_key", PICK,
+            "        .then(|| std::fs::canonicalize(plain).ok())\n",
+            "        .then(|| None::<PathBuf>)\n",
+            T_CANON, "rust"),
+    # Review N1: herdr's verbatim `\\?\` form is the same folder
+    Control("p39d_strip_verbatim", PICK,
+            '        .strip_prefix(r"\\\\?\\")\n        .filter(',
+            '        .strip_prefix("no such prefix")\n        .filter(',
+            T_CANON, "rust"),
+    # Review N3: shown again, the cards read at once
+    Control("p39d_page_visibility", CARDS_JS,
+            "document.addEventListener('visibilitychange', shown);",
+            "",
             T_PAGE, "rust"),
 )
