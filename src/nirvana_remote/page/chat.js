@@ -208,7 +208,13 @@
 
       attach.addEventListener('click', openAttach);
       sendButton.addEventListener('click', () => send());
-      input.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); send(); } });
+      // The Enter that confirms an IME candidate (Japanese, Chinese, the iPhone's own) is not a send: Safari marks
+      // it isComposing, or keyCode 229 (review round, N3).
+      input.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return;
+        event.preventDefault();
+        send();
+      });
       input.addEventListener('input', drawPending);
       // A screenshot pasted straight into the box (the iOS long-press Paste) arrives as a file on the paste event.
       input.addEventListener('paste', (event) => {
@@ -242,7 +248,8 @@
         },
         agent: (data) => { agent = Object.assign(agent, data); drawHead(); },
         live: (data) => drawLive(data.live),
-        gone: () => { note.textContent = 'This agent has closed on the PC.'; },
+        // Over for good: the view ends here, so EventSource does not reconnect to a 404 and overwrite the note.
+        gone: (_, close) => { close(); note.textContent = 'This agent has closed on the PC.'; },
         state: (on) => { if (!on) note.textContent = 'Reconnecting to the PC…'; else if (note.textContent.startsWith('Reconnecting')) note.textContent = ''; },
       });
     },

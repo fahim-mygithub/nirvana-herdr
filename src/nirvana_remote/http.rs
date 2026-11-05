@@ -23,8 +23,11 @@ pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
 pub const CONNECTIONS: usize = 32;
 const HEADERS: usize = 48;
 /// After the answer, at most this much of what the caller still sends is read and dropped, for at most
-/// `DRAIN_TIME`: Windows resets a socket closed with unread bytes, and a reset can cut the answer short.
-pub const DRAIN_LIMIT: usize = 64 * 1024;
+/// `DRAIN_TIME`: Windows resets a socket closed with unread bytes, and a reset can cut the answer short. 8 MiB is a
+/// second of a 64 Mbit/s uplink (review round, N4): a 413 or 400 answered on the head of a large upload, its body
+/// unread, is drained while the caller stops sending, so it reads the answer instead of a reset. It was 64 KiB, and a
+/// caller that sent a few MiB before reading lost the 413.
+pub const DRAIN_LIMIT: usize = 8 * 1024 * 1024;
 pub const DRAIN_TIME: Duration = Duration::from_secs(1);
 /// The slowest a body may arrive on average, past its first `READ_TIMEOUT` (P39b): a 50 MiB upload gets 10 s plus
 /// 800 s. That is about 0.5 Mbit/s, under any phone's uplink, and it keeps P39a's rule that a slow caller cannot hold
@@ -395,7 +398,16 @@ impl Conn {
         let mut total: u64 = 0;
         loop {
             let line = self.line(deadline)?;
-            let hex = line.split(';').next().unwrap_or("").trim();
+            // RFC 9112 §7.1: `1*HEXDIG`, then optional whitespace before an extension. `from_str_radix` alone
+            // would take a leading `+` or space (review round, N5).
+            let hex = line
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim_end_matches([' ', '\t']);
+            if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(BodyError::Bad("a chunk size that is not hex"));
+            }
             let chunk = u64::from_str_radix(hex, 16)
                 .map_err(|_| BodyError::Bad("a chunk size that is not hex"))?;
             if chunk == 0 {
@@ -551,7 +563,7 @@ async fn finish(stream: &mut tokio::net::TcpStream, answer: &[u8]) {
     let _ = stream.write_all(answer).await;
     let _ = stream.shutdown().await;
     let _ = tokio::time::timeout(DRAIN_TIME, async {
-        let mut chunk = [0u8; 4096];
+        let mut chunk = [0u8; 16 * 1024];
         let mut left = DRAIN_LIMIT;
         while left > 0 {
             match stream.read(&mut chunk).await {

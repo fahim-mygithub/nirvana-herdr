@@ -42,6 +42,21 @@ T_PATHS = _T + "a_send_adds_the_uploaded_files_paths_and_refuses_any_other_name"
 T_NAMES = _T + "upload_names_are_the_servers_own"
 T_FRAMING = _T + "the_body_framing_is_read_from_the_head"
 T_PAGE = _T + "the_page_has_the_spaces_and_chat_screens_and_no_inline_script"
+# Review round (record p39b, "Review round").
+HERDR = "src/nirvana_remote/herdr.rs"
+T_WHOSE = _T + "the_folders_record_is_a_lone_claudes_only"
+T_FIRST_PROMPT = _T + "a_chat_view_takes_the_transcript_that_comes_with_the_first_prompt"
+T_CONTROLS = _T + "phone_text_reaches_agent_prompt_without_controls"
+T_BETWEEN = _T + "a_change_between_the_snapshot_and_the_subscription_is_seen"
+T_SPIN = _T + "a_stream_that_ends_at_once_is_not_subscribed_in_a_loop"
+T_OLD = _T + "an_old_stream_ends_when_the_feed_subscribes_again"
+T_SILENT = _T + "a_socket_that_never_answers_is_given_up_on"
+T_STOP_READER = _T + "a_subscription_told_to_stop_ends_its_reader"
+T_RECHECK = _T + "a_live_view_ends_when_the_owner_or_this_pc_changes"
+T_CROSS_READ = _T + "a_cross_site_read_of_the_api_gets_nothing"
+T_EARLY_413 = _T + "a_413_on_the_head_reaches_a_caller_that_sends_its_body_first"
+T_CHUNK_HEX = _T + "a_chunk_size_is_plain_hex"
+T_PAGE_ROUND = _T + "the_page_ends_a_gone_view_and_waits_out_composition"
 
 CONTROLS = (
     # §2.1: herdr's blocked reads as "needs you"
@@ -292,8 +307,8 @@ CONTROLS = (
             T_CAP, "rust"),
     # The message carries each upload's path
     Control("p39b_send_adds_paths", SEND,
-            "    parts.extend(files.iter().map(|file| file.display().to_string()));\n",
-            "",
+            "    parts.extend(files.iter().map(|file| {\n",
+            "    parts.extend(files.iter().filter(|_| false).map(|file| {\n",
             T_PATHS, "rust"),
     # Only the server's upload names become paths
     Control("p39b_send_names_checked", LIVE,
@@ -340,4 +355,130 @@ CONTROLS = (
             "accept: 'image/*'",
             "accept: '*/*'",
             T_PAGE, "rust"),
+    # --- Review round ---
+    # S1: the folder's record is a Claude's only, never a Codex's or an Antigravity's
+    Control("p39b_record_claude_only", CHAT,
+            "    if !is_claude(agent) {\n",
+            "    if false {\n",
+            T_WHOSE, "rust"),
+    # S1: ... and only a lone Claude's in that folder
+    Control("p39b_record_lone_claude", CHAT,
+            "    if shared {\n",
+            "    if false {\n",
+            T_WHOSE, "rust"),
+    # S1: a Claude before its probe is known by herdr's label
+    Control("p39b_kind_from_label", CHAT,
+            '        None => agent["agent"].as_str().and_then(Kind::from_agent_label),\n',
+            "        None => None,\n",
+            T_WHOSE, "rust"),
+    # S1: a chat view takes the transcript that comes later, and sends the whole chat from it
+    Control("p39b_chat_path_rechecked", LIVE,
+            "                                    Some(found) if fresh != path => {\n",
+            "                                    Some(found) if false => {\n",
+            T_FIRST_PROMPT, "rust"),
+    # S2: the phone's text loses its controls before agent.prompt
+    Control("p39b_text_controls_dropped", SEND,
+            "    let text: String = text.chars().filter(|&c| typed(c)).collect();\n",
+            "    let text: String = text.to_string();\n",
+            T_CONTROLS, "rust"),
+    # S2: ... the C1 ones too
+    Control("p39b_c1_dropped", SEND,
+            "    c == '\\n' || c == '\\t' || !c.is_control()\n",
+            "    c == '\\n' || c == '\\t' || (c >= ' ' && c != '\\u{7f}')\n",
+            T_CONTROLS, "rust"),
+    # S2: a file's path follows after a space, not an Enter
+    Control("p39b_files_after_space", SEND,
+            '    parts.join(" ")\n',
+            '    parts.join("\\n")\n',
+            T_PATHS, "rust"),
+    # S2: a path with a space is quoted
+    Control("p39b_path_quoted", SEND,
+            "        if path.contains(char::is_whitespace) {\n",
+            "        if false {\n",
+            T_CONTROLS, "rust"),
+    # S3a: a change between the snapshot and the subscription is sent
+    Control("p39b_feed_snapshot_after_subscribe", SPACES,
+            "                    if !self.send(Some(again.to_string())) {\n",
+            "                    if false {\n",
+            T_BETWEEN, "rust"),
+    # S3b: a wait before every subscription after the first
+    Control("p39b_feed_backoff", SPACES,
+            "                std::thread::sleep(retry);\n",
+            "",
+            T_SPIN, "rust"),
+    # S3b: ... reset only by an event, not by the ack
+    Control("p39b_feed_reset_on_event", SPACES,
+            "            let _ends = Stop(stop);\n",
+            "            let _ends = Stop(stop);\n            retry = RETRY_FIRST;\n",
+            T_SPIN, "rust"),
+    # S3c: a stream left behind is told to stop
+    Control("p39b_old_stream_stopped", SPACES,
+            "        self.0.store(true, Ordering::SeqCst);\n",
+            "        let _ = &self.0;\n",
+            T_OLD, "rust"),
+    # S3c: the real socket reader ends once told to stop
+    Control("p39b_polled_stop", HERDR,
+            "                .is_some_and(|stop| stop.load(Ordering::SeqCst))\n",
+            "                .is_some_and(|_| false)\n",
+            T_STOP_READER, "rust"),
+    # S4: a socket call gives up at its wait plus the margin
+    Control("p39b_socket_deadline", HERDR,
+            "    reader.get_mut().deadline = Some(Instant::now() + wait);\n",
+            "    reader.get_mut().deadline = Some(Instant::now() + wait * 3);\n",
+            T_SILENT, "rust"),
+    # S4: ... and not before: agent.wait's own timeout plus the margin
+    Control("p39b_socket_wait_margin", HERDR,
+            "        .map_or(ANSWER_TIMEOUT, |ms| Duration::from_millis(ms) + MARGIN)\n",
+            "        .map_or(ANSWER_TIMEOUT, Duration::from_millis)\n",
+            T_SILENT, "rust"),
+    # S5: a closed agent's view ends on the page
+    Control("p39b_page_gone_closes", CHAT_JS,
+            "        gone: (_, close) => { close(); note.textContent = 'This agent has closed on the PC.'; },\n",
+            "        gone: () => { note.textContent = 'This agent has closed on the PC.'; },\n",
+            T_PAGE_ROUND, "rust"),
+    # S5: a handler is given its view's close
+    Control("p39b_page_handler_close", APP_JS,
+            "          if (!over) on[name](data, close);\n",
+            "          on[name](data);\n",
+            T_PAGE_ROUND, "rust"),
+    # S6: a live view asks again each wake who it serves
+    Control("p39b_view_rechecks_caller", STREAM,
+            "    while !ticket.over() && still() {\n",
+            "    while !ticket.over() {\n",
+            T_RECHECK, "rust"),
+    # S7: a read of /api/ is held to Sec-Fetch-Site and Origin
+    Control("p39b_api_reads_checked", ROUTES,
+            '    if reads && !request.path.starts_with("/api/") {\n',
+            "    if reads {\n",
+            T_CROSS_READ, "rust"),
+    # S7: the page's own files still open from a link
+    Control("p39b_page_files_open_from_links", ROUTES,
+            '    if reads && !request.path.starts_with("/api/") {\n',
+            "    if false {\n",
+            T_CROSS_READ, "rust"),
+    # S7: a read with neither header (Safari before 16.4, another PC's probe) is let in
+    Control("p39b_read_without_headers", ROUTES,
+            "        if reads {\n            return Ok(());\n        }\n",
+            "",
+            T_CROSS_READ, "rust"),
+    # N2: one reopen on a wake
+    Control("p39b_page_one_reopen", APP_JS,
+            "      if (document.visibilityState === 'visible' && Date.now() - opened >= 1000) open();\n",
+            "      if (document.visibilityState === 'visible') open();\n",
+            T_PAGE_ROUND, "rust"),
+    # N3: no send while an IME composes
+    Control("p39b_page_ime", CHAT_JS,
+            "        if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return;\n",
+            "        if (event.key !== 'Enter') return;\n",
+            T_PAGE_ROUND, "rust"),
+    # N4: a 413 on the head reaches a caller that sent megabytes first
+    Control("p39b_drain_large", HTTP,
+            "pub const DRAIN_LIMIT: usize = 8 * 1024 * 1024;\n",
+            "pub const DRAIN_LIMIT: usize = 64 * 1024;\n",
+            T_EARLY_413, "rust"),
+    # N5: a chunk size is plain hex
+    Control("p39b_chunk_plain_hex", HTTP,
+            "            if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {\n",
+            "            if hex.is_empty() {\n",
+            T_CHUNK_HEX, "rust"),
 )

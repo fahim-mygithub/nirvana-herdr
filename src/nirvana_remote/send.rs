@@ -204,13 +204,38 @@ pub fn save(
     }
 }
 
-/// The message as typed into the agent: the text, then each file's full path on its own line.
+/// Whether `c` reaches the pane as itself, not as a key (review round, S2). herdr's `agent.prompt` writes the text
+/// as it is, inside `ESC[200~ ... ESC[201~` when the pane asked for bracketed paste (`encode_api_text`,
+/// `src/app/api_helpers.rs:25`), so an `ESC[201~` in the text ends the paste early and what follows is read as
+/// keys: a `\r` submits, an `ESC` interrupts. Every C0 control but `\n` and `\t` goes (`ESC` with them, so no
+/// sequence can start), and DEL, and the C1 controls (U+0080-U+009F: U+009B is a one-character CSI to a terminal
+/// that reads C1).
+fn typed(c: char) -> bool {
+    c == '\n' || c == '\t' || !c.is_control()
+}
+
+/// The message as typed into the agent: the text with its controls dropped (`typed`), then each file's full path,
+/// after a space, in quotes when it has one (a space's folder may: "3D-Printer Flow"). Not on a line of its own: in a
+/// pane that did not ask for bracketed paste, that newline would be an Enter, and send the text before its files.
 pub fn message(text: &str, files: &[PathBuf]) -> String {
     let mut parts: Vec<String> = Vec::new();
+    let text: String = text.chars().filter(|&c| typed(c)).collect();
     let text = text.trim();
     if !text.is_empty() {
         parts.push(text.to_string());
     }
-    parts.extend(files.iter().map(|file| file.display().to_string()));
-    parts.join("\n")
+    parts.extend(files.iter().map(|file| {
+        let path: String = file
+            .display()
+            .to_string()
+            .chars()
+            .filter(|&c| typed(c) && c != '\n')
+            .collect();
+        if path.contains(char::is_whitespace) {
+            format!("\"{path}\"")
+        } else {
+            path
+        }
+    }));
+    parts.join(" ")
 }

@@ -26,10 +26,11 @@ use super::send;
 use super::spaces;
 use super::stream;
 
-/// One of this herdr's agents, with its space's name.
+/// One of this herdr's agents, with its space's name, and herdr's other agents (whose folders it may share).
 pub struct Found {
     pub agent: Value,
     pub space: String,
+    pub others: Vec<Value>,
 }
 
 impl Found {
@@ -77,6 +78,19 @@ fn decode(text: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// Each bubble's text by its id: what a view has sent.
+fn keyed(messages: &[Value]) -> HashMap<String, String> {
+    messages
+        .iter()
+        .map(|bubble| {
+            (
+                bubble["id"].as_str().unwrap_or("").to_string(),
+                bubble.to_string(),
+            )
+        })
+        .collect()
+}
+
 fn error(status: u16, why: impl Into<String>) -> Response {
     Response::json(status, &json!({ "error": why.into() }))
 }
@@ -116,19 +130,35 @@ impl Site {
                 .find(|space| space["workspace_id"] == *workspace)
                 .map(|space| space["label"].as_str().unwrap_or("").to_string())
         };
-        agents["agents"]
+        let all = agents["agents"]
             .as_array()
             .map(Vec::as_slice)
-            .unwrap_or_default()
-            .iter()
+            .unwrap_or_default();
+        all.iter()
             .filter(|agent| !id.is_empty() && agent["pane_id"] == id)
             .find_map(|agent| {
                 Some(Found {
                     agent: agent.clone(),
                     space: space(&agent["workspace_id"])?,
+                    others: all
+                        .iter()
+                        .filter(|other| other["pane_id"] != id)
+                        .cloned()
+                        .collect(),
                 })
             })
             .ok_or_else(|| error(404, "no such agent in this PC's spaces"))
+    }
+
+    /// Who the checks let in now: the owner's login and this PC, as the supervisor last read them from Tailscale
+    /// (review round, S6). A live view takes it when it opens and ends at its next `stream::WAKE` once it differs:
+    /// the owner signed this PC in to another account, or Tailscale stopped saying who the owner is (both are
+    /// `None` then, and every new request is refused too).
+    fn caller(&self) -> (Option<String>, Option<super::routes::Me>) {
+        (
+            self.owner.read().ok().and_then(|owner| owner.clone()),
+            self.me.read().ok().and_then(|me| me.clone()),
+        )
     }
 
     fn found_in(&self, request: &Request) -> Result<Found, Response> {
@@ -139,6 +169,7 @@ impl Site {
     fn transcript(&self, found: &Found) -> Option<PathBuf> {
         chat::transcript_for(
             &found.agent,
+            &found.others,
             self.claude_dir.as_deref(),
             self.nirvana_home.as_deref(),
         )
@@ -183,11 +214,17 @@ impl Site {
         if stream::begin(conn, event_stream_head()).is_err() {
             return Response::sent();
         }
-        stream::run(conn, &ticket, |wait| match lists.recv_timeout(wait) {
-            Ok(list) => Some(vec![stream::event("spaces", &list)]),
-            Err(RecvTimeoutError::Timeout) => Some(Vec::new()),
-            Err(RecvTimeoutError::Disconnected) => None,
-        });
+        let caller = self.caller();
+        stream::run(
+            conn,
+            &ticket,
+            || self.caller() == caller,
+            |wait| match lists.recv_timeout(wait) {
+                Ok(list) => Some(vec![stream::event("spaces", &list)]),
+                Err(RecvTimeoutError::Timeout) => Some(Vec::new()),
+                Err(RecvTimeoutError::Disconnected) => None,
+            },
+        );
         Response::sent()
     }
 
@@ -221,15 +258,7 @@ impl Site {
         let mut path = self.transcript(&found);
         let mut stamp = chat::stamp(path.as_deref());
         let messages = chat::read(path.as_deref());
-        let mut sent: HashMap<String, String> = messages
-            .iter()
-            .map(|bubble| {
-                (
-                    bubble["id"].as_str().unwrap_or("").to_string(),
-                    bubble.to_string(),
-                )
-            })
-            .collect();
+        let mut sent = keyed(&messages);
         let first = self.chat_payload(&found, &messages, path.is_some());
         let mut row = first["agent"].clone();
         if conn
@@ -239,74 +268,99 @@ impl Site {
             return Response::sent();
         }
         let mut gone = false;
-        stream::run(conn, &ticket, |wait| {
-            if gone {
-                return None;
-            }
-            let mut parts = Vec::new();
-            match lists.recv_timeout(wait) {
-                Ok(list) => {
-                    let list: Value = serde_json::from_str(&list).unwrap_or_default();
-                    let now = list["spaces"]
-                        .as_array()
-                        .map(Vec::as_slice)
-                        .unwrap_or_default()
-                        .iter()
-                        .flat_map(|space| space["agents"].as_array().cloned().unwrap_or_default())
-                        .find(|agent| agent["id"] == id.as_str());
-                    match now {
-                        None => {
-                            gone = true;
-                            return Some(vec![stream::event("gone", "{}")]);
-                        }
-                        Some(now) => {
-                            let mut now = now;
-                            now["space"] = row["space"].clone();
-                            if now != row {
-                                parts.push(stream::event("agent", &now.to_string()));
-                                parts.push(stream::event(
-                                    "live",
-                                    &json!({ "live": self.live(&id) }).to_string(),
-                                ));
-                                if path.is_none() {
-                                    // A Claude's transcript token comes with its first prompt.
-                                    path = self
-                                        .found(&id)
-                                        .ok()
-                                        .and_then(|found| self.transcript(&found));
+        let caller = self.caller();
+        stream::run(
+            conn,
+            &ticket,
+            || self.caller() == caller,
+            |wait| {
+                if gone {
+                    return None;
+                }
+                let mut parts = Vec::new();
+                match lists.recv_timeout(wait) {
+                    Ok(list) => {
+                        let list: Value = serde_json::from_str(&list).unwrap_or_default();
+                        let now = list["spaces"]
+                            .as_array()
+                            .map(Vec::as_slice)
+                            .unwrap_or_default()
+                            .iter()
+                            .flat_map(|space| {
+                                space["agents"].as_array().cloned().unwrap_or_default()
+                            })
+                            .find(|agent| agent["id"] == id.as_str());
+                        match now {
+                            None => {
+                                gone = true;
+                                return Some(vec![stream::event("gone", "{}")]);
+                            }
+                            Some(now) => {
+                                let mut now = now;
+                                now["space"] = row["space"].clone();
+                                if now != row {
+                                    row = now;
+                                    // Its transcript may have changed with it: a Claude's token comes with its
+                                    // first prompt and outranks the folder's record, and a second Claude in the
+                                    // folder takes the record away (chat.rs, "Whose record"). Then the whole chat
+                                    // again, from the new file.
+                                    let found = self.found(&id).ok();
+                                    let fresh =
+                                        found.as_ref().and_then(|found| self.transcript(found));
+                                    match found {
+                                        Some(found) if fresh != path => {
+                                            path = fresh;
+                                            stamp = chat::stamp(path.as_deref());
+                                            let messages = chat::read(path.as_deref());
+                                            sent = keyed(&messages);
+                                            let whole = self.chat_payload(
+                                                &found,
+                                                &messages,
+                                                path.is_some(),
+                                            );
+                                            row = whole["agent"].clone();
+                                            parts.push(stream::event("chat", &whole.to_string()));
+                                        }
+                                        _ => {
+                                            parts.push(stream::event("agent", &row.to_string()));
+                                            parts.push(stream::event(
+                                                "live",
+                                                &json!({ "live": self.live(&id) }).to_string(),
+                                            ));
+                                        }
+                                    }
                                 }
-                                row = now;
                             }
                         }
                     }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => return None,
                 }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => return None,
-            }
-            let fresh = chat::stamp(path.as_deref());
-            if fresh != stamp {
-                stamp = fresh;
-                let changed: Vec<Value> = chat::read(path.as_deref())
-                    .into_iter()
-                    .filter(|bubble| {
-                        let key = bubble["id"].as_str().unwrap_or("").to_string();
-                        let text = bubble.to_string();
-                        if sent.get(&key) == Some(&text) {
-                            return false;
-                        }
-                        sent.insert(key, text);
-                        true
-                    })
-                    .collect();
-                if !changed.is_empty() {
-                    parts.push(stream::event(
-                        "messages",
-                        &json!({ "messages": changed }).to_string(),
-                    ));
+                let fresh = chat::stamp(path.as_deref());
+                if fresh != stamp {
+                    stamp = fresh;
+                    let changed: Vec<Value> = chat::read(path.as_deref())
+                        .into_iter()
+                        .filter(|bubble| {
+                            let key = bubble["id"].as_str().unwrap_or("").to_string();
+                            let text = bubble.to_string();
+                            if sent.get(&key) == Some(&text) {
+                                return false;
+                            }
+                            sent.insert(key, text);
+                            true
+                        })
+                        .collect();
+                    if !changed.is_empty() {
+                        parts.push(stream::event(
+                            "messages",
+                            &json!({ "messages": changed }).to_string(),
+                        ));
+                    }
                 }
-            }
-            Some(parts)
-        });
+                Some(parts)
+            },
+        );
         Response::sent()
     }
 

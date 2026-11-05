@@ -111,19 +111,26 @@
   // A live view (record p39b, "Why SSE"). EventSource reconnects by itself after a dropped connection; when the PC
   // answers anything but 200 (herdr restarting) it closes for good, so it is opened again here with a growing wait.
   // When iPhone Safari brings the page back from the background, the view is opened again at once: the first event
-  // of every stream is the whole state. on.state(true|false) says whether it is live.
+  // of every stream is the whole state. on.state(true|false) says whether it is live. Safari fires both pageshow and
+  // visibilitychange on a wake (and pageshow on the first load), so a view opened in the last second is kept, not
+  // opened again: each extra open held a slot on the PC until its next failed write (review round, N2). The
+  // handlers get the view's close as their second argument: a view that is over for good (the agent closed) ends
+  // itself there, instead of reconnecting to a 404 for as long as the screen is open (S5).
   function stream(path, on) {
     let source = null;
     let wait = 1000;
     let timer = null;
     let over = false;
+    let opened = 0;
     function open() {
       if (over) return;
       clearTimeout(timer);
       if (source) source.close();
+      opened = Date.now();
       source = new EventSource(path);
       source.onopen = () => { wait = 1000; if (on.state) on.state(true); };
       source.onerror = () => {
+        if (over) return;
         if (on.state) on.state(false);
         if (source.readyState === EventSource.CLOSED) {
           timer = setTimeout(open, wait);
@@ -135,21 +142,24 @@
         source.addEventListener(name, (event) => {
           let data = {};
           try { data = JSON.parse(event.data); } catch (_) { return; }
-          on[name](data);
+          if (!over) on[name](data, close);
         });
       }
     }
-    function shown() { if (document.visibilityState === 'visible') open(); }
-    document.addEventListener('visibilitychange', shown);
-    window.addEventListener('pageshow', shown);
-    open();
-    return function close() {
+    function shown() {
+      if (document.visibilityState === 'visible' && Date.now() - opened >= 1000) open();
+    }
+    function close() {
       over = true;
       clearTimeout(timer);
       if (source) source.close();
       document.removeEventListener('visibilitychange', shown);
       window.removeEventListener('pageshow', shown);
-    };
+    }
+    document.addEventListener('visibilitychange', shown);
+    window.addEventListener('pageshow', shown);
+    open();
+    return close;
   }
 
   // A bottom sheet over the screen (prototype's sheet and backdrop motion); the content's buttons call close().

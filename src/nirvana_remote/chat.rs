@@ -12,8 +12,14 @@
 //!    `resume_session` from `src/app/nirvana_new.rs:213`), with the same checks: a plain session id, the file's stem
 //!    that id, its folder Claude Code's own name for the space's folder, and the file there.
 //!
-//! Either way the file must sit directly in a folder of `<claude config>/projects/` and be `<plain id>.jsonl`; an
-//! agent that is not Claude has none, and its chat shows the live screen only.
+//! Either way the file must sit directly in a folder of `<claude config>/projects/` and be `<plain id>.jsonl`.
+//!
+//! **Whose record** (review round, S1). The record is the folder's, not an agent's, so it is taken only for an agent
+//! that is a Claude (its `nirvana_kind` token, else herdr's own agent label, as `nirvana_spaces::Kind` reads them)
+//! and the only Claude of this herdr in that folder. A Codex or Antigravity agent, or a second Claude in a folder
+//! whose other Claude may own the record, gets none: its chat shows the live screen from `agent.read` and the note
+//! that there is no transcript, never another agent's conversation. A Claude's own token, once its probe has run,
+//! is its answer whatever else is in the folder.
 //!
 //! **Bubbles.** The transcript's tail (`read_tail`, 256 KiB), one JSON entry a line: a typed prompt is a user
 //! bubble, the assistant's text an agent bubble, and each tool call one folded line whose result (the matching
@@ -65,9 +71,32 @@ pub fn is_transcript(path: &Path, claude: &Path) -> bool {
     stem_ok && path.is_absolute() && path.is_file() && same_dir(projects, &claude.join("projects"))
 }
 
-/// The agent's own transcript, by the rules above; `None` when it has none.
+/// Whether herdr's row is a Claude: its kind token, else herdr's agent label.
+pub fn is_claude(agent: &Value) -> bool {
+    use crate::nirvana_spaces::{Kind, KIND_TOKEN};
+    let kind = match agent["tokens"][KIND_TOKEN].as_str() {
+        Some(token) => Kind::parse(token),
+        None => agent["agent"].as_str().and_then(Kind::from_agent_label),
+    };
+    kind == Some(Kind::Claude)
+}
+
+fn folder_of(agent: &Value) -> Option<&Path> {
+    agent["cwd"]
+        .as_str()
+        .or_else(|| agent["foreground_cwd"].as_str())
+        .filter(|folder| !folder.is_empty())
+        .map(Path::new)
+}
+
+fn same_folder(left: &Path, right: &Path) -> bool {
+    left == right || same_dir(left, right)
+}
+
+/// The agent's own transcript, by the rules above; `None` when it has none. `others` are herdr's other agents.
 pub fn transcript_for(
     agent: &Value,
+    others: &[Value],
     claude: Option<&Path>,
     home: Option<&Path>,
 ) -> Option<PathBuf> {
@@ -76,11 +105,19 @@ pub fn transcript_for(
         let path = PathBuf::from(token);
         return is_transcript(&path, claude).then_some(path);
     }
+    if !is_claude(agent) {
+        return None;
+    }
     let home = home?;
-    let folder = agent["cwd"]
-        .as_str()
-        .or_else(|| agent["foreground_cwd"].as_str())?;
-    let folder = Path::new(folder);
+    let folder = folder_of(agent)?;
+    let shared = others.iter().any(|other| {
+        other["pane_id"] != agent["pane_id"]
+            && is_claude(other)
+            && folder_of(other).is_some_and(|theirs| same_folder(theirs, folder))
+    });
+    if shared {
+        return None;
+    }
     let id = crate::nirvana_launch::resume_session_at(
         home,
         folder,

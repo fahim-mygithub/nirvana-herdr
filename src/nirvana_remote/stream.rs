@@ -14,7 +14,8 @@
 //!
 //! Each view holds one of the 32 connection slots for as long as it is open, so at most `MOST` are open at once: a
 //! new one ends the oldest (a phone that came back from the background opens a new view before the old one's
-//! connection is found dead). A view also ends after `LIFETIME`, and the page reconnects. A comment every `BEAT`
+//! connection is found dead). A view also ends after `LIFETIME`, and the page reconnects, and within a `WAKE` of
+//! the owner's login or this PC's Tailscale name changing under it (`run`'s `still`). A comment every `BEAT`
 //! finds a reader that went away (the write fails). Stopping Nirvana Remote ends them all (`close_all`).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -113,15 +114,17 @@ pub fn begin(conn: &mut Conn, head: Response) -> std::io::Result<()> {
     conn.write(format!("retry: {RETRY_MS}\n\n").as_bytes())
 }
 
-/// Run a view until it is over or its reader is gone: `next` is called at least each `WAKE` and returns what to
-/// send (nothing, or events), or `None` to end the view.
+/// Run a view until it is over, its reader is gone, or `still` says the caller would no longer be let in (review
+/// round, S6: the checks run once on the request, so a view asks again each `WAKE`): `next` is called at least each
+/// `WAKE` and returns what to send (nothing, or events), or `None` to end the view.
 pub fn run(
     conn: &mut Conn,
     ticket: &Ticket,
+    still: impl Fn() -> bool,
     mut next: impl FnMut(Duration) -> Option<Vec<String>>,
 ) {
     let mut wrote = Instant::now();
-    while !ticket.over() {
+    while !ticket.over() && still() {
         let Some(parts) = next(WAKE) else {
             return;
         };

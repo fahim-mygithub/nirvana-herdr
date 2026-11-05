@@ -132,13 +132,29 @@ pub fn for_this_pc(hosts: &[&str], host: Option<&str>) -> Result<(), &'static st
 /// owner's Tailscale identity, so the browser's own word on where it came from is required: `Sec-Fetch-Site`
 /// same-origin (or none, a typed request), and an `Origin`, when sent, of exactly this PC's page. A request with
 /// neither is refused: every browser that can run the page sends both.
+///
+/// A read of `/api/` is held to the same headers when they are sent (P39b review round, S7): another site's page on
+/// the owner's phone could otherwise open `/api/chat/events` with an `<img>` or `EventSource`, carrying the owner's
+/// identity, and each such view would take one of the six live slots from the owner's own (it could not read them:
+/// no CORS). The page's own `fetch` and `EventSource` are same-origin, and iPhone Safari says so: WebKit sends
+/// `Sec-Fetch-Site` since Safari 16.4 (iOS 16.4, March 2023), as Chrome and Firefox did before it. A read with
+/// neither header is let in, unlike a write: a same-origin GET carries no `Origin` (the Fetch standard adds one to a
+/// GET only when it is cross-origin in CORS mode), so a browser older than 16.4 sends nothing at all on the page's
+/// own reads, and refusing that would lock such a phone out of a page it was let into; and another PC's Nirvana
+/// Remote asking `/api/hello` (`pcs::Https`, not a browser) sends neither. A browser that sends neither cannot say
+/// a request is cross-site, so this check cannot tell; a phone on iOS 16.4 or later always says. The page's own
+/// files are not held to it: a link or a typed address opens `/`, and that navigation is `cross-site` or `none`.
 pub fn same_site(request: &Request, host: &str) -> Result<(), &'static str> {
-    if request.method == "GET" || request.method == "HEAD" {
+    let reads = request.method == "GET" || request.method == "HEAD";
+    if reads && !request.path.starts_with("/api/") {
         return Ok(());
     }
     let site = request.header("Sec-Fetch-Site");
     let origin = request.header("Origin");
     if site.is_empty() && origin.is_empty() {
+        if reads {
+            return Ok(());
+        }
         return Err("a request that may change something without Sec-Fetch-Site or Origin");
     }
     match site.as_slice() {

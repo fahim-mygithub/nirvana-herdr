@@ -9,6 +9,7 @@
 //! page that listens (`listen`), one channel each.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -22,7 +23,7 @@ use super::herdr::Herdr;
 pub const SETTLE: Duration = Duration::from_millis(150);
 /// A burst is cut here, so a stream that never pauses still shows its changes.
 const SETTLE_MOST: Duration = Duration::from_secs(1);
-/// After `events.subscribe` fails or ends, the feed subscribes again after this, doubling to `RETRY_MOST`.
+/// Before each subscription after the first the feed waits this, doubling to `RETRY_MOST` (`Feed::watch`).
 const RETRY_FIRST: Duration = Duration::from_millis(500);
 const RETRY_MOST: Duration = Duration::from_secs(10);
 
@@ -135,6 +136,15 @@ pub fn subscriptions(panes: &BTreeSet<String>) -> Value {
     Value::Array(list)
 }
 
+/// Sets its flag when dropped: the subscription it guards is told to end.
+struct Stop(Arc<AtomicBool>);
+
+impl Drop for Stop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 #[derive(Default)]
 struct State {
     listeners: Vec<Sender<String>>,
@@ -210,18 +220,27 @@ impl Feed {
         true
     }
 
+    /// The feed's loop (review round, S3): snapshot, subscribe, snapshot again (a change that came between the two
+    /// is seen now, not at the next event), then rebuild on each burst of events. Before every subscription after
+    /// the first it waits `retry`, which doubles each time and goes back to `RETRY_FIRST` only once a stream has
+    /// carried an event: a server that acks and closes at once, or keeps failing, is asked at most every
+    /// `RETRY_MOST`, not in a tight loop. A stream left behind is told to `stop`, so its reader thread ends within
+    /// herdr.rs's `POLL`.
     fn watch(self: Arc<Self>) {
         let mut retry = RETRY_FIRST;
+        let mut first = true;
         loop {
+            if !std::mem::replace(&mut first, false) {
+                if !self.send(None) {
+                    return;
+                }
+                std::thread::sleep(retry);
+                retry = (retry * 2).min(RETRY_MOST);
+            }
             let list = match snapshot(self.herdr.as_ref()) {
                 Ok(list) => list,
                 Err(error) => {
                     warn!(%error, "nirvana remote could not read the spaces");
-                    if !self.send(None) {
-                        return;
-                    }
-                    std::thread::sleep(retry);
-                    retry = (retry * 2).min(RETRY_MOST);
                     continue;
                 }
             };
@@ -229,21 +248,29 @@ impl Feed {
             if !self.send(Some(list.to_string())) {
                 return;
             }
-            let events = match self.herdr.subscribe(subscriptions(&watched)) {
+            let stop = Arc::new(AtomicBool::new(false));
+            let events = match self.herdr.subscribe(subscriptions(&watched), stop.clone()) {
                 Ok(events) => events,
                 Err(error) => {
                     warn!(%error, "nirvana remote could not subscribe to herdr's events");
-                    if !self.send(None) {
-                        return;
-                    }
-                    std::thread::sleep(retry);
-                    retry = (retry * 2).min(RETRY_MOST);
                     continue;
                 }
             };
-            retry = RETRY_FIRST;
-            // The stream is read on its own thread so a burst can be waited out here. When the feed moves on, that
-            // thread stays blocked in its read until the stream's next event, then ends with it.
+            // The stream ends when this subscription is left, however it is left.
+            let _ends = Stop(stop);
+            match snapshot(self.herdr.as_ref()) {
+                Ok(again) => {
+                    let moved = panes(&again) != watched;
+                    if !self.send(Some(again.to_string())) {
+                        return;
+                    }
+                    if moved {
+                        continue;
+                    }
+                }
+                Err(_) => continue,
+            }
+            // The stream is read on its own thread so a burst can be waited out here.
             let (tx, rx) = mpsc::channel::<Value>();
             let reader = std::thread::Builder::new()
                 .name("nirvana-remote-events".into())
@@ -255,13 +282,16 @@ impl Feed {
                     }
                 });
             if reader.is_err() {
-                std::thread::sleep(retry);
                 continue;
             }
+            let mut heard = false;
             loop {
                 if rx.recv().is_err() {
                     // The stream ended (herdr fell behind, or its server is going): subscribe again.
                     break;
+                }
+                if !std::mem::replace(&mut heard, true) {
+                    retry = RETRY_FIRST;
                 }
                 let started = Instant::now();
                 loop {
