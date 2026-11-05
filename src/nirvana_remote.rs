@@ -13,14 +13,21 @@
 //! The mount is a foreground serve held by a child `tailscale serve` (tailscale.rs): it ends with this server, a
 //! hard kill included, and is checked again every `CHECK_EVERY`.
 
+pub mod chat;
 pub mod herdr;
 pub mod http;
+pub mod live;
 pub mod pcs;
 pub mod peer;
 pub mod routes;
+pub mod send;
+pub mod spaces;
+pub mod stream;
 pub mod tailscale;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_live;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -208,6 +215,8 @@ const POLL: Duration = Duration::from_millis(100);
 struct Serving {
     task: tokio::task::JoinHandle<()>,
     stop: tokio::sync::watch::Sender<bool>,
+    /// The page's live views (P39b): ended with the serve, since each holds a connection to this listener.
+    streams: Arc<stream::Streams>,
     held: Option<Box<dyn Held>>,
     key: Key,
     url: String,
@@ -229,6 +238,7 @@ impl Serving {
             }
         })
         .await;
+        self.streams.close_all();
         let _ = self.stop.send(true);
         let _ = self.task.await;
     }
@@ -329,6 +339,7 @@ async fn bring_up(
     let mut serving = Serving {
         task,
         stop,
+        streams: site.streams.clone(),
         held: None,
         key: key.clone(),
         url,
@@ -472,7 +483,7 @@ pub fn start(api_tx: crate::api::ApiRequestSender) -> Option<Remote> {
         info!(why, "nirvana remote not started");
         return None;
     }
-    let site = Arc::new(routes::Site::new(
+    let mut site = routes::Site::new(
         Arc::new(tailscale::Cli),
         Arc::new(herdr::App {
             api_tx,
@@ -482,7 +493,11 @@ pub fn start(api_tx: crate::api::ApiRequestSender) -> Option<Remote> {
         Arc::new(pcs::Https),
         HTTPS_PORT,
         time::OffsetDateTime::now_utc,
-    ));
+    );
+    // P39b: where the chat's transcripts may be read from, and the folder session records.
+    site.claude_dir = crate::nirvana::claude_config_dir();
+    site.nirvana_home = crate::nirvana::home();
+    let site = Arc::new(site);
     let config = Config {
         port: LOCAL_PORT,
         https_port: HTTPS_PORT,

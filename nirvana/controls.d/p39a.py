@@ -206,8 +206,8 @@ CONTROLS = (
             T_HELLO, "rust"),
     # §1.4: the page's CSP
     Control("p39a_page_csp", ROUTES,
-            '        self.route(peer, &request)\n            .with("Content-Security-Policy", CSP)\n',
-            "        self.route(peer, &request)\n",
+            '        self.route(peer, &request, conn)\n            .with("Content-Security-Policy", CSP)\n',
+            "        self.route(peer, &request, conn)\n",
             T_PAGE, "rust"),
     # §1.4: the screen 1 file is served
     Control("p39a_page_screen_served", ROUTES,

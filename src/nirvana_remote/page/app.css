@@ -42,7 +42,8 @@ a:hover { color: #86CBD2; }
   margin: 0 auto;
   overflow: hidden;
 }
-.nv button { font: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0; cursor: pointer; text-align: left; }
+/* The reset has no weight of its own (:where), so a button's own class sets its padding and background. */
+:where(.nv) button { font: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0; cursor: pointer; text-align: left; }
 .nv button:focus-visible, .nv a:focus-visible, .nv input:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
 .nv .press { transition: transform calc(var(--k) * 120ms) ease, background-color calc(var(--k) * 160ms) ease; }
 .nv .press:active { transform: scale(.97); }
@@ -98,3 +99,123 @@ a:hover { color: #86CBD2; }
 .lock { margin-top: auto; display: flex; gap: 10px; align-items: flex-start; color: var(--muted); font-size: 13px; }
 .lock svg { flex-shrink: 0; margin-top: 1px; }
 .skeleton { height: 72px; background: linear-gradient(90deg, #1A1D20, #1F2327, #1A1D20); background-size: 200% 100%; animation: shim calc(var(--k) * 1800ms) linear infinite; }
+
+/* P39b motion, from the prototype: the sheet, its backdrop, a new space's row, the working dots. The reduced-motion
+   rule above covers them: it is on `.nv *`. */
+.nv .sheet { animation: up calc(var(--k) * 380ms) cubic-bezier(.2, .9, .25, 1) both; }
+.nv .sheet-out { animation: down calc(var(--k) * 240ms) ease-in both; }
+.nv .backdrop { animation: fadeIn calc(var(--k) * 300ms) ease both; }
+.nv .backdrop-out { animation: fadeOut calc(var(--k) * 240ms) ease-in both; }
+.nv .new-row { animation: newRow calc(var(--k) * 700ms) cubic-bezier(.2, .8, .2, 1) both; }
+.nv .dots span { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: var(--teal); margin-right: 4px; animation: blink calc(var(--k) * 1100ms) ease-in-out infinite; }
+.nv .dots span:nth-child(2) { animation-delay: calc(var(--k) * 160ms); }
+.nv .dots span:nth-child(3) { animation-delay: calc(var(--k) * 320ms); }
+@keyframes up { from { transform: translateY(100%) } to { transform: none } }
+@keyframes down { from { transform: none } to { transform: translateY(100%) } }
+@keyframes fadeOut { from { opacity: 1 } to { opacity: 0 } }
+@keyframes blink { 0%, 100% { opacity: .25; transform: translateY(0) } 50% { opacity: 1; transform: translateY(-2px) } }
+@keyframes newRow { 0% { opacity: 0; transform: translateY(-8px); background: rgba(95, 179, 188, .22) } 40% { opacity: 1; transform: none; background: rgba(95, 179, 188, .22) } 100% { background: var(--card) } }
+
+[hidden] { display: none !important; }
+.scroll { min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+.scroll::-webkit-scrollbar { display: none; }
+
+/* The bar on top of screens 2 and 3. */
+.top { display: flex; align-items: center; gap: 6px; padding: calc(48px + env(safe-area-inset-top, 0px)) 12px 10px; box-sizing: border-box; flex-shrink: 0; }
+.top.ruled { border-bottom: 1px solid var(--hover); }
+.icon-button { width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; border-radius: 12px; flex-shrink: 0; }
+.top-text { display: flex; flex-direction: column; flex-grow: 1; min-width: 0; }
+.top-title { font-size: 18px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.top-title.small { font-size: 16px; font-weight: 600; }
+.top-sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.top-chip { flex-shrink: 0; }
+
+/* Screen 2: the spaces. */
+.body { flex-grow: 1; padding: 6px 0 calc(32px + env(safe-area-inset-bottom, 0px)); }
+.pad { padding: 0 16px; }
+.spaces { display: flex; flex-direction: column; gap: 10px; }
+.space { background: var(--card); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
+.space-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px 6px; }
+.mark { color: var(--faint); font-size: 16px; width: 18px; text-align: center; flex-shrink: 0; }
+.mark.working { color: var(--teal); }
+.mark.needs { color: var(--purple); }
+.mark.done { color: var(--green); }
+.space-name { font-weight: 600; flex-grow: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent { display: flex; align-items: center; gap: 12px; padding: 10px 16px 12px 44px; width: 100%; box-sizing: border-box; min-height: 56px; }
+.agent-text { display: flex; flex-direction: column; flex-grow: 1; gap: 2px; min-width: 0; }
+.agent-name { font-size: 14px; font-weight: 500; }
+.agent-line { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-none { display: block; padding: 4px 16px 14px 44px; font-size: 13px; color: var(--faint); }
+.skeleton.round { border-radius: 16px; height: 112px; }
+
+/* The state chip (the prototype's `meta`). */
+.chip { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 500; background: var(--hover); color: var(--muted); }
+.chip-dot { width: 7px; height: 7px; border-radius: 50%; background: #5A6067; }
+.chip.working { background: rgba(95, 179, 188, 0.12); }
+.chip.working .chip-dot { background: var(--teal); }
+.chip.needs { background: rgba(169, 149, 214, 0.16); color: #C2B3E3; }
+.chip.needs .chip-dot { background: var(--purple); }
+.chip.done { background: rgba(99, 185, 141, 0.14); color: #86CFA8; }
+.chip.done .chip-dot { background: var(--green); }
+
+/* Screen 3: the chat. */
+.chat { background: var(--bg); }
+.thread { flex-grow: 1; display: flex; flex-direction: column-reverse; }
+.thread-in { display: flex; flex-direction: column; gap: 12px; padding: 16px; }
+.messages { display: flex; flex-direction: column; gap: 12px; }
+.bubble-user { align-self: flex-end; max-width: 82%; background: rgba(95, 179, 188, 0.16); border: 1px solid rgba(95, 179, 188, 0.28); border-radius: 18px 18px 6px 18px; padding: 10px 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.bubble-agent { max-width: 92%; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+.bubble-file { align-self: flex-end; display: flex; align-items: center; gap: 10px; background: var(--hover); border-radius: 14px; padding: 8px 12px 8px 8px; max-width: 82%; }
+.file-icon { width: 40px; height: 40px; border-radius: 8px; background: #2A3A3D; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.file-text { display: flex; flex-direction: column; min-width: 0; }
+.file-name { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.file-sub { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.tool { display: flex; flex-direction: column; gap: 6px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 9px 12px; font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12.5px; width: 100%; box-sizing: border-box; }
+.tool-line { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; }
+.caret { color: var(--faint); display: inline-block; transition: transform calc(var(--k) * 180ms) ease; }
+.tool.open .caret { transform: rotate(90deg); }
+.tool-name { color: var(--teal); font-weight: 500; flex-shrink: 0; }
+.tool-arg { color: var(--soft); flex-grow: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tool-result { flex-shrink: 0; max-width: 40%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tool-result.ok { color: #86CFA8; }
+.tool-result.bad { color: var(--red); }
+.tool-detail { display: none; color: var(--muted); padding-left: 16px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tool.open .tool-detail { display: block; }
+/* Not `.working`: the state chip and the space mark carry that class. */
+.at-work { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.at-work .shim { font-weight: 500; }
+.live-box { display: flex; flex-direction: column; gap: 6px; background: #161A1D; border: 1px dashed var(--line); border-radius: 12px; padding: 8px 12px; width: 100%; box-sizing: border-box; }
+.live-label { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
+.live { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--soft); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 4.4em; overflow: hidden; }
+.live-box.open .live { max-height: none; }
+
+/* Screen 5: the box. 16 px text, so iPhone Safari does not zoom in on focus. */
+.composer { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px calc(28px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--hover); background: var(--bg); flex-shrink: 0; }
+.composer .note:empty { display: none; }
+.pending { display: flex; flex-wrap: wrap; gap: 8px; }
+.pending:empty { display: none; }
+.pending-chip { display: flex; align-items: center; gap: 8px; background: var(--hover); border-radius: 10px; padding: 6px 6px 6px 10px; font-size: 13px; max-width: 100%; box-sizing: border-box; }
+.pending-chip > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.pending-chip.bad { color: var(--red); }
+.chip-x { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 8px; flex-shrink: 0; }
+.composer-row { display: flex; align-items: center; gap: 8px; }
+.attach-button { width: 44px; height: 44px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; border-radius: 22px; background: var(--hover); }
+.draft { flex-grow: 1; min-width: 0; height: 44px; border-radius: 22px; border: 1px solid #2A2F34; background: var(--card); color: var(--text); padding: 0 16px; font: inherit; font-size: 16px; box-sizing: border-box; }
+.send-button { width: 44px; height: 44px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; border-radius: 22px; background: var(--teal); opacity: 0.4; }
+.send-button.ready { opacity: 1; }
+.hidden-file { display: none; }
+.hidden-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+/* The sheet: screen 5's "Add to the message", and the queue or send now choice. */
+.layer { position: absolute; inset: 0; z-index: 20; }
+.backdrop { position: absolute; inset: 0; width: 100%; height: 100%; background: rgba(5, 7, 8, 0.62); }
+.sheet { position: absolute; left: 0; right: 0; bottom: 0; background: var(--card); border-radius: 24px 24px 0 0; border-top: 1px solid #2A2F34; padding: 10px 16px calc(32px + env(safe-area-inset-bottom, 0px)); box-sizing: border-box; display: flex; flex-direction: column; gap: 14px; }
+.grip { width: 40px; height: 5px; border-radius: 3px; background: var(--sleep); align-self: center; }
+.sheet-body { display: flex; flex-direction: column; gap: 6px; }
+.sheet-title { font-size: 17px; font-weight: 600; padding: 0 4px 6px; }
+.sheet-foot { font-size: 12px; color: var(--faint); padding: 6px 4px 0; }
+.option { display: flex; align-items: center; gap: 14px; min-height: 56px; padding: 0 8px; border-radius: 12px; width: 100%; box-sizing: border-box; }
+.option-icon { width: 40px; height: 40px; border-radius: 10px; background: #1F3033; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.option-text { display: flex; flex-direction: column; min-width: 0; }
+.option-name { font-weight: 500; }
+.option-sub { font-size: 12px; color: var(--muted); }
