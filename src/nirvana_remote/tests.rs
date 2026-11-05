@@ -853,6 +853,109 @@ fn only_the_owners_default_server_hosts_nirvana_remote() {
     );
 }
 
+/// Session fix (0.55.1): every Nirvana window runs `--session nirvana`, and the old gate skipped every named
+/// session, so the owner's server logged "a named session's server" and served nothing.
+#[test]
+fn the_nirvana_session_hosts_nirvana_remote_and_other_names_skip() {
+    let nirvana = || Some(crate::nirvana_launch::SESSION.to_string());
+    let none = |_: &str| None;
+    assert_eq!(super::skip_reason(none, nirvana(), false), None);
+    for name in ["HERDR_SOCKET_PATH", "XDG_CONFIG_HOME"] {
+        let set = |var: &str| (var == name).then(|| "x".to_string());
+        assert!(
+            super::skip_reason(set, nirvana(), false).is_some(),
+            "{name}"
+        );
+    }
+    let off = |name: &str| (name == "NIRVANA_REMOTE").then(|| "off".to_string());
+    assert_eq!(
+        super::skip_reason(off, nirvana(), false),
+        Some("NIRVANA_REMOTE=off")
+    );
+    assert!(
+        super::skip_reason(none, nirvana(), true).is_some(),
+        "a debug build still waits for NIRVANA_REMOTE=on"
+    );
+    let on = |name: &str| (name == "NIRVANA_REMOTE").then(|| "on".to_string());
+    assert_eq!(super::skip_reason(on, nirvana(), true), None);
+    for other in ["work", "nirvana-2", "Nirvana"] {
+        assert_eq!(
+            super::skip_reason(none, Some(other.into()), false),
+            Some("a named session's server"),
+            "{other}"
+        );
+    }
+}
+
+/// Session fix (0.55.1): the default session's server and the Nirvana session's may both host it now. Each writes
+/// its own state file (`session::data_dir` differs), both want port 7790 and 8443 on one tailnet node. The first up
+/// keeps its mount; the second reads that foreground mount in `serve status`, reports "8443 taken" in its own file
+/// and changes nothing, before and after it stops.
+#[test]
+fn a_second_sessions_server_finds_8443_taken_and_leaves_the_first_alone() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let ts = Arc::new(FakeTailscale::with(Ok(ready_json())));
+    let first_state = temp_state("two-first");
+    let second_state = temp_state("two-second");
+    let _ = std::fs::remove_file(&first_state);
+    let _ = std::fs::remove_file(&second_state);
+    let rt = runtime();
+    let config = |state: &std::path::Path| super::Config {
+        port,
+        https_port: 8443,
+        state: state.to_path_buf(),
+        every: Duration::from_secs(3600),
+        confirm: Duration::from_secs(2),
+    };
+    let (stop_first, stopped) = tokio::sync::watch::channel(false);
+    let first = rt.spawn(super::supervise(
+        site(ts.clone(), Ok(()), None),
+        config(&first_state),
+        stopped,
+    ));
+    assert!(
+        wait_for(&first_state, |report| report.up).up,
+        "the first is up"
+    );
+    let mounted = ts.serve_text();
+    assert_eq!(mounted, ours(port, true));
+    supervise_once(ts.clone(), port, &second_state, |ts| {
+        let report = read_report(&second_state);
+        assert!(!report.up);
+        assert_eq!(report.short, "8443 taken");
+        assert!(
+            report.long.contains("another running Nirvana Remote"),
+            "{}",
+            report.long
+        );
+        assert_eq!(ts.serve_text(), mounted, "the first's mount stands");
+        assert!(read_report(&first_state).up, "and its row stays up");
+    });
+    assert_eq!(ts.serve_text(), mounted, "the second's stop leaves it too");
+    assert_eq!(
+        ts.calls(),
+        vec![format!("hold 8443 {port}")],
+        "one hold, the first's"
+    );
+    assert_eq!(
+        get(
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            "/api/hello",
+            Some(OWNER)
+        )
+        .0,
+        200,
+        "the first still serves"
+    );
+    let _ = stop_first.send(true);
+    rt.block_on(first).unwrap();
+    assert_eq!(ts.serve_text(), "{}");
+}
+
 // --- The sidebar row -------------------------------------------------------------------------------------------
 
 #[test]

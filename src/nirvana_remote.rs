@@ -4,11 +4,12 @@
 //! login to the active pc session working right now." and, for the login, "Tailscale account"
 //! (nirvana/plans/2026-11-04-39-nirvana-mobile.md, built from 2026-10-22-remote-access-design.md).
 //!
-//! One per PC, inside the default herdr server, started and stopped with it. It listens on 127.0.0.1 only;
-//! `tailscale serve` puts it at `https://<pc>.<tailnet>.ts.net:8443/` for the owner's devices and names each caller
-//! in a header (`routes.rs`), trusted only from the Tailscale service's own connection (`peer.rs`). Tailscale off or
-//! signed out, HTTPS off for the tailnet, the port taken, or anything not its own on 8443: it does not serve, and the
-//! sidebar's servers block says why from the state file this writes (`foot_row`). No fallback to the home network.
+//! One per PC, inside the Nirvana session's herdr server (or the default one), started and stopped with it. It
+//! listens on 127.0.0.1 only; `tailscale serve` puts it at `https://<pc>.<tailnet>.ts.net:8443/` for the owner's
+//! devices and names each caller in a header (`routes.rs`), trusted only from the Tailscale service's own connection
+//! (`peer.rs`). Tailscale off or signed out, HTTPS off for the tailnet, the port taken, or anything not its own on
+//! 8443: it does not serve, and the sidebar's servers block says why from the state file this writes (`foot_row`). No
+//! fallback to the home network.
 //! The mount is a foreground serve held by a child `tailscale serve` (tailscale.rs): it ends with this server, a
 //! hard kill included, and is checked again every `CHECK_EVERY`.
 
@@ -46,9 +47,10 @@ const STATE_FILE: &str = "nirvana-remote.json";
 #[cfg(not(test))]
 const FOOT_EVERY: Duration = Duration::from_secs(3);
 
-/// Why this server does not host Nirvana Remote, or `None` when it does. Only the default server of the owner's
-/// own config does: the integration tests start real `herdr server` processes with `HERDR_SOCKET_PATH` and
-/// `XDG_CONFIG_HOME` set (36 of them, tests/), and none of those may run a real `tailscale` (plan 39 §4). A debug
+/// Why this server does not host Nirvana Remote, or `None` when it does. Only the default server or the Nirvana
+/// session's server of the owner's own config does: the integration tests start real `herdr server` processes with
+/// `HERDR_SOCKET_PATH` and `XDG_CONFIG_HOME` set (36 of them, tests/), and none of those may run a real `tailscale`
+/// (plan 39 §4). Any other named session skips, so a second session on this PC never contends for the port. A debug
 /// build (`herdr-dev`, which has its own config dir and sets neither) hosts it only when `NIRVANA_REMOTE=on` asks:
 /// a dev server started first would otherwise take the port and the mount from the installed one (review round, B1).
 pub fn skip_reason(
@@ -69,7 +71,11 @@ pub fn skip_reason(
     if var("XDG_CONFIG_HOME").is_some() {
         return Some("a server on its own config (XDG_CONFIG_HOME)");
     }
-    if session.is_some() {
+    // The Nirvana session hosts it like the default one. Every Nirvana window runs `--session nirvana`
+    // (`nirvana_launch::SESSION`), so skipping every named session skipped the only server it exists for: on
+    // 2026-11-04, after installing 0.55.0, the owner's server logged `nirvana remote not started why="a named
+    // session's server"` and `tailscale serve status --json` read `{}` (record p39a, "Session fix (0.55.1)").
+    if session.is_some_and(|name| name != crate::nirvana_launch::SESSION) {
         return Some("a named session's server");
     }
     if debug_build && !asked.is_some_and(|value| value.eq_ignore_ascii_case("on")) {

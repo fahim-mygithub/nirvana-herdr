@@ -64,6 +64,9 @@ T_THROTTLE = "nirvana_remote::tests::a_refusal_is_logged_once_a_minute_per_calle
 T_SNAPSHOT = "nirvana_remote::tests::the_process_snapshot_refuses_from_cache_and_trusts_only_fresh"
 T_ONE_OWNER = "nirvana_remote::tests::a_second_server_leaves_the_holders_report_alone"
 T_STATUS_CACHE = "nirvana_remote::tests::api_pcs_reads_tailscale_once_in_five_seconds"
+# Session fix (0.55.1, p39a.md "Session fix (0.55.1)").
+T_SESSION = "nirvana_remote::tests::the_nirvana_session_hosts_nirvana_remote_and_other_names_skip"
+T_TWO = "nirvana_remote::tests::a_second_sessions_server_finds_8443_taken_and_leaves_the_first_alone"
 
 CONTROLS = (
     # §1.2: only the owner's login; another user's is refused
@@ -513,4 +516,21 @@ CONTROLS = (
             "        if exists(&installed) {\n",
             "        if false {\n",
             T_CLI_PATH, "rust"),
+
+    # --- Session fix (0.55.1) -------------------------------------------------------------------------------------
+    # The Nirvana session's server hosts it (the owner's window is `--session nirvana`)
+    Control("p39a_nirvana_session_hosts", ROOT_RS,
+            "    if session.is_some_and(|name| name != crate::nirvana_launch::SESSION) {\n",
+            "    if session.is_some() {\n",
+            T_SESSION, "rust"),
+    # ... and any other named session still skips
+    Control("p39a_other_session_skips", ROOT_RS,
+            "    if session.is_some_and(|name| name != crate::nirvana_launch::SESSION) {\n",
+            "    if false && session.is_some_and(|name| name != crate::nirvana_launch::SESSION) {\n",
+            T_SESSION, "rust"),
+    # Two sessions' servers: the second finds the first's live mount and reports "8443 taken"
+    Control("p39a_second_session_taken", ROOT_RS,
+            "        Mount::OursForeground => {\n            return Err(Off::ServeTaken(format!(\n",
+            "        Mount::OursForeground => {}\n        Mount::OursBackground if false => {\n            return Err(Off::ServeTaken(format!(\n",
+            T_TWO, "rust"),
 )
