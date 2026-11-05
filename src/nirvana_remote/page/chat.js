@@ -3,7 +3,7 @@
 // screen from herdr's agent.read; both kept current by /api/chat/events. The box sends through agent.prompt, as if
 // typed on the PC; while the agent works the owner picks queue or send now. A pasted screenshot, a photo or a file
 // is uploaded to the space's .nirvana/uploads/ first, and its path goes with the message. The Esc button and the
-// prompt sheet are P39c's.
+// prompt sheet are prompt.js's (P39c).
 (function () {
   'use strict';
   const nv = window.Nirvana;
@@ -71,9 +71,11 @@
       const anyFile = h('input', { class: 'hidden-file', type: 'file', multiple: true, tabindex: '-1' });
       const attach = h('button', { class: 'press attach-button', type: 'button', 'aria-label': 'Attach a screenshot or file' },
         nv.icon('attach', 20, '#B0B5BA'));
+      // P39c: the prompt sheet, and its Answer and Esc buttons beside the box.
+      const prompts = nv.prompts(id, () => agent, (text) => { note.textContent = text; });
       el.append(h('div', { class: 'composer' }, note, chips,
         h('div', { class: 'composer-row' }, attach,
-          h('label', { for: 'nv-draft', class: 'hidden-label', text: 'Message the agent' }), input, sendButton),
+          h('label', { for: 'nv-draft', class: 'hidden-label', text: 'Message the agent' }), input, prompts.answer, prompts.esc, sendButton),
         photos, anyFile));
 
       function drawHead() {
@@ -82,6 +84,7 @@
         input.placeholder = 'Message ' + agent.name;
         state.replaceChildren(chip(agent.status));
         working.hidden = agent.status !== 'working';
+        prompts.status(agent.status);
       }
 
       function bubble(m) {
@@ -226,7 +229,7 @@
 
       drawHead();
       drawPending();
-      return nv.stream('/api/chat/events?agent=' + encodeURIComponent(id), {
+      const ended = nv.stream('/api/chat/events?agent=' + encodeURIComponent(id), {
         chat: (data) => {
           agent = Object.assign(agent, data.agent || {});
           drawHead();
@@ -252,6 +255,7 @@
         gone: (_, close) => { close(); note.textContent = 'This agent has closed on the PC.'; },
         state: (on) => { if (!on) note.textContent = 'Reconnecting to the PC…'; else if (note.textContent.startsWith('Reconnecting')) note.textContent = ''; },
       });
+      return () => { prompts.close(); ended(); };
     },
   });
 })();

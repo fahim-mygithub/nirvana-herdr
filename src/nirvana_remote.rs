@@ -19,6 +19,8 @@ pub mod http;
 pub mod live;
 pub mod pcs;
 pub mod peer;
+/// P39c: the prompt sheet and Esc.
+pub mod prompt;
 pub mod routes;
 pub mod send;
 pub mod spaces;
@@ -28,6 +30,8 @@ pub mod tailscale;
 mod tests;
 #[cfg(test)]
 mod tests_live;
+#[cfg(test)]
+mod tests_prompt;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
