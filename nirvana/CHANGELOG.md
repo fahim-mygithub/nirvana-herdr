@@ -3,6 +3,17 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.55.1: Nirvana Remote runs in the Nirvana session (plan 39a fix)
+
+- **Changed:** `skip_reason` lets the `nirvana` session's server host Nirvana Remote, like the default session; any
+  other named session still skips. Two tests and three `p39a_` controls pin it, including a second server finding
+  8443 taken and leaving the first one's mount alone.
+- **Because:** every Nirvana window runs `--session nirvana`, and 0.55.0 skipped every named session, so it skipped
+  the only server it exists for.
+- **Measured:** 2026-11-04, after installing 0.55.0, the owner's server logged `nirvana remote not started why="a
+  named session's server"` and `tailscale serve status --json` read `{}`.
+- **If you remove this:** the phone page never comes up in a real Nirvana window.
+
 ## alpha 0.55.0: Nirvana Remote, the phone's door to this PC (plan 39a)
 
 - **Changed:**
