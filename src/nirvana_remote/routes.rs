@@ -264,6 +264,8 @@ pub struct Site {
     pub spent: super::prompt::Spent,
     /// P39d: the picker's root, the preset and the ports (pick.rs). The default reads and starts nothing.
     pub local: super::pick::Local,
+    /// P39e: the phones with alerts on and this PC's push key (alerts.rs). `None` answers that alerts are not set up.
+    pub alerts: Option<Arc<super::alerts::Alerts>>,
 }
 
 impl Site {
@@ -291,6 +293,7 @@ impl Site {
             nirvana_home: None,
             spent: super::prompt::Spent::default(),
             local: super::pick::Local::default(),
+            alerts: None,
             herdr,
         }
     }
@@ -369,6 +372,10 @@ impl Site {
         }
         // P39d's routes, after every check above: the picker, the cards, and their two scripts (pick.rs).
         if let Some(answer) = self.new_space_and_cards(request, conn) {
+            return answer;
+        }
+        // P39e's routes, after every check above too: the alerts toggle, and the home-screen app's files (alerts.rs).
+        if let Some(answer) = self.alerts_routes(request, conn) {
             return answer;
         }
         // P39b's routes that change something: every check above has passed, and only now is a body read.

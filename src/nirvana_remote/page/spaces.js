@@ -43,8 +43,11 @@
         }) }, pickers.plusIcon());
       el.append(h('div', { class: 'top' }, back, h('span', { class: 'top-text' }, title, version), add));
       const cards = window.NirvanaCards ? window.NirvanaCards.mount(nv) : null;
+      // P39e: the alerts switch below the spaces (alerts.js).
+      const alerts = window.NirvanaAlerts ? window.NirvanaAlerts.mount() : null;
       el.append(h('div', { class: 'scroll body stack' }, cards && cards.el,
-        h('div', { class: 'section pad' }, h('span', { class: 'label', text: 'Spaces' }), list, note)));
+        h('div', { class: 'section pad' }, h('span', { class: 'label', text: 'Spaces' }), list, note),
+        alerts && alerts.el));
 
       const seen = new Set();
       let first = true;

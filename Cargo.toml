@@ -64,6 +64,12 @@ ureq = { version = "2.12", default-features = false, features = ["tls"] }
 # Nirvana fork, plan 39 P39a: Nirvana Remote's HTTP/1.1 request parser (src/nirvana_remote/http.rs). hyper's own parser,
 # no dependencies; the server around it is ~150 lines on the tokio already here, where hyper 1 adds eight crates.
 httparse = "1.10"
+# Nirvana fork, plan 39 P39e: Web Push for Nirvana Remote's alerts. ring is already in the tree under rustls (ureq's
+# TLS), with these features: P-256 ECDH, HKDF-SHA-256 and AES-128-GCM for RFC 8291, ECDSA P-256 for RFC 8292's VAPID
+# JWT. url is already in the tree under ureq: the push endpoint is parsed once, for the host allow-list. Neither adds
+# a package to Cargo.lock.
+ring = { version = "0.17", default-features = false }
+url = "2"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 unicode-width = "0.2"
 unicode-segmentation = "1.13.1"
