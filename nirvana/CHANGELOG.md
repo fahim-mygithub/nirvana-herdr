@@ -3,6 +3,22 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.56.0: Nirvana Remote spaces, chat, send, paste and upload (plan 39b)
+
+- **Changed:** the phone page gains screen 2 (every space and its agents, live over Server-Sent Events from one shared
+  `events.subscribe`), screen 3 (the agent's Claude transcript as bubbles, tool calls folded) and screen 5 (send
+  through `agent.prompt`, queue or send now, paste and upload to `<space>/.nirvana/uploads/` behind a `.gitignore` of
+  `*`, 50 MB per file refused before and while streaming). Every new route runs the P39a login, peer and Host checks;
+  `/api/*` GETs also need a same-origin or absent `Sec-Fetch-Site`. Review round: the folder transcript only for the
+  folder's single Claude, phone text stripped of control characters, a backoff and re-snapshot on the event feed, a read
+  timeout on herdr's socket, streams re-check their caller each second.
+- **Because:** the owner: "have different computers login to the active pc session working right now ... my phone with
+  the ability to paste screenshots and upload files as well" (plan 39 L3); P39a gave only the PC list.
+- **Measured:** 104 `nirvana_remote`/`nirvana_running` tests at the merge, scoped per the owner's 2026-11-05 ruling;
+  one, `the_page_ends_a_gone_view_and_waits_out_composition`, failed once in 12 runs under a parallel build and is
+  open for P39c. Nothing measured yet on a real phone or tailnet.
+- **If you remove this:** the phone sees the PC and nothing in it.
+
 ## alpha 0.55.1: Nirvana Remote runs in the Nirvana session (plan 39a fix)
 
 - **Changed:** `skip_reason` lets the `nirvana` session's server host Nirvana Remote, like the default session; any

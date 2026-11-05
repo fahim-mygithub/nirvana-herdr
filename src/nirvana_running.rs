@@ -98,7 +98,7 @@ fn typed_prompt(entry: &Value) -> Option<String> {
     first_line(text)
 }
 
-fn tool_detail(input: &Value) -> String {
+pub(crate) fn tool_detail(input: &Value) -> String {
     [
         "description",
         "command",

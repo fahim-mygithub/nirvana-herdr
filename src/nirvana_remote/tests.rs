@@ -1198,6 +1198,73 @@ fn a_mount_that_goes_away_turns_the_row_off_and_is_set_again() {
     assert!(holds >= 2, "{:?}", ts.calls());
 }
 
+/// P39b: a live view holds a connection to the listener, and the serve's end closes it (`Serving::end`), so neither
+/// a phone nor the herdr server's shutdown waits on it.
+#[test]
+fn stopping_nirvana_remote_ends_the_pages_live_views() {
+    let ts = Arc::new(FakeTailscale::with(Ok(ready_json())));
+    let state = temp_state("views");
+    let _ = std::fs::remove_file(&state);
+    let rt = runtime();
+    let config = super::Config {
+        port: 0,
+        https_port: 8443,
+        state: state.clone(),
+        every: Duration::from_secs(3600),
+        confirm: Duration::from_secs(2),
+    };
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let task = rt.spawn(super::supervise(
+        site(ts.clone(), Ok(()), None),
+        config,
+        stopped,
+    ));
+    assert!(wait_for(&state, |report| report.up).up);
+    let local: u16 = ts
+        .calls()
+        .iter()
+        .find_map(|call| call.strip_prefix("hold 8443 ")?.parse().ok())
+        .unwrap();
+    let mut view = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], local))).unwrap();
+    view.write_all(format!("{}\r\n", proxied("GET", "/api/events", Some(OWNER))).as_bytes())
+        .unwrap();
+    view.set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let mut seen = String::new();
+    let mut chunk = [0u8; 4096];
+    let started = Instant::now();
+    while !seen.contains("event: spaces") && started.elapsed() < Duration::from_secs(5) {
+        if let Ok(read) = view.read(&mut chunk) {
+            seen.push_str(&String::from_utf8_lossy(&chunk[..read]));
+        }
+    }
+    assert!(seen.contains("event: spaces"), "{seen}");
+    let _ = stop.send(true);
+    rt.block_on(task).unwrap();
+    let started = Instant::now();
+    let mut closed = false;
+    while started.elapsed() < Duration::from_secs(3) {
+        match view.read(&mut chunk) {
+            Ok(0) => {
+                closed = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(err)
+                if err.kind() == std::io::ErrorKind::TimedOut
+                    || err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => {
+                closed = true;
+                break;
+            }
+        }
+    }
+    drop(view);
+    // A view left open would hold the runtime's drop for its 15 minutes.
+    rt.shutdown_timeout(Duration::from_secs(1));
+    assert!(closed, "the live view outlived Nirvana Remote");
+}
+
 #[test]
 fn the_held_serve_is_foreground_and_asks_nothing() {
     assert_eq!(
@@ -1313,6 +1380,7 @@ fn a_head_that_never_finishes_gets_408() {
         http::Limits {
             read_timeout: Duration::from_millis(300),
             connections: http::CONNECTIONS,
+            body_rate: http::BODY_RATE,
         },
     );
     let started = Instant::now();

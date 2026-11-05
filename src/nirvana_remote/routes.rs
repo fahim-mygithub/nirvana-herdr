@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -16,7 +17,7 @@ use serde_json::json;
 use tracing::warn;
 
 use super::herdr::Herdr;
-use super::http::{Handler, Request, Response};
+use super::http::{Conn, Handler, Request, Response};
 use super::pcs::Probe;
 use super::peer::PeerCheck;
 use super::tailscale::Tailscale;
@@ -46,6 +47,16 @@ pub const ASSETS: &[(&str, &str, &str)] = &[
         "/pcs.js",
         "text/javascript; charset=utf-8",
         include_str!("page/pcs.js"),
+    ),
+    (
+        "/spaces.js",
+        "text/javascript; charset=utf-8",
+        include_str!("page/spaces.js"),
+    ),
+    (
+        "/chat.js",
+        "text/javascript; charset=utf-8",
+        include_str!("page/chat.js"),
     ),
 ];
 
@@ -121,13 +132,29 @@ pub fn for_this_pc(hosts: &[&str], host: Option<&str>) -> Result<(), &'static st
 /// owner's Tailscale identity, so the browser's own word on where it came from is required: `Sec-Fetch-Site`
 /// same-origin (or none, a typed request), and an `Origin`, when sent, of exactly this PC's page. A request with
 /// neither is refused: every browser that can run the page sends both.
+///
+/// A read of `/api/` is held to the same headers when they are sent (P39b review round, S7): another site's page on
+/// the owner's phone could otherwise open `/api/chat/events` with an `<img>` or `EventSource`, carrying the owner's
+/// identity, and each such view would take one of the six live slots from the owner's own (it could not read them:
+/// no CORS). The page's own `fetch` and `EventSource` are same-origin, and iPhone Safari says so: WebKit sends
+/// `Sec-Fetch-Site` since Safari 16.4 (iOS 16.4, March 2023), as Chrome and Firefox did before it. A read with
+/// neither header is let in, unlike a write: a same-origin GET carries no `Origin` (the Fetch standard adds one to a
+/// GET only when it is cross-origin in CORS mode), so a browser older than 16.4 sends nothing at all on the page's
+/// own reads, and refusing that would lock such a phone out of a page it was let into; and another PC's Nirvana
+/// Remote asking `/api/hello` (`pcs::Https`, not a browser) sends neither. A browser that sends neither cannot say
+/// a request is cross-site, so this check cannot tell; a phone on iOS 16.4 or later always says. The page's own
+/// files are not held to it: a link or a typed address opens `/`, and that navigation is `cross-site` or `none`.
 pub fn same_site(request: &Request, host: &str) -> Result<(), &'static str> {
-    if request.method == "GET" || request.method == "HEAD" {
+    let reads = request.method == "GET" || request.method == "HEAD";
+    if reads && !request.path.starts_with("/api/") {
         return Ok(());
     }
     let site = request.header("Sec-Fetch-Site");
     let origin = request.header("Origin");
     if site.is_empty() && origin.is_empty() {
+        if reads {
+            return Ok(());
+        }
         return Err("a request that may change something without Sec-Fetch-Site or Origin");
     }
     match site.as_slice() {
@@ -219,6 +246,14 @@ pub struct Site {
     pub now: fn() -> time::OffsetDateTime,
     pub throttle: Throttle,
     status: Mutex<Cached>,
+    /// The one `events.subscribe` every live page shares (P39b).
+    pub feed: Arc<super::spaces::Feed>,
+    /// The live views open now, ended when Nirvana Remote stops.
+    pub streams: Arc<super::stream::Streams>,
+    /// Claude Code's config folder: transcripts are read from under it only. `None` reads none (a test's default).
+    pub claude_dir: Option<PathBuf>,
+    /// The fork's install root, for the folder session records "Open Nirvana here" resumes from.
+    pub nirvana_home: Option<PathBuf>,
 }
 
 impl Site {
@@ -232,7 +267,6 @@ impl Site {
     ) -> Self {
         Self {
             tailscale,
-            herdr,
             peer,
             probe,
             owner: RwLock::new(None),
@@ -241,6 +275,11 @@ impl Site {
             now,
             throttle: Throttle::new(LOG_EVERY),
             status: Mutex::new(None),
+            feed: super::spaces::Feed::new(herdr.clone()),
+            streams: super::stream::Streams::new(),
+            claude_dir: None,
+            nirvana_home: None,
+            herdr,
         }
     }
 
@@ -280,15 +319,15 @@ impl Handler for Site {
         Response::text(403, REFUSED).with("Content-Security-Policy", CSP)
     }
 
-    fn handle(&self, peer: SocketAddr, request: Request) -> Response {
+    fn handle(&self, peer: SocketAddr, request: Request, conn: &mut Conn) -> Response {
         // Every answer, a refusal included, carries the CSP (review nit N7).
-        self.route(peer, &request)
+        self.route(peer, &request, conn)
             .with("Content-Security-Policy", CSP)
     }
 }
 
 impl Site {
-    fn route(&self, peer: SocketAddr, request: &Request) -> Response {
+    fn route(&self, peer: SocketAddr, request: &Request, conn: &mut Conn) -> Response {
         let logins = request.header(LOGIN_HEADER);
         let owner = self.owner.read().ok().and_then(|owner| owner.clone());
         let me = self.me.read().ok().and_then(|me| me.clone());
@@ -316,6 +355,14 @@ impl Site {
             }
             return Response::text(status, REFUSED);
         }
+        // P39b's routes that change something: every check above has passed, and only now is a body read.
+        if request.method == "POST" {
+            match request.path.as_str() {
+                "/api/send" => return self.send(request, conn),
+                "/api/upload" => return self.upload(request, conn),
+                _ => {}
+            }
+        }
         if request.method != "GET" && request.method != "HEAD" {
             return Response::text(405, "GET only").with("Allow", "GET, HEAD");
         }
@@ -325,6 +372,10 @@ impl Site {
         match request.path.as_str() {
             "/api/hello" => self.hello(),
             "/api/pcs" => self.pcs(),
+            "/api/spaces" => self.spaces(),
+            "/api/events" => self.events(request, conn),
+            "/api/chat" => self.chat(request),
+            "/api/chat/events" => self.chat_events(request, conn),
             _ => Response::text(404, "not found"),
         }
     }
