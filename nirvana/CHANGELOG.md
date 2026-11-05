@@ -3,6 +3,32 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.55.0: Nirvana Remote, the phone's door to this PC (plan 39a)
+
+- **Changed:**
+  - Nirvana Remote runs inside the default herdr server of a release build: when Tailscale runs and the tailnet has
+    HTTPS on, it binds 127.0.0.1:7790 and holds a foreground `tailscale serve --https=8443` to it, inside a job that
+    ends with herdr. A foreground mount is dropped when its CLI ends, when tailscaled restarts and at reboot. It
+    changes nothing when 8443 holds anyone else's mount, and says "up" only after `serve status` shows its mount; each
+    60 s check re-reads it.
+  - Who gets in: the connection must come from the Tailscale service's own process, the request must carry exactly
+    one `Tailscale-User-Login` equal to this PC's login, from another device's Tailscale address, with this PC's
+    ts.net name as Host; a non-GET also needs a same-site origin. Everything else gets a 403 or 421 and one
+    rate-limited log line.
+  - The page (screen 1 of the prototype): "Your PCs", this PC first, then the owner's other machines with online,
+    no Nirvana, or asleep with last seen. Plain HTML, CSS and JS built into the binary.
+  - The sidebar's servers block starts with a `remote` row: `● remote :8443`, or `○ remote <why>`.
+  - New dependency: `httparse`.
+  **Because:** the owner, 2026-11-04: "create a mobile app that is able to connect to this app", the prototype "This
+  looks good", and the rulings "Home-screen page", "Start P39a now". Plan 39.
+  **Measured:** nothing live yet: the owner's live check (record p39a.md) is owed. Gates: nextest 4,687 of 4,688, the
+  one failure the known Windows plugin-path test; clippy clean; the dry run finds 2,703 of 2,703; all 89 `p39a_`
+  controls and the older controls whose lines moved go red alone. One Sonnet review (two blockers: a debug build
+  served too, and a blind `--yes` over 8443), one fix round. A hypothesis: a local process of the owner's account
+  reaching the PC's own ts.net name is refused by the self-address check; the live check measures it.
+  **If you remove this:** the phone has no way into the live session, and plan 39's next packages have nothing to
+  stand on.
+
 ## alpha 0.54.1: superpowers off on every Nirvana Claude start, Sonnet included
 
 - **Changed:**

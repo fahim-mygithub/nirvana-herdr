@@ -59,6 +59,7 @@ mod nirvana_memory_trim;
 mod nirvana_preload;
 mod nirvana_preset;
 mod nirvana_profiles;
+mod nirvana_remote;
 mod nirvana_retro;
 mod nirvana_review;
 mod nirvana_run;

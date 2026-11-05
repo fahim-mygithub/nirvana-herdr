@@ -38,6 +38,8 @@ use super::*;
 use crate::nirvana_usage::{short_duration, Figure, Shown, UsageRow};
 use ratatui::style::Color;
 
+/// Plan 39 P39a: Nirvana Remote's row in the servers block.
+pub(super) const REMOTE: &str = "remote";
 /// At most this many server rows, then "+N more".
 pub(super) const SERVERS_SHOWN: usize = 4;
 /// The agents panel keeps at least its head (three rows) and two agents; below that the foot is not
@@ -99,6 +101,16 @@ pub(super) fn footer_height(servers: usize, pools: usize) -> u16 {
         1 + servers.min(SERVERS_SHOWN) + usize::from(servers > SERVERS_SHOWN)
     };
     (1 + servers + 1 + pools + 1) as u16
+}
+
+/// Plan 39 P39a: the rows Nirvana Remote's row adds to the foot: itself, and the "servers" head when no space
+/// runs a server (the block shows for it alone).
+pub(super) fn remote_height(servers: usize, remote: bool) -> u16 {
+    match (remote, servers) {
+        (false, _) => 0,
+        (true, 0) => 2,
+        (true, _) => 1,
+    }
 }
 
 /// The agents panel's area and the foot's, out of the sidebar's lower section.
@@ -213,6 +225,38 @@ pub(super) fn figures(figure: &Figure, wide: bool) -> String {
     }
 }
 
+/// Plan 39 P39a: Nirvana Remote's row, first in the servers block: up with its tailnet port, or off with why ("the
+/// Servers square says why", plan 39 §2 failures). The next free row.
+fn remote_row(
+    buffer: &mut Buffer,
+    area: Rect,
+    y: u16,
+    remote: Option<&crate::nirvana_remote::FootRow>,
+    room: usize,
+    palette: &Palette,
+) -> u16 {
+    let Some(remote) = remote.filter(|_| y < area.bottom()) else {
+        return y;
+    };
+    let (dot, colour, text) = if remote.up {
+        ("\u{25CF}", palette.green, palette.overlay1)
+    } else {
+        ("\u{25CB}", palette.overlay0, palette.yellow)
+    };
+    put_text(buffer, area.x + 1, y, 1, dot, Style::default().fg(colour));
+    put_text(
+        buffer,
+        area.x + 3,
+        y,
+        area.width.saturating_sub(3),
+        REMOTE,
+        Style::default().fg(palette.text),
+    );
+    let why = fit(&remote.text, room.saturating_sub(REMOTE.len() + 1));
+    right(buffer, area, y, &why, Style::default().fg(text));
+    y + 1
+}
+
 /// The hits a click on a server row opens.
 pub(super) type ServerHits = Vec<(Rect, u16)>;
 
@@ -220,6 +264,7 @@ pub(super) fn render_footer(
     buffer: &mut Buffer,
     area: Rect,
     servers: &[ServerRow],
+    remote: Option<&crate::nirvana_remote::FootRow>,
     usage: &[UsageRow],
     palette: &Palette,
     hits: &mut ServerHits,
@@ -267,9 +312,14 @@ pub(super) fn render_footer(
     );
     y += 1;
     let room = area.width.saturating_sub(3) as usize;
+    // Plan 39 P39a: with no space server, the block shows for Nirvana Remote's row alone.
+    if servers.is_empty() && remote.is_some() && y < area.bottom() {
+        heading(buffer, area, y, " servers", palette);
+        y = remote_row(buffer, area, y + 1, remote, room, palette);
+    }
     if !servers.is_empty() && y < area.bottom() {
         heading(buffer, area, y, " servers", palette);
-        y += 1;
+        y = remote_row(buffer, area, y + 1, remote, room, palette);
         for server in servers.iter().take(SERVERS_SHOWN) {
             if y >= area.bottom() {
                 break;

@@ -553,10 +553,13 @@ pub(crate) fn render_sidebar(
 
     // Nirvana fork: running servers and usage at the foot, under the agents panel (nirvana_footer.rs).
     let servers = super::nirvana_footer::server_rows(snapshot);
+    // Plan 39 P39a: Nirvana Remote's row, read from the state file the server writes.
+    let remote = crate::nirvana_remote::foot_row();
     let usage = crate::nirvana_usage::rows();
     let (agents_area, foot_area) = super::nirvana_footer::split(
         detail_area,
-        super::nirvana_footer::footer_height(servers.len(), usage.len()),
+        super::nirvana_footer::footer_height(servers.len(), usage.len())
+            + super::nirvana_footer::remote_height(servers.len(), remote.is_some()),
     );
     super::render_agent_panel(
         buffer,
@@ -572,6 +575,7 @@ pub(crate) fn render_sidebar(
             buffer,
             foot_area,
             &servers,
+            remote.as_ref(),
             &usage,
             palette,
             &mut hits.nirvana_servers,
