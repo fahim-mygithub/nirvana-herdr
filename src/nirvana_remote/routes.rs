@@ -254,6 +254,8 @@ pub struct Site {
     pub claude_dir: Option<PathBuf>,
     /// The fork's install root, for the folder session records "Open Nirvana here" resumes from.
     pub nirvana_home: Option<PathBuf>,
+    /// P39d: the picker's root, the preset and the ports (pick.rs). The default reads and starts nothing.
+    pub local: super::pick::Local,
 }
 
 impl Site {
@@ -279,6 +281,7 @@ impl Site {
             streams: super::stream::Streams::new(),
             claude_dir: None,
             nirvana_home: None,
+            local: super::pick::Local::default(),
             herdr,
         }
     }
@@ -354,6 +357,10 @@ impl Site {
                 );
             }
             return Response::text(status, REFUSED);
+        }
+        // P39d's routes, after every check above: the picker, the cards, and their two scripts (pick.rs).
+        if let Some(answer) = self.new_space_and_cards(request, conn) {
+            return answer;
         }
         // P39b's routes that change something: every check above has passed, and only now is a body read.
         if request.method == "POST" {
