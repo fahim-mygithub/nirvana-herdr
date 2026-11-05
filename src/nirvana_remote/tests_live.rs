@@ -21,16 +21,17 @@ use super::routes::{self, Site};
 use super::tailscale::{Held, Tailscale};
 use super::{chat, send, spaces, stream};
 
-const OWNER: &str = "owner@example.com";
-const HOST: &str = "desk.example-tail.ts.net:8443";
-const PHONE: &str = "100.101.102.103";
-const DESK_IP: &str = "100.64.0.1";
+pub(super) const OWNER: &str = "owner@example.com";
+pub(super) const HOST: &str = "desk.example-tail.ts.net:8443";
+pub(super) const PHONE: &str = "100.101.102.103";
+pub(super) const DESK_IP: &str = "100.64.0.1";
 const SESSION: &str = "6f1c2a3b-0000-4000-8000-000000000001";
-const REFUSED: &str = "Only the Tailscale account this PC is signed in with can connect.";
+pub(super) const REFUSED: &str =
+    "Only the Tailscale account this PC is signed in with can connect.";
 
 // --- Fakes ------------------------------------------------------------------------------------------------------
 
-struct NoTailscale;
+pub(super) struct NoTailscale;
 
 impl Tailscale for NoTailscale {
     fn status(&self) -> Result<String, String> {
@@ -47,7 +48,7 @@ impl Tailscale for NoTailscale {
     }
 }
 
-struct Admit;
+pub(super) struct Admit;
 
 impl PeerCheck for Admit {
     fn check(&self, _peer: SocketAddr, _local: SocketAddr) -> Result<(), Refusal> {
@@ -55,7 +56,7 @@ impl PeerCheck for Admit {
     }
 }
 
-struct NoProbe;
+pub(super) struct NoProbe;
 
 impl Probe for NoProbe {
     fn hello(&self, _dns: &str, _port: u16) -> Option<Hello> {
@@ -237,7 +238,7 @@ impl Herdr for FakeHerdr {
 
 // --- The site and the wire ---------------------------------------------------------------------------------------
 
-fn fixed_now() -> time::OffsetDateTime {
+pub(super) fn fixed_now() -> time::OffsetDateTime {
     time::Date::from_calendar_date(2026, time::Month::November, 4)
         .unwrap()
         .with_hms(12, 0, 0)
@@ -264,9 +265,9 @@ fn site_with(herdr: Arc<FakeHerdr>, claude: Option<PathBuf>, home: Option<PathBu
     Arc::new(site)
 }
 
-struct Running {
+pub(super) struct Running {
     rt: tokio::runtime::Runtime,
-    addr: SocketAddr,
+    pub(super) addr: SocketAddr,
     stop: tokio::sync::watch::Sender<bool>,
     site: Arc<Site>,
 }
@@ -302,17 +303,17 @@ fn serve_with(site: Arc<Site>, limits: http::Limits) -> Running {
     }
 }
 
-fn serve(site: Arc<Site>) -> Running {
+pub(super) fn serve(site: Arc<Site>) -> Running {
     serve_with(site, http::Limits::DEFAULT)
 }
 
 /// What tailscaled sends for a request from the owner's phone (or `login`), without the closing blank line.
-fn proxied(method: &str, path: &str, login: &str) -> String {
+pub(super) fn proxied(method: &str, path: &str, login: &str) -> String {
     format!("{method} {path} HTTP/1.1\r\nHost: {HOST}\r\nX-Forwarded-For: {PHONE}\r\nTailscale-User-Login: {login}\r\n")
 }
 
 /// The headers a POST from the page itself carries.
-fn from_page() -> String {
+pub(super) fn from_page() -> String {
     format!("Sec-Fetch-Site: same-origin\r\nOrigin: https://{HOST}\r\n")
 }
 
@@ -326,25 +327,62 @@ fn split(answer: &str) -> (u16, String, String) {
     (status, head.to_string(), body.to_string())
 }
 
-fn raw(addr: SocketAddr, bytes: &[u8]) -> (u16, String, String) {
-    let mut stream = TcpStream::connect(addr).unwrap();
+/// One request and its whole answer. A read that fails, or a body shorter or longer than its `Content-Length`, fails
+/// the test here with what was read, instead of handing a cut body to the test's own assertions (P39c item 6: the
+/// helper dropped the read's error, so a flake read as a missing line of the page).
+pub(super) fn raw(addr: SocketAddr, bytes: &[u8]) -> (u16, String, String) {
+    let mut stream =
+        TcpStream::connect(addr).unwrap_or_else(|err| panic!("connect to {addr}: {err}"));
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
     stream.write_all(bytes).unwrap();
     let mut answer = Vec::new();
-    let _ = stream.read_to_end(&mut answer);
+    if let Err(err) = stream.read_to_end(&mut answer) {
+        panic!(
+            "the answer could not be read whole: {err} ({:?}), after {} bytes: {:?}",
+            err.kind(),
+            answer.len(),
+            String::from_utf8_lossy(&answer[..answer.len().min(300)])
+        );
+    }
+    whole(&answer, bytes.starts_with(b"HEAD "));
     split(&String::from_utf8_lossy(&answer))
 }
 
-fn get(addr: SocketAddr, path: &str, login: &str) -> (u16, String, String) {
+/// An answer's body is exactly its `Content-Length`, when it has one (a live view has none); a HEAD answer keeps
+/// the length and has no body.
+pub(super) fn whole(answer: &[u8], head_request: bool) {
+    let Some(end) = answer.windows(4).position(|w| {
+        w == b"
+
+"
+    }) else {
+        return;
+    };
+    let head = String::from_utf8_lossy(&answer[..end]);
+    let length = head.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("Content-Length")
+            .then(|| value.trim().parse::<usize>().ok())?
+    });
+    if let Some(length) = length {
+        let body = answer.len() - end - 4;
+        assert!(
+            body == if head_request { 0 } else { length },
+            "a body of {body} bytes under Content-Length {length}: {head}"
+        );
+    }
+}
+
+pub(super) fn get(addr: SocketAddr, path: &str, login: &str) -> (u16, String, String) {
     raw(
         addr,
         format!("{}\r\n", proxied("GET", path, login)).as_bytes(),
     )
 }
 
-fn post(
+pub(super) fn post(
     addr: SocketAddr,
     path: &str,
     kind: &str,
@@ -2038,4 +2076,48 @@ fn a_chat_view_takes_the_transcript_that_comes_with_the_first_prompt() {
     assert_eq!(whole["transcript"], true);
     assert_eq!(whole["messages"].as_array().unwrap().len(), 4);
     assert_eq!(whole["agent"]["status"], "done");
+}
+
+/// P39c item 6. The page's scripts read in parallel against one server, as a phone's first load and a test run under
+/// a parallel build both do: every answer is read whole (`raw` fails on a read error or a short body) and is the
+/// asset byte for byte. 384 connections, so the run does not press on this PC's ephemeral ports (a probe of 30 000
+/// in a few seconds had `connect` fail with WSAENOBUFS, os error 10055; record p39c).
+#[test]
+fn asset_reads_in_parallel_arrive_whole() {
+    let w = world("assets-parallel");
+    let running = serve(w.site());
+    let addr = running.addr;
+    let asset = |path: &str| {
+        routes::ASSETS
+            .iter()
+            .find(|(at, _, _)| *at == path)
+            .map(|(_, _, body)| (*body).to_string())
+            .unwrap()
+    };
+    let (app, chat) = (asset("/app.js"), asset("/chat.js"));
+    let threads: Vec<_> = (0..16)
+        .map(|thread| {
+            let (app, chat) = (app.clone(), chat.clone());
+            std::thread::spawn(move || {
+                for i in 0..24 {
+                    let (path, want) = if (thread + i) % 2 == 0 {
+                        ("/app.js", &app)
+                    } else {
+                        ("/chat.js", &chat)
+                    };
+                    let (status, _, body) = get(addr, path, OWNER);
+                    assert_eq!(status, 200, "{path}");
+                    assert!(
+                        body == *want,
+                        "{path}: {} of {} bytes",
+                        body.len(),
+                        want.len()
+                    );
+                }
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().expect("every read whole");
+    }
 }

@@ -58,6 +58,12 @@ pub const ASSETS: &[(&str, &str, &str)] = &[
         "text/javascript; charset=utf-8",
         include_str!("page/chat.js"),
     ),
+    // P39c: screen 4, the prompt sheet and the Esc button.
+    (
+        "/prompt.js",
+        "text/javascript; charset=utf-8",
+        include_str!("page/prompt.js"),
+    ),
 ];
 
 /// The page loads its fonts from Google, as the prototype does, and everything else from this origin only.
@@ -360,6 +366,8 @@ impl Site {
             match request.path.as_str() {
                 "/api/send" => return self.send(request, conn),
                 "/api/upload" => return self.upload(request, conn),
+                // P39c: one key to the prompt the phone saw, or Esc (prompt.rs).
+                "/api/key" => return self.key(request, conn),
                 _ => {}
             }
         }
@@ -376,6 +384,8 @@ impl Site {
             "/api/events" => self.events(request, conn),
             "/api/chat" => self.chat(request),
             "/api/chat/events" => self.chat_events(request, conn),
+            // P39c: a blocked agent's prompt as the phone is shown it (prompt.rs).
+            "/api/prompt" => self.prompt(request),
             _ => Response::text(404, "not found"),
         }
     }

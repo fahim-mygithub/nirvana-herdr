@@ -219,3 +219,25 @@ a:hover { color: #86CBD2; }
 .option-text { display: flex; flex-direction: column; min-width: 0; }
 .option-name { font-weight: 500; }
 .option-sub { font-size: 12px; color: var(--muted); }
+
+/* P39c, screen 4: the prompt sheet, and the Answer and Esc buttons beside the box (prototype: the Esc pill, the
+   sheet's pulsing dot, the command box and the numbered answers, the first in the accent). */
+.esc-button { height: 44px; padding: 0 14px; flex-shrink: 0; border-radius: 22px; background: #2A2023; color: var(--red); font-size: 13px; font-weight: 500; }
+.answer-button { height: 44px; padding: 0 14px; flex-shrink: 0; border-radius: 22px; background: rgba(169, 149, 214, 0.16); color: #C2B3E3; font-size: 13px; font-weight: 600; }
+.esc-button[hidden], .answer-button[hidden] { display: none; }
+.sheet-body.prompt { gap: 14px; max-height: 80vh; max-height: 80dvh; overflow-y: auto; }
+.prompt-head { display: flex; align-items: center; gap: 10px; }
+.prompt-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--purple); flex-shrink: 0; }
+.prompt-title { font-size: 17px; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.prompt-box { margin: 0; background: var(--bg); border: 1px solid #2A2F34; border-radius: 12px; padding: 12px 14px; font-size: 13.5px; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; }
+.prompt-sub { font-size: 13px; color: var(--muted); margin-top: -4px; }
+.answer-list { display: flex; flex-direction: column; gap: 8px; }
+.answer-option { display: flex; align-items: center; gap: 12px; min-height: 52px; padding: 0 14px; border-radius: 14px; background: var(--hover); font-weight: 500; width: 100%; box-sizing: border-box; overflow-wrap: anywhere; }
+.answer-option.first { background: var(--teal); color: #0E1B1D; font-weight: 600; }
+.answer-key { color: var(--muted); flex-shrink: 0; }
+.answer-option.first .answer-key { color: inherit; opacity: 0.7; }
+.esc-option { color: var(--red); }
+.keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.pad-key { min-height: 52px; border-radius: 14px; background: var(--hover); font-size: 17px; text-align: center; }
+.pad-key.wide { font-size: 14px; }
+.prompt-note:empty { display: none; }
