@@ -7,6 +7,7 @@ HTTP = "src/nirvana_remote/http.rs"
 INDEX = "src/nirvana_remote/page/index.html"
 PROMPT_JS = "src/nirvana_remote/page/prompt.js"
 CHAT_JS = "src/nirvana_remote/page/chat.js"
+TESTS_LIVE = "src/nirvana_remote/tests_live.rs"
 
 _T = "nirvana_remote::tests_prompt::"
 T_MENU = _T + "a_claude_menu_reads_as_its_heading_and_numbered_buttons"
@@ -20,6 +21,10 @@ T_ESC = _T + "esc_stops_a_working_agent_and_goes_nowhere_else"
 T_REFUSED = _T + "a_refused_caller_gets_nothing_from_the_prompt_routes"
 T_PAGE = _T + "the_page_has_the_prompt_sheet_and_the_esc_button"
 T_WHOLE = "nirvana_remote::tests_live::asset_reads_in_parallel_arrive_whole"
+# Review round
+T_WHOLE_PROMPT = _T + "menus_equal_in_their_last_rows_hash_apart_by_what_is_above"
+T_SPENT = _T + "the_same_seen_twice_presses_once"
+T_ESC_SPENT = _T + "a_second_esc_within_the_window_is_refused"
 
 CONTROLS = (
     # Item 1: a menu is read as buttons for a Claude only (only Claude Code's digit picks were measured)
@@ -69,8 +74,8 @@ CONTROLS = (
             T_CHANGED, "rust"),
     # Item 4: a menu's seen is its own text
     Control("p39c_seen_is_the_menu", PROMPT,
-            "            hash(&text)\n",
-            '            hash("menu")\n',
+            '        Some(menu) => hash(&format!("menu\\n{}", whole_prompt(&rows, menu))),\n',
+            '        Some(menu) => hash("menu"),\n',
             T_CHANGED, "rust"),
     # Item 4: a raw screen's seen is its own text
     Control("p39c_seen_is_the_screen", PROMPT,
@@ -140,8 +145,8 @@ CONTROLS = (
             T_PAGE, "rust"),
     # Item 4: a tap carries what the sheet showed
     Control("p39c_page_seen_sent", PROMPT_JS,
-            "onclick: () => press(o.key, data.seen, note)",
-            "onclick: () => press(o.key, null, note)",
+            "onclick: () => press(o.key, data.seen, note, true)",
+            "onclick: () => press(o.key, null, note, true)",
             T_PAGE, "rust"),
     # Item 4: a prompt that changed is shown again
     Control("p39c_page_changed_shown", PROMPT_JS,
@@ -163,4 +168,66 @@ CONTROLS = (
             "    let _ = stream.write_all(answer).await;\n",
             "    let _ = stream.write_all(&answer[..answer.len() / 2]).await;\n",
             T_WHOLE, "rust"),
+    # --- Review round ---
+    # S1: `whole` checks the length. The page's test asserts only with `contains`, so it goes red here through
+    # `whole` alone: `raw` hands it the answer one byte short.
+    Control("p39c_whole_checks", TESTS_LIVE,
+            '    whole(&answer, bytes.starts_with(b"HEAD "));\n',
+            '    whole(&answer[..answer.len() - 1], bytes.starts_with(b"HEAD "));\n',
+            T_PAGE, "rust"),
+    # S3: a menu's seen is the whole prompt, not the capped lines the sheet shows
+    Control("p39c_seen_whole", PROMPT,
+            '        Some(menu) => hash(&format!("menu\\n{}", whole_prompt(&rows, menu))),\n',
+            '        Some(menu) => hash(&format!("menu\\n{menu:?}")),\n',
+            T_WHOLE_PROMPT, "rust"),
+    # S3: from the rule above option 1, not from option 1
+    Control("p39c_seen_from_the_rule", PROMPT,
+            "    for row in &rows[top..] {\n",
+            "    for row in &rows[one..] {\n",
+            T_WHOLE_PROMPT, "rust"),
+    # S3: the highlight is stripped
+    Control("p39c_seen_no_highlight", PROMPT,
+            "    let bare = |row: &str| row.trim().trim_start_matches('\\u{276F}').trim().to_string();\n",
+            "    let bare = |row: &str| row.trim().to_string();\n",
+            T_WHOLE_PROMPT, "rust"),
+    # S2: a pressed seen is spent
+    Control("p39c_spent_claimed", PROMPT,
+            "        if !self.spent.claim(found.id(), &what) {\n",
+            "        if body.seen.is_none() && !self.spent.claim(found.id(), &what) {\n",
+            T_SPENT, "rust"),
+    # S2: only the same seen is refused, the next prompt is not
+    Control("p39c_spent_same_only", PROMPT,
+            "            if was == what && at.elapsed() < self.window {\n",
+            "            if at.elapsed() < self.window {\n",
+            T_SPENT, "rust"),
+    # S2: only within the window
+    Control("p39c_spent_window", PROMPT,
+            "            if was == what && at.elapsed() < self.window {\n",
+            "            if was == what && at.elapsed() < SPENT_FOR {\n",
+            T_SPENT, "rust"),
+    # S2: a key that did not reach herdr spends nothing
+    Control("p39c_spent_released", PROMPT,
+            "                self.spent.release(found.id(), &what);\n",
+            "",
+            T_SPENT, "rust"),
+    # S4: a second Esc to the same pane is refused
+    Control("p39c_esc_spent", PROMPT,
+            "        if !self.spent.claim(found.id(), &what) {\n",
+            "        if body.seen.is_some() && !self.spent.claim(found.id(), &what) {\n",
+            T_ESC_SPENT, "rust"),
+    # S2: the sheet's keys are off until the answer
+    Control("p39c_page_hold", PROMPT_JS,
+            "      hold(true);\n",
+            "",
+            T_PAGE, "rust"),
+    # N1: after a menu's digit the sheet reads again
+    Control("p39c_page_after", PROMPT_JS,
+            "if (menu && key !== 'esc') after(key, seen); else sheetClose();",
+            "sheetClose();",
+            T_PAGE, "rust"),
+    # S4: the Esc button rests after a 200
+    Control("p39c_page_esc_rest", PROMPT_JS,
+            "setTimeout(() => { esc.disabled = false; }, ESC_REST)",
+            "esc.disabled = false",
+            T_PAGE, "rust"),
 )

@@ -241,3 +241,5 @@ a:hover { color: #86CBD2; }
 .pad-key { min-height: 52px; border-radius: 14px; background: var(--hover); font-size: 17px; text-align: center; }
 .pad-key.wide { font-size: 14px; }
 .prompt-note:empty { display: none; }
+/* One press per prompt (review S2, S4): a key on its way, and Esc for 3 s after it went, reads as off. */
+.prompt button:disabled, .esc-button:disabled { opacity: .45; }

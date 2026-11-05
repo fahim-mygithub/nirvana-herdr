@@ -260,6 +260,8 @@ pub struct Site {
     pub claude_dir: Option<PathBuf>,
     /// The fork's install root, for the folder session records "Open Nirvana here" resumes from.
     pub nirvana_home: Option<PathBuf>,
+    /// P39c: what each pane was last pressed with, so one prompt takes one press (prompt.rs, review S2).
+    pub spent: super::prompt::Spent,
 }
 
 impl Site {
@@ -285,6 +287,7 @@ impl Site {
             streams: super::stream::Streams::new(),
             claude_dir: None,
             nirvana_home: None,
+            spent: super::prompt::Spent::default(),
             herdr,
         }
     }

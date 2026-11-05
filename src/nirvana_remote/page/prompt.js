@@ -28,15 +28,39 @@
       body = null;
     }
 
-    async function press(key, seen, note) {
+    // One press per prompt (review S2): every key of the sheet is off from the tap until the answer, so a double tap
+    // cannot press a second key into whatever Claude draws next. The server refuses a second press of the same seen
+    // as well, which covers a second phone.
+    function hold(on) {
+      if (body) body.querySelectorAll('button').forEach((b) => { b.disabled = on; });
+    }
+
+    async function press(key, seen, note, menu) {
       note.textContent = '';
+      hold(true);
       const r = await nv.postJson('/api/key', { agent: id, key, seen })
         .catch(() => ({ ok: false, status: 0, data: {} }));
-      if (r.ok) { pressed = true; sheetClose(); return; }
+      if (r.ok) { pressed = true; if (menu && key !== 'esc') after(key, seen); else sheetClose(); return; }
       const now = r.data.prompt;
       if (r.status === 409 && now && now.blocked) { show(now, 'The prompt changed on the PC: this is the one there now.'); return; }
       if (r.status === 409 && now) { sheetClose(); say('Answered on the PC.'); return; }
+      hold(false);
       note.textContent = r.data.error || 'Not sent: the PC did not answer.';
+    }
+
+    // After a menu's digit (review N1): read again and draw what the PC asks now instead of closing, so a
+    // multi-select can go on; close when the agent no longer asks. Claude redraws after a key with some delay (not
+    // measured), so a read that still shows the pressed prompt is tried a few times before the sheet closes.
+    async function after(key, seen) {
+      for (let i = 0; i < 4; i++) {
+        await new Promise((go) => setTimeout(go, 400));
+        if (over || !open()) return;
+        const data = await nv.getJson('/api/prompt?agent=' + encodeURIComponent(id)).catch(() => null);
+        if (!open()) return;
+        if (!data || !data.blocked) { sheetClose(); return; }
+        if (data.seen !== seen) { show(data, 'Sent ' + key + '. This is what the PC asks now.'); return; }
+      }
+      sheetClose();
     }
 
     function show(data, why) {
@@ -53,7 +77,7 @@
         const shown = menu ? lines.join('\n') : data.screen;
         const keys = menu
           ? menu.options.map((o, i) => h('button', { class: 'press answer-option' + (i === 0 ? ' first' : ''), type: 'button',
-            onclick: () => press(o.key, data.seen, note) }, h('span', { class: 'answer-key mono', text: o.key }), h('span', { text: o.label })))
+            onclick: () => press(o.key, data.seen, note, true) }, h('span', { class: 'answer-key mono', text: o.key }), h('span', { text: o.label })))
           : [h('div', { class: 'keypad' }, ...data.keys.map((k) => h('button', { class: 'press pad-key mono' + (k.length > 1 ? ' wide' : ''), type: 'button',
             text: k === 'enter' ? 'Enter' : k === 'esc' ? 'Esc' : k, onclick: () => press(k, data.seen, note) })))];
         const el = h('div', { class: 'sheet-body prompt' },
@@ -89,10 +113,16 @@
     }
 
     answer.addEventListener('click', read);
+    // One Esc per stop (review S4): the button is off while the key is on its way and for ESC_REST after it went, so
+    // a second tap cannot reach a Claude that already stopped (Esc Esc there clears the PC's input or opens rewind).
+    // The server refuses a second Esc to the same pane within the same time (prompt.rs SPENT_FOR).
+    const ESC_REST = 3000;
     esc.addEventListener('click', async () => {
+      esc.disabled = true;
       const r = await nv.postJson('/api/key', { agent: id, key: 'esc', seen: null })
         .catch(() => ({ ok: false, status: 0, data: {} }));
-      if (r.ok) { say('Esc sent: the agent stops its turn.'); return; }
+      if (r.ok) { say('Esc sent: the agent stops its turn.'); setTimeout(() => { esc.disabled = false; }, ESC_REST); return; }
+      esc.disabled = false;
       if (r.status === 409 && r.data.prompt && r.data.prompt.blocked) { show(r.data.prompt, 'It is asking on the PC now.'); return; }
       say(r.data.error || 'Not sent: the PC did not answer.');
     });

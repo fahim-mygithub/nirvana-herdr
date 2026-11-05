@@ -353,11 +353,9 @@ pub(super) fn raw(addr: SocketAddr, bytes: &[u8]) -> (u16, String, String) {
 /// An answer's body is exactly its `Content-Length`, when it has one (a live view has none); a HEAD answer keeps
 /// the length and has no body.
 pub(super) fn whole(answer: &[u8], head_request: bool) {
-    let Some(end) = answer.windows(4).position(|w| {
-        w == b"
-
-"
-    }) else {
+    // The four bytes CR LF CR LF. The first version had the escapes collapsed to two raw LFs by the file write, so
+    // `windows(4)` never matched and nothing was checked (review S1; control `p39c_whole_checks`).
+    let Some(end) = answer.windows(4).position(|w| w == b"\r\n\r\n") else {
         return;
     };
     let head = String::from_utf8_lossy(&answer[..end]);
