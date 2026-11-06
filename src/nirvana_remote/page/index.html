@@ -6,6 +6,15 @@
 <meta name="theme-color" content="#121416">
 <meta name="color-scheme" content="dark">
 <title>Nirvana</title>
+<!-- P39e: the home-screen app. The manifest names it, its colours and icon, standalone from /; iOS reads the
+     apple-touch-icon and the apple-mobile-web-app tags (the status bar is see-through, and the screens already pad
+     for env(safe-area-inset-top)). -->
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Nirvana">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
 <link rel="stylesheet" href="/app.css">
@@ -21,5 +30,6 @@
 <script src="/chat.js"></script>
 <script src="/cards.js"></script>
 <script src="/newspace.js"></script>
+<script src="/alerts.js"></script>
 </body>
 </html>

@@ -3,6 +3,23 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.58.0: Nirvana Remote alerts and the home-screen app (plan 39e)
+
+- **Changed:** the page installs as a home-screen app (manifest, icons, a service worker with no fetch handler and no
+  cache; CSP unchanged). An alerts switch on screen 2 subscribes the phone to Web Push; when an agent turns done or
+  needs you (not working or idle, 5 s debounce) the PC sends each phone an RFC 8291 encrypted, RFC 8292 signed push
+  over ureq with `ring`, both already in the tree. Push endpoints only on Apple, Google FCM or Mozilla hosts, no
+  redirects followed, at most 8 phones. The VAPID key lives in the session's herdr data dir with an owner-only DACL,
+  never logged or served; the VAPID `sub` is the fork's public repo URL, no e-mail. Review round: a regenerated key
+  clears the stored phones and the page asks to turn alerts on again; two 401/403 drop a phone; sends in parallel and
+  stop-aware; a notification per state.
+- **Because:** plan 39 §2.7 and §5 step 5; the prototype's screen 7 ("This looks good", L2).
+- **Measured:** full checkpoint at this merge (the third since P39b's full run): nextest 4787/4788, the one failure the
+  known `windows_plugin_pane_commands_resolve_from_plugin_root_with_cwd_override`; clippy clean; 2934 controls find
+  their text once. The RFC 8291 Appendix A vector reproduces byte for byte. Apple's acceptance of the token is not
+  yet measured: the owner's first push is the check.
+- **If you remove this:** the phone learns an agent needs you only by looking.
+
 ## alpha 0.57.0: Nirvana Remote prompt buttons, Esc, new space and cards (plans 39c and 39d)
 
 - **Changed:** P39c: a blocked Claude's numbered menu shows on the phone as buttons (read by the Running square's

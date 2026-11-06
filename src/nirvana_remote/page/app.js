@@ -202,8 +202,24 @@
 
   function screen(name, def) { screens[name] = def; }
 
+  // The chat a tapped alert names (P39e, sw.js): `#chat?agent=<pane id>&name=...&space=...`. Back goes to the spaces.
+  function linked(hash) {
+    const [name, query] = hash.split('?');
+    if (name !== 'chat' || !query || !has('chat')) return null;
+    const asked = new URLSearchParams(query);
+    const agent = asked.get('agent') || '';
+    return agent ? { agent, name: asked.get('name') || '', space: asked.get('space') || '' } : null;
+  }
+
   function boot() {
     const name = location.hash.slice(1);
+    const chat = linked(name);
+    if (chat) {
+      history.replaceState({ name: 'spaces', params: {} }, '', '#spaces');
+      history.pushState({ name: 'chat', params: chat }, '', '#chat');
+      show('chat', 'f', chat);
+      return;
+    }
     // A screen that needs what led to it (an agent) starts over from the PC list.
     const start = has(name) && name !== 'chat' ? name : 'pcs';
     history.replaceState({ name: start, params: {} }, '', '#' + start);

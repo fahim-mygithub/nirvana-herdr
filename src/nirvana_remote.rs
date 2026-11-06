@@ -37,6 +37,11 @@ pub mod cards;
 pub mod pick;
 #[cfg(test)]
 mod tests_cards;
+// Plan 39 P39e: alerts, Web Push to the owner's phones, and the home-screen app's files.
+pub mod alerts;
+#[cfg(test)]
+mod tests_alerts;
+pub mod webpush;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -473,10 +478,15 @@ pub async fn supervise(
 pub struct Remote {
     stop: tokio::sync::watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
+    /// P39e: told to stop with the rest; its thread ends within a second, or once a push in flight is answered.
+    alerts: Option<Arc<alerts::Alerts>>,
 }
 
 impl Remote {
     pub async fn stop(self) {
+        if let Some(alerts) = &self.alerts {
+            alerts.stop();
+        }
         let _ = self.stop.send(true);
         let _ = self.task.await;
     }
@@ -508,7 +518,19 @@ pub fn start(api_tx: crate::api::ApiRequestSender) -> Option<Remote> {
     site.nirvana_home = crate::nirvana::home();
     // P39d: the picker's root under the profile, the verb's preset, the servers block's ports.
     site.local = pick::Local::live();
+    // P39e: the push key and the phones, in this session's data dir beside the state file. Alerts that cannot be set
+    // up leave the rest of Nirvana Remote serving; the routes then say so.
+    site.alerts = match alerts::Alerts::live() {
+        Ok(alerts) => Some(alerts),
+        Err(why) => {
+            warn!(why, "nirvana remote alerts are off");
+            None
+        }
+    };
     let site = Arc::new(site);
+    if let Some(alerts) = &site.alerts {
+        alerts.attach(site.feed.clone());
+    }
     let config = Config {
         port: LOCAL_PORT,
         https_port: HTTPS_PORT,
@@ -517,8 +539,9 @@ pub fn start(api_tx: crate::api::ApiRequestSender) -> Option<Remote> {
         confirm: Duration::from_secs(10),
     };
     let (stop, stopped) = tokio::sync::watch::channel(false);
+    let alerts = site.alerts.clone();
     let task = tokio::spawn(supervise(site, config, stopped));
-    Some(Remote { stop, task })
+    Some(Remote { stop, task, alerts })
 }
 
 /// The sidebar's row: up with its port, or off with why.
