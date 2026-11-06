@@ -27,10 +27,12 @@ pub const RECORD_SIZE: u32 = 4096;
 /// A push body's plaintext may be at most this long (RFC 8291 §4: 4096 less the 86-octet header, the delimiter and
 /// the 16-octet tag).
 pub const PLAINTEXT_MOST: usize = 3993;
-/// The VAPID token's `sub`, the contact the push service may write to (RFC 8292 §2.1). A placeholder on purpose: the
-/// owner's address would leave the tailnet in every token. Apple asks for a `mailto:` or `https:` URI; whether it
-/// takes this one is the owner's live check (record p39e).
-pub const SUBJECT: &str = "mailto:nirvana-remote@example.com";
+/// The VAPID token's `sub`, the contact the push service may write to (RFC 8292 §2.1): the fork's public repository.
+/// An `https:` URL on a real public host, because Apple answers 403 `BadJwtToken` to a `sub` whose host is not one
+/// (public reports: `.invalid`, `.local` and `@localhost` refused; record p39e, review round). Not an e-mail address:
+/// every token goes to Apple, and the owner's address would leave the tailnet in each. Whether Apple takes this one is
+/// the owner's first live check.
+pub const SUBJECT: &str = "https://github.com/fahim-mygithub/nirvana-herdr";
 /// How long a VAPID token is good for; RFC 8292 §2 allows at most 24 h.
 pub const TOKEN_FOR: u64 = 12 * 60 * 60;
 const _: () = assert!(

@@ -27,6 +27,12 @@ T_REFUSED = _T + "a_refused_caller_gets_nothing_from_the_alerts_routes"
 T_KEY = _T + "the_key_is_made_once_kept_private_and_only_its_public_half_is_served"
 T_APP = _T + "the_home_screen_app_is_served_with_its_manifest_icons_and_worker"
 T_LINK = _T + "a_tapped_alert_links_to_its_agents_chat"
+# Review round (record p39e, "Review round")
+T_REJECTED = _T + "a_phone_whose_token_is_refused_twice_in_a_row_is_dropped"
+T_HANG = _T + "a_hung_push_service_holds_up_no_other_phone_and_nothing_starts_after_stop"
+T_NEWKEY = _T + "a_new_key_drops_the_phones_stored_with_the_old_one"
+T_UNSEEN = _T + "a_key_file_that_cannot_be_looked_at_turns_alerts_off_and_no_key_is_made"
+T_CHECK = _T + "the_page_asks_whether_the_pc_keeps_its_subscription_and_an_unchanged_one_is_not_rewritten"
 
 CONTROLS = (
     # RFC 8291: the key_info label, the CEK label, the delimiter, the record size in network order
@@ -176,7 +182,7 @@ CONTROLS = (
             T_REFUSED, "rust"),
     # The key: made once, a private DACL, the public half served
     Control("p39e_key_kept", ALERTS,
-            "    if !path.exists() {\n",
+            "    if !there {\n",
             "    if true {\n",
             T_KEY, "rust"),
     Control("p39e_private_dacl", ALERTS,
@@ -224,4 +230,62 @@ CONTROLS = (
             "    const agent = asked.get('agent') || '';\n",
             "    const agent = asked.get('id') || '';\n",
             T_LINK, "rust"),
+    # Review round. S1: the VAPID sub is the fork's public https URL, no e-mail address
+    Control("p39e_sub_public_https", WEBPUSH,
+            'pub const SUBJECT: &str = "https://github.com/fahim-mygithub/nirvana-herdr";\n',
+            'pub const SUBJECT: &str = "mailto:nirvana-remote@example.com";\n',
+            T_VAPID, "rust"),
+    # S2: a key file that cannot be looked at is not "missing"; a new key drops the old phones; 403 twice drops one
+    Control("p39e_key_try_exists", ALERTS,
+            '    let there = exists(&path)\n        .map_err(|err| format!("the alerts key could not be looked at: {}", err.kind()))?;\n',
+            "    let there = exists(&path).unwrap_or(false);\n",
+            T_UNSEEN, "rust"),
+    Control("p39e_new_key_drops_phones", ALERTS,
+            "        if made && !phones.is_empty() {\n",
+            "        if false && made {\n",
+            T_NEWKEY, "rust"),
+    Control("p39e_rejected_status", ALERTS,
+            "            Err(ureq::Error::Status(code @ (401 | 403), _)) => Outcome::Rejected(code),\n",
+            "",
+            T_REJECTED, "rust"),
+    Control("p39e_rejected_twice", ALERTS,
+            "pub const REJECTED_MOST: u8 = 2;\n",
+            "pub const REJECTED_MOST: u8 = 3;\n",
+            T_REJECTED, "rust"),
+    # S3: an alert's phones are sent to at once; nothing starts after stop
+    Control("p39e_push_parallel", ALERTS,
+            "                sending.push((phone, scope.spawn(move || self.push(phone, body, urgency))));\n",
+            "                let done = self.push(phone, body, urgency);\n"
+            "                sending.push((phone, scope.spawn(move || done)));\n",
+            T_HANG, "rust"),
+    Control("p39e_push_stop_between", ALERTS,
+            "                if self.stop.load(Ordering::SeqCst) {\n                    break;\n                }\n",
+            "",
+            T_HANG, "rust"),
+    # N3: the page asks the PC; an unchanged subscription is not rewritten
+    Control("p39e_check_same", ALERTS,
+            "            (at.is_some(), at.is_some_and(|known| known.same(phone)))\n",
+            "            (at.is_some(), at.is_some())\n",
+            T_CHECK, "rust"),
+    Control("p39e_unchanged_not_written", ALERTS,
+            "        if phones.iter().any(|known| known.same(&phone)) {\n",
+            "        if false {\n",
+            T_CHECK, "rust"),
+    # S4, N2 and the page's sentence: text checks on the JS (no JS runs in these tests)
+    Control("p39e_sw_tag_state", SW_JS,
+            "    tag: agent ? 'agent-' + agent + '-' + state : 'nirvana',\n",
+            "    tag: agent ? 'agent-' + agent : 'nirvana',\n",
+            T_APP, "rust"),
+    Control("p39e_sw_focus_fallback", SW_JS,
+            "      } catch (_) {\n        // A window that would not take focus",
+            "      } finally {\n        // A window that would not take focus",
+            T_APP, "rust"),
+    Control("p39e_page_key_changed", ALERTS_JS,
+            "            note.textContent = KEY_CHANGED;\n",
+            "",
+            T_APP, "rust"),
+    Control("p39e_page_check_first", ALERTS_JS,
+            "            ? await nv.postJson('/api/alerts/check', subscription.toJSON())\n",
+            "            ? await nv.postJson('/api/alerts/subscribe', subscription.toJSON())\n",
+            T_APP, "rust"),
 )

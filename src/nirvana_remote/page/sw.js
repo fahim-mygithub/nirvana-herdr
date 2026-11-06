@@ -16,11 +16,13 @@ self.addEventListener('push', (event) => {
   let data = {};
   try { data = event.data ? event.data.json() : {}; } catch (_) { data = {}; }
   const agent = typeof data.agent === 'string' ? data.agent : '';
+  const state = typeof data.state === 'string' ? data.state : '';
   event.waitUntil(self.registration.showNotification(data.title || 'Nirvana', {
     body: data.body || '',
     icon: '/icon-192.png',
-    // One notification per agent: a newer one for the same agent replaces the last.
-    tag: agent ? 'agent-' + agent : 'nirvana',
+    // One notification per agent and state: "needs you" then "is done" are two. With one tag per agent the second
+    // would replace the first, and iOS (no renotify) shows a replacement with no new banner or sound.
+    tag: agent ? 'agent-' + agent + '-' + state : 'nirvana',
     data: { agent, name: data.name || '', space: data.space || '' },
   }));
 });
@@ -34,9 +36,13 @@ self.addEventListener('notificationclick', (event) => {
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     for (const client of windows) {
       if (!('focus' in client)) continue;
-      await client.focus();
-      if (open) client.postMessage({ open: 'chat', params: open });
-      return;
+      try {
+        await client.focus();
+        if (open) client.postMessage({ open: 'chat', params: open });
+        return;
+      } catch (_) {
+        // A window that would not take focus: the tap still opens the chat, in a new one.
+      }
     }
     await self.clients.openWindow(url);
   })());

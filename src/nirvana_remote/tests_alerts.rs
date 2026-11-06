@@ -136,7 +136,8 @@ struct Got {
 }
 
 /// A push service on 127.0.0.1: it records each POST and answers 410 for a path with `gone` in it, 500 for one with
-/// `broken`, else 201, as Apple's does.
+/// `broken`, 403 for one with `rejected` (Apple's answer to a token it refuses), else 201, as Apple's does. A path with
+/// `hang` in it is recorded and never answered (the connection is held 5 s, longer than any test's timeout).
 struct FakePush {
     port: u16,
     got: Arc<Mutex<Vec<Got>>>,
@@ -206,14 +207,21 @@ fn answer_push(stream: TcpStream, log: &Mutex<Vec<Got>>) {
         "410 Gone"
     } else if path.contains("broken") {
         "500 Internal Server Error"
+    } else if path.contains("rejected") {
+        "403 Forbidden"
     } else {
         "201 Created"
     };
+    let hang = path.contains("hang");
     log.lock().unwrap().push(Got {
         path,
         headers,
         body,
     });
+    if hang {
+        std::thread::sleep(Duration::from_secs(5));
+        return;
+    }
     let mut stream = reader.into_inner();
     let _ = stream.write_all(
         format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes(),
@@ -445,7 +453,12 @@ fn the_vapid_header_is_an_es256_token_for_the_push_services_origin() {
     let claims: Value = serde_json::from_slice(&b64(parts[1].as_bytes())).unwrap();
     assert_eq!(claims["aud"], "https://web.push.apple.com");
     assert_eq!(claims["exp"], now + webpush::TOKEN_FOR);
-    assert_eq!(claims["sub"], webpush::SUBJECT);
+    // A real public https contact (Apple refuses a made-up host), and no e-mail address leaves in the token.
+    assert_eq!(
+        claims["sub"],
+        "https://github.com/fahim-mygithub/nirvana-herdr"
+    );
+    assert!(!webpush::SUBJECT.contains('@'), "no e-mail address in sub");
     let signature = b64(parts[2].as_bytes());
     assert_eq!(signature.len(), 64, "ES256 is r || s, 64 octets");
     ring::signature::UnparsedPublicKey::new(
@@ -782,6 +795,223 @@ fn a_stopped_nirvana_remote_sends_no_more_alerts() {
     drop(running);
 }
 
+#[test]
+fn a_phone_whose_token_is_refused_twice_in_a_row_is_dropped() {
+    let w = world("rejected", false);
+    let running = serve(w.site.clone());
+    for name in ["phone-ok", "phone-rejected"] {
+        let (status, answer) = post_json(
+            running.addr,
+            "/api/alerts/subscribe",
+            &Ua::new().subscription(&w.push.url(name)),
+        );
+        assert_eq!(status, 200, "{answer}");
+    }
+    until_subscribed(&w.herdr);
+    w.herdr.set("p1", "done");
+    assert_eq!(w.push.wait_for(2, Duration::from_secs(5)).len(), 2);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(w.alerts.count(), 2, "one 403 does not end a phone");
+    w.herdr.set("p2", "blocked");
+    assert_eq!(w.push.wait_for(4, Duration::from_secs(5)).len(), 4);
+    let started = Instant::now();
+    while w.alerts.count() != 1 && started.elapsed() < Duration::from_secs(3) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(w.alerts.count(), 1, "the second 403 in a row drops it");
+    let kept = phones_on_disk(&w.dir);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert!(kept[0].ends_with("phone-ok"), "{kept:?}");
+    drop(running);
+    w.alerts.stop();
+}
+
+#[test]
+fn a_hung_push_service_holds_up_no_other_phone_and_nothing_starts_after_stop() {
+    let w = world("hang", false);
+    let running = serve(w.site.clone());
+    for name in ["phone-hang-a", "phone-hang-b", "phone-ok"] {
+        let (status, answer) = post_json(
+            running.addr,
+            "/api/alerts/subscribe",
+            &Ua::new().subscription(&w.push.url(name)),
+        );
+        assert_eq!(status, 200, "{answer}");
+    }
+    let alert = Alert {
+        space: "S".into(),
+        agent: "p1".into(),
+        name: "nirvana".into(),
+        state: "done",
+    };
+    // `world` gives each push 3 s; one after the other, two hung phones would hold the third up 6 s.
+    let sender = w.alerts.clone();
+    let (alert_a, started) = (alert.clone(), Instant::now());
+    let sending = std::thread::spawn(move || sender.push_all(&alert_a));
+    let mut ok_at = None;
+    while started.elapsed() < Duration::from_secs(8) && ok_at.is_none() {
+        if w.push.got().iter().any(|got| got.path == "/push/phone-ok") {
+            ok_at = Some(started.elapsed());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    sending.join().unwrap();
+    let took = started.elapsed();
+    let ok_at = ok_at.expect("phone-ok got its push");
+    assert!(
+        ok_at < Duration::from_millis(1500),
+        "the phone behind two hung ones waited {ok_at:?}"
+    );
+    assert!(
+        took < Duration::from_millis(4500),
+        "one alert took {took:?}, more than one push's timeout"
+    );
+    assert_eq!(w.push.got().len(), 3);
+    // After stop, an alert starts no push at all.
+    w.alerts.stop();
+    let started = Instant::now();
+    w.alerts.push_all(&alert);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(w.push.got().len(), 3, "a push started after stop");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    drop(running);
+}
+
+// --- The key file --------------------------------------------------------------------------------------------------
+
+fn two_phones_on_disk(dir: &Path) {
+    let phones: Vec<Value> = (0..2)
+        .map(|n| {
+            let ua = Ua::new();
+            json!({
+                "endpoint": format!("https://web.push.apple.com/phone-{n}"),
+                "p256dh": URL_SAFE_NO_PAD.encode(&ua.public),
+                "auth": URL_SAFE_NO_PAD.encode(ua.auth),
+                "added": 1,
+            })
+        })
+        .collect();
+    std::fs::write(
+        dir.join(alerts::PHONES_FILE),
+        json!({ "phones": phones }).to_string(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_new_key_drops_the_phones_stored_with_the_old_one() {
+    let dir = scratch("newkey");
+    let first = Alerts::open(&dir, Hosts::PushServices, Duration::from_secs(1)).unwrap();
+    let old = first.public_key();
+    drop(first);
+    two_phones_on_disk(&dir);
+    let kept = Alerts::open(&dir, Hosts::PushServices, Duration::from_secs(1)).unwrap();
+    assert_eq!(kept.count(), 2, "the same key keeps its phones");
+    drop(kept);
+    std::fs::remove_file(dir.join(alerts::KEY_FILE)).unwrap();
+    let fresh = Alerts::open(&dir, Hosts::PushServices, Duration::from_secs(1)).unwrap();
+    assert_ne!(fresh.public_key(), old, "a new key");
+    assert_eq!(
+        fresh.count(),
+        0,
+        "phones subscribed with the old key are dropped"
+    );
+    assert!(
+        phones_on_disk(&dir).is_empty(),
+        "and the phones file says so"
+    );
+}
+
+#[test]
+fn a_corrupt_key_turns_alerts_off_and_is_not_replaced() {
+    let dir = scratch("corrupt");
+    two_phones_on_disk(&dir);
+    std::fs::write(dir.join(alerts::KEY_FILE), "not a key\n").unwrap();
+    let opened = Alerts::open(&dir, Hosts::PushServices, Duration::from_secs(1));
+    let why = opened.err().expect("alerts are off with a corrupt key");
+    assert!(why.contains("alerts key"), "{why}");
+    assert!(
+        !why.contains("not a key"),
+        "the file's text in the error: {why}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join(alerts::KEY_FILE)).unwrap(),
+        "not a key\n",
+        "the file is left as it was"
+    );
+    assert_eq!(phones_on_disk(&dir).len(), 2, "and the phones too");
+}
+
+#[test]
+fn a_key_file_that_cannot_be_looked_at_turns_alerts_off_and_no_key_is_made() {
+    fn denied(_: &Path) -> std::io::Result<bool> {
+        Err(std::io::ErrorKind::PermissionDenied.into())
+    }
+    let dir = scratch("unseen");
+    let first = Alerts::open(&dir, Hosts::PushServices, Duration::from_secs(1)).unwrap();
+    drop(first);
+    let key = std::fs::read(dir.join(alerts::KEY_FILE)).unwrap();
+    two_phones_on_disk(&dir);
+    let why = Alerts::open_with(&dir, Hosts::PushServices, Duration::from_secs(1), denied)
+        .err()
+        .expect("alerts are off when the key file cannot be looked at");
+    assert!(why.contains("looked at"), "{why}");
+    assert_eq!(
+        std::fs::read(dir.join(alerts::KEY_FILE)).unwrap(),
+        key,
+        "the key is not replaced"
+    );
+    assert_eq!(phones_on_disk(&dir).len(), 2, "the phones are kept");
+    std::fs::remove_file(dir.join(alerts::KEY_FILE)).unwrap();
+    assert!(Alerts::open_with(&dir, Hosts::PushServices, Duration::from_secs(1), denied).is_err());
+    assert!(
+        !dir.join(alerts::KEY_FILE).exists(),
+        "no key is made over a file that may be there"
+    );
+}
+
+#[test]
+fn the_page_asks_whether_the_pc_keeps_its_subscription_and_an_unchanged_one_is_not_rewritten() {
+    let w = world("check", false);
+    let running = serve(w.site.clone());
+    let ua = Ua::new();
+    let subscription = ua.subscription(&w.push.url("phone-1"));
+    let (status, answer) = post_json(running.addr, "/api/alerts/check", &subscription);
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer, json!({"known": false, "same": false}));
+    assert_eq!(
+        post_json(running.addr, "/api/alerts/subscribe", &subscription).0,
+        200
+    );
+    let (_, answer) = post_json(running.addr, "/api/alerts/check", &subscription);
+    assert_eq!(answer, json!({"known": true, "same": true}));
+    let renewed = Ua::new().subscription(&w.push.url("phone-1"));
+    let (_, answer) = post_json(running.addr, "/api/alerts/check", &renewed);
+    assert_eq!(
+        answer,
+        json!({"known": true, "same": false}),
+        "the same endpoint, new keys"
+    );
+    assert_eq!(phones_on_disk(&w.dir).len(), 1, "a check writes nothing");
+    // The same subscription again is not written again; one that differs is.
+    std::fs::remove_file(w.dir.join(alerts::PHONES_FILE)).unwrap();
+    let (status, answer) = post_json(running.addr, "/api/alerts/subscribe", &subscription);
+    assert_eq!((status, answer["new"].clone()), (200, json!(false)));
+    assert!(
+        !w.dir.join(alerts::PHONES_FILE).exists(),
+        "an unchanged subscription rewrote the phones file"
+    );
+    assert_eq!(
+        post_json(running.addr, "/api/alerts/subscribe", &renewed).0,
+        200
+    );
+    assert_eq!(phones_on_disk(&w.dir).len(), 1, "new keys are written");
+    let (status, _, _) = get(running.addr, "/api/alerts/check", OWNER);
+    assert_eq!(status, 405);
+    drop(running);
+    w.alerts.stop();
+}
+
 // --- The routes ------------------------------------------------------------------------------------------------------
 
 #[test]
@@ -914,6 +1144,11 @@ fn a_refused_caller_gets_nothing_from_the_alerts_routes() {
         ),
         format!("{}\r\n", proxied("GET", "/api/alerts", "someone@else.example")),
         format!("{}\r\n", proxied("GET", "/sw.js", "someone@else.example")),
+        format!(
+            "{}{}Content-Type: application/json\r\nContent-Length: {length}\r\n\r\n{body}",
+            proxied("POST", "/api/alerts/check", "someone@else.example"),
+            from_page()
+        ),
     ];
     for request in tries {
         let (status, _, text) = raw(running.addr, request.as_bytes());
@@ -1110,6 +1345,17 @@ fn the_home_screen_app_is_served_with_its_manifest_icons_and_worker() {
         sw.contains("'/#chat?' + new URLSearchParams(open)"),
         "a tap opens the agent's chat"
     );
+    // Text checks only (no JS runs here): one notification per agent and state, and a focus that fails still opens.
+    assert!(
+        sw.contains("tag: agent ? 'agent-' + agent + '-' + state : 'nirvana',"),
+        "needs you then done are two notifications"
+    );
+    let tap = sw.split("'notificationclick'").nth(1).unwrap();
+    let caught = tap.find("} catch (_) {").expect("a failed focus is caught");
+    assert!(
+        caught < tap.find("await self.clients.openWindow(url);").unwrap(),
+        "and falls through to openWindow"
+    );
     let (status, _, _) = raw(
         running.addr,
         format!(
@@ -1129,6 +1375,13 @@ fn the_home_screen_app_is_served_with_its_manifest_icons_and_worker() {
     assert!(script.contains("postJson('/api/alerts/subscribe', subscription.toJSON())"));
     assert!(
         script.contains("postJson('/api/alerts/unsubscribe', { endpoint: subscription.endpoint })")
+    );
+    // On opening: asked, not re-posted; a subscription the PC does not keep says so.
+    assert!(script.contains("await nv.postJson('/api/alerts/check', subscription.toJSON())"));
+    assert!(script
+        .contains(r#"const KEY_CHANGED = "The PC's alert key changed: turn alerts on again.";"#));
+    assert!(
+        script.contains("            stale = true;\n            note.textContent = KEY_CHANGED;\n")
     );
     // The permission prompt is asked for in the tap itself, before anything is awaited (iOS).
     let click = script

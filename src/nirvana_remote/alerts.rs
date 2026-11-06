@@ -9,8 +9,9 @@
 //! working, done again within `DEBOUNCE`) sends once (`Debounce`).
 //!
 //! **Sending** is a plain HTTPS POST with the ureq already in the tree, on this module's own thread (never on the
-//! async runtime), `PUSH_TIMEOUT` each, no redirect followed. A push service that answers 404 or 410 has dropped
-//! the phone's subscription, and it is dropped here too.
+//! async runtime), one thread per phone so an alert takes `PUSH_TIMEOUT` at most, no redirect followed. A push
+//! service that answers 404 or 410 has dropped the phone's subscription, and it is dropped here too; one that refuses
+//! this PC's token twice in a row (`REJECTED_MOST`) is treated the same way.
 //!
 //! **Only the owner's phones, and only push services.** Subscribing is a POST behind every check in `Site::route`
 //! (P39a and P39b: the Tailscale service's connection, the owner's login, another device, this PC's Host, and from
@@ -58,8 +59,13 @@ pub const BODY_MOST: u64 = 4 * 1024;
 const ENDPOINT_MOST: usize = 2048;
 /// The same agent and state again within this long is the same alert: a flap sends once.
 pub const DEBOUNCE: Duration = Duration::from_secs(5);
-/// One push waits at most this long for its push service.
+/// One push waits at most this long for its push service. An alert's phones are sent to at once (`push_all`), so
+/// this is also about the longest one alert takes.
 pub const PUSH_TIMEOUT: Duration = Duration::from_secs(10);
+/// A phone whose push service answers 401 or 403 this many times in a row is dropped: its subscription was made with
+/// a key the push service no longer takes (a new `KEY_FILE`, or one the service refuses), and every later alert to it
+/// would be refused too. Twice, not once, so one bad answer does not end a phone.
+pub const REJECTED_MOST: u8 = 2;
 /// How long a push service keeps an alert for a phone that is off: an alert older than this is no news.
 pub const TTL_SECS: u64 = 60 * 60;
 /// How often the watcher looks at `stop` and at whether any phone is left.
@@ -149,6 +155,13 @@ pub struct Phone {
     pub auth: String,
     /// Unix seconds it was added.
     pub added: u64,
+}
+
+impl Phone {
+    /// The same subscription: endpoint and keys (when it was added aside).
+    pub fn same(&self, other: &Phone) -> bool {
+        self.endpoint == other.endpoint && self.p256dh == other.p256dh && self.auth == other.auth
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -269,6 +282,8 @@ pub enum Outcome {
     Sent,
     /// 404 or 410: the subscription is gone (RFC 8030 §7.3), and so is the phone here.
     Gone,
+    /// 401 or 403: the push service refused the token (RFC 8292 §4.2); `REJECTED_MOST` in a row drops the phone.
+    Rejected(u16),
     Failed(String),
 }
 
@@ -351,10 +366,20 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     renamed
 }
 
-/// This PC's VAPID key from `dir`, made and kept there the first time.
-fn load_key(dir: &Path) -> Result<Vapid, String> {
+/// Whether a file is there, as `Path::try_exists` says; a test hands in one that fails.
+pub type Exists = fn(&Path) -> std::io::Result<bool>;
+
+/// This PC's VAPID key from `dir`, made and kept there the first time; `true` with it when it was made just now.
+///
+/// A new key ends every stored phone's subscription: each was made with the old key as its `applicationServerKey`,
+/// and the push service refuses a token signed with another (403). So a key is made only when the file is known to be
+/// missing: a file that could not even be looked at (`exists` failed) turns alerts off, as a corrupt one does,
+/// rather than a new key being renamed over one that may be fine.
+fn load_key(dir: &Path, exists: Exists) -> Result<(Vapid, bool), String> {
     let path = dir.join(KEY_FILE);
-    if !path.exists() {
+    let there = exists(&path)
+        .map_err(|err| format!("the alerts key could not be looked at: {}", err.kind()))?;
+    if !there {
         let pkcs8 = Vapid::generate()?;
         let text = format!("{}\n", URL_SAFE_NO_PAD.encode(&pkcs8));
         write_private(&path, text.as_bytes())
@@ -365,7 +390,7 @@ fn load_key(dir: &Path) -> Result<Vapid, String> {
     let text = std::fs::read_to_string(&path)
         .map_err(|err| format!("the alerts key could not be read: {}", err.kind()))?;
     let pkcs8 = unpad(&text).map_err(|()| "the alerts key file is not base64url".to_string())?;
-    Vapid::from_pkcs8(&pkcs8)
+    Vapid::from_pkcs8(&pkcs8).map(|vapid| (vapid, !there))
 }
 
 fn load_phones(path: &Path) -> Vec<Phone> {
@@ -387,6 +412,8 @@ pub struct Alerts {
     running: AtomicBool,
     stop: AtomicBool,
     feed: Mutex<Option<Arc<Feed>>>,
+    /// Each phone's 401/403 answers in a row (`REJECTED_MOST`); in memory only, so a restart starts each at none.
+    strikes: Mutex<HashMap<String, u8>>,
     /// Whether a phone that turns alerts on gets `welcome`. Off in tests that count pushes.
     pub welcome: bool,
     pub debounce: Duration,
@@ -395,10 +422,31 @@ pub struct Alerts {
 impl Alerts {
     /// The alerts kept in `dir` (the session's data dir), its key made the first time.
     pub fn open(dir: &Path, hosts: Hosts, timeout: Duration) -> Result<Self, String> {
+        Self::open_with(dir, hosts, timeout, Path::try_exists)
+    }
+
+    /// `open`, with how the key file is looked for handed in (a test makes it fail).
+    pub fn open_with(
+        dir: &Path,
+        hosts: Hosts,
+        timeout: Duration,
+        exists: Exists,
+    ) -> Result<Self, String> {
         std::fs::create_dir_all(dir)
             .map_err(|err| format!("the data dir could not be made: {}", err.kind()))?;
-        let vapid = load_key(dir)?;
-        let phones = load_phones(&dir.join(PHONES_FILE));
+        let (vapid, made) = load_key(dir, exists)?;
+        let mut phones = load_phones(&dir.join(PHONES_FILE));
+        if made && !phones.is_empty() {
+            // Each was subscribed with the key that is gone: the push service would refuse every alert to them, and
+            // they would hold places under `MOST`. The page says to turn alerts on again (alerts.js).
+            warn!(
+                phones = phones.len(),
+                "nirvana remote made a new alerts key; the phones stored were subscribed with the old one and are dropped"
+            );
+            phones.clear();
+            write_private(&dir.join(PHONES_FILE), br#"{"phones":[]}"#)
+                .map_err(|err| format!("the phones file could not be written: {}", err.kind()))?;
+        }
         let agent = ureq::AgentBuilder::new()
             .timeout(timeout)
             // A push service that redirects is not followed: the host allow-list is for the URL that is POSTed to.
@@ -413,6 +461,7 @@ impl Alerts {
             running: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             feed: Mutex::new(None),
+            strikes: Mutex::default(),
             welcome: true,
             debounce: DEBOUNCE,
         })
@@ -457,7 +506,9 @@ impl Alerts {
         }
     }
 
-    /// Ends the watcher within `WAKE` (or once a push in flight is answered); called when Nirvana Remote stops.
+    /// Ends the watcher within `WAKE`, or, when an alert is being sent, once its pushes in flight are answered or time
+    /// out (`PUSH_TIMEOUT`, since they run at once); no phone and no alert is started after it. Called when Nirvana
+    /// Remote stops, which does not wait for the watcher.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
     }
@@ -499,6 +550,7 @@ impl Alerts {
 
     /// The watcher: every list the feed sends, compared with the last; each change that passes `Debounce` is pushed.
     fn watch(self: Arc<Self>, feed: Arc<Feed>) {
+        let _cleared = Unwinding(&self.running);
         let mut before: Option<Value> = None;
         let mut debounce = Debounce::new(self.debounce);
         'listen: while self.go_on() {
@@ -540,8 +592,10 @@ impl Alerts {
         }
     }
 
-    /// `alert` to every phone; the ones whose push service says they are gone are dropped.
-    fn push_all(&self, alert: &Alert) {
+    /// `alert` to every phone, all at once on one thread each (at most `MOST`), so a push service that hangs holds the
+    /// alert up for `PUSH_TIMEOUT` at most, not that times each phone. Nothing starts once `stop` is set. The phones
+    /// whose push service says they are gone, or refused their token `REJECTED_MOST` times in a row, are dropped.
+    pub fn push_all(&self, alert: &Alert) {
         let phones = self.phones.lock().map(|p| p.clone()).unwrap_or_default();
         let body = payload(alert);
         let urgency = if alert.state == "needs" {
@@ -549,15 +603,50 @@ impl Alerts {
         } else {
             "normal"
         };
+        let outcomes: Vec<(&Phone, Outcome)> = std::thread::scope(|scope| {
+            let mut sending = Vec::new();
+            for phone in &phones {
+                if self.stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                let body = &body;
+                sending.push((phone, scope.spawn(move || self.push(phone, body, urgency))));
+            }
+            sending
+                .into_iter()
+                .map(|(phone, sent)| {
+                    let outcome = sent
+                        .join()
+                        .unwrap_or_else(|_| Outcome::Failed("the send panicked".into()));
+                    (phone, outcome)
+                })
+                .collect()
+        });
         let mut gone = Vec::new();
         let (mut sent, mut failed) = (0, 0);
-        for phone in &phones {
-            match self.push(phone, &body, urgency) {
-                Outcome::Sent => sent += 1,
-                Outcome::Gone => gone.push(phone.endpoint.clone()),
-                Outcome::Failed(why) => {
-                    failed += 1;
-                    warn!(host = %host_of(&phone.endpoint), why, "nirvana remote alert not sent");
+        if let Ok(mut strikes) = self.strikes.lock() {
+            for (phone, outcome) in outcomes {
+                match outcome {
+                    Outcome::Sent => {
+                        sent += 1;
+                        strikes.remove(&phone.endpoint);
+                    }
+                    Outcome::Gone => gone.push(phone.endpoint.clone()),
+                    Outcome::Rejected(code) => {
+                        failed += 1;
+                        let count = strikes.entry(phone.endpoint.clone()).or_insert(0);
+                        *count += 1;
+                        warn!(host = %host_of(&phone.endpoint), status = code, strikes = *count,
+                            "nirvana remote alert not sent: the push service refused this PC's token");
+                        if *count >= REJECTED_MOST {
+                            strikes.remove(&phone.endpoint);
+                            gone.push(phone.endpoint.clone());
+                        }
+                    }
+                    Outcome::Failed(why) => {
+                        failed += 1;
+                        warn!(host = %host_of(&phone.endpoint), why, "nirvana remote alert not sent");
+                    }
                 }
             }
         }
@@ -610,6 +699,7 @@ impl Alerts {
             Ok(response) if (200..300).contains(&response.status()) => Outcome::Sent,
             Ok(response) => Outcome::Failed(format!("status {}", response.status())),
             Err(ureq::Error::Status(404 | 410, _)) => Outcome::Gone,
+            Err(ureq::Error::Status(code @ (401 | 403), _)) => Outcome::Rejected(code),
             Err(ureq::Error::Status(code, _)) => Outcome::Failed(format!("status {code}")),
             // The kind only: ureq's own text names the URL, and an endpoint's path is the phone's capability.
             Err(ureq::Error::Transport(transport)) => Outcome::Failed(transport.kind().to_string()),
@@ -622,6 +712,12 @@ impl Alerts {
             .phones
             .lock()
             .map_err(|_| (500, "the alerts are broken".to_string()))?;
+        if phones.iter().any(|known| known.same(&phone)) {
+            // Nothing changed: the file is not rewritten (the page tells the PC only when it differs, but an old page
+            // may still tell it each time it opens).
+            self.start_watching(&phones);
+            return Ok(false);
+        }
         let mut next = phones.clone();
         let count = next.len();
         let new = match next.iter_mut().find(|known| known.endpoint == phone.endpoint) {
@@ -649,6 +745,14 @@ impl Alerts {
         Ok(new)
     }
 
+    /// Whether this PC keeps a phone at `phone`'s endpoint, and whether with the same keys.
+    fn known(&self, phone: &Phone) -> (bool, bool) {
+        self.phones.lock().map_or((false, false), |phones| {
+            let at = phones.iter().find(|known| known.endpoint == phone.endpoint);
+            (at.is_some(), at.is_some_and(|known| known.same(phone)))
+        })
+    }
+
     fn remove(&self, endpoint: &str) -> Result<bool, (u16, String)> {
         let mut phones = self
             .phones
@@ -665,6 +769,19 @@ impl Alerts {
         self.save(&next).map_err(|why| (500, why))?;
         *phones = next;
         Ok(true)
+    }
+}
+
+/// Clears `Alerts::running` if the watcher thread panics, so the next subscribe starts a new one instead of trusting a
+/// watcher that is gone. Only on a panic: a watcher that ends normally clears it in `go_on`, under the phones lock,
+/// and clearing it again here could clear a newer watcher's flag.
+struct Unwinding<'a>(&'a AtomicBool);
+
+impl Drop for Unwinding<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.store(false, Ordering::SeqCst);
+        }
     }
 }
 
@@ -771,9 +888,10 @@ impl Site {
         let answer = match (request.path.as_str(), request.method.as_str()) {
             ("/api/alerts", "GET" | "HEAD") => self.alerts_key(),
             ("/api/alerts/subscribe", "POST") => self.alerts_subscribe(request, conn),
+            ("/api/alerts/check", "POST") => self.alerts_check(request, conn),
             ("/api/alerts/unsubscribe", "POST") => self.alerts_unsubscribe(request, conn),
             ("/api/alerts", _) => Response::text(405, "GET only").with("Allow", "GET, HEAD"),
-            ("/api/alerts/subscribe" | "/api/alerts/unsubscribe", _) => {
+            ("/api/alerts/subscribe" | "/api/alerts/check" | "/api/alerts/unsubscribe", _) => {
                 Response::text(405, "POST only").with("Allow", "POST")
             }
             _ => return None,
@@ -834,15 +952,41 @@ impl Site {
             let _ = std::thread::Builder::new()
                 .name("nirvana-remote-welcome".into())
                 .spawn(move || {
-                    if let Outcome::Failed(why) = sender.push(&phone, &welcome(), "normal") {
-                        warn!(host = %host_of(&phone.endpoint), why, "nirvana remote welcome alert not sent");
-                    }
+                    let why = match sender.push(&phone, &welcome(), "normal") {
+                        Outcome::Sent | Outcome::Gone => return,
+                        Outcome::Rejected(code) => format!("status {code}, the token refused"),
+                        Outcome::Failed(why) => why,
+                    };
+                    warn!(host = %host_of(&phone.endpoint), why, "nirvana remote welcome alert not sent");
                 });
         }
         Response::json(
             200,
             &json!({ "on": true, "new": new, "phones": alerts.count() }),
         )
+    }
+
+    /// `POST /api/alerts/check`: whether this PC keeps the posted subscription (`known`) and with the same keys
+    /// (`same`), so the page re-posts only one that differs and says so when the PC no longer knows it. A POST, not a
+    /// GET with a query: the endpoint is the phone's capability and stays out of URLs. Nothing is written.
+    fn alerts_check(&self, request: &Request, conn: &mut Conn) -> Response {
+        let alerts = match self.alerts_or_why() {
+            Ok(alerts) => alerts.clone(),
+            Err(answer) => return answer,
+        };
+        let body: Subscribe = match json_body(request, conn) {
+            Ok(body) => body,
+            Err(answer) => return answer,
+        };
+        let phone = Phone {
+            endpoint: url::Url::parse(&body.endpoint)
+                .map_or(body.endpoint.clone(), |url| url.to_string()),
+            p256dh: body.keys.p256dh.trim().trim_end_matches('=').to_string(),
+            auth: body.keys.auth.trim().trim_end_matches('=').to_string(),
+            added: 0,
+        };
+        let (known, same) = alerts.known(&phone);
+        Response::json(200, &json!({ "known": known, "same": same }))
     }
 
     fn alerts_unsubscribe(&self, request: &Request, conn: &mut Conn) -> Response {

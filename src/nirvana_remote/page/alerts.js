@@ -39,6 +39,9 @@
   const IN_SAFARI = 'On iPhone, alerts work only from the home-screen app (iOS 16.4 or later). In Safari, tap Share, '
     + 'then Add to Home Screen, and open Nirvana from there.';
   const DENIED = 'Notifications are off for Nirvana. Turn them on in Settings, Notifications, Nirvana.';
+  // The phone has a subscription the PC no longer keeps: the PC made a new key (its phones are dropped then), or
+  // the push service refused this one and the PC let it go (alerts.rs, REJECTED_MOST).
+  const KEY_CHANGED = "The PC's alert key changed: turn alerts on again.";
 
   // Why the switch cannot work here, or '' when it can.
   function why() {
@@ -71,6 +74,8 @@
     let server = null;
     let on = false;
     let busy = false;
+    // The phone's subscription is one the PC does not keep: turning on makes a new one.
+    let stale = false;
     const knob = h('span', { class: 'switch-knob' });
     const toggle = h('button', { class: 'press switch', type: 'button', role: 'switch', 'aria-checked': 'false',
       'aria-label': 'Alerts when an agent is done or needs you' }, knob);
@@ -107,7 +112,7 @@
         const pc = await key();
         const ready = await worker();
         let subscription = await ready.pushManager.getSubscription();
-        if (subscription && !sameKey(subscription, pc)) {
+        if (subscription && (stale || !sameKey(subscription, pc))) {
           await subscription.unsubscribe();
           subscription = null;
         }
@@ -120,6 +125,7 @@
           return;
         }
         on = true;
+        stale = false;
         note.textContent = answer.data.new ? 'Alerts are on. A first one is on its way.' : 'Alerts are on.';
       } catch (error) {
         note.textContent = 'Alerts could not be turned on: ' + ((error && error.message) || error);
@@ -163,8 +169,9 @@
       turnOn(asked);
     });
 
-    // Where the phone stands: already subscribed with this PC's key, it is on, and the PC is told again (it may
-    // have dropped the phone after a 410, and telling it twice changes nothing).
+    // Where the phone stands. Subscribed, and the PC keeps that subscription with the same keys: on, and nothing is
+    // posted. The PC keeps the endpoint with other keys (the browser renewed them): posted again. The PC does not
+    // keep it, or the phone's was made with another key: off, and the row says to turn alerts on again.
     (async () => {
       const cannot = why();
       if (cannot) { note.textContent = cannot; return; }
@@ -172,9 +179,19 @@
         const pc = await key();
         const ready = await worker();
         const subscription = await ready.pushManager.getSubscription();
-        if (subscription && Notification.permission === 'granted' && sameKey(subscription, pc)) {
-          const answer = await nv.postJson('/api/alerts/subscribe', subscription.toJSON());
-          on = answer.ok;
+        if (subscription && Notification.permission === 'granted') {
+          const check = sameKey(subscription, pc)
+            ? await nv.postJson('/api/alerts/check', subscription.toJSON())
+            : { ok: true, data: { known: false } };
+          if (check.ok && check.data.known && check.data.same) {
+            on = true;
+          } else if (check.ok && check.data.known) {
+            const answer = await nv.postJson('/api/alerts/subscribe', subscription.toJSON());
+            on = answer.ok;
+          } else if (check.ok) {
+            stale = true;
+            note.textContent = KEY_CHANGED;
+          }
         }
       } catch (error) {
         note.textContent = 'Alerts: ' + ((error && error.message) || error);
