@@ -282,7 +282,7 @@ impl Drop for Running {
     }
 }
 
-fn serve_with(site: Arc<Site>, limits: http::Limits) -> Running {
+pub(super) fn serve_with(site: Arc<Site>, limits: http::Limits) -> Running {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -527,15 +527,15 @@ const TRANSCRIPT: &str = concat!(
 );
 
 /// A folder, a Claude config with the transcript for it, and herdr with the Nirvana agent pointing at it.
-struct World {
+pub(super) struct World {
     root: PathBuf,
-    folder: PathBuf,
+    pub(super) folder: PathBuf,
     claude: PathBuf,
     path: PathBuf,
     herdr: Arc<FakeHerdr>,
 }
 
-fn world(name: &str) -> World {
+pub(super) fn world(name: &str) -> World {
     let root = scratch(name);
     let folder = root.join("space");
     std::fs::create_dir_all(&folder).unwrap();
@@ -555,16 +555,16 @@ fn world(name: &str) -> World {
 }
 
 impl World {
-    fn site(&self) -> Arc<Site> {
+    pub(super) fn site(&self) -> Arc<Site> {
         site_with(self.herdr.clone(), Some(self.claude.clone()), None)
     }
 
-    fn uploads(&self) -> PathBuf {
+    pub(super) fn uploads(&self) -> PathBuf {
         self.folder.join(".nirvana").join("uploads")
     }
 
     /// The files in the uploads folder, `.gitignore` left out.
-    fn uploaded(&self) -> Vec<String> {
+    pub(super) fn uploaded(&self) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(self.uploads())
             .into_iter()
             .flatten()
@@ -1265,7 +1265,7 @@ fn an_upload_lands_in_the_spaces_uploads_folder_under_the_servers_name() {
 }
 
 /// Send `head`, then `body` from another thread; the answer.
-fn upload_streamed(
+pub(super) fn upload_streamed(
     addr: SocketAddr,
     head: String,
     body: impl FnOnce(&mut TcpStream) + Send + 'static,
@@ -1284,7 +1284,7 @@ fn upload_streamed(
     (status, body)
 }
 
-fn upload_head(length: Option<u64>) -> String {
+pub(super) fn upload_head(length: Option<u64>) -> String {
     let framing = length.map_or_else(
         || "Transfer-Encoding: chunked\r\n".to_string(),
         |n| format!("Content-Length: {n}\r\n"),
@@ -1380,7 +1380,7 @@ fn a_50_mb_upload_is_taken_whole() {
 }
 
 #[test]
-fn a_slow_upload_gets_408_and_leaves_no_file() {
+fn a_slow_upload_is_cut_and_leaves_no_file() {
     let w = world("slow");
     let running = serve_with(
         w.site(),
@@ -1390,11 +1390,16 @@ fn a_slow_upload_gets_408_and_leaves_no_file() {
         },
     );
     let started = Instant::now();
-    let (status, _) = upload_streamed(running.addr, upload_head(Some(1000)), |out| {
+    let (status, body) = upload_streamed(running.addr, upload_head(Some(1000)), |out| {
         let _ = out.write_all(b"only some of it");
         std::thread::sleep(Duration::from_secs(3));
     });
-    assert_eq!(status, 408);
+    assert_eq!(
+        status, 400,
+        "a body that stops: not 408, which a browser re-sends"
+    );
+    // The 400 is the timeout's, not a malformed body's (P39u moved the timeout off 408 to 400).
+    assert!(body.contains("the upload was too slow"), "{body}");
     assert!(started.elapsed() < Duration::from_secs(5));
     assert!(w.uploaded().is_empty(), "{:?}", w.uploaded());
     // The average-rate deadline: a body that keeps trickling is cut too.
@@ -1416,7 +1421,7 @@ fn a_slow_upload_gets_408_and_leaves_no_file() {
             std::thread::sleep(Duration::from_millis(100));
         }
     });
-    assert_eq!(status, 408, "1500 bytes at 1000/s get 0.5 s plus 1 s");
+    assert_eq!(status, 400, "1500 bytes at 1000/s get 0.5 s plus 1 s");
     assert!(
         started.elapsed() < Duration::from_millis(4500),
         "cut at the deadline, not when the sender stopped"

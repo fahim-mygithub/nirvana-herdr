@@ -9,6 +9,8 @@
   const nv = window.Nirvana;
   const h = nv.h;
   const MOST = 50 * 1024 * 1024;
+  // Said only while an upload really is under way: a hung one now times out to failed (app.js uploadWait).
+  const WAIT = 'Wait for the upload to finish.';
   const LABEL = { working: 'working', needs: 'needs you', done: 'done', idle: 'idle' };
 
   function size(bytes) {
@@ -134,25 +136,60 @@
         liveBox.hidden = !text;
       }
 
+      // A chip says its own state (record p39u: the note line is overwritten by later notes, so a failure's reason
+      // there was gone by the time the owner looked): uploading with how far, the size once it is in, or failed and
+      // why, with Retry. Its X removes it, and stops its upload.
+      function chipText(p) {
+        // XHR counts what left the phone, not what the PC has: at 100% the PC may still be reading it in.
+        if (p.state === 'up' && p.sent >= p.size) return p.label + ' · sent, waiting for the PC';
+        if (p.state === 'up') return p.label + ' · uploading' + (p.sent ? ' ' + Math.floor((p.sent / p.size) * 100) + '%' : '');
+        if (p.state === 'bad') return p.label + ' · failed: ' + p.why;
+        return p.label + ' · ' + size(p.size);
+      }
+
       function drawPending() {
         chips.replaceChildren(...pending.map((p) => h('span', { class: 'msg pending-chip' + (p.state === 'bad' ? ' bad' : '') },
           nv.icon(p.image ? 'image' : 'file', 16, '#86CBD2', 1.8),
-          h('span', { text: p.label + (p.state === 'up' ? ' · uploading' : ' · ' + size(p.size)) }),
+          h('span', { text: chipText(p) }),
+          p.state === 'bad' && h('button', { class: 'press chip-retry', type: 'button', text: 'Retry', onclick: () => start(p) }),
           h('button', { class: 'press chip-x', type: 'button', 'aria-label': 'Remove the attachment',
-            onclick: () => { pending.splice(pending.indexOf(p), 1); drawPending(); } }, nv.icon('close', 14, '#B0B5BA', 2.2)))));
+            onclick: () => { if (p.req) p.req.abort(); pending.splice(pending.indexOf(p), 1); drawPending(); } }, nv.icon('close', 14, '#B0B5BA', 2.2)))));
         sendButton.classList.toggle('ready', !!(input.value.trim() || pending.some((p) => p.file)));
       }
 
-      async function uploadFile(file) {
+      // Why an upload failed, in the chip's words: the PC's reason and how far it got, or that it did not answer.
+      function failure(r) {
+        if (r.why) return r.why;
+        const why = r.data.error || 'the PC answered ' + r.status;
+        if (!r.data.read || r.data.seconds === undefined) return why;
+        return why + ' (' + size(r.data.read) + ' in ' + r.data.seconds + ' s)';
+      }
+
+      async function start(p) {
+        p.state = 'up';
+        p.sent = 0;
+        p.why = '';
+        drawPending();
+        const req = nv.upload('/api/upload?agent=' + encodeURIComponent(id), p.source, {
+          progress: (sent) => { if (p.req === req) { p.sent = sent; drawPending(); } },
+        });
+        p.req = req;
+        const r = await req.done;
+        if (p.req !== req || !pending.includes(p)) return;
+        p.req = null;
+        if (r.ok && r.data.file) { p.file = r.data.file; p.state = 'ok'; }
+        else { p.state = 'bad'; p.why = failure(r); }
+        if (note.textContent === WAIT && !pending.some((q) => q.state === 'up')) note.textContent = '';
+        drawPending();
+      }
+
+      function uploadFile(file) {
         if (file.size > MOST) { note.textContent = (file.name || 'That file') + ' is over 50 MB: not sent.'; return; }
         const image = (file.type || '').startsWith('image/');
-        const p = { label: file.name || (image ? 'screenshot' : 'file'), size: file.size, state: 'up', image, file: null };
+        const p = { label: file.name || (image ? 'screenshot' : 'file'), size: file.size, state: 'up', image, file: null,
+          source: file, sent: 0, why: '', req: null };
         pending.push(p);
-        drawPending();
-        const r = await nv.upload('/api/upload?agent=' + encodeURIComponent(id), file).catch(() => ({ ok: false, data: {} }));
-        if (r.ok && r.data.file) { p.file = r.data.file; p.state = 'ok'; note.textContent = ''; }
-        else { p.state = 'bad'; note.textContent = 'The upload failed: ' + (r.data.error || r.status || 'no answer'); }
-        drawPending();
+        start(p);
       }
 
       function filesFrom(list) { for (const file of Array.from(list || [])) uploadFile(file); }
@@ -189,16 +226,30 @@
           option('Send now', 'Stops its turn with Esc, then sends', 'close', () => close(() => go('now')))));
       }
 
-      async function send(mode) {
+      // A failed attachment asks before the message goes without it (record p39u: Send used to wait on it forever).
+      function without(failed, go) {
+        nv.sheet((close) => h('div', { class: 'sheet-body' },
+          h('span', { class: 'sheet-title', text: failed.length === 1 ? 'One attachment did not upload' : failed.length + ' attachments did not upload' }),
+          option('Send without it', 'The message goes with what did upload', 'send', () => close(go)),
+          option('Keep it', 'Retry it or remove it first', 'close', () => close())));
+      }
+
+      // `skip`: the owner said to send without the failed attachments.
+      async function send(mode, skip) {
         const text = input.value.trim();
-        if (pending.some((p) => p.state === 'up')) { note.textContent = 'Wait for the upload to finish.'; return; }
+        if (pending.some((p) => p.state === 'up')) { note.textContent = WAIT; return; }
+        const failed = pending.filter((p) => p.state === 'bad');
         const ready = pending.filter((p) => p.file);
-        if (!text && !ready.length) return;
-        if (agent.status === 'working' && !mode) { choose(send); return; }
+        if (!text && !ready.length) {
+          if (failed.length) note.textContent = 'The attachment did not upload: retry it or remove it.';
+          return;
+        }
+        if (failed.length && !skip) { without(failed, () => send(mode, true)); return; }
+        if (agent.status === 'working' && !mode) { choose((m) => send(m, skip)); return; }
         note.textContent = '';
         const r = await nv.postJson('/api/send', { agent: id, text, files: ready.map((p) => p.file), mode: mode || null })
           .catch(() => ({ ok: false, status: 0, data: {} }));
-        if (r.status === 409 && r.data.choose) { agent.status = 'working'; drawHead(); choose(send); return; }
+        if (r.status === 409 && r.data.choose) { agent.status = 'working'; drawHead(); choose((m) => send(m, skip)); return; }
         if (!r.ok) { note.textContent = r.data.error || 'Not sent: the PC did not answer.'; return; }
         if (r.data.stopped === false) note.textContent = 'It did not stop in time, so the message waits in its queue.';
         for (const p of ready) local.push(bubble({ kind: 'file', text: p.label, sub: size(p.size) + ' · ' + p.file }));

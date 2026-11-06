@@ -36,7 +36,7 @@ T_REFUSED = _T + "a_refused_caller_gets_nothing_from_the_new_routes"
 T_UPLOAD = _T + "an_upload_lands_in_the_spaces_uploads_folder_under_the_servers_name"
 T_TOO_BIG = _T + "an_upload_over_50_mb_is_refused_before_its_body_is_read"
 T_CHUNKED = _T + "a_chunked_upload_is_refused_the_moment_it_passes_50_mb"
-T_SLOW = _T + "a_slow_upload_gets_408_and_leaves_no_file"
+T_SLOW = _T + "a_slow_upload_is_cut_and_leaves_no_file"  # was ..._gets_408_...: a cut body is a 400 since P39u
 T_CAP = _T + "the_33rd_connection_waits_while_a_50_mb_upload_holds_a_slot"
 T_PATHS = _T + "a_send_adds_the_uploaded_files_paths_and_refuses_any_other_name"
 T_NAMES = _T + "upload_names_are_the_servers_own"
@@ -295,7 +295,7 @@ CONTROLS = (
             "        let deadline = self.started + self.limits.read_timeout + Duration::from_secs(size / rate);\n",
             "        let deadline = self.started + self.limits.read_timeout + Duration::from_secs(size / rate + 60);\n",
             T_SLOW, "rust"),
-    # ... and a body that stops is a 408
+    # ... and a body that stops is cut (a 400 since P39u)
     Control("p39b_body_timeout_408", HTTP,
             "                Err(BodyError::Timeout)\n            }\n            Err(_) => {\n",
             '                Err(BodyError::Bad("timed out"))\n            }\n            Err(_) => {\n',

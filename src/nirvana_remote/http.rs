@@ -38,7 +38,7 @@ pub const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// A chunk-size or trailer line longer than this is not one.
 const CHUNK_LINE: usize = 1024;
 
-/// The limits `serve` runs with; a test shortens the timeout to see its 408.
+/// The limits `serve` runs with; a test shortens the timeout to see its 408 (a head) or 400 (a body).
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
     pub read_timeout: Duration,
@@ -249,7 +249,12 @@ impl BodyError {
     pub fn status(&self) -> u16 {
         match self {
             Self::TooLarge => 413,
-            Self::Timeout => 408,
+            // Not 408 (P39u): a browser takes a 408 as "the server dropped an idle connection" and sends the
+            // request again by itself, so the page never hears of it. Measured: Chrome re-sent a slow upload
+            // every 13 s, four times, while its XHR saw nothing. The 2026-11-06 upload's folder last changed
+            // 223 s after it began, about four of its 51 s deadlines (Safari's retry is not measured). A 400
+            // ends the upload and reaches the page.
+            Self::Timeout => 400,
             Self::Bad(_) => 400,
             Self::Write(_) => 500,
         }
@@ -286,6 +291,11 @@ impl Conn {
 
     pub fn framing(&self) -> Framing {
         self.framing
+    }
+
+    /// Since the head was read: the clock `read_body`'s deadline runs on (P39u: an upload's log line says it).
+    pub fn elapsed(&self) -> Duration {
+        self.started.elapsed()
     }
 
     fn into_stream(self) -> std::net::TcpStream {
