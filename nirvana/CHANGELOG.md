@@ -3,6 +3,18 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.58.1: Nirvana Remote runs only in the Nirvana session
+
+- **Changed:** `skip_reason` hosts Nirvana Remote only in the `nirvana` session; the default session now skips with
+  "not the Nirvana session", other names as before. Tests moved onto the `nirvana` session; control
+  `p39a_default_session_skips`.
+- **Because:** the owner, 2026-11-05, asked whether only the Nirvana window should run the phone server: "I agree".
+  With both allowed, a plain herdr server started first held 8443, the phone saw its spaces, and the Nirvana window
+  read `○ remote 8443 taken` (0.55.1 review, should-fix).
+- **Measured:** 155 `nirvana_remote` tests (scoped); the three session controls redden alone; 2935 controls find their
+  text once.
+- **If you remove this:** whichever herdr starts first owns the phone.
+
 ## alpha 0.58.0: Nirvana Remote alerts and the home-screen app (plan 39e)
 
 - **Changed:** the page installs as a home-screen app (manifest, icons, a service worker with no fetch handler and no
