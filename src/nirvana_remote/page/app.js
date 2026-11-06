@@ -99,13 +99,39 @@
     return answer(response);
   }
 
-  // A file as the whole body; the server names it from its type (record p39b, uploads).
-  async function upload(path, file) {
-    const response = await fetch(path, {
-      method: 'POST', credentials: 'same-origin', cache: 'no-store',
-      headers: { 'Content-Type': file.type || 'application/octet-stream' }, body: file,
+  // The server's body deadline (http.rs READ_TIMEOUT, BODY_RATE and BODY_MOST): 10 s, plus the size at 16 KiB a
+  // second, never past 20 minutes. An upload waits that long and a margin, so the server's own answer and its reason
+  // come first; past it the PC is not answering at all (record p39u: on 2026-11-06 a fetch with no end left a chip
+  // "uploading" and Send refused).
+  const READ_TIMEOUT_MS = 10000;
+  const BODY_RATE = 16384;
+  const BODY_MOST_MS = 1200000;
+  const UPLOAD_MARGIN_MS = 30000;
+  function uploadWait(bytes) { return Math.min(READ_TIMEOUT_MS + Math.ceil(bytes / BODY_RATE) * 1000, BODY_MOST_MS) + UPLOAD_MARGIN_MS; }
+
+  // A file as the whole body; the server names it from its type (record p39b, uploads). XMLHttpRequest, not fetch
+  // (record p39u): its upload progress works on iPhone Safari, where fetch has none, and its timeout ends an upload
+  // that hangs. A same-origin POST carries Origin and Sec-Fetch-Site from XHR as from fetch. `on.progress(sent,
+  // total)` as it goes; `done` resolves as answer() does, with `why` when there was no answer, and never rejects.
+  function upload(path, file, on) {
+    const xhr = new XMLHttpRequest();
+    const done = new Promise((resolve) => {
+      const failed = (why) => resolve({ ok: false, status: 0, data: {}, why });
+      xhr.open('POST', path);
+      xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+      xhr.timeout = uploadWait(file.size);
+      xhr.upload.onprogress = (event) => { if (on && on.progress && event.lengthComputable) on.progress(event.loaded, event.total); };
+      xhr.onload = () => {
+        let data = null;
+        try { data = JSON.parse(xhr.responseText); } catch (_) { /* not JSON */ }
+        resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, data: data || {} });
+      };
+      xhr.onerror = () => failed('the connection to the PC failed');
+      xhr.ontimeout = () => failed('no answer from the PC in ' + Math.round(xhr.timeout / 1000) + ' s');
+      xhr.onabort = () => failed('removed');
+      xhr.send(file);
     });
-    return answer(response);
+    return { done, abort: () => xhr.abort() };
   }
 
   // A live view (record p39b, "Why SSE"). EventSource reconnects by itself after a dropped connection; when the PC

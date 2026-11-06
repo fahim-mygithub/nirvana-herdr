@@ -12,12 +12,17 @@
 //! - `POST /api/send`: `{"agent", "text", "files", "mode"}` (`send.rs`).
 //! - `POST /api/upload?agent=<id>`: the body is the file; its type names the extension.
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
+use std::time::Instant;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tracing::{info, warn};
 
 use super::chat;
 use super::http::{Conn, Framing, Request, Response};
@@ -458,37 +463,147 @@ impl Site {
         }
     }
 
+    /// `POST /api/upload`. Every answer but a saved file logs one line (P39u: on 2026-11-06 two phone uploads failed
+    /// and herdr-server.log said nothing): the route, the size the head declared, the bytes read, the time since the
+    /// head, the status and why; never a byte of the file. The lines go through the refusals' throttle, one per kind
+    /// of failure a minute. A saved file logs its size and time at info, which is the phone's uplink, measured. The
+    /// answer to a failure carries the same figures, so the page can say on the chip how far it got.
     pub(super) fn upload(&self, request: &Request, conn: &mut Conn) -> Response {
+        let size = match conn.framing() {
+            Framing::Length(length) => length.to_string(),
+            Framing::Chunked => "chunked".to_string(),
+            Framing::None => "none".to_string(),
+            Framing::Bad => "bad framing".to_string(),
+        };
+        let read = Cell::new(0u64);
+        let taken = self.take_upload(request, conn, &read);
+        let elapsed = conn.elapsed();
+        match taken {
+            Ok(answer) => {
+                info!(
+                    route = "/api/upload",
+                    size = %size,
+                    read = read.get(),
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "nirvana remote upload saved"
+                );
+                Response::json(200, &answer)
+            }
+            Err((status, why)) => {
+                if let Some(held_back) = self
+                    .throttle
+                    .allow(&format!("upload {status} {why}"), Instant::now())
+                {
+                    warn!(
+                        route = "/api/upload",
+                        size = %size,
+                        read = read.get(),
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        status,
+                        why = %why,
+                        held_back,
+                        "nirvana remote upload failed"
+                    );
+                }
+                Response::json(
+                    status,
+                    &json!({
+                        "error": why,
+                        "read": read.get(),
+                        "seconds": elapsed.as_secs(),
+                    }),
+                )
+            }
+        }
+    }
+
+    /// The upload itself: the answer to send, or the status and why; `read` counts the body's bytes as they come.
+    fn take_upload(
+        &self,
+        request: &Request,
+        conn: &mut Conn,
+        read: &Cell<u64>,
+    ) -> Result<Value, (u16, String)> {
         match conn.framing() {
-            Framing::None => return error(411, "an upload has a length"),
-            Framing::Bad => return error(400, "a body framing this server does not read"),
+            Framing::None => return Err((411, "an upload has a length".into())),
+            Framing::Bad => return Err((400, "a body framing this server does not read".into())),
             // Refused on the head: not a byte of the body is read.
             Framing::Length(length) if length > send::UPLOAD_MOST => {
-                return error(413, "over 50 MB")
+                return Err((413, "over 50 MB".into()))
             }
             _ => {}
         }
-        let found = match self.found_in(request) {
-            Ok(found) => found,
-            Err(refused) => return refused,
-        };
-        let dir = match send::folder_of(&found.agent).and_then(|folder| send::uploads_dir(&folder))
-        {
-            Ok(dir) => dir,
-            Err(why) => return error(409, why),
-        };
+        // Held until the answer: the body is read only with a place.
+        let _place = self.uploads.take().ok_or_else(|| (503, BUSY.to_string()))?;
+        let found = self.found_in(request).map_err(|refused| {
+            let why = serde_json::from_slice::<Value>(&refused.body)
+                .ok()
+                .and_then(|body| body["error"].as_str().map(str::to_string))
+                .unwrap_or_default();
+            (refused.status, why)
+        })?;
+        let dir = send::folder_of(&found.agent)
+            .and_then(|folder| send::uploads_dir(&folder))
+            .map_err(|why| (409, why))?;
         let kind = request
             .header("Content-Type")
             .first()
             .copied()
             .unwrap_or("");
         let name = send::name_for(kind, (self.now)());
-        match send::save(&dir, &name, |sink| conn.read_body(send::UPLOAD_MOST, sink)) {
-            Ok((path, size)) => Response::json(
-                200,
-                &json!({"file": name, "path": path.display().to_string(), "size": size}),
-            ),
-            Err((status, why)) => error(status, why),
-        }
+        let (path, size) = send::save(&dir, &name, |sink| {
+            conn.read_body(send::UPLOAD_MOST, &mut Counted { sink, read })
+        })?;
+        Ok(json!({"file": name, "path": path.display().to_string(), "size": size}))
+    }
+}
+
+/// At most this many uploads are read at once, in all (P39u review round, S1). Per caller would bound nothing:
+/// tailscaled's proxy makes every request come from loopback, and only the owner's login gets this far. With the
+/// slower `http::BODY_RATE` an upload can hold a connection for up to `http::BODY_MOST`; four of them and the six
+/// live views (`stream::MOST`) are 10 of the 32 connections, so a stuck or retrying phone cannot starve the page.
+/// The page keeps to the same number by itself (chat.js `UPLOADS_AT_ONCE`); past it the answer is a 503.
+pub const UPLOADS_AT_ONCE: usize = 4;
+const BUSY: &str = "the PC is busy with other uploads";
+
+/// The uploads being read now (`UPLOADS_AT_ONCE`).
+#[derive(Debug, Default)]
+pub struct Uploads(AtomicUsize);
+
+impl Uploads {
+    /// A place, given back when it drops; `None` when all are taken.
+    fn take(&self) -> Option<Place<'_>> {
+        self.0
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |now| {
+                (now < UPLOADS_AT_ONCE).then_some(now + 1)
+            })
+            .ok()
+            .map(|_| Place(&self.0))
+    }
+}
+
+struct Place<'a>(&'a AtomicUsize);
+
+impl Drop for Place<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// A sink that counts what goes through it: the bytes of the body read so far, for the log line.
+struct Counted<'a> {
+    sink: &'a mut dyn Write,
+    read: &'a Cell<u64>,
+}
+
+impl Write for Counted<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let wrote = self.sink.write(bytes)?;
+        self.read.set(self.read.get() + wrote as u64);
+        Ok(wrote)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.sink.flush()
     }
 }

@@ -32,6 +32,8 @@ mod tests;
 mod tests_live;
 #[cfg(test)]
 mod tests_prompt;
+#[cfg(test)]
+mod tests_upload;
 // Plan 39 P39d: the new-space picker and the cards.
 pub mod cards;
 pub mod pick;

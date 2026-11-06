@@ -3,6 +3,23 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.58.2: phone uploads land, and a failed one says why
+
+- **Changed:** the uploads folder is created race-free (two photos picked together no longer fail the second with os
+  error 183); a body that arrives too slowly is answered 400, not a 408 browsers re-send silently, and the answer is
+  drained so a Windows reset does not cut it; the body floor drops from 64 to 16 KiB/s with a 20 min ceiling and at
+  most 4 uploads in flight (503 past that, and the page queues the rest); every upload failure logs one throttled line
+  (size, bytes read, seconds, why) and a saved one logs its size and time. The page uploads with XHR: progress on each
+  chip, a timeout from the server's own deadline, the reason and Retry on a failed chip, X aborts, Send with a failed
+  chip asks "Send without it" or "Keep it".
+- **Because:** 2026-11-06 the owner: "if I have attachments and try to send the button does work"; two iPhone photos
+  on weak signal left only `.gitignore` in `.nirvana/uploads/`, no log line, one chip failed and one stuck uploading.
+- **Measured:** the folder race failed 5 of 5 with the old code; in headless Chromium a slow upload answered 408 was
+  re-sent four times, 13 s apart, unseen by the page (Safari not measured; the incident's 223 s of folder changes fit
+  about four 51 s deadlines, suggestive only); the old 1 s drain lost the 400 to `os error 10053`. 163
+  `nirvana_remote` tests (scoped); 2964 controls find their text once.
+- **If you remove this:** a phone photo on a weak link fails without a word, and Send waits forever.
+
 ## alpha 0.58.1: Nirvana Remote runs only in the Nirvana session
 
 - **Changed:** `skip_reason` hosts Nirvana Remote only in the `nirvana` session; the default session now skips with

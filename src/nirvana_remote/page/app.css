@@ -197,6 +197,9 @@ a:hover { color: #86CBD2; }
 .pending-chip { display: flex; align-items: center; gap: 8px; background: var(--hover); border-radius: 10px; padding: 6px 6px 6px 10px; font-size: 13px; max-width: 100%; box-sizing: border-box; }
 .pending-chip > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .pending-chip.bad { color: var(--red); }
+/* P39u: a failed chip's reason wraps rather than being cut off; Retry sits beside the X. */
+.pending-chip.bad > span { white-space: normal; }
+.chip-retry { height: 28px; padding: 0 10px; border-radius: 8px; flex-shrink: 0; font-size: 13px; color: var(--teal); }
 .chip-x { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 8px; flex-shrink: 0; }
 .composer-row { display: flex; align-items: center; gap: 8px; }
 .attach-button { width: 44px; height: 44px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; border-radius: 22px; background: var(--hover); }

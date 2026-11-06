@@ -141,20 +141,35 @@ fn plain_dir(path: &Path) -> bool {
 
 /// `<folder>/.nirvana/uploads/`, made when missing, with its `.gitignore`. A link or junction on the way is refused:
 /// the file would land somewhere else.
+///
+/// Two uploads at once may both find the folder missing (P39u, 2026-11-06: the owner picked two photos in a space
+/// with no `uploads/` yet; both asked at 01:55:36, one made the folder and the other's `create_dir` failed with
+/// "Cannot create a file when that file already exists", a 409 on its chip). So a folder that another upload made
+/// in between is taken, and checked as one made here; the `.gitignore` likewise.
 pub fn uploads_dir(folder: &Path) -> Result<PathBuf, String> {
     let nirvana = folder.join(crate::nirvana_run::DIR);
     let uploads = nirvana.join("uploads");
     for dir in [&nirvana, &uploads] {
-        if !dir.exists() {
-            std::fs::create_dir(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+        match std::fs::create_dir(dir) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(format!("{}: {err}", dir.display())),
         }
         if !plain_dir(dir) {
             return Err(format!("{} is not a plain folder", dir.display()));
         }
     }
     let ignore = uploads.join(".gitignore");
-    if !ignore.exists() {
-        std::fs::write(&ignore, IGNORE).map_err(|err| format!("{}: {err}", ignore.display()))?;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&ignore)
+    {
+        Ok(mut file) => file
+            .write_all(IGNORE.as_bytes())
+            .map_err(|err| format!("{}: {err}", ignore.display()))?,
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(err) => return Err(format!("{}: {err}", ignore.display())),
     }
     Ok(uploads)
 }
