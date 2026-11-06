@@ -38,7 +38,7 @@ T_SERVES = "nirvana_remote::tests::supervise_serves_when_tailscale_is_ready_and_
 T_SERVE_FAILS = "nirvana_remote::tests::a_failed_serve_closes_the_listener_and_says_why"
 T_TAKEN = "nirvana_remote::tests::a_taken_port_says_why_and_serves_nothing"
 T_CLEARED = "nirvana_remote::tests::a_signed_out_tailscale_lets_nobody_in"
-T_SKIP = "nirvana_remote::tests::only_the_owners_default_server_hosts_nirvana_remote"
+T_SKIP = "nirvana_remote::tests::only_the_owners_nirvana_server_hosts_nirvana_remote"
 T_FOOT_ROW = "nirvana_remote::tests::the_foot_row_reads_up_off_and_stale"
 T_FOOT_UP = "client::shell::tests::nirvana_footer::the_servers_block_leads_with_nirvana_remote_up_on_its_port"
 T_FOOT_OFF = "client::shell::tests::nirvana_footer::nirvana_remote_off_says_why_with_no_space_server"
@@ -67,6 +67,8 @@ T_STATUS_CACHE = "nirvana_remote::tests::api_pcs_reads_tailscale_once_in_five_se
 # Session fix (0.55.1, p39a.md "Session fix (0.55.1)").
 T_SESSION = "nirvana_remote::tests::the_nirvana_session_hosts_nirvana_remote_and_other_names_skip"
 T_TWO = "nirvana_remote::tests::a_second_sessions_server_finds_8443_taken_and_leaves_the_first_alone"
+# Nirvana only (0.58.1, p39a.md "Nirvana only (0.58.1)").
+T_DEFAULT = "nirvana_remote::tests::the_default_session_does_not_host_nirvana_remote"
 
 CONTROLS = (
     # §1.2: only the owner's login; another user's is refused
@@ -520,14 +522,19 @@ CONTROLS = (
     # --- Session fix (0.55.1) -------------------------------------------------------------------------------------
     # The Nirvana session's server hosts it (the owner's window is `--session nirvana`)
     Control("p39a_nirvana_session_hosts", ROOT_RS,
-            "    if session.is_some_and(|name| name != crate::nirvana_launch::SESSION) {\n",
-            "    if session.is_some() {\n",
+            "        Some(crate::nirvana_launch::SESSION) => {}\n",
+            "        Some(crate::nirvana_launch::SESSION) => return Some(\"a named session's server\"),\n",
             T_SESSION, "rust"),
     # ... and any other named session still skips
     Control("p39a_other_session_skips", ROOT_RS,
-            "    if session.is_some_and(|name| name != crate::nirvana_launch::SESSION) {\n",
-            "    if false && session.is_some_and(|name| name != crate::nirvana_launch::SESSION) {\n",
+            "        Some(_) => return Some(\"a named session's server\"),\n",
+            "        Some(_) => {}\n",
             T_SESSION, "rust"),
+    # Nirvana only (0.58.1): the default session does not host it (the owner, 2026-11-06)
+    Control("p39a_default_session_skips", ROOT_RS,
+            "        None => return Some(\"not the Nirvana session\"),\n",
+            "        None => {}\n",
+            T_DEFAULT, "rust"),
     # Two sessions' servers: the second finds the first's live mount and reports "8443 taken"
     Control("p39a_second_session_taken", ROOT_RS,
             "        Mount::OursForeground => {\n            return Err(Off::ServeTaken(format!(\n",

@@ -829,28 +829,54 @@ fn a_taken_port_says_why_and_serves_nothing() {
     assert!(ts.calls().is_empty());
 }
 
+/// The gates in front of the session's: a Nirvana-session server under a test's socket or config, with `off`, or in
+/// a debug build without `on`, does not host it. Before 0.58.1 this used the default session, which now skips first
+/// and would hide every one of these.
 #[test]
-fn only_the_owners_default_server_hosts_nirvana_remote() {
+fn only_the_owners_nirvana_server_hosts_nirvana_remote() {
+    let nirvana = || Some(crate::nirvana_launch::SESSION.to_string());
     let none = |_: &str| None;
-    assert_eq!(super::skip_reason(none, None, false), None);
+    assert_eq!(super::skip_reason(none, nirvana(), false), None);
     let socket = |name: &str| (name == "HERDR_SOCKET_PATH").then(|| "x".to_string());
-    assert!(super::skip_reason(socket, None, false).is_some());
+    assert!(super::skip_reason(socket, nirvana(), false).is_some());
     let config = |name: &str| (name == "XDG_CONFIG_HOME").then(|| "x".to_string());
-    assert!(super::skip_reason(config, None, false).is_some());
+    assert!(super::skip_reason(config, nirvana(), false).is_some());
     let off = |name: &str| (name == "NIRVANA_REMOTE").then(|| "off".to_string());
-    assert!(super::skip_reason(off, None, false).is_some());
+    assert!(super::skip_reason(off, nirvana(), false).is_some());
     assert!(super::skip_reason(none, Some("work".into()), false).is_some());
     // Review round B1: a debug build (herdr-dev) runs it only when asked.
     assert!(
-        super::skip_reason(none, None, true).is_some(),
+        super::skip_reason(none, nirvana(), true).is_some(),
         "a plain debug server"
     );
     let on = |name: &str| (name == "NIRVANA_REMOTE").then(|| "on".to_string());
-    assert_eq!(super::skip_reason(on, None, true), None);
+    assert_eq!(super::skip_reason(on, nirvana(), true), None);
     assert!(
         super::skip_reason(on, Some("work".into()), true).is_some(),
         "on does not lift the other gates"
     );
+}
+
+/// Nirvana only (0.58.1): a plain `herdr` window started first took 8443 and the Nirvana window read "8443
+/// taken". The owner, 2026-11-06: "I agree" to only the Nirvana window running the phone server. The default
+/// session skips with a short reason, and `on` or a release build does not lift it.
+#[test]
+fn the_default_session_does_not_host_nirvana_remote() {
+    let none = |_: &str| None;
+    let on = |name: &str| (name == "NIRVANA_REMOTE").then(|| "on".to_string());
+    assert_eq!(
+        super::skip_reason(none, None, false),
+        Some("not the Nirvana session")
+    );
+    assert_eq!(
+        super::skip_reason(on, None, false),
+        Some("not the Nirvana session")
+    );
+    assert_eq!(
+        super::skip_reason(on, None, true),
+        Some("not the Nirvana session")
+    );
+    assert!(super::skip_reason(none, None, true).is_some(), "debug too");
 }
 
 /// Session fix (0.55.1): every Nirvana window runs `--session nirvana`, and the old gate skipped every named
@@ -887,10 +913,11 @@ fn the_nirvana_session_hosts_nirvana_remote_and_other_names_skip() {
     }
 }
 
-/// Session fix (0.55.1): the default session's server and the Nirvana session's may both host it now. Each writes
-/// its own state file (`session::data_dir` differs), both want port 7790 and 8443 on one tailnet node. The first up
-/// keeps its mount; the second reads that foreground mount in `serve status`, reports "8443 taken" in its own file
-/// and changes nothing, before and after it stops.
+/// Session fix (0.55.1): two servers that both host it, each with its own state file (`session::data_dir` differs),
+/// both want port 7790 and 8443 on one tailnet node. Since 0.58.1 only the Nirvana session hosts it, so this is
+/// the case of a second one all the same (a pre-0.58.1 install beside a new one, a debug build with
+/// `NIRVANA_REMOTE=on`). The first up keeps its mount; the second reads that foreground mount in `serve status`,
+/// reports "8443 taken" in its own file and changes nothing, before and after it stops.
 #[test]
 fn a_second_sessions_server_finds_8443_taken_and_leaves_the_first_alone() {
     let port = std::net::TcpListener::bind("127.0.0.1:0")
