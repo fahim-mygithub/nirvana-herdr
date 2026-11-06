@@ -11,6 +11,9 @@
   const MOST = 50 * 1024 * 1024;
   // Said only while an upload really is under way: a hung one now times out to failed (app.js uploadWait).
   const WAIT = 'Wait for the upload to finish.';
+  // The PC reads at most this many uploads at once (live.rs UPLOADS_AT_ONCE) and answers more with a 503; the rest
+  // wait here for a place instead (record p39u, review round).
+  const UPLOADS_AT_ONCE = 4;
   const LABEL = { working: 'working', needs: 'needs you', done: 'done', idle: 'idle' };
 
   function size(bytes) {
@@ -140,6 +143,7 @@
       // there was gone by the time the owner looked): uploading with how far, the size once it is in, or failed and
       // why, with Retry. Its X removes it, and stops its upload.
       function chipText(p) {
+        if (p.state === 'up' && p.queued) return p.label + ' · waiting to upload';
         // XHR counts what left the phone, not what the PC has: at 100% the PC may still be reading it in.
         if (p.state === 'up' && p.sent >= p.size) return p.label + ' · sent, waiting for the PC';
         if (p.state === 'up') return p.label + ' · uploading' + (p.sent ? ' ' + Math.floor((p.sent / p.size) * 100) + '%' : '');
@@ -148,12 +152,14 @@
       }
 
       function drawPending() {
+        // Every way an upload ends comes through here, the X included (review round, S3: the X left the note behind).
+        if (note.textContent === WAIT && !pending.some((q) => q.state === 'up')) note.textContent = '';
         chips.replaceChildren(...pending.map((p) => h('span', { class: 'msg pending-chip' + (p.state === 'bad' ? ' bad' : '') },
           nv.icon(p.image ? 'image' : 'file', 16, '#86CBD2', 1.8),
           h('span', { text: chipText(p) }),
           p.state === 'bad' && h('button', { class: 'press chip-retry', type: 'button', text: 'Retry', onclick: () => start(p) }),
           h('button', { class: 'press chip-x', type: 'button', 'aria-label': 'Remove the attachment',
-            onclick: () => { if (p.req) p.req.abort(); pending.splice(pending.indexOf(p), 1); drawPending(); } }, nv.icon('close', 14, '#B0B5BA', 2.2)))));
+            onclick: () => { if (p.req) p.req.abort(); pending.splice(pending.indexOf(p), 1); drawPending(); next(); } }, nv.icon('close', 14, '#B0B5BA', 2.2)))));
         sendButton.classList.toggle('ready', !!(input.value.trim() || pending.some((p) => p.file)));
       }
 
@@ -165,11 +171,15 @@
         return why + ' (' + size(r.data.read) + ' in ' + r.data.seconds + ' s)';
       }
 
+      function uploading() { return pending.filter((q) => q.req).length; }
+
       async function start(p) {
         p.state = 'up';
         p.sent = 0;
         p.why = '';
+        p.queued = uploading() >= UPLOADS_AT_ONCE;
         drawPending();
+        if (p.queued) return;
         const req = nv.upload('/api/upload?agent=' + encodeURIComponent(id), p.source, {
           progress: (sent) => { if (p.req === req) { p.sent = sent; drawPending(); } },
         });
@@ -179,15 +189,20 @@
         p.req = null;
         if (r.ok && r.data.file) { p.file = r.data.file; p.state = 'ok'; }
         else { p.state = 'bad'; p.why = failure(r); }
-        if (note.textContent === WAIT && !pending.some((q) => q.state === 'up')) note.textContent = '';
         drawPending();
+        next();
+      }
+
+      // A place came free: the next waiting chip takes it. `start` sets its `req` before it awaits, so the count holds.
+      function next() {
+        for (const q of pending) if (q.queued && uploading() < UPLOADS_AT_ONCE) start(q);
       }
 
       function uploadFile(file) {
         if (file.size > MOST) { note.textContent = (file.name || 'That file') + ' is over 50 MB: not sent.'; return; }
         const image = (file.type || '').startsWith('image/');
         const p = { label: file.name || (image ? 'screenshot' : 'file'), size: file.size, state: 'up', image, file: null,
-          source: file, sent: 0, why: '', req: null };
+          source: file, sent: 0, why: '', req: null, queued: false };
         pending.push(p);
         start(p);
       }

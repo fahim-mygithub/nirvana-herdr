@@ -495,7 +495,7 @@ CONTROLS = (
             T_HEAD_LEN, "rust"),
     # N1: the unread body is drained, so the close is not a reset
     Control("p39a_drain", HTTP,
-            "    let _ = tokio::time::timeout(DRAIN_TIME, async {\n",
+            "    let _ = tokio::time::timeout_at(drain.until.into(), async {\n",
             "    let _ = tokio::time::timeout(Duration::ZERO, async {\n",
             T_DRAIN, "rust"),
     # S7: only the holder overwrites another's fresh report

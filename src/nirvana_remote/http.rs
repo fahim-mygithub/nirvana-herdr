@@ -29,10 +29,19 @@ const HEADERS: usize = 48;
 /// caller that sent a few MiB before reading lost the 413.
 pub const DRAIN_LIMIT: usize = 8 * 1024 * 1024;
 pub const DRAIN_TIME: Duration = Duration::from_secs(1);
-/// The slowest a body may arrive on average, past its first `READ_TIMEOUT` (P39b): a 50 MiB upload gets 10 s plus
-/// 800 s. That is about 0.5 Mbit/s, under any phone's uplink, and it keeps P39a's rule that a slow caller cannot hold
-/// one of the 32 slots for as long as it likes.
-pub const BODY_RATE: u64 = 64 * 1024;
+/// After a body cut for being too slow, the drain reads on for up to this long (P39u review round, S2; see
+/// `Conn::read_body`).
+pub const CUT_DRAIN: Duration = Duration::from_secs(10);
+/// The slowest a body may arrive on average, past its first `READ_TIMEOUT`: 128 kbit/s, so a 2.7 MB photo gets
+/// 10 s plus 164 s. P39b set 64 KiB/s (about 0.5 Mbit/s), and the P39u review round put that on the edge of what one
+/// bar of LTE carries: a cell-edge uplink is power-limited to roughly 0.1-1 Mbit/s of goodput, less through a
+/// tailnet relay on a lossy radio (public figures, not measured on the owner's phone; the first saved upload's log
+/// line is that measurement). `BODY_MOST` keeps P39a's rule that a slow caller cannot hold a slot for as long as it
+/// likes.
+pub const BODY_RATE: u64 = 16 * 1024;
+/// The longest one body may take, whatever its size (P39u review round, S1): at `BODY_RATE` alone a 50 MiB upload
+/// would hold its slot 10 s plus 3 200 s. At 20 minutes a file that large needs about 43 KiB/s.
+pub const BODY_MOST: Duration = Duration::from_secs(20 * 60);
 /// A live view's write gives up after this long: a reader that stopped reading does not keep its slot.
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// A chunk-size or trailer line longer than this is not one.
@@ -45,6 +54,8 @@ pub struct Limits {
     pub connections: usize,
     /// Bytes a second a body must average once its first `read_timeout` is spent.
     pub body_rate: u64,
+    /// The most time one body may take (`BODY_MOST`).
+    pub body_most: Duration,
 }
 
 impl Limits {
@@ -52,6 +63,7 @@ impl Limits {
         read_timeout: READ_TIMEOUT,
         connections: CONNECTIONS,
         body_rate: BODY_RATE,
+        body_most: BODY_MOST,
     };
 }
 
@@ -261,6 +273,26 @@ impl BodyError {
     }
 }
 
+/// How long, and how much, `finish` reads and drops after the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Drain {
+    pub bytes: u64,
+    pub until: Instant,
+    /// The drain stops when nothing has come for this long: the caller has stopped sending.
+    pub idle: Duration,
+}
+
+impl Drain {
+    /// After any answer: `DRAIN_LIMIT` for `DRAIN_TIME`.
+    pub fn after_answer() -> Self {
+        Self {
+            bytes: DRAIN_LIMIT as u64,
+            until: Instant::now() + DRAIN_TIME,
+            idle: DRAIN_TIME,
+        }
+    }
+}
+
 /// The connection as a route sees it, on the blocking pool: the body to read when it wants one, and the socket to
 /// write a live view to.
 pub struct Conn {
@@ -270,6 +302,10 @@ pub struct Conn {
     framing: Framing,
     limits: Limits,
     started: Instant,
+    /// The body's bytes taken so far, for the drain after a cut.
+    taken: u64,
+    /// Set when the body was cut for being too slow (`read_body`): the drain that follows its 400.
+    drain: Option<Drain>,
 }
 
 impl Conn {
@@ -286,6 +322,8 @@ impl Conn {
             framing,
             limits,
             started: Instant::now(),
+            taken: 0,
+            drain: None,
         }
     }
 
@@ -298,8 +336,9 @@ impl Conn {
         self.started.elapsed()
     }
 
-    fn into_stream(self) -> std::net::TcpStream {
-        self.stream
+    fn into_stream(self) -> (std::net::TcpStream, Drain) {
+        let drain = self.drain.unwrap_or_else(Drain::after_answer);
+        (self.stream, drain)
     }
 
     /// The bytes waiting, reading more when none are: at most `read_timeout` per read, never past `deadline`.
@@ -365,6 +404,7 @@ impl Conn {
             sink.write_all(&waiting[..take])
                 .map_err(|err| BodyError::Write(err.to_string()))?;
             self.at += take;
+            self.taken += take as u64;
             count -= take as u64;
         }
         Ok(())
@@ -389,7 +429,7 @@ impl Conn {
 
     /// Read the whole body into `sink`, at most `limit` bytes; how many were read. A `Content-Length` over `limit`
     /// is refused before a byte is read; a chunked body is counted as it streams and refused the moment it passes
-    /// `limit`. The deadline is `read_timeout` plus the body's size at `body_rate`.
+    /// `limit`. The deadline is `read_timeout` plus the body's size at `body_rate`, and never past `body_most`.
     pub fn read_body(&mut self, limit: u64, sink: &mut dyn Write) -> Result<u64, BodyError> {
         let size = match self.framing {
             Framing::None => return Ok(0),
@@ -399,7 +439,38 @@ impl Conn {
             Framing::Chunked => limit,
         };
         let rate = self.limits.body_rate.max(1);
-        let deadline = self.started + self.limits.read_timeout + Duration::from_secs(size / rate);
+        let allowed = (self.limits.read_timeout + Duration::from_secs(size / rate))
+            .min(self.limits.body_most);
+        let read = self.read_framed(limit, sink, self.started + allowed);
+        if read == Err(BodyError::Timeout) {
+            // The 400 that follows is the caller's only word of the cut, and a caller still sending when the socket
+            // closes is reset, which can lose the answer (P39u review round, S2). So the drain reads on: the rest of
+            // a declared length (a chunked body's is not known, so `DRAIN_LIMIT`), for at most `CUT_DRAIN`, and
+            // stops when the caller goes quiet for `read_timeout`. Not to the ceiling: this caller was cut for being
+            // slow, and the drain is outside the upload's in-flight place, so it must not hold a connection for
+            // minutes. tailscaled's proxy, the only real caller, reads the answer as it arrives and closes on its
+            // `Connection: close`, which ends the drain at once; 10 s covers a caller that finishes a send already
+            // under way before it reads.
+            let bytes = match self.framing {
+                Framing::Length(length) => length.saturating_sub(self.taken),
+                _ => DRAIN_LIMIT as u64,
+            };
+            self.drain = Some(Drain {
+                bytes,
+                until: Instant::now() + CUT_DRAIN,
+                idle: self.limits.read_timeout,
+            });
+        }
+        read
+    }
+
+    /// `read_body`'s reading, to `deadline`.
+    fn read_framed(
+        &mut self,
+        limit: u64,
+        sink: &mut dyn Write,
+        deadline: Instant,
+    ) -> Result<u64, BodyError> {
         if let Framing::Length(length) = self.framing {
             self.copy(length, sink, deadline)?;
             self.framing = Framing::None;
@@ -555,7 +626,7 @@ async fn connection(
         (conn.into_stream(), response)
     })
     .await;
-    let Ok((plain, response)) = ran else {
+    let Ok(((plain, drain), response)) = ran else {
         return;
     };
     if plain.set_nonblocking(true).is_err() {
@@ -564,21 +635,26 @@ async fn connection(
     let Ok(mut stream) = tokio::net::TcpStream::from_std(plain) else {
         return;
     };
-    finish(&mut stream, &response.encode(head_only)).await;
+    finish_with(&mut stream, &response.encode(head_only), drain).await;
 }
 
 /// Send the answer, close the sending half, then read and drop what the caller still sends until it closes, up to
 /// `DRAIN_LIMIT` or `DRAIN_TIME`.
 async fn finish(stream: &mut tokio::net::TcpStream, answer: &[u8]) {
+    finish_with(stream, answer, Drain::after_answer()).await;
+}
+
+/// `finish`, draining as `drain` says: a body cut for being slow drains longer (`Conn::read_body`).
+async fn finish_with(stream: &mut tokio::net::TcpStream, answer: &[u8], drain: Drain) {
     let _ = stream.write_all(answer).await;
     let _ = stream.shutdown().await;
-    let _ = tokio::time::timeout(DRAIN_TIME, async {
+    let _ = tokio::time::timeout_at(drain.until.into(), async {
         let mut chunk = [0u8; 16 * 1024];
-        let mut left = DRAIN_LIMIT;
+        let mut left = drain.bytes;
         while left > 0 {
-            match stream.read(&mut chunk).await {
-                Ok(0) | Err(_) => break,
-                Ok(read) => left = left.saturating_sub(read),
+            match tokio::time::timeout(drain.idle, stream.read(&mut chunk)).await {
+                Ok(Ok(0) | Err(_)) | Err(_) => break,
+                Ok(Ok(read)) => left = left.saturating_sub(read as u64),
             }
         }
     })

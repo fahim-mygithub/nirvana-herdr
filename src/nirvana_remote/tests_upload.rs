@@ -1,15 +1,16 @@
 //! Plan 39 P39u: phone uploads that never landed (2026-11-06, the owner's iPhone, 0.58.1), and the fixes. Fakes
 //! only, as `tests_live.rs`: a fake herdr, no Tailscale, a server on 127.0.0.1 that the test stops.
 
-use std::io::Write;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::Value;
 
 use super::http;
 use super::tests_live::{
-    get, post, raw, serve, serve_with, upload_head, upload_streamed, world, OWNER,
+    get, post, raw, serve, serve_with, upload_head, upload_streamed, upload_timed, world, OWNER,
 };
 
 /// Everything the server logs, from every thread: the upload route runs on tokio's blocking pool, so a thread-local
@@ -132,7 +133,8 @@ fn a_failed_upload_logs_one_line_with_its_size_bytes_time_and_why() {
 }
 
 /// Item 3: the page waits for an upload as long as the server would (its `READ_TIMEOUT` plus the size at its
-/// `BODY_RATE`) and a margin, then gives up; it uploads with XHR, whose progress iPhone Safari reports.
+/// `BODY_RATE`, never past its `BODY_MOST`) and a margin, then gives up; it uploads with XHR, whose progress iPhone
+/// Safari reports.
 #[test]
 fn the_page_gives_up_on_an_upload_just_after_the_servers_own_deadline() {
     let w = world("p39u-wait");
@@ -149,8 +151,15 @@ fn the_page_gives_up_on_an_upload_just_after_the_servers_own_deadline() {
         app.contains(&format!("const BODY_RATE = {};", http::BODY_RATE)),
         "the page's copy of BODY_RATE"
     );
+    assert!(
+        app.contains(&format!(
+            "const BODY_MOST_MS = {};",
+            http::BODY_MOST.as_millis()
+        )),
+        "the page's copy of BODY_MOST"
+    );
     for part in [
-        "return READ_TIMEOUT_MS + Math.ceil(bytes / BODY_RATE) * 1000 + UPLOAD_MARGIN_MS;",
+        "return Math.min(READ_TIMEOUT_MS + Math.ceil(bytes / BODY_RATE) * 1000, BODY_MOST_MS) + UPLOAD_MARGIN_MS;",
         "xhr.timeout = uploadWait(file.size);",
         "xhr.ontimeout = () => failed(",
         "xhr.onerror = () => failed(",
@@ -165,7 +174,8 @@ fn the_page_gives_up_on_an_upload_just_after_the_servers_own_deadline() {
 }
 
 /// Item 3: a failed chip says why on itself and has Retry; Send with one asks to send without it; "Wait for the
-/// upload to finish." only while one is under way.
+/// upload to finish." only while one is under way, cleared in `drawPending` so the X clears it too (review round,
+/// S3); at most the server's `UPLOADS_AT_ONCE` at once, the rest waiting on the page (review round, S1).
 #[test]
 fn a_failed_chip_says_why_and_retries_and_send_asks_to_go_without_it() {
     let w = world("p39u-chip");
@@ -193,9 +203,40 @@ fn a_failed_chip_says_why_and_retries_and_send_asks_to_go_without_it() {
             "return why + ' (' + size(r.data.read) + ' in ' + r.data.seconds + ' s)';",
             "how far it got",
         ),
+        (
+            "pending.splice(pending.indexOf(p), 1); drawPending(); next(); }",
+            "the X gives its place to a waiting chip",
+        ),
+        (
+            "p.queued = uploading() >= UPLOADS_AT_ONCE;",
+            "past the PC's number, a chip waits",
+        ),
+        (
+            "for (const q of pending) if (q.queued && uploading() < UPLOADS_AT_ONCE) start(q);",
+            "a waiting chip starts when a place is free",
+        ),
     ] {
         assert!(chat.contains(part), "{what}: {part}");
     }
+    assert!(
+        chat.contains(&format!(
+            "const UPLOADS_AT_ONCE = {};",
+            super::live::UPLOADS_AT_ONCE
+        )),
+        "the page's copy of UPLOADS_AT_ONCE"
+    );
+    // S3: the stale note is cleared in drawPending itself, which every path (the X too) goes through.
+    let draw = chat
+        .split("function drawPending() {")
+        .nth(1)
+        .and_then(|rest| rest.split("chips.replaceChildren(").next())
+        .expect("drawPending");
+    assert!(
+        draw.contains(
+            "if (note.textContent === WAIT && !pending.some((q) => q.state === 'up')) note.textContent = '';"
+        ),
+        "the note cleared in drawPending: {draw}"
+    );
     assert!(
         !chat.contains("note.textContent = 'The upload failed: '"),
         "the reason is no longer only in the note"
@@ -297,4 +338,128 @@ fn two_photos_at_once_into_a_new_space_both_land() {
         assert_eq!(status, 200, "{body}");
     }
     assert_eq!(w.uploaded().len(), 2, "{:?}", w.uploaded());
+}
+
+/// Review round S1: one upload may take at most `BODY_MOST`, whatever its size and rate. Here the rate alone would
+/// give a 1000-byte body 1000 s; the ceiling, shortened to 1.5 s, cuts it. And the real figures: the incident's
+/// 2.7 MB photo gets at least 170 s (128 kbit/s), and the ceiling is 20 minutes.
+#[test]
+fn an_upload_is_cut_at_the_ceiling_whatever_its_rate() {
+    let photo = http::READ_TIMEOUT + Duration::from_secs(2_700_000 / http::BODY_RATE);
+    assert!(photo >= Duration::from_secs(170), "{photo:?}");
+    assert_eq!(http::BODY_MOST, Duration::from_secs(20 * 60));
+    let w = world("p39u-ceiling");
+    let running = serve_with(
+        w.site(),
+        http::Limits {
+            read_timeout: Duration::from_millis(300),
+            body_rate: 1,
+            body_most: Duration::from_millis(1500),
+            ..http::Limits::DEFAULT
+        },
+    );
+    let (status, body, answered) = upload_timed(running.addr, upload_head(Some(1000)), |out| {
+        // Two bytes each 100 ms for 8 s: never idle for the 0.3 s, and the rate's deadline is far off.
+        for _ in 0..80 {
+            if out.write_all(b"xx").is_err() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    });
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("the upload was too slow"), "{body}");
+    assert!(
+        answered < Duration::from_secs(5),
+        "cut at the ceiling, not when the sender stopped: {answered:?}"
+    );
+    assert!(w.uploaded().is_empty(), "{:?}", w.uploaded());
+}
+
+/// Review round S1: at most `UPLOADS_AT_ONCE` uploads are read at once, in all; one more is answered 503 at once and
+/// logged like any other failure; a place given back is taken again.
+#[test]
+fn a_fifth_upload_at_once_is_told_the_pc_is_busy() {
+    let log = captured();
+    let w = world("p39u-busy");
+    let running = serve(w.site());
+    let addr = running.addr;
+    let holding: Vec<_> = (0..super::live::UPLOADS_AT_ONCE)
+        .map(|_| {
+            let (go, wait) = mpsc::channel::<()>();
+            let upload = std::thread::spawn(move || {
+                upload_streamed(addr, upload_head(Some(1000)), move |out| {
+                    let _ = out.write_all(&[b'h'; 10]);
+                    let _ = wait.recv();
+                    let _ = out.write_all(&[b'h'; 990]);
+                })
+            });
+            (go, upload)
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(500));
+    let (status, body) = upload_streamed(addr, upload_head(Some(10)), |out| {
+        let _ = out.write_all(&[b'f'; 10]);
+    });
+    assert_eq!(status, 503, "{body}");
+    let answer: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(answer["error"], "the PC is busy with other uploads");
+    assert!(
+        upload_lines(&log)
+            .iter()
+            .any(|line| line.contains("status=503")
+                && line.contains("why=the PC is busy with other uploads")),
+        "{:#?}",
+        upload_lines(&log)
+    );
+    for (go, upload) in holding {
+        let _ = go.send(());
+        let (status, body) = upload.join().unwrap();
+        assert_eq!(status, 200, "{body}");
+    }
+    let (status, _, body) = post(addr, "/api/upload?agent=p2", "image/jpeg", b"after", OWNER);
+    assert_eq!(status, 200, "the places were given back: {body}");
+    assert_eq!(w.uploaded().len(), super::live::UPLOADS_AT_ONCE + 1);
+}
+
+/// Review round S2: a caller that is still sending when its body is cut, and reads only once it has sent it all, gets
+/// the 400. The server drains the rest of the declared length for up to `CUT_DRAIN`; with the 1 s drain every other
+/// answer has, it closed while this caller still sent.
+#[test]
+fn a_slow_caller_that_reads_after_sending_still_gets_the_400() {
+    let w = world("p39u-drain");
+    let running = serve_with(
+        w.site(),
+        http::Limits {
+            read_timeout: Duration::from_millis(300),
+            body_rate: 1000,
+            ..http::Limits::DEFAULT
+        },
+    );
+    let mut stream = TcpStream::connect(running.addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    stream
+        .write_all(upload_head(Some(3000)).as_bytes())
+        .unwrap();
+    // 3000 bytes at 1000/s get 0.3 s plus 3 s. Slowly for 4 s, past the cut; then the rest over 2.5 s, past the
+    // 1 s drain; then read.
+    for _ in 0..40 {
+        let _ = stream.write_all(b"ss");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    for _ in 0..10 {
+        let _ = stream.write_all(&[b's'; 292]);
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let mut answer = Vec::new();
+    let read = stream.read_to_end(&mut answer);
+    let text = String::from_utf8_lossy(&answer);
+    assert!(
+        text.starts_with("HTTP/1.1 400 "),
+        "the 400 arrived ({read:?}): {text:?}"
+    );
+    assert!(text.contains("the upload was too slow"), "{text}");
+    assert!(w.uploaded().is_empty(), "{:?}", w.uploaded());
 }

@@ -16,6 +16,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::Instant;
 
@@ -532,6 +533,8 @@ impl Site {
             }
             _ => {}
         }
+        // Held until the answer: the body is read only with a place.
+        let _place = self.uploads.take().ok_or_else(|| (503, BUSY.to_string()))?;
         let found = self.found_in(request).map_err(|refused| {
             let why = serde_json::from_slice::<Value>(&refused.body)
                 .ok()
@@ -552,6 +555,38 @@ impl Site {
             conn.read_body(send::UPLOAD_MOST, &mut Counted { sink, read })
         })?;
         Ok(json!({"file": name, "path": path.display().to_string(), "size": size}))
+    }
+}
+
+/// At most this many uploads are read at once, in all (P39u review round, S1). Per caller would bound nothing:
+/// tailscaled's proxy makes every request come from loopback, and only the owner's login gets this far. With the
+/// slower `http::BODY_RATE` an upload can hold a connection for up to `http::BODY_MOST`; four of them and the six
+/// live views (`stream::MOST`) are 10 of the 32 connections, so a stuck or retrying phone cannot starve the page.
+/// The page keeps to the same number by itself (chat.js `UPLOADS_AT_ONCE`); past it the answer is a 503.
+pub const UPLOADS_AT_ONCE: usize = 4;
+const BUSY: &str = "the PC is busy with other uploads";
+
+/// The uploads being read now (`UPLOADS_AT_ONCE`).
+#[derive(Debug, Default)]
+pub struct Uploads(AtomicUsize);
+
+impl Uploads {
+    /// A place, given back when it drops; `None` when all are taken.
+    fn take(&self) -> Option<Place<'_>> {
+        self.0
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |now| {
+                (now < UPLOADS_AT_ONCE).then_some(now + 1)
+            })
+            .ok()
+            .map(|_| Place(&self.0))
+    }
+}
+
+struct Place<'a>(&'a AtomicUsize);
+
+impl Drop for Place<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 

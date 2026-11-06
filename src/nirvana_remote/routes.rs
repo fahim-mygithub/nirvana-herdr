@@ -266,6 +266,8 @@ pub struct Site {
     pub local: super::pick::Local,
     /// P39e: the phones with alerts on and this PC's push key (alerts.rs). `None` answers that alerts are not set up.
     pub alerts: Option<Arc<super::alerts::Alerts>>,
+    /// P39u: the uploads being read now, at most `live::UPLOADS_AT_ONCE`.
+    pub uploads: super::live::Uploads,
 }
 
 impl Site {
@@ -294,6 +296,7 @@ impl Site {
             spent: super::prompt::Spent::default(),
             local: super::pick::Local::default(),
             alerts: None,
+            uploads: super::live::Uploads::default(),
             herdr,
         }
     }

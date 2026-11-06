@@ -99,13 +99,15 @@
     return answer(response);
   }
 
-  // The server's body deadline (http.rs READ_TIMEOUT and BODY_RATE): 10 s, plus the size at 64 KiB a second. An
-  // upload waits that long and a margin, so the server's own answer and its reason come first; past it the PC is not
-  // answering at all (record p39u: on 2026-11-06 a fetch with no end left a chip "uploading" and Send refused).
+  // The server's body deadline (http.rs READ_TIMEOUT, BODY_RATE and BODY_MOST): 10 s, plus the size at 16 KiB a
+  // second, never past 20 minutes. An upload waits that long and a margin, so the server's own answer and its reason
+  // come first; past it the PC is not answering at all (record p39u: on 2026-11-06 a fetch with no end left a chip
+  // "uploading" and Send refused).
   const READ_TIMEOUT_MS = 10000;
-  const BODY_RATE = 65536;
+  const BODY_RATE = 16384;
+  const BODY_MOST_MS = 1200000;
   const UPLOAD_MARGIN_MS = 30000;
-  function uploadWait(bytes) { return READ_TIMEOUT_MS + Math.ceil(bytes / BODY_RATE) * 1000 + UPLOAD_MARGIN_MS; }
+  function uploadWait(bytes) { return Math.min(READ_TIMEOUT_MS + Math.ceil(bytes / BODY_RATE) * 1000, BODY_MOST_MS) + UPLOAD_MARGIN_MS; }
 
   // A file as the whole body; the server names it from its type (record p39b, uploads). XMLHttpRequest, not fetch
   // (record p39u): its upload progress works on iPhone Safari, where fetch has none, and its timeout ends an upload

@@ -1284,6 +1284,35 @@ pub(super) fn upload_streamed(
     (status, body)
 }
 
+/// `upload_streamed`, with how long the answer's first byte took: after a cut the server drains what the caller
+/// still sends (P39u review round, S2), so the exchange ends later than the answer arrives.
+pub(super) fn upload_timed(
+    addr: SocketAddr,
+    head: String,
+    body: impl FnOnce(&mut TcpStream) + Send + 'static,
+) -> (u16, String, Duration) {
+    let started = Instant::now();
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    stream.write_all(head.as_bytes()).unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let sender = std::thread::spawn(move || body(&mut writer));
+    let mut answer = vec![0u8; 1];
+    let first = match stream.read(&mut answer) {
+        Ok(1) => started.elapsed(),
+        _ => {
+            answer.clear();
+            started.elapsed()
+        }
+    };
+    let _ = stream.read_to_end(&mut answer);
+    let _ = sender.join();
+    let (status, _, body) = split(&String::from_utf8_lossy(&answer));
+    (status, body, first)
+}
+
 pub(super) fn upload_head(length: Option<u64>) -> String {
     let framing = length.map_or_else(
         || "Transfer-Encoding: chunked\r\n".to_string(),
@@ -1409,10 +1438,10 @@ fn a_slow_upload_is_cut_and_leaves_no_file() {
             read_timeout: Duration::from_millis(500),
             connections: http::CONNECTIONS,
             body_rate: 1000,
+            body_most: http::BODY_MOST,
         },
     );
-    let started = Instant::now();
-    let (status, _) = upload_streamed(running.addr, upload_head(Some(1500)), |out| {
+    let (status, _, answered) = upload_timed(running.addr, upload_head(Some(1500)), |out| {
         // Two bytes each 100 ms for 8 s: never idle for the 0.5 s, always under the rate.
         for _ in 0..80 {
             if out.write_all(b"xx").is_err() {
@@ -1422,9 +1451,11 @@ fn a_slow_upload_is_cut_and_leaves_no_file() {
         }
     });
     assert_eq!(status, 400, "1500 bytes at 1000/s get 0.5 s plus 1 s");
+    // The answer's time, not the exchange's: since P39u's review round the server drains what the sender still
+    // sends after the cut.
     assert!(
-        started.elapsed() < Duration::from_millis(4500),
-        "cut at the deadline, not when the sender stopped"
+        answered < Duration::from_millis(4500),
+        "cut at the deadline, not when the sender stopped: {answered:?}"
     );
     assert!(w.uploaded().is_empty());
 }

@@ -1408,6 +1408,7 @@ fn a_head_that_never_finishes_gets_408() {
             read_timeout: Duration::from_millis(300),
             connections: http::CONNECTIONS,
             body_rate: http::BODY_RATE,
+            body_most: http::BODY_MOST,
         },
     );
     let started = Instant::now();

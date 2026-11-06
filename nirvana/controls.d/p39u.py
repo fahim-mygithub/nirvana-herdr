@@ -13,6 +13,9 @@ T_TWO = _T + "two_photos_at_once_into_a_new_space_both_land"
 T_LOG = _T + "a_failed_upload_logs_one_line_with_its_size_bytes_time_and_why"
 T_WAIT = _T + "the_page_gives_up_on_an_upload_just_after_the_servers_own_deadline"
 T_CHIP = _T + "a_failed_chip_says_why_and_retries_and_send_asks_to_go_without_it"
+T_CEILING = _T + "an_upload_is_cut_at_the_ceiling_whatever_its_rate"
+T_BUSY = _T + "a_fifth_upload_at_once_is_told_the_pc_is_busy"
+T_DRAIN = _T + "a_slow_caller_that_reads_after_sending_still_gets_the_400"
 
 CONTROLS = (
     # The cause: the folder made by check-then-create, as 0.58.1 did; two uploads at once into a new space race
@@ -75,8 +78,8 @@ CONTROLS = (
             T_LOG, "rust"),
     # Item 3: the page's copy of the server's rate is the server's
     Control("p39u_page_rate", APP_JS,
-            "  const BODY_RATE = 65536;\n",
             "  const BODY_RATE = 16384;\n",
+            "  const BODY_RATE = 65536;\n",
             T_WAIT, "rust"),
     # Item 3: a hung upload times out
     Control("p39u_page_timeout", APP_JS,
@@ -112,5 +115,65 @@ CONTROLS = (
     Control("p39u_chip_how_far", CHAT_JS,
             "        return why + ' (' + size(r.data.read) + ' in ' + r.data.seconds + ' s)';\n",
             "        return why;\n",
+            T_CHIP, "rust"),
+    # Review round S1: the floor is 128 kbit/s, not P39b's 0.5 Mbit/s
+    Control("p39u_body_rate", HTTP,
+            "pub const BODY_RATE: u64 = 16 * 1024;\n",
+            "pub const BODY_RATE: u64 = 64 * 1024;\n",
+            T_CEILING, "rust"),
+    # Review round S1: no body takes longer than the ceiling
+    Control("p39u_ceiling", HTTP,
+            "            .min(self.limits.body_most);\n",
+            ";\n",
+            T_CEILING, "rust"),
+    # Review round S1: the page's copy of the ceiling is the server's
+    Control("p39u_page_most", APP_JS,
+            "  const BODY_MOST_MS = 1200000;\n",
+            "  const BODY_MOST_MS = 600000;\n",
+            T_WAIT, "rust"),
+    # Review round S1: the page waits no longer than the ceiling (and its margin)
+    Control("p39u_page_ceiling", APP_JS,
+            "return Math.min(READ_TIMEOUT_MS + Math.ceil(bytes / BODY_RATE) * 1000, BODY_MOST_MS) + UPLOAD_MARGIN_MS;",
+            "return READ_TIMEOUT_MS + Math.ceil(bytes / BODY_RATE) * 1000 + UPLOAD_MARGIN_MS;",
+            T_WAIT, "rust"),
+    # Review round S1: at most UPLOADS_AT_ONCE uploads are read at once; the next is a 503
+    Control("p39u_busy", LIVE,
+            "                (now < UPLOADS_AT_ONCE).then_some(now + 1)\n",
+            "                Some(now + 1)\n",
+            T_BUSY, "rust"),
+    # Review round S1: a place is given back when its upload answers
+    Control("p39u_busy_given_back", LIVE,
+            "        self.0.fetch_sub(1, Ordering::SeqCst);\n",
+            "",
+            T_BUSY, "rust"),
+    # Review round S2: after a body cut for being slow, the drain reads on, so a caller still sending reads the 400
+    Control("p39u_cut_drain", HTTP,
+            "        let drain = self.drain.unwrap_or_else(Drain::after_answer);\n",
+            "        let drain = Drain::after_answer();\n",
+            T_DRAIN, "rust"),
+    # Review round S3: the stale note is cleared where every path goes, the X included
+    Control("p39u_note_cleared", CHAT_JS,
+            "        if (note.textContent === WAIT && !pending.some((q) => q.state === 'up')) note.textContent = '';\n",
+            "",
+            T_CHIP, "rust"),
+    # Review round S1: the page's copy of UPLOADS_AT_ONCE is the server's
+    Control("p39u_page_at_once", CHAT_JS,
+            "  const UPLOADS_AT_ONCE = 4;\n",
+            "  const UPLOADS_AT_ONCE = 6;\n",
+            T_CHIP, "rust"),
+    # Review round S1: past the PC's number a chip waits on the page, not a 503
+    Control("p39u_page_queue", CHAT_JS,
+            "        p.queued = uploading() >= UPLOADS_AT_ONCE;\n",
+            "        p.queued = false;\n",
+            T_CHIP, "rust"),
+    # Review round S1: a waiting chip starts when a place comes free
+    Control("p39u_page_next", CHAT_JS,
+            "        for (const q of pending) if (q.queued && uploading() < UPLOADS_AT_ONCE) start(q);\n",
+            "",
+            T_CHIP, "rust"),
+    # Review round S1: the X gives its place to a waiting chip
+    Control("p39u_x_next", CHAT_JS,
+            "drawPending(); next(); } }, nv.icon('close'",
+            "drawPending(); } }, nv.icon('close'",
             T_CHIP, "rust"),
 )

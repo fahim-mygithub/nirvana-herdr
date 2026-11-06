@@ -267,8 +267,8 @@ CONTROLS = (
             T_UPLOAD, "rust"),
     # Uploads: kept out of git by the folder's own .gitignore
     Control("p39b_upload_gitignore", SEND,
-            '        std::fs::write(&ignore, IGNORE).map_err(|err| format!("{}: {err}", ignore.display()))?;\n',
-            '        std::fs::write(&ignore, "").map_err(|err| format!("{}: {err}", ignore.display()))?;\n',
+            "            .write_all(IGNORE.as_bytes())\n",
+            '            .write_all(b"")\n',
             T_UPLOAD, "rust"),
     # Uploads: over 50 MB by its Content-Length, refused before the body (and before herdr is asked)
     Control("p39b_upload_head_413", LIVE,
@@ -292,8 +292,8 @@ CONTROLS = (
             T_CHUNKED, "rust"),
     # P39a's slow-request rule holds for a body: under the average rate is cut at the deadline
     Control("p39b_body_rate_deadline", HTTP,
-            "        let deadline = self.started + self.limits.read_timeout + Duration::from_secs(size / rate);\n",
-            "        let deadline = self.started + self.limits.read_timeout + Duration::from_secs(size / rate + 60);\n",
+            "        let allowed = (self.limits.read_timeout + Duration::from_secs(size / rate))\n",
+            "        let allowed = (self.limits.read_timeout + Duration::from_secs(size / rate + 60))\n",
             T_SLOW, "rust"),
     # ... and a body that stops is cut (a 400 since P39u)
     Control("p39b_body_timeout_408", HTTP,
