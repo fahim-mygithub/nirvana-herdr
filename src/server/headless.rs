@@ -3389,7 +3389,15 @@ impl HeadlessServer {
         // Plan 31 review W: a queued wake is tried again until it is delivered.
         changed |= self.app.nirvana_wake_retry(now);
         // Dead panes: a finished worker's or job's pane closes after its grace (`nirvana_dead::decide`).
-        changed |= self.app.nirvana_dead_panes(now);
+        // Review S2: the tabs each client has on screen keep their panes; `pane list` names only the server's focus.
+        let clients = &self.clients;
+        changed |= self.app.nirvana_dead_panes(now, || {
+            clients
+                .values()
+                .filter_map(|client| client.shell_location.as_ref()?.focused_tab_id())
+                .map(str::to_owned)
+                .collect()
+        });
         changed
     }
 }

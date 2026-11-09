@@ -85,6 +85,12 @@ struct FakeHerdr {
     extra_tabs: Vec<&'static str>,
     busy: Vec<&'static str>,
     relabelled: Vec<&'static str>,
+    /// Panes whose foreground list herdr answers empty.
+    empty: Vec<&'static str>,
+    /// Panes gone by the time of their `pane close` (`pane_not_found`).
+    gone: Vec<&'static str>,
+    /// Tabs `tab list` reads as the server's focus.
+    focused_tabs: Vec<&'static str>,
     closed: RefCell<Vec<String>>,
 }
 
@@ -95,11 +101,14 @@ impl FakeHerdr {
             extra_tabs: vec!["wP:t1"],
             busy: Vec::new(),
             relabelled: Vec::new(),
+            empty: Vec::new(),
+            gone: Vec::new(),
+            focused_tabs: Vec::new(),
             closed: RefCell::new(Vec::new()),
         }
     }
 
-    fn call(&self, args: &[&str]) -> Result<Value, String> {
+    fn call(&self, args: &[&str]) -> Answer {
         match args {
             ["pane", "list"] => Ok(json!({"result": {"panes": self.panes}})),
             ["tab", "list"] => {
@@ -113,12 +122,17 @@ impl FakeHerdr {
                 }
                 let tabs: Vec<Value> = tabs
                     .iter()
-                    .map(|tab| json!({"tab_id": tab, "workspace_id": "wP"}))
+                    .map(|tab| {
+                        json!({"tab_id": tab, "workspace_id": "wP",
+                            "focused": self.focused_tabs.contains(&tab.as_str())})
+                    })
                     .collect();
                 Ok(json!({"result": {"tabs": tabs}}))
             }
             ["pane", "process-info", "--pane", id] => {
-                let names: Vec<&str> = if self.busy.contains(id) {
+                let names: Vec<&str> = if self.empty.contains(id) {
+                    Vec::new()
+                } else if self.busy.contains(id) {
                     vec!["pwsh.exe", "python.exe"]
                 } else {
                     vec!["pwsh.exe"]
@@ -131,7 +145,7 @@ impl FakeHerdr {
                     .panes
                     .iter()
                     .find(|pane| pane["pane_id"] == *id)
-                    .ok_or("pane_not_found")?;
+                    .ok_or((Some("pane_not_found".to_owned()), "no pane".to_owned()))?;
                 let label = if self.relabelled.contains(id) {
                     json!("sonnet\u{b7}someone-else")
                 } else {
@@ -139,16 +153,24 @@ impl FakeHerdr {
                 };
                 Ok(json!({"result": {"pane": {"pane_id": id, "label": label}}}))
             }
+            ["pane", "close", id] if self.gone.contains(id) => Err((
+                Some("pane_not_found".to_owned()),
+                format!("pane {id} not found"),
+            )),
             ["pane", "close", id] => {
                 self.closed.borrow_mut().push((*id).to_owned());
                 Ok(json!({"result": {"type": "ok"}}))
             }
-            other => Err(format!("the fake herdr has no answer for {other:?}")),
+            other => Err((None, format!("the fake herdr has no answer for {other:?}"))),
         }
     }
 
     fn sweep(&self, home: &Path, now: u64) -> Vec<String> {
-        sweep(home, &|args| self.call(args), now, false).unwrap()
+        self.pass(home, &Pass::at(now))
+    }
+
+    fn pass(&self, home: &Path, pass: &Pass) -> Vec<String> {
+        sweep(home, &|args| self.call(args), pass).unwrap()
     }
 
     fn closed(&self) -> Vec<String> {
@@ -378,7 +400,13 @@ fn a_dry_run_names_each_verdict_and_closes_nothing() {
         pane("wP:pD", "wP:t2", Some(&worker("done-one")), &root.0),
         pane("wP:pG", "wP:t2", Some(&worker("ghost")), &root.0),
     ]);
-    let lines = sweep(&home.0, &|args| herdr.call(args), LATER, true).unwrap();
+    let lines = herdr.pass(
+        &home.0,
+        &Pass {
+            dry_run: true,
+            ..Pass::at(LATER)
+        },
+    );
     assert!(herdr.closed().is_empty());
     assert_eq!(
         lines,
@@ -437,4 +465,257 @@ fn labels_name_a_worker_or_a_job() {
     assert_eq!(parse_label("1"), None);
     assert_eq!(parse_label("Jobs"), None);
     assert_eq!(parse_label("my shell\u{b7}x y"), None);
+}
+
+// ---- review round (dead-review.md S1-S6, N4) ----
+
+/// Appends a journal line to the run, with the next `seq`.
+fn append(root: &Path, run: &str, mut line: Value) {
+    let path = root
+        .join(".nirvana")
+        .join("runs")
+        .join(run)
+        .join("journal.jsonl");
+    let text = std::fs::read_to_string(&path).unwrap();
+    line["seq"] = json!(text.lines().count() + 1);
+    std::fs::write(&path, format!("{text}{line}\n")).unwrap();
+}
+
+#[test]
+fn a_tab_on_screen_keeps_its_panes() {
+    let (home, root) = (Temp::new("home"), Temp::new("proj"));
+    project_with(
+        &root.0,
+        "r",
+        &[
+            ("seen", "wP:pF"),
+            ("tabbed", "wP:pT"),
+            ("client", "wP:pC"),
+            ("off", "wP:pO"),
+        ],
+        &[],
+    );
+    let mut focused = pane("wP:pF", "wP:tF", Some(&worker("seen")), &root.0);
+    focused["focused"] = json!(true);
+    let mut herdr = FakeHerdr::new(vec![
+        agent_pane("wP:p1", "wP:t1"),
+        focused,
+        pane("wP:pT", "wP:tT", Some(&worker("tabbed")), &root.0),
+        pane("wP:pC", "wP:tC", Some(&worker("client")), &root.0),
+        pane("wP:pO", "wP:tO", Some(&worker("off")), &root.0),
+    ]);
+    herdr.focused_tabs = vec!["wP:tT"];
+    let pass = Pass {
+        watched_tabs: ["wP:tC".to_owned()].into_iter().collect(),
+        ..Pass::at(LATER)
+    };
+    herdr.pass(&home.0, &pass);
+    // The server's focused pane, the server's focused tab, and a client's focused tab stay; the tab no one sees closes.
+    assert_eq!(herdr.closed(), vec!["wP:pO".to_owned()]);
+}
+
+#[test]
+fn a_pass_closes_at_most_the_cap_and_the_next_takes_the_rest() {
+    let (home, root) = (Temp::new("home"), Temp::new("proj"));
+    let names: Vec<(String, String)> = (0..MAX_CLOSES + 5)
+        .map(|n| (format!("order-{n}"), format!("wP:q{n}")))
+        .collect();
+    let orders: Vec<(&str, &str)> = names
+        .iter()
+        .map(|(order, pane)| (order.as_str(), pane.as_str()))
+        .collect();
+    project_with(&root.0, "r", &orders, &[]);
+    let panes = |skip: usize| {
+        let mut panes = vec![agent_pane("wP:p1", "wP:t1")];
+        panes.extend(
+            names
+                .iter()
+                .skip(skip)
+                .map(|(order, id)| pane(id, "wP:t9", Some(&worker(order)), &root.0)),
+        );
+        panes
+    };
+    let first = FakeHerdr::new(panes(0));
+    let lines = first.sweep(&home.0, LATER);
+    assert_eq!(first.closed().len(), MAX_CLOSES);
+    assert_eq!(
+        lines.last().map(String::as_str),
+        Some("stopped at 25 closes; the rest wait for the next pass")
+    );
+    let second = FakeHerdr::new(panes(MAX_CLOSES));
+    second.sweep(&home.0, LATER + 60);
+    assert_eq!(second.closed().len(), 5);
+}
+
+#[test]
+fn a_worker_stopped_mid_run_keeps_its_pane_an_hour() {
+    let (home, root) = (Temp::new("home"), Temp::new("proj"));
+    // Started at 1_000_002, never ended, no supervisor: a crash or a restart mid-run.
+    project_with(&root.0, "r", &[("mid", "wP:pM")], &["mid"]);
+    let fresh = || {
+        FakeHerdr::new(vec![
+            agent_pane("wP:p1", "wP:t1"),
+            pane("wP:pM", "wP:t2", Some(&worker("mid")), &root.0),
+        ])
+    };
+    let stopped = 1_000_002;
+    // Ten minutes on: an ended order's pane would be gone; this one waits.
+    let herdr = fresh();
+    herdr.sweep(&home.0, stopped + 600);
+    assert!(herdr.closed().is_empty(), "kept under the hour");
+    // Hours on, but the server started ten seconds ago (a reboot): the hour counts from the start.
+    let herdr = fresh();
+    let now = stopped + 5 * 3600;
+    herdr.pass(
+        &home.0,
+        &Pass {
+            server_started: now - 10,
+            ..Pass::at(now)
+        },
+    );
+    assert!(
+        herdr.closed().is_empty(),
+        "kept an hour from the server's start"
+    );
+    // Past the hour: it closes.
+    let herdr = fresh();
+    herdr.sweep(&home.0, stopped + STOPPED_GRACE_S + 1);
+    assert_eq!(herdr.closed(), vec!["wP:pM".to_owned()]);
+}
+
+#[test]
+fn a_run_seating_a_worker_keeps_its_panes() {
+    let (home, root) = (Temp::new("home"), Temp::new("proj"));
+    project_with(&root.0, "r", &[("done-one", "wP:pS")], &[]);
+    let seated_at = LATER - 5;
+    append(
+        &root.0,
+        "r",
+        json!({"v":1,"at":seated_at,"event":"seated","order":"next","seat":"sonnet",
+            "cli":"claude","model":"claude-sonnet-5-5","effort":"medium","pool":"max","class":"ops.terminal",
+            "size":"medium","mode":"balanced","reason":"r","order_file":"f","cwd":"cwd"}),
+    );
+    let fresh = || {
+        FakeHerdr::new(vec![
+            agent_pane("wP:p1", "wP:t1"),
+            pane("wP:pS", "wP:t2", Some(&worker("done-one")), &root.0),
+        ])
+    };
+    // `open_pane` may be about to reuse the finished pane for `next`.
+    let herdr = fresh();
+    herdr.sweep(&home.0, LATER);
+    assert!(
+        herdr.closed().is_empty(),
+        "kept while the run seats a worker"
+    );
+    // Past the seat grace the finished pane closes.
+    let herdr = fresh();
+    herdr.sweep(&home.0, seated_at + SEAT_GRACE_S);
+    assert_eq!(herdr.closed(), vec!["wP:pS".to_owned()]);
+}
+
+#[test]
+fn a_pane_gone_at_its_close_counts_as_gone() {
+    let (home, root) = (Temp::new("home"), Temp::new("proj"));
+    project_with(&root.0, "r", &[("one", "wP:pA"), ("two", "wP:pB")], &[]);
+    // A space whose only tab holds two finished panes; the first is gone by its close.
+    let mut pair = FakeHerdr::new(vec![
+        pane("wP:pA", "wP:t9", Some(&worker("one")), &root.0),
+        pane("wP:pB", "wP:t9", Some(&worker("two")), &root.0),
+    ]);
+    pair.extra_tabs = Vec::new();
+    pair.gone = vec!["wP:pA"];
+    let lines = pair.sweep(&home.0, LATER);
+    assert_eq!(
+        lines,
+        vec![format!("wP:pA ({}) was already gone", worker("one"))]
+    );
+    // The gone pane counts as gone, so the other, now the space's last, stays.
+    assert!(pair.closed().is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn a_lock_probe_error_reads_live_and_keeps_the_pane() {
+    let (home, root) = (Temp::new("home"), Temp::new("proj"));
+    project_with(&root.0, "r", &[("odd", "wP:pL")], &["odd"]);
+    let project = Project::at(&root.0);
+    // A directory where the lock file goes: opening it fails with access denied, not a sharing violation.
+    let lock = root
+        .0
+        .join(".nirvana")
+        .join("runs")
+        .join("r")
+        .join("live")
+        .join("odd.lock");
+    std::fs::create_dir_all(&lock).unwrap();
+    assert!(
+        crate::nirvana_worker::live(&project, "r", "odd"),
+        "a probe error is a doubt, and a doubt reads live"
+    );
+    let herdr = FakeHerdr::new(vec![
+        agent_pane("wP:p1", "wP:t1"),
+        pane("wP:pL", "wP:t2", Some(&worker("odd")), &root.0),
+    ]);
+    herdr.sweep(&home.0, LATER + 1_000_000);
+    assert!(herdr.closed().is_empty());
+}
+
+#[test]
+fn the_sweep_timer_runs_only_in_the_nirvana_session() {
+    assert!(sweeps_in(Some("nirvana")));
+    assert!(!sweeps_in(None), "the default session");
+    assert!(!sweeps_in(Some("work")), "another named session");
+}
+
+#[test]
+fn an_unreadable_key_record_keeps_the_pane() {
+    let (home, root) = (Temp::new("home"), Temp::new("proj"));
+    project_with(&root.0, "r", &[("keyed", "wP:pU"), ("plain", "wP:pV")], &[]);
+    // A folder where the key record goes: it cannot be read, so the owner may have typed in the pane.
+    let keys = home.0.join("nirvana").join("keys");
+    std::fs::create_dir_all(keys.join("wP_pU")).unwrap();
+    let herdr = FakeHerdr::new(vec![
+        agent_pane("wP:p1", "wP:t1"),
+        pane("wP:pU", "wP:t2", Some(&worker("keyed")), &root.0),
+        pane("wP:pV", "wP:t2", Some(&worker("plain")), &root.0),
+    ]);
+    herdr.sweep(&home.0, LATER);
+    assert_eq!(herdr.closed(), vec!["wP:pV".to_owned()]);
+}
+
+#[test]
+fn an_empty_process_list_keeps_the_pane() {
+    let (home, root) = (Temp::new("home"), Temp::new("proj"));
+    project_with(&root.0, "r", &[("blank", "wP:pE"), ("plain", "wP:pW")], &[]);
+    let mut herdr = FakeHerdr::new(vec![
+        agent_pane("wP:p1", "wP:t1"),
+        pane("wP:pE", "wP:t2", Some(&worker("blank")), &root.0),
+        pane("wP:pW", "wP:t2", Some(&worker("plain")), &root.0),
+    ]);
+    herdr.empty = vec!["wP:pE"];
+    herdr.sweep(&home.0, LATER);
+    assert_eq!(herdr.closed(), vec!["wP:pW".to_owned()]);
+}
+
+#[test]
+fn a_herdr_call_past_its_limit_is_killed() {
+    let mut command = if cfg!(windows) {
+        let mut command = std::process::Command::new("ping");
+        command.args(["-n", "30", "127.0.0.1"]);
+        command
+    } else {
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30");
+        command
+    };
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let started = Instant::now();
+    let answer = output_within(command, Duration::from_millis(300));
+    let took = started.elapsed();
+    assert!(answer.is_err(), "a call past its limit is an error");
+    assert!(took < Duration::from_secs(10), "it waited {took:?}");
 }

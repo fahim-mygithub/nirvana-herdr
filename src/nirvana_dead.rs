@@ -14,8 +14,10 @@
 //! most runs never reach; a job's pane was never closed. `sweep` closes them by the rules in `decide`.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus, Output};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -30,6 +32,20 @@ pub const SEAT_GRACE_S: u64 = 60;
 /// run is being started in (its label renamed, its `seat exec` not yet typed) is never taken for a finished one. The
 /// run's journal, streams and record outlive the pane, so the wait costs nothing that the owner needs.
 pub const CLOSE_GRACE_S: u64 = 120;
+
+/// A pane whose order still wants a worker (Seated, Running, Deferred) but whose supervisor holds no lock stays this
+/// long, counted from the later of the order's last journal event and the server's start (review S4). That order did
+/// not end: its supervisor died with a crash, a reboot or a server restart, and `herdr run tick` restarts a Deferred
+/// one in a new pane (`open_pane` falls back to a new tab). After a restart the owner may want the last screen to see
+/// where it stopped, so the pane waits an hour, not the two minutes of an order that ended.
+pub const STOPPED_GRACE_S: u64 = 3600;
+
+/// At most this many closes per pass (review S2). The 2026-11-08 backlog was 115 panes; at 25 a minute it drains in
+/// five passes, so a wrong rule shows in the log and on screen before it takes everything, and a pass stays short.
+pub const MAX_CLOSES: usize = 25;
+
+/// One herdr call inside the sweep gives up after this (review S1). A `pane list` answers in milliseconds.
+pub const CALL_LIMIT: Duration = Duration::from_secs(15);
 
 /// The sweep's log under the Nirvana home's `nirvana/` folder: one line per pane it closed or failed to close.
 pub const LOG_FILE: &str = "dead-panes.log";
@@ -81,6 +97,11 @@ pub enum Ended {
     Unknown,
     /// Its supervisor or its job's process runs.
     Running,
+    /// Its run seated an order under `SEAT_GRACE_S` ago: `open_pane` may be about to reuse this pane (review S5).
+    Seating,
+    /// Its order still wants a worker but no supervisor holds the lock, since this unix second (the order's last
+    /// journal event): a crash or a restart mid-run. Waits `STOPPED_GRACE_S`.
+    Stopped(u64),
     /// It ended at this unix second (the order's last journal event, the job's end).
     At(u64),
 }
@@ -95,6 +116,8 @@ pub struct PaneFacts {
     pub tab_has_agent: bool,
     /// The pane is the only pane of its space's only tab: closing it would close the space.
     pub last_of_space: bool,
+    /// Its tab is on someone's screen: the server's focused tab or pane, or a client's focused tab (review S2).
+    pub watched: bool,
     pub ended: Ended,
     /// The owner's last key in the pane; `Err` when the record could not be read.
     pub owner_key_at: Result<Option<u64>, String>,
@@ -108,9 +131,11 @@ pub enum Verdict {
 
 /// Whether the sweep closes the pane. Every doubt keeps it. `processes` is `pane process-info`'s foreground list,
 /// asked only when every other rule allows the close, so a pass costs one herdr call per candidate, not per pane.
+/// `server_started` is the server's start in unix seconds (0 when unknown): a stopped order's hour counts from it too.
 pub fn decide(
     facts: &PaneFacts,
     now: u64,
+    server_started: u64,
     processes: impl FnOnce() -> Option<Vec<Value>>,
 ) -> Verdict {
     let keep = |why: &str| Verdict::Keep(why.to_owned());
@@ -123,13 +148,28 @@ pub fn decide(
     if facts.last_of_space {
         return keep("it is its space's last pane");
     }
-    let ended_at = match facts.ended {
+    if facts.watched {
+        return keep("it is on screen");
+    }
+    let (ended_at, since, grace, why) = match facts.ended {
         Ended::Unknown => return keep("no record names its worker or job"),
         Ended::Running => return keep("its worker or job still runs"),
-        Ended::At(at) => at,
+        Ended::Seating => return keep("its run is starting a worker"),
+        Ended::Stopped(at) => (
+            at,
+            at.max(server_started),
+            STOPPED_GRACE_S,
+            "its worker stopped mid-run under the hour's grace ago",
+        ),
+        Ended::At(at) => (
+            at,
+            at,
+            CLOSE_GRACE_S,
+            "its worker or job ended under the grace ago",
+        ),
     };
-    if now < ended_at.saturating_add(CLOSE_GRACE_S) {
-        return keep("its worker or job ended under the grace ago");
+    if now < since.saturating_add(grace) {
+        return keep(why);
     }
     match &facts.owner_key_at {
         Err(_) => return keep("the owner's last key in it could not be read"),
@@ -167,8 +207,8 @@ fn candidate_projects(home: &Path, pane: &str, cwd: Option<&str>) -> Vec<PathBuf
     roots
 }
 
-/// What the journals or the job records say of the pane's owner.
-pub fn ended_of(home: &Path, pane: &str, cwd: Option<&str>, owner: &Owner) -> Ended {
+/// What the journals or the job records say of the pane's owner at `now`.
+pub fn ended_of(home: &Path, pane: &str, cwd: Option<&str>, owner: &Owner, now: u64) -> Ended {
     match owner {
         Owner::Worker { seat, order } => {
             for root in candidate_projects(home, pane, cwd) {
@@ -185,6 +225,19 @@ pub fn ended_of(home: &Path, pane: &str, cwd: Option<&str>, owner: &Owner) -> En
                 }
                 if crate::nirvana_worker::live(&project, &run, order) {
                     return Ended::Running;
+                }
+                // Review S5: `open_pane` may reuse a finished pane of the run's tab for an order it seats; while one
+                // was seated under the seat grace ago, no pane of the run closes. The race left: a sweep that read
+                // the journal just before the `seated` line, then closed the pane as `open_pane` picked it (a
+                // window of one pass's `process-info`, `pane get` and `pane close`, well under a second).
+                if state.orders.iter().any(|other| {
+                    other.phase == Phase::Seated
+                        && now.saturating_sub(other.seated_at) < SEAT_GRACE_S
+                }) {
+                    return Ended::Seating;
+                }
+                if known.phase.wants_worker() {
+                    return Ended::Stopped(known.last_at);
                 }
                 return Ended::At(known.last_at);
             }
@@ -222,17 +275,67 @@ fn array_at(value: &Value, pointers: &[&str]) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// One pass over every pane herdr lists: closes each one `decide` allows, and returns a line per pane it closed or
-/// failed to close (with `dry_run`, a line per labelled pane and nothing closed). `herdr` is this build's CLI against
-/// the server (`nirvana_worker::herdr_json`); a test passes a fake.
+/// A herdr answer: its JSON, or its error code (`pane_not_found`) and message (`nirvana_worker::herdr_json_coded`).
+pub type Answer = Result<Value, (Option<String>, String)>;
+
+/// What one pass knows beyond the panes: when, whether it only reads, the server's start, and the tabs the server's
+/// clients have focused (the server passes them, `app::nirvana_dead_panes`; `pane list` names only its own focus).
+#[derive(Debug, Clone, Default)]
+pub struct Pass {
+    pub now: u64,
+    pub dry_run: bool,
+    pub server_started: u64,
+    pub watched_tabs: HashSet<String>,
+}
+
+impl Pass {
+    pub fn at(now: u64) -> Self {
+        Self {
+            now,
+            ..Self::default()
+        }
+    }
+}
+
+fn is_true(value: &Value, pointer: &str) -> bool {
+    value.pointer(pointer).and_then(Value::as_bool) == Some(true)
+}
+
+fn gone(code: &Option<String>) -> bool {
+    code.as_deref() == Some("pane_not_found")
+}
+
+/// A pane the pass closed or found gone leaves its tab one pane emptier, and its space one tab emptier with the last.
+fn forget(
+    panes_in_tab: &mut HashMap<String, usize>,
+    tabs_in_space: &mut HashMap<String, usize>,
+    tab: &str,
+    space: &str,
+) {
+    let left = panes_in_tab.entry(tab.to_owned()).or_default();
+    *left = left.saturating_sub(1);
+    if *left == 0 {
+        let tabs_left = tabs_in_space.entry(space.to_owned()).or_default();
+        *tabs_left = tabs_left.saturating_sub(1);
+    }
+}
+
+/// One pass over every pane herdr lists: closes each one `decide` allows, at most `MAX_CLOSES`, and returns a line
+/// per pane it closed, found gone or failed to close (with `dry_run`, a line per labelled pane and nothing closed).
+/// `herdr` is this build's CLI against the server (`nirvana_worker::herdr_json_within`); a test passes a fake.
 pub fn sweep(
     home: &Path,
-    herdr: &dyn Fn(&[&str]) -> Result<Value, String>,
-    now: u64,
-    dry_run: bool,
+    herdr: &dyn Fn(&[&str]) -> Answer,
+    pass: &Pass,
 ) -> Result<Vec<String>, String> {
-    let panes = array_at(&herdr(&["pane", "list"])?, &["/result/panes", "/panes"]);
-    let tabs = array_at(&herdr(&["tab", "list"])?, &["/result/tabs", "/tabs"]);
+    let now = pass.now;
+    let list = |args: &[&str], pointers: &[&str]| {
+        herdr(args)
+            .map(|value| array_at(&value, pointers))
+            .map_err(|(_, why)| why)
+    };
+    let panes = list(&["pane", "list"], &["/result/panes", "/panes"])?;
+    let tabs = list(&["tab", "list"], &["/result/tabs", "/tabs"])?;
     let tab_of = |pane: &Value| str_at(pane, &["/tab_id"]).unwrap_or("").to_owned();
     // Live counts, so a pass that closes several panes never takes a space's last one.
     let mut panes_in_tab: HashMap<String, usize> = HashMap::new();
@@ -255,8 +358,23 @@ pub fn sweep(
         .filter(|pane| str_at(pane, &["/agent"]).is_some())
         .map(tab_of)
         .collect();
+    // Review S2: a tab on screen keeps every pane in it. Scroll and mouse never reach `note_owner_key`, so a pane the
+    // owner is only reading would close under them; the server's focus is in `pane list` and `tab list`, the clients'
+    // own focus comes in `pass.watched_tabs`.
+    let mut watched = pass.watched_tabs.clone();
+    for tab in &tabs {
+        if is_true(tab, "/focused") {
+            watched.extend(str_at(tab, &["/tab_id"]).map(str::to_owned));
+        }
+    }
+    for pane in &panes {
+        if is_true(pane, "/focused") {
+            watched.insert(tab_of(pane));
+        }
+    }
 
     let mut lines = Vec::new();
+    let mut tries = 0;
     for pane in &panes {
         let Some(id) = str_at(pane, &["/pane_id"]) else {
             continue;
@@ -265,6 +383,12 @@ pub fn sweep(
         let Some(owner) = parse_label(label) else {
             continue;
         };
+        if !pass.dry_run && tries >= MAX_CLOSES {
+            lines.push(format!(
+                "stopped at {MAX_CLOSES} closes; the rest wait for the next pass"
+            ));
+            break;
+        }
         let tab = tab_of(pane);
         let space = space_of_tab.get(&tab).cloned().unwrap_or_default();
         let facts = PaneFacts {
@@ -272,7 +396,8 @@ pub fn sweep(
             tab_has_agent: agent_tabs.contains(&tab),
             last_of_space: panes_in_tab.get(&tab).copied().unwrap_or(0) <= 1
                 && tabs_in_space.get(&space).copied().unwrap_or(0) <= 1,
-            ended: ended_of(home, id, str_at(pane, &["/cwd"]), &owner),
+            watched: watched.contains(&tab),
+            ended: ended_of(home, id, str_at(pane, &["/cwd"]), &owner, now),
             owner_key_at: nirvana_run::owner_key_in(home, id),
             owner: Some(owner),
         };
@@ -289,8 +414,8 @@ pub fn sweep(
                     )
                 })
         };
-        let verdict = decide(&facts, now, read_processes);
-        if dry_run {
+        let verdict = decide(&facts, now, pass.server_started, read_processes);
+        if pass.dry_run {
             lines.push(match &verdict {
                 Verdict::Close => format!("would close {id} ({label})"),
                 Verdict::Keep(why) => format!("keeps {id} ({label}): {why}"),
@@ -300,11 +425,18 @@ pub fn sweep(
         if verdict != Verdict::Close {
             continue;
         }
+        tries += 1;
         // The label is read again just before the close: a run that reuses the pane renames it first
         // (`nirvana_worker::open_pane`), so a pane taken since the list is left alone.
-        let label_now = herdr(&["pane", "get", id]).ok().and_then(|info| {
-            str_at(&info, &["/result/pane/label", "/pane/label"]).map(str::to_owned)
-        });
+        let label_now = match herdr(&["pane", "get", id]) {
+            Ok(info) => str_at(&info, &["/result/pane/label", "/pane/label"]).map(str::to_owned),
+            Err((code, _)) if gone(&code) => {
+                lines.push(format!("{id} ({label}) was already gone"));
+                forget(&mut panes_in_tab, &mut tabs_in_space, &tab, &space);
+                continue;
+            }
+            Err(_) => None,
+        };
         if label_now.as_deref() != Some(label) {
             lines.push(format!(
                 "kept {id} ({label}): its label changed since the list"
@@ -314,23 +446,117 @@ pub fn sweep(
         match herdr(&["pane", "close", id]) {
             Ok(_) => {
                 lines.push(format!("closed {id} ({label})"));
-                let left = panes_in_tab.entry(tab.clone()).or_default();
-                *left = left.saturating_sub(1);
-                if *left == 0 {
-                    let tabs_left = tabs_in_space.entry(space).or_default();
-                    *tabs_left = tabs_left.saturating_sub(1);
-                }
+                forget(&mut panes_in_tab, &mut tabs_in_space, &tab, &space);
             }
-            Err(why) => lines.push(format!("failed to close {id} ({label}): {why}")),
+            // Review S5: a pane gone between the `pane get` and the close (its tab closed, a reuse failed) is one
+            // the pass no longer counts, not a failure.
+            Err((code, _)) if gone(&code) => {
+                lines.push(format!("{id} ({label}) was already gone"));
+                forget(&mut panes_in_tab, &mut tabs_in_space, &tab, &space);
+            }
+            Err((_, why)) => lines.push(format!("failed to close {id} ({label}): {why}")),
         }
     }
     Ok(lines)
 }
 
-/// `herdr run sweep [--dry-run]`: one pass against the server this process belongs to. The server starts it every
-/// `PASS_EVERY` (`app::nirvana_dead_panes`); the owner runs `--dry-run` to see each labelled pane's verdict.
+/// Waits for `child` up to `limit`; past it, kills it and answers `None` (review S1).
+pub fn wait_within(child: &mut Child, limit: Duration) -> std::io::Result<Option<ExitStatus>> {
+    let deadline = Instant::now() + limit;
+    let mut nap = Duration::from_millis(5);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        std::thread::sleep(nap.min(left));
+        nap = (nap * 2).min(Duration::from_millis(100));
+    }
+}
+
+fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> Option<std::thread::JoinHandle<Vec<u8>>> {
+    pipe.map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            bytes
+        })
+    })
+}
+
+/// `command`'s output, or an error once it runs past `limit` (killed). The pipes drain on threads so a full pipe never
+/// stalls the child; on a timeout they are left to end with it, not joined.
+pub fn output_within(mut command: Command, limit: Duration) -> Result<Output, String> {
+    let mut child = command.spawn().map_err(|err| err.to_string())?;
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+    let status = wait_within(&mut child, limit).map_err(|err| err.to_string())?;
+    let Some(status) = status else {
+        return Err(format!("no answer in {} s; killed", limit.as_secs_f32()));
+    };
+    let joined = |handle: Option<std::thread::JoinHandle<Vec<u8>>>| {
+        handle
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or_default()
+    };
+    Ok(Output {
+        status,
+        stdout: joined(stdout),
+        stderr: joined(stderr),
+    })
+}
+
+/// Appends `lines` to the sweep's log, each with the time.
+pub fn log_lines(home: &Path, lines: &[String]) {
+    let dir = home.join(crate::nirvana_seat::DIR);
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut log) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(LOG_FILE))
+    {
+        let at = nirvana_run::utc(nirvana_run::now());
+        for line in lines {
+            let _ = writeln!(log, "{at} {line}");
+        }
+    }
+}
+
+/// Whether a server of this session runs the sweep timer (review S6): only the Nirvana session's, as Nirvana Remote
+/// since 0.58.1 (`nirvana_remote::skip_reason`). Pane ids (`wP:p2`) are per session but the key and pane-index files
+/// under the shared home are keyed by id alone, so a second session's sweep could read another session's records.
+pub fn sweeps_in(session: Option<&str>) -> bool {
+    session == Some(crate::nirvana_launch::SESSION)
+}
+
+/// `herdr run sweep [--dry-run] [--server-started <unix s>] [--watched <tab>]...`: one pass against the server this
+/// process belongs to. The server starts it every `PASS_EVERY` (`app::nirvana_dead_panes`) with its start and its
+/// clients' focused tabs; the owner runs `--dry-run` to see each labelled pane's verdict. Run by hand without
+/// `--server-started`, the pass takes the server as started now, so a stopped order's pane reads kept.
 pub fn cli(args: &[String]) -> std::io::Result<()> {
-    let dry_run = args.iter().any(|arg| arg == "--dry-run");
+    let now = nirvana_run::now();
+    let mut pass = Pass {
+        server_started: now,
+        ..Pass::at(now)
+    };
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--dry-run" => pass.dry_run = true,
+            "--server-started" => {
+                if let Some(at) = rest.next().and_then(|at| at.parse().ok()) {
+                    pass.server_started = at;
+                }
+            }
+            "--watched" => pass.watched_tabs.extend(rest.next().cloned()),
+            _ => {}
+        }
+    }
     if !crate::nirvana_worker::in_herdr() {
         println!("not in herdr: no server to sweep");
         return Ok(());
@@ -339,34 +565,22 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         println!("no Nirvana home");
         return Ok(());
     };
-    let lines = match sweep(
-        &home,
-        &crate::nirvana_worker::herdr_json,
-        nirvana_run::now(),
-        dry_run,
-    ) {
+    let herdr = |args: &[&str]| crate::nirvana_worker::herdr_json_within(args, CALL_LIMIT);
+    let lines = match sweep(&home, &herdr, &pass) {
         Ok(lines) => lines,
         Err(why) => {
             eprintln!("herdr run sweep: {why}");
+            if !pass.dry_run {
+                log_lines(&home, &[format!("the sweep could not list panes: {why}")]);
+            }
             std::process::exit(1);
         }
     };
     for line in &lines {
         println!("{line}");
     }
-    if !dry_run && !lines.is_empty() {
-        let dir = home.join(crate::nirvana_seat::DIR);
-        let _ = std::fs::create_dir_all(&dir);
-        if let Ok(mut log) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join(LOG_FILE))
-        {
-            let at = nirvana_run::utc(nirvana_run::now());
-            for line in &lines {
-                let _ = writeln!(log, "{at} {line}");
-            }
-        }
+    if !pass.dry_run && !lines.is_empty() {
+        log_lines(&home, &lines);
     }
     Ok(())
 }

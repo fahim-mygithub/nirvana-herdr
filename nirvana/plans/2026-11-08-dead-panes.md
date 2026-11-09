@@ -107,6 +107,9 @@ Controls: `nirvana/controls.d/dead.py` (prefix `dead_`), each run alone and red;
 
 ## The owner's live check
 
+Replaced by the review round's steps below (the cap, the on-screen rule and the stopped-order hour change steps 2 and
+4).
+
 1. Install the merged build and restart Nirvana. Before 60 s pass, in any Nirvana pane: `herdr run sweep --dry-run`.
    Expect `would close …` for the old `run …` / `job·…` panes and `keeps …: <reason>` for any you typed in.
 2. Wait a minute. The `run …` tabs whose panes all closed are gone; `Jobs` is gone when no job runs.
@@ -116,3 +119,62 @@ Controls: `nirvana/controls.d/dead.py` (prefix `dead_`), each run alone and red;
 4. Seat a short order. Its row counts while it runs; when it ends its pane stays about 2 to 3 minutes, then closes.
    Type into a finished worker's pane before then: that pane stays.
 5. `herdr seat read <order>` on a closed worker still prints its report or stream.
+
+## Review round (2026-11-09)
+
+Builder: "Opus high - dead panes review round", on 1de5ee94. The review: "Sonnet high - dead panes review"
+(`dead-review.md` in the orchestrator's scratchpad). Every should-fix was checked against the code before it was fixed;
+all six held. The steps of "The owner's live check" above are replaced by the ones at the end of this section.
+
+| Finding | Checked | What was done | Test | Controls |
+|---|---|---|---|---|
+| S1 a hung sweep child stops all sweeping | held: the reaper only `wait()`ed, `herdr_json` is `.output()` with no limit | the reaper (`app::nirvana_dead_panes::reap`) waits at most `SWEEP_LIMIT` (300 s), kills the child, logs `the sweep ran past 300 s and was killed` to `dead-panes.log`, frees `SWEEPING` whatever happened; each herdr call in the sweep is `nirvana_worker::herdr_json_within(.., CALL_LIMIT)` (15 s, killed past it) | `a_hung_sweep_is_killed_logged_and_frees_the_next_pass` (a 30 s `ping` as the hung child), `a_herdr_call_past_its_limit_is_killed` | `dead_reap_deadline`, `dead_reap_frees`, `dead_reap_logs`, `dead_call_limit` |
+| S2 no cap, focused pane not protected | held: `pane list` and `tab list` carry `focused`; only forwarded keys reach `note_owner_key` (headless.rs:2450-2456) | a tab on screen keeps every pane in it: the server's focused tab, the tab of its focused pane, and each client's focused tab (`ClientShellLocation::focused_tab_id`, passed by the server as `--watched <tab>`); at most `MAX_CLOSES` (25) close attempts per pass, then `stopped at 25 closes; the rest wait for the next pass` | `a_tab_on_screen_keeps_its_panes`, `a_pass_closes_at_most_the_cap_and_the_next_takes_the_rest` | `dead_watched_keeps`, `dead_watched_tab_focus`, `dead_watched_pane_focus`, `dead_watched_clients`, `dead_cap`, `dead_cap_counts` |
+| S3 Windows lock probe: any error but 32 read free | held: `Err(err) => held(&err)` | only an open that succeeds reads free; `NotFound` reads not live; every other error reads live | `a_lock_probe_error_reads_live_and_keeps_the_pane` (Windows only: a folder where the lock file goes gives access denied) | `dead_probe_error_live` |
+| S4 a run cut by a reboot closes at once | held: `Ended::At(last_at)` for a Running order with no lock | `Ended::Stopped(last_at)` for an order that still wants a worker with no supervisor; it waits `STOPPED_GRACE_S` (1 h) from the later of `last_at` and the server's start (`--server-started`, the server's first loop pass); the owner-key rule still compares against `last_at` | `a_worker_stopped_mid_run_keeps_its_pane_an_hour` (10 min on: kept; 5 h on with the server 10 s old: kept; past the hour: closed) | `dead_stopped_grace`, `dead_stopped_from_start`, `dead_stopped_phase` |
+| S5 reuse race | held: `Placement::Reuse` at nirvana_worker.rs:2817 picks a finished pane of the run's tab | a pane whose run has an order Seated under `SEAT_GRACE_S` ago is kept (`Ended::Seating`); `pane_not_found` at `pane get` or `pane close` is "was already gone", counted gone so the space's last pane rule stays right | `a_run_seating_a_worker_keeps_its_panes`, `a_pane_gone_at_its_close_counts_as_gone` | `dead_seating`, `dead_gone_at_close`, `dead_gone_counts` |
+| S6 every server with a home sweeps | held: pane ids are per session, the key and pane-index files are not | the timer runs only when `session::active_name()` is `nirvana_launch::SESSION` (`nirvana_dead::sweeps_in`), as Nirvana Remote since 0.58.1; checked before `NEXT_PASS` is set, so another session's loop gets no sweep deadline at all | `the_sweep_timer_runs_only_in_the_nirvana_session` | `dead_session_gate` |
+| N4 missing tests | held | an unreadable key record keeps; an empty process list keeps (`only_shells(&[])` is true, so this arm is load-bearing) | `an_unreadable_key_record_keeps_the_pane`, `an_empty_process_list_keeps_the_pane` | `dead_key_unreadable`, `dead_empty_processes` |
+| N4 `dead_counts_the_closed` | its find text moved into `forget` | find updated, run alone: red | `a_run_tabs_panes_all_close_but_a_spaces_last_pane_stays` | `dead_counts_the_closed` |
+
+**The race that remains (S5).** A sweep that replayed the run's journal just before `herdr seat` wrote the `seated`
+line, then closed the pane while `open_pane` was picking it for reuse. The window is one candidate's `process-info`,
+`pane get` and `pane close`, well under a second. The seat start then fails at the pane rename; `herdr run tick`
+restarts a Deferred order in a new tab, a Seated one shows `stopped` after the seat grace. Accepted.
+
+**The stopped-order hour when run by hand.** `herdr run sweep` typed by the owner has no `--server-started`, so it takes
+the server as started now: a stopped order's pane reads `keeps …: its worker stopped mid-run under the hour's grace
+ago` in a hand-run dry run even when the server has been up longer. The server's own passes pass its real start.
+
+**Untested (N2), by design: none of it reaches a real server in a test.** The timer itself (`nirvana_dead_panes`
+returns at once under `cfg!(test)`); the session gate's call site (the test covers `sweeps_in`, not the call); the
+child spawn and its arguments (`--server-started`, `--watched`); the server's collection of the clients' focused tabs
+(headless.rs); the log file written by a real pass (the reaper's log line is tested); `herdr_json_within` against a
+real herdr (the limit is tested with a hung `ping`); a real `pane close` taking its tab with its last pane; whether a
+real `pane close` of a gone pane answers `pane_not_found` (the wake-pane fix measured that code for `pane close` on
+2026-10-18, `nirvana_worker::herdr_error`); a real session. The fake answers at the JSON pointers the real code
+already reads elsewhere.
+
+**Not done from the review:** N1 (no sweep deadline until the first `nirvana_dead_panes` call), N3 (same order name
+in two runs), N5, N6. None was asked; N3 keeps or closes correctly by the review's own reading.
+
+### The owner's live check (in order)
+
+1. Install the merged build and restart Nirvana.
+2. Before a minute passes, in any Nirvana pane: `herdr run sweep --dry-run`. Expect `would close …` for the old
+   `run …` and `job·…` panes, `keeps …: it is on screen` for every pane in the tab you are looking at, and
+   `keeps …: <reason>` for any you typed in. Run by hand, an order cut off mid-run reads kept (the hour, above).
+3. Wait about three minutes. The first pass runs a minute after the start and closes at most 25 panes; each minute
+   after closes up to 25 more, so the 2026-11-08 backlog (115) drains in about five minutes. `run …` tabs go when
+   their last pane does; `Jobs` goes when no job pane is left.
+   `type %LOCALAPPDATA%\Programs\Nirvana-Herdr\nirvana\dead-panes.log` lists each close, each `stopped at 25 closes`,
+   and any `was already gone`.
+4. Keep a finished worker's tab on screen through a pass: its panes stay. Switch away: they close on a later pass.
+5. A worker that was running when Nirvana went down keeps its pane for an hour after the restart, so its last screen
+   can be read; then it closes.
+6. The sidebar rows under the spaces show only workers that run now; the agents panel's Run groups show the ended
+   ones as stopped/blocked/done with their time frozen.
+7. Seat a short order. Its row counts while it runs; when it ends, and once its tab is off screen, its pane closes 2
+   to 3 minutes later. Type into a finished worker's pane before then: that pane stays.
+8. `herdr seat read <order>` on a closed worker still prints its report or stream.
+9. A second herdr session (`herdr --session other`) never sweeps: a finished worker's pane there stays.
