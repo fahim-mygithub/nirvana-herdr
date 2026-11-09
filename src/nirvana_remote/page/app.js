@@ -10,6 +10,33 @@
 (function () {
   'use strict';
 
+  // P39o item 7: the home-screen app is laid out for the whole screen (app.css :root.standalone). The owner,
+  // 2026-11-08: "it now doesn't need to accommodate for a web browser url bar." iOS answers navigator.standalone;
+  // an installed Android Chrome app, display-mode. While the keyboard is up, the visual viewport is smaller than the
+  // layout one (iOS does not resize the page for it, and may scroll it): its top and the part below it set the
+  // column's top and bottom, so the composer stays just above the keyboard.
+  const root = document.documentElement;
+  function media(query) { return Boolean(window.matchMedia && window.matchMedia(query).matches); }
+  const installed = navigator.standalone === true
+    || media('(display-mode: standalone)') || media('(display-mode: fullscreen)');
+  const KEYBOARD_PX = 80;
+  function fit() {
+    const view = window.visualViewport;
+    const top = Math.max(0, Math.round(view.offsetTop));
+    const below = Math.max(0, Math.round(window.innerHeight - view.height - view.offsetTop));
+    root.style.setProperty('--vv-top', top + 'px');
+    root.style.setProperty('--vv-bottom', below + 'px');
+    root.classList.toggle('kb', below > KEYBOARD_PX);
+  }
+  if (installed) {
+    root.classList.add('standalone');
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', fit);
+      window.visualViewport.addEventListener('scroll', fit);
+      fit();
+    }
+  }
+
   const screens = {};
   const enter = { r: 'scr-r', l: 'scr-l', f: 'scr-f' };
   let leave = null;

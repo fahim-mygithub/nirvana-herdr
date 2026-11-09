@@ -254,13 +254,31 @@ pub fn read(path: Option<&Path>) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// The last lines of an `agent.read` answer, trailing blanks and runs of blank lines dropped.
+/// A line that only draws: blank, or nothing but horizontal box rules and spaces. Claude Code's empty input box
+/// draws a dozen full-width `────` lines (P39o item 8: the owner's iPhone screenshot, 2026-11-08, showed six rules
+/// above the prompt and seven under it, filling the "On the PC now" box). A rule with a word in it (`──── Nirvana ─`)
+/// is content.
+fn filler(line: &str) -> bool {
+    line.chars().all(|c| matches!(c, ' ' | '─' | '━' | '═'))
+}
+
+/// The last lines of an `agent.read` answer: trailing blanks dropped, and each run of blank or rule-only lines
+/// collapsed to one line, a rule when the run has one (it still separates), before the last `LIVE_LINES` are taken,
+/// so those lines are content. Done here, not in the page: fewer bytes to the phone, and a test can hold it.
 pub fn live(read: &Value) -> String {
     let text = read["read"]["text"].as_str().unwrap_or("");
     let mut lines: Vec<&str> = Vec::new();
     for line in text.lines().map(str::trim_end) {
         if line.is_empty() && lines.last().is_none_or(|last| last.is_empty()) {
             continue;
+        }
+        if filler(line) {
+            if let Some(last) = lines.last_mut().filter(|last| filler(last)) {
+                if last.is_empty() {
+                    *last = line;
+                }
+                continue;
+            }
         }
         lines.push(line);
     }

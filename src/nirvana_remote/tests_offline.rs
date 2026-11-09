@@ -309,3 +309,103 @@ fn the_error_screen_says_which_case_and_what_to_check() {
         css.contains(".reach { position: absolute; inset: 0; z-index: 30; background: var(--bg);")
     );
 }
+
+/// Item 7: the home-screen app is laid out for the whole screen (the owner's iPhone, 2026-11-08: empty bands above
+/// the header and below the composer); a Safari tab keeps its old room. The layout itself was measured in headless
+/// Chromium with emulated insets (record p39o); this holds the lines that make it.
+#[test]
+fn the_home_screen_app_is_laid_out_for_the_whole_screen() {
+    let w = world("offline-layout");
+    let running = serve(w.site());
+    let (_, css) = fetch(running.addr, "/app.css");
+    let css = String::from_utf8(css).unwrap();
+    // The insets are read in one place, and every screen pads with them.
+    assert!(css.contains("  --safe-top: env(safe-area-inset-top, 0px);\n"));
+    assert!(css.contains("  --safe-bottom: env(safe-area-inset-bottom, 0px);\n"));
+    assert_eq!(
+        css.matches("env(safe-area-inset").count(),
+        4,
+        "only in :root"
+    );
+    assert!(css.contains("padding: calc(var(--gap-top) + var(--safe-top)) 12px 10px;"));
+    assert!(css.contains("padding: 10px 12px calc(var(--gap-bottom) + var(--safe-bottom));"));
+    // A tab keeps the prototype's room; the app keeps a small gap past the insets.
+    assert!(css.contains("  --gap-top: 48px;\n  --gap-bottom: 28px;\n"));
+    assert!(css.contains(":root.standalone { --gap-top: 10px; --gap-bottom: 10px; }"));
+    // The keyboard covers the home indicator.
+    assert!(css.contains(":root.standalone.kb { --safe-bottom: 0px; }"));
+    // The app's column is the screen, not a height from vh, and follows the visual viewport.
+    assert!(css.contains(
+        ":root.standalone .nv {\n  position: fixed;\n  top: var(--vv-top, 0px);\n  bottom: var(--vv-bottom, 0px);\n"
+    ));
+    // Landscape: the column stays clear of a notch on either side.
+    assert!(css.contains(
+        "  max-width: min(430px, calc(100vw - 2 * max(var(--safe-left), var(--safe-right))));\n"
+    ));
+
+    let (_, app) = fetch(running.addr, "/app.js");
+    let app = String::from_utf8(app).unwrap();
+    assert!(app.contains("  const installed = navigator.standalone === true\n    || media('(display-mode: standalone)') || media('(display-mode: fullscreen)');\n"));
+    assert!(app.contains("  if (installed) {\n    root.classList.add('standalone');\n"));
+    assert!(app.contains(
+        "    const below = Math.max(0, Math.round(window.innerHeight - view.height - view.offsetTop));\n"
+    ));
+    assert!(app.contains("    root.style.setProperty('--vv-bottom', below + 'px');\n"));
+    assert!(app.contains("    root.classList.toggle('kb', below > KEYBOARD_PX);\n"));
+    assert!(app.contains("      window.visualViewport.addEventListener('resize', fit);\n"));
+
+    let (_, _, page) = get(running.addr, "/", OWNER);
+    assert!(page.contains("viewport-fit=cover"), "edge to edge");
+    assert!(page.contains(
+        r#"<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">"#
+    ));
+}
+
+/// Item 8: "On the PC now" shows content, not Claude Code's empty input box. A screen as the owner's screenshot of
+/// 2026-11-08 showed it: six rules, the box's titled rule, the prompt line, seven rules, a short one, a blank, the
+/// status lines.
+#[test]
+fn the_pc_now_box_collapses_runs_of_blank_and_rule_lines() {
+    let rule = "─".repeat(80);
+    let mut screen = vec![
+        "  - Restart Claude Code to load the new MCP tools".to_string(),
+        String::new(),
+        "* Crunched for 48s · done 11:28 PM".to_string(),
+        String::new(),
+        "136465 tokens".to_string(),
+    ];
+    screen.extend(std::iter::repeat_n(rule.clone(), 6));
+    screen.push(format!("{} Nirvana ─", "─".repeat(46)));
+    screen.push("❯ fix the e2e fixture and run those two tests".to_string());
+    screen.extend(std::iter::repeat_n(format!("{rule}   "), 7));
+    screen.push("━".repeat(60));
+    screen.push(String::new());
+    screen.push("  Claude 5h 19% 3h42m · Gemini week 7% 4d19h".to_string());
+    screen.push("═".repeat(10) + "  " + &"─".repeat(10));
+    screen.push("  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent".to_string());
+    screen.push(String::new());
+    let read = serde_json::json!({ "read": { "text": screen.join("\n") } });
+    let live = super::chat::live(&read);
+    let want = [
+        "  - Restart Claude Code to load the new MCP tools",
+        "",
+        "* Crunched for 48s · done 11:28 PM",
+        "",
+        "136465 tokens",
+        rule.as_str(),
+        &format!("{} Nirvana ─", "─".repeat(46)),
+        "❯ fix the e2e fixture and run those two tests",
+        rule.as_str(),
+        "  Claude 5h 19% 3h42m · Gemini week 7% 4d19h",
+        &("═".repeat(10) + "  " + &"─".repeat(10)),
+        "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent",
+    ]
+    .join("\n");
+    assert_eq!(live, want);
+    // A run that starts blank keeps a rule, which still separates.
+    let read = serde_json::json!({ "read": { "text": format!("a\n\n{rule}\n\nb") } });
+    assert_eq!(super::chat::live(&read), format!("a\n{rule}\nb"));
+    // Blank lines alone still collapse to one, as before.
+    let read = serde_json::json!({ "read": { "text": "a\n\n\n\nb\n\n" } });
+    assert_eq!(super::chat::live(&read), "a\n\nb");
+}
