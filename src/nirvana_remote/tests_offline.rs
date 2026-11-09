@@ -242,8 +242,9 @@ fn the_error_screen_says_which_case_and_what_to_check() {
     // Item 2: the titles, and the refusal names the account, not reach.
     assert!(app.contains(r#"unreachable: { title: "Can't reach your PC","#));
     assert!(app.contains("offline: { title: 'This phone is offline',"));
+    // Review round, S4: a 403 is also the same-site check of a page not opened from the PC's own address.
     assert!(app.contains(
-        r#"refused: { title: 'The PC refused this phone', lead: "This phone's Tailscale account is not the PC's."#
+        r#"refused: { title: 'The PC refused this phone', lead: "This phone's Tailscale account is not the PC's, or this page was not opened from the PC's own address. Only"#
     ));
     let refused = app.split("    refused: {").nth(1).unwrap();
     let refused = &refused[..refused.find('\n').unwrap()];
@@ -271,15 +272,17 @@ fn the_error_screen_says_which_case_and_what_to_check() {
     // Every request reports what came back; one with no answer waits as a live view does; only a failed load
     // (not a send, whose typed text would go) has its screen drawn again.
     assert!(app.contains("    if (load) reach.dirty = true;\n"));
-    assert!(app.contains("      trouble('network', !options.method);\n"));
+    assert!(app.contains("      trouble('network', load);\n"));
+    assert!(app.contains("    if (why) trouble(why, load);\n"));
     assert!(app.contains("    if (why === 'network') lost();\n    else fallen(why);\n"));
-    assert!(app.contains("    const response = await reached(path, { credentials: 'same-origin', cache: 'no-store' });\n"));
+    assert!(app.contains("    const response = await reached(path, { credentials: 'same-origin', cache: 'no-store' }, !quiet);\n"));
+    assert!(app.contains("      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),\n    }, false);\n"));
     assert!(app.contains("      xhr.addEventListener('error', () => trouble('network'));"));
     // Back where the owner was: the screen stays under the error screen, a failed screen is drawn again, live views
     // open at once; a screen change keeps the error screen on top.
-    assert!(
-        app.contains("    if (reach.dirty && current) show(current.name, 'f', current.params);\n")
-    );
+    assert!(app.contains(
+        "    if (reach.dirty && current && !screens[current.name].keep) show(current.name, 'f', current.params);\n"
+    ));
     assert!(app.contains("    for (const revive of reach.revive) revive();\n"));
     assert!(
         app.contains("    if (reach.layer) document.getElementById('nv').append(reach.layer);\n")
@@ -348,7 +351,13 @@ fn the_home_screen_app_is_laid_out_for_the_whole_screen() {
     assert!(app.contains("  const installed = navigator.standalone === true\n    || media('(display-mode: standalone)') || media('(display-mode: fullscreen)');\n"));
     assert!(app.contains("  if (installed) {\n    root.classList.add('standalone');\n"));
     assert!(app.contains(
-        "    const below = Math.max(0, Math.round(window.innerHeight - view.height - view.offsetTop));\n"
+        "    let below = Math.max(0, Math.round(window.innerHeight - view.height - view.offsetTop));\n"
+    ));
+    // Review round, S3: a pinch-zoom is not a keyboard.
+    assert!(before(
+        &app,
+        "    if (view.scale > 1.01) { top = 0; below = 0; }\n",
+        "    root.style.setProperty('--vv-top', top + 'px');\n"
     ));
     assert!(app.contains("    root.style.setProperty('--vv-bottom', below + 'px');\n"));
     assert!(app.contains("    root.classList.toggle('kb', below > KEYBOARD_PX);\n"));
@@ -408,4 +417,73 @@ fn the_pc_now_box_collapses_runs_of_blank_and_rule_lines() {
     // Blank lines alone still collapse to one, as before.
     let read = serde_json::json!({ "read": { "text": "a\n\n\n\nb\n\n" } });
     assert_eq!(super::chat::live(&read), "a\n\nb");
+}
+
+/// Review round: the owner's draft and attachments survive the PC dropping and coming back (S1), a stale page gets
+/// the new build (S2), and the error screen is drawn in place (N1). The page's JavaScript does not run here; the
+/// chat case ran in headless Chromium (record p39o, review round).
+#[test]
+fn the_review_round_keeps_the_draft_and_reloads_the_new_build() {
+    let w = world("offline-round");
+    let running = serve(w.site());
+    let text = |path: &str| String::from_utf8(fetch(running.addr, path).1).unwrap();
+    let app = text("/app.js");
+    let chat = text("/chat.js");
+    let prompt = text("/prompt.js");
+    let sw = text("/sw.js");
+
+    // S1: a quiet read does not mark the screen; an answer while nothing is down clears the mark; the chat is kept.
+    assert!(app.contains("    const quiet = Boolean(opts && opts.quiet);\n"));
+    assert!(app.contains("    if (reach.down) up();\n    else reach.dirty = false;\n"));
+    assert!(chat.contains("  nv.screen('chat', {\n    keep: true,\n"));
+    assert_eq!(
+        prompt
+            .matches("nv.getJson('/api/prompt?agent=' + encodeURIComponent(id), { quiet: true }).catch(() => null);")
+            .count(),
+        2,
+        "both of the prompt's reads are quiet"
+    );
+    assert!(!prompt.contains("encodeURIComponent(id)).catch"));
+
+    // S2: a page brought to the front asks the PC's build; a stale reload first has the worker forget its window.
+    let shown = app
+        .split("  document.addEventListener('visibilitychange', () => {\n")
+        .nth(1)
+        .unwrap();
+    let shown = &shown[..shown.find("  });").unwrap()];
+    assert!(
+        shown.contains("    if (reach.down) tryNow();\n    else fresh();\n"),
+        "{shown}"
+    );
+    let fresh = app.split("  async function fresh() {").nth(1).unwrap();
+    let fresh = &fresh[..fresh.find("\n  }\n").unwrap()];
+    assert!(fresh.contains("fetch('/api/hello'"), "{fresh}");
+    assert!(
+        fresh.contains(") stale(response.headers.get(BUILD_HEADER) || '');"),
+        "{fresh}"
+    );
+    assert!(
+        !fresh.contains("fallen("),
+        "a failure here is not the screen at once"
+    );
+    assert!(app.contains("    forgetDown().then(() => location.reload());\n"));
+    assert!(!app.contains("    location.reload();\n"));
+    assert!(app.contains("      try { worker.postMessage({ forget: 'down' }, [channel.port2]); }"));
+    assert!(app.contains("      const timer = setTimeout(done, FORGET_MS);\n"));
+    let message = sw.split("self.addEventListener('message'").nth(1).unwrap();
+    let message = &message[..message.find("\n});").unwrap()];
+    assert!(
+        message.contains("  if (data.forget !== 'down') return;\n  downUntil = 0;\n"),
+        "{message}"
+    );
+    assert!(
+        message.contains("event.ports[0].postMessage({ forgot: true });"),
+        "{message}"
+    );
+
+    // N1: the error screen is drawn again only when what it says changes; a retry writes the countdown only.
+    assert!(app.contains("    if (reach.layer && reach.layer.dataset.says === says) return;\n"));
+    assert!(app.contains(
+        "    const says = reach.down + (navigator.onLine === false ? ' offline' : ' online');\n"
+    ));
 }

@@ -28,6 +28,8 @@ const DOWN_MS = 15000;
 // tailscaled's own gateway errors when Nirvana is not behind the serve mount (502, 503, 504).
 const NOT_THE_PAGE = [403, 421, 502, 503, 504];
 let downUntil = 0;
+// The error screen's Try again and its automatic tries ask /api/hello, which this worker never answers, so the
+// DOWN_MS window does not hold them back: they reach the PC (or fail) at once (review round, N6).
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
@@ -99,6 +101,16 @@ function within(promise, ms) {
     promise.then((value) => { clearTimeout(timer); resolve(value); }, (error) => { clearTimeout(timer); reject(error); });
   });
 }
+
+// The page found it is an older build than the PC's (app.js stale) and is about to reload: the down window goes
+// first, or the reload would be served this cache's old shell again (review round, S2). The answer on the port tells
+// the page it may reload now.
+self.addEventListener('message', (event) => {
+  const data = event.data || {};
+  if (data.forget !== 'down') return;
+  downUntil = 0;
+  if (event.ports && event.ports[0]) event.ports[0].postMessage({ forgot: true });
+});
 
 // The body is what alerts.rs's payload writes: title (the space), body (the agent and its state), and the agent's
 // pane id, name and space for the tap. iOS ends a subscription that gets pushes without notifications, so every

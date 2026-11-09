@@ -22,8 +22,11 @@
   const KEYBOARD_PX = 80;
   function fit() {
     const view = window.visualViewport;
-    const top = Math.max(0, Math.round(view.offsetTop));
-    const below = Math.max(0, Math.round(window.innerHeight - view.height - view.offsetTop));
+    let top = Math.max(0, Math.round(view.offsetTop));
+    let below = Math.max(0, Math.round(window.innerHeight - view.height - view.offsetTop));
+    // A pinch-zoom shrinks the visual viewport with no keyboard up (review round, S3: the viewport meta has no
+    // maximum-scale, so iOS lets the owner zoom): the column then keeps the whole screen, as with no keyboard.
+    if (view.scale > 1.01) { top = 0; below = 0; }
     root.style.setProperty('--vv-top', top + 'px');
     root.style.setProperty('--vv-bottom', below + 'px');
     root.classList.toggle('kb', below > KEYBOARD_PX);
@@ -122,7 +125,7 @@
     unreachable: { title: "Can't reach your PC", lead: 'Nothing came back from the PC. Check these, most likely first.', order: ['tailscale', 'awake', 'nirvana', 'online'] },
     offline: { title: 'This phone is offline', lead: 'The phone has no network, so nothing can reach the PC. Check these.', order: ['online', 'tailscale', 'awake', 'nirvana'] },
     nirvana: { title: 'Nirvana is not answering on the PC', lead: 'Tailscale reached the PC, but Nirvana did not answer behind it. Check these.', order: ['nirvana', 'awake', 'tailscale', 'online'] },
-    refused: { title: 'The PC refused this phone', lead: "This phone's Tailscale account is not the PC's. Only the account the PC is signed in with can connect.", order: ['account', 'name', 'started'] },
+    refused: { title: 'The PC refused this phone', lead: "This phone's Tailscale account is not the PC's, or this page was not opened from the PC's own address. Only the account the PC is signed in with can connect.", order: ['account', 'name', 'started'] },
   };
   const CHECKS = {
     tailscale: ['Tailscale is on on this phone', 'Open the Tailscale app: the VPN switch at the top is on, and it says Connected. This page cannot see the VPN; only you can.'],
@@ -153,7 +156,10 @@
   // check): a phone moving from Wi-Fi to mobile data loses a request or two and should not flash the screen. The
   // check as the page opens covers a page that came out of the cache. An answer that is not the page's is the screen
   // at once. Only a failed load (a GET) has the screen drawn again when the PC is back: a failed send keeps the
-  // chat as it is, the typed text with it.
+  // chat as it is, the typed text with it. Review round, S1: a read that handles its own failure (getJson with
+  // quiet) does not count, any answer from the PC while nothing is down clears the flag (so a one-second Wi-Fi to
+  // mobile blip, N2, leaves nothing behind), and a screen marked keep (the chat: the draft and the pending
+  // attachments) is never drawn again; its live view opens again (revive) and that is all.
   function trouble(why, load) {
     if (load) reach.dirty = true;
     if (why === 'network') lost();
@@ -164,6 +170,7 @@
     clearTimeout(reach.grace);
     reach.grace = null;
     if (reach.down) up();
+    else reach.dirty = false;
   }
 
   // A live view went down: it reconnects by itself, and the PC is checked only if it is still down after LOST_MS.
@@ -184,8 +191,38 @@
     } catch (_) {
       return false;
     }
-    location.reload();
+    forgetDown().then(() => location.reload());
     return true;
+  }
+
+  // Review round, S2: the worker serves its kept shell for DOWN_MS after any failure (sw.js downUntil). A reload
+  // inside that window would get the old build again, and RELOAD_GAP_MS would block a second try; so the worker is
+  // told to forget the window first, and the reload waits for its answer (at most FORGET_MS: a worker that does not
+  // answer, or no worker, reloads anyway).
+  const FORGET_MS = 1000;
+  function forgetDown() {
+    const worker = navigator.serviceWorker && navigator.serviceWorker.controller;
+    if (!worker) return Promise.resolve();
+    return new Promise((done) => {
+      const timer = setTimeout(done, FORGET_MS);
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => { clearTimeout(timer); done(); };
+      try { worker.postMessage({ forget: 'down' }, [channel.port2]); } catch (_) { clearTimeout(timer); done(); }
+    });
+  }
+
+  // Review round, S2: a page brought back to the front asks the PC's build too, not only while down. A failure here
+  // is not the error screen at once (a phone just woken is still bringing its VPN up): the live views' own errors
+  // and LOST_MS decide that.
+  async function fresh() {
+    if (reach.down || reach.checking) return;
+    const stop = new AbortController();
+    const timer = setTimeout(() => stop.abort(), PROBE_MS);
+    try {
+      const response = await fetch('/api/hello', { credentials: 'same-origin', cache: 'no-store', signal: stop.signal });
+      if (!verdict(response.status, response.headers.get('Content-Type'))) stale(response.headers.get(BUILD_HEADER) || '');
+    } catch (_) { /* the live views notice */ }
+    clearTimeout(timer);
   }
 
   async function check() {
@@ -239,21 +276,29 @@
     reach.layer = null;
     reach.when = null;
     for (const revive of reach.revive) revive();
-    if (reach.dirty && current) show(current.name, 'f', current.params);
+    if (reach.dirty && current && !screens[current.name].keep) show(current.name, 'f', current.params);
     reach.dirty = false;
   }
 
+  // A tap while a check is in flight: check() returns at once and the countdown is already stopped. That is right
+  // only because the check in flight ends in fallen() (which schedules again) or up() (review round, N3).
   function tryNow() {
     clearInterval(reach.tick);
     check();
   }
 
+  // Drawn again only when what it says changes (the case, or the phone going on or offline): each retry only writes
+  // the countdown (schedule), so the Try again button keeps its focus and a tap mid-retry, the scroll stays, and
+  // role=alert is not read out again every few seconds (review round, N1).
   function drawDown() {
     const copy = COPY[reach.down] || COPY.unreachable;
+    const says = reach.down + (navigator.onLine === false ? ' offline' : ' online');
+    if (reach.layer && reach.layer.dataset.says === says) return;
     if (!reach.layer) {
       reach.layer = h('section', { class: 'reach scr-f', role: 'alert' });
       document.getElementById('nv').append(reach.layer);
     }
+    reach.layer.dataset.says = says;
     const items = copy.order.map((key, i) => {
       const [title, how] = CHECKS[key];
       const net = key === 'online';
@@ -281,7 +326,11 @@
 
   window.addEventListener('offline', () => { if (reach.down) drawDown(); lost(); });
   window.addEventListener('online', () => { if (reach.down) { drawDown(); tryNow(); } });
-  document.addEventListener('visibilitychange', () => { if (reach.down && document.visibilityState === 'visible') tryNow(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    if (reach.down) tryNow();
+    else fresh();
+  });
 
   async function answer(response) {
     let data = null;
@@ -290,22 +339,26 @@
   }
 
   // A fetch that tells the reach check what came back (P39o).
-  async function reached(path, options) {
+  // `load`: a failure marks the screen to be drawn again when the PC is back.
+  async function reached(path, options, load) {
     let response;
     try {
       response = await fetch(path, options);
     } catch (_) {
-      trouble('network', !options.method);
+      trouble('network', load);
       throw new Error('no answer from the PC');
     }
     const why = verdict(response.status, response.headers.get('Content-Type'));
-    if (why) trouble(why, !options.method);
+    if (why) trouble(why, load);
     else answered();
     return response;
   }
 
-  async function getJson(path) {
-    const response = await reached(path, { credentials: 'same-origin', cache: 'no-store' });
+  // `{ quiet: true }`: the caller handles a failure itself and nothing on the screen is left stale by it (prompt.js's
+  // reads), so it does not mark the screen to be drawn again (review round, S1).
+  async function getJson(path, opts) {
+    const quiet = Boolean(opts && opts.quiet);
+    const response = await reached(path, { credentials: 'same-origin', cache: 'no-store' }, !quiet);
     if (!response.ok) {
       let why = response.status + '';
       try { why = (await response.json()).error || why; } catch (_) { /* not JSON */ }
@@ -319,7 +372,7 @@
     const response = await reached(path, {
       method: 'POST', credentials: 'same-origin', cache: 'no-store',
       headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    });
+    }, false);
     return answer(response);
   }
 

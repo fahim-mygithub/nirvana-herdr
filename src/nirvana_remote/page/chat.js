@@ -35,7 +35,11 @@
         h('span', { class: 'option-sub', text: sub })));
   }
 
+  // keep (P39o review round, S1): when the PC answers again after the error screen, the chat is not drawn again, so
+  // the typed text, the pending attachments and an open sheet stay; its live view opens again (app.js revive), and
+  // its first event is the whole state.
   nv.screen('chat', {
+    keep: true,
     render(el, params) {
       const id = params.agent || '';
       el.classList.add('chat');
