@@ -1469,26 +1469,40 @@ fn open_orders_at(project: &Project, now: u64) -> Vec<OpenOrder> {
     open_runs(project)
         .into_iter()
         .flat_map(|(run, state)| {
-            state
-                .orders
-                .into_iter()
-                .map(move |order| (run.clone(), order))
-        })
-        .filter(|(_, order)| !order.phase.terminal() && order.phase != Phase::Reseated)
-        .filter_map(|(run, order)| {
-            // Dead panes: an order whose phase wants a worker with none running reads "stopped", never "running".
-            let supervised = order.phase.wants_worker()
-                && crate::nirvana_worker::live(project, &run, order.id());
-            let live =
-                crate::nirvana_dead::order_live(order.phase, supervised, order.seated_at, now);
-            // Finished rows (2026-11-09): an ended order (delivered, asked, interrupted, stopped) leaves the list
-            // `ROWS_GRACE_S` after its last event, whether or not its run has a live order. The owner's foot named
-            // orders days old ("orders: bs-2-09-bump-s1 opus interrupted, ...").
-            crate::nirvana_dead::still_shown(live, order.last_at, now).then(|| OpenOrder {
-                order: order.id().to_owned(),
-                seat: order.seated.seat.clone(),
-                phase: crate::nirvana_dead::phase_word(order.phase, live).to_owned(),
-            })
+            let orders = state.orders;
+            orders
+                .iter()
+                .filter(|order| !order.phase.terminal() && order.phase != Phase::Reseated)
+                .filter_map(|order| {
+                    // Dead panes: an order whose phase wants a worker with none running reads "stopped", never
+                    // "running".
+                    let supervised = order.phase.wants_worker()
+                        && crate::nirvana_worker::live(project, &run, order.id());
+                    let live = crate::nirvana_dead::order_live(
+                        order.phase,
+                        supervised,
+                        order.seated_at,
+                        now,
+                    );
+                    // Finished rows (2026-11-09): an ended order leaves the list by itself, whatever its run
+                    // (`nirvana_dead::order_shown`: a pending deferral until it is due, an open question until it is
+                    // answered, a dead supervisor's order for the sweep's hour, the rest `ROWS_GRACE_S`). The owner's
+                    // foot named orders days old ("orders: bs-2-09-bump-s1 opus interrupted, ...").
+                    let answered = crate::nirvana_dead::answered(&orders, order);
+                    let shown = crate::nirvana_dead::order_shown(order, live, answered, now);
+                    // Review S1: a deferral with no supervisor is queued, not stopped.
+                    let phase = if order.phase == Phase::Deferred {
+                        Phase::Deferred.word()
+                    } else {
+                        crate::nirvana_dead::phase_word(order.phase, live)
+                    };
+                    shown.then(|| OpenOrder {
+                        order: order.id().to_owned(),
+                        seat: order.seated.seat.clone(),
+                        phase: phase.to_owned(),
+                    })
+                })
+                .collect::<Vec<_>>()
         })
         .collect()
 }

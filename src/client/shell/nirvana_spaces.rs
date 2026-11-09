@@ -83,35 +83,76 @@ pub(super) fn fold_space_agents(agents: Vec<SpaceAgent>) -> Vec<SpaceAgent> {
     out
 }
 
-/// Finished rows (nirvana/plans/2026-11-09-finished-rows.md): whether a pane is a worker's or a job's. Its label is
-/// `<seat>·<order>` or `job·<name>` (`nirvana_dead::parse_label`; `nirvana_worker::open_pane` and
-/// `nirvana_job::open_job_pane` name the pane before the worker starts), or the subagents poller read an order seated
-/// in it (`nirvana_subagents::is_seat_worker_pane`, known only once the poller has read that run). herdr detects
-/// the `claude -p` a worker runs as an agent; the owner's screenshot of 2026-11-09 showed the worker of
-/// `quad-v5-size-colour` twice, as "Claude S5.5 idle" under its space and as its order's row. Such a pane is shown
-/// once, as its order's row with the order's state; never as a space agent row or an agents-panel row of its own.
-pub(super) fn is_worker_pane(snapshot: &ClientShellSnapshot, pane_id: &str) -> bool {
-    snapshot.panes.iter().any(|pane| {
-        pane.pane_id == pane_id
-            && pane
-                .label
-                .as_deref()
-                .and_then(crate::nirvana_dead::parse_label)
-                .is_some()
-    }) || crate::nirvana_subagents::is_seat_worker_pane(pane_id)
+/// Finished rows, review S2: a pane newly labelled `<seat>·<order>` or `job·<name>` counts as a worker's this long on
+/// its label alone. `nirvana_worker::open_pane` and `nirvana_job::open_job_pane` name the pane before the worker starts,
+/// and the subagents poller knows the pane only once it has read the run (every 2 to 10 s), so the label covers that
+/// race. Past it only the poller's set holds the pane: a kept pane whose order is done, which the owner now uses for
+/// their own Claude, shows as an ordinary agent again. The seat grace: `open_pane` types `seat exec` within 10.3 s.
+pub(super) const LABEL_ALONE: std::time::Duration =
+    std::time::Duration::from_secs(crate::nirvana_dead::SEAT_GRACE_S);
+
+/// When this window first saw each pane under its current worker label: pane id -> (label, first seen). Pruned to the
+/// snapshot's panes on each build, so it is bounded by the session's panes, and a relabel restarts the clock.
+static LABEL_SEEN: std::sync::Mutex<Option<HashMap<String, (String, std::time::Instant)>>> =
+    std::sync::Mutex::new(None);
+
+/// Finished rows (nirvana/plans/2026-11-09-finished-rows.md): the panes that are a worker's or a job's, built once per
+/// call for every agent it filters (review N5; it was a scan of the snapshot and a lock per agent). herdr detects the
+/// `claude -p` a worker runs as an agent; the owner's screenshot of 2026-11-09 showed the worker of
+/// `quad-v5-size-colour` twice, as "Claude S5.5 idle" under its space and as its order's row. Such a pane is shown once,
+/// as its order's row with the order's state; never as a space agent row or an agents-panel row of its own. A pane is
+/// in the set while its order's worker holds it (`nirvana_subagents::seat_worker_panes`, rebuilt by the poller each
+/// read, review S2), or for `LABEL_ALONE` after it took a worker's label.
+pub(super) fn worker_panes(snapshot: &ClientShellSnapshot) -> std::collections::HashSet<String> {
+    worker_panes_at(snapshot, std::time::Instant::now())
 }
 
-/// The agents running in one space, in the snapshot's order. A worker's or a job's pane is not one (`is_worker_pane`).
+/// `worker_panes` at `now`, for a test's clock.
+pub(super) fn worker_panes_at(
+    snapshot: &ClientShellSnapshot,
+    now: std::time::Instant,
+) -> std::collections::HashSet<String> {
+    let mut set = crate::nirvana_subagents::seat_worker_panes();
+    let mut guard = LABEL_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    let seen = guard.get_or_insert_with(HashMap::new);
+    seen.retain(|pane_id, _| snapshot.panes.iter().any(|pane| &pane.pane_id == pane_id));
+    for pane in &snapshot.panes {
+        let Some(label) = pane
+            .label
+            .as_deref()
+            .filter(|label| crate::nirvana_dead::parse_label(label).is_some())
+        else {
+            seen.remove(&pane.pane_id);
+            continue;
+        };
+        let (_, first) = seen
+            .entry(pane.pane_id.clone())
+            .and_modify(|(was, at)| {
+                if was != label {
+                    *was = label.to_owned();
+                    *at = now;
+                }
+            })
+            .or_insert_with(|| (label.to_owned(), now));
+        if now.saturating_duration_since(*first) < LABEL_ALONE {
+            set.insert(pane.pane_id.clone());
+        }
+    }
+    set
+}
+
+/// The agents running in one space, in the snapshot's order. A worker's or a job's pane is not one (`worker_panes`).
 pub(super) fn space_agents(
     snapshot: &ClientShellSnapshot,
     workspace_id: &str,
     indicators: crate::config::StatusIndicatorStyle,
 ) -> Vec<SpaceAgent> {
+    let workers = worker_panes(snapshot);
     let raw: Vec<SpaceAgent> = snapshot
         .agents
         .iter()
         .filter(|agent| agent.workspace_id == workspace_id)
-        .filter(|agent| !is_worker_pane(snapshot, &agent.pane_id))
+        .filter(|agent| !workers.contains(&agent.pane_id))
         .map(|agent| {
             let token = |key: &str| {
                 agent
@@ -562,11 +603,12 @@ pub(super) fn space_workers(
     workspace_id: &str,
     view: impl Fn(&ClientShellAgent) -> Option<crate::nirvana_subagents::SubagentsView>,
 ) -> Vec<SpaceWorker> {
+    let workers = worker_panes(snapshot);
     let subagents: Vec<crate::nirvana_subagents::Subagent> = snapshot
         .agents
         .iter()
         .filter(|agent| agent.workspace_id == workspace_id)
-        .filter(|agent| !is_worker_pane(snapshot, &agent.pane_id))
+        .filter(|agent| !workers.contains(&agent.pane_id))
         .filter_map(view)
         .flat_map(|view| view.subagents)
         .collect();
@@ -1497,6 +1539,76 @@ mod sparkle_tests {
             vec!["quad-pegs"],
             "the worker shows once"
         );
+        crate::nirvana_subagents::set_worker_panes_for_test(None);
+    }
+
+    /// Finished rows, review S2: a label hides a pane only for `LABEL_ALONE` after it took it (the race before the
+    /// poller has read the run); past it only the poller's set, rebuilt each read from the orders still holding their
+    /// panes, hides it. A kept worker pane whose order is done, which the owner now runs their own Claude in, shows
+    /// again; a relabel (a new worker seated into the pane) restarts the clock; the owner's own space agent, unlabelled
+    /// and held by no order, is never hidden.
+    #[test]
+    fn a_kept_worker_pane_the_owner_reuses_shows_again() {
+        let mut snap = spaces(vec![(
+            AgentStatus::Idle,
+            vec![
+                agent("wP:p1", "ws_1", AgentStatus::Idle, true),
+                agent("wP:p5", "ws_1", AgentStatus::Idle, false),
+            ],
+        )]);
+        let template = snap.panes[0].clone();
+        for (pane, label) in [
+            ("wP:p1", None),
+            ("wP:p5", Some("sonnet\u{b7}crawl-beta-gui-3-s1")),
+        ] {
+            let mut entry = template.clone();
+            entry.pane_id = pane.into();
+            entry.workspace_id = "ws_1".into();
+            entry.label = label.map(str::to_owned);
+            snap.panes.push(entry);
+        }
+        let held = |panes: &[&str]| {
+            crate::nirvana_subagents::set_worker_panes_for_test(Some(
+                panes.iter().map(|pane| (*pane).to_owned()).collect(),
+            ));
+        };
+        let hidden = |snap: &ClientShellSnapshot, at: std::time::Instant| {
+            let mut set: Vec<String> = worker_panes_at(snap, at).into_iter().collect();
+            set.sort();
+            set
+        };
+        let t0 = std::time::Instant::now();
+        held(&[]);
+        assert_eq!(
+            hidden(&snap, t0),
+            vec!["wP:p5".to_owned()],
+            "the label alone, at first"
+        );
+        assert_eq!(
+            hidden(&snap, t0 + LABEL_ALONE - Duration::from_secs(1)),
+            vec!["wP:p5".to_owned()]
+        );
+        // Past it, no order holds the pane: the owner's Claude in it is an ordinary agent again.
+        assert!(hidden(&snap, t0 + LABEL_ALONE).is_empty());
+        // While the poller reads an order holding it, it stays a worker's however long.
+        held(&["wP:p5"]);
+        assert_eq!(
+            hidden(&snap, t0 + LABEL_ALONE * 100),
+            vec!["wP:p5".to_owned()]
+        );
+        // A new worker seated into the pane renames it: the label holds it again from that moment.
+        held(&[]);
+        let later = t0 + LABEL_ALONE * 200;
+        snap.panes
+            .iter_mut()
+            .filter(|pane| pane.pane_id == "wP:p5")
+            .for_each(|pane| pane.label = Some("opus\u{b7}next-order".into()));
+        assert_eq!(hidden(&snap, later), vec!["wP:p5".to_owned()], "relabelled");
+        assert!(hidden(&snap, later + LABEL_ALONE).is_empty());
+        // The owner's own space agent is never hidden, at any time.
+        for at in [t0, later, later + LABEL_ALONE] {
+            assert!(!worker_panes_at(&snap, at).contains("wP:p1"));
+        }
         crate::nirvana_subagents::set_worker_panes_for_test(None);
     }
 }

@@ -968,14 +968,28 @@ pub(crate) fn cap_flat_rows(rows: Vec<Subagent>) -> (Vec<Subagent>, usize) {
     (shown, flat.saturating_sub(FLAT_SHOWN))
 }
 
+/// The seat orders of the runs `orchestrator_pane_id` leads, as rows. Each read also replaces that orchestrator's set
+/// of worker panes (`replace_worker_panes`): the panes of its orders whose worker still holds them
+/// (`nirvana_dead::worker_pane`), never the orchestrator's own pane.
 pub fn read_seat_orders(
     project_folder: &Path,
     orchestrator_pane_id: &str,
     now_secs: u64,
 ) -> Vec<Subagent> {
+    let (rows, panes) = seat_orders_and_panes(project_folder, orchestrator_pane_id, now_secs);
+    replace_worker_panes(orchestrator_pane_id, panes);
+    rows
+}
+
+fn seat_orders_and_panes(
+    project_folder: &Path,
+    orchestrator_pane_id: &str,
+    now_secs: u64,
+) -> (Vec<Subagent>, HashSet<String>) {
+    let mut worker_panes = HashSet::new();
     let runs_dir = project_folder.join(".nirvana").join("runs");
     let Ok(entries) = std::fs::read_dir(&runs_dir) else {
-        return Vec::new();
+        return (Vec::new(), worker_panes);
     };
 
     let project = crate::nirvana_run::Project::at(project_folder);
@@ -1017,17 +1031,29 @@ pub fn read_seat_orders(
                 crate::nirvana_dead::order_live(order.phase, supervised, order.seated_at, now_secs)
             })
             .collect();
-        // Finished rows (2026-11-09): a run whose orders have all ended leaves the panel `ROWS_GRACE_S` after its
-        // newest order's last event; one with a live order keeps its ended orders beside it as context. The owner's
-        // screenshot held such groups (`bs-2-09`, `quadxlslice`, `quad-split`, `print-audit`) for days.
-        let newest_order_at = run_state
-            .orders
-            .iter()
-            .map(|order| order.last_at)
-            .max()
-            .unwrap_or(0);
-        let run_shown =
-            crate::nirvana_dead::still_shown(lives.contains(&true), newest_order_at, now_secs);
+        // Finished rows (2026-11-09): a run's group stays while any of its orders is shown (`nirvana_dead::order_shown`:
+        // live, a pending deferral, an open question, a dead supervisor's order for the sweep's hour, else
+        // `ROWS_GRACE_S` after its last event); a shown run keeps its ended orders beside the shown one as context. The
+        // owner's screenshot held finished groups (`bs-2-09`, `quadxlslice`, `quad-split`, `print-audit`) for days.
+        let run_shown = run_state.orders.iter().zip(&lives).any(|(order, live)| {
+            let answered = crate::nirvana_dead::answered(&run_state.orders, order);
+            crate::nirvana_dead::order_shown(order, *live, answered, now_secs)
+        });
+        // Review S2: a pane is a worker's while its order's worker holds it, and only then; the set is rebuilt on
+        // every read, so a kept pane the owner reuses after its order is done shows as an ordinary pane again.
+        for (order, live) in run_state.orders.iter().zip(&lives) {
+            if let Some(pane) = order
+                .pane
+                .as_ref()
+                .filter(|pane| *pane != orchestrator_pane_id)
+            {
+                // An ended run lists only live orders, so only a live order of it holds a pane.
+                let listed = *live || !run_ended;
+                if listed && crate::nirvana_dead::worker_pane(order, *live, now_secs) {
+                    worker_panes.insert(pane.clone());
+                }
+            }
+        }
 
         for (order, is_live) in run_state.orders.into_iter().zip(lives) {
             if matches!(
@@ -1044,10 +1070,7 @@ pub fn read_seat_orders(
                 continue;
             }
 
-            if let Some(pane) = &order.pane {
-                record_worker_pane(pane.clone());
-            }
-            // Recorded first, so a pane left open never turns into an agent row; no stream is read for a hidden run.
+            // No stream is read for a hidden run.
             if !run_shown {
                 continue;
             }
@@ -1134,7 +1157,7 @@ pub fn read_seat_orders(
             });
         }
     }
-    subagents
+    (subagents, worker_panes)
 }
 
 // -----------------------------------------------------------------------------
@@ -1167,7 +1190,11 @@ struct PollTask {
 
 static ENTRIES: Mutex<Option<HashMap<String, PaneCacheEntry>>> = Mutex::new(None);
 static CHANGED: AtomicBool = AtomicBool::new(false);
-static WORKER_PANES: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+/// Finished rows, review S2: per orchestrator pane, the worker panes its last read found held by their orders' workers.
+/// Replaced on each read (`replace_worker_panes`), dropped with the orchestrator's cache entry; never accumulated, so a
+/// pane id is a worker's only while an order holds it. It was a process-lifetime set: a pane recorded once stayed a
+/// worker's for the life of the window, even after its id was reused.
+static WORKER_PANES: Mutex<Option<HashMap<String, HashSet<String>>>> = Mutex::new(None);
 #[cfg(test)]
 static TEST_CLAUDE_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
@@ -1351,13 +1378,36 @@ pub fn is_seat_worker_pane(pane_id: &str) -> bool {
         }
     }
     let guard = WORKER_PANES.lock().unwrap_or_else(|e| e.into_inner());
-    guard.as_ref().is_some_and(|set| set.contains(pane_id))
+    guard
+        .as_ref()
+        .is_some_and(|all| all.values().any(|set| set.contains(pane_id)))
 }
 
-/// Records a pane ID as a seat worker pane.
-pub fn record_worker_pane(pane_id: String) {
+/// Every pane `is_seat_worker_pane` holds, as one set: the spaces view and the agents panel build it once per draw
+/// rather than locking per agent (review N5).
+pub fn seat_worker_panes() -> HashSet<String> {
+    #[cfg(test)]
+    {
+        if let Some(set) = TEST_WORKER_PANES.with_borrow(|s| s.clone()) {
+            return set;
+        }
+    }
+    let guard = WORKER_PANES.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .as_ref()
+        .map(|all| all.values().flatten().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// Replaces the worker panes `orchestrator_pane_id`'s runs hold, from a fresh read of them.
+fn replace_worker_panes(orchestrator_pane_id: &str, panes: HashSet<String>) {
     let mut guard = WORKER_PANES.lock().unwrap_or_else(|e| e.into_inner());
-    guard.get_or_insert_with(HashSet::new).insert(pane_id);
+    let all = guard.get_or_insert_with(HashMap::new);
+    if panes.is_empty() {
+        all.remove(orchestrator_pane_id);
+    } else {
+        all.insert(orchestrator_pane_id.to_owned(), panes);
+    }
 }
 
 /// Returns the cached subagents view for `pane_id`.
@@ -1445,6 +1495,14 @@ pub fn poll_with<F>(
             return;
         };
         forget_unasked(map);
+        // Review S2: an orchestrator nobody shows any more holds no worker panes.
+        if let Some(sets) = WORKER_PANES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            sets.retain(|orchestrator, _| map.contains_key(orchestrator));
+        }
 
         let mut all_claude: Vec<(String, PathBuf, Option<String>)> = Vec::new();
         for (pane_id, entry) in map.iter() {
@@ -2673,9 +2731,10 @@ mod tests {
             })
             .collect();
         std::fs::write(run_dir.join("journal.jsonl"), text).unwrap();
-        // Finished rows (2026-11-09): the run leaves the panel `ROWS_GRACE_S` after its last order event (1006), so the
-        // frozen time is read twice inside the grace; `an_ended_run_leaves_the_panel_after_the_grace` reads past it.
-        for now in [1_100, 1_300] {
+        // Finished rows (2026-11-09): read inside the grace (1 100, 1 300) and, restored (review N4), far past it (5 000,
+        // 900 000): `quad-xl-slice2`'s question is open (no later order answers it), so the run stays shown however
+        // late, and the time of both orders still stops at their last event.
+        for now in [1_100, 1_300, 5_000, 900_000] {
             let rows = read_seat_orders(&temp, "wP:p1", now);
             let row = |name: &str| rows.iter().find(|s| s.name == name).cloned().unwrap();
             let died = row("quad-xl-slice4");
@@ -2687,6 +2746,10 @@ mod tests {
             assert_eq!(asked.elapsed_secs, 2);
             assert!(!asked.waiting);
         }
+        // Far past both graces neither pane is a worker's: the dead supervisor's order let go of `wP:p3D` an hour after
+        // its last event, and the open question never held `wP:p39` past `ROWS_GRACE_S`.
+        assert!(!is_seat_worker_pane("wP:p3D"));
+        assert!(!is_seat_worker_pane("wP:p39"));
         let _ = std::fs::remove_dir_all(&temp);
     }
 
@@ -2759,10 +2822,20 @@ mod tests {
         };
         let row = |run: &str, name: &str| (run.to_owned(), name.to_owned());
         let grace = crate::nirvana_dead::ROWS_GRACE_S;
-        // Read first past the grace, so `print-audit` is never shown in this process: its pane is still recorded as a
-        // worker's, so a pane left open never turns into an agent row.
+        // Past the grace `print-audit` is gone, and its pane is no worker's any more (review S2: the set is rebuilt each
+        // read, not accumulated), so a kept pane the owner reuses shows as an ordinary pane; the live order holds its own.
         assert!(!names(1004 + grace).contains(&row("print-audit", "audit-adapter")));
-        assert!(is_seat_worker_pane("wP:pA"));
+        assert!(!is_seat_worker_pane("wP:pA"));
+        assert!(
+            !is_seat_worker_pane("wP:pB"),
+            "an ended order in a live run does not hold its pane"
+        );
+        assert!(is_seat_worker_pane("wP:pC"));
+        names(1004 + grace - 1);
+        assert!(
+            is_seat_worker_pane("wP:pA"),
+            "inside the grace the order's row and its pane go together"
+        );
         // Inside the grace the ended run still shows.
         assert_eq!(
             names(1004 + grace - 1),
@@ -2788,14 +2861,143 @@ mod tests {
                 row("quad-v5", "quad-v5-size-colour"),
             ]
         );
-        // The live order ends: its run leaves the grace after that order's last event (1006), not before.
+        // The live order's supervisor dies with no word in the journal (a server restart): its run stays the sweep's
+        // `STOPPED_GRACE_S` after that order's last event (1006), as long as its pane may stay open (review N2).
         drop(lock);
+        let stopped = crate::nirvana_dead::STOPPED_GRACE_S;
         assert_eq!(
-            names(1006 + grace - 1).len(),
+            names(1006 + stopped - 1).len(),
             2,
-            "the run whose last order event is 1006 stays inside the grace"
+            "the run whose dead order's last event is 1006 stays its hour"
         );
-        assert!(names(1006 + grace).is_empty(), "then every group has left");
+        assert!(
+            names(1006 + stopped).is_empty(),
+            "then every group has left"
+        );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Finished rows, review round (S1, N1, N2, S2): an order that still waits for something keeps its run shown. A
+    /// Deferred one until its `until` plus `ROWS_GRACE_S` (its supervisor returned at the deferral, so no lock); an
+    /// Asked one until a later order answers it; a Seated or Running one whose supervisor died for the sweep's
+    /// `STOPPED_GRACE_S`, as long as its pane may stay open. The worker-pane set follows each read, and never holds the
+    /// orchestrator's own pane.
+    #[test]
+    fn a_pending_order_keeps_its_run_shown() {
+        let temp = std::env::temp_dir().join(format!(
+            "nirvana_test_rows_pending_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let seated = |seq: u64, order: &str| {
+            serde_json::json!({"v":1,"seq":seq,"at":1000 + seq,"event":"seated","order":order,"seat":"sonnet",
+                "cli":"claude","model":"claude-sonnet-5-5","effort":"medium","pool":"max","class":"ops.terminal",
+                "size":"medium","mode":"balanced","reason":"r","order_file":"f","cwd":"cwd"})
+        };
+        let started = |seq: u64, order: &str, pane: &str| {
+            serde_json::json!({"v":1,"seq":seq,"at":1000 + seq,"event":"started","order":order,"attempt":1,
+                "pid":1,"pane":pane,"tab":null,"resume":null,"argv":[]})
+        };
+        let asked = |seq: u64, order: &str| serde_json::json!({"v":1,"seq":seq,"at":1000 + seq,"event":"asked","order":order,"question":"q"});
+        let opened = serde_json::json!({"v":1,"seq":1,"at":1001,"event":"opened","project":"p",
+            "orchestrator_pane":"wP:p1","auto":true,"pools":[],"pools_basis":null});
+        let write = |run: &str, lines: &[serde_json::Value]| {
+            let dir = temp.join(".nirvana").join("runs").join(run);
+            std::fs::create_dir_all(&dir).unwrap();
+            let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+            std::fs::write(dir.join("journal.jsonl"), text).unwrap();
+        };
+        let until = 50_000;
+        write(
+            "deferred",
+            &[
+                opened.clone(),
+                seated(2, "rate-limited"),
+                started(3, "rate-limited", "wP:pD"),
+                serde_json::json!({"v":1,"seq":4,"at":1004,"event":"deferred","order":"rate-limited",
+                    "until":until,"why":"window"}),
+            ],
+        );
+        write(
+            "open-question",
+            &[
+                opened.clone(),
+                seated(2, "asks"),
+                started(3, "asks", "wP:pQ"),
+                asked(4, "asks"),
+            ],
+        );
+        // The next order seated with no parent answers the open question (`nirvana_run::replay`).
+        write(
+            "answered",
+            &[
+                opened.clone(),
+                seated(2, "asked-first"),
+                started(3, "asked-first", "wP:pR"),
+                asked(4, "asked-first"),
+                seated(5, "answer"),
+                started(6, "answer", "wP:pS"),
+                serde_json::json!({"v":1,"seq":7,"at":1007,"event":"delivered","order":"answer",
+                    "report":{"status":"done"}}),
+            ],
+        );
+        // A server restart killed this one's supervisor; one more order was started in the orchestrator's own pane.
+        write(
+            "died",
+            &[
+                opened,
+                seated(2, "cut"),
+                started(3, "cut", "wP:pX"),
+                seated(4, "in-orchestrator"),
+                started(5, "in-orchestrator", "wP:p1"),
+            ],
+        );
+        let runs = |now: u64| -> Vec<String> {
+            let mut runs: Vec<String> = read_seat_orders(&temp, "wP:p1", now)
+                .into_iter()
+                .filter_map(|sub| sub.run_id)
+                .collect();
+            runs.sort();
+            runs.dedup();
+            runs
+        };
+        let grace = crate::nirvana_dead::ROWS_GRACE_S;
+        let stopped = crate::nirvana_dead::STOPPED_GRACE_S;
+        // Past the 5-minute grace of every last event: the deferral, the question and the dead supervisor stay.
+        assert_eq!(
+            runs(1007 + grace),
+            vec!["deferred", "died", "open-question"],
+            "S1, N1, N2: pending orders keep their runs; the answered run left"
+        );
+        assert!(is_seat_worker_pane("wP:pD"), "the deferral holds its pane");
+        assert!(
+            is_seat_worker_pane("wP:pX"),
+            "the dead supervisor's order holds its pane its hour"
+        );
+        assert!(
+            !is_seat_worker_pane("wP:pQ"),
+            "an open question does not hold the asker's pane"
+        );
+        assert!(
+            !is_seat_worker_pane("wP:p1"),
+            "the orchestrator's own pane is never a worker's"
+        );
+        assert_eq!(
+            runs(1005 + stopped - 1),
+            vec!["deferred", "died", "open-question"]
+        );
+        // N2: the hour after the dead orders' last event, the run's rows and its pane go together.
+        assert_eq!(runs(1005 + stopped), vec!["deferred", "open-question"]);
+        assert!(!is_seat_worker_pane("wP:pX"));
+        // S1: due at `until`, the deferral stays its grace past it, then leaves with its pane.
+        assert_eq!(runs(until + grace - 1), vec!["deferred", "open-question"]);
+        assert!(is_seat_worker_pane("wP:pD"));
+        assert_eq!(runs(until + grace), vec!["open-question"]);
+        assert!(!is_seat_worker_pane("wP:pD"));
+        // N1: unanswered, however late.
+        assert_eq!(runs(10_000_000), vec!["open-question"]);
         let _ = std::fs::remove_dir_all(&temp);
     }
 
