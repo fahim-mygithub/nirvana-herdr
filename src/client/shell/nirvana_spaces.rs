@@ -83,7 +83,25 @@ pub(super) fn fold_space_agents(agents: Vec<SpaceAgent>) -> Vec<SpaceAgent> {
     out
 }
 
-/// The agents running in one space, in the snapshot's order.
+/// Finished rows (nirvana/plans/2026-11-09-finished-rows.md): whether a pane is a worker's or a job's. Its label is
+/// `<seat>·<order>` or `job·<name>` (`nirvana_dead::parse_label`; `nirvana_worker::open_pane` and
+/// `nirvana_job::open_job_pane` name the pane before the worker starts), or the subagents poller read an order seated
+/// in it (`nirvana_subagents::is_seat_worker_pane`, known only once the poller has read that run). herdr detects
+/// the `claude -p` a worker runs as an agent; the owner's screenshot of 2026-11-09 showed the worker of
+/// `quad-v5-size-colour` twice, as "Claude S5.5 idle" under its space and as its order's row. Such a pane is shown
+/// once, as its order's row with the order's state; never as a space agent row or an agents-panel row of its own.
+pub(super) fn is_worker_pane(snapshot: &ClientShellSnapshot, pane_id: &str) -> bool {
+    snapshot.panes.iter().any(|pane| {
+        pane.pane_id == pane_id
+            && pane
+                .label
+                .as_deref()
+                .and_then(crate::nirvana_dead::parse_label)
+                .is_some()
+    }) || crate::nirvana_subagents::is_seat_worker_pane(pane_id)
+}
+
+/// The agents running in one space, in the snapshot's order. A worker's or a job's pane is not one (`is_worker_pane`).
 pub(super) fn space_agents(
     snapshot: &ClientShellSnapshot,
     workspace_id: &str,
@@ -93,6 +111,7 @@ pub(super) fn space_agents(
         .agents
         .iter()
         .filter(|agent| agent.workspace_id == workspace_id)
+        .filter(|agent| !is_worker_pane(snapshot, &agent.pane_id))
         .map(|agent| {
             let token = |key: &str| {
                 agent
@@ -547,7 +566,7 @@ pub(super) fn space_workers(
         .agents
         .iter()
         .filter(|agent| agent.workspace_id == workspace_id)
-        .filter(|agent| !crate::nirvana_subagents::is_seat_worker_pane(&agent.pane_id))
+        .filter(|agent| !is_worker_pane(snapshot, &agent.pane_id))
         .filter_map(view)
         .flat_map(|view| view.subagents)
         .collect();
@@ -1414,5 +1433,70 @@ mod sparkle_tests {
             assert_eq!(unicode_width::UnicodeWidthStr::width(*frame), 1, "{frame}");
             assert_eq!(sparkle_glyph(index), *frame);
         }
+    }
+
+    /// Finished rows (2026-11-09): the owner's screenshot listed "Claude S5.5 idle" under 3D-Printer Flow above the
+    /// worker's own row "quad-v5… S5.5 4m50s": herdr detects the worker's `claude -p` in its pane `wP:p4N`
+    /// (`sonnet·quad-v5-size-colour`). The space's agent rows, the agents panel's rows and the space's worker rows
+    /// now leave out every worker's and job's pane by its label, so the worker shows once, as its order's row.
+    #[test]
+    fn a_worker_shows_once_as_its_orders_row() {
+        crate::nirvana_subagents::set_worker_panes_for_test(Some(std::collections::HashSet::new()));
+        let mut worker = agent("wP:p4N", "ws_1", AgentStatus::Idle, false);
+        worker.tokens = vec![
+            ("nirvana_kind".into(), "claude".into()),
+            ("nirvana_model".into(), "Claude Sonnet 5.5".into()),
+        ];
+        let job = agent("wP:p9", "ws_1", AgentStatus::Idle, false);
+        let plain = agent("wP:p7", "ws_1", AgentStatus::Idle, false);
+        let mut snap = spaces(vec![(
+            AgentStatus::Idle,
+            vec![
+                agent("wP:p1", "ws_1", AgentStatus::Idle, true),
+                worker,
+                job,
+                plain,
+            ],
+        )]);
+        let template = snap.panes[0].clone();
+        for (pane, label) in [
+            ("wP:p1", None),
+            ("wP:p4N", Some("sonnet\u{b7}quad-v5-size-colour")),
+            ("wP:p9", Some("job\u{b7}bs209-build")),
+            ("wP:p7", Some("notes")),
+        ] {
+            let mut entry = template.clone();
+            entry.pane_id = pane.into();
+            entry.workspace_id = "ws_1".into();
+            entry.label = label.map(str::to_owned);
+            snap.panes.push(entry);
+        }
+        let agents: Vec<String> = space_agents(
+            &snap,
+            "ws_1",
+            crate::config::StatusIndicatorStyle::default(),
+        )
+        .into_iter()
+        .map(|agent| agent.pane_id)
+        .collect();
+        assert_eq!(agents, vec!["wP:p1".to_owned(), "wP:p7".to_owned()]);
+        let config = ClientShellConfig::from_config(&Config::default());
+        let panel: Vec<String> = super::super::agent_sidebar::agent_rows(&snap, &config, None)
+            .into_iter()
+            .map(|row| row.pane_id)
+            .collect();
+        assert_eq!(panel, vec!["wP:p1".to_owned(), "wP:p7".to_owned()]);
+        // The worker's own row comes from the orchestrator's pane, and only from there: the worker pane is not asked.
+        let workers = space_workers(&snap, "ws_1", |agent| {
+            (agent.pane_id == "wP:p1" || agent.pane_id == "wP:p4N")
+                .then(|| live_worker(&agent.pane_id).remove(&agent.pane_id))
+                .flatten()
+        });
+        assert_eq!(
+            workers.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(),
+            vec!["quad-pegs"],
+            "the worker shows once"
+        );
+        crate::nirvana_subagents::set_worker_panes_for_test(None);
     }
 }

@@ -2537,8 +2537,10 @@ fn the_statusline_names_an_order_with_no_supervisor_stopped() {
     let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
     std::fs::write(run_dir.join("journal.jsonl"), text).unwrap();
     let project = Project::at(&root);
+    // Finished rows (2026-11-09): read inside the grace after the order's last event (1002), where a stopped order
+    // still shows.
     let phases = || -> Vec<String> {
-        open_orders(&project)
+        open_orders_at(&project, 1100)
             .into_iter()
             .map(|order| order.phase)
             .collect()
@@ -2549,5 +2551,72 @@ fn the_statusline_names_an_order_with_no_supervisor_stopped() {
         .unwrap();
     assert_eq!(phases(), vec!["running".to_owned()]);
     drop(lock);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Finished rows (2026-11-09): the owner's foot read "orders: bs-2-09-bump-s1 opus interrupted, ..., quad-xl-slice2
+/// sonnet asked, ..." for orders days old. An ended order (delivered, asked, interrupted, stopped) leaves the list
+/// `ROWS_GRACE_S` after its last event; a live order stays however old, and so does its run's recent ended order.
+#[test]
+fn the_statusline_lists_only_live_and_recent_orders() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("nirvana_claude_rows_{nanos}"));
+    let run_dir = root.join(".nirvana").join("runs").join("r");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    let seated = |seq: u64, order: &str| {
+        serde_json::json!({"v":1,"seq":seq,"at":1000 + seq,"event":"seated","order":order,"seat":"sonnet",
+            "cli":"claude","model":"claude-sonnet-5-5","effort":"medium","pool":"max","class":"ops.terminal",
+            "size":"medium","mode":"balanced","reason":"r","order_file":"f","cwd":"cwd"})
+    };
+    let started = |seq: u64, order: &str| {
+        serde_json::json!({"v":1,"seq":seq,"at":1000 + seq,"event":"started","order":order,"attempt":1,"pid":1,
+            "pane":"wP:p3D","tab":null,"resume":null,"argv":[]})
+    };
+    let lines = [
+        serde_json::json!({"v":1,"seq":1,"at":1001,"event":"opened","project":"p","orchestrator_pane":"wP:p1",
+            "auto":true,"pools":[],"pools_basis":null}),
+        seated(2, "asked-early"),
+        started(3, "asked-early"),
+        serde_json::json!({"v":1,"seq":4,"at":1004,"event":"asked","order":"asked-early","question":"q"}),
+        seated(5, "delivered-late"),
+        started(6, "delivered-late"),
+        serde_json::json!({"v":1,"seq":7,"at":1100,"event":"delivered","order":"delivered-late",
+            "report":{"status":"done"}}),
+        seated(8, "still-going"),
+        started(9, "still-going"),
+    ];
+    let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(run_dir.join("journal.jsonl"), text).unwrap();
+    let project = Project::at(&root);
+    let lock = crate::nirvana_worker::take_live(&project, "r", "still-going")
+        .unwrap()
+        .unwrap();
+    let names = |now: u64| -> Vec<String> {
+        open_orders_at(&project, now)
+            .into_iter()
+            .map(|order| format!("{} {}", order.order, order.phase))
+            .collect()
+    };
+    let grace = crate::nirvana_dead::ROWS_GRACE_S;
+    assert_eq!(
+        names(1004 + grace - 1),
+        vec![
+            "asked-early asked",
+            "delivered-late delivered",
+            "still-going running"
+        ]
+    );
+    assert_eq!(
+        names(1004 + grace),
+        vec!["delivered-late delivered", "still-going running"],
+        "the asked order left at its grace though its run has a live order"
+    );
+    assert_eq!(names(1100 + grace), vec!["still-going running"]);
+    assert_eq!(names(1_000_000), vec!["still-going running"], "live stays");
+    drop(lock);
+    assert!(names(1_000_000).is_empty(), "stopped and old: gone");
     let _ = std::fs::remove_dir_all(&root);
 }
