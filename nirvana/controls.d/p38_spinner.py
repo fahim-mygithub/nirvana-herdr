@@ -324,12 +324,13 @@ CONTROLS = (
         T_WAITING,
         "rust",
     ),
-    # Review S4: Asked and Deferred orders wait
+    # Review S4: a Deferred order waits. Dead panes (2026-11-08) moved the find: an Asked order is no longer live, so
+    # only a live Deferred one waits.
     Control(
         "p38_waiting_phases",
         SUBAGENTS,
-        "                    crate::nirvana_run::Phase::Asked | crate::nirvana_run::Phase::Deferred\n",
-        "                    crate::nirvana_run::Phase::Asked\n",
+        "                waiting: is_live && order.phase == crate::nirvana_run::Phase::Deferred,\n",
+        "                waiting: is_live && order.phase == crate::nirvana_run::Phase::Asked,\n",
         T_PHASES,
         "rust",
     ),

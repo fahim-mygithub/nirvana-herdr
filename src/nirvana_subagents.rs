@@ -72,8 +72,9 @@ pub struct Subagent {
     pub run_id: Option<String>,
     #[serde(default)]
     pub run_event_time: Option<u64>,
-    /// A live seat order that waits rather than works: Asked (on an answer) or Deferred (on a window's reset). Its
-    /// row still shows as live; only plan 38's sparkle leaves it out.
+    /// A live seat order that waits rather than works: Deferred (on a window's reset), its supervisor holding its lock
+    /// in its pane. Its row still shows as live; only plan 38's sparkle leaves it out. An Asked order is not live since
+    /// the dead-panes fix: its worker has ended (`nirvana_dead::order_live`).
     #[serde(default)]
     pub waiting: bool,
 }
@@ -977,6 +978,7 @@ pub fn read_seat_orders(
         return Vec::new();
     };
 
+    let project = crate::nirvana_run::Project::at(project_folder);
     let mut subagents = Vec::new();
     for entry in entries.flatten() {
         let journal_path = entry.path().join("journal.jsonl");
@@ -1002,6 +1004,7 @@ pub fn read_seat_orders(
 
         let run_ended = run_state.ended.is_some();
         let run_event_time = run_state.last_at;
+        let run_id = entry.file_name().to_string_lossy().to_string();
 
         for order in run_state.orders {
             if matches!(
@@ -1014,13 +1017,12 @@ pub fn read_seat_orders(
                 continue;
             }
 
-            let is_live = matches!(
-                order.phase,
-                crate::nirvana_run::Phase::Seated
-                    | crate::nirvana_run::Phase::Running
-                    | crate::nirvana_run::Phase::Asked
-                    | crate::nirvana_run::Phase::Deferred
-            );
+            // Dead panes (2026-11-08): live is the supervisor's lock, never the journal phase alone. An Asked order's
+            // supervisor has exited, and a Running one's dies with a server restart; both counted 128 h to 391 h.
+            let supervised = order.phase.wants_worker()
+                && crate::nirvana_worker::live(&project, &run_id, order.id());
+            let is_live =
+                crate::nirvana_dead::order_live(order.phase, supervised, order.seated_at, now_secs);
             if run_ended && !is_live {
                 continue;
             }
@@ -1043,10 +1045,15 @@ pub fn read_seat_orders(
                 } else {
                     SubagentState::Failed
                 }
+            } else if order.phase == crate::nirvana_run::Phase::Asked {
+                // The worker asked and ended; the order waits on the owner, as a blocked delivery does (plan 37b).
+                SubagentState::Blocked
             } else if order.phase == crate::nirvana_run::Phase::Interrupted
+                || order.phase.wants_worker()
                 || order.outcome.as_deref() == Some("stopped")
                 || order.outcome.as_deref() == Some("interrupted")
             {
+                // A phase that wants a worker with no supervisor: its worker died with no word in the journal.
                 SubagentState::Stopped
             } else {
                 SubagentState::Failed
@@ -1087,8 +1094,6 @@ pub fn read_seat_orders(
                 order.seated.class.clone()
             };
 
-            let run_id = entry.file_name().to_string_lossy().to_string();
-
             subagents.push(Subagent {
                 id: format!("order-{}", order.seated.order),
                 parent_id: None,
@@ -1102,12 +1107,9 @@ pub fn read_seat_orders(
                 ended_at,
                 depth: 0,
                 target_pane_id: target_pane,
-                run_id: Some(run_id),
+                run_id: Some(run_id.clone()),
                 run_event_time,
-                waiting: matches!(
-                    order.phase,
-                    crate::nirvana_run::Phase::Asked | crate::nirvana_run::Phase::Deferred
-                ),
+                waiting: is_live && order.phase == crate::nirvana_run::Phase::Deferred,
             });
         }
     }
@@ -2539,16 +2541,31 @@ mod tests {
         }
         std::fs::write(run_dir.join("journal.jsonl"), &lines).unwrap();
 
+        // Dead panes: a row is live while a supervisor holds its order's lock. o-running's and o-deferred's do.
+        let project = crate::nirvana_run::Project::at(&temp);
+        let running_lock = crate::nirvana_worker::take_live(&project, "run-1", "o-running")
+            .unwrap()
+            .unwrap();
+        let deferred_lock = crate::nirvana_worker::take_live(&project, "run-1", "o-deferred")
+            .unwrap()
+            .unwrap();
         let subs = read_seat_orders(&temp, "orch-1", 2000);
         let find_state = |name: &str| -> Option<SubagentState> {
             subs.iter().find(|s| s.name == name).map(|s| s.state)
         };
 
-        // Assert all phases
-        assert_eq!(find_state("o-seated"), Some(SubagentState::Running));
+        // Assert all phases. o-seated was seated at 1002 and no supervisor took it: past the seat grace it stopped.
+        assert_eq!(find_state("o-seated"), Some(SubagentState::Stopped));
         assert_eq!(find_state("o-running"), Some(SubagentState::Running));
-        assert_eq!(find_state("o-asked"), Some(SubagentState::Running));
+        // An asked worker has ended; its order waits on the owner, as a blocked delivery does.
+        assert_eq!(find_state("o-asked"), Some(SubagentState::Blocked));
         assert_eq!(find_state("o-deferred"), Some(SubagentState::Running));
+        // Within the seat grace a Seated order whose supervisor has not started yet is live.
+        let early = read_seat_orders(&temp, "orch-1", 1030);
+        assert_eq!(
+            early.iter().find(|s| s.name == "o-seated").map(|s| s.state),
+            Some(SubagentState::Running)
+        );
         assert_eq!(find_state("o-del-done"), Some(SubagentState::Done));
         assert_eq!(find_state("o-del-blocked"), Some(SubagentState::Blocked));
         assert_eq!(find_state("o-del-failed"), Some(SubagentState::Failed));
@@ -2562,7 +2579,7 @@ mod tests {
         };
         assert_eq!(waiting("o-seated"), Some(false));
         assert_eq!(waiting("o-running"), Some(false));
-        assert_eq!(waiting("o-asked"), Some(true));
+        assert_eq!(waiting("o-asked"), Some(false));
         assert_eq!(waiting("o-deferred"), Some(true));
 
         // Now test Ended run: finished rows are hidden!
@@ -2588,6 +2605,65 @@ mod tests {
             .count();
         assert_eq!(finished_count, 0, "ended run hides all finished rows");
 
+        drop(running_lock);
+        drop(deferred_lock);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Dead panes (2026-11-08): `quad-xl-slice4` read Running for 127 h after a server restart ended its supervisor,
+    /// and `quad-xl-slice2` (asked) for 128 h. A worker whose order's lock nobody holds is not live and its time stops at
+    /// the order's last event, however late the read.
+    #[test]
+    fn a_worker_with_no_supervisor_stops_counting() {
+        let temp = std::env::temp_dir().join(format!(
+            "nirvana_test_dead_rows_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let run_dir = temp.join(".nirvana").join("runs").join("quadxlslice");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let seated = |seq: u64, order: &str| {
+            serde_json::json!({"v":1,"seq":seq,"at":1000 + seq,"event":"seated","order":order,"seat":"sonnet",
+                "cli":"claude","model":"claude-sonnet-5-5","effort":"medium","pool":"max","class":"ops.terminal",
+                "size":"medium","mode":"balanced","reason":"r","order_file":"f","cwd":"cwd"})
+        };
+        let started = |seq: u64, order: &str, pane: &str| {
+            serde_json::json!({"v":1,"seq":seq,"at":1000 + seq,"event":"started","order":order,"attempt":1,
+                "pid":1,"pane":pane,"tab":null,"resume":null,"argv":[]})
+        };
+        let lines = [
+            serde_json::json!({"v":1,"seq":1,"at":1001,"event":"opened","project":"p",
+                "orchestrator_pane":"wP:p1","auto":true,"pools":[],"pools_basis":null}),
+            seated(2, "quad-xl-slice4"),
+            started(3, "quad-xl-slice4", "wP:p3D"),
+            seated(4, "quad-xl-slice2"),
+            started(5, "quad-xl-slice2", "wP:p39"),
+            serde_json::json!({"v":1,"seq":6,"at":1006,"event":"asked","order":"quad-xl-slice2","question":"q"}),
+        ];
+        let text: String = lines
+            .iter()
+            .map(|line| {
+                format!(
+                    "{line}
+"
+                )
+            })
+            .collect();
+        std::fs::write(run_dir.join("journal.jsonl"), text).unwrap();
+        for now in [5_000, 900_000] {
+            let rows = read_seat_orders(&temp, "wP:p1", now);
+            let row = |name: &str| rows.iter().find(|s| s.name == name).cloned().unwrap();
+            let died = row("quad-xl-slice4");
+            assert_eq!(died.state, SubagentState::Stopped, "at {now}");
+            assert_eq!(died.ended_at, Some(1003));
+            assert_eq!(died.elapsed_secs, 1);
+            let asked = row("quad-xl-slice2");
+            assert_eq!(asked.state, SubagentState::Blocked, "at {now}");
+            assert_eq!(asked.elapsed_secs, 2);
+            assert!(!asked.waiting);
+        }
         let _ = std::fs::remove_dir_all(&temp);
     }
 

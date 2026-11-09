@@ -1461,14 +1461,27 @@ pub struct OpenOrder {
 }
 
 fn open_orders(project: &Project) -> Vec<OpenOrder> {
+    let now = nirvana_run::now();
     open_runs(project)
         .into_iter()
-        .flat_map(|(_, state)| state.orders)
-        .filter(|order| !order.phase.terminal() && order.phase != Phase::Reseated)
-        .map(|order| OpenOrder {
-            order: order.id().to_owned(),
-            seat: order.seated.seat.clone(),
-            phase: order.phase.word().to_owned(),
+        .flat_map(|(run, state)| {
+            state
+                .orders
+                .into_iter()
+                .map(move |order| (run.clone(), order))
+        })
+        .filter(|(_, order)| !order.phase.terminal() && order.phase != Phase::Reseated)
+        .map(|(run, order)| {
+            // Dead panes: an order whose phase wants a worker with none running reads "stopped", never "running".
+            let supervised = order.phase.wants_worker()
+                && crate::nirvana_worker::live(project, &run, order.id());
+            let live =
+                crate::nirvana_dead::order_live(order.phase, supervised, order.seated_at, now);
+            OpenOrder {
+                order: order.id().to_owned(),
+                seat: order.seated.seat.clone(),
+                phase: crate::nirvana_dead::phase_word(order.phase, live).to_owned(),
+            }
         })
         .collect()
 }

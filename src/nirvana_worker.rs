@@ -1016,6 +1016,14 @@ fn pane_index(home: &Path, pane: &str) -> PathBuf {
     home.join(nirvana_seat::DIR).join("panes").join(safe)
 }
 
+/// The project whose worker last ran in `pane`, as `note_worker_pane` wrote it; `None` when no supervisor noted the
+/// pane (a worker before plan 31, or a pane no worker ran in). The dead-pane sweep reads it (`nirvana_dead`).
+pub(crate) fn pane_project(home: &Path, pane: &str) -> Option<PathBuf> {
+    let root = std::fs::read_to_string(pane_index(home, pane)).ok()?;
+    let root = root.trim();
+    (!root.is_empty()).then(|| PathBuf::from(root))
+}
+
 /// Records, as the supervisor takes a pane, that it runs `order` there (`PANE_EXT`) and that the pane's journals are
 /// `project`'s (`pane_index`). A failed write loses the guard's facts, never the worker.
 pub(crate) fn note_worker_pane(project: &Project, run: &str, order: &str, pane: &str) {
@@ -2952,7 +2960,7 @@ fn idle_shell(pane: &str) -> bool {
 
 /// Every foreground process is a shell. The journal has already said the worker ended; this catches its
 /// supervisor still drawing the footer, or the owner running something in the pane since.
-fn only_shells(processes: &[Value]) -> bool {
+pub(crate) fn only_shells(processes: &[Value]) -> bool {
     processes.iter().all(|process| {
         let name = process
             .get("name")

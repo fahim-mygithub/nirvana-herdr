@@ -3388,6 +3388,8 @@ impl HeadlessServer {
         changed |= self.app.nirvana_fresh(now);
         // Plan 31 review W: a queued wake is tried again until it is delivered.
         changed |= self.app.nirvana_wake_retry(now);
+        // Dead panes: a finished worker's or job's pane closes after its grace (`nirvana_dead::decide`).
+        changed |= self.app.nirvana_dead_panes(now);
         changed
     }
 }

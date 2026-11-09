@@ -527,9 +527,10 @@ pub(super) struct SpaceWorker {
     pub(super) name: String,
     pub(super) model: String,
     pub(super) elapsed: String,
-    /// Plan 38 review S4: whether the worker is at work, so its space sparkles. A live row is also an order that waits
-    /// (Asked: on an answer; Deferred: on a window's reset) or one whose own pane is gone, which the journal can keep
-    /// live forever; those keep their row and do not sparkle.
+    /// Plan 38 review S4: whether the worker is at work, so its space sparkles. A live row is also a Deferred order
+    /// that waits on a window's reset, or one whose own pane is gone; those keep their row and do not sparkle. Since
+    /// the dead-panes fix a row is live only while a supervisor holds the order's lock (`nirvana_dead::order_live`), so
+    /// an Asked order or a worker that died with the server no longer keeps a row here, counting for days.
     pub(super) working: bool,
 }
 
