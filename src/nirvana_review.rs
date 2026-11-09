@@ -623,7 +623,50 @@ fn queue(
         world.leases = leases.leases.clone();
         world.overrides_used = leases.overrides(run);
     }
-    let pick = pick(table, &world, id)?;
+    queue_on(
+        project, run, journal, id, parent, kind, subject, brief, table, &world,
+    )
+}
+
+/// Order LEARN: an idle review, seated on the world its spare gate read (`nirvana_idle_review::decide`), so the seat it
+/// gets is the one whose window was judged spare. Kind `REVIEW`, subject `nirvana_idle_review::SUBJECT`, no parent.
+pub(crate) fn queue_idle(
+    project: &Project,
+    run: &str,
+    journal: &Journal,
+    id: &str,
+    brief: &str,
+    table: &Table,
+    world: &nirvana_seat::World,
+) -> Result<String, String> {
+    queue_on(
+        project,
+        run,
+        journal,
+        id,
+        None,
+        REVIEW,
+        crate::nirvana_idle_review::SUBJECT,
+        brief,
+        table,
+        world,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn queue_on(
+    project: &Project,
+    run: &str,
+    journal: &Journal,
+    id: &str,
+    parent: Option<&str>,
+    kind: &str,
+    subject: &str,
+    brief: &str,
+    table: &Table,
+    world: &nirvana_seat::World,
+) -> Result<String, String> {
+    let pick = pick(table, world, id)?;
     let cwd = review_cwd(project, run, id);
     std::fs::create_dir_all(&cwd).map_err(|err| err.to_string())?;
     let order_file = crate::nirvana_worker::write_order(project, &cwd, id, brief)
@@ -1127,6 +1170,9 @@ pub fn gate_review(
                     Vec::new()
                 },
             }
+        } else if subject == crate::nirvana_idle_review::SUBJECT {
+            // Order LEARN: an idle review read many orders; each op names the one its evidence is from.
+            crate::nirvana_idle_review::apply(project, run, &root, &report, &order, at)
         } else if kind == MERGE {
             let shas: BTreeMap<String, String> =
                 std::fs::read_to_string(shas_path(project, run, &root))
@@ -1235,6 +1281,10 @@ pub fn gate_review(
             .pending
             .retain(|p| !(p.run == run && (p.order == order || p.order == root)));
     });
+    // Order LEARN: an idle review's result goes to the Learning square, and its run ends with it.
+    if subject == crate::nirvana_idle_review::SUBJECT {
+        crate::nirvana_idle_review::finished(project, run, &order, verdict.word(), &axes);
+    }
     Ok(Ruling {
         order,
         run: run.to_owned(),
