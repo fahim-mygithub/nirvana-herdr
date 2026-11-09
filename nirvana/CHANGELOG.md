@@ -3,6 +3,18 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.60.1: Nirvana Remote's message box grows with its text
+
+- **Changed:** the chat's message box is a box that grows with its text, up to about six lines, then scrolls inside.
+  Coming back to the app re-fits it, and tapping it puts the cursor at the end of the draft. Enter still sends.
+- **Because:** the owner, 2026-11-09: "when I type in the chat box then leave the screen then try to retype the textbox
+  doesnt grow with the text size and it onlt shows the beginning part of the text". It was a one-line text field.
+- **Measured:** headless Chromium and WebKit on Windows, not Safari: 44 px empty, 132 px at 150 characters, 154 px and
+  scrolling at 750; after a hide and show, focus put the caret at the end with the end in view; a send emptied it to
+  44 px. 171 nirvana_remote tests pass; controls p39g_* 6 of 6 red.
+- **If you remove this:** a long draft shows only its first words after the owner leaves the app, and cannot be read
+  back before sending.
+
 ## alpha 0.60.0: Nirvana Remote error page, home-screen layout, and a cleaner "On the PC now"
 
 - **Changed:** the service worker keeps a versioned copy of the page's static shell (never `/api/` or agent data; the

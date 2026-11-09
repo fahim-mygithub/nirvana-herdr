@@ -2085,6 +2085,35 @@ fn the_page_ends_a_gone_view_and_waits_out_composition() {
     );
 }
 
+/// The owner, 2026-11-09: after leaving the screen the one-line box showed only the start of the draft and did not grow.
+/// The box is a textarea that fits its text on every change and when the screen comes back, and a return to it puts
+/// the caret at the end. The layout itself was measured in headless Chromium and WebKit only (record p39g).
+#[test]
+fn the_message_box_grows_with_its_text_and_comes_back_at_the_end() {
+    let w = world("grow");
+    let running = serve(w.site());
+    let (_, _, chat) = get(running.addr, "/chat.js", OWNER);
+    let (_, _, css) = get(running.addr, "/app.css", OWNER);
+    assert!(chat.contains("h('textarea', { id: 'nv-draft'"), "a box that wraps");
+    assert!(
+        chat.contains("input.style.height = Math.min(input.scrollHeight, DRAFT_MOST) + 'px';"),
+        "the box fits its text"
+    );
+    assert!(
+        chat.contains("input.addEventListener('input', () => { fitDraft(); drawPending(); });"),
+        "fit on typing"
+    );
+    assert!(
+        chat.contains("document.addEventListener('visibilitychange', refit);"),
+        "fit on coming back"
+    );
+    assert!(
+        chat.contains("input.addEventListener('focus', () => requestAnimationFrame(toEnd));"),
+        "the caret goes to the end"
+    );
+    assert!(css.contains("resize: none; overflow-y: hidden;"), "no grab handle");
+}
+
 #[test]
 fn a_chat_view_takes_the_transcript_that_comes_with_the_first_prompt() {
     let w = world("first-prompt");

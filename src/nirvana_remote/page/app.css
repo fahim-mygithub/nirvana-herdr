@@ -229,9 +229,12 @@ a:hover { color: #86CBD2; }
 .pending-chip.bad > span { white-space: normal; }
 .chip-retry { height: 28px; padding: 0 10px; border-radius: 8px; flex-shrink: 0; font-size: 13px; color: var(--teal); }
 .chip-x { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 8px; flex-shrink: 0; }
-.composer-row { display: flex; align-items: center; gap: 8px; }
+/* The buttons stay at the foot of a box that has grown. */
+.composer-row { display: flex; align-items: flex-end; gap: 8px; }
 .attach-button { width: 44px; height: 44px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; border-radius: 22px; background: var(--hover); }
-.draft { flex-grow: 1; min-width: 0; height: 44px; border-radius: 22px; border: 1px solid #2A2F34; background: var(--card); color: var(--text); padding: 0 16px; font: inherit; font-size: 16px; box-sizing: border-box; }
+/* The box grows with its text (chat.js fitDraft): one line is the old 44 px pill. */
+.draft { flex-grow: 1; min-width: 0; min-height: 44px; height: 44px; border-radius: 22px; border: 1px solid #2A2F34; background: var(--card); color: var(--text); padding: 11px 16px; font: inherit; font-size: 16px; line-height: 22px; box-sizing: border-box; resize: none; overflow-y: hidden; display: block; }
+.draft.full { overflow-y: auto; }
 .send-button { width: 44px; height: 44px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; border-radius: 22px; background: var(--teal); opacity: 0.4; }
 .send-button.ready { opacity: 1; }
 .hidden-file { display: none; }

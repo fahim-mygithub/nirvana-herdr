@@ -14,6 +14,9 @@
   // The PC reads at most this many uploads at once (live.rs UPLOADS_AT_ONCE) and answers more with a 503; the rest
   // wait here for a place instead (record p39u, review round).
   const UPLOADS_AT_ONCE = 4;
+  // The box grows to six lines of 22 px (16 px text) plus its padding, then scrolls inside: room for a paragraph
+  // while the thread stays in view above the keyboard.
+  const DRAFT_MOST = 6 * 22 + 22;
   const LABEL = { working: 'working', needs: 'needs you', done: 'done', idle: 'idle' };
 
   function size(bytes) {
@@ -72,7 +75,9 @@
       // The box.
       const note = h('span', { class: 'note', role: 'status' });
       const chips = h('div', { class: 'pending' });
-      const input = h('input', { id: 'nv-draft', class: 'draft', type: 'text', autocomplete: 'off',
+      // A box that grows with the text (the owner, 2026-11-09: a one-line field showed only the start of a long draft
+      // after leaving the screen, and never grew). Enter still sends; the text wraps instead of running off the side.
+      const input = h('textarea', { id: 'nv-draft', class: 'draft', rows: '1', autocomplete: 'off',
         enterkeyhint: 'send', placeholder: 'Message ' + agent.name });
       const sendButton = h('button', { class: 'press send-button', type: 'button', 'aria-label': 'Send' },
         nv.icon('send', 20, '#0E1B1D', 2.2));
@@ -86,6 +91,24 @@
         h('div', { class: 'composer-row' }, attach,
           h('label', { for: 'nv-draft', class: 'hidden-label', text: 'Message the agent' }), input, prompts.answer, prompts.esc, sendButton),
         photos, anyFile));
+
+      // The box is as tall as its text, up to DRAFT_LINES lines, then scrolls inside. Run on every change of the text
+      // and whenever the screen comes back, since a box laid out while hidden measures 0.
+      function fitDraft() {
+        input.style.height = 'auto';
+        input.style.height = Math.min(input.scrollHeight, DRAFT_MOST) + 'px';
+        input.classList.toggle('full', input.scrollHeight > DRAFT_MOST);
+        // Setting the height scrolls the box back to its top; typing at the end keeps the end in view.
+        if (input.selectionEnd === input.value.length) input.scrollTop = input.scrollHeight;
+      }
+
+      // Back in the box: the caret goes to the end of the draft and the end is in view, not its first line.
+      function toEnd() {
+        fitDraft();
+        const end = input.value.length;
+        if (input.selectionStart === 0 && input.selectionEnd === 0 && end) input.setSelectionRange(end, end);
+        input.scrollTop = input.scrollHeight;
+      }
 
       function drawHead() {
         name.textContent = agent.name;
@@ -275,6 +298,7 @@
         if (text) local.push(bubble({ kind: 'user', text }));
         for (const node of local) list.append(node);
         input.value = '';
+        fitDraft();
         pending.splice(0, pending.length);
         drawPending();
       }
@@ -288,7 +312,12 @@
         event.preventDefault();
         send();
       });
-      input.addEventListener('input', drawPending);
+      input.addEventListener('input', () => { fitDraft(); drawPending(); });
+      input.addEventListener('focus', () => requestAnimationFrame(toEnd));
+      const refit = () => { if (document.visibilityState === 'visible') requestAnimationFrame(fitDraft); };
+      document.addEventListener('visibilitychange', refit);
+      window.addEventListener('pageshow', refit);
+      window.addEventListener('resize', refit);
       // A screenshot pasted straight into the box (the iOS long-press Paste) arrives as a file on the paste event.
       input.addEventListener('paste', (event) => {
         const files = event.clipboardData ? Array.from(event.clipboardData.files || []) : [];
@@ -299,7 +328,8 @@
 
       drawHead();
       drawPending();
-      const ended = nv.stream('/api/chat/events?agent=' + encodeURIComponent(id), {
+      requestAnimationFrame(fitDraft);
+      const stop = nv.stream('/api/chat/events?agent=' + encodeURIComponent(id), {
         chat: (data) => {
           agent = Object.assign(agent, data.agent || {});
           drawHead();
@@ -325,6 +355,13 @@
         gone: (_, close) => { close(); note.textContent = 'This agent has closed on the PC.'; },
         state: (on) => { if (!on) note.textContent = 'Reconnecting to the PC…'; else if (note.textContent.startsWith('Reconnecting')) note.textContent = ''; },
       });
+      // The window's listeners go with the screen, or each chat opened leaves three behind.
+      const ended = () => {
+        document.removeEventListener('visibilitychange', refit);
+        window.removeEventListener('pageshow', refit);
+        window.removeEventListener('resize', refit);
+        stop();
+      };
       return () => { prompts.close(); ended(); };
     },
   });
