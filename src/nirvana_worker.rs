@@ -1016,6 +1016,14 @@ fn pane_index(home: &Path, pane: &str) -> PathBuf {
     home.join(nirvana_seat::DIR).join("panes").join(safe)
 }
 
+/// The project whose worker last ran in `pane`, as `note_worker_pane` wrote it; `None` when no supervisor noted the
+/// pane (a worker before plan 31, or a pane no worker ran in). The dead-pane sweep reads it (`nirvana_dead`).
+pub(crate) fn pane_project(home: &Path, pane: &str) -> Option<PathBuf> {
+    let root = std::fs::read_to_string(pane_index(home, pane)).ok()?;
+    let root = root.trim();
+    (!root.is_empty()).then(|| PathBuf::from(root))
+}
+
 /// Records, as the supervisor takes a pane, that it runs `order` there (`PANE_EXT`) and that the pane's journals are
 /// `project`'s (`pane_index`). A failed write loses the guard's facts, never the worker.
 pub(crate) fn note_worker_pane(project: &Project, run: &str, order: &str, pane: &str) {
@@ -1178,9 +1186,12 @@ pub fn live(project: &Project, run: &str, order: &str) -> bool {
     }
     #[cfg(windows)]
     {
+        // Dead-panes review S3: only an open that succeeds reads free. A sharing violation is a supervisor, and any
+        // other error (access denied, a delete pending, a lock violation) is a doubt; since the sweep closes panes on
+        // this answer, a doubt reads live, as `nirvana_dead::decide` keeps on every doubt.
         match open_exclusive(&path) {
             Ok(_) => false,
-            Err(err) => held(&err),
+            Err(err) => err.kind() != std::io::ErrorKind::NotFound,
         }
     }
     #[cfg(not(windows))]
@@ -2630,6 +2641,25 @@ pub(crate) fn herdr_json_coded(args: &[&str]) -> Result<Value, (Option<String>, 
     let out = herdr_command(args)
         .output()
         .map_err(|err| (None, format!("herdr {}: {err}", args.join(" "))))?;
+    herdr_answer(args, &out)
+}
+
+/// `herdr_json_coded` that gives up after `limit`, the call killed: the dead-pane sweep's calls (review S1), so one
+/// herdr that never answers cannot hold the sweep for ever.
+pub(crate) fn herdr_json_within(
+    args: &[&str],
+    limit: Duration,
+) -> Result<Value, (Option<String>, String)> {
+    let out = crate::nirvana_dead::output_within(herdr_command(args), limit)
+        .map_err(|why| (None, format!("herdr {}: {why}", args.join(" "))))?;
+    herdr_answer(args, &out)
+}
+
+/// A herdr call's JSON answer from its output, or its error code and message.
+fn herdr_answer(
+    args: &[&str],
+    out: &std::process::Output,
+) -> Result<Value, (Option<String>, String)> {
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let value: Option<Value> = serde_json::from_str(text.trim()).ok();
     if !out.status.success() {
@@ -2952,7 +2982,7 @@ fn idle_shell(pane: &str) -> bool {
 
 /// Every foreground process is a shell. The journal has already said the worker ended; this catches its
 /// supervisor still drawing the footer, or the owner running something in the pane since.
-fn only_shells(processes: &[Value]) -> bool {
+pub(crate) fn only_shells(processes: &[Value]) -> bool {
     processes.iter().all(|process| {
         let name = process
             .get("name")

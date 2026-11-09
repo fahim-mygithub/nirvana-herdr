@@ -2513,3 +2513,41 @@ fn a_windows_path_in_another_case_is_inside_the_project() {
         None
     );
 }
+
+/// Dead panes (2026-11-08): the statusline's order list read "running" for an order whose supervisor died with the
+/// server. Its phase wants a worker and nobody holds its lock: it reads "stopped"; with the lock held, "running".
+#[test]
+fn the_statusline_names_an_order_with_no_supervisor_stopped() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("nirvana_claude_dead_{nanos}"));
+    let run_dir = root.join(".nirvana").join("runs").join("r");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    let lines = [
+        serde_json::json!({"v":1,"seq":1,"at":1000,"event":"opened","project":"p","orchestrator_pane":"wP:p1",
+            "auto":true,"pools":[],"pools_basis":null}),
+        serde_json::json!({"v":1,"seq":2,"at":1001,"event":"seated","order":"slice4","seat":"sonnet",
+            "cli":"claude","model":"claude-sonnet-5-5","effort":"medium","pool":"max","class":"ops.terminal",
+            "size":"medium","mode":"balanced","reason":"r","order_file":"f","cwd":"cwd"}),
+        serde_json::json!({"v":1,"seq":3,"at":1002,"event":"started","order":"slice4","attempt":1,"pid":1,
+            "pane":"wP:p3D","tab":null,"resume":null,"argv":[]}),
+    ];
+    let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(run_dir.join("journal.jsonl"), text).unwrap();
+    let project = Project::at(&root);
+    let phases = || -> Vec<String> {
+        open_orders(&project)
+            .into_iter()
+            .map(|order| order.phase)
+            .collect()
+    };
+    assert_eq!(phases(), vec!["stopped".to_owned()]);
+    let lock = crate::nirvana_worker::take_live(&project, "r", "slice4")
+        .unwrap()
+        .unwrap();
+    assert_eq!(phases(), vec!["running".to_owned()]);
+    drop(lock);
+    let _ = std::fs::remove_dir_all(&root);
+}

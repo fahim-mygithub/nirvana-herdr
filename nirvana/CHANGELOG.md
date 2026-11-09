@@ -3,6 +3,25 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.59.0: finished workers close and stop counting
+
+- **Changed:** an order counts as running only while a supervisor holds its lock (or it was seated under 60 s ago);
+  otherwise its row says stopped, or blocked when Asked, and its time stops at its last event; the statusline says
+  stopped. The `nirvana` session's server runs `herdr run sweep` every 60 s (one at a time, killed past 300 s, each
+  herdr call 15 s) that closes a finished worker's or job's bare-shell pane 120 s after it ended (1 h when the order
+  still wanted a worker but nothing holds it: a crash or reboot mid-run), and a run tab with it, at most 25 a pass.
+  Never closed: a pane without a worker or job label, a tab with an agent, a space's last pane, a pane no journal or
+  job record names, a held lock or live job process, a pane the owner typed in after the end, a tab on screen. Every
+  close is logged to `<home>/nirvana/dead-panes.log`; `herdr run sweep --dry-run` lists what would close.
+- **Because:** 2026-11-08 the owner: "Notice how all the agents underneath are not clcosed and are falsly running.
+  Plus all the dead tabs at the top can wew fix this".
+- **Measured:** the owner's session held 38 tabs and 123 panes for 5 agents; 116 panes were ended workers and jobs back
+  at a pwsh prompt, run tabs back to 2026-10-22; rows counted up to 391 h. Full checkpoint at this merge: nextest
+  4822/4823 (the known `windows_plugin_pane_commands_resolve_from_plugin_root_with_cwd_override`), clippy clean, 3006
+  controls find their text once. The timer, a real `pane close` and a real session are untested until the owner's
+  restart.
+- **If you remove this:** every finished worker leaves a pane, a tab and a clock running forever.
+
 ## alpha 0.58.2: phone uploads land, and a failed one says why
 
 - **Changed:** the uploads folder is created race-free (two photos picked together no longer fail the second with os

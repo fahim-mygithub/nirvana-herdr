@@ -2302,6 +2302,7 @@ const USAGE: &str = "usage: herdr run status [<run>] [--json]
        herdr run receipt <run> [--json]
        herdr run end <run>                   end the run; write receipt.md and receipt.json beside the journal
        herdr run tidy                        close the tabs of every ended run in this project
+       herdr run sweep [--dry-run]           close every finished worker's and job's pane in this server
        herdr run log <run> --json '<event>'  append gated, merged, asked or usage (the orchestrator's turns)
        herdr run retro <run> | retro reject <id> [--why text] | retro propose --json '<proposal>' | retro list";
 
@@ -2339,6 +2340,10 @@ fn load(project: &Project, run: &str) -> (Journal, Vec<Event>, usize, RunState) 
 }
 
 pub fn cli(args: &[String]) -> std::io::Result<()> {
+    // Dead panes: the sweep spans every project's panes in the server, so it takes no project.
+    if args.first().map(String::as_str) == Some("sweep") {
+        return crate::nirvana_dead::cli(&args[1..]);
+    }
     let project = Project::from_env();
     let rest = args.get(1..).unwrap_or(&[]);
     match args.first().map(String::as_str) {
