@@ -394,11 +394,15 @@ impl Site {
         if request.method != "GET" && request.method != "HEAD" {
             return Response::text(405, "GET only").with("Allow", "GET, HEAD");
         }
-        if let Some((_, kind, body)) = ASSETS.iter().find(|(path, _, _)| *path == request.path) {
-            return Response::new(200, kind, *body);
+        if let Some((path, kind, body)) = ASSETS.iter().find(|(path, _, _)| *path == request.path) {
+            // P39o: the page carries this build's tag, which the worker's cache is named for (shell.rs).
+            return Response::new(200, kind, super::shell::served(path, body));
         }
         match request.path.as_str() {
-            "/api/hello" => self.hello(),
+            // P39o: the page's reach check; the build tag says whether its shell is this build's (shell.rs).
+            "/api/hello" => self
+                .hello()
+                .with(super::shell::BUILD_HEADER, super::shell::build()),
             "/api/pcs" => self.pcs(),
             "/api/spaces" => self.spaces(),
             "/api/events" => self.events(request, conn),

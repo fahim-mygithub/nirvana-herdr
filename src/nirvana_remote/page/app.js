@@ -10,6 +10,36 @@
 (function () {
   'use strict';
 
+  // P39o item 7: the home-screen app is laid out for the whole screen (app.css :root.standalone). The owner,
+  // 2026-11-08: "it now doesn't need to accommodate for a web browser url bar." iOS answers navigator.standalone;
+  // an installed Android Chrome app, display-mode. While the keyboard is up, the visual viewport is smaller than the
+  // layout one (iOS does not resize the page for it, and may scroll it): its top and the part below it set the
+  // column's top and bottom, so the composer stays just above the keyboard.
+  const root = document.documentElement;
+  function media(query) { return Boolean(window.matchMedia && window.matchMedia(query).matches); }
+  const installed = navigator.standalone === true
+    || media('(display-mode: standalone)') || media('(display-mode: fullscreen)');
+  const KEYBOARD_PX = 80;
+  function fit() {
+    const view = window.visualViewport;
+    let top = Math.max(0, Math.round(view.offsetTop));
+    let below = Math.max(0, Math.round(window.innerHeight - view.height - view.offsetTop));
+    // A pinch-zoom shrinks the visual viewport with no keyboard up (review round, S3: the viewport meta has no
+    // maximum-scale, so iOS lets the owner zoom): the column then keeps the whole screen, as with no keyboard.
+    if (view.scale > 1.01) { top = 0; below = 0; }
+    root.style.setProperty('--vv-top', top + 'px');
+    root.style.setProperty('--vv-bottom', below + 'px');
+    root.classList.toggle('kb', below > KEYBOARD_PX);
+  }
+  if (installed) {
+    root.classList.add('standalone');
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', fit);
+      window.visualViewport.addEventListener('scroll', fit);
+      fit();
+    }
+  }
+
   const screens = {};
   const enter = { r: 'scr-r', l: 'scr-l', f: 'scr-f' };
   let leave = null;
@@ -74,14 +104,261 @@
     return svg;
   }
 
+  // P39o (record p39o): whether the PC answers, and the error screen when it does not. The owner, 2026-11-08: "add a
+  // tailsscale check to the UI when it fails to connect. Like a error page." The screen lies over whatever screen
+  // was open, so when the PC answers again the owner is where they were; a screen whose data failed to load is drawn
+  // again then, and every live view opens again at once instead of waiting out its own back-off.
+  //
+  // What the page can tell apart: the phone offline (navigator.onLine false), no answer at all (the PC unreachable:
+  // Tailscale off on the phone, the PC asleep or off), tailscaled answering a gateway error with no JSON (the serve
+  // mount is there, Nirvana is not), and the PC refusing (403/421 from routes.rs's checks: another Tailscale
+  // account). It cannot read whether the phone's VPN is on, so that is a check for the owner, worded as one.
+  const LOST_MS = 10000;              // a live view down this long: the PC is checked
+  const PROBE_MS = 6000;              // a check waits this long for /api/hello
+  const RETRY_S = [2, 4, 8, 15, 30];  // the error screen's automatic tries, then every 30 s
+  const RELOAD_GAP_MS = 60000;        // a stale shell reloads at most once a minute
+  const BUILD_HEADER = 'Nirvana-Build';
+  let current = null;
+  const reach = { down: '', layer: null, when: null, grace: null, tick: null, tries: 0, dirty: false, checking: false, revive: new Set() };
+
+  const COPY = {
+    unreachable: { title: "Can't reach your PC", lead: 'Nothing came back from the PC. Check these, most likely first.', order: ['tailscale', 'awake', 'nirvana', 'online'] },
+    offline: { title: 'This phone is offline', lead: 'The phone has no network, so nothing can reach the PC. Check these.', order: ['online', 'tailscale', 'awake', 'nirvana'] },
+    nirvana: { title: 'Nirvana is not answering on the PC', lead: 'Tailscale reached the PC, but Nirvana did not answer behind it. Check these.', order: ['nirvana', 'awake', 'tailscale', 'online'] },
+    refused: { title: 'The PC refused this phone', lead: "This phone's Tailscale account is not the PC's, or this page was not opened from the PC's own address. Only the account the PC is signed in with can connect.", order: ['account', 'name', 'started'] },
+  };
+  const CHECKS = {
+    tailscale: ['Tailscale is on on this phone', 'Open the Tailscale app: the VPN switch at the top is on, and it says Connected. This page cannot see the VPN; only you can.'],
+    awake: ['The PC is on and awake', 'A sleeping PC drops off the tailnet. Wake it; in the Tailscale app it should show as connected, not "last seen".'],
+    nirvana: ['Nirvana is open on the PC', "The Nirvana sidebar's bottom row reads ● remote :8443, its dot green."],
+    online: ['This phone is online', ''],
+    account: ["Sign in with the PC's account", 'In the Tailscale app, tap your account: it must be the one the PC is signed in to Tailscale with.'],
+    name: ['Open the PC by its name', "Use the PC's own address, https://<pc>.<tailnet>.ts.net:8443/, not its IP or another name."],
+    started: ['Nirvana just started on the PC?', 'For a few seconds after it starts, it does not know its own account yet. Try again.'],
+  };
+
+  function online() {
+    return navigator.onLine === false
+      ? 'This phone says it is offline: turn off Airplane mode, or join Wi-Fi or mobile data.'
+      : 'This phone says it is online.';
+  }
+
+  // What an answer says about reaching the PC: 'refused', 'nirvana', or '' (the PC's Nirvana answered).
+  function verdict(status, kind) {
+    if (status === 403 || status === 421) return 'refused';
+    if (status >= 502 && status <= 504 && !(kind || '').includes('json')) return 'nirvana';
+    return '';
+  }
+
+  function unreachable() { return navigator.onLine === false ? 'offline' : 'unreachable'; }
+
+  // A request that failed. With no answer at all, the screen waits as a dropped live view does (LOST_MS, then a
+  // check): a phone moving from Wi-Fi to mobile data loses a request or two and should not flash the screen. The
+  // check as the page opens covers a page that came out of the cache. An answer that is not the page's is the screen
+  // at once. Only a failed load (a GET) has the screen drawn again when the PC is back: a failed send keeps the
+  // chat as it is, the typed text with it. Review round, S1: a read that handles its own failure (getJson with
+  // quiet) does not count, any answer from the PC while nothing is down clears the flag (so a one-second Wi-Fi to
+  // mobile blip, N2, leaves nothing behind), and a screen marked keep (the chat: the draft and the pending
+  // attachments) is never drawn again; its live view opens again (revive) and that is all.
+  function trouble(why, load) {
+    if (load) reach.dirty = true;
+    if (why === 'network') lost();
+    else fallen(why);
+  }
+
+  function answered() {
+    clearTimeout(reach.grace);
+    reach.grace = null;
+    if (reach.down) up();
+    else reach.dirty = false;
+  }
+
+  // A live view went down: it reconnects by itself, and the PC is checked only if it is still down after LOST_MS.
+  function lost() {
+    if (reach.down || reach.grace) return;
+    reach.grace = setTimeout(() => { reach.grace = null; check(); }, LOST_MS);
+  }
+
+  // A shell from an older build's cache (the PC was slow, then answered with another tag) loads again from the PC.
+  function stale(build) {
+    const meta = document.querySelector('meta[name="nirvana-build"]');
+    const mine = meta ? meta.getAttribute('content') : '';
+    if (!build || !mine || build === mine) return false;
+    try {
+      const last = Number(sessionStorage.getItem('nirvana-reloaded')) || 0;
+      if (Date.now() - last < RELOAD_GAP_MS) return false;
+      sessionStorage.setItem('nirvana-reloaded', String(Date.now()));
+    } catch (_) {
+      return false;
+    }
+    forgetDown().then(() => location.reload());
+    return true;
+  }
+
+  // Review round, S2: the worker serves its kept shell for DOWN_MS after any failure (sw.js downUntil). A reload
+  // inside that window would get the old build again, and RELOAD_GAP_MS would block a second try; so the worker is
+  // told to forget the window first, and the reload waits for its answer (at most FORGET_MS: a worker that does not
+  // answer, or no worker, reloads anyway).
+  const FORGET_MS = 1000;
+  function forgetDown() {
+    const worker = navigator.serviceWorker && navigator.serviceWorker.controller;
+    if (!worker) return Promise.resolve();
+    return new Promise((done) => {
+      const timer = setTimeout(done, FORGET_MS);
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => { clearTimeout(timer); done(); };
+      try { worker.postMessage({ forget: 'down' }, [channel.port2]); } catch (_) { clearTimeout(timer); done(); }
+    });
+  }
+
+  // Review round, S2: a page brought back to the front asks the PC's build too, not only while down. A failure here
+  // is not the error screen at once (a phone just woken is still bringing its VPN up): the live views' own errors
+  // and LOST_MS decide that.
+  async function fresh() {
+    if (reach.down || reach.checking) return;
+    const stop = new AbortController();
+    const timer = setTimeout(() => stop.abort(), PROBE_MS);
+    try {
+      const response = await fetch('/api/hello', { credentials: 'same-origin', cache: 'no-store', signal: stop.signal });
+      if (!verdict(response.status, response.headers.get('Content-Type'))) stale(response.headers.get(BUILD_HEADER) || '');
+    } catch (_) { /* the live views notice */ }
+    clearTimeout(timer);
+  }
+
+  async function check() {
+    if (reach.checking) return;
+    reach.checking = true;
+    if (reach.when) reach.when.textContent = 'Checking…';
+    const stop = new AbortController();
+    const timer = setTimeout(() => stop.abort(), PROBE_MS);
+    let why = '';
+    let build = '';
+    try {
+      const response = await fetch('/api/hello', { credentials: 'same-origin', cache: 'no-store', signal: stop.signal });
+      why = verdict(response.status, response.headers.get('Content-Type'));
+      build = response.headers.get(BUILD_HEADER) || '';
+    } catch (_) {
+      why = unreachable();
+    }
+    clearTimeout(timer);
+    reach.checking = false;
+    if (why) fallen(why);
+    else if (!stale(build)) up();
+  }
+
+  function fallen(why) {
+    clearTimeout(reach.grace);
+    reach.grace = null;
+    if (!reach.down) reach.tries = 0;
+    reach.down = why;
+    drawDown();
+    schedule();
+  }
+
+  function schedule() {
+    clearInterval(reach.tick);
+    let left = RETRY_S[Math.min(reach.tries, RETRY_S.length - 1)];
+    reach.tries += 1;
+    reach.when.textContent = 'Trying again in ' + left + ' s';
+    reach.tick = setInterval(() => {
+      left -= 1;
+      if (left > 0) { reach.when.textContent = 'Trying again in ' + left + ' s'; return; }
+      clearInterval(reach.tick);
+      check();
+    }, 1000);
+  }
+
+  function up() {
+    if (!reach.down) return;
+    reach.down = '';
+    clearInterval(reach.tick);
+    if (reach.layer) reach.layer.remove();
+    reach.layer = null;
+    reach.when = null;
+    for (const revive of reach.revive) revive();
+    if (reach.dirty && current && !screens[current.name].keep) show(current.name, 'f', current.params);
+    reach.dirty = false;
+  }
+
+  // A tap while a check is in flight: check() returns at once and the countdown is already stopped. That is right
+  // only because the check in flight ends in fallen() (which schedules again) or up() (review round, N3).
+  function tryNow() {
+    clearInterval(reach.tick);
+    check();
+  }
+
+  // Drawn again only when what it says changes (the case, or the phone going on or offline): each retry only writes
+  // the countdown (schedule), so the Try again button keeps its focus and a tap mid-retry, the scroll stays, and
+  // role=alert is not read out again every few seconds (review round, N1).
+  function drawDown() {
+    const copy = COPY[reach.down] || COPY.unreachable;
+    const says = reach.down + (navigator.onLine === false ? ' offline' : ' online');
+    if (reach.layer && reach.layer.dataset.says === says) return;
+    if (!reach.layer) {
+      reach.layer = h('section', { class: 'reach scr-f', role: 'alert' });
+      document.getElementById('nv').append(reach.layer);
+    }
+    reach.layer.dataset.says = says;
+    const items = copy.order.map((key, i) => {
+      const [title, how] = CHECKS[key];
+      const net = key === 'online';
+      return h('li', { class: 'reach-item' },
+        h('span', { class: 'reach-n' + (net && navigator.onLine === false ? ' bad' : ''), text: String(i + 1) }),
+        h('span', { class: 'reach-text' },
+          h('span', { class: 'reach-check', text: title }),
+          h('span', { class: 'reach-how', text: net ? online() : how })));
+    });
+    reach.when = h('span', { class: 'note', role: 'status' });
+    reach.layer.replaceChildren(
+      h('div', { class: 'brand' },
+        h('div', { class: 'brand-mark reach-mark' }, icon('lotus', 26, '#8D939A', 1.7)),
+        h('div', { class: 'brand-text' },
+          h('span', { class: 'brand-name', text: 'Nirvana' }),
+          h('span', { class: 'brand-sub', text: 'Not connected to the PC' }))),
+      h('div', { class: 'section' },
+        h('h1', { class: 'reach-title', text: copy.title }),
+        h('p', { class: 'reach-lead', text: copy.lead })),
+      h('ol', { class: 'card reach-list' }, ...items),
+      h('div', { class: 'reach-foot' },
+        h('button', { class: 'press reach-try', type: 'button', text: 'Try again', onclick: tryNow }),
+        reach.when));
+  }
+
+  window.addEventListener('offline', () => { if (reach.down) drawDown(); lost(); });
+  window.addEventListener('online', () => { if (reach.down) { drawDown(); tryNow(); } });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    if (reach.down) tryNow();
+    else fresh();
+  });
+
   async function answer(response) {
     let data = null;
     try { data = await response.json(); } catch (_) { /* not JSON */ }
     return { ok: response.ok, status: response.status, data: data || {} };
   }
 
-  async function getJson(path) {
-    const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store' });
+  // A fetch that tells the reach check what came back (P39o).
+  // `load`: a failure marks the screen to be drawn again when the PC is back.
+  async function reached(path, options, load) {
+    let response;
+    try {
+      response = await fetch(path, options);
+    } catch (_) {
+      trouble('network', load);
+      throw new Error('no answer from the PC');
+    }
+    const why = verdict(response.status, response.headers.get('Content-Type'));
+    if (why) trouble(why, load);
+    else answered();
+    return response;
+  }
+
+  // `{ quiet: true }`: the caller handles a failure itself and nothing on the screen is left stale by it (prompt.js's
+  // reads), so it does not mark the screen to be drawn again (review round, S1).
+  async function getJson(path, opts) {
+    const quiet = Boolean(opts && opts.quiet);
+    const response = await reached(path, { credentials: 'same-origin', cache: 'no-store' }, !quiet);
     if (!response.ok) {
       let why = response.status + '';
       try { why = (await response.json()).error || why; } catch (_) { /* not JSON */ }
@@ -92,10 +369,10 @@
 
   // A POST from this page: the browser adds Origin and Sec-Fetch-Site, which the server requires (record p39a, S5).
   async function postJson(path, body) {
-    const response = await fetch(path, {
+    const response = await reached(path, {
       method: 'POST', credentials: 'same-origin', cache: 'no-store',
       headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    });
+    }, false);
     return answer(response);
   }
 
@@ -122,11 +399,16 @@
       xhr.timeout = uploadWait(file.size);
       xhr.upload.onprogress = (event) => { if (on && on.progress && event.lengthComputable) on.progress(event.loaded, event.total); };
       xhr.onload = () => {
+        const why = verdict(xhr.status, xhr.getResponseHeader('Content-Type'));
+        if (why) trouble(why);
+        else answered();
         let data = null;
         try { data = JSON.parse(xhr.responseText); } catch (_) { /* not JSON */ }
         resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, data: data || {} });
       };
       xhr.onerror = () => failed('the connection to the PC failed');
+      // P39o: no answer at all is a question for the reach check too.
+      xhr.addEventListener('error', () => trouble('network'));
       xhr.ontimeout = () => failed('no answer from the PC in ' + Math.round(xhr.timeout / 1000) + ' s');
       xhr.onabort = () => failed('removed');
       xhr.send(file);
@@ -154,9 +436,10 @@
       if (source) source.close();
       opened = Date.now();
       source = new EventSource(path);
-      source.onopen = () => { wait = 1000; if (on.state) on.state(true); };
+      source.onopen = () => { wait = 1000; answered(); if (on.state) on.state(true); };
       source.onerror = () => {
         if (over) return;
+        lost();
         if (on.state) on.state(false);
         if (source.readyState === EventSource.CLOSED) {
           timer = setTimeout(open, wait);
@@ -175,8 +458,13 @@
     function shown() {
       if (document.visibilityState === 'visible' && Date.now() - opened >= 1000) open();
     }
+    // P39o: the PC answered again (the reach check): open now, not at the end of the back-off.
+    function revive() {
+      if (!over && (!source || source.readyState !== EventSource.OPEN)) open();
+    }
     function close() {
       over = true;
+      reach.revive.delete(revive);
       clearTimeout(timer);
       if (source) source.close();
       document.removeEventListener('visibilitychange', shown);
@@ -184,6 +472,7 @@
     }
     document.addEventListener('visibilitychange', shown);
     window.addEventListener('pageshow', shown);
+    reach.revive.add(revive);
     open();
     return close;
   }
@@ -216,6 +505,10 @@
     const def = has(name) ? screens[name] : screens.pcs;
     const el = h('section', { class: 'screen ' + (enter[dir] || enter.f) });
     document.getElementById('nv').replaceChildren(el);
+    // P39o: the screen the error screen returns to; the error screen itself stays on top.
+    current = { name: has(name) ? name : 'pcs', params: params || {} };
+    reach.dirty = false;
+    if (reach.layer) document.getElementById('nv').append(reach.layer);
     const cleanup = def.render(el, params || {}, api);
     if (typeof cleanup === 'function') leave = cleanup;
   }
@@ -257,6 +550,9 @@
     show(state.name, 'l', state.params);
   });
   document.addEventListener('DOMContentLoaded', boot);
+  // P39o: one check as the page opens. It shows the error screen at once when the page came out of the phone's cache
+  // with the PC out of reach, and reloads a shell that is not the running build's.
+  document.addEventListener('DOMContentLoaded', check);
 
   // Whether the phone asked for less motion: the sparkle then stands still.
   function still() { return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches; }

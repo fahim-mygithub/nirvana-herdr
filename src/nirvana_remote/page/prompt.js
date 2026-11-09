@@ -55,7 +55,7 @@
       for (let i = 0; i < 4; i++) {
         await new Promise((go) => setTimeout(go, 400));
         if (over || !open()) return;
-        const data = await nv.getJson('/api/prompt?agent=' + encodeURIComponent(id)).catch(() => null);
+        const data = await nv.getJson('/api/prompt?agent=' + encodeURIComponent(id), { quiet: true }).catch(() => null);
         if (!open()) return;
         if (!data || !data.blocked) { sheetClose(); return; }
         if (data.seen !== seen) { show(data, 'Sent ' + key + '. This is what the PC asks now.'); return; }
@@ -96,8 +96,10 @@
       });
     }
 
+    // Quiet (P39o review round, S1): a failed read leaves nothing stale, and must not have the chat drawn again when
+    // the PC is back (the owner's draft and pending attachments would go).
     async function read() {
-      const data = await nv.getJson('/api/prompt?agent=' + encodeURIComponent(id)).catch(() => null);
+      const data = await nv.getJson('/api/prompt?agent=' + encodeURIComponent(id), { quiet: true }).catch(() => null);
       if (data && data.blocked && status === 'needs') show(data);
     }
 

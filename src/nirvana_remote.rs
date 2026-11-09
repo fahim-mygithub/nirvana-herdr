@@ -44,6 +44,10 @@ pub mod alerts;
 #[cfg(test)]
 mod tests_alerts;
 pub mod webpush;
+// Plan 39 P39o: the shell the phone keeps for when the PC cannot be reached, and the error screen's tests.
+pub mod shell;
+#[cfg(test)]
+mod tests_offline;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -18,8 +18,23 @@
   --purple: #A995D6;
   --red: #EC9A92;
   --k: 1;
+  /* P39o item 7: the room above the header and below the last row, and the screen's own insets. In a Safari tab
+     these are the prototype's 48 px and 28 px, as before. The home-screen app has no browser bars: the status bar
+     (black-translucent) and the home indicator are the insets themselves, so it keeps only a small gap past them
+     (:root.standalone below). */
+  --gap-top: 48px;
+  --gap-bottom: 28px;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
   color-scheme: dark;
 }
+/* The home-screen app (app.js sets the class from display-mode standalone or fullscreen, or navigator.standalone):
+   the header sits just under the status bar or Dynamic Island, the composer just over the home indicator. */
+:root.standalone { --gap-top: 10px; --gap-bottom: 10px; }
+/* The keyboard is up: it covers the home indicator, so the composer needs no room for it. */
+:root.standalone.kb { --safe-bottom: 0px; }
 html, body { margin: 0; background: var(--bg); }
 body {
   color: var(--text);
@@ -37,10 +52,23 @@ a:hover { color: #86CBD2; }
 .nv {
   position: relative;
   max-width: 430px;
+  /* Clear of a landscape notch on either side, the column centred between the two insets' larger. */
+  max-width: min(430px, calc(100vw - 2 * max(var(--safe-left), var(--safe-right))));
   min-height: 100vh;
   min-height: 100dvh;
   margin: 0 auto;
   overflow: hidden;
+}
+/* The home-screen app: the column is the screen itself, edge to edge (viewport-fit=cover), not a height from vh. On
+   the owner's iPhone, 2026-11-08, the column ended well above the home indicator. The visual viewport's top and
+   bottom (app.js) keep the composer above the keyboard. */
+:root.standalone .nv {
+  position: fixed;
+  top: var(--vv-top, 0px);
+  bottom: var(--vv-bottom, 0px);
+  left: 0;
+  right: 0;
+  min-height: 0;
 }
 /* The reset has no weight of its own (:where), so a button's own class sets its padding and background. */
 :where(.nv) button { font: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0; cursor: pointer; text-align: left; }
@@ -75,7 +103,7 @@ a:hover { color: #86CBD2; }
 }
 
 /* Screen 1: your PCs. */
-.pcs { padding: calc(56px + env(safe-area-inset-top, 0px)) 20px calc(28px + env(safe-area-inset-bottom, 0px)); gap: 28px; }
+.pcs { padding: calc(var(--gap-top) + 8px + var(--safe-top)) 20px calc(var(--gap-bottom) + var(--safe-bottom)); gap: 28px; }
 .brand { display: flex; align-items: center; gap: 12px; }
 .brand-mark { width: 44px; height: 44px; border-radius: 12px; background: var(--teal-deep); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .brand-text { display: flex; flex-direction: column; }
@@ -121,7 +149,7 @@ a:hover { color: #86CBD2; }
 .scroll::-webkit-scrollbar { display: none; }
 
 /* The bar on top of screens 2 and 3. */
-.top { display: flex; align-items: center; gap: 6px; padding: calc(48px + env(safe-area-inset-top, 0px)) 12px 10px; box-sizing: border-box; flex-shrink: 0; }
+.top { display: flex; align-items: center; gap: 6px; padding: calc(var(--gap-top) + var(--safe-top)) 12px 10px; box-sizing: border-box; flex-shrink: 0; }
 .top.ruled { border-bottom: 1px solid var(--hover); }
 .icon-button { width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; border-radius: 12px; flex-shrink: 0; }
 .top-text { display: flex; flex-direction: column; flex-grow: 1; min-width: 0; }
@@ -131,7 +159,7 @@ a:hover { color: #86CBD2; }
 .top-chip { flex-shrink: 0; }
 
 /* Screen 2: the spaces. */
-.body { flex-grow: 1; padding: 6px 0 calc(32px + env(safe-area-inset-bottom, 0px)); }
+.body { flex-grow: 1; padding: 6px 0 calc(var(--gap-bottom) + 4px + var(--safe-bottom)); }
 .pad { padding: 0 16px; }
 .spaces { display: flex; flex-direction: column; gap: 10px; }
 .space { background: var(--card); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
@@ -190,7 +218,7 @@ a:hover { color: #86CBD2; }
 .live-box.open .live { max-height: none; }
 
 /* Screen 5: the box. 16 px text, so iPhone Safari does not zoom in on focus. */
-.composer { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px calc(28px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--hover); background: var(--bg); flex-shrink: 0; }
+.composer { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px calc(var(--gap-bottom) + var(--safe-bottom)); border-top: 1px solid var(--hover); background: var(--bg); flex-shrink: 0; }
 .composer .note:empty { display: none; }
 .pending { display: flex; flex-wrap: wrap; gap: 8px; }
 .pending:empty { display: none; }
@@ -212,7 +240,7 @@ a:hover { color: #86CBD2; }
 /* The sheet: screen 5's "Add to the message", and the queue or send now choice. */
 .layer { position: absolute; inset: 0; z-index: 20; }
 .backdrop { position: absolute; inset: 0; width: 100%; height: 100%; background: rgba(5, 7, 8, 0.62); }
-.sheet { position: absolute; left: 0; right: 0; bottom: 0; background: var(--card); border-radius: 24px 24px 0 0; border-top: 1px solid #2A2F34; padding: 10px 16px calc(32px + env(safe-area-inset-bottom, 0px)); box-sizing: border-box; display: flex; flex-direction: column; gap: 14px; }
+.sheet { position: absolute; left: 0; right: 0; bottom: 0; background: var(--card); border-radius: 24px 24px 0 0; border-top: 1px solid #2A2F34; padding: 10px 16px calc(var(--gap-bottom) + 4px + var(--safe-bottom)); box-sizing: border-box; display: flex; flex-direction: column; gap: 14px; }
 .grip { width: 40px; height: 5px; border-radius: 3px; background: var(--sleep); align-self: center; }
 .sheet-body { display: flex; flex-direction: column; gap: 6px; }
 .sheet-title { font-size: 17px; font-weight: 600; padding: 0 4px 6px; }
@@ -292,3 +320,20 @@ a:hover { color: #86CBD2; }
 .switch-knob { position: absolute; top: 3px; left: 3px; width: 24px; height: 24px; border-radius: 50%; background: var(--text); transition: transform calc(var(--k) * 200ms) cubic-bezier(.2, .8, .2, 1); }
 .switch.on .switch-knob { transform: translateX(20px); background: var(--teal-ink); }
 @media (prefers-reduced-motion: reduce) { .switch, .switch-knob { transition: none; } }
+
+/* P39o: the error screen when the PC cannot be reached (record p39o). It lies over the open screen, in screen 1's
+   layout and colours: the brand row, a title, a card of checks, and Try again in the send button's teal. */
+.reach { position: absolute; inset: 0; z-index: 30; background: var(--bg); display: flex; flex-direction: column; gap: 22px; box-sizing: border-box; overflow-y: auto; padding: calc(var(--gap-top) + 8px + var(--safe-top)) 20px calc(var(--gap-bottom) + var(--safe-bottom)); }
+.reach-mark { background: var(--hover); }
+.reach-title { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
+.reach-lead { margin: 0; color: var(--soft); font-size: 14px; }
+.reach-list { list-style: none; margin: 0; padding: 0; }
+.reach-item { display: flex; gap: 14px; padding: 14px 16px; align-items: flex-start; }
+.reach-item + .reach-item { border-top: 1px solid var(--line); }
+.reach-n { width: 22px; height: 22px; border-radius: 11px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; background: rgba(95, 179, 188, 0.16); color: var(--teal); }
+.reach-n.bad { background: #2A2023; color: var(--red); }
+.reach-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.reach-check { font-weight: 600; font-size: 14px; }
+.reach-how { font-size: 13px; color: var(--muted); }
+.reach-foot { margin-top: auto; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.nv .reach-try { width: 100%; height: 48px; border-radius: 24px; background: var(--teal); color: #0E2A2D; font-weight: 600; text-align: center; }

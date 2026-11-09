@@ -3,6 +3,25 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.60.0: Nirvana Remote error page, home-screen layout, and a cleaner "On the PC now"
+
+- **Changed:** the service worker keeps a versioned copy of the page's static shell (never `/api/` or agent data; the
+  PC always answers first, the copy only when it gives no answer in 4 s, refuses, or its proxy answers 502-504), so
+  the phone can show "Can't reach your PC" with a checklist (Tailscale on on this phone, PC awake, Nirvana open with
+  `● remote :8443`, phone online), or "This phone is offline", "Nirvana is not answering on the PC", or "The PC refused
+  this phone"; it retries with backoff and returns where the owner was, keeping a draft and its attachments. A new
+  build replaces the shell and a stale page reloads. In the home-screen app the page fills the screen by the safe-area
+  insets (header under the status bar, composer above the home indicator or the keyboard; pinch-zoom ignored); the
+  Safari-tab layout is unchanged. "On the PC now" collapses runs of blank and `─━═` rule lines to one.
+- **Because:** the owner, 2026-11-08: "Can you also add a tailsscale check to the UI when it fails to connect. Like a
+  error page." and "This page needs to also accommodate for phones like the iPhone 17 pro max or other devices when
+  added to the Home Screen because it now doesn't need to accommodate for a web browser url bar."
+- **Measured:** headless Chromium with emulated insets (iPhone 17 Pro Max app: back button top 72 px, composer bottom
+  912 of 956) and the error screen 10.7 s after the PC drops; Chromium and WebKit-on-Windows only, not Safari. 170
+  `nirvana_remote` tests (scoped); 3114 controls find their text once.
+- **If you remove this:** a phone that cannot reach the PC shows Safari's blank error, and the app wastes the top and
+  bottom of the screen.
+
 ## alpha 0.59.0: finished workers close and stop counting
 
 - **Changed:** an order counts as running only while a supervisor holds its lock (or it was seated under 60 s ago);

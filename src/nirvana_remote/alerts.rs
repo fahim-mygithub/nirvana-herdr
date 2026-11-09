@@ -878,9 +878,18 @@ impl Site {
     /// P39e's routes and files. Called after every check in `Site::route`, like P39d's.
     pub fn alerts_routes(&self, request: &Request, conn: &mut Conn) -> Option<Response> {
         let reads = request.method == "GET" || request.method == "HEAD";
-        if let Some((_, kind, body)) = FILES.iter().find(|(path, _, _)| *path == request.path) {
+        if let Some((path, kind, body)) = FILES.iter().find(|(path, _, _)| *path == request.path) {
             return Some(if reads {
-                Response::new(200, kind, *body)
+                // P39o: the worker is served with the build tag and the shell's paths written in (shell.rs).
+                Response::new(
+                    200,
+                    kind,
+                    if *path == "/sw.js" {
+                        super::shell::worker().as_bytes()
+                    } else {
+                        *body
+                    },
+                )
             } else {
                 Response::text(405, "GET only").with("Allow", "GET, HEAD")
             });

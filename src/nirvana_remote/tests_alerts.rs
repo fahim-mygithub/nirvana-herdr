@@ -1332,13 +1332,11 @@ fn the_home_screen_app_is_served_with_its_manifest_icons_and_worker() {
     let (head, sw) = get_bytes(running.addr, "/sw.js");
     assert!(head.contains("text/javascript"), "{head}");
     let sw = String::from_utf8(sw).unwrap();
-    assert!(
-        !sw.contains("'fetch'") && !sw.contains("\"fetch\""),
-        "no fetch handler: it caches nothing"
-    );
-    assert!(
-        !sw.contains("caches.") && !sw.contains("cache.put"),
-        "no Cache Storage"
+    // P39o: one fetch handler, for the shell only (tests_offline.rs says what it answers).
+    assert_eq!(
+        sw.matches("addEventListener('fetch'").count(),
+        1,
+        "one fetch handler"
     );
     assert!(sw.contains("showNotification"));
     assert!(
