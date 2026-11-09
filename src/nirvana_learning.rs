@@ -204,6 +204,8 @@ pub struct LearningView {
     pub profiles: Vec<ProfileRow>,
     /// `nirvana_review::crowded`: `(class, profile, live count)` a merge at `herdr run end` takes.
     pub waiting: Vec<(String, Option<String>, usize)>,
+    /// Order LEARN: the idle review's switch, its last review here and what it did, and its last check.
+    pub idle: crate::nirvana_idle_review::IdleView,
 }
 
 impl LearningView {
@@ -615,6 +617,7 @@ pub fn load_with(root: &Path, now: u64, memo: &mut Memo) -> LearningView {
         changes: changes(root, &profiles),
         waiting: review::crowded(root),
         profiles,
+        idle: crate::nirvana_idle_review::view(root),
     }
 }
 
@@ -662,6 +665,8 @@ pub fn stamp(root: &Path, now: u64) -> Stamp {
         // Also the folder the cap's count is renamed into (`nirvana_review::queue`), so a queued review reads again.
         project.dir().join("runs"),
         seat::dir().join(seat::SEATS_FILE),
+        // Order LEARN: the idle review's switch; its per-project state is renamed into `runs/`, stamped above.
+        crate::nirvana_idle_review::global_path(),
     ];
     for entry in listed(&profile_files::folder(root)) {
         paths.push(entry.clone());

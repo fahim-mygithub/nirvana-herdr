@@ -25,6 +25,12 @@
 //!   The worker reads the file when it wants it.
 //! - **Counters** in `.nirvana/lessons/index.json`: offered (a brief listed it), opened (the worker's stream read
 //!   its file), passed after opened. A lesson offered often that does not help decays out of the briefs (`live`).
+//! - **The class is the router's** (order LEARN, 2026-11-09). A brief offers a lesson to orders of its exact class
+//!   (`fits`), and the router seats orders by the class ids of `seats.toml`. Workers wrote their own words in the
+//!   lesson's `class` (`slicer-estimation`, `CoreMedia Host Clock Alignment`), and no such lesson on this machine was
+//!   ever offered (`nirvana/lessons_census.py`; the counts are in nirvana/plans/2026-11-09-learn-idle.md). The gate
+//!   now keeps a worker's lesson under the class its own order was seated with, its words as `topic:`; `herdr lessons
+//!   reclass` moves the old ones the same way, as one ledger op that `herdr lessons rollback` undoes.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -394,6 +400,8 @@ pub fn verify_and_write(
         Ok(lesson) => lesson,
         Err(why) => return Verdict::Refused(why),
     };
+    // Order LEARN: the class the next order of this kind is routed with, not the worker's own words for it.
+    let (lesson, topic) = routed(root, run, order, lesson);
     let written = (|| {
         let io = |err: std::io::Error| format!("could not write it: {err}");
         let _lock = lock(root).map_err(io)?;
@@ -423,7 +431,12 @@ pub fn verify_and_write(
             &mut index,
             &slug,
             &lesson,
-            &Source { order, run, at },
+            &Source {
+                order,
+                run,
+                at,
+                topic: topic.as_deref(),
+            },
             meta,
         )
         .map_err(io)?;
@@ -440,11 +453,59 @@ pub(crate) fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The order and run a write names, and when.
+/// The order and run a write names, and when; `topic` is the worker's own words for the class, when herdr kept the
+/// lesson under its order's class instead (order LEARN).
 struct Source<'a> {
     order: &'a str,
     run: &'a str,
     at: u64,
+    topic: Option<&'a str>,
+}
+
+/// Order LEARN: the class ids of the seat table as this machine has it, read without writing (`seats.toml`, else
+/// herdr's default), together with the default's: a class the router names in either is one an order can carry.
+pub fn router_classes() -> std::collections::BTreeSet<String> {
+    let own =
+        std::fs::read_to_string(crate::nirvana_seat::dir().join(crate::nirvana_seat::SEATS_FILE))
+            .ok();
+    let mut out = std::collections::BTreeSet::new();
+    for text in own
+        .as_deref()
+        .into_iter()
+        .chain([crate::nirvana_seat::DEFAULT])
+    {
+        if let Ok(table) = crate::nirvana_seat::parse(text) {
+            out.extend(table.classes.into_iter().map(|class| class.id));
+        }
+    }
+    out
+}
+
+/// Order LEARN: the class `order` of `run` was seated with, read from the journal's raw lines as `import` reads them,
+/// so a journal from before one of today's fields still answers. The last `seated` line wins.
+pub fn seated_class(root: &Path, run: &str, order: &str) -> Option<String> {
+    if !nirvana_run::valid_id(run) || !nirvana_run::valid_id(order) {
+        return None;
+    }
+    let journal =
+        std::fs::read_to_string(Project::at(root).run_dir(run).join(nirvana_run::JOURNAL)).ok()?;
+    told(&journal)
+        .remove(order)?
+        .class
+        .filter(|class| !class.trim().is_empty())
+}
+
+/// Order LEARN: `lesson` under the class its order was seated with, and the worker's own words for the class when they
+/// differ. A lesson review's own class is never a lesson's (`nirvana_review` scopes its lessons by the order it read);
+/// a journal that cannot say keeps the worker's words, as before.
+fn routed(root: &Path, run: &str, order: &str, lesson: Lesson) -> (Lesson, Option<String>) {
+    match seated_class(root, run, order).filter(|class| class != crate::nirvana_review::CLASS) {
+        Some(class) if one_line(&lesson.class) != class => {
+            let topic = one_line(&lesson.class);
+            (Lesson { class, ..lesson }, Some(topic))
+        }
+        _ => (lesson, None),
+    }
 }
 
 fn lesson_path(root: &Path, slug: &str) -> PathBuf {
@@ -615,8 +676,12 @@ fn write_locked(
         .profile
         .map(|profile| format!("profile: {profile}\n"))
         .unwrap_or_default();
+    let topic_line = source
+        .topic
+        .map(|topic| format!("topic: {}\n", one_line(topic)))
+        .unwrap_or_default();
     let body = format!(
-        "---\nname: {name_line}\ndescription: {name_line}\nclass: {}\n{profile_line}order: {}\nrun: {}\nevidence: {}\n---\n\n{}\n",
+        "---\nname: {name_line}\ndescription: {name_line}\nclass: {}\n{topic_line}{profile_line}order: {}\nrun: {}\nevidence: {}\n---\n\n{}\n",
         one_line(&lesson.class),
         source.order,
         source.run,
@@ -867,7 +932,12 @@ pub fn review_new(
                 index,
                 &slug,
                 lesson,
-                &Source { order: by, run, at },
+                &Source {
+                    order: by,
+                    run,
+                    at,
+                    topic: None,
+                },
                 Meta {
                     profile,
                     origin: Origin::Review,
@@ -923,7 +993,7 @@ pub fn review_patch(
             index,
             slug,
             &lesson,
-            &Source { order: by, run, at },
+            &Source { order: by, run, at, topic: None },
             Meta {
                 profile: entry.profile.as_deref(),
                 origin: Origin::Review,
@@ -1030,7 +1100,12 @@ pub fn merge(
             index,
             &target,
             &lesson,
-            &Source { order: by, run, at },
+            &Source {
+                order: by,
+                run,
+                at,
+                topic: None,
+            },
             Meta {
                 profile: first.profile.as_deref(),
                 origin: Origin::Merge,
@@ -1101,6 +1176,15 @@ pub fn rollback(root: &Path, id: &str, at: u64) -> Result<String, String> {
         }
         noted(root, &path);
         match &before.entry {
+            // Review round N6: a reclass changed only the class; the offers and opens since are kept.
+            Some(entry) if row.op == "reclass" => {
+                let mut entry = entry.clone();
+                if let Some(now) = index.lessons.get(&before.slug) {
+                    entry.counters = now.counters.clone();
+                    entry.seen = now.seen.clone();
+                }
+                index.lessons.insert(before.slug.clone(), entry);
+            }
             Some(entry) => {
                 index.lessons.insert(before.slug.clone(), entry.clone());
             }
@@ -1135,6 +1219,207 @@ pub fn rollback(root: &Path, id: &str, at: u64) -> Result<String, String> {
             .collect::<Vec<_>>()
             .join(", ")
     ))
+}
+
+// ---- order LEARN: the router's class, and retiring a lesson that never helps ----
+
+/// What `reclass` moved, `(slug, from, to)`, what it left, `(slug, class, why)`, and its ledger op.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Reclassed {
+    pub moved: Vec<(String, String, String)>,
+    pub left: Vec<(String, String, String)>,
+    pub op: Option<String>,
+}
+
+/// The lesson file with its frontmatter's `class:` line set to `to`, and `topic: <from>` after it unless it has a
+/// topic. `None` when the file has no frontmatter `class:` line. Review round S6: every other byte is kept, line endings
+/// and trailing lines included, so a file the owner saved with CRLF is changed in its class line only.
+fn with_class(body: &str, from: &str, to: &str) -> Option<String> {
+    let lines: Vec<&str> = body.split_inclusive('\n').collect();
+    let bare = |line: &str| line.trim_end_matches(['\n', '\r']).to_owned();
+    if lines.first().map(|line| bare(line)).as_deref() != Some("---") {
+        return None;
+    }
+    let end = lines.iter().skip(1).position(|line| bare(line) == "---")? + 1;
+    let at = lines[1..end]
+        .iter()
+        .position(|line| bare(line).starts_with("class:"))?
+        + 1;
+    let ending = &lines[at][bare(lines[at]).len()..];
+    let topic = !lines[1..end]
+        .iter()
+        .any(|line| bare(line).starts_with("topic:"));
+    let mut out = String::with_capacity(body.len() + 64);
+    for (n, line) in lines.iter().enumerate() {
+        if n != at {
+            out.push_str(line);
+            continue;
+        }
+        out.push_str(&format!("class: {to}{ending}"));
+        if topic {
+            out.push_str(&format!("topic: {}{ending}", one_line(from)));
+        }
+    }
+    Some(out)
+}
+
+/// Review round S6: why `reclass` leaves a lesson whose file herdr did not write last.
+pub const EDITED: &str = "edited since herdr wrote it, or written before herdr logged its writes";
+
+/// Review round S6: whether the lesson's file is, byte for byte, what herdr last wrote: the newest line for it in the
+/// writes log (`noted`, the sha of the file's bytes) or the newest ledger row's `after` for it. A file the owner saved
+/// since, or one no record names, is not.
+pub fn herdr_wrote_last(root: &Path, slug: &str) -> bool {
+    let path = lesson_path(root, slug);
+    let Some(sha) = file_sha(&path) else {
+        return false;
+    };
+    let rel = rel_in(&dir(root), &path);
+    let logged = std::fs::read_to_string(writes_path(root))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+        .rfind(|row| row.get("path").and_then(|p| p.as_str()) == Some(rel.as_str()))
+        .and_then(|row| row.get("sha").and_then(|s| s.as_str()).map(str::to_owned));
+    if logged.as_deref() == Some(sha.as_str()) {
+        return true;
+    }
+    let ledgered = ledger(root)
+        .iter()
+        .rev()
+        .find_map(|row| row.after.iter().find(|snap| snap.slug == slug).cloned())
+        .and_then(|snap| snap.file);
+    ledgered.is_some() && std::fs::read_to_string(&path).ok() == ledgered
+}
+
+/// Order LEARN: each worker's lesson whose class is not one of `classes` (the router's, `router_classes`) gets the
+/// class its own order was seated with, its old class kept as `topic:`. All of them in one ledger op, `reclass`, so
+/// `herdr lessons rollback <id>` puts every one back. A review's or a merge's lesson is left: its class is the reviewed
+/// order's already (`nirvana_review::apply_review`). `dry` writes nothing, not even the lock.
+///
+/// Review round S6: a lesson whose file is not as herdr last wrote it (`herdr_wrote_last`) is left, listed with
+/// `EDITED`, unless `edited` (the owner's `herdr lessons reclass --edited`). The idle review passes `false`.
+pub fn reclass(
+    root: &Path,
+    classes: &std::collections::BTreeSet<String>,
+    dry: bool,
+    edited: bool,
+    at: u64,
+) -> Result<Reclassed, String> {
+    let index = read_index(root);
+    let mut out = Reclassed::default();
+    for (slug, entry) in &index.lessons {
+        if classes.contains(&entry.class) {
+            continue;
+        }
+        if entry.origin != Origin::Worker {
+            out.left.push((
+                slug.clone(),
+                entry.class.clone(),
+                format!("a {} lesson: not a worker's", entry.origin.word()),
+            ));
+            continue;
+        }
+        match seated_class(root, &entry.run, &entry.order) {
+            Some(_) if !edited && !herdr_wrote_last(root, slug) => out.left.push((
+                slug.clone(),
+                entry.class.clone(),
+                format!("{EDITED}: herdr lessons reclass --edited moves it"),
+            )),
+            Some(class) if classes.contains(&class) && class != crate::nirvana_review::CLASS => {
+                out.moved.push((slug.clone(), entry.class.clone(), class));
+            }
+            Some(class) => out.left.push((
+                slug.clone(),
+                entry.class.clone(),
+                format!(
+                    "its order was seated as {class}, not a class the router offers lessons to"
+                ),
+            )),
+            None => out.left.push((
+                slug.clone(),
+                entry.class.clone(),
+                format!(
+                    "no seated line for {}/{} in its journal",
+                    entry.run, entry.order
+                ),
+            )),
+        }
+    }
+    if dry || out.moved.is_empty() {
+        return Ok(out);
+    }
+    let slugs: Vec<String> = out.moved.iter().map(|(slug, _, _)| slug.clone()).collect();
+    let moved = out.moved.clone();
+    let (_, id) = ledgered(
+        root,
+        "reclass",
+        "herdr",
+        "reclass",
+        at,
+        &slugs,
+        |index, _| {
+            for (slug, from, to) in &moved {
+                let Some(entry) = index.lessons.get_mut(slug) else {
+                    return Err(format!("{slug} left the index since it was read"));
+                };
+                if entry.class != *from {
+                    return Err(format!("{slug}'s class changed since it was read"));
+                }
+                // S6: checked again under the lock, the file read as it is (its own line endings).
+                if !edited && !herdr_wrote_last(root, slug) {
+                    return Err(format!("{slug}: {EDITED} since it was read"));
+                }
+                let body = std::fs::read_to_string(lesson_path(root, slug))
+                    .map_err(|_| format!("{slug}.md is missing"))?;
+                let text =
+                    with_class(&body, from, to).ok_or(format!("{slug}.md has no class line"))?;
+                let path = lesson_path(root, slug);
+                std::fs::write(&path, text).map_err(|err| format!("{slug}: {err}"))?;
+                noted(root, &path);
+                entry.class = to.clone();
+            }
+            Ok(slugs[0].clone())
+        },
+    )?;
+    out.op = Some(id);
+    Ok(out)
+}
+
+/// Order LEARN: a lesson that has had its first `DECAY_AFTER` offers and never led to a pass after it was opened. The
+/// decay rule has already taken it out of the briefs (`live`); retiring it takes it out of the index and the reviews'
+/// reading too.
+pub fn retirable(counters: &Counters) -> bool {
+    counters.offered >= DECAY_AFTER && counters.passed_after_opened == 0
+}
+
+/// Order LEARN: the idle review's `retire` op. The lesson's file goes to `.archive/<id>-<slug>.md` and it leaves the
+/// index, in one ledger row that `rollback` undoes; a lesson that is not `retirable` is refused.
+pub fn retire(root: &Path, slug: &str, by: &str, run: &str, at: u64) -> Result<String, String> {
+    let slugs = [slug.to_owned()];
+    ledgered(root, "retire", by, run, at, &slugs, |index, id| {
+        let Some(entry) = index.lessons.get(slug).cloned() else {
+            return Err(format!("no lesson {slug} to retire"));
+        };
+        if !retirable(&entry.counters) {
+            return Err(format!(
+                "{slug} is offered {} · passed after opened {}: only a lesson offered {DECAY_AFTER} times or more \
+                 that never helped is retired",
+                entry.counters.offered, entry.counters.passed_after_opened
+            ));
+        }
+        let archive = dir(root).join(ARCHIVE);
+        std::fs::create_dir_all(&archive).map_err(|err| err.to_string())?;
+        let copy = archive.join(format!("{id}-{slug}.md"));
+        let from = lesson_path(root, slug);
+        std::fs::copy(&from, &copy).map_err(|err| format!("archive {slug}: {err}"))?;
+        noted(root, &copy);
+        index.lessons.remove(slug);
+        std::fs::remove_file(&from).map_err(|err| format!("remove {slug}: {err}"))?;
+        noted(root, &from);
+        Ok(slug.to_owned())
+    })
+    .map(|(_, id)| id)
 }
 
 /// One brief line per live lesson an order of `class` and `profile` is offered (`fits`): the path from the
@@ -1483,7 +1768,10 @@ const USAGE: &str = "usage: herdr lessons for --class <class> [--all]   one line
        herdr lessons stats                          per origin (worker, review, merge): offered, opened, passed after
        herdr lessons import [--run <run>] [--dry-run]  keep the lessons of gated-pass orders, through the gate's checks
        herdr lessons merge [--class <class>] [--run <run>]  queue an umbrella review of a class over 8 live lessons
-       herdr lessons rollback <op-id>               undo one review or merge op from ledger.jsonl";
+       herdr lessons rollback <op-id>               undo one review or merge op from ledger.jsonl
+       herdr lessons reclass [--dry-run] [--edited] give each lesson whose class the router never names its order's class
+                                                    (--edited: also lessons changed since herdr wrote them)
+       herdr lessons idle [status|on|off|tick]      the memory review in idle time on spare usage (order LEARN)";
 
 fn usage_exit() -> ! {
     eprintln!("{USAGE}");
@@ -1583,6 +1871,27 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             Ok(())
         }
         Some("merge") => crate::nirvana_review::merge_cli(&project, &args[1..]),
+        Some("idle") => crate::nirvana_idle_review::cli(&args[1..]),
+        Some("reclass") => {
+            let (mut dry, mut edited) = (false, false);
+            for arg in &args[1..] {
+                match arg.as_str() {
+                    "--dry-run" => dry = true,
+                    "--edited" => edited = true,
+                    _ => usage_exit(),
+                }
+            }
+            match reclass(&root, &router_classes(), dry, edited, nirvana_run::now()) {
+                Ok(done) => {
+                    print!("{}", reclass_report(&done, dry));
+                    Ok(())
+                }
+                Err(why) => {
+                    eprintln!("herdr lessons reclass: {why}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Some("rollback") => {
             let Some(id) = args.get(1) else { usage_exit() };
             match rollback(&root, id, nirvana_run::now()) {
@@ -1598,6 +1907,27 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         }
         _ => usage_exit(),
     }
+}
+
+/// `herdr lessons reclass`'s lines: each lesson moved and each left, with why, and the op to roll back.
+pub fn reclass_report(done: &Reclassed, dry: bool) -> String {
+    let verb = if dry { "would move" } else { "moved" };
+    let mut text = format!(
+        "{verb} {} lesson(s) to their order's class; left {}{}\n",
+        done.moved.len(),
+        done.left.len(),
+        done.op
+            .as_deref()
+            .map(|id| format!("; undo with herdr lessons rollback {id}"))
+            .unwrap_or_default()
+    );
+    for (slug, from, to) in &done.moved {
+        text.push_str(&format!("  - {slug}: {from:?} -> {to}\n"));
+    }
+    for (slug, class, why) in &done.left {
+        text.push_str(&format!("  = {slug} ({class:?}) left: {why}\n"));
+    }
+    text
 }
 
 /// The import's counts, then each refusal reason with its count, then each refused order.

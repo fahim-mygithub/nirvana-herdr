@@ -3,6 +3,25 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.62.0: lessons reach the orders they would help, and a memory review runs in idle time on spare usage
+
+- **Changed:** the gate keeps a worker's lesson under the class its order was seated with (the worker's own words stay
+  as `topic:`); `herdr lessons reclass [--dry-run] [--edited]` moves old lessons the same way, one ledgered op that
+  `herdr lessons rollback` undoes. A lesson offered 6 or more times that never helped can be retired (ledgered). An
+  idle review (`src/nirvana_idle_review.rs`, a 5-minute tick) seats one lesson review for a project when nothing has
+  run and no one has typed for 30 min, the review seat's 5 h window is fresh, half or more projected unused and resets
+  within 2 h, its week a quarter unused, and no pool's use rose in the last 30 min (other Claude use); any unreadable
+  input means no review. Caps: 2 per project per day, 3 per pool's window, inside the 20 a day. The cap is reserved
+  before seating. `herdr lessons idle on|off|status`; the Learning panel shows the last idle review.
+- **Because:** the owner, 2026-11-09: "how is the memory system working is it improving the agents and storing finding
+  in memory? Can we have it review during long periods of idle if we have ree usage left?" Measured: 20 of 36 lessons
+  carried a worker's free-text class and were never offered (all 6 in 3D-Printer Flow); 76 lesson reviews made 7
+  ledger ops.
+- **Measured:** 155 scoped tests pass, clippy clean, 63 controls red; `nirvana/lessons_census.py` recomputes the
+  numbers. Every threshold is a hypothesis (record `nirvana/plans/2026-11-09-learn-idle.md` §3.3, §6.3).
+- **If you remove this:** lessons with a worker's own class never reach a brief, and spare usage that resets unused
+  is never spent on curating them.
+
 ## alpha 0.61.0: a worker shows once, and finished runs leave the panel by themselves
 
 - **Changed:** a pane labelled for a worker or job is never a space agent row; it shows once, as its order's row. A Run

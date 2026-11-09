@@ -233,6 +233,11 @@ fn lines(view: &LearningView, now: u64) -> Vec<Line> {
             )));
         }
     }
+    // Order LEARN: when the last idle review ran, what it did, and the switch (`nirvana_idle_review::lines`).
+    out.push(Line::Head("Idle review"));
+    for line in crate::nirvana_idle_review::lines(&view.idle, now) {
+        out.push(Line::Text(line));
+    }
     out.push(Line::Head("Waiting"));
     if view.waiting.is_empty() {
         out.push(Line::Text(format!(

@@ -411,6 +411,8 @@ impl HeadlessServer {
     /// - Renders virtually and streams frames to clients
     pub async fn run(&mut self) -> io::Result<()> {
         crate::logging::startup("server");
+        // Order LEARN: the idle memory review's tick, a child process every five minutes (`nirvana_idle_review::start`).
+        crate::nirvana_idle_review::start();
 
         let server_stop = self.server_stop.clone();
         let quit_notify = self.server_event_tx.clone();
