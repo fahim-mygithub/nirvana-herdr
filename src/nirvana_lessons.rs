@@ -1176,6 +1176,15 @@ pub fn rollback(root: &Path, id: &str, at: u64) -> Result<String, String> {
         }
         noted(root, &path);
         match &before.entry {
+            // Review round N6: a reclass changed only the class; the offers and opens since are kept.
+            Some(entry) if row.op == "reclass" => {
+                let mut entry = entry.clone();
+                if let Some(now) = index.lessons.get(&before.slug) {
+                    entry.counters = now.counters.clone();
+                    entry.seen = now.seen.clone();
+                }
+                index.lessons.insert(before.slug.clone(), entry);
+            }
             Some(entry) => {
                 index.lessons.insert(before.slug.clone(), entry.clone());
             }
@@ -1223,34 +1232,78 @@ pub struct Reclassed {
 }
 
 /// The lesson file with its frontmatter's `class:` line set to `to`, and `topic: <from>` after it unless it has a
-/// topic. `None` when the file has no frontmatter `class:` line.
+/// topic. `None` when the file has no frontmatter `class:` line. Review round S6: every other byte is kept, line endings
+/// and trailing lines included, so a file the owner saved with CRLF is changed in its class line only.
 fn with_class(body: &str, from: &str, to: &str) -> Option<String> {
-    let mut lines: Vec<String> = body.lines().map(str::to_owned).collect();
-    if lines.first().map(String::as_str) != Some("---") {
+    let lines: Vec<&str> = body.split_inclusive('\n').collect();
+    let bare = |line: &str| line.trim_end_matches(['\n', '\r']).to_owned();
+    if lines.first().map(|line| bare(line)).as_deref() != Some("---") {
         return None;
     }
-    let end = lines.iter().skip(1).position(|line| line == "---")? + 1;
+    let end = lines.iter().skip(1).position(|line| bare(line) == "---")? + 1;
     let at = lines[1..end]
         .iter()
-        .position(|line| line.starts_with("class:"))?
+        .position(|line| bare(line).starts_with("class:"))?
         + 1;
-    lines[at] = format!("class: {to}");
-    if !lines[1..end].iter().any(|line| line.starts_with("topic:")) {
-        lines.insert(at + 1, format!("topic: {}", one_line(from)));
+    let ending = &lines[at][bare(lines[at]).len()..];
+    let topic = !lines[1..end]
+        .iter()
+        .any(|line| bare(line).starts_with("topic:"));
+    let mut out = String::with_capacity(body.len() + 64);
+    for (n, line) in lines.iter().enumerate() {
+        if n != at {
+            out.push_str(line);
+            continue;
+        }
+        out.push_str(&format!("class: {to}{ending}"));
+        if topic {
+            out.push_str(&format!("topic: {}{ending}", one_line(from)));
+        }
     }
-    let mut out = lines.join("\n");
-    out.push('\n');
     Some(out)
+}
+
+/// Review round S6: why `reclass` leaves a lesson whose file herdr did not write last.
+pub const EDITED: &str = "edited since herdr wrote it, or written before herdr logged its writes";
+
+/// Review round S6: whether the lesson's file is, byte for byte, what herdr last wrote: the newest line for it in the
+/// writes log (`noted`, the sha of the file's bytes) or the newest ledger row's `after` for it. A file the owner saved
+/// since, or one no record names, is not.
+pub fn herdr_wrote_last(root: &Path, slug: &str) -> bool {
+    let path = lesson_path(root, slug);
+    let Some(sha) = file_sha(&path) else {
+        return false;
+    };
+    let rel = rel_in(&dir(root), &path);
+    let logged = std::fs::read_to_string(writes_path(root))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+        .rfind(|row| row.get("path").and_then(|p| p.as_str()) == Some(rel.as_str()))
+        .and_then(|row| row.get("sha").and_then(|s| s.as_str()).map(str::to_owned));
+    if logged.as_deref() == Some(sha.as_str()) {
+        return true;
+    }
+    let ledgered = ledger(root)
+        .iter()
+        .rev()
+        .find_map(|row| row.after.iter().find(|snap| snap.slug == slug).cloned())
+        .and_then(|snap| snap.file);
+    ledgered.is_some() && std::fs::read_to_string(&path).ok() == ledgered
 }
 
 /// Order LEARN: each worker's lesson whose class is not one of `classes` (the router's, `router_classes`) gets the
 /// class its own order was seated with, its old class kept as `topic:`. All of them in one ledger op, `reclass`, so
 /// `herdr lessons rollback <id>` puts every one back. A review's or a merge's lesson is left: its class is the reviewed
 /// order's already (`nirvana_review::apply_review`). `dry` writes nothing, not even the lock.
+///
+/// Review round S6: a lesson whose file is not as herdr last wrote it (`herdr_wrote_last`) is left, listed with
+/// `EDITED`, unless `edited` (the owner's `herdr lessons reclass --edited`). The idle review passes `false`.
 pub fn reclass(
     root: &Path,
     classes: &std::collections::BTreeSet<String>,
     dry: bool,
+    edited: bool,
     at: u64,
 ) -> Result<Reclassed, String> {
     let index = read_index(root);
@@ -1268,6 +1321,11 @@ pub fn reclass(
             continue;
         }
         match seated_class(root, &entry.run, &entry.order) {
+            Some(_) if !edited && !herdr_wrote_last(root, slug) => out.left.push((
+                slug.clone(),
+                entry.class.clone(),
+                format!("{EDITED}: herdr lessons reclass --edited moves it"),
+            )),
             Some(class) if classes.contains(&class) && class != crate::nirvana_review::CLASS => {
                 out.moved.push((slug.clone(), entry.class.clone(), class));
             }
@@ -1308,7 +1366,12 @@ pub fn reclass(
                 if entry.class != *from {
                     return Err(format!("{slug}'s class changed since it was read"));
                 }
-                let body = read_body(root, slug).ok_or(format!("{slug}.md is missing"))?;
+                // S6: checked again under the lock, the file read as it is (its own line endings).
+                if !edited && !herdr_wrote_last(root, slug) {
+                    return Err(format!("{slug}: {EDITED} since it was read"));
+                }
+                let body = std::fs::read_to_string(lesson_path(root, slug))
+                    .map_err(|_| format!("{slug}.md is missing"))?;
                 let text =
                     with_class(&body, from, to).ok_or(format!("{slug}.md has no class line"))?;
                 let path = lesson_path(root, slug);
@@ -1706,7 +1769,8 @@ const USAGE: &str = "usage: herdr lessons for --class <class> [--all]   one line
        herdr lessons import [--run <run>] [--dry-run]  keep the lessons of gated-pass orders, through the gate's checks
        herdr lessons merge [--class <class>] [--run <run>]  queue an umbrella review of a class over 8 live lessons
        herdr lessons rollback <op-id>               undo one review or merge op from ledger.jsonl
-       herdr lessons reclass [--dry-run]            give each lesson whose class the router never names its order's class
+       herdr lessons reclass [--dry-run] [--edited] give each lesson whose class the router never names its order's class
+                                                    (--edited: also lessons changed since herdr wrote them)
        herdr lessons idle [status|on|off|tick]      the memory review in idle time on spare usage (order LEARN)";
 
 fn usage_exit() -> ! {
@@ -1809,12 +1873,15 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         Some("merge") => crate::nirvana_review::merge_cli(&project, &args[1..]),
         Some("idle") => crate::nirvana_idle_review::cli(&args[1..]),
         Some("reclass") => {
-            let dry = match args.get(1).map(String::as_str) {
-                None => false,
-                Some("--dry-run") => true,
-                Some(_) => usage_exit(),
-            };
-            match reclass(&root, &router_classes(), dry, nirvana_run::now()) {
+            let (mut dry, mut edited) = (false, false);
+            for arg in &args[1..] {
+                match arg.as_str() {
+                    "--dry-run" => dry = true,
+                    "--edited" => edited = true,
+                    _ => usage_exit(),
+                }
+            }
+            match reclass(&root, &router_classes(), dry, edited, nirvana_run::now()) {
                 Ok(done) => {
                     print!("{}", reclass_report(&done, dry));
                     Ok(())

@@ -16,7 +16,9 @@
 //!   Efficient, small) on the cached world (`nirvana_seat::cached_world`, the readings the window keeps fresh), and
 //!   runs only when that seat's pool's 5 h window is read fresh, at least `SPARE_MIN` of it is projected unused, and it
 //!   resets within `RESETS_WITHIN_S`: what it spends is usage the window would lose at its reset. A missing or stale
-//!   reading is no review.
+//!   reading is no review. Review round S2: the week is not lost at that reset, so each week window of the seat must be
+//!   read fresh and `WEEK_SPARE_MIN` projected unused. Review round S5: no review when any pool's 5 h use rose across
+//!   the last `IDLE_AFTER_S` (the owner's Claude Code outside herdr), or when the seat's pool has no reading that old.
 //! - **A normal order with its own record.** It opens a run of its own (`idle-<utc>`), is seated and launched by
 //!   `nirvana_review::queue` as every lesson review is, and is gated by `nirvana_review::gate_review`, which hands its
 //!   ops to `apply` here: new and patch ops through the same evidence checks against the stream of the order they name,
@@ -67,8 +69,31 @@ pub const LOOKBACK_S: u64 = 7 * 86_400;
 /// The subject a review's sidecar names for an idle review (`nirvana_review::gate_review` hands it to `apply`). Not an
 /// order id (`nirvana_run::valid_id` refuses `@`), so no order is ever mistaken for it.
 pub const SUBJECT: &str = "@idle";
+/// Review round S2: a review's spend counts against the pool's week too, and the week is not lost at the 5 h reset. Each
+/// week window of the seat must be read fresh and at least this share of it projected unused at its own reset. A
+/// hypothesis: a review is 20k-50k tokens, far under 1% of a week, so the floor is a margin against a wrong projection
+/// (the pace is a straight line from the week's start), not the review's size. The Max week on 2026-10-18 (48% used at
+/// 32% elapsed, projected 150%) reads 0 and refuses.
+pub const WEEK_SPARE_MIN: f32 = 0.25;
+/// Review round S5: the pool's 5 h `used` rose by more than this since the newest reading at least `IDLE_AFTER_S` old:
+/// someone (the owner's Claude Code outside herdr, a phone session, an orchestrator mid-turn) is spending it. Claude's
+/// `/usage` reads whole percents, so any rise it can show is over this.
+pub const USAGE_RISE: f32 = 0.005;
+/// Review round S3: after a queue that failed, this project waits this long before the next try. A hypothesis: long
+/// enough that a corrupt `leases.json` or a held lock costs two tries a day at most (the day cap counts each try), short
+/// enough to take the same idle stretch once it is fixed.
+pub const BACKOFF_S: u64 = 3_600;
+/// Review round S4/N5: a reserved review whose order never reached the journal, or was seated and never started, after
+/// this long is settled as stranded. Longer than `TICK_TIMEOUT`, so a slow tick is never taken for a dead one.
+pub const STRANDED_S: u64 = 15 * 60;
+/// Review round N9: a tick child still running after this is killed; the next one starts on time.
+#[cfg_attr(test, allow(dead_code))]
+pub const TICK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// Two readings of one pool's window whose resets are this close are the same window.
 const SAME_WINDOW_S: u64 = 900;
+/// The 5 h samples kept per pool for the S5 check: three idle spans, so a baseline of `IDLE_AFTER_S` ago survives a
+/// missed tick or two.
+const SAMPLES_KEPT_S: u64 = 3 * IDLE_AFTER_S;
 const STATE: &str = ".idle-review.json";
 const GLOBAL: &str = "idle-review.json";
 const LOCK: &str = "idle-review.lock";
@@ -83,6 +108,9 @@ pub struct Spare {
     /// `None`: no fresh reading of the pool's 5 h window (missing, old, or read before a passed reset).
     pub spare: Option<f32>,
     pub resets_at: Option<u64>,
+    /// Review round S2: each week window of the seat (`week`, `week.fable`) and its projected unused share, `None` when
+    /// it is not read fresh.
+    pub week: Vec<(String, Option<f32>)>,
 }
 
 /// Everything `decide` reads.
@@ -91,14 +119,23 @@ pub struct Facts {
     pub now: u64,
     /// `herdr lessons idle on`.
     pub on: bool,
+    /// Review round S1: an input the busy check needs that cannot be read (`leases.json`, a project's runs folder,
+    /// `record.jsonl`): no review, since what it would have said is unknown.
+    pub doubt: Option<String>,
     /// Why an order runs somewhere: a live lease.
     pub busy: Option<String>,
     /// The newest owner key in any pane; `Err` when a key file cannot be read.
     pub owner_key: Result<Option<u64>, String>,
     /// The newest journal or stream write of any order in any known project, and where.
     pub activity: Option<(u64, String)>,
-    /// Orders gated in this project since its last idle review.
-    pub new_orders: usize,
+    /// Review round S5: a pool whose 5 h `used` rose across the last `IDLE_AFTER_S`, and by how much; `Err` when the
+    /// seat's pool has no reading from that long ago to compare with.
+    pub usage_moved: Result<Option<(String, f32)>, String>,
+    /// Review round S3: a queue failed here; no try before this.
+    pub backoff_until: Option<u64>,
+    /// Orders gated in this project since its last idle review; `None` until the tick counts them, which it does only
+    /// when every other fact allows a review (review round N2: the count replays journals).
+    pub new_orders: Option<usize>,
     /// Why `lesson_reviews_per_day` refuses a review now.
     pub review_cap: Option<String>,
     pub used_today: u32,
@@ -117,11 +154,26 @@ fn minutes(seconds: u64) -> String {
     crate::nirvana_usage::short_duration(seconds)
 }
 
-/// The rule. Each refusal is said, so the Learning square can say why no review ran.
+/// The rule. Each refusal is said, so the Learning square can say why no review ran. The order count comes last: the
+/// tick counts orders only when `ready` passes (review round N2).
 pub fn decide(facts: &Facts) -> Decision {
-    let skip = |why: String| Decision::Skip(why);
+    if let Err(why) = ready(facts) {
+        return Decision::Skip(why);
+    }
+    match facts.new_orders {
+        Some(n) if n > 0 => Decision::Run,
+        _ => Decision::Skip("no order gated here since the last idle review".into()),
+    }
+}
+
+/// Every fact but the order count, cheapest first.
+pub fn ready(facts: &Facts) -> Result<(), String> {
+    let skip = |why: String| Err(why);
     if !facts.on {
         return skip("idle review is off (herdr lessons idle on)".into());
+    }
+    if let Some(why) = &facts.doubt {
+        return skip(format!("cannot tell whether an order runs: {why}"));
     }
     if let Some(why) = &facts.busy {
         return skip(format!("an order runs: {why}"));
@@ -146,8 +198,23 @@ pub fn decide(facts: &Facts) -> Decision {
             ));
         }
     }
-    if facts.new_orders == 0 {
-        return skip("no order gated here since the last idle review".into());
+    match &facts.usage_moved {
+        Err(why) => return skip(format!("no usage history to rule out other use: {why}")),
+        Ok(Some((pool, rise))) => {
+            return skip(format!(
+                "{}'s 5h use rose {:.0} points in the last {}: someone is using it",
+                crate::nirvana_usage::label(pool),
+                rise * 100.0,
+                minutes(IDLE_AFTER_S)
+            ))
+        }
+        Ok(None) => {}
+    }
+    if let Some(until) = facts.backoff_until.filter(|until| *until > facts.now) {
+        return skip(format!(
+            "the last try here failed; next try in {}",
+            minutes(until - facts.now)
+        ));
     }
     if let Some(why) = &facts.review_cap {
         return skip(why.clone());
@@ -192,7 +259,27 @@ pub fn decide(facts: &Facts) -> Decision {
             minutes(RESETS_WITHIN_S)
         ));
     }
-    Decision::Run
+    // S2: what is lost at the 5 h reset is the 5 h window's spare only; the week keeps counting the spend.
+    if spare.week.is_empty() {
+        return skip(format!(
+            "{label} has no week reading: the week's room is unknown"
+        ));
+    }
+    for (window, share) in &spare.week {
+        let Some(share) = share else {
+            return skip(format!(
+                "{label}'s {window} reading is missing or old: no review on a guess"
+            ));
+        };
+        if *share < WEEK_SPARE_MIN {
+            return skip(format!(
+                "{label}'s {window} is {:.0}% projected unused, under {:.0}%: the week has no room",
+                share * 100.0,
+                WEEK_SPARE_MIN * 100.0
+            ));
+        }
+    }
+    Ok(())
 }
 
 // ---- state ----
@@ -226,17 +313,31 @@ pub struct SpaceState {
     /// The last tick's answer for this project, and when.
     #[serde(default)]
     pub check: Option<(u64, String)>,
+    /// Review round S3: a queue failed; no try before this.
+    #[serde(default)]
+    pub backoff_until: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// One 5 h reading of a pool as a tick saw it (review round S5).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Sample {
+    pub read_at: u64,
+    pub used: f32,
+    #[serde(default)]
+    pub resets_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Global {
     #[serde(default)]
     pub off: bool,
-    /// The pool and reset of the window `count` counts.
+    /// Review round N3: per pool, the reset of the window counted and the reviews in it. One pool's count no longer
+    /// resets another's.
     #[serde(default)]
-    pub window: Option<(String, u64)>,
+    pub windows: BTreeMap<String, (u64, u32)>,
+    /// Review round S5: per pool, the 5 h readings of the last `SAMPLES_KEPT_S`.
     #[serde(default)]
-    pub count: u32,
+    pub samples: BTreeMap<String, Vec<Sample>>,
 }
 
 pub fn space_path(root: &Path) -> PathBuf {
@@ -268,6 +369,40 @@ pub fn read_global() -> Global {
     read_json(&global_path())
 }
 
+/// Review round N4: the one writer of a state file. Read, change and write under `<file>.lock`, held only for that, so
+/// the gate's `finished` and a tick never put back a copy read before the other wrote. Not the tick's own `LOCK`: the
+/// tick's settle gates a review, whose `finished` comes here in the same process.
+fn change_json<T, R>(path: &Path, change: impl FnOnce(&mut T) -> R) -> std::io::Result<R>
+where
+    T: Default + Serialize + for<'de> Deserialize<'de>,
+{
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(PathBuf::from(format!("{}.lock", path.display())))?;
+    file.lock()?;
+    let mut value: T = read_json(path);
+    let out = change(&mut value);
+    write_json(path, &value)?;
+    drop(file);
+    Ok(out)
+}
+
+pub fn change_space<R>(
+    root: &Path,
+    change: impl FnOnce(&mut SpaceState) -> R,
+) -> std::io::Result<R> {
+    change_json(&space_path(root), change)
+}
+
+pub fn change_global<R>(change: impl FnOnce(&mut Global) -> R) -> std::io::Result<R> {
+    change_json(&global_path(), change)
+}
+
 pub fn used_today(state: &SpaceState, now: u64) -> u32 {
     if state.day == now / 86_400 {
         state.count
@@ -277,28 +412,129 @@ pub fn used_today(state: &SpaceState, now: u64) -> u32 {
 }
 
 pub fn used_window(global: &Global, pool: &str, resets_at: Option<u64>) -> u32 {
-    match (&global.window, resets_at) {
-        (Some((own, at)), Some(resets)) if own == pool && at.abs_diff(resets) <= SAME_WINDOW_S => {
-            global.count
-        }
+    match (global.windows.get(pool), resets_at) {
+        (Some((at, count)), Some(resets)) if at.abs_diff(resets) <= SAME_WINDOW_S => *count,
         _ => 0,
     }
 }
 
+/// One more review in `pool`'s window that resets at `resets_at`.
+fn count_window(global: &mut Global, pool: &str, resets_at: u64) {
+    let count = used_window(global, pool, Some(resets_at)) + 1;
+    global.windows.insert(pool.to_owned(), (resets_at, count));
+}
+
 /// `herdr lessons idle on|off`.
 pub fn set_on(on: bool) -> std::io::Result<()> {
-    let mut global = read_global();
-    global.off = !on;
-    write_json(&global_path(), &global)
+    change_global(|global| global.off = !on)
+}
+
+/// Review round S5: each pool's fresh 5 h reading into the global samples, the old ones dropped.
+pub fn record_samples(global: &mut Global, world: &World) {
+    for reading in &world.readings {
+        let Some(used) = reading.used else { continue };
+        if reading.window != "5h"
+            || crate::nirvana_usage::freshness(reading, world.now)
+                != crate::nirvana_usage::Freshness::Fresh
+        {
+            continue;
+        }
+        let samples = global.samples.entry(reading.pool.clone()).or_default();
+        if samples
+            .last()
+            .is_none_or(|last| last.read_at < reading.read_at)
+        {
+            samples.push(Sample {
+                read_at: reading.read_at,
+                used,
+                resets_at: reading.resets_at,
+            });
+        }
+    }
+    let keep_from = world.now.saturating_sub(SAMPLES_KEPT_S);
+    for samples in global.samples.values_mut() {
+        samples.retain(|sample| sample.read_at >= keep_from);
+    }
+    global.samples.retain(|_, samples| !samples.is_empty());
+}
+
+/// Review round S5: whether a pool's 5 h use rose across the last `IDLE_AFTER_S`. The seat's own pool must have a
+/// sample at least that old in the same window (else `Err`: no history is no review); any other pool with one counts
+/// too, since its rise says the owner is at work.
+pub fn usage_moved(
+    global: &Global,
+    world: &World,
+    pool: &str,
+) -> Result<Option<(String, f32)>, String> {
+    let before = world.now.saturating_sub(IDLE_AFTER_S);
+    let rise = |pool: &str| -> Option<f32> {
+        let now = world.readings.iter().find(|reading| {
+            reading.pool == pool
+                && reading.window == "5h"
+                && reading.used.is_some()
+                && crate::nirvana_usage::freshness(reading, world.now)
+                    == crate::nirvana_usage::Freshness::Fresh
+        })?;
+        let then = global
+            .samples
+            .get(pool)?
+            .iter()
+            .filter(|sample| sample.read_at <= before)
+            .filter(|sample| match (sample.resets_at, now.resets_at) {
+                (Some(a), Some(b)) => a.abs_diff(b) <= SAME_WINDOW_S,
+                _ => false,
+            })
+            .max_by_key(|sample| sample.read_at)?;
+        Some(now.used.unwrap_or(0.0) - then.used)
+    };
+    let Some(own) = rise(pool) else {
+        return Err(format!(
+            "no reading of {}'s 5h window from {} ago in this window yet",
+            crate::nirvana_usage::label(pool),
+            minutes(IDLE_AFTER_S)
+        ));
+    };
+    if own > USAGE_RISE {
+        return Ok(Some((pool.to_owned(), own)));
+    }
+    for other in global.samples.keys().filter(|other| *other != pool) {
+        if let Some(up) = rise(other).filter(|up| *up > USAGE_RISE) {
+            return Ok(Some((other.clone(), up)));
+        }
+    }
+    Ok(None)
 }
 
 // ---- the facts, from files ----
 
 /// The projects herdr knows: each that an ended order's `record.jsonl` line names.
-pub fn known_projects() -> Vec<PathBuf> {
-    let text =
-        std::fs::read_to_string(nirvana_seat::dir().join("record.jsonl")).unwrap_or_default();
+pub fn known_projects() -> Result<Vec<PathBuf>, String> {
+    known_projects_in(
+        &nirvana_seat::dir().join("record.jsonl"),
+        &std::env::temp_dir(),
+    )
+}
+
+/// `known_projects` from `record`. Review round N3: a root under `temp` (a check's fixture that reached the record) is
+/// never a project to spend a review on, nor a root with no `.nirvana` folder now; one root spelled in two cases is one
+/// on Windows. Review round S1: a record that exists and cannot be read is `Err`, never no projects.
+pub fn known_projects_in(record: &Path, temp: &Path) -> Result<Vec<PathBuf>, String> {
+    let text = match std::fs::read_to_string(record) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(format!("{}: {err}", record.display())),
+    };
+    let fold = |path: &Path| {
+        let text = path.display().to_string().replace('/', "\\");
+        if cfg!(windows) {
+            text.to_lowercase()
+        } else {
+            text
+        }
+    };
+    let temp = fold(temp);
     let mut out: Vec<PathBuf> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
     for line in text.lines() {
         let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
@@ -310,12 +546,18 @@ pub fn known_projects() -> Vec<PathBuf> {
             continue;
         };
         let root = PathBuf::from(root.trim_end_matches(['\\', '/']));
-        if !root.as_os_str().is_empty() && !out.contains(&root) {
-            out.push(root);
+        let key = fold(&root);
+        if root.as_os_str().is_empty()
+            || (!temp.is_empty() && key.starts_with(&temp))
+            || !root.join(nirvana_run::DIR).is_dir()
+            || !seen.insert(key)
+        {
+            continue;
         }
+        out.push(root);
     }
     out.sort();
-    out
+    Ok(out)
 }
 
 fn modified(path: &Path) -> Option<u64> {
@@ -328,25 +570,33 @@ fn modified(path: &Path) -> Option<u64> {
         .map(|d| d.as_secs())
 }
 
-/// The newest write of any order in `root`: each run's journal and every stream file.
-pub fn activity(root: &Path) -> Option<u64> {
-    let runs = Project::at(root).dir().join("runs");
+/// The newest write of any order in `root`: each run's journal and every stream file. Review round S1: a runs or
+/// streams folder that exists and cannot be listed is `Err` (a doubt), never quiet; a folder that is not there is.
+pub fn activity(root: &Path) -> Result<Option<u64>, String> {
+    let list = |dir: &Path| -> Result<Vec<PathBuf>, String> {
+        match std::fs::read_dir(dir) {
+            Ok(entries) => entries
+                .map(|entry| {
+                    entry
+                        .map(|entry| entry.path())
+                        .map_err(|err| format!("{}: {err}", dir.display()))
+                })
+                .collect(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(err) => Err(format!("{}: {err}", dir.display())),
+        }
+    };
     let mut newest = None;
-    for run in std::fs::read_dir(runs).into_iter().flatten().flatten() {
-        let path = run.path();
+    for path in list(&Project::at(root).dir().join("runs"))? {
         if !path.is_dir() {
             continue;
         }
         newest = newest.max(modified(&path.join(nirvana_run::JOURNAL)));
-        for stream in std::fs::read_dir(path.join("streams"))
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
-            newest = newest.max(modified(&stream.path()));
+        for stream in list(&path.join("streams"))? {
+            newest = newest.max(modified(&stream));
         }
     }
-    newest
+    Ok(newest)
 }
 
 /// The newest owner key in any pane (`nirvana_run::note_owner_key`). No folder is no key; a file that cannot be read
@@ -389,6 +639,13 @@ pub fn spare(table: &Table, world: &World, id: &str) -> Result<(Pick, Spare), St
         pool: pick.pool.clone(),
         spare: window.and_then(|window| window.spare),
         resets_at: window.and_then(|window| window.resets_at),
+        // `used` is `None` unless the reading is fresh (`nirvana_seat` reads only fresh ones), so is `spare`.
+        week: pick
+            .windows
+            .iter()
+            .filter(|window| window.window.split('.').next() == Some("week"))
+            .map(|window| (window.window.clone(), window.used.and(window.spare)))
+            .collect(),
     };
     Ok((pick, spare))
 }
@@ -647,31 +904,48 @@ fn end_run(project: &Project, run: &str, outcome: &str, why: String) {
     );
 }
 
-/// Queues one idle review of `subjects` in `project`: the reclass first (`nirvana_lessons::reclass`, a ledger op of its
-/// own), then a run of its own, the digests, the brief, and the order through `nirvana_review::queue`.
+/// Queues one idle review of `subjects` in `project` as order `id` of run `run` (reserved by the tick before this): the
+/// reclass first (`nirvana_lessons::reclass`, a ledger op of its own, only lessons herdr wrote last), then the run, the
+/// digests, the brief, and the order through `nirvana_review::queue_idle`.
 #[allow(clippy::too_many_arguments)]
 fn queue(
     project: &Project,
     table: &Table,
     world: &World,
+    run: &str,
+    id: &str,
     subjects: &[Reviewed],
     total: usize,
     since: u64,
     now: u64,
-) -> Result<(String, String, String), String> {
+) -> Result<String, String> {
     let root = &project.root;
     let mut said = Vec::new();
-    match nirvana_lessons::reclass(root, &nirvana_lessons::router_classes(), false, now) {
-        Ok(done) if !done.moved.is_empty() => said.push(format!(
-            "reclassed {} lesson(s) as {}",
-            done.moved.len(),
-            done.op.unwrap_or_default()
-        )),
-        Ok(_) => {}
+    match nirvana_lessons::reclass(root, &nirvana_lessons::router_classes(), false, false, now) {
+        Ok(done) => {
+            if !done.moved.is_empty() {
+                said.push(format!(
+                    "reclassed {} lesson(s) as {}",
+                    done.moved.len(),
+                    done.op.unwrap_or_default()
+                ));
+            }
+            // Review round S6: a lesson the owner edited is left; the line says so, so the square shows it.
+            let edited = done
+                .left
+                .iter()
+                .filter(|(_, _, why)| why.starts_with(nirvana_lessons::EDITED))
+                .count();
+            if edited > 0 {
+                said.push(format!(
+                    "{edited} lesson(s) left in their class: {} (herdr lessons reclass --dry-run lists them)",
+                    nirvana_lessons::EDITED
+                ));
+            }
+        }
         Err(why) => said.push(format!("reclass refused: {why}")),
     }
-    let run = run_id(project, now);
-    let id = format!("{run}-review");
+    let (run, id) = (run.to_owned(), id.to_owned());
     let journal = project.journal(&run);
     journal
         .append(
@@ -720,7 +994,7 @@ fn queue(
     match made {
         Ok(line) => {
             said.push(line);
-            Ok((run, id, said.join("; ")))
+            Ok(said.join("; "))
         }
         Err(why) => {
             end_run(project, &run, "failed", format!("not queued: {why}"));
@@ -732,41 +1006,57 @@ fn queue(
 // ---- the tick ----
 
 /// One tick over `projects`: settle each finished idle review, then decide for each project in turn and queue at
-/// most one review. Returns a line per project.
-pub fn tick_with(projects: &[PathBuf], table: &Table, world: &World) -> Vec<String> {
+/// most one review. `doubt` is an input the tick could not read (`leases.json`: review round S1). Returns a line per
+/// project.
+pub fn tick_with(
+    projects: &[PathBuf],
+    table: &Table,
+    world: &World,
+    doubt: Option<String>,
+) -> Vec<String> {
     let now = world.now;
     let mut lines = Vec::new();
     for root in projects {
-        if let Some(line) = settle(&Project::at(root)) {
+        if let Some(line) = settle(&Project::at(root), world, doubt.is_none()) {
             lines.push(line);
         }
     }
-    let mut global = read_global();
+    // S5: this tick's readings join the history before it is read.
+    let global = change_global(|global| {
+        record_samples(global, world);
+        global.clone()
+    })
+    .unwrap_or_else(|_| read_global());
     let busy = busy(world);
     let owner = owner_key(&nirvana_seat::dir());
-    let activity = projects
-        .iter()
-        .filter_map(|root| activity(root).map(|at| (at, root.display().to_string())))
-        .max();
+    let mut activity = None;
+    let mut doubt = doubt;
+    for root in projects {
+        match self::activity(root) {
+            Ok(at) => activity = activity.max(at.map(|at| (at, root.display().to_string()))),
+            Err(why) => doubt = doubt.or(Some(why)),
+        }
+    }
+    // N2: one pick for every project (the world is the same; no lease is the review's yet), and the S5 history for its
+    // pool.
+    let picked = spare(table, world, "idle-review");
+    let moved = match &picked {
+        Ok((_, spare)) => usage_moved(&global, world, &spare.pool),
+        Err(why) => Err(why.clone()),
+    };
     let cap = review::per_day(Some(table));
     let mut queued = false;
     for root in projects {
         let project = Project::at(root);
-        let mut state = read_space(root);
+        let state = read_space(root);
         let since = state
             .last
             .as_ref()
             .map_or(now.saturating_sub(LOOKBACK_S), |last| last.through);
-        let gated = if !queued && !global.off {
-            gated_since(&project, since)
-        } else {
-            Vec::new()
-        };
-        let id = format!("{}-review", run_id(&project, now));
-        let picked = spare(table, world, &id);
-        let facts = Facts {
+        let mut facts = Facts {
             now,
             on: !global.off,
+            doubt: doubt.clone(),
             busy: if queued {
                 Some("an idle review was queued in this tick".into())
             } else {
@@ -774,7 +1064,9 @@ pub fn tick_with(projects: &[PathBuf], table: &Table, world: &World) -> Vec<Stri
             },
             owner_key: owner.clone(),
             activity: activity.clone(),
-            new_orders: gated.len(),
+            usage_moved: moved.clone(),
+            backoff_until: state.backoff_until,
+            new_orders: None,
             review_cap: review::cap_refusal(root, cap, now),
             used_today: used_today(&state, now),
             used_window: picked.as_ref().map_or(0, |(_, spare)| {
@@ -785,44 +1077,89 @@ pub fn tick_with(projects: &[PathBuf], table: &Table, world: &World) -> Vec<Stri
                 .map(|(_, spare)| spare.clone())
                 .map_err(Clone::clone),
         };
+        // N2: the journals are replayed only when every cheaper fact allows a review.
+        let gated = if ready(&facts).is_ok() {
+            gated_since(&project, since)
+        } else {
+            Vec::new()
+        };
+        facts.new_orders = Some(gated.len());
         let decision = decide(&facts);
         let said = match (&decision, &picked) {
             (Decision::Run, Ok((pick, spare))) => {
+                queued = true;
                 let subjects: Vec<Reviewed> = gated.iter().take(MAX_ORDERS).cloned().collect();
                 let through = gated.iter().map(|r| r.at).max().unwrap_or(now);
-                match queue(&project, table, world, &subjects, gated.len(), since, now) {
-                    Ok((run, order, line)) => {
-                        queued = true;
+                let run = run_id(&project, now);
+                let id = format!("{run}-review");
+                // S3/S4: the reservation is written before anything is queued: the day's count, the window's count and
+                // `last` with the run. A tick that dies after this has spent its count and moved `through`, so the
+                // next tick cannot run the same orders again; `settle` ends a review that never reached the journal.
+                let reserved = change_space(root, |state| {
+                    if state.day != now / 86_400 {
                         state.day = now / 86_400;
-                        state.count = facts.used_today + 1;
-                        state.last = Some(Last {
-                            at: now,
-                            run,
-                            order,
-                            seat: format!("{} {}", pick.seat, pick.effort.word()),
-                            through,
-                            orders: subjects.len(),
-                            result: None,
-                            done_at: None,
-                        });
-                        let window = (spare.pool.clone(), spare.resets_at.unwrap_or(now));
-                        global.count = facts.used_window + 1;
-                        global.window = Some(window);
-                        let _ = write_json(&global_path(), &global);
-                        format!("queued: {line}")
+                        state.count = 0;
                     }
-                    Err(why) => format!("not queued: {why}"),
+                    state.count += 1;
+                    state.last = Some(Last {
+                        at: now,
+                        run: run.clone(),
+                        order: id.clone(),
+                        seat: format!("{} {}", pick.seat, pick.effort.word()),
+                        through,
+                        orders: subjects.len(),
+                        result: None,
+                        done_at: None,
+                    });
+                })
+                .and_then(|()| {
+                    change_global(|global| {
+                        count_window(global, &spare.pool, spare.resets_at.unwrap_or(now))
+                    })
+                });
+                // A test stands in for a tick that dies here (S4).
+                #[cfg(test)]
+                if reserved.is_ok() && DIE_AFTER_RESERVE.get() {
+                    return lines;
+                }
+                match reserved {
+                    Err(err) => format!("not queued: the reservation cannot be written: {err}"),
+                    Ok(()) => match queue(
+                        &project,
+                        table,
+                        world,
+                        &run,
+                        &id,
+                        &subjects,
+                        gated.len(),
+                        since,
+                        now,
+                    ) {
+                        Ok(line) => format!("queued: {line}"),
+                        Err(why) => {
+                            // S3: the try stays counted; its orders are read again after the back-off.
+                            let _ = change_space(root, |state| {
+                                if let Some(last) = state.last.as_mut().filter(|l| l.run == run) {
+                                    last.result = Some(format!("not queued: {why}"));
+                                    last.done_at = Some(now);
+                                    last.through = since;
+                                }
+                                state.backoff_until = Some(now + BACKOFF_S);
+                            });
+                            format!("not queued: {why}; next try in {}", minutes(BACKOFF_S))
+                        }
+                    },
                 }
             }
             (Decision::Run, Err(why)) => format!("no seat: {why}"),
             (Decision::Skip(why), _) => format!("skipped: {why}"),
         };
-        if state.check.as_ref().map(|(_, was)| was) != Some(&said)
-            || matches!(decision, Decision::Run)
-        {
-            state.check = Some((now, said.clone()));
-            let _ = write_json(&space_path(root), &state);
-        }
+        let run_now = matches!(decision, Decision::Run);
+        let _ = change_space(root, |state| {
+            if state.check.as_ref().map(|(_, was)| was) != Some(&said) || run_now {
+                state.check = Some((now, said.clone()));
+            }
+        });
         lines.push(format!("{}: {said}", root.display()));
     }
     lines
@@ -831,8 +1168,17 @@ pub fn tick_with(projects: &[PathBuf], table: &Table, world: &World) -> Vec<Stri
 /// A tick on this machine: the known projects, the seat table read without writing, the cached world. One tick at a
 /// time (`LOCK`): a second one finds the lock taken and does nothing.
 pub fn tick() -> Vec<String> {
-    let dir = nirvana_seat::dir();
-    if std::fs::create_dir_all(&dir).is_err() {
+    match known_projects() {
+        Ok(projects) => tick_in(&nirvana_seat::dir(), &projects),
+        Err(why) => vec![format!(
+            "the project list cannot be read ({why}): no review"
+        )],
+    }
+}
+
+/// `tick` over `projects`, with the nirvana folder `dir`.
+pub fn tick_in(dir: &Path, projects: &[PathBuf]) -> Vec<String> {
+    if std::fs::create_dir_all(dir).is_err() {
         return vec!["no nirvana folder".into()];
     }
     let Ok(file) = std::fs::OpenOptions::new()
@@ -852,8 +1198,17 @@ pub fn tick() -> Vec<String> {
         Ok(table) => table,
         Err(why) => return vec![format!("seats.toml is refused: {why}")],
     };
-    let world = nirvana_seat::cached_world(&dir, nirvana_run::now());
-    let lines = tick_with(&known_projects(), &table, &world);
+    // S1: `cached_world` reads an unreadable `leases.json` as no leases, which is "nothing runs". The tick reads it
+    // itself and fails closed; `cached_world` is shared, so it is left as it is.
+    let mut world = nirvana_seat::cached_world(dir, nirvana_run::now());
+    let doubt = match nirvana_seat::load_leases(&dir.join(nirvana_seat::LEASES_FILE)) {
+        Ok(leases) => {
+            world.leases = leases.leases;
+            None
+        }
+        Err(why) => Some(why),
+    };
+    let lines = tick_with(projects, &table, &world, doubt);
     let _ = file.unlock();
     lines
 }
@@ -861,32 +1216,64 @@ pub fn tick() -> Vec<String> {
 // ---- settling, and the gate's half ----
 
 /// The project's last idle review, when it is not settled yet: gated (its result read from the gate's axes), delivered
-/// (gated now, which records the result through `finished`), or ended with no report.
-pub fn settle(project: &Project) -> Option<String> {
-    let mut state = read_space(&project.root);
+/// (gated now, which records the result through `finished`), ended with no report, or stranded (review round S4/N5:
+/// reserved and never journaled, or seated and never started, `STRANDED_S` on with no live lease). `leases_known`:
+/// `world.leases` was read; without it a seated review is never called stranded.
+pub fn settle(project: &Project, world: &World, leases_known: bool) -> Option<String> {
+    let state = read_space(&project.root);
     let last = state.last.clone().filter(|last| last.result.is_none())?;
     let run_state = replay(&project.journal(&last.run).read().0);
-    let known = run_state.order(&last.order)?;
+    let stale = world.now.saturating_sub(last.at) > STRANDED_S;
+    let Some(known) = run_state.order(&last.order) else {
+        if !stale {
+            return None;
+        }
+        let why = "never seated: the tick that reserved it stopped first".to_owned();
+        if project.journal(&last.run).path.is_file() {
+            end_run(project, &last.run, "failed", why.clone());
+        }
+        record(project, &last.run, &why, world.now);
+        return Some(format!("{}: {why}", last.order));
+    };
     if known.verdict.is_none() && known.phase == Phase::Delivered {
         return Some(match nirvana_gate::gate(project, &last.run, &last.order) {
             Ok(ruling) => format!("{}: gated {}", last.order, ruling.verdict),
             Err(why) => format!("{}: {why}", last.order),
         });
     }
-    if known.verdict.is_none() && matches!(known.phase, Phase::Failed | Phase::Interrupted) {
-        let why = format!(
-            "ended with no report ({})",
-            known.outcome.as_deref().unwrap_or(known.phase.word())
-        );
+    let never_started = known.phase == Phase::Seated
+        && stale
+        && leases_known
+        && !world
+            .leases
+            .iter()
+            .any(|lease| lease.order == last.order && lease.live(world.now));
+    if known.verdict.is_none()
+        && (matches!(known.phase, Phase::Failed | Phase::Interrupted) || never_started)
+    {
+        let why = if never_started {
+            "seated and never started, its lease ended".to_owned()
+        } else {
+            format!(
+                "ended with no report ({})",
+                known.outcome.as_deref().unwrap_or(known.phase.word())
+            )
+        };
         end_run(project, &last.run, "failed", why.clone());
-        if let Some(last) = state.last.as_mut() {
-            last.result = Some(why.clone());
-            last.done_at = Some(nirvana_run::now());
-        }
-        let _ = write_json(&space_path(&project.root), &state);
+        record(project, &last.run, &why, world.now);
         return Some(format!("{}: {why}", last.order));
     }
     None
+}
+
+/// `last.result` for the review of `run`, under the state file's lock (N4).
+fn record(project: &Project, run: &str, line: &str, at: u64) {
+    let _ = change_space(&project.root, |state| {
+        if let Some(last) = state.last.as_mut().filter(|last| last.run == run) {
+            last.result = Some(line.to_owned());
+            last.done_at = Some(at);
+        }
+    });
 }
 
 /// What a gated idle review did, in one line: `pass · 2 applied (op-7: new x; ...) · 1 refused`.
@@ -921,12 +1308,7 @@ pub fn result_line(verdict: &str, axes: &[Axis]) -> String {
 /// The gate's call after it journals an idle review's verdict: the result into the project's state, and the run ended.
 pub fn finished(project: &Project, run: &str, order: &str, verdict: &str, axes: &[Axis]) {
     let line = result_line(verdict, axes);
-    let mut state = read_space(&project.root);
-    if let Some(last) = state.last.as_mut().filter(|last| last.run == run) {
-        last.result = Some(line.clone());
-        last.done_at = Some(nirvana_run::now());
-        let _ = write_json(&space_path(&project.root), &state);
-    }
+    record(project, run, &line, nirvana_run::now());
     end_run(project, run, "done", format!("{order} gated: {line}"));
 }
 
@@ -1012,13 +1394,30 @@ pub fn apply(
                     Op::New(lesson) | Op::Patch { lesson, .. } => lesson.evidence.clone(),
                     Op::Merge { .. } => unreachable!("matched above"),
                 };
-                // The order the op names, else the first given order whose stream holds the quote.
-                let named = from.as_deref().and_then(|from| {
-                    given
-                        .orders
-                        .iter()
-                        .find(|(r, o, _, _)| format!("{r}/{o}") == from || *o == from)
-                });
+                // The order the op names, else the first given order whose stream holds the quote. Review round N8: a
+                // bare order id that two given runs share names neither.
+                let matching: Vec<_> = from
+                    .as_deref()
+                    .map(|from| {
+                        given
+                            .orders
+                            .iter()
+                            .filter(|(r, o, _, _)| format!("{r}/{o}") == from || *o == from)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if matching.len() > 1 {
+                    lines.push((
+                        false,
+                        format!(
+                            "op {n} refused: {} names {} orders this review read; name it <run>/<order>",
+                            from.as_deref().unwrap_or_default(),
+                            matching.len()
+                        ),
+                    ));
+                    continue;
+                }
+                let named = matching.first().copied();
                 let found = named.or_else(|| {
                     given.orders.iter().find(|(r, o, _, _)| {
                         let stream = streams
@@ -1124,11 +1523,12 @@ pub fn lines(view: &IdleView, now: u64) -> Vec<String> {
     };
     let mut out = vec![if view.on {
         format!(
-            "on: after {} idle, on a seat whose 5h window is {:.0}%+ projected unused and resets within {} \u{b7} \
-             herdr lessons idle off",
+            "on: after {} idle, on a seat whose 5h window is {:.0}%+ projected unused and resets within {}, \
+             and whose week is {:.0}%+ \u{b7} herdr lessons idle off",
             minutes(IDLE_AFTER_S),
             SPARE_MIN * 100.0,
-            minutes(RESETS_WITHIN_S)
+            minutes(RESETS_WITHIN_S),
+            WEEK_SPARE_MIN * 100.0
         )
     } else {
         "off \u{b7} herdr lessons idle on".to_owned()
@@ -1169,7 +1569,7 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
                 "idle review is {}",
                 if read_global().off { "off" } else { "on" }
             );
-            for root in known_projects() {
+            for root in known_projects().map_err(std::io::Error::other)? {
                 println!("{}", root.display());
                 for line in lines(&view(&root), now) {
                     println!("  {line}");
@@ -1221,11 +1621,32 @@ pub fn start() {
                     use std::os::windows::process::CommandExt;
                     command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
                 }
+                // N9: a hung tick (a stuck gate in `settle`) is killed at `TICK_TIMEOUT`; it is this thread's own
+                // child, nothing else.
                 if let Ok(mut child) = command.spawn() {
-                    let _ = child.wait();
+                    let started = std::time::Instant::now();
+                    loop {
+                        match child.try_wait() {
+                            Ok(None) if started.elapsed() < TICK_TIMEOUT => {
+                                std::thread::sleep(Duration::from_secs(1));
+                            }
+                            Ok(None) => {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                break;
+                            }
+                            _ => break,
+                        }
+                    }
                 }
             });
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Review round S4: a test makes the tick stop right after its reservation, as a killed tick would.
+    static DIE_AFTER_RESERVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]

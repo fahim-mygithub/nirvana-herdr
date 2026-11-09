@@ -82,6 +82,9 @@ the gate kept them as written. No such lesson can ever be offered.
 
 ### 3.2 Idle review on spare usage (`src/nirvana_idle_review.rs`)
 
+(The review round changed this rule; §6.2 is the rule as it stands, §6.4 the live check. This section is the first
+build, kept as built.)
+
 The rule is one pure function, `decide`, over `Facts`; the server starts `herdr lessons idle tick` as a windowless child
 every 5 minutes (`start`, one line in `server/headless.rs`); the tick reads files only, queues at most one review, and
 takes a lock so two ticks never overlap. In order, a review runs only when:
@@ -126,7 +129,7 @@ them is the hunk in §5.
 | `PER_WINDOW` | 3 per 5 h window | a flash-low lesson review was 20k-50k tokens (live checks 2026-11-01 F8) |
 | `MAX_ORDERS`, `DIGEST_CHARS`, `LOOKBACK_S` | 12, 24,000, 7 days | bound the brief; median stream in 3D-Printer Flow is 2.5 MB |
 
-## 4. The owner's live check, in order
+## 4. The owner's live check, in order (first build; superseded by §6.4)
 
 1. `herdr lessons reclass --dry-run` in each project; then `herdr lessons reclass` where the moves look right. Note the
    op id it prints; `herdr lessons rollback <id>` undoes it.
@@ -148,3 +151,125 @@ them is the hunk in §5.
   Without the schema hunk a claude reviewer cannot emit `retire` (the schema's `op` enum is new, patch, merge); agy and
   the other ops work.
 - The switch is a CLI and a file, not a Learning square menu item: the square's menu is client code.
+
+## 6. Review round (2026-11-09, `learn-review.md` against 14b42571)
+
+Builder: "Opus high - lessons and idle review round". Every finding was checked against the code before it was fixed;
+the reviewer was right on every one (§6.1 says where a fix differs from the suggestion).
+
+### 6.1 What each finding came to
+
+| Finding | Checked | What was done |
+|---|---|---|
+| S1 busy fails open | right: `cached_world` reads an unreadable `leases.json` as no leases | `tick_in` reads `leases.json` itself; an error is `Facts.doubt` and no review. Also a doubt: a runs or streams folder that exists and cannot be listed (`activity` is now a `Result`), and a `record.jsonl` that exists and cannot be read (`known_projects_in`). `cached_world` is unchanged |
+| S2 week not judged | right | `Spare.week`: each week window of the seat (`week`, `week.fable`) must be read fresh and at least `WEEK_SPARE_MIN` (25%) projected unused at its own reset; a seat with no week reading is no review |
+| S3 failed queue loops | right | the try is counted before the queue (the S4 reservation) and stays counted; `backoff_until` (1 h) stops the next tries; `last.through` goes back so the orders are read later; `queue_on` gives back the lesson-review count and the pending row when `book` or the journal write fails (all reviews, not only idle ones) |
+| S4 crash double-runs | right | the reservation (day count, the pool's window count, `last` with the run, order and `through`) is written before `queue`; `settle` ends a reservation that never reached the journal after `STRANDED_S` (15 min) as "never seated" |
+| S5 owner's use outside herdr | right | the tick keeps each pool's fresh 5 h readings for 90 min (`Global.samples`); no review when the seat's pool has no reading from 30 min ago in the same window, or when any pool's `used` rose more than half a point since then. Not built: a pane's "working" state (the tick is a child process with no server state) |
+| S6 reclass rewrites owner edits | right | the automatic reclass moves only a lesson whose bytes are what herdr last wrote (the newest writes-log sha, or the newest ledger `after`); the rest is left and listed as edited. `herdr lessons reclass --edited` moves them for the owner; `with_class` keeps every byte but the class line (CRLF, trailing lines) |
+| N1 `through` skips unread orders | right | recorded, not changed: the newest 12 are read and the rest only counted in the brief, on purpose. A backlog older than the newest 12 is not worth a paid read; the next review starts after the newest |
+| N2 cheap checks first | right | `ready` checks every fact but the order count; `gated_since` (the journal replay) runs only when `ready` passes; the pick runs once per tick, not per project. No test: what it saves is time, not behaviour |
+| N3 activity, window, projects | right | the window count is per pool (`Global.windows`); `known_projects_in` skips roots under the temp folder, roots with no `.nirvana` now, and a second spelling of one root on Windows. Not changed: `activity` still stats every stream (fine at today's counts; recorded) |
+| N4 lost updates | right | one writer: `change_space` / `change_global` read, change and write under `<file>.lock`; the tick, `settle`, `finished` and `herdr lessons idle on/off` all go through them. No test (a race) |
+| N5 launch failure counts as success | right | `queue_on` journals an idle review that did not launch as interrupted, releases its lease, gives back the count and returns `Err`; `settle` ends a review seated and never started once its lease is gone and `STRANDED_S` has passed (not when `leases.json` was unreadable). An ordinary lesson review's launch failure is unchanged |
+| N6 rollback resets counters | right | a `reclass` rollback restores the class and file and keeps the counters and `seen` earned since |
+| N7 crowding sooner | right | recorded: live-check step 3 below |
+| N8 bare order id | right | a bare `from` that names two given orders refuses the op ("name it run/order") |
+| N9 tick has no timeout | right | `start` kills its own tick child after `TICK_TIMEOUT` (10 min). No test: `start` does nothing under test |
+| N10 product wiring untested | right | tick-level tests for the owner key, a fresh stream, a pool's rise and the lock; tests for the project list, the per-pool window, the never-started settle; a control on each wiring line |
+
+### 6.2 The rule as it stands (`ready`, then the order count), cheapest first
+
+1. idle review is on;
+2. no doubt: `leases.json`, each project's runs folder and `record.jsonl` all read;
+3. no live lease anywhere;
+4. no owner key in any pane for 30 minutes; a key file that cannot be read is a doubt;
+5. no journal or stream written in any known project for 30 minutes;
+6. **no pool's 5 h use rose by more than half a point in the last 30 minutes, and the seat's pool has a reading from
+   30 minutes ago in this window** (S5; the first half hour after the server starts never reviews);
+7. no back-off from a failed try here (S3);
+8. `lesson_reviews_per_day` has room; under 2 idle reviews here this UTC day; under 3 in this pool's 5 h window;
+9. the seat's 5 h window: read fresh, 50%+ projected unused, resets within 2 h;
+10. **every week window of the seat: read fresh, 25%+ projected unused at its reset** (S2);
+11. at least one order gated here since the last idle review (read only now: N2).
+
+"Usage that would be lost anyway" is true of the 5 h window only: what a review spends there is gone at the reset if
+unused. The week keeps counting the same tokens until its own reset; rule 10 is why that is acceptable.
+
+### 6.3 The numbers added, each a hypothesis
+
+| Number | Value | Why |
+|---|---|---|
+| `WEEK_SPARE_MIN` | 25% projected unused | a review is under 1% of a week; the floor is a margin against a straight-line projection. The Max week of 2026-10-18 (48% used at 32% elapsed) projects 0% spare and refuses |
+| `USAGE_RISE` | 0.5 point | Claude's `/usage` reads whole percents: any rise it can show is over it |
+| samples kept | 90 min | three idle spans: a baseline 30 min old survives two missed ticks |
+| `BACKOFF_S` | 1 h | a corrupt `leases.json` or a held lock costs at most the day cap's two tries |
+| `STRANDED_S` | 15 min | longer than `TICK_TIMEOUT`, so a slow tick is never taken for a dead one |
+| `TICK_TIMEOUT` | 10 min | a tick is file reads; one past ten minutes is stuck (most likely a gate in `settle`) |
+
+Measured (`python nirvana/lessons_census.py`, rerun 2026-11-09 after the round; its new `reclass:` line is S6's split
+of each project's worker lessons that are not under a router class), verbatim:
+
+```
+== the machine, last 14 days: 10545 journal events; gaps of 30 min or more 45 (287.5 h); of 60 min or more 39 (283.5 h)
+== C:\Users\fahim\Desktop\Pojects\3D-Printer Flow
+   lessons 6 (live 6, class not a router class 5, never offered 6) · offered 0 · opened 0 · passed after opened 0
+   orders seated 138 · gated events 123 · lesson-review orders 18 · ledger ops {'new': 1}
+   reclass: automatic 5 · left for the owner (not as herdr wrote it) 0
+== C:\Users\fahim\Desktop\Pojects\3D-Printer-Flow-xtool
+   lessons 3 (live 3, class not a router class 2, never offered 3) · offered 0 · opened 0 · passed after opened 0
+   orders seated 77 · gated events 22 · lesson-review orders 11 · ledger ops {}
+   reclass: automatic 2 · left for the owner (not as herdr wrote it) 0
+== C:\Users\fahim\Desktop\Pojects\3D-Printer-Flow-xtool-xcs
+   lessons 0 (live 0, class not a router class 0, never offered 0) · offered 0 · opened 0 · passed after opened 0
+   orders seated 9 · gated events 6 · lesson-review orders 0 · ledger ops {}
+   reclass: automatic 0 · left for the owner (not as herdr wrote it) 0
+== C:\Users\fahim\Desktop\Pojects\WorkoutApp\WorkOutAppRefactor
+   lessons 16 (live 11, class not a router class 5, never offered 7) · offered 39 · opened 12 · passed after opened 3
+   orders seated 96 · gated events 87 · lesson-review orders 22 · ledger ops {'new': 3}
+   reclass: automatic 2 · left for the owner (not as herdr wrote it) 3
+== C:\Users\fahim\Desktop\Pojects\groove-coach
+   lessons 11 (live 11, class not a router class 8, never offered 9) · offered 4 · opened 5 · passed after opened 2
+   orders seated 79 · gated events 63 · lesson-review orders 19 · ledger ops {'new': 3}
+   reclass: automatic 4 · left for the owner (not as herdr wrote it) 4
+== D:\MotoProject
+   lessons 0 (live 0, class not a router class 0, never offered 0) · offered 0 · opened 0 · passed after opened 0
+   orders seated 57 · gated events 14 · lesson-review orders 7 · ledger ops {}
+   reclass: automatic 0 · left for the owner (not as herdr wrote it) 0
+```
+
+The lessons left for the owner have no writes-log line or ledger row matching their bytes. The script cannot tell an
+owner's edit from a lesson written before herdr kept its writes log; `git log -p` on each file (they are tracked)
+can. The script's per-lesson lines (`herdr T/F`) name them.
+
+### 6.4 The owner's live check, in order
+
+1. In each project, `herdr lessons reclass --dry-run`: the moves, and the lessons left as "edited since herdr wrote
+   it". For each one left, `git log -p .nirvana/lessons/<slug>.md` shows whether you edited it; if not (it predates
+   the writes log), `herdr lessons reclass --edited` moves it too. Note the op id; `herdr lessons rollback <id>`
+   undoes it and keeps the counters earned since.
+2. `herdr lessons for --class build.bounded` in 3D-Printer Flow: the moved lessons are listed.
+3. **Crowding (N7):** in WorkOutAppRefactor, `herdr lessons list` after the reclass. A class with more than 8 live
+   lessons queues a merge order at the next `herdr run end`, and each brief of that class carries one line per live
+   lesson. If that is sooner than wanted, say so: a per-project delay before the first merge is not built.
+4. Seat one `build.bounded` order in 3D-Printer Flow: its brief has a "Lessons from earlier build.bounded orders"
+   section; the Learning square's offered count rises.
+5. `herdr lessons idle status`: on, and each project's last check. Right after a server start it says "no usage
+   history to rule out other use" for half an hour: expected (rule 6).
+6. Leave herdr open (so usage is read) with no order running, no typing and no Claude Code use anywhere (the phone
+   too) for 30+ minutes, inside 2 h of the cheap seat's 5 h reset with half of it unused and its week a quarter or more
+   unused. Within 5 minutes an `idle-…` run appears in the panel with one `…-review` order.
+7. A second check of the S5 rule: during such a stretch, send one prompt in a Claude Code window outside herdr. The
+   next check says "Max's 5h use rose … someone is using it" once the reading moves (Claude reads whole percents, so a
+   tiny prompt may not move it).
+8. When the review is gated, the Learning panel's "Idle review" lines say when it ran and what it did; `herdr lessons
+   rollback <op>` undoes any op it applied.
+9. `herdr lessons idle off`; the next check says "idle review is off". `herdr lessons idle on` again.
+
+### 6.5 Not done in this round
+
+- S5's second signal (a pane whose agent is working) is not built: the tick is a child process and reads files only.
+- N1 is kept as built (above); N3's bound on `activity` is not built.
+- N2, N4 and N9 have no test: time saved, a race, and a thread that does nothing under test.
+- A non-idle lesson review whose launch fails still holds its lease until it expires (the old path; N5 was scoped to
+  idle reviews).

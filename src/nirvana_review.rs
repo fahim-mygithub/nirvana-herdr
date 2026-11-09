@@ -584,8 +584,17 @@ fn launch(project: &Project, run: &str, seated: &Seated) -> Result<String, Strin
     #[cfg(test)]
     {
         let _ = (project, run, seated);
+        if LAUNCH_FAILS.get() {
+            return Err("a test's launch failure".into());
+        }
         Ok("not started in a test".into())
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Order LEARN review round N5: a test makes the next launches fail.
+    pub(crate) static LAUNCH_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The review's pick: the rule at Efficient, size small, on the live world and the live leases.
@@ -738,12 +747,41 @@ fn queue_on(
         });
     })
     .map_err(|err| err.to_string())?;
-    nirvana_gate::book(table, &pick, id, run).map_err(|err| err.to_string())?;
-    if let Err(err) = journal.append(now(), Kind::Seated(Box::new(seated.clone()))) {
-        crate::nirvana_worker::release_lease(id);
+    // Order LEARN review round S3: a review that never seats does not keep the day's count or a pending row; before,
+    // an idle tick whose `book` failed spent one of `lesson_reviews_per_day` every five minutes.
+    let unqueue = || {
+        let _ = change_state(&project.root, |state| {
+            if state.day == at / 86_400 {
+                state.queued = state.queued.saturating_sub(1);
+            }
+            state.pending.retain(|p| !(p.run == run && p.order == id));
+        });
+    };
+    if let Err(err) = nirvana_gate::book(table, &pick, id, run) {
+        unqueue();
         return Err(err.to_string());
     }
-    let how = launch(project, run, &seated).unwrap_or_else(|err| err);
+    if let Err(err) = journal.append(now(), Kind::Seated(Box::new(seated.clone()))) {
+        crate::nirvana_worker::release_lease(id);
+        unqueue();
+        return Err(err.to_string());
+    }
+    let launched = launch(project, run, &seated);
+    // Order LEARN review round N5: an idle review that did not launch is a failure, not a seat held for its lease's
+    // length: journaled as interrupted, its lease released, and the tick told. A lesson review keeps its old path.
+    if let (Err(err), true) = (&launched, subject == crate::nirvana_idle_review::SUBJECT) {
+        let _ = journal.append(
+            now(),
+            Kind::Interrupted {
+                order: id.to_owned(),
+                why: format!("launch failed: {err}"),
+            },
+        );
+        crate::nirvana_worker::release_lease(id);
+        unqueue();
+        return Err(format!("launch failed: {err}"));
+    }
+    let how = launched.unwrap_or_else(|err| err);
     Ok(format!(
         "{id} seated on {} {} ({how}): the {kind} of {subject}; herdr gates it when it delivers",
         pick.seat,

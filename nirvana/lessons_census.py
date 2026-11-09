@@ -65,6 +65,33 @@ def projects_from_record(home):
     return out
 
 
+def herdr_wrote_last(nv, slug):
+    """Review round S6, as `nirvana_lessons::herdr_wrote_last` reads it: the lesson file's bytes are what herdr last
+    wrote, by the newest writes-log line for it (`runs/.lesson-writes.jsonl`, the sha of the bytes) or the newest
+    ledger row's `after` snapshot of it. The automatic reclass moves only these."""
+    import hashlib
+    path = nv / "lessons" / f"{slug}.md"
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return False
+    logged = None
+    for row in jsonl(nv / "runs" / ".lesson-writes.jsonl"):
+        if row.get("path") == f"{slug}.md":
+            logged = row.get("sha")
+    if logged == hashlib.sha256(raw).hexdigest():
+        return True
+    snap = None
+    for row in jsonl(nv / "lessons" / "ledger.jsonl"):
+        for after in row.get("after", []):
+            if after.get("slug") == slug:
+                snap = after.get("file")
+    try:
+        return snap is not None and raw.decode("utf-8") == snap
+    except UnicodeDecodeError:
+        return False
+
+
 def live(c):
     return c["offered"] < DECAY_AFTER or c["passed_after_opened"] * HELP_EVERY >= c["offered"]
 
@@ -113,6 +140,7 @@ def census(root, classes):
             "order_class": order_class,
             "origin": e.get("origin", "worker"),
             "profile": e.get("profile"),
+            "herdr_wrote_last": herdr_wrote_last(nv, slug),
             **c,
             "live": live(c),
             "later_same_class": sum(1 for s in later if s[3] == e.get("class")),
@@ -124,6 +152,12 @@ def census(root, classes):
         "live": sum(1 for l in lessons if l["live"]),
         "not_router_class": sum(1 for l in lessons if not l["router_class"]),
         "never_offered": sum(1 for l in lessons if l["offered"] == 0),
+        # What the idle review's automatic reclass would move (a worker's lesson, not a router class, its file as herdr
+        # last wrote it) and what it leaves for the owner's `herdr lessons reclass --edited`.
+        "reclass_auto": sum(1 for l in lessons if l["origin"] == "worker" and not l["router_class"]
+                            and l["herdr_wrote_last"]),
+        "reclass_owner": sum(1 for l in lessons if l["origin"] == "worker" and not l["router_class"]
+                             and not l["herdr_wrote_last"]),
         "offered": sum(l["offered"] for l in lessons),
         "opened": sum(l["opened"] for l in lessons),
         "passed_after_opened": sum(l["passed_after_opened"] for l in lessons),
@@ -194,11 +228,16 @@ def main(argv):
             f"   orders seated {p['orders_seated']} · gated events {p['orders_gated']} · lesson-review orders "
             f"{p['lesson_review_orders']} · ledger ops {p['ledger_ops']}"
         )
+        print(
+            f"   reclass: automatic {p['reclass_auto']} · left for the owner (not as herdr wrote it) "
+            f"{p['reclass_owner']}"
+        )
         print(f"   seated by class {p['seated_by_class']}")
         for l in p["per_lesson"]:
             print(
                 f"   - {l['slug'][:44]:44} class {l['class']!r:42} router {str(l['router_class'])[0]} "
-                f"order {l['order_class']!s:18} {l['origin']:6} off {l['offered']} open {l['opened']} "
+                f"order {l['order_class']!s:18} {l['origin']:6} herdr {str(l['herdr_wrote_last'])[0]} "
+                f"off {l['offered']} open {l['opened']} "
                 f"pao {l['passed_after_opened']} · later same class {l['later_same_class']} · later order class "
                 f"{l['later_order_class']}"
             )
