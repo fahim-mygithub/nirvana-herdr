@@ -1638,7 +1638,9 @@ fn the_page_has_the_spaces_and_chat_screens_and_no_inline_script() {
     );
     let (_, _, app) = get(running.addr, "/app.js", OWNER);
     assert!(
-        app.contains("addEventListener('visibilitychange'") && app.contains("EventSource.CLOSED"),
+        // The live view's own listener: P39o's error screen has another, which a bare substring also matched.
+        app.contains("    document.addEventListener('visibilitychange', shown);\n")
+            && app.contains("EventSource.CLOSED"),
         "back from the background, and a restart"
     );
     for (name, text) in [("spaces", &spaces), ("chat", &chat), ("app", &app)] {

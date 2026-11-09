@@ -292,3 +292,20 @@ a:hover { color: #86CBD2; }
 .switch-knob { position: absolute; top: 3px; left: 3px; width: 24px; height: 24px; border-radius: 50%; background: var(--text); transition: transform calc(var(--k) * 200ms) cubic-bezier(.2, .8, .2, 1); }
 .switch.on .switch-knob { transform: translateX(20px); background: var(--teal-ink); }
 @media (prefers-reduced-motion: reduce) { .switch, .switch-knob { transition: none; } }
+
+/* P39o: the error screen when the PC cannot be reached (record p39o). It lies over the open screen, in screen 1's
+   layout and colours: the brand row, a title, a card of checks, and Try again in the send button's teal. */
+.reach { position: absolute; inset: 0; z-index: 30; background: var(--bg); display: flex; flex-direction: column; gap: 22px; box-sizing: border-box; overflow-y: auto; padding: calc(56px + env(safe-area-inset-top, 0px)) 20px calc(28px + env(safe-area-inset-bottom, 0px)); }
+.reach-mark { background: var(--hover); }
+.reach-title { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
+.reach-lead { margin: 0; color: var(--soft); font-size: 14px; }
+.reach-list { list-style: none; margin: 0; padding: 0; }
+.reach-item { display: flex; gap: 14px; padding: 14px 16px; align-items: flex-start; }
+.reach-item + .reach-item { border-top: 1px solid var(--line); }
+.reach-n { width: 22px; height: 22px; border-radius: 11px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; background: rgba(95, 179, 188, 0.16); color: var(--teal); }
+.reach-n.bad { background: #2A2023; color: var(--red); }
+.reach-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.reach-check { font-weight: 600; font-size: 14px; }
+.reach-how { font-size: 13px; color: var(--muted); }
+.reach-foot { margin-top: auto; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.nv .reach-try { width: 100%; height: 48px; border-radius: 24px; background: var(--teal); color: #0E2A2D; font-weight: 600; text-align: center; }
