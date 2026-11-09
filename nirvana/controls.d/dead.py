@@ -213,7 +213,7 @@ CONTROLS = (
             "                && false;\n",
             T_STATUS, "rust"),
     Control("dead_status_word", CLAUDE,
-            "                phase: crate::nirvana_dead::phase_word(order.phase, live).to_owned(),\n",
-            "                phase: order.phase.word().to_owned(),\n",
+            "                        crate::nirvana_dead::phase_word(order.phase, live)\n",
+            "                        order.phase.word()\n",
             T_STATUS, "rust"),
 )

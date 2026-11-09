@@ -50,6 +50,67 @@ pub const CALL_LIMIT: Duration = Duration::from_secs(15);
 /// The sweep's log under the Nirvana home's `nirvana/` folder: one line per pane it closed or failed to close.
 pub const LOG_FILE: &str = "dead-panes.log";
 
+/// Finished rows (nirvana/plans/2026-11-09-finished-rows.md): an ended order, and a run whose orders have all ended,
+/// stay in the agents panel and the statusline's order list this long after the order's (the run's newest order's)
+/// last journal event, then leave by themselves. The owner, 2026-11-09: "the runs on the bottom are not cleared".
+/// Five minutes: the orchestrator is woken with the outcome within the minute and reports it in its own pane, a
+/// finished worker's pane closes 2 to 3 minutes after its end (`CLOSE_GRACE_S` plus a pass), and the statusline
+/// refreshes every 30 s; so the row outlives its pane by a couple of minutes and is gone before the owner has to clear
+/// it. The journals stay: `herdr run status` lists every run's orders, `herdr run receipt <run>` and `herdr seat read
+/// <order>` print the rest.
+pub const ROWS_GRACE_S: u64 = 300;
+
+/// Whether a row stays shown: it is live, or its last journal event is under `ROWS_GRACE_S` ago. For a run's group in
+/// the agents panel, `live` is "any of its orders is live" and `last_at` its newest order's last event; for one order
+/// in the statusline, the order's own.
+pub fn still_shown(live: bool, last_at: u64, now: u64) -> bool {
+    live || now < last_at.saturating_add(ROWS_GRACE_S)
+}
+
+/// Finished rows, review round: whether one order's row stays in the agents panel and the statusline. Live, always. Not
+/// live, by what the order still waits for:
+/// - Deferred (review S1): a rate limit journaled `deferred { until }` and its supervisor returned, so no lock is held,
+///   but the order is pending, due at `until` (often hours away, the window's reset). It stays until `until` plus
+///   `ROWS_GRACE_S`, or until its phase changes (`herdr run tick` reseats it). Hiding it 5 minutes after the deferral
+///   left nothing on screen saying work was queued.
+/// - Asked and not `answered` (review N1): the question is open; the row is the owner's only sign of it on screen. It
+///   stays until a later order answers it (`OrderState::answers`) or the run ends (an ended run lists only live orders).
+/// - Seated or Running with no supervisor (review N2): it died with a crash or a server restart. It stays
+///   `STOPPED_GRACE_S` after its last event, as long as the sweep keeps its pane, so the row and the pane leave together.
+///   The sweep counts that hour from the later of the last event and the server's start; the rows cannot see the
+///   server's start, so after a restart the pane may outlive the row. It is then an ordinary pane again (`worker_pane`
+///   no longer holds it), shown as whatever herdr detects in it, not hidden.
+/// - Anything else that ended (delivered, interrupted, answered): `ROWS_GRACE_S` after its last event.
+pub fn order_shown(order: &nirvana_run::OrderState, live: bool, answered: bool, now: u64) -> bool {
+    if live {
+        return true;
+    }
+    match order.phase {
+        Phase::Asked if !answered => true,
+        Phase::Deferred => {
+            let due = order.deferred_until.unwrap_or(0).max(order.last_at);
+            now < due.saturating_add(ROWS_GRACE_S)
+        }
+        Phase::Seated | Phase::Running => now < order.last_at.saturating_add(STOPPED_GRACE_S),
+        _ => still_shown(false, order.last_at, now),
+    }
+}
+
+/// Finished rows, review S2: whether an order's pane is still its worker's, so it is hidden from the space's agent rows
+/// and the agents panel and shown only as the order's row. The row's own rule, except that an open question does not
+/// hold the pane: the worker that asked has exited, and an owner who opens a Claude in that pane to answer must see it.
+pub fn worker_pane(order: &nirvana_run::OrderState, live: bool, now: u64) -> bool {
+    order_shown(order, live, true, now)
+}
+
+/// Whether a later order of the run answers `order`'s question (`nirvana_run::replay` sets `answers` on the next order
+/// seated with no parent while a question is open).
+pub fn answered(orders: &[nirvana_run::OrderState], order: &nirvana_run::OrderState) -> bool {
+    orders
+        .iter()
+        .any(|other| other.answers.as_deref() == Some(order.id()))
+}
+
 /// Whether an order's worker is live: its phase wants a worker and a supervisor holds its lock, or it was seated
 /// under `SEAT_GRACE_S` ago and its supervisor has not started yet. Asked, Delivered and the other ended phases never
 /// are: the supervisor exits as it journals them. The one liveness rule for the agents panel, the spaces' worker rows
@@ -534,10 +595,39 @@ pub fn sweeps_in(session: Option<&str>) -> bool {
     session == Some(crate::nirvana_launch::SESSION)
 }
 
+/// Which server a hand-run sweep asks (finished rows, item 5). Inside herdr, its own (`None`). From a plain shell, the
+/// 0.59.0 live check's `herdr run sweep --dry-run` printed "not in herdr: no server to sweep": now a dry run asks the
+/// session `--session` named, else the Nirvana session, the only one whose server sweeps (`sweeps_in`). A closing pass
+/// from a plain shell is refused: it would not know which tabs the window's clients have on screen (`--watched`, review
+/// S2), and the server runs one every minute anyway.
+///
+/// Inside herdr the process's own server wins over `--session` (review N6): `herdr --session nirvana run sweep
+/// --dry-run` typed in a pane of another session sweeps that other session. Harmless: a dry run only reads (`pane list`,
+/// `tab list`, `pane process-info`), and the closing pass is the server's own.
+pub fn sweep_target(
+    in_herdr: bool,
+    named: Option<&str>,
+    dry_run: bool,
+) -> Result<Option<String>, String> {
+    if in_herdr {
+        return Ok(None);
+    }
+    if !dry_run {
+        return Err(
+            "not in herdr: only `herdr run sweep --dry-run` runs from a plain shell; the Nirvana server sweeps every minute"
+                .to_owned(),
+        );
+    }
+    Ok(Some(
+        named.unwrap_or(crate::nirvana_launch::SESSION).to_owned(),
+    ))
+}
+
 /// `herdr run sweep [--dry-run] [--server-started <unix s>] [--watched <tab>]...`: one pass against the server this
-/// process belongs to. The server starts it every `PASS_EVERY` (`app::nirvana_dead_panes`) with its start and its
-/// clients' focused tabs; the owner runs `--dry-run` to see each labelled pane's verdict. Run by hand without
-/// `--server-started`, the pass takes the server as started now, so a stopped order's pane reads kept.
+/// process belongs to, or, `--dry-run` from a plain shell, against the Nirvana session's (`sweep_target`). The server
+/// starts it every `PASS_EVERY` (`app::nirvana_dead_panes`) with its start and its clients' focused tabs; the owner
+/// runs `--dry-run` to see each labelled pane's verdict. Run by hand without `--server-started`, the pass takes the
+/// server as started now, so a stopped order's pane reads kept.
 pub fn cli(args: &[String]) -> std::io::Result<()> {
     let now = nirvana_run::now();
     let mut pass = Pass {
@@ -557,9 +647,19 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             _ => {}
         }
     }
-    if !crate::nirvana_worker::in_herdr() {
-        println!("not in herdr: no server to sweep");
-        return Ok(());
+    match sweep_target(
+        crate::nirvana_worker::in_herdr(),
+        crate::session::active_name().as_deref(),
+        pass.dry_run,
+    ) {
+        Ok(None) => {}
+        // The herdr calls below are this binary run as a child (`nirvana_worker::herdr_command`), which reads
+        // `HERDR_SESSION` for its socket when no socket path is set, as `herdr --session <name>` itself does.
+        Ok(Some(session)) => std::env::set_var(crate::session::SESSION_ENV_VAR, session),
+        Err(why) => {
+            println!("{why}");
+            return Ok(());
+        }
     }
     let Some(home) = crate::nirvana::home() else {
         println!("no Nirvana home");

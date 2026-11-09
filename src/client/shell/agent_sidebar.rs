@@ -488,9 +488,10 @@ pub(super) fn agent_rows(
     config: &ClientShellConfig,
     machine: Option<&str>,
 ) -> Vec<AgentRow> {
+    let workers = super::nirvana_spaces::worker_panes(snapshot);
     ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
         .into_iter()
-        .filter(|pane_id| !crate::nirvana_subagents::is_seat_worker_pane(pane_id))
+        .filter(|pane_id| !workers.contains(pane_id))
         .filter_map(|pane_id| agent_row(snapshot, &pane_id, config, machine))
         .collect()
 }

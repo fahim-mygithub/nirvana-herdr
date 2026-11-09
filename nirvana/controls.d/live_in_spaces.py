@@ -33,8 +33,8 @@ CONTROLS = (
     Control(
         'p30_own_space_only',
         'src/client/shell/nirvana_spaces.rs',
-        '        .filter(|agent| agent.workspace_id == workspace_id)\n        .filter(|agent| !crate::nirvana_subagents::is_seat_worker_pane(&agent.pane_id))\n',
-        '        .filter(|_| true)\n        .filter(|agent| !crate::nirvana_subagents::is_seat_worker_pane(&agent.pane_id))\n',
+        '        .filter(|agent| agent.workspace_id == workspace_id)\n        .filter(|agent| !workers.contains(&agent.pane_id))\n        .filter_map(view)\n',
+        '        .filter(|_| true)\n        .filter(|agent| !workers.contains(&agent.pane_id))\n        .filter_map(view)\n',
         'workers_of_another_space_never_show_under_this_one',
         'rust',
     ),
@@ -225,8 +225,8 @@ CONTROLS = (
     Control(
         'p30_seat_worker_filter',
         'src/client/shell/nirvana_spaces.rs',
-        '        .filter(|agent| !crate::nirvana_subagents::is_seat_worker_pane(&agent.pane_id))\n',
-        '        .filter(|_| true)\n',
+        '        .filter(|agent| !workers.contains(&agent.pane_id))\n        .filter_map(view)\n',
+        '        .filter(|_| true)\n        .filter_map(view)\n',
         'a_seat_worker_pane_brings_no_worker_rows',
         'rust',
     ),

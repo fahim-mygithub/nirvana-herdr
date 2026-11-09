@@ -3,6 +3,22 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.61.0: a worker shows once, and finished runs leave the panel by themselves
+
+- **Changed:** a pane labelled for a worker or job is never a space agent row; it shows once, as its order's row. A Run
+  group in the agents panel, and an order in the foot's list, leaves 5 minutes after its orders end. A Deferred order
+  stays until its time plus 5 minutes, an unanswered question stays until answered, and a Running order whose worker
+  died stays as long as its pane may (1 h). A kept worker pane the owner reuses shows again after 60 s. `herdr run
+  sweep --dry-run` works from a plain shell against the `nirvana` session (or `--session`); closing stays in herdr.
+- **Because:** the owner, 2026-11-09: "The ui cleanup still isint proactive. For example I see a claude idle underneath
+  3d-pritner low. Plus the runs on the bottom are not cleared. in the agents panal." The idle "Claude" row was the
+  running quad-v5 worker, listed twice; Run groups came from run records the 0.59.0 pane sweep never touched.
+- **Measured:** 177 scoped tests pass; 31 controls red; full checkpoint at this merge. The `run studio-gui` pane is kept
+  by the owner-key rule (a key a day after its run ended), not a sweep bug. Record
+  `nirvana/plans/2026-11-09-finished-rows.md`.
+- **If you remove this:** the running worker shows as an idle "Claude" agent, and ended runs fill the agents panel and
+  the foot forever.
+
 ## alpha 0.60.1: Nirvana Remote's message box grows with its text
 
 - **Changed:** the chat's message box is a box that grows with its text, up to about six lines, then scrolls inside.

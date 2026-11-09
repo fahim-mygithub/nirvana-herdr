@@ -719,3 +719,53 @@ fn a_herdr_call_past_its_limit_is_killed() {
     assert!(answer.is_err(), "a call past its limit is an error");
     assert!(took < Duration::from_secs(10), "it waited {took:?}");
 }
+
+/// Finished rows (2026-11-09): a row stays while live, and an ended one for `ROWS_GRACE_S` after its last event.
+#[test]
+fn an_ended_row_stays_the_grace_and_a_live_one_always() {
+    assert!(still_shown(false, 1_000, 1_000 + ROWS_GRACE_S - 1));
+    assert!(!still_shown(false, 1_000, 1_000 + ROWS_GRACE_S));
+    assert!(still_shown(true, 1_000, 1_000 + ROWS_GRACE_S * 1_000));
+    // Minutes, not hours: the owner asked for a proactive cleanup.
+    assert!((60..=600).contains(&ROWS_GRACE_S));
+}
+
+/// Finished rows, item 5: the 0.59.0 live check's `herdr run sweep --dry-run` from a plain shell printed "not in herdr:
+/// no server to sweep". A dry run there asks the named session, else the Nirvana session; a closing pass is refused.
+#[test]
+fn a_dry_run_from_a_plain_shell_asks_the_nirvana_session() {
+    assert_eq!(sweep_target(true, None, false), Ok(None));
+    assert_eq!(sweep_target(true, Some("other"), true), Ok(None));
+    assert_eq!(
+        sweep_target(false, None, true),
+        Ok(Some(crate::nirvana_launch::SESSION.to_owned()))
+    );
+    assert_eq!(
+        sweep_target(false, Some("other"), true),
+        Ok(Some("other".to_owned()))
+    );
+    let refused = sweep_target(false, None, false).unwrap_err();
+    assert!(refused.contains("--dry-run"), "{refused}");
+}
+
+/// Finished rows, item 4: `wP:p5` (`sonnet·crawl-beta-gui-3-s1`, run `studio-gui`) stayed open. Its order ended
+/// (`ended stopped`) at 1792746293 (2026-10-23 09:04:53Z); the owner's key record for `wP:p5` reads 1792840486
+/// (2026-10-24 11:14:46Z), a day later. The never-close rule "the owner typed in it after its worker ended" keeps it,
+/// as meant; these are the record's own numbers.
+#[test]
+fn the_studio_gui_pane_is_kept_by_the_owners_later_key() {
+    let facts = PaneFacts {
+        pane: "wP:p5".into(),
+        owner: parse_label("sonnet\u{b7}crawl-beta-gui-3-s1"),
+        tab_has_agent: false,
+        last_of_space: false,
+        watched: false,
+        ended: Ended::At(1_792_746_293),
+        owner_key_at: Ok(Some(1_792_840_486)),
+    };
+    let now = 1_794_200_000;
+    assert_eq!(
+        decide(&facts, now, now - 600, || Some(Vec::new())),
+        Verdict::Keep("the owner typed in it after its worker or job ended".into())
+    );
+}
