@@ -5,6 +5,10 @@ description: "Route video, audio, and >400k-token files to Gemini seats (argon o
 
 # Media and Huge-Read Seating (`media.video`, `media.audio`, `read.huge`)
 
+**A still image or a PDF goes to the `look` skill:** `herdr look <file> --ask "<question>"` prints the answer as text
+from a cheap seat, and the picture never enters your context. This skill is for video, audio and huge reads.
+`herdr media doctor` lists which tools (ffmpeg, ffprobe, pdftoppm) and which seats this machine has for each kind.
+
 As the Nirvana Claude orchestrator, **never read a video, an audio file, or a huge (>400k token) file into your own context**. Claude cannot ingest video or audio at all, and reading huge inputs on Claude burns the `>150k` context tier that consumes 74% of the Max weekly pool. Always delegate media and huge reads to an Antigravity (`agy`) worker seated on `argon` or `flash`.
 
 `herdr` below is the fork's binary, `"${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe"`. A plain `herdr` on this machine's
@@ -29,6 +33,8 @@ Antigravity's `view_file` tool supports `image`, `pdf`, `video`, and `audio` up 
    - Preserves voice-overs as mono low-bitrate AAC (`-ac 1 -b:a 48k`), because spoken narration carries intent.
    - Computes target video bitrate from duration with a safety margin, and retries once at a lower bitrate if pass 1 still exceeds `--max-mb`.
    - Pass the resulting `.shrunk.mp4` path to the worker.
+   - A still image is never made a video: `shrink` gives a copy at most `--max-px` (default 1024) on its long edge in
+     `<project>\.nirvana\look\`, and `probe` reports it as an image with its pixel count and token estimate.
 
 ## 2. Pick the right seat (`herdr seat pick`)
 
