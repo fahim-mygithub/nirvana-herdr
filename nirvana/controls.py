@@ -11,6 +11,9 @@ The file is restored in a `finally`. Rust controls recompile the crate (about 30
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -103,8 +106,8 @@ CONTROLS: tuple[Control, ...] = (
             'tmp.write_bytes((ver + "\\n").encode("utf-8"))', 'tmp.write_bytes(b"0.0.0\\n")',
             "nirvana.test_scripts.InstallTest.test_install_moves_the_old_build_aside_and_stamps_last", "python"),
     Control("install_overwrites_old_build", "nirvana/install.py",
-            "    if target.exists():\n        target.rename(",
-            "    if False:\n        target.rename(",
+            "    if target.exists():\n        aside = bin_dir",
+            "    if False:\n        aside = bin_dir",
             "nirvana.test_scripts.InstallTest.test_install_moves_the_old_build_aside_and_stamps_last", "python"),
     Control("bump_feature_keeps_fix", "nirvana/version.py",
             'return f"{major}.{feature + 1}.0"', 'return f"{major}.{feature + 1}.{fix}"',
@@ -1064,7 +1067,101 @@ assert len(_names) == len(set(_names)), f"duplicate control names: {sorted({n fo
 def command(c: Control) -> list[str]:
     if c.kind == "rust":
         return ["cargo", "nextest", "run", "--locked", "--no-fail-fast", c.test]
-    return [sys.executable, "-m", "unittest", c.test]
+    # `-B`: no bytecode is written for a sabotaged file. Two controls on one file whose replacements change its size
+    # by the same bytes, run within one second, matched the first one's .pyc (it checks mtime in seconds and size)
+    # and ran its sabotage instead (plan 40: c40e_clean_top_link_skipped read green after
+    # c40e_clean_never_through_a_link; memory note same-size-sabotage-runs-stale-bytecode).
+    return [sys.executable, "-B", "-m", "unittest", c.test]
+
+
+# Plan 40 review B6: the restore was only the `finally` below, which dies with the process. A TaskStop, a closed
+# terminal or a power cut during a 900 s build left the sabotage in the source, and the next run read the broken bytes
+# as the original (the "find text occurs 0 times" line then hid it). So the original goes to disk before the sabotage,
+# and every run starts by putting back any it finds. `target/` is git-ignored and per worktree.
+RESTORE = ROOT / "target" / "controls-restore"
+
+
+def _pid_alive(pid: int) -> bool:
+    """Whether `pid` runs. Never `os.kill(pid, 0)`: on Windows that is TerminateProcess."""
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":
+        import ctypes
+        kernel = ctypes.windll.kernel32
+        handle = kernel.OpenProcess(0x1000, False, pid)    # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            ok = kernel.GetExitCodeProcess(handle, ctypes.byref(code))
+            return bool(ok) and code.value == 259          # STILL_ACTIVE
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _save_original(c: Control, original: bytes, sabotaged: bytes) -> Path:
+    """`<name>.bak` holds the bytes, `<name>.json` the file, this run's pid and the sabotaged bytes' sha256; the bytes
+    land before the note, so a note always names a whole backup."""
+    RESTORE.mkdir(parents=True, exist_ok=True)
+    bak = RESTORE / f"{c.name}.bak"
+    tmp = bak.with_suffix(".bak.tmp")
+    tmp.write_bytes(original)
+    os.replace(tmp, bak)
+    note = RESTORE / f"{c.name}.json"
+    note.write_text(json.dumps({"file": c.file, "pid": os.getpid(),
+                                "sabotaged": hashlib.sha256(sabotaged).hexdigest()}), encoding="utf-8")
+    return note
+
+
+def _drop_original(c: Control) -> None:
+    for suffix in (".json", ".bak"):
+        try:
+            (RESTORE / f"{c.name}{suffix}").unlink()
+        except FileNotFoundError:
+            pass
+
+
+def repair() -> list[str]:
+    """Puts back every file a run that died left sabotaged; a line each. A backup whose run still lives is left to
+    that run's own `finally`."""
+    lines: list[str] = []
+    if not RESTORE.is_dir():
+        return lines
+    for note in sorted(RESTORE.glob("*.json")):
+        try:
+            data = json.loads(note.read_text(encoding="utf-8"))
+            rel, pid, sabotaged = str(data["file"]), int(data["pid"]), str(data["sabotaged"])
+        except (OSError, ValueError, KeyError, TypeError) as err:
+            lines.append(f"repair: {note.name} unreadable ({err}); left for a person")
+            continue
+        if _pid_alive(pid):
+            lines.append(f"repair: {rel} is under a live run (pid {pid}); left to it")
+            continue
+        bak = note.with_suffix(".bak")
+        path = ROOT / rel
+        try:
+            original = bak.read_bytes()
+        except OSError as err:
+            lines.append(f"repair: no backup for {rel} ({err}); left for a person")
+            continue
+        now = path.read_bytes() if path.is_file() else b""
+        if now != original:
+            if hashlib.sha256(now).hexdigest() != sabotaged:
+                # Someone edited the file after the run died: their bytes are not overwritten.
+                lines.append(f"repair: {rel} changed since a run died (pid {pid}); its original is {bak}")
+                continue
+            path.write_bytes(original)
+            lines.append(f"repair: restored {rel} from a run that died (pid {pid})")
+        note.unlink()
+        bak.unlink()
+    return lines
 
 
 def run_one(c: Control) -> tuple[bool, str]:
@@ -1073,7 +1170,9 @@ def run_one(c: Control) -> tuple[bool, str]:
     find, replace = c.find.encode("utf-8"), c.replace.encode("utf-8")
     if original.count(find) != 1:
         return False, f"find text occurs {original.count(find)} times, not once"
-    path.write_bytes(original.replace(find, replace))
+    sabotaged = original.replace(find, replace)
+    _save_original(c, original, sabotaged)
+    path.write_bytes(sabotaged)
     try:
         p = subprocess.run(command(c), cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=TIMEOUT)
@@ -1088,6 +1187,7 @@ def run_one(c: Control) -> tuple[bool, str]:
         return False, f"timed out after {TIMEOUT}s"
     finally:
         path.write_bytes(original)
+        _drop_original(c)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1095,6 +1195,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--only")
     ns = ap.parse_args(argv)
+    for line in repair():
+        print(line, flush=True)
     chosen = [c for c in CONTROLS if ns.only is None or c.name == ns.only.strip()]
     if not chosen:
         print(f"unknown control {ns.only!r}; names: {', '.join(c.name for c in CONTROLS)}")

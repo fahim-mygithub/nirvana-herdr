@@ -140,13 +140,47 @@ fn title_case(word: &str) -> String {
 const CLAUDE_FAMILY_ALIASES: &[&str] = &["sonnet", "opus", "haiku", "fable"];
 const CLAUDE_GENERIC_ALIASES: &[&str] = &["default", "best", "opusplan", "<synthetic>"];
 
+/// The efforts a seat id carries at its end (`claude-opus-5-5-high`, `gemini-3.8-flash-low`): `seat.rs` writes the
+/// substituted `claude-opus-5-5-{effort}` of the g-opus seat into the journal, and the installed `record.jsonl` holds
+/// `"model":"claude-opus-5-5-high"` (plan 40 review B1). The effort is the seat's, not the model's name.
+const EFFORT_WORDS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+/// A model id or label as the model alone: the context tag (`[1m]`), a trailing parenthetical as Antigravity names
+/// its picks (`Gemini 3.8 Flash (High)`), and, on a `claude-` or `gemini-` id only, a trailing effort word. Only
+/// those two: `gpt-5.1-codex-max` is a model's own name.
+pub fn bare_model(model: &str) -> &str {
+    let mut m = model.trim();
+    m = m.split('[').next().unwrap_or(m).trim_end();
+    if m.ends_with(')') {
+        if let Some(open) = m.rfind(" (") {
+            m = m[..open].trim_end();
+        }
+    }
+    let lower = m.to_ascii_lowercase();
+    if lower.starts_with("claude-") || lower.starts_with("gemini-") {
+        if let Some((head, tail)) = m.rsplit_once('-') {
+            if EFFORT_WORDS.contains(&tail.to_ascii_lowercase().as_str()) {
+                m = head;
+            }
+        }
+    }
+    m
+}
+
 /// "claude-sonnet-5-5" -> "Claude Sonnet 5.5"; "claude-3-5-sonnet-20241022" -> "Claude Sonnet 3.5";
-/// "claude-opus-5-5[1m]" -> "Claude Opus 5.5"; "sonnet" -> "Claude Sonnet". None: not an Anthropic name.
+/// "claude-opus-5-5[1m]" -> "Claude Opus 5.5"; "claude-opus-5-5-high" -> "Claude Opus 5.5"; "sonnet" ->
+/// "Claude Sonnet"; Antigravity's "Claude Opus 5.5 (Thinking)" -> "Claude Opus 5.5". None: not an Anthropic name.
 pub fn claude_label(model: &str) -> Option<String> {
-    let model = model.trim();
-    let model = model.split('[').next().unwrap_or(model);
+    let model = bare_model(model);
     if CLAUDE_FAMILY_ALIASES.contains(&model) {
         return Some(format!("Claude {}", title_case(model)));
+    }
+    // A label already (Antigravity spells its Claude picks for people): kept when it names a family.
+    if let Some(rest) = model.strip_prefix("Claude ") {
+        let family = rest.split_whitespace().next().unwrap_or("");
+        return CLAUDE_FAMILY_ALIASES
+            .contains(&family.to_ascii_lowercase().as_str())
+            .then(|| model.to_string());
     }
     let rest = model.strip_prefix("claude-")?;
     let mut family = Vec::new();
@@ -244,15 +278,17 @@ pub fn codex_model(model: Option<&str>) -> AgentModel {
     }
 }
 
-/// Antigravity names its models for people already ("Gemini 3.8 Flash (High)"); none -> "Antigravity".
+/// Antigravity names its models for people already ("Gemini 3.8 Flash (High)"); none -> "Antigravity". A Claude
+/// model run through agy reads as that Claude model (review B1): the label comes from the model, the kind (the icon,
+/// the restart) from the CLI.
 pub fn antigravity_model(model: Option<&str>) -> AgentModel {
+    let model = model.map(str::trim).filter(|model| !model.is_empty());
     AgentModel {
         kind: Kind::Antigravity,
-        label: model
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-            .unwrap_or(Kind::Antigravity.provider())
-            .to_string(),
+        label: match model {
+            None => Kind::Antigravity.provider().to_string(),
+            Some(model) => claude_label(model).unwrap_or_else(|| model.to_string()),
+        },
         transcript: None,
         role: None,
     }
@@ -420,71 +456,109 @@ pub fn is_nirvana_claude(args: &[String]) -> bool {
     crate::nirvana_run::is_nirvana_claude_argv(&refs, plugin_dir.as_deref())
 }
 
-/// The short model representation (plan 26 S1).
-/// - Claude: family initial and version, `S5.5`, `O5.5`, `H5.5`, `F5.1`.
-/// - Gemini: `Flash` or `Pro`.
-/// - Codex: `Codex`.
+/// A Gemini model's line, as the chip names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeminiLine {
+    Flash,
+    Pro,
+    Argon,
+    Other,
+}
+
+/// The model family a label or id names (plan 40 review M2): the one place that decides it, for the chip, the
+/// subagent rows and the pane label. Read from the model, never the CLI that runs it: agy runs Claude models too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Family {
+    /// The family's initial (`S`, `O`, `H`, `F`, or `C` for a bare "Claude") and its version when the name has one.
+    Claude(char, Option<String>),
+    Gemini(GeminiLine),
+    Codex,
+    /// Antigravity with no model known yet: only the CLI is.
+    Antigravity,
+    /// A model on this machine, by its name.
+    Local(String),
+}
+
+/// The family of a label ("Claude Opus 5.5", "Sonnet 5.5", "Gemini 4 Argon", "Local llama3.1") or an id
+/// ("claude-opus-5-5-high", "gemini-3.8-flash-low"). Words are whole words: "deepseek-prover" holds no "pro", and a
+/// "4" in a date names no model.
+pub fn model_family(model: &str) -> Family {
+    let trimmed = model.trim();
+    if let Some(name) = trimmed.strip_prefix("Local ") {
+        return Family::Local(name.trim().to_string());
+    }
+    let bare = bare_model(trimmed);
+    let label = claude_label(bare).unwrap_or_else(|| bare.to_string());
+    let lower = label.to_ascii_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '.')
+        .filter(|word| !word.is_empty())
+        .collect();
+    let has = |word: &str| words.contains(&word);
+    let initial = [('S', "sonnet"), ('O', "opus"), ('H', "haiku"), ('F', "fable")]
+        .into_iter()
+        .find(|(_, family)| has(family))
+        .map(|(initial, _)| initial);
+    if initial.is_some() || words.first() == Some(&"claude") {
+        let version = words
+            .iter()
+            .find(|word| {
+                word.bytes().any(|b| b.is_ascii_digit())
+                    && word.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+            })
+            .map(|word| word.to_string());
+        return Family::Claude(initial.unwrap_or('C'), version);
+    }
+    if has("gemini") || has("flash") || has("argon") {
+        let line = if has("flash") {
+            GeminiLine::Flash
+        } else if has("argon") {
+            GeminiLine::Argon
+        } else if has("pro") {
+            GeminiLine::Pro
+        } else {
+            GeminiLine::Other
+        };
+        return Family::Gemini(line);
+    }
+    if has("codex") || words.first() == Some(&"gpt") {
+        return Family::Codex;
+    }
+    if words == ["antigravity"] {
+        return Family::Antigravity;
+    }
+    Family::Local(trimmed.to_string())
+}
+
+/// The short model representation (plan 26 S1), from `model_family`:
+/// - Claude: family initial and version, `S5.5`, `O5.5`, `H5.5`, `F5.2`.
+/// - Gemini: `Flash`, `Pro`, `Argon`, else `Gemini`.
+/// - Codex: `Codex`. Antigravity with no model: `Agy`, whole, not a cut "Antigr".
 /// - A local model: its name, cut to 6 cells.
 pub fn compact_model(model: &str) -> String {
-    let trimmed = model.trim();
-    let lower = trimmed.to_lowercase();
-
-    // 1. Claude: family initial and version (e.g. S5.5, O5.5, H5.5, F5.1)
-    if lower.contains("sonnet")
-        || lower.contains("opus")
-        || lower.contains("haiku")
-        || lower.contains("fable")
-        || trimmed.starts_with("Claude")
-    {
-        let family_initial = if lower.contains("sonnet") {
-            'S'
-        } else if lower.contains("opus") {
-            'O'
-        } else if lower.contains("haiku") {
-            'H'
-        } else if lower.contains("fable")
-            || (trimmed.starts_with("Claude") && lower.contains("flash"))
-        {
-            'F'
-        } else {
-            'C'
-        };
-        // Extract version: e.g. "5.5", "3.5", "5.1", "3.7"
-        let ver = trimmed
-            .split(|c: char| !c.is_ascii_digit() && c != '.')
-            .find(|s| !s.is_empty() && s.chars().any(|c| c.is_ascii_digit()));
-        return match ver {
-            Some(v) => format!("{family_initial}{v}"),
-            None => family_initial.to_string(),
-        };
-    }
-
-    // 2. Gemini: Flash or Pro
-    if lower.contains("flash") {
-        return "Flash".to_string();
-    }
-    if lower.contains("pro") {
-        return "Pro".to_string();
-    }
-
-    // 3. Codex: Codex
-    if lower.contains("codex") {
-        return "Codex".to_string();
-    }
-
-    // 4. Local model: its name, cut to 6 cells
-    let name = trimmed.strip_prefix("Local ").unwrap_or(trimmed);
-    let mut out = String::new();
-    let mut width = 0;
-    for ch in name.chars() {
-        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + w > 6 {
-            break;
+    match model_family(model) {
+        Family::Claude(initial, Some(version)) => format!("{initial}{version}"),
+        Family::Claude(initial, None) => initial.to_string(),
+        Family::Gemini(GeminiLine::Flash) => "Flash".to_string(),
+        Family::Gemini(GeminiLine::Pro) => "Pro".to_string(),
+        Family::Gemini(GeminiLine::Argon) => "Argon".to_string(),
+        Family::Gemini(GeminiLine::Other) => "Gemini".to_string(),
+        Family::Codex => "Codex".to_string(),
+        Family::Antigravity => "Agy".to_string(),
+        Family::Local(name) => {
+            let mut out = String::new();
+            let mut width = 0;
+            for ch in name.chars() {
+                let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if width + w > 6 {
+                    break;
+                }
+                out.push(ch);
+                width += w;
+            }
+            out
         }
-        out.push(ch);
-        width += w;
     }
-    out
 }
 
 /// The agent in a pane's shell and its model, read now. Runs on the worker thread only.
@@ -891,6 +965,43 @@ mod tests {
             "Gemini 3.8 Flash (High)"
         );
         assert_eq!(antigravity_model(None).label, "Antigravity");
+    }
+
+    /// Plan 40 review "Model labels": every id the seats and panes produce, through the pane label and the chip.
+    /// The rows that were wrong before: the g-opus id via agy (`O5`), Argon (`Gemini`), a bare Antigravity
+    /// (`Antigr`), a dated Gemini Pro id read as Argon for its `4`, and a "pro" inside a local model's name.
+    #[test]
+    fn model_label_table_reads_every_id_right() {
+        let rows: &[(&str, &str, &str)] = &[
+            // (id or label, pane label, chip)
+            ("claude-fable-5-2", "Claude Fable 5.2", "F5.2"),
+            ("Claude Fable 5.2", "Claude Fable 5.2", "F5.2"),
+            ("claude-opus-5-5", "Claude Opus 5.5", "O5.5"),
+            ("claude-sonnet-5-5", "Claude Sonnet 5.5", "S5.5"),
+            ("claude-haiku-5-5", "Claude Haiku 5.5", "H5.5"),
+            ("claude-opus-5-5-high", "Claude Opus 5.5", "O5.5"),
+            ("claude-sonnet-5-5-medium", "Claude Sonnet 5.5", "S5.5"),
+            ("Claude Opus 5.5 (Thinking)", "Claude Opus 5.5", "O5.5"),
+            ("gemini-3.8-flash-high", "gemini-3.8-flash-high", "Flash"),
+            ("Gemini 3.8 Flash (High)", "Gemini 3.8 Flash (High)", "Flash"),
+            ("gemini-4-argon-low", "gemini-4-argon-low", "Argon"),
+            ("Gemini 4 Argon", "Gemini 4 Argon", "Argon"),
+            ("gemini-3-pro-20260414", "gemini-3-pro-20260414", "Pro"),
+        ];
+        for (id, label, chip) in rows {
+            assert_eq!(antigravity_model(Some(id)).label, *label, "label of {id}");
+            assert_eq!(compact_model(id), *chip, "chip of {id}");
+            assert_eq!(compact_model(label), *chip, "chip of label {label}");
+        }
+        assert_eq!(compact_model(&antigravity_model(None).label), "Agy");
+        assert_eq!(compact_model(&claude_model(None).label), "C");
+        assert_eq!(compact_model("Local deepseek-prover"), "deepse");
+        assert_eq!(compact_model("Gemini 3.8 Pro"), "Pro");
+        assert_eq!(compact_model("GPT-5 Codex"), "Codex");
+        assert_eq!(claude_label("claude-fable-5-2").as_deref(), Some("Claude Fable 5.2"));
+        assert_eq!(claude_label("claude-opus-5-5-max").as_deref(), Some("Claude Opus 5.5"));
+        assert_eq!(bare_model("gpt-5.1-codex-max"), "gpt-5.1-codex-max");
+        assert_eq!(claude_model(Some("claude-opus-5-5-high")).kind, Kind::Claude);
     }
 
     #[test]

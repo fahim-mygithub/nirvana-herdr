@@ -56,9 +56,22 @@ def install_binary(built: Path, target: Path, prefix: str) -> Path:
             old.unlink()          # an old build still running (a supervisor, a server) stays locked; skip it
         except OSError:
             pass
+    aside = None
     if target.exists():
-        target.rename(bin_dir / f"{prefix}.old-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}{target.suffix}")
-    shutil.copy2(built, target)
+        aside = bin_dir / f"{prefix}.old-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}{target.suffix}"
+        target.rename(aside)
+    try:
+        shutil.copy2(built, target)
+    except BaseException:
+        # Plan 40 review B4: a full disk or a scanner holding the new file left no herdr.exe at all, and the
+        # Explorer verb and the plugin hooks named a missing file until the next install. The old one goes back.
+        if aside is not None:
+            try:
+                target.unlink()
+            except OSError:
+                pass
+            os.replace(aside, target)
+        raise
     return target
 
 

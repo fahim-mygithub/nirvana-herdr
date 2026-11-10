@@ -212,5 +212,93 @@ class FilesTest(unittest.TestCase):
             self.assertEqual({p.name for p in assets}, set(ws.ASSETS))
 
 
+def _tree(root: Path) -> dict:
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+class ReplaceTreeTest(unittest.TestCase):
+    """Plan 40 review B3: the plugin folder is replaced with no moment where it is half there."""
+
+    def _world(self, tmp: Path) -> tuple[Path, Path, dict]:
+        src, dst = tmp / "src", tmp / "home" / "claude"
+        for rel, data in {"ROLE.md": b"new role", "hooks/hooks.json": b"{}", "skills/a/SKILL.md": b"new a"}.items():
+            (src / rel).parent.mkdir(parents=True, exist_ok=True)
+            (src / rel).write_bytes(data)
+        for rel, data in {"ROLE.md": b"old role", "skills/a/SKILL.md": b"old a", "agents/gone.md": b"old"}.items():
+            (dst / rel).parent.mkdir(parents=True, exist_ok=True)
+            (dst / rel).write_bytes(data)
+        return src, dst, _tree(dst)
+
+    def test_a_copy_that_fails_midway_leaves_the_old_tree_whole(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            src, dst, before = self._world(Path(tmp))
+            calls = []
+            real = ws.shutil.copy2
+
+            def flaky(a, b):
+                calls.append(a)
+                if len(calls) == 2:
+                    raise PermissionError(13, "held by a scanner")
+                return real(a, b)
+
+            with mock.patch.object(ws.shutil, "copy2", flaky), self.assertRaises(OSError):
+                ws._replace_tree(src, dst)
+            self.assertEqual(_tree(dst), before)
+            self.assertEqual(sorted(p.name for p in dst.parent.iterdir()), ["claude"], "no .new or .old left")
+
+    def test_a_good_copy_replaces_the_tree_and_drops_removed_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src, dst, _ = self._world(Path(tmp))
+            ws._replace_tree(src, dst)
+            self.assertEqual(_tree(dst), _tree(src))
+            self.assertEqual(sorted(p.name for p in dst.parent.iterdir()), ["claude"])
+
+    def test_a_folder_that_cannot_be_renamed_is_overlaid_in_place(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            src, dst, _ = self._world(Path(tmp))
+            real = ws.os.replace
+
+            def held(a, b):
+                if Path(a) == dst:
+                    raise PermissionError(5, "a file inside is open")
+                return real(a, b)
+
+            with mock.patch.object(ws.os, "replace", held):
+                ws._replace_tree(src, dst)
+            self.assertEqual(_tree(dst), _tree(src))
+            self.assertEqual(sorted(p.name for p in dst.parent.iterdir()), ["claude"])
+
+
+class FontFailureTest(unittest.TestCase):
+    def test_a_failed_font_download_does_not_stop_the_install(self):
+        """Plan 40 review B2: offline, the download raised after the binary was in place and the verb was never
+        written."""
+        import urllib.error
+        reg = ws.FakeRegistry()
+        base = r"Software\Classes"
+
+        def offline(*_a, **_k):
+            raise urllib.error.URLError("no network")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            home = tmp / "home"
+            try:
+                report = ws.install_all(home, reg=reg, base=base, fragments=tmp / "frag", config_dir=tmp / "claude",
+                                        wt=Path(r"C:\L\Microsoft\WindowsApps\wt.exe"), font=True,
+                                        font_present=lambda: False, fonts_dir=tmp / "fonts",
+                                        font_cache=tmp / "cache", opener=offline)
+            except OSError as err:
+                self.fail(f"the font failure stopped the install: {err!r}")
+        self.assertTrue(str(report["font"]).startswith("failed: "), report["font"])
+        for sub, token in ws.VERBS:
+            self.assertEqual(reg.get(rf"{base}\{sub}\command", None),
+                             ws.verb_command(home / "bin" / "nirvana-open.exe", token))
+        self.assertEqual(reg.get(rf"{base}\{ws.TOAST_KEY}", "DisplayName"), "Nirvana")
+        self.assertEqual(report["old_verb_removed"], {sub: False for sub in ws.OLD_VERBS})
+
+
 if __name__ == "__main__":
     unittest.main()

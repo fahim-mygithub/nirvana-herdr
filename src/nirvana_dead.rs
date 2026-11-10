@@ -518,7 +518,70 @@ pub fn sweep(
             Err((_, why)) => lines.push(format!("failed to close {id} ({label}): {why}")),
         }
     }
+    // Plan 40 review D1: a phone upload cut by a killed PC is left as `<name>.partial` for ever (`send::save` removes
+    // it only on a handled error). Each pane's folder is a space the phone may have sent into.
+    let mut folders: Vec<PathBuf> = panes
+        .iter()
+        .filter_map(|pane| str_at(pane, &["/cwd"]))
+        .map(PathBuf::from)
+        .collect();
+    folders.sort();
+    folders.dedup();
+    lines.extend(sweep_partials(&folders, now, pass.dry_run));
     Ok(lines)
+}
+
+/// An unfinished upload this old is a dead one: an upload is cut at `http::BODY_MOST` (20 min).
+pub const PARTIAL_AGE_S: u64 = 3600;
+
+/// Removes `<folder>/.nirvana/uploads/<upload name>.partial` files older than `PARTIAL_AGE_S` (by their last write,
+/// against `now` in unix seconds), a line each. Only a name `send::name_for` gives, only a plain file in a plain
+/// folder: a finished upload is the owner's file and is never touched, nor anything a link points at.
+pub fn sweep_partials(folders: &[PathBuf], now: u64, dry_run: bool) -> Vec<String> {
+    use crate::nirvana_remote::send;
+    let mut lines = Vec::new();
+    for folder in folders {
+        let uploads = folder.join(nirvana_run::DIR).join("uploads");
+        if !send::plain_dir(&uploads) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&uploads) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(upload) = name.to_str().and_then(|name| name.strip_suffix(".partial")) else {
+                continue;
+            };
+            if !send::is_upload_name(upload) {
+                continue;
+            }
+            let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if !meta.file_type().is_file() {
+                continue;
+            }
+            let written = meta
+                .modified()
+                .ok()
+                .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(now, |since| since.as_secs());
+            if now.saturating_sub(written) < PARTIAL_AGE_S {
+                continue;
+            }
+            let path = entry.path();
+            if dry_run {
+                lines.push(format!("would remove {}: an upload never finished", path.display()));
+                continue;
+            }
+            match std::fs::remove_file(&path) {
+                Ok(()) => lines.push(format!("removed {}: an upload never finished", path.display())),
+                Err(err) => lines.push(format!("failed to remove {}: {err}", path.display())),
+            }
+        }
+    }
+    lines
 }
 
 /// Waits for `child` up to `limit`; past it, kills it and answers `None` (review S1).

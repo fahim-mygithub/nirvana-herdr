@@ -314,20 +314,10 @@ struct OpenBody {
 
 impl Site {
     /// P39d's routes, after every check `route` makes: `GET /api/folders`, `POST /api/folders/open`, the cards'
-    /// three `GET`s (`cards.rs`), and the two screens' scripts. `None` for any other path.
+    /// three `GET`s (`cards.rs`). The two screens' scripts are rows of `routes::ASSETS`. `None` for any other path.
     pub fn new_space_and_cards(&self, request: &Request, conn: &mut Conn) -> Option<Response> {
         let reads = request.method == "GET" || request.method == "HEAD";
         let answer = match (request.path.as_str(), reads) {
-            ("/newspace.js", true) => Response::new(
-                200,
-                "text/javascript; charset=utf-8",
-                include_str!("page/newspace.js"),
-            ),
-            ("/cards.js", true) => Response::new(
-                200,
-                "text/javascript; charset=utf-8",
-                include_str!("page/cards.js"),
-            ),
             ("/api/folders", true) => self.folders(),
             ("/api/folders/open", false) if request.method == "POST" => {
                 self.open_folder(request, conn)
@@ -336,7 +326,7 @@ impl Site {
             ("/api/cards/servers", true) => self.servers_card(),
             ("/api/cards/running", true) => self.running_card(),
             (
-                "/newspace.js" | "/cards.js" | "/api/folders" | "/api/cards/usage"
+                "/api/folders" | "/api/cards/usage"
                 | "/api/cards/servers" | "/api/cards/running",
                 false,
             ) => Response::text(405, "GET only").with("Allow", "GET, HEAD"),

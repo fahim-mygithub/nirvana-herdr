@@ -1525,9 +1525,13 @@ fn a_send_adds_the_uploaded_files_paths_and_refuses_any_other_name() {
         .as_str()
         .unwrap()
         .to_string();
+    // Plan 40: an image's path is followed by its note (send::note_for); the path still comes first.
+    let path = w.uploads().join(&name).display().to_string();
     assert_eq!(
         typed,
-        format!("look {}", w.uploads().join(&name).display()),
+        format!(
+            "look {path} (image, 4 bytes; herdr look \"{path}\" --ask \"<your question>\" reads it and answers in text)"
+        ),
         "after a space, not a newline: an Enter in a pane without bracketed paste"
     );
     for bad in [

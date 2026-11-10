@@ -112,11 +112,68 @@ def toast_icon_path(home: Path) -> Path:
 
 # ---- files ----
 
+def _copy_file(src, dst):
+    """`copytree`'s copier, by name, so a test can make one copy fail (`copytree` binds `copy2` at definition)."""
+    return shutil.copy2(src, dst)
+
+
+def _remove_quietly(path: Path) -> None:
+    """A tree removed as far as it goes: a file a running Nirvana Claude holds stays until the next install."""
+    shutil.rmtree(path, ignore_errors=True)
+
+
 def _replace_tree(src: Path, dst: Path) -> None:
-    """`dst` becomes a copy of `src`: a file removed from the tree is removed at the install too."""
-    if dst.exists():
-        shutil.rmtree(dst)
-    shutil.copytree(src, dst)
+    """`dst` becomes a copy of `src`: a file removed from the tree is removed at the install too.
+
+    Plan 40 review B3: this was `rmtree(dst)` then `copytree`, so a file a running Nirvana Claude held (a hook, a
+    skill, an antivirus scan) stopped the delete midway and left the live plugin half gone, and the install aborted
+    before the binary. Now the new tree is copied whole beside it first, and only a finished copy takes the name: a
+    failed copy leaves `dst` as it was. If `dst` itself cannot be renamed (Windows refuses a folder with an open
+    file), the copy is laid over it file by file and only files the tree no longer has are removed; every file is
+    then the old one or the new one, never missing."""
+    src, dst = Path(src), Path(dst)
+    tag = f"{os.getpid()}"
+    for stale in dst.parent.glob(f"{dst.name}.new-*"):
+        _remove_quietly(stale)
+    for stale in dst.parent.glob(f"{dst.name}.old-*"):
+        _remove_quietly(stale)
+    new = dst.with_name(f"{dst.name}.new-{tag}")
+    try:
+        shutil.copytree(src, new, copy_function=_copy_file)
+    except BaseException:
+        _remove_quietly(new)
+        raise
+    if not dst.exists():
+        os.replace(new, dst)
+        return
+    old = dst.with_name(f"{dst.name}.old-{tag}")
+    try:
+        os.replace(dst, old)
+    except OSError:
+        # A held file: overlay in place.
+        try:
+            shutil.copytree(new, dst, copy_function=_copy_file, dirs_exist_ok=True)
+            keep = {p.relative_to(new) for p in new.rglob("*")}
+            for path in sorted(dst.rglob("*"), reverse=True):
+                if path.relative_to(dst) in keep:
+                    continue
+                try:
+                    if path.is_dir() and not path.is_symlink():
+                        path.rmdir()
+                    else:
+                        path.unlink()
+                except OSError:
+                    pass
+        finally:
+            _remove_quietly(new)
+        return
+    try:
+        os.replace(new, dst)
+    except BaseException:
+        os.replace(old, dst)
+        _remove_quietly(new)
+        raise
+    _remove_quietly(old)
 
 
 def statusline(home: Path) -> dict:
@@ -429,10 +486,15 @@ def install_font(reg, fonts_key: str, fonts_dir: Path, cache_dir: Path, opener=u
 # ---- everything ----
 
 def install_all(home: Path, *, reg=None, base: str = CLASSES, fragments: Path | None = None,
-                config_dir: Path | None = None, wt: Path | None = None, font: bool = True) -> dict:
+                config_dir: Path | None = None, wt: Path | None = None, font: bool = True,
+                font_present=None, fonts_dir: Path | None = None, font_cache: Path | None = None,
+                opener=urllib.request.urlopen) -> dict:
     """The whole Windows side, in an order where a failure leaves nothing that points at a missing file: the files
-    first, then the keys that name them, Nirvana-C's verb removed last so a failed install never leaves no verb."""
+    first, then the keys that name them, Nirvana-C's verb removed last so a failed install never leaves no verb.
+
+    `font_present`, `fonts_dir`, `font_cache` and `opener` are the font step's world, for a test to replace."""
     home = Path(home)
+    font_present = font_installed if font_present is None else font_present
     reg = Registry() if reg is None else reg
     fragments = fragments_root() if fragments is None else Path(fragments)
     config_dir = claude_config_dir() if config_dir is None else Path(config_dir)
@@ -442,10 +504,17 @@ def install_all(home: Path, *, reg=None, base: str = CLASSES, fragments: Path | 
     report["themes"] = [str(p) for p in install_themes(config_dir)]
     report["fragment"] = str(write_fragment(fragments, fragment(home)))
     report["old_fragment_removed"] = remove_old_fragment(fragments)
-    if font and not font_installed():
+    if font and not font_present():
         local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
-        report["font"] = install_font(reg, USER_FONTS_KEY, local / "Microsoft" / "Windows" / "Fonts",
-                                      local / "Nirvana-Herdr" / "font-cache")
+        fonts_dir = local / "Microsoft" / "Windows" / "Fonts" if fonts_dir is None else Path(fonts_dir)
+        font_cache = local / "Nirvana-Herdr" / "font-cache" if font_cache is None else Path(font_cache)
+        # Plan 40 review B2: offline, `opener` raised URLError (a proxy page fails the sha with ValueError) after
+        # install.py had put the new binary and its stamp in place, so the toast id, the verb and Nirvana-C's
+        # cleanup never ran and the script ended in a traceback. The font is cosmetic: the rest goes on.
+        try:
+            report["font"] = install_font(reg, USER_FONTS_KEY, fonts_dir, font_cache, opener=opener)
+        except (OSError, ValueError, zipfile.BadZipFile, KeyError) as err:
+            report["font"] = f"failed: {err}"
     else:
         report["font"] = "already installed" if font else "skipped"
     report["toast"] = register_toast_id(reg, base, toast_icon_path(home))

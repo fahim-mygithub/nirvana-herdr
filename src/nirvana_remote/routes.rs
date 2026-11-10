@@ -64,6 +64,18 @@ pub const ASSETS: &[(&str, &str, &str)] = &[
         "text/javascript; charset=utf-8",
         include_str!("page/prompt.js"),
     ),
+    // P39d: the new-space and cards screens. Plan 40 review D3: these were served from pick.rs's own match and
+    // listed again in shell.rs, by hand; one row here serves them and puts them in the offline shell and its tag.
+    (
+        "/newspace.js",
+        "text/javascript; charset=utf-8",
+        include_str!("page/newspace.js"),
+    ),
+    (
+        "/cards.js",
+        "text/javascript; charset=utf-8",
+        include_str!("page/cards.js"),
+    ),
 ];
 
 /// The page loads its fonts from Google, as the prototype does, and everything else from this origin only.
