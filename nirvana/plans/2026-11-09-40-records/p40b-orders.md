@@ -98,3 +98,25 @@ So the addendum's rule as written ("a call names the URL") would not have passed
 for `media.*` only: a cited URL counts when a shell command or a file tool's path names it. For a YouTube URL, its
 video id in an opened path or a run command also counts. The report's own `finish`/`StructuredOutput` call and file
 writes never count. The oEmbed check of cited videos still runs. `research.*` is unchanged.
+
+## Review round (`pkg-review-b.md`)
+
+| Finding | Verdict on the review | What changed |
+|---|---|---|
+| S1 | Right: every shell command and every `Read` path counted, answered or not. | `media_read` counts a URL only from a call that fetches (`command_fetches`) or hands it to ffprobe, or to ffmpeg as `-i`. A video id counts only in a media file (video, audio, frames, captions, `.info.json`) opened without an error: a Claude `tool_result` without `is_error`, an agy step `DONE` with no error, an ffprobe or ffmpeg input whose command exited 0. ffmpeg's output file is not an input. |
+| S2 | Right. | The footer is the order's sentence word for word; "a locked file" is gone. |
+| N1 | Right. | `check:` (any case) is names only when it looks like names, rule in `check_names`; `test:` and `serves:` unchanged. |
+| N2 | Right. | The pinned line reports the check's result (a pass or fail word besides the name), else the last line naming it. |
+| N3 | Right, no change. | |
+| N4 | Half right: the gate and the worker drop the error (`let _ =`), but `herdr run log` and `herdr run end` pass it on with `?`. | `correct_or_note` writes a line to `record-corrections.log` beside the record when the correction fails, and still returns the error. |
+| N5 | Right. Kept. | The gate's job ends anything the test left running, on a normal exit too. That is the job's purpose: a test's leftovers (a build daemon, a server a `herdr` client started) would otherwise outlive the gate and hold its pipes or ports. A test that needs a daemon to survive starts it outside the gate. |
+| N6 | Right. Kept. | An unanswered tool call waits 1800 s before a stall, also after stdout ends and for an interactive tool that never answers in `-p` mode. Kept because a long `cargo` or `yt-dlp` call is silent for minutes and a false stall restarts a whole run; 1800 s is still a hypothesis. |
+| N7 | Right. | Nothing here: the merge puts `herdr look` (c40c) in first. |
+| N8, N9 | Right, no change. | |
+| N10 | Right. | The three hunks stand. |
+
+S1, the three real shapes: `yt-breakdown` and `yt-breakdown-illit` pass by their `read_file` of `proxy.mp4` and
+`contact_sheet.jpg` (the whole fixture streams, in the test); `video-breakdown` by plan 35a's local-file rule. A
+`read_file` of `ingest.json` alone no longer counts. Not applied to a cited local file: `video-breakdown` also cited
+its own order file (`.md`), so the media-extension rule there would refuse a real shape; `stable_read` keeps plan
+35a's rule for local files in every class, which counts a `Read` whether or not it worked.

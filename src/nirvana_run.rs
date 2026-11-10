@@ -2308,9 +2308,33 @@ pub fn write_record(
     if !written {
         // Plan 40 addendum A: the gate's failure was recorded first, then the orchestrator accepted the order. The
         // record keeps one line per order and run, so that line is corrected to the final decision.
-        correct_record(&dir, &line)?;
+        correct_or_note(&dir, &line)?;
     }
     Ok(written)
+}
+
+/// Beside the record: each correction that could not be made, one line each.
+pub const CORRECTION_LOG: &str = "record-corrections.log";
+
+/// Review round (N4): `correct_record`, and when it fails (the lock not taken in its 10 s, a read or rename that
+/// fails) a line in `CORRECTION_LOG` beside the record, so the owner can find why an accepted order still reads
+/// failed. The gate and the worker drop `write_record`'s error (`let _ =`); `herdr run log` prints it once. The error is
+/// still returned.
+pub fn correct_or_note(dir: &Path, line: &nirvana_seat::RecordLine) -> std::io::Result<bool> {
+    correct_record(dir, line).inspect_err(|err| {
+        let note = format!(
+            "{} run {} order {}: the record line was not corrected to {}: {err}\n",
+            now(),
+            line.run.as_deref().unwrap_or("?"),
+            line.order,
+            line.outcome,
+        );
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join(CORRECTION_LOG))
+            .and_then(|mut file| std::io::Write::write_all(&mut file, note.as_bytes()));
+    })
 }
 
 /// Plan 40 addendum A: the record ends with the final decision. When `line` is a pass (`accepted`, or a later

@@ -2990,9 +2990,12 @@ fn c40b_a_claude_worker_excludes_the_dynamic_system_prompt_sections() {
 fn c40b_the_order_footer_says_finish_the_order_and_nothing_twice() {
     assert!(ORDER_FOOTER.contains(FOOTER_MARK));
     assert!(ORDER_FOOTER.contains(
-        "Finish the whole order before you report. Work through ordinary obstacles such as an error, a timeout or a \
-         locked file. Report `blocked` only for something the order forbids or only the owner can decide."
+        "Finish the whole order before you report. Work through ordinary obstacles such as an error or a timeout. \
+         Report `blocked` for anything the order forbids, anything only the owner can decide, a missing credential or \
+         sign-in (never look for one elsewhere), and a file you do not own or that another agent holds."
     ));
+    // Review round (S2): a locked file is not an ordinary obstacle; it may be another agent's.
+    assert!(!ORDER_FOOTER.contains("locked file"));
     assert!(!ORDER_FOOTER.contains("Work only in this folder"));
     assert!(!ORDER_FOOTER.contains("Your last message is the Work Report"));
     assert!(first_line("o.md").contains("Work only in this folder"));

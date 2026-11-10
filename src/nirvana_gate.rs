@@ -235,6 +235,27 @@ fn strip_key<'a>(line: &'a str, key: &str) -> Option<&'a str> {
         .map(|_| &line[key.len()..])
 }
 
+/// Review round (N1): with the case ignored (B6), an order's prose "Check: the page loads" read as three check names and
+/// sent the order back. So a `check:` value is names only when it looks like names: every word (split on spaces,
+/// commas and tabs, backticks trimmed) is letters, digits and `_ : . -` and does not end a sentence with `.`, and the
+/// value is one word, or carries a backtick, or every word carries a digit or one of `_ : . -` as test names do
+/// (`test_mul`, `gate::lock`, `c40b-a`). Otherwise the line is prose and names nothing. The cost: a list of plain
+/// words with no mark (`check: alpha beta`) is prose now; write it in backticks.
+fn check_names(rest: &str) -> Option<Vec<String>> {
+    let names: Vec<String> = words(rest).collect();
+    let name_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '.' | '-');
+    let marked = |word: &str| {
+        word.chars()
+            .any(|c| c.is_ascii_digit() || matches!(c, '_' | ':' | '.' | '-'))
+    };
+    (!names.is_empty()
+        && names
+            .iter()
+            .all(|word| word.chars().all(name_char) && !word.ends_with('.'))
+        && (names.len() == 1 || rest.contains('`') || names.iter().all(|word| marked(word))))
+    .then_some(names)
+}
+
 /// The gate lines of an order file (the syntax in the module comment). herdr's own footer and a send-back's brief
 /// never start a line with one of these words, so a child order reads its root's lines unchanged.
 pub fn spec(text: &str) -> Spec {
@@ -252,7 +273,7 @@ pub fn spec(text: &str) -> Spec {
                 spec.test = Some(command.to_owned());
             }
         } else if let Some(rest) = strip_key(line, "check:") {
-            spec.checks.extend(words(rest));
+            spec.checks.extend(check_names(rest).unwrap_or_default());
         } else if let Some(rest) = strip_key(line, "serves:") {
             spec.serves
                 .extend(words(rest).filter_map(|port| port.parse::<u16>().ok()));
@@ -412,10 +433,23 @@ pub fn filter(output: &str, checks: &[String]) -> Vec<String> {
     }
     // Plan 40 review B4: the first line naming each check survives the cut, so the reader still sees it ran when 70
     // `... PASSED` lines follow it. The rest is cut from the front: the last lines hold the summary a reader reads
-    // first.
+    // first. Review round (N2): the pinned line is the one that reports the check's result (a pass or fail word
+    // besides the name), else the last line naming it: the first may be `Compiling <name>`, which says nothing ran.
+    let reports = |line: &str, check: &str| {
+        line.replace(check, " ")
+            .to_ascii_lowercase()
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| matches!(word, "ok" | "pass" | "passed" | "fail" | "failed" | "error" | "panicked"))
+    };
     let mut pinned = vec![false; kept.len()];
     for check in checks {
-        if let Some(at) = kept.iter().position(|line| line.contains(check.as_str())) {
+        let naming = || {
+            kept.iter()
+                .enumerate()
+                .filter(|(_, line)| line.contains(check.as_str()))
+        };
+        let result = naming().find(|(_, line)| reports(line, check)).or_else(|| naming().next_back());
+        if let Some((at, _)) = result {
             pinned[at] = true;
         }
     }
@@ -1277,32 +1311,97 @@ pub struct Reads {
     texts: Vec<String>,
     outputs: Vec<String>,
     paths: Vec<String>,
-    /// Addendum B (plan 40): every shell command and every path a file tool opened, as written, for `media_read`
-    /// only. The report's own calls (`finish`, `StructuredOutput`) and writes are not here: a cite names itself there.
-    calls: Vec<String>,
+    /// Addendum B (plan 40), for `media_read` only: each URL (normalized) a call that fetches or opens media named
+    /// (`command_media`). The report's own calls (`finish`, `StructuredOutput`) and writes are not here: a cite names
+    /// itself there.
+    media_urls: Vec<String>,
+    /// Each media file (`media_file`) a call opened and that was answered without an error: a `Read`/`read_file`/
+    /// `view_file` result, or an ffprobe or ffmpeg input whose command exited 0.
+    media_files: Vec<String>,
 }
 
-/// Addendum B (plan 40): a `media.*` order's cited source counts as read when a command or a file tool's path names
-/// it: the URL itself (`yt-dlp <url>`, `ffprobe <url>`), or, for a YouTube URL, its video id in a file the worker
-/// opened or a command it ran (`...\youtube\8aQ8SoQl5EY\proxy.mp4`). Four of six `media.video` orders on argon were
-/// sent back on 2026-10-31; `yt-breakdown` and `yt-breakdown-illit` cited the video whose downloaded copy they had
-/// watched, which no fetch in their streams named. `research.*` keeps the stricter rules above. The oEmbed check of
-/// a cited video (`invented_videos`) still runs.
+/// Addendum B (plan 40): a `media.*` order's cited source counts as read when a call that fetches or opens media names
+/// it (`yt-dlp <url>`, `ffprobe <url>`, `ffmpeg -i <url>`), or, for a YouTube URL, when its video id stands in a media
+/// file the worker opened without an error (`...\youtube\8aQ8SoQl5EY\proxy.mp4`). Four of six `media.video` orders on
+/// argon were sent back on 2026-10-31; `yt-breakdown` and `yt-breakdown-illit` cited the video whose downloaded copy
+/// they had watched, which no fetch in their streams named. Review round (S1): the first cut counted any command or
+/// `Read` path that named the URL or the id, so `echo <url>` or a `Read` of a missing `...\<id>\x` passed. `research.*`
+/// keeps the stricter rules above. The oEmbed check of a cited video (`invented_videos`) still runs. A cited local
+/// file keeps plan 35a's rule (`stable_read`, any class).
 pub fn media_read(url: &str, reads: &Reads) -> bool {
     let norm = normalize_url(url);
-    if !norm.is_empty()
-        && reads.calls.iter().any(|call| {
-            extract_url_tokens(call)
-                .iter()
-                .any(|token| normalize_url(token) == norm)
-        })
-    {
+    if !norm.is_empty() && reads.media_urls.contains(&norm) {
         return true;
     }
     match stable_id(url) {
-        Some(id @ StableId::Video(_)) => reads.calls.iter().any(|call| id_in(call, &id)),
+        Some(id @ StableId::Video(_)) => reads.media_files.iter().any(|file| id_in(file, &id)),
         _ => false,
     }
+}
+
+/// Review round (S1): the files that hold a video's media: what a download leaves (video, audio, yt-dlp's
+/// `.info.json`), the frames a worker cuts from it, and its captions. A plain `.json`, `.md` or `.txt` is not here:
+/// the worker's own notes in the id's folder (yt-breakdown's `ingest.json`) are no sign it watched anything.
+const MEDIA_EXTENSIONS: &[&str] = &[
+    "mp4", "webm", "mkv", "mov", "m4v", "avi", "m4a", "mp3", "wav", "opus", "ogg", "flac", "aac", "jpg", "jpeg",
+    "png", "webp", "gif", "vtt", "srt", "ttml", "sbv", "json3",
+];
+
+fn media_file(path: &str) -> bool {
+    let lower = path
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | ',' | '(' | ')' | '[' | ']'))
+        .to_ascii_lowercase();
+    lower.ends_with(".info.json")
+        || lower.rsplit_once('.').is_some_and(|(stem, ext)| {
+            !stem.is_empty() && !stem.ends_with(['/', '\\']) && MEDIA_EXTENSIONS.contains(&ext)
+        })
+}
+
+/// Review round (S1): what one shell command shows of media, for `media_read`. URLs: every URL of a command that
+/// fetches (`command_fetches`, the filter `research.*` uses), and the URLs a segment hands to ffprobe or to ffmpeg as
+/// its `-i` input. Files: the media files (`media_file`) a segment hands to ffprobe, or to ffmpeg as `-i`; they count
+/// only once the call is answered without an error, which the caller judges. ffmpeg's output file is not an input: a
+/// command that writes `<id>\x.mp4` opened nothing of that video. ffprobe or ffmpeg inside a script's string
+/// (`subprocess.run(["ffmpeg", ...])`) is not a command word (`segment_code` blanks strings); those workers' own
+/// `read_file` of the media still counts.
+fn command_media(cmd: &str) -> (Vec<String>, Vec<String>) {
+    let mut urls = Vec::new();
+    if command_fetches(cmd) {
+        urls.extend(extract_url_tokens(cmd).iter().map(|token| normalize_url(token)));
+    }
+    let mut files = Vec::new();
+    for segment in segments(cmd) {
+        let code = segment_code(segment).to_ascii_lowercase();
+        let probe = command_words(&code, "ffprobe").next().is_some();
+        let mpeg = command_words(&code, "ffmpeg").next().is_some();
+        if !probe && !mpeg {
+            continue;
+        }
+        let words: Vec<&str> = segment
+            .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\''))
+            .filter(|word| !word.is_empty())
+            .collect();
+        for (at, word) in words.iter().enumerate() {
+            let input = probe || (at > 0 && words[at - 1] == "-i");
+            if !input {
+                continue;
+            }
+            urls.extend(extract_url_tokens(word).iter().map(|token| normalize_url(token)));
+            if media_file(word) {
+                files.push((*word).to_owned());
+            }
+        }
+    }
+    (urls, files)
+}
+
+/// agy's `run_command` output leads with `Command exited with code N.` when N is not 0 (`view::agy_result`).
+fn agy_command_ok(output: &str) -> bool {
+    output
+        .strip_prefix("Command exited with code ")
+        .and_then(|rest| rest.split('.').next())
+        .and_then(|code| code.trim().parse::<i64>().ok())
+        .is_none_or(|code| code == 0)
 }
 
 fn segments(cmd: &str) -> impl Iterator<Item = &str> {
@@ -1461,6 +1560,9 @@ fn json_text(val: &Value) -> String {
 pub fn stream_reads(stream: &str) -> Reads {
     let mut reads = Reads::default();
     let mut fetch_ids: Vec<String> = Vec::new();
+    // Review round (S1): a Claude call's media files wait here for its `tool_result`; only one without `is_error`
+    // counts them. A `Read` of a missing file or a failed ffprobe answers with `is_error: true`.
+    let mut media_pending: Vec<(String, Vec<String>)> = Vec::new();
     for line in stream.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
@@ -1478,7 +1580,9 @@ pub fn stream_reads(stream: &str) -> Reads {
                             .and_then(Value::as_str)
                             .filter(|_| matches!(name, "Bash" | "PowerShell"))
                         {
-                            reads.calls.push(command.to_owned());
+                            let (urls, files) = command_media(command);
+                            reads.media_urls.extend(urls);
+                            media_pending.push((id.to_owned(), files));
                         }
                         let text = match name {
                             "Bash" | "PowerShell" => input
@@ -1499,7 +1603,9 @@ pub fn stream_reads(stream: &str) -> Reads {
                             "Read" => {
                                 if let Some(path) = input.get("file_path").and_then(Value::as_str) {
                                     reads.paths.push(local_path(path));
-                                    reads.calls.push(path.to_owned());
+                                    if media_file(path) {
+                                        media_pending.push((id.to_owned(), vec![path.to_owned()]));
+                                    }
                                 }
                                 None
                             }
@@ -1522,6 +1628,12 @@ pub fn stream_reads(stream: &str) -> Reads {
                                 .outputs
                                 .push(json_text(block.get("content").unwrap_or(&Value::Null)));
                         }
+                        if let Some(at) = media_pending.iter().position(|(call, _)| call == id) {
+                            let (_, files) = media_pending.swap_remove(at);
+                            if block.get("is_error").and_then(Value::as_bool) != Some(true) {
+                                reads.media_files.extend(files);
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -1534,17 +1646,27 @@ pub fn stream_reads(stream: &str) -> Reads {
         let tool = step.get("tool_name").and_then(Value::as_str).unwrap_or("");
         let params = &step["tool_info"]["parameters"];
         let output = step["tool_info"]["output"].as_str().unwrap_or("");
+        // Review round (S1): agy answers a step on a later line with the same step, `DONE` or `ERROR` (an error under
+        // `tool_info.error`); the `ACTIVE` line is the call alone.
+        let answered = step.get("state").and_then(Value::as_str) == Some("DONE")
+            && step["tool_info"].get("error").is_none_or(Value::is_null);
         let text = match tool {
             "run_command" => {
                 let command = params["CommandLine"].as_str().unwrap_or("");
-                reads.calls.push(command.to_owned());
+                let (urls, files) = command_media(command);
+                reads.media_urls.extend(urls);
+                if answered && agy_command_ok(output) {
+                    reads.media_files.extend(files);
+                }
                 command_fetches(command).then(|| command.to_owned())
             }
             "read_file" | "view_file" => {
                 for key in ["Path", "AbsolutePath", "file_path"] {
                     if let Some(path) = params.get(key).and_then(Value::as_str) {
                         reads.paths.push(local_path(path));
-                        reads.calls.push(path.to_owned());
+                        if answered && media_file(path) {
+                            reads.media_files.push(path.to_owned());
+                        }
                     }
                 }
                 None

@@ -35,6 +35,12 @@ T_SEAT = "c40b_the_guard_names_the_sessions_own_seat"
 T_IMAGE = "c40b_the_orchestrator_may_not_read_a_large_image"
 T_HOOK = "c40b_the_image_guard_is_a_read_hook"
 T_SUB = "a_worker_subagents_outcome_is_recorded_under_its_seat_effort_and_class"
+# Review round.
+T_REFUSE = "c40b_a_media_cite_needs_a_call_that_opened_it"
+T_OPENED = "c40b_a_media_cite_counts_a_call_that_opened_it"
+T_PROSE = "c40b_a_check_line_of_prose_names_no_check"
+T_PIN = "c40b_the_pinned_check_line_is_its_result"
+T_NOTE = "c40b_a_correction_that_fails_is_noted_beside_the_record"
 
 CONTROLS = (
     # B1: a reseat is followed to the root, and only a send-back adds to the depth.
@@ -79,15 +85,58 @@ CONTROLS = (
             '        if class.starts_with("media.") && media_read(url, &reads) {',
             "        if media_read(url, &reads) {", T_VIDEO, "rust"),
     Control("c40b_media_video_id_ignored", GATE,
-            "        Some(id @ StableId::Video(_)) => reads.calls.iter().any(|call| id_in(call, &id)),",
+            "        Some(id @ StableId::Video(_)) => reads.media_files.iter().any(|file| id_in(file, &id)),",
             "        Some(StableId::Video(_)) => false,", T_VIDEO, "rust"),
     Control("c40b_media_report_call_vouches", GATE,
             '        let output = step["tool_info"]["output"].as_str().unwrap_or("");\n',
             '        let output = step["tool_info"]["output"].as_str().unwrap_or("");\n'
-            "        reads.calls.push(json_text(params));\n", T_VIDEO, "rust"),
+            "        reads.media_files.push(json_text(params));\n", T_VIDEO, "rust"),
     Control("c40b_media_url_in_command_ignored", GATE,
-            "                .any(|token| normalize_url(token) == norm)\n",
-            "                .any(|token| normalize_url(token) == norm && false)\n", T_PAGES, "rust"),
+            "    if !norm.is_empty() && reads.media_urls.contains(&norm) {\n",
+            "    if !norm.is_empty() && false {\n", T_PAGES, "rust"),
+    # Review round S1: each refusal. echo and the heredoc are refused by the same line (a command that fetches
+    # nothing gives no URL), so one control covers both.
+    Control("c40b_media_any_command_names_urls", GATE,
+            "    if command_fetches(cmd) {\n        urls.extend(",
+            "    if true {\n        urls.extend(", T_REFUSE, "rust"),
+    Control("c40b_media_ls_reads_as_ffprobe", GATE,
+            '        let probe = command_words(&code, "ffprobe").next().is_some();\n',
+            "        let probe = true;\n", T_REFUSE, "rust"),
+    Control("c40b_media_error_answer_counts", GATE,
+            "                            if block.get(\"is_error\").and_then(Value::as_bool) != Some(true) {\n",
+            "                            if true {\n", T_REFUSE, "rust"),
+    Control("c40b_media_agy_unanswered_counts", GATE,
+            '        let answered = step.get("state").and_then(Value::as_str) == Some("DONE")\n',
+            "        let answered = true\n", T_REFUSE, "rust"),
+    Control("c40b_media_any_file_counts", GATE,
+            '    lower.ends_with(".info.json")\n        ||',
+            "    true\n        ||", T_REFUSE, "rust"),
+    Control("c40b_media_failed_agy_probe_counts", GATE,
+            "                if answered && agy_command_ok(output) {\n",
+            "                if answered {\n", T_REFUSE, "rust"),
+    Control("c40b_media_ffmpeg_output_counts", GATE,
+            '            let input = probe || (at > 0 && words[at - 1] == "-i");\n',
+            "            let input = probe || mpeg;\n", T_REFUSE, "rust"),
+    # Review round S1: what does count.
+    Control("c40b_media_probed_file_dropped", GATE,
+            "                files.push((*word).to_owned());\n",
+            "                let _ = word;\n", T_OPENED, "rust"),
+    Control("c40b_media_probed_url_dropped", GATE,
+            "            urls.extend(extract_url_tokens(word).iter().map(|token| normalize_url(token)));\n",
+            "", T_OPENED, "rust"),
+    # Review round N1, N2, N4, S2.
+    Control("c40b_check_prose_read_as_names", GATE,
+            "        && (names.len() == 1 || rest.contains('`') || names.iter().all(|word| marked(word))))\n",
+            "        && true)\n", T_PROSE, "rust"),
+    Control("c40b_check_pins_first_naming_line", GATE,
+            "        let result = naming().find(|(_, line)| reports(line, check)).or_else(|| naming().next_back());\n",
+            "        let result = naming().next();\n", T_PIN, "rust"),
+    Control("c40b_correction_failure_unnoted", RUN,
+            "            .open(dir.join(CORRECTION_LOG))\n",
+            '            .open(dir.join("elsewhere.log"))\n', T_NOTE, "rust"),
+    Control("c40b_footer_locked_file_ordinary", WORKER,
+            "Work through ordinary obstacles such as an error or a timeout.",
+            "Work through ordinary obstacles such as an error, a timeout or a locked file.", T_FOOTER, "rust"),
     # B7: an open tool call gets the longer ceiling.
     Control("c40b_tool_ceiling_ignored", RUN,
             "        silent_s >= TOOL_STALL_AFTER_S\n", "        silent_s >= STALL_AFTER_S\n", T_CEILING, "rust"),

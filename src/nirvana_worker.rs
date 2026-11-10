@@ -548,10 +548,14 @@ pub fn continue_line(order_file: &str, why: &str) -> String {
 /// T2: "work only in this folder" is the prompt line's (`first_line`) and the Work Report's fields are the schema's
 /// (`--json-schema`); the footer said both again on every order, send-back and reseat. The finish sentence is the
 /// owner's (plan 40 order): the Claude Fable 5.2 guide measured that models stop early more often at low and medium
-/// effort, and a send-back costs a whole new run.
+/// effort, and a send-back costs a whole new run. Review round (S2): the first wording named "a locked file" ordinary and
+/// left `blocked` only for the forbidden and the owner's decisions, so it pushed a worker past a missing credential
+/// (CLAUDE.md rule 12) and a file another agent holds (rule 2). The blockers are now named, and a credential is never
+/// looked for elsewhere.
 pub const ORDER_FOOTER: &str = "\n\n---\nFrom herdr (plan 12 §4): do not start subagents or background processes unless this order allows it. \
-Finish the whole order before you report. Work through ordinary obstacles such as an error, a timeout or a locked file. \
-Report `blocked` only for something the order forbids or only the owner can decide.\n";
+Finish the whole order before you report. Work through ordinary obstacles such as an error or a timeout. \
+Report `blocked` for anything the order forbids, anything only the owner can decide, a missing credential or sign-in \
+(never look for one elsewhere), and a file you do not own or that another agent holds.\n";
 pub(crate) const FOOTER_MARK: &str = "From herdr (plan 12 §4)";
 
 // ---- the stream ----

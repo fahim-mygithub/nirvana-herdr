@@ -1773,6 +1773,22 @@ fn c40b_an_accept_after_a_failed_gate_corrects_the_orders_line() {
     assert_eq!((entry.orders, entry.passes), (2, 1));
 }
 
+/// Review round (N4): a correction that cannot be made leaves a line beside the record, and still returns the error.
+/// The record here is a folder, so reading it fails as a lock not taken would.
+#[test]
+fn c40b_a_correction_that_fails_is_noted_beside_the_record() {
+    let dir = record_temp("note");
+    std::fs::create_dir_all(dir.join(crate::nirvana_seat::RECORD_FILE)).expect("a folder in its place");
+    let accepted = record_of("o1", "r1", crate::nirvana_gate::Outcome::ACCEPTED);
+    assert!(correct_or_note(&dir, &accepted).is_err());
+    let note = std::fs::read_to_string(dir.join(CORRECTION_LOG)).expect("a note");
+    assert!(note.contains("run r1 order o1: the record line was not corrected to accepted"), "{note}");
+    // A correction that works notes nothing.
+    let fine = record_temp("note-fine");
+    assert!(!correct_or_note(&fine, &accepted).expect("no record yet"));
+    assert!(!fine.join(CORRECTION_LOG).exists());
+}
+
 /// The journal verdict `accepted` is the record's outcome word.
 #[test]
 fn c40b_an_accepted_verdict_is_the_records_outcome() {
