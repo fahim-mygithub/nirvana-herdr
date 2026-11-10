@@ -202,6 +202,12 @@ fn log_call(
     {
         let _ = writeln!(file, "{entry}");
     }
+    // Plan 40 D1: the call log only grew; lines past 30 days go when it is next written.
+    crate::nirvana_board::prune_log(
+        &dir.join(CALLS_FILE),
+        crate::nirvana_board::PRUNE_AFTER,
+        std::time::SystemTime::now(),
+    );
 }
 
 /// What `herdr jev agree` counts.
@@ -774,7 +780,7 @@ pub fn pane_tail(pane: &str) -> Option<String> {
 
 // ---- the CLI ---------------------------------------------------------------------------------------
 
-pub const USAGE: &str = "       herdr jev roles [watch|seating [off|shadow|on]]   (Jev's roles 2 and 3, default shadow)\n       herdr jev agree   (how often Jev's seat matched the rule's, from jev-calls.jsonl)\n       herdr jev watch --pane <id> | --screen-file <path>   (one watch now, for a check)";
+pub const USAGE: &str = "       herdr jev roles [watch|seating [off|shadow|on]]   (Jev's roles 2 and 3, default shadow)\n       herdr jev agree   (how often Jev's seat matched the rule's, over the last 30 days of jev-calls.jsonl, all it keeps)\n       herdr jev watch --pane <id> | --screen-file <path>   (one watch now, for a check)";
 
 fn fail(message: &str) -> ! {
     eprintln!("herdr jev: {message}");

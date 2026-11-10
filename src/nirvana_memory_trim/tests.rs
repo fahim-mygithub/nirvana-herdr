@@ -270,8 +270,8 @@ fn accept_keeps_a_byte_identical_backup_then_replaces_the_index_and_restore_puts
         Some(done.backup.clone())
     );
     // Restore puts the original back, byte for byte.
-    let used = restore_in(&c, Path::new(FOLDER)).expect("restored");
-    assert_eq!(used, done.backup);
+    let used = restore_in(&c, Path::new(FOLDER), false).expect("restored");
+    assert_eq!(used.backup, done.backup);
     assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
 }
 
@@ -287,7 +287,79 @@ fn a_second_accept_makes_its_own_backup_and_restore_takes_the_newest() {
     assert_ne!(first.backup, second.backup);
     assert!(first.backup.exists() && second.backup.exists());
     // Restore takes the newest.
-    assert_eq!(restore_in(&c, Path::new(FOLDER)).unwrap(), second.backup);
+    assert_eq!(
+        restore_in(&c, Path::new(FOLDER), false).unwrap().backup,
+        second.backup
+    );
+}
+
+/// Plan 40 B3: an index that gained an entry since the trim is not overwritten without `--force`, the refusal names
+/// the pointer, and a restore keeps a copy of the index it replaces, which a second restore never takes.
+#[test]
+fn restore_keeps_the_index_it_replaces_and_refuses_to_drop_a_pointer() {
+    let c = ctx("restore-guard", 400);
+    let path = put_index(&c, &index_text(40));
+    propose_in(&c, Path::new(FOLDER), &heads_only()).unwrap();
+    let done = accept_in(&c, Path::new(FOLDER)).unwrap();
+    let mut grown = std::fs::read_to_string(&path).unwrap();
+    grown.push_str("- [Brand new](brand-new.md) — written after the trim\n");
+    std::fs::write(&path, &grown).unwrap();
+    let refused = restore_in(&c, Path::new(FOLDER), false).unwrap_err();
+    assert!(refused.contains("brand-new.md"), "{refused}");
+    assert!(refused.contains("--force"), "{refused}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), grown, "untouched");
+    let forced = restore_in(&c, Path::new(FOLDER), true).expect("forced");
+    assert_eq!(forced.backup, done.backup);
+    let kept = forced.kept.expect("a copy of the replaced index");
+    assert_eq!(std::fs::read_to_string(&kept).unwrap(), grown);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), index_text(40));
+    // The copy is not a backup `restore` takes: the newest backup is still the accept's.
+    assert_eq!(
+        status_in(&c, Path::new(FOLDER)).unwrap().backup,
+        Some(done.backup.clone())
+    );
+    // An index that only lost pointers since (the trimmed one put back) restores with no force.
+    std::fs::write(&path, std::fs::read(&done.backup).unwrap()).unwrap();
+    let again = restore_in(&c, Path::new(FOLDER), false).expect("same text");
+    assert_eq!(again.kept, None, "nothing to keep when the index is the backup");
+}
+
+/// Plan 40 D1: memory backups past 30 days go, but the newest five of a folder stay whatever their age.
+#[test]
+fn old_backups_are_pruned_but_the_newest_five_stay() {
+    let c = ctx("prune-backups", 400);
+    let dir = backup_dir(&c);
+    std::fs::create_dir_all(&dir).unwrap();
+    let hash = crate::nirvana_launch::folder_hash(Path::new(FOLDER));
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 24 * 60 * 60);
+    let mut names = Vec::new();
+    for n in 0..8 {
+        let path = dir.join(format!("{hash}-2026010{n}T000000Z-00.md"));
+        std::fs::write(&path, "old").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        names.push(path);
+    }
+    let other = dir.join("otherfolder-20260101T000000Z-00.md");
+    std::fs::write(&other, "another folder's").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&other)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    prune_backups(&c, Path::new(FOLDER));
+    let left: Vec<bool> = names.iter().map(|p| p.exists()).collect();
+    assert_eq!(
+        left,
+        vec![true, false, false, true, true, true, true, true],
+        "the oldest (the fullest index) and the newest five stayed; the two between went"
+    );
+    assert!(other.exists(), "another folder's backup is not this folder's to prune");
 }
 
 #[test]
@@ -325,7 +397,7 @@ fn discard_deletes_the_proposal_and_only_the_proposal() {
     assert!(!proposal_path(&path).exists());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     assert!(
-        restore_in(&c, Path::new(FOLDER)).is_err(),
+        restore_in(&c, Path::new(FOLDER), false).is_err(),
         "no backup, nothing to restore"
     );
 }

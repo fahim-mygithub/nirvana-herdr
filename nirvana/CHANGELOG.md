@@ -3,6 +3,30 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.64.0: less text injected per session, an idle compact that says why, and the memory area's bugs
+
+- **Changed:** the first board notice of a session is capped to each section's head with the command that reads the
+  rest; a brief offers at most 15 lessons (ranked helped, opened, newest, with three places kept for new ones that
+  were never opened) and counts them as offered only once the seat is written; no Jev guide without a Jev key or on
+  a `resume` start; the Stop hook reads a 128 KB tail first. Idle compact: one shared context reading that is no
+  reading after a compaction, a transcript age that ignores Claude Code's own recap lines, one INFO line per new
+  skip reason, and `herdr compact why [--json]`. Lesson offer lines ask a worker to open the lessons that name its
+  step; review rule 6 keeps a measured and worked-around dead end. Bugs: a hostile `Retry-After` cannot panic;
+  `herdr memory restore` keeps what it replaces and refuses to drop pointers unless `--force`; the Preload panel
+  measures off the draw path; one lock for every `NIRVANA.md` writer; `settings.local.json` is re-read before the
+  write; every `JEV.md` placeholder has a default. Per-session files and three logs are pruned after 30 days.
+- **Because:** the owner, 2026-11-09: "create new features that would help improve token efficenccy" and "Do a
+  project lceanup / code review and ifx any bugs." The audit: the orchestrator is a third of a run's cost, and 118
+  turns after an idle gap of over an hour re-bought their cache; the live server's log held no idle compact line
+  since 2026-10-15.
+- **Measured:** characters before and after, from tests: first board notice 17,263 to 1,051; lessons block 3,894
+  to 1,629; guide with no key 1,470 to 0; Stop hook read 4,187,049 to 130,351 bytes. Replayed over 127 real idle
+  gaps, the transcript-age rule first passes at minute 50 or 51 in 115 of them, up from 60. 593 scoped tests pass,
+  clippy clean, 3300 of 3300 controls find their text. Not known: what blocks idle compact in the live session;
+  `herdr compact why` is how to find out. The wording changes and the 30-day prune are hypotheses.
+- **If you remove this:** every session start pays the whole board again, a class with many lessons grows its briefs
+  without bound, and an idle compact that does not fire stays silent about why.
+
 ## alpha 0.63.0: Fable 5.2 takes a seat, the seat table is refit from the record, and the lifetime usage audit
 
 - **Changed:** the `fable` seat is `claude-fable-5-2`, on, with efforts low to xhigh and its own `week.fable`

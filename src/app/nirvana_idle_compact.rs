@@ -24,6 +24,38 @@ use crate::terminal::{TerminalId, TerminalRuntime, TerminalState};
 /// delay, so the reply takes one write; the bound keeps a stuck pane from holding the server loop.
 const KEYS_REPLY_WAIT: Duration = Duration::from_millis(250);
 
+/// Plan 40d Part 1: how often the server's reading of its Claude panes is written for `herdr compact why` when no
+/// check ran. A check writes it at once.
+const WHY_EVERY: Duration = Duration::from_secs(60);
+
+/// The last full check of a pane: when (Unix seconds), the decision, and each fact (`fact_rows`).
+struct Checked {
+    at: u64,
+    decision: String,
+    facts: Vec<(&'static str, String)>,
+}
+
+fn checked() -> &'static std::sync::Mutex<std::collections::BTreeMap<String, Checked>> {
+    static CHECKED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<String, Checked>>,
+    > = std::sync::OnceLock::new();
+    CHECKED.get_or_init(Default::default)
+}
+
+fn why_written() -> &'static std::sync::Mutex<Option<Instant>> {
+    static WRITTEN: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    &WRITTEN
+}
+
+/// An `Instant` as a Unix second, through the pair (`now`, `wall`) read at one moment.
+fn unix_of(at: Instant, now: Instant, wall: u64) -> u64 {
+    if at <= now {
+        wall.saturating_sub(now.duration_since(at).as_secs())
+    } else {
+        wall.saturating_add(at.duration_since(now).as_secs())
+    }
+}
+
 /// A pane herdr sees running Claude.
 pub(super) struct ClaudePane {
     pub(super) terminal_id: TerminalId,
@@ -107,6 +139,7 @@ impl App {
     /// Checks the idle Claude terminal that is due first, and types `/compact` where `decide` says to. True when a
     /// key was typed.
     pub(crate) fn nirvana_idle_compact(&mut self, now: Instant) -> bool {
+        self.idle_compact_why(now, false);
         if self.idle_compact_deadline().is_none_or(|due| now < due) {
             return false;
         }
@@ -198,9 +231,36 @@ impl App {
             owner_key: owner_key_of(&pane.public),
             input_line,
         };
-        match decide(&facts) {
+        let decision = decide(&facts);
+        checked().lock().unwrap_or_else(|e| e.into_inner()).insert(
+            pane.public.clone(),
+            Checked {
+                at: crate::nirvana_run::now(),
+                decision: crate::nirvana_idle_compact::decision_text(&decision),
+                facts: crate::nirvana_idle_compact::fact_rows(&facts),
+            },
+        );
+        let typed = match decision {
             Decision::Skip(reason) => {
-                tracing::debug!(pane = %pane.public, reason, "nirvana: idle compact left the pane alone");
+                // Plan 40d Part 1: each new reason in a stretch is one INFO line, so the server's log says why.
+                let key = crate::nirvana_idle_compact::reason_key(&reason);
+                let new = self
+                    .state
+                    .terminals
+                    .get_mut(&terminal_id)
+                    .is_some_and(|terminal| {
+                        let new = terminal.idle_stretch.logged.as_deref() != Some(key.as_str());
+                        if new {
+                            terminal.idle_stretch.logged = Some(key);
+                        }
+                        new
+                    });
+                let idle_minutes = idle_for.map_or(0, |idle| idle.as_secs() / 60);
+                if new {
+                    tracing::info!(pane = %pane.public, idle_minutes, reason, "nirvana: idle compact left the pane alone");
+                } else {
+                    tracing::debug!(pane = %pane.public, idle_minutes, reason, "nirvana: idle compact left the pane alone");
+                }
                 false
             }
             Decision::Send => self.idle_compact_paste(
@@ -210,6 +270,67 @@ impl App {
                 idle_for,
                 facts.context_tokens,
             ),
+        };
+        self.idle_compact_why(now, true);
+        typed
+    }
+
+    /// Plan 40d Part 1: the server's reading of every Claude pane, for `herdr compact why`: its state and stretch now,
+    /// and the last full check's facts and decision. `wall` is the Unix second at `now`.
+    pub(super) fn idle_compact_why_snapshot(&self, now: Instant, wall: u64) -> serde_json::Value {
+        let rule = self.idle_compact.rule();
+        let checked = checked().lock().unwrap_or_else(|e| e.into_inner());
+        let panes: Vec<serde_json::Value> = self
+            .claude_panes()
+            .iter()
+            .filter_map(|pane| {
+                let terminal = self.state.terminals.get(&pane.terminal_id)?;
+                let stretch = &terminal.idle_stretch;
+                let last = checked.get(&pane.public);
+                Some(serde_json::json!({
+                    "pane": pane.public,
+                    "state": format!("{:?}", terminal.state),
+                    "idle_since": stretch.since.map(|since| unix_of(since, now, wall)),
+                    "sent": stretch.sent,
+                    "next_check": rule
+                        .and_then(|rule| stretch.next_check_at(rule.minutes))
+                        .map(|at| unix_of(at, now, wall)),
+                    "checked": last.map(|last| last.at),
+                    "decision": last.map(|last| last.decision.clone()),
+                    "facts": last.map(|last| {
+                        last.facts
+                            .iter()
+                            .map(|(name, value)| serde_json::json!([name, value]))
+                            .collect::<Vec<_>>()
+                    }),
+                }))
+            })
+            .collect();
+        serde_json::json!({
+            "written": wall,
+            "setting": crate::nirvana_idle_compact::setting_text(rule),
+            "panes": panes,
+        })
+    }
+
+    /// Writes the snapshot under the Nirvana home: at once after a check, else at most every `WHY_EVERY`. A failed
+    /// write is logged at DEBUG and changes nothing else.
+    fn idle_compact_why(&self, now: Instant, force: bool) {
+        {
+            let mut written = why_written().lock().unwrap_or_else(|e| e.into_inner());
+            if !force && written.is_some_and(|at| now.saturating_duration_since(at) < WHY_EVERY) {
+                return;
+            }
+            *written = Some(now);
+        }
+        let Some(home) = crate::nirvana::home() else {
+            return;
+        };
+        let snapshot = self.idle_compact_why_snapshot(now, crate::nirvana_run::now());
+        let path = crate::nirvana_idle_compact::why_path(&home);
+        let text = serde_json::to_string_pretty(&snapshot).unwrap_or_default();
+        if let Err(err) = crate::nirvana_seat::write_atomic(&path, text.as_bytes()) {
+            tracing::debug!(path = %path.display(), err = %err, "nirvana: idle compact could not write its snapshot");
         }
     }
 
@@ -746,6 +867,66 @@ mod tests {
         assert_eq!(typed(&mut receiver), "");
         // Checked and skipped: due again a minute on, not at once.
         assert_eq!(app.idle_compact_deadline(), Some(t0 + 52 * MIN));
+    }
+
+    /// Plan 40d Part 1: the owner's suspicion was that a Claude that finished while nobody looked reads "done", not
+    /// idle. "done" is the agents view's name for `Idle` on a pane not yet seen (`agent_view::status_name`); the
+    /// terminal's state is `Idle` all along, and idle compact never reads the pane's seen mark. So the unattended pane
+    /// is compacted.
+    #[tokio::test]
+    async fn idle_compact_server_compacts_a_finished_pane_nobody_has_looked_at() {
+        let _guard = crate::nirvana::with_test_home("idle-compact-unseen");
+        let mut app = test_app();
+        let t0 = Instant::now();
+        let mut receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+        let tab = &mut app.state.workspaces[0].tabs[0];
+        let root = tab.root_pane;
+        tab.panes.get_mut(&root).unwrap().seen = false;
+        assert!(app.nirvana_idle_compact_with(t0 + 51 * MIN, long_idle));
+        assert_eq!(typed(&mut receiver), "/compact");
+    }
+
+    /// Plan 40d Part 1: a skip is logged at INFO once per reason in a stretch (its numbers left out), and every check
+    /// writes the snapshot `herdr compact why` reads: each fact, the decision, never the owner's typed text.
+    #[tokio::test]
+    async fn idle_compact_server_says_why_it_left_a_pane_alone() {
+        let _guard = crate::nirvana::with_test_home("idle-compact-why");
+        let mut app = test_app();
+        let t0 = Instant::now();
+        let mut receiver = idle_claude(&mut app, t0, RECORDED_TYPED);
+        let terminal_id = root_terminal_id(&app);
+        assert!(!app.nirvana_idle_compact_with(t0 + 51 * MIN, long_idle));
+        assert_eq!(
+            app.state.terminals[&terminal_id].idle_stretch.logged.as_deref(),
+            Some("the input line holds text")
+        );
+        assert!(!app.nirvana_idle_compact_with(t0 + 52 * MIN, long_idle));
+        assert_eq!(typed(&mut receiver), "");
+        let home = crate::nirvana::home().unwrap();
+        let text = std::fs::read_to_string(crate::nirvana_idle_compact::why_path(&home)).unwrap();
+        let why: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let pane = &why["panes"][0];
+        assert_eq!(pane["pane"], root_public(&app));
+        assert_eq!(pane["state"], "Idle");
+        assert_eq!(pane["decision"], "skip: the input line holds text");
+        assert!(
+            pane["facts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row[0] == "input line" && row[1] == "holds 17 characters"),
+            "{text}"
+        );
+        assert!(!text.contains("hello owner draft"), "{text}");
+        let shown = crate::nirvana_idle_compact::render_why(&why, crate::nirvana_run::now());
+        println!("{shown}");
+        assert!(shown.contains(": skip: the input line holds text"), "{shown}");
+        assert!(shown.contains("  context: 80000 tokens"), "{shown}");
+        // A new stretch logs its reason again.
+        app.state.terminals.get_mut(&terminal_id).unwrap().idle_stretch = IdleStretch::default()
+            .after(AgentState::Working, t0)
+            .after(AgentState::Idle, t0 + 60 * MIN);
+        assert_eq!(app.state.terminals[&terminal_id].idle_stretch.logged, None);
     }
 
     #[tokio::test]

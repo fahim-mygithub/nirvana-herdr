@@ -775,6 +775,12 @@ impl JevTrimmer {
         {
             let _ = writeln!(file, "{entry}");
         }
+        // Plan 40 D1: the call log only grew; lines past 30 days go when it is next written.
+        crate::nirvana_board::prune_log(
+            &dir.join(CALLS_FILE),
+            crate::nirvana_board::PRUNE_AFTER,
+            std::time::SystemTime::now(),
+        );
     }
 }
 
@@ -962,6 +968,7 @@ pub fn accept_in(ctx: &Ctx, folder: &Path) -> Result<Accepted, String> {
     write_atomic(&index, proposed.as_bytes())
         .map_err(|e| format!("could not replace the index: {e}"))?;
     let _ = std::fs::remove_file(&proposal);
+    prune_backups(ctx, folder);
     Ok(Accepted {
         backup,
         before: tokens_of(&original),
@@ -988,28 +995,127 @@ pub fn discard(cwd: &Path) -> Result<bool, String> {
     discard_in(&Ctx::from_env().ok_or("no home")?, cwd)
 }
 
-/// Puts the newest backup of this folder's index back. Returns the backup used.
-pub fn restore_in(ctx: &Ctx, folder: &Path) -> Result<PathBuf, String> {
+/// Backups kept for a folder whatever their age: one of them may be the only copy of an index.
+pub const KEEP_BACKUPS: usize = 5;
+
+/// Plan 40 D1: one backup was written per accept and none was ever removed. Of this folder's backups, those past
+/// the newest `KEEP_BACKUPS` of their kind, not the oldest of it, and older than `crate::nirvana_board::PRUNE_AFTER`
+/// are deleted. The two
+/// kinds (`.md` from accept, `.pre-restore` from restore) are counted apart, so copies of one kind never push the
+/// only backup of the other out.
+fn prune_backups(ctx: &Ctx, folder: &Path) {
+    let prefix = format!("{}-", crate::nirvana_launch::folder_hash(folder));
+    let Ok(entries) = std::fs::read_dir(backup_dir(ctx)) else {
+        return;
+    };
+    let ours: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&prefix))
+        })
+        .collect();
+    for suffix in [".md", PRE_RESTORE] {
+        let mut kind: Vec<PathBuf> = ours
+            .iter()
+            .filter(|p| p.to_string_lossy().ends_with(suffix))
+            .cloned()
+            .collect();
+        // The names sort in time order (`compact_now`).
+        kind.sort();
+        // Plan 40d N5: the oldest of each kind stays too. After six trims in a day the first backup, the index
+        // before any trim and so the fullest, was the one deleted 30 days later.
+        if !kind.is_empty() {
+            kind.remove(0);
+        }
+        crate::nirvana_board::prune_old_files(
+            kind,
+            KEEP_BACKUPS,
+            crate::nirvana_board::PRUNE_AFTER,
+            std::time::SystemTime::now(),
+        );
+    }
+}
+
+/// What a restore did: the backup put back, and the copy kept of the index it replaced (none when there was no
+/// index, or it already matched the backup).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Restored {
+    pub backup: PathBuf,
+    pub kept: Option<PathBuf>,
+}
+
+/// The suffix of the copy a restore keeps of the index it replaces. Not `.md`, so `newest_backup` never takes it and
+/// a second restore does not flip back to it.
+const PRE_RESTORE: &str = ".pre-restore";
+
+/// Puts the newest backup of this folder's index back.
+///
+/// Plan 40 B3: it overwrote the live index with no copy and no pointer check, so entries Claude Code added since the
+/// trim stopped being pointed at, against this module's own "this cannot lose a pointer". Now the index it replaces
+/// is copied first, and a backup that lacks pointers the index has now is refused, naming them, unless `force`.
+pub fn restore_in(ctx: &Ctx, folder: &Path, force: bool) -> Result<Restored, String> {
     let index =
         index_path(ctx, folder).ok_or("the folder's name is too long to find its memory")?;
     let backup = newest_backup(ctx, folder).ok_or("there is no backup of this folder's index")?;
     let bytes = std::fs::read(&backup).map_err(|e| format!("could not read the backup: {e}"))?;
+    let current = std::fs::read(&index).ok();
+    let mut kept = None;
+    if let Some(current) = current.as_deref().filter(|c| *c != bytes.as_slice()) {
+        let now = String::from_utf8_lossy(current);
+        let old = String::from_utf8_lossy(&bytes);
+        let had = pointers(&old);
+        let lost: Vec<String> = pointers(&now)
+            .into_iter()
+            .filter(|(pointer, n)| had.get(pointer).copied().unwrap_or(0) < *n)
+            .map(|(pointer, _)| pointer)
+            .collect();
+        if !lost.is_empty() && !force {
+            return Err(format!(
+                "the index now points at {} the backup does not: {}. Run herdr memory restore --force to restore anyway",
+                if lost.len() == 1 { "a file" } else { "files" },
+                lost.join(", ")
+            ));
+        }
+        let dir = backup_dir(ctx);
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("could not make the backup folder: {e}"))?;
+        let stem = format!(
+            "{}-{}",
+            crate::nirvana_launch::folder_hash(folder),
+            compact_now()
+        );
+        let copy = (0u32..100)
+            .map(|n| dir.join(format!("{stem}-{n:02}{PRE_RESTORE}")))
+            .find(|path| !path.exists())
+            .ok_or("no free name for the copy of the index")?;
+        std::fs::write(&copy, current)
+            .map_err(|e| format!("could not keep a copy of the index: {e}"))?;
+        if std::fs::read(&copy).ok().as_deref() != Some(current) {
+            let _ = std::fs::remove_file(&copy);
+            return Err("the copy of the index did not read back identical; nothing restored".into());
+        }
+        kept = Some(copy);
+        prune_backups(ctx, folder);
+    }
     if let Some(dir) = index.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     write_atomic(&index, &bytes).map_err(|e| format!("could not restore: {e}"))?;
     // A proposal made against the trimmed index no longer describes anything.
     let _ = std::fs::remove_file(proposal_path(&index));
-    Ok(backup)
+    Ok(Restored { backup, kept })
 }
 
-pub fn restore(cwd: &Path) -> Result<PathBuf, String> {
-    restore_in(&Ctx::from_env().ok_or("no home")?, cwd)
+pub fn restore(cwd: &Path, force: bool) -> Result<Restored, String> {
+    restore_in(&Ctx::from_env().ok_or("no home")?, cwd, force)
 }
 
 // ---- the command -------------------------------------------------------------------------------------
 
-pub const USAGE: &str = "usage: herdr memory status|trim|accept|discard|restore [<folder>]\n       herdr memory record-session   (the hooks run it; Claude Code's JSON on stdin)";
+pub const USAGE: &str = "usage: herdr memory status|trim|accept|discard|restore [--force] [<folder>]\n       herdr memory record-session   (the hooks run it; Claude Code's JSON on stdin)";
 
 fn fail(message: &str) -> ! {
     eprintln!("{message}");
@@ -1043,7 +1149,14 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
     if verb == "record-session" {
         return crate::nirvana_session_record::cli();
     }
-    let folder = folder_arg(args.get(1).map(String::as_str))?;
+    // `--force` only means something to `restore`; it is taken out wherever it stands so it is never the folder.
+    let force = args[1..].iter().any(|a| a == "--force");
+    let rest: Vec<&str> = args[1..]
+        .iter()
+        .map(String::as_str)
+        .filter(|a| *a != "--force")
+        .collect();
+    let folder = folder_arg(rest.first().copied())?;
     match verb {
         "status" => match status(&folder) {
             None => println!("no auto memory index for this folder"),
@@ -1096,8 +1209,17 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             Ok(false) => println!("there was no proposal"),
             Err(why) => fail(&why),
         },
-        "restore" => match restore(&folder) {
-            Ok(b) => println!("restored from {}", b.display()),
+        "restore" => match restore(&folder, force) {
+            Ok(r) => {
+                println!("restored from {}", r.backup.display());
+                if let Some(kept) = &r.kept {
+                    // Plan 40d N6: no verb restores this copy; the line says how.
+                    println!(
+                        "the index it replaced is kept in {}. To put it back, copy that file over the index.",
+                        kept.display()
+                    );
+                }
+            }
             Err(why) => fail(&format!("not restored: {why}")),
         },
         _ => fail(USAGE),

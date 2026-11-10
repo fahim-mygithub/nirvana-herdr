@@ -3756,7 +3756,8 @@ pub fn seat_order_with(
         (project.root.clone(), None, None)
     };
     // Plan 12 O5 (§7.4.3): one line per live lesson of the class, the path and the description, never the body.
-    let lessons = crate::nirvana_lessons::offer_for(
+    // Plan 40 T5: built uncounted; the offers are counted once the seat is written, below.
+    let lessons = crate::nirvana_lessons::offer_uncounted(
         &project.root,
         &cwd,
         &booked.class,
@@ -3787,15 +3788,15 @@ pub fn seat_order_with(
     let cards = match profile {
         Some(name) if booked.class == crate::nirvana_knowledge::TEACH_CLASS => {
             crate::nirvana_knowledge::copy_for_teacher(&project.root, &cwd, name);
-            String::new()
+            crate::nirvana_lessons::Offer::default()
         }
-        Some(name) => crate::nirvana_knowledge::offer(&project.root, &cwd, name),
-        None => String::new(),
+        Some(name) => crate::nirvana_knowledge::offer_uncounted(&project.root, &cwd, name),
+        None => crate::nirvana_lessons::Offer::default(),
     };
-    let mut text = if lessons.is_empty() && cards.is_empty() {
+    let mut text = if lessons.section.is_empty() && cards.section.is_empty() {
         text
     } else {
-        format!("{}{lessons}{cards}", text.trim_end())
+        format!("{}{}{}", text.trim_end(), lessons.section, cards.section)
     };
     // Plan 29 §5.3 and review F4: an order granted a server never starts a device; a desktop one batches, reads crops.
     // Plan 31 §2.2: an order with the owner's verified approval may Send once, after an explained slice.
@@ -3879,6 +3880,12 @@ pub fn seat_order_with(
         .map_err(io)?;
     if let Some(first) = first {
         return Ok(first);
+    }
+    // Plan 40 T5: the seat is written, so the offers count now. A seating that failed before here, or found the order
+    // already seated, cost no lesson or card an offer toward its decay.
+    crate::nirvana_lessons::count_offered(&project.root, &lessons);
+    if let Some(name) = profile {
+        crate::nirvana_knowledge::count_offered(&project.root, name, &cards);
     }
     // Plan 35 P35a: the project folder's dirty files at seating, so the owned axis counts only this order's changes.
     if seated.worktree.is_none() {

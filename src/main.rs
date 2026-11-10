@@ -642,6 +642,10 @@ fn main() -> io::Result<()> {
     if args.get(1).map(String::as_str) == Some("lessons") {
         return nirvana_lessons::cli(&args[2..]);
     }
+    // Plan 40d: why each Claude pane was or was not compacted when idle, from the server's snapshot.
+    if args.get(1).map(String::as_str) == Some("compact") {
+        return nirvana_idle_compact::cli(&args[2..]);
+    }
     // Nirvana fork, plan 33 P33a: the project's agent profiles, which `herdr seat run --profile` seats an order with.
     if args.get(1).map(String::as_str) == Some("profile") {
         return nirvana_profiles::cli(&args[2..]);

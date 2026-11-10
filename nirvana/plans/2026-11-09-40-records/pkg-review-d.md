@@ -1,0 +1,60 @@
+# Review of P40d MEMORY (c40d-memory, 86b37c7e..b67ae0fb)
+
+Ran: `cargo nextest run --no-fail-fast -E 'test(/nirvana_board|nirvana_memory_trim|nirvana_jev_compact|nirvana_idle_compact|nirvana_lessons|nirvana_preload/)'` in the worktree with private TEMP: 156 run, 156 passed. `python nirvana/controls.py --dry-run`: "3231 of 3238 find their text exactly once" (see S1). Clippy not run.
+
+## S findings (fix before merge)
+
+### S1. Seven older controls now find their text 0 times; the dry-run gate is red, the record says nothing, no hunk is given
+`PYTHONIOENCODING=utf-8 python nirvana/controls.py --dry-run | grep -v ^PLAN` prints seven `FAIL ... finds 0x` rows, all caused by this diff removing or rewriting the product line they sabotage:
+- `jev_memory_git_tracked` (src/nirvana_jev_memory.rs `.args(["ls-files", "-z"])` is now `run_cmd(... &["ls-files","-z"] ...)`)
+- `jev_memory_row_file` (src/nirvana_preload.rs `memory.file = Some(crate::nirvana_jev_memory::file());` is now `::path()`)
+- `p27_context_leaves_output`, `p27_context_none_without_fields`, `p27_context_assistant_only`, `p27_context_tail_widens` (src/nirvana_idle_compact.rs: `context_tokens(usage)`, the `fields` array, the assistant check and the `found.is_some() || window >= MAX_TAIL` line are gone)
+- `o4b_md_lessons_no_head` (src/nirvana_lessons.rs `.unwrap_or_else(|_| MEMORY_HEAD.to_owned())` is now inside `edit_memory_file`'s closure)
+
+Effect: seven assertions are no longer sabotage-guarded (the `ls-files` tracked-only rule, the `output_tokens` exclusion, the assistant-only check, the tail widening, the NIRVANA.md head). The builder owns none of those controls files except c40d.py, so the fix is hunks for `controls.d/jev_memory.py`, `p27*.py`, `o4b*.py` (re-point each find text at the new product line, or retire it with the test that now owns the assertion). The record lists only the p34a hunk. Without them the merge gate fails (CLAUDE.md rule 9: a check that never ran reads as a pass). Also the new tests `context_tokens_leave_out_output` and `a_compaction_after_the_last_turn_is_no_reading` reach the shared reading in nirvana_jev_compact.rs, so the sabotage for the `total` sum should be a c40d control on `read_context`'s `.sum::<u64>()` (check the keys list there includes no `output_tokens`; none of c40d's 27 controls does).
+
+## N findings (record or fix)
+
+### N1. T4: resume skips the guide; claim "a session resumed after a compaction never gets it back" does not hold
+Traced. The `compact` source re-runs the SessionStart hook, so the guide is re-printed at the compaction. Claude Code persists hook output in the transcript as an `attachment` of type `hook_additional_context` (48 in this session's own transcript, counted with grep). A resumed session replays those. Gap that remains: a session started with no Jev key (T3 prints nothing), key added later, then resumed: no guide until `clear`/`compact`. Low cost; note it in the record.
+
+### N2. T2 cap can starve new lessons
+`rank` = helped, then opened, then newest. With 15 or more lessons that were ever opened, a lesson with `opened == 0` can never enter the first 15, is never offered, so never gains `opened` and never decays. A lesson that helped before is never hidden (helped sorts first) unless over 15 lessons helped. Fix: keep 2 or 3 of the 15 slots for the newest unopened lessons.
+
+### N3. D1 log pruning changes what `herdr jev agree`, the Learning panel and any audit sees
+`agreement_in` sums `cost_usd` and counts seating agreement over the whole text it is given (nirvana_jev_roles.rs:230); after D1 that is at most 31 days of `jev-calls.jsonl`. `nirvana/usage_audit.py` on branch usage-audit reading `jev-calls.jsonl` has the same horizon. Record the 30-day horizon in the `agree` help and tell the usage-audit owner. All four `ts` writers are RFC 3339 (checked: `now()`, `time_now()`, `utc_now()`), so the prune does match real lines. The record says "both writers" for `jev-calls.jsonl`; there are three (nirvana_jev_roles.rs, nirvana_memory_trim.rs, nirvana_preset.rs:897). preset.rs does not prune; the other two do, so it is still bounded.
+
+### N4. `prune_log` details
+- The trigger reads only the first line. If that line has no readable `ts` (a torn append, hand edit), the log is never pruned again. Fails safe, defeats the cleanup silently.
+- An append by another process between `read_to_string` and `rename` is lost (Rust opens with FILE_SHARE_DELETE, so the rename succeeds and the appender writes to the orphaned file). Documented in the doc comment; rewrite happens about daily. Acceptable for a telemetry log, but `jev-calls.jsonl` is the evidence log for the shadow-to-on decision.
+- A clock set forward by a year drops every line and every board-seen/compact file; a clock set back deletes nothing (`duration_since` errors, kept). Nothing else is lost: board-seen and compact state are re-creatable.
+
+### N5. `prune_dir` and `prune_backups` safety (traced end to end)
+- Session ids are filtered to `[A-Za-z0-9_-]` in both `seen_path` and `memory_path`, so no `..`; the pruned folder is the fixed `board-seen/` or `jev/compact/`. `prune_dir` takes only `file_type().is_file()` entries (a junction or symlink is not followed or deleted). A file with an old mtime (copied) is pruned only if past 30 days; `board-seen` files are rewritten on every prompt so a live session's file is fresh. A session idle more than 30 days loses its seen file and gets the (capped) first notice again.
+- `prune_backups`: counts `.md` and `.pre-restore` apart, keeps the newest 5 of each by name, deletes the rest only if mtime is over 30 days. `newest_backup` takes only `.md`, so a `.pre-restore` is never the restore source and never pushes a `.md` out. Residual: after 6 trims in one day, the first backup (the fullest index) is deleted 30 days later. Not the only copy of the live index, but the only copy of the original. Keep the oldest backup of each kind too, or say so in the record.
+
+### N6. B3 restore
+Refusal, `--force` and the copy are right: the copy is written and read back before the index is touched; `--force` is filtered out wherever it stands. The copy is made only when the live index differs from the backup. `restore` for a second time restores the same `.md` (the pre-restore copy is never chosen). The `.pre-restore` copy has no verb that restores it; the message prints its path and the owner copies it by hand. Say that in the help text.
+
+### N7. B6 `update_local`
+Traced: the read-again compares raw bytes, retries once, then errors with nothing written; the temp name is `temp_sibling` (pid plus counter) and removed on rename error; the test asserts no leftover. Hand-edited JSON with comments or a trailing comma fails `serde_json` in `parse_local`, so the call returns the "is not JSON" error before any write and the file is untouched (pre-existing behaviour kept). Keys Claude Code added survive a retry. Residuals: (1) the window between the second read and the rename remains (documented); (2) a crash between `fs::write(temp)` and `rename` leaves `.settings.local.json.tmp.<pid>.<n>` in `.claude/`; (3) `serde_json` has no `preserve_order` in Cargo.toml, so every write re-sorts the owner's keys alphabetically (pre-existing; the repo already depends on `jsonc-parser` with `cst`, which would keep order and comments).
+
+### N8. B1 idle compact
+Traced `read_context` newest-first. Compaction summary then a new small assistant turn gives `Tokens(small)`, so idle compact cannot fire on it; a compaction with no assistant line after gives `Compacted`, so `decide` skips. A user line that only quotes `isCompactSummary` is not matched (top-level field checked). `fresh` shares the reading: after a compaction with no new turn it now sees `None` and `trigger` returns Err "context could not be read" (fails closed, no fresh start); before, it saw the stale pre-compaction size. For an owner who edited nothing that is a behaviour change, in the safe direction.
+
+### N9. Locks (item 6)
+A crashed holder leaves `NIRVANA.md.lock`. Takers poll 50 ms for `LOCK_WAIT` (3 s), then fail with "another writer holds"; the lock is taken over when its mtime is over `LOCK_STALE` (15 s). So the worst case is 15 s after the crash, with each caller stalled up to 3 s. Callers (`nirvana_gate.rs:3472`, `nirvana_review.rs:1301`, digest hook) ignore the error with `let _`. The new `PermissionDenied` wait: on a path that is truly denied (read-only home, antivirus hold) every call now waits the full 3 s before the error instead of failing at once; it is on the SessionStart digest hook path. Also `write_board_line` used to write nothing when its line was unchanged and now takes and removes a lock file on every session start before finding that out; read first, lock only to change. Stale takeover is still not race-free (two takers both see the old lock; the second `remove_file` removes the first's fresh lock); window tiny.
+
+### N10. T1 capped first notice
+Keeps the size, each section's first line and `"<exe>" board read prints all of it`, and the footer with the `board write <section> --expect` how-to. Nothing needed to read is missing. A section whose useful content is past its first line (a "Server" section listing port and command) is now hidden until the agent runs `board read`; the old notice guaranteed it was seen. Also the record says the fresh note "caps its board heads the same way"; nirvana_fresh.rs is not in the diff (it already used name and first line, `NOTE_SECTIONS`); reword.
+
+### N11. Wording (item 7), quoted
+- `LESSONS_OFFER_LINE`: "Each was checked by herdr's gate. Before a step, open each lesson whose line touches what that step does, and leave the others closed." (cards: same with "card" and "a `do not:` line is a warning").
+- Could it make a worker open every lesson? It is a step-by-step test ("each ... whose line touches what that step does") against "only if it fits this order". Combined with the 15 cap, worst case is 15 opens of up to 120 steps lines per order. "Before a step" invites a re-scan at every step. Cost is bounded by the cap; watch `herdr lessons stats` opened over offered after it lands, as the record says. A one-time wording ("Before the work, open each ...") would bound it better.
+- Review rule 6 now ends: "One exception: a dead end the stream shows the worker measured and then resolved or worked around is worth keeping, as the way through, so the next worker does not repeat it." The sentence follows "a failure of this machine or its setup (a missing program, a sign-in, a path)" in the same rule and does not say the exception is only for the tool-is-broken clause. A reviewer can read "python missing, worker used py instead" as a measured and worked-around dead end and keep a machine-setup lesson. Suggest: "This exception covers a claim that a tool cannot be used, never a failure of this machine or its setup."
+
+### N12. Others
+- B4: `CHANGED` is set every 5 s read even when the facts are equal, so a visible Preload panel repaints every 5 s; set it only when the facts differ.
+- Hunks for files not owned: `src/nirvana_claude.rs` (`write_board_line` via `edit_memory_file`), `src/nirvana_worker.rs` (offer_uncounted plus count after the journal write) and `p34a_knowledge.py` apply by inspection: the only other users of `offer_for`/`knowledge::offer` are the worker lines the hunk rewrites, and no older control other than `p34a_worker_offers_no_cards` names them (grepped `nirvana/controls.d`). The count placement after `if let Some(first) = first { return Ok(first); }` is right. Without the claude hunk, B5 is only half fixed (that writer still reads, edits and writes unlocked), so the two hunks must land with the merge.
+- B2: `retry_wait` traced for NaN, -1, inf, -inf, 1e30, an overflowing integer: none panics; NaN, negatives and text wait 400 ms, huge values cap at deadline + 1 s so there is no retry. HTTP-date form still reads as unreadable (pre-existing).
+- B7, T3, T6: traced and tested; the Stop hook widens when the 128 KB chunk holds no reading or the context is at a line.

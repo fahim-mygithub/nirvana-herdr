@@ -253,7 +253,16 @@ struct Lock(PathBuf);
 
 impl Lock {
     fn take(root: &Path) -> std::io::Result<Lock> {
-        let path = root.join(BOARD_DIR).join(LOCK_FILE);
+        Lock::take_at(&root.join(BOARD_DIR).join(LOCK_FILE))
+    }
+
+    fn take_at(path: &Path) -> std::io::Result<Lock> {
+        Lock::take_within(path, LOCK_WAIT)
+    }
+
+    /// `take_at` waiting at most `wait` (plan 40d N9: the session-start path waits about a second, not three).
+    fn take_within(path: &Path, wait: Duration) -> std::io::Result<Lock> {
+        let path = path.to_path_buf();
         std::fs::create_dir_all(path.parent().expect("a parent"))?;
         let started = Instant::now();
         loop {
@@ -273,13 +282,22 @@ impl Lock {
                         let _ = std::fs::remove_file(&path);
                         continue;
                     }
-                    if started.elapsed() > LOCK_WAIT {
+                    if started.elapsed() > wait {
                         return Err(std::io::Error::other(format!(
                             "another writer holds {}",
                             path.display()
                         )));
                     }
                     std::thread::sleep(Duration::from_millis(50));
+                }
+                // Plan 40, measured in `a_file_lock_keeps_both_writers_lines` (2 runs in 12 failed before this): on
+                // Windows a lock file the last writer just removed is "delete pending" for a moment, and creating it
+                // then is Access denied, not AlreadyExists. That is a lock being let go: wait for it like a held one.
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::PermissionDenied
+                        && started.elapsed() <= wait =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
                 }
                 Err(err) => return Err(err),
             }
@@ -380,6 +398,30 @@ fn section_text(section: &Section) -> String {
     format!("## {}{by}\n{}", section.name, section.text)
 }
 
+/// The most of the board a session's first notice prints whole. Plan 40 T1: the first prompt of every session (and
+/// of every `/clear`) printed the whole board, uncapped, so a 20 KB board cost about 5k tokens per session per
+/// agent. Over this, the first notice is each section's name and first line, the size, and the command that reads
+/// the rest. The fresh start's note (`nirvana_fresh`, `NOTE_SECTIONS`) already listed only names and first lines
+/// before plan 40 and was not changed by it (plan 40d N10). A section whose use is past its first line (a server's
+/// port and command) is now seen only through `board read`. A hypothesis: about 400 tokens.
+pub const FIRST_NOTICE_WHOLE_CHARS: usize = 1_200;
+/// A section's first line in a capped notice is cut to this.
+const FIRST_LINE_CHARS: usize = 160;
+
+fn first_line(text: &str) -> String {
+    let line = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    if line.chars().count() > FIRST_LINE_CHARS {
+        let cut: String = line.chars().take(FIRST_LINE_CHARS).collect();
+        format!("{cut}...")
+    } else {
+        line.to_owned()
+    }
+}
+
 /// What a session is told on its next prompt. `seen` is what it saw last; `None` is its first prompt. `None`
 /// back means print nothing: the board has not changed for it.
 pub fn notice(board: &Board, seen: Option<&Board>, exe: &Path) -> Option<String> {
@@ -388,11 +430,32 @@ pub fn notice(board: &Board, seen: Option<&Board>, exe: &Path) -> Option<String>
             "The shared board is empty so far.".to_owned()
         } else {
             let sections: Vec<_> = board.sections.iter().map(section_text).collect();
-            format!(
-                "Shared board, revision {}:\n{}",
-                board.revision,
-                sections.join("\n")
-            )
+            let whole = sections.join("\n");
+            let size = whole.chars().count();
+            if size <= FIRST_NOTICE_WHOLE_CHARS {
+                format!("Shared board, revision {}:\n{whole}", board.revision)
+            } else {
+                let heads: Vec<String> = board
+                    .sections
+                    .iter()
+                    .map(|section| {
+                        let by = if section.by.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" (by {})", section.by)
+                        };
+                        format!("## {}{by}: {}", section.name, first_line(&section.text))
+                    })
+                    .collect();
+                format!(
+                    "Shared board, revision {}: {} sections, {size} characters. Each section's first line is below; \
+                     {} board read prints all of it.\n{}",
+                    board.revision,
+                    board.sections.len(),
+                    exe_line(exe),
+                    heads.join("\n")
+                )
+            }
         };
         out.push('\n');
         out.push_str(&footer(exe));
@@ -551,9 +614,9 @@ pub fn set_shared(local: &mut Value, exe: &Path, on: bool) {
 
 /// Switches the hook in a folder's local settings: the file Preload's switches use.
 pub fn share(cwd: &Path, on: bool) -> Result<(), String> {
-    let mut local = crate::nirvana_preload::read_local(cwd)?;
-    set_shared(&mut local, &exe(), on);
-    crate::nirvana_preload::write_local(cwd, &local)?;
+    // Plan 40 B6: through the one read-check-write, so a grant Claude Code wrote meanwhile is not lost.
+    let exe = exe();
+    crate::nirvana_preload::update_local(cwd, &|local| set_shared(local, &exe, on))?;
     forget(cwd);
     Ok(())
 }
@@ -790,6 +853,177 @@ fn run_notice(input: &str) {
         println!("{text}");
     }
     remember(session, &board);
+    // Plan 40 D1: one file per session, never removed. A new session is the time to sweep, once.
+    if seen.is_none() {
+        if let Some(dir) = seen_path(session).and_then(|p| p.parent().map(Path::to_path_buf)) {
+            prune_dir(&dir, 0, PRUNE_AFTER, SystemTime::now());
+        }
+    }
+}
+
+// ---- pruning the files that only grow (plan 40 D1) ---------------------------------------------------
+
+/// Per-session files and log lines older than this are removed when their module next writes there.
+pub const PRUNE_AFTER: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// Deletes the files of `oldest_first` older than `max_age`, but never the newest `keep_newest` of them. A file
+/// whose time cannot be read is kept. Returns how many went.
+pub fn prune_old_files(
+    oldest_first: Vec<PathBuf>,
+    keep_newest: usize,
+    max_age: Duration,
+    now: SystemTime,
+) -> usize {
+    let candidates = oldest_first.len().saturating_sub(keep_newest);
+    let mut gone = 0;
+    for path in oldest_first.into_iter().take(candidates) {
+        let old = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > max_age);
+        if old && std::fs::remove_file(&path).is_ok() {
+            gone += 1;
+        }
+    }
+    gone
+}
+
+/// `prune_old_files` over the plain files of one folder, oldest first by their write time.
+pub fn prune_dir(dir: &Path, keep_newest: usize, max_age: Duration, now: SystemTime) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut files: Vec<(SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter_map(|entry| {
+            let modified = entry.metadata().and_then(|meta| meta.modified()).ok()?;
+            Some((modified, entry.path()))
+        })
+        .collect();
+    files.sort();
+    prune_old_files(
+        files.into_iter().map(|(_, path)| path).collect(),
+        keep_newest,
+        max_age,
+        now,
+    )
+}
+
+/// A log is rewritten only once its first line is this much past `max_age`, so a log in steady use is rewritten
+/// about once a day, not on every write after its first line ages out.
+const PRUNE_SLACK: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Plan 40d N4: the most lines read from a log's top for the first readable `ts`. One torn or hand-edited first line
+/// had stopped the pruning for good.
+const PRUNE_PROBE_LINES: usize = 64;
+
+/// Plan 40d N4: rewrites tried before giving up when the log keeps growing under the prune.
+const PRUNE_TRIES: usize = 3;
+
+/// A JSON line's `ts` (RFC 3339); `None` for a line with none, or no JSON.
+fn line_time(line: &str) -> Option<SystemTime> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    let ts = value.get("ts")?.as_str()?;
+    time::OffsetDateTime::parse(ts, &time::format_description::well_known::Rfc3339)
+        .ok()
+        .map(SystemTime::from)
+}
+
+/// Drops the lines of a JSON-lines log whose `ts` (RFC 3339) is older than `max_age`. It reads only the top of the
+/// log, to the first line with a readable `ts` (at most `PRUNE_PROBE_LINES`), unless that one is older than `max_age`
+/// and a day, so a log with nothing to drop costs one short read per call. A line with no readable `ts` is kept. The
+/// rewrite goes through a temporary file and a rename, and the log's size is read again just before the rename: an
+/// append from another process since the read means the rewrite starts again, so that line is not lost (`PRUNE_TRIES`).
+/// Returns how many lines went.
+///
+/// `PRUNE_AFTER` (30 days) is also the horizon of what reads these logs later: `herdr jev agree` and any audit of
+/// `jev-calls.jsonl` see at most the last month. Changing it is the owner's call.
+pub fn prune_log(path: &Path, max_age: Duration, now: SystemTime) -> usize {
+    prune_log_with(path, max_age, now, &mut || {})
+}
+
+fn prune_log_with(
+    path: &Path,
+    max_age: Duration,
+    now: SystemTime,
+    before_rename: &mut dyn FnMut(),
+) -> usize {
+    let (Some(cutoff), Some(trigger)) = (
+        now.checked_sub(max_age),
+        now.checked_sub(max_age + PRUNE_SLACK),
+    ) else {
+        return 0;
+    };
+    let first = std::fs::File::open(path).ok().and_then(|file| {
+        use std::io::BufRead;
+        std::io::BufReader::new(file)
+            .lines()
+            .take(PRUNE_PROBE_LINES)
+            .map_while(Result::ok)
+            .find_map(|line| line_time(&line))
+    });
+    if first.is_none_or(|at| at >= trigger) {
+        return 0;
+    }
+    let old = |line: &str| line_time(line).is_some_and(|at| at < cutoff);
+    prune_lines(path, &old, before_rename)
+}
+
+fn prune_lines(path: &Path, old: &dyn Fn(&str) -> bool, before_rename: &mut dyn FnMut()) -> usize {
+    for _ in 0..PRUNE_TRIES {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return 0;
+        };
+        let mut gone = 0;
+        let mut kept = String::with_capacity(text.len());
+        for line in text.lines() {
+            if old(line) {
+                gone += 1;
+            } else if !line.trim().is_empty() {
+                kept.push_str(line);
+                kept.push('\n');
+            }
+        }
+        let temp = crate::nirvana_session_record::temp_sibling(path);
+        if std::fs::write(&temp, kept).is_err() {
+            let _ = std::fs::remove_file(&temp);
+            return 0;
+        }
+        before_rename();
+        let grown = std::fs::metadata(path).map(|meta| meta.len()).ok() != Some(text.len() as u64);
+        if grown {
+            let _ = std::fs::remove_file(&temp);
+            continue;
+        }
+        if std::fs::rename(&temp, path).is_err() {
+            let _ = std::fs::remove_file(&temp);
+            return 0;
+        }
+        return gone;
+    }
+    0
+}
+
+// ---- a lock beside any file (plan 40 B5) -------------------------------------------------------------
+
+/// Holds `<file>.lock` while a read-modify-write of `file` runs; the same rules as the board's own lock.
+pub struct FileLock {
+    _lock: Lock,
+}
+
+impl FileLock {
+    pub fn take(file: &Path) -> std::io::Result<FileLock> {
+        FileLock::take_within(file, LOCK_WAIT)
+    }
+
+    /// `take`, waiting at most `wait` for a held lock before the error.
+    pub fn take_within(file: &Path, wait: Duration) -> std::io::Result<FileLock> {
+        let mut name = file.file_name().unwrap_or_default().to_os_string();
+        name.push(".lock");
+        Lock::take_within(&file.with_file_name(name), wait).map(|lock| FileLock { _lock: lock })
+    }
 }
 
 #[cfg(test)]
@@ -984,6 +1218,169 @@ mod tests {
             "{empty}"
         );
         assert_eq!(unseen(&next, Some(&board)), vec!["Server".to_owned()]);
+    }
+
+    /// Plan 40 T1: a big board's first notice is capped to each section's first line, its size and the read
+    /// command; a small board still comes whole; later notices are as they were.
+    #[test]
+    fn a_big_boards_first_notice_is_capped() {
+        let exe = Path::new(r"C:\bin\herdr.exe");
+        let mut board = Board::parse(BOARD);
+        for n in 0..12 {
+            let body = format!("first line of topic {n}\n{}", "a long note line\n".repeat(80));
+            board.set(&format!("Topic {n}"), &body, "claude", "t");
+        }
+        board.revision = 9;
+        // The notice as it was before the cap: the whole board, then the how-to.
+        let sections: Vec<_> = board.sections.iter().map(section_text).collect();
+        let whole = format!(
+            "Shared board, revision {}:\n{}\n{}",
+            board.revision,
+            sections.join("\n"),
+            footer(exe)
+        )
+        .chars()
+        .count();
+        let first = notice(&board, None, exe).expect("a first notice");
+        println!(
+            "plan 40 T1: first board notice, before {whole} chars, after {}",
+            first.chars().count()
+        );
+        assert!(first.chars().count() * 4 < whole, "{first}");
+        assert!(first.contains("14 sections"), "{first}");
+        assert!(first.contains("## Topic 3 (by claude): first line of topic 3"), "{first}");
+        assert!(!first.contains("a long note line"), "{first}");
+        assert!(first.contains("\"C:\\bin\\herdr.exe\" board read prints all"), "{first}");
+        assert!(first.contains("board write <section> --expect"), "{first}");
+        // A small board is whole, as before.
+        let small = notice(&Board::parse(BOARD), None, exe).unwrap();
+        assert!(small.contains("## Server (by codex)\nport 5173"), "{small}");
+        // A later notice still carries a changed section whole.
+        let mut next = board.clone();
+        next.set("Topic 3", "first line of topic 3\nnew second line", "codex", "t");
+        let changed = notice(&next, Some(&board), exe).unwrap();
+        assert!(changed.contains("new second line"), "{changed}");
+    }
+
+    /// Plan 40 D1: files and log lines past the age go; the newest `keep` files and fresh lines stay.
+    #[test]
+    fn old_files_and_log_lines_are_pruned() {
+        let dir = scratch("prune");
+        let now = SystemTime::now();
+        let old = now - Duration::from_secs(40 * 24 * 60 * 60);
+        let mut paths = Vec::new();
+        for n in 0..4 {
+            let path = dir.join(format!("s{n}.md"));
+            std::fs::write(&path, "x").unwrap();
+            if n < 3 {
+                std::fs::File::options()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_modified(old - Duration::from_secs(n))
+                    .unwrap();
+            }
+            paths.push(path);
+        }
+        // s3 is new; keep 1 keeps it, and the three old files go.
+        assert_eq!(prune_dir(&dir, 1, PRUNE_AFTER, now), 3);
+        assert_eq!(
+            paths.iter().map(|p| p.exists()).collect::<Vec<_>>(),
+            vec![false, false, false, true]
+        );
+        let log = dir.join("calls.jsonl");
+        let ts = |t: SystemTime| {
+            time::OffsetDateTime::from(t)
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap()
+        };
+        let text = format!(
+            "{}\n{}\nnot json\n{}\n",
+            json!({"ts": ts(old), "n": 1}),
+            json!({"ts": ts(old), "n": 2}),
+            json!({"ts": ts(now), "n": 3})
+        );
+        std::fs::write(&log, &text).unwrap();
+        assert_eq!(prune_log(&log, PRUNE_AFTER, now), 2);
+        let left = std::fs::read_to_string(&log).unwrap();
+        assert!(!left.contains("\"n\":1") && left.contains("not json") && left.contains("\"n\":3"));
+        // A log whose first line is fresh is not read past that line.
+        assert_eq!(prune_log(&log, PRUNE_AFTER, now), 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Plan 40d N4: a damaged first line no longer stops the pruning (it is kept), and a line appended between the
+    /// read and the rename is not lost: the rewrite starts again.
+    #[test]
+    fn a_damaged_head_is_pruned_past_and_a_late_append_is_kept() {
+        let dir = scratch("prune-n4");
+        let now = SystemTime::now();
+        let old = now - Duration::from_secs(40 * 24 * 60 * 60);
+        let ts = |t: SystemTime| {
+            time::OffsetDateTime::from(t)
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap()
+        };
+        let log = dir.join("calls.jsonl");
+        let text = format!(
+            "{{\"ts\":\"torn\n{}\n{}\n",
+            json!({"ts": ts(old), "n": 1}),
+            json!({"ts": ts(now), "n": 2})
+        );
+        std::fs::write(&log, &text).unwrap();
+        let late = json!({"ts": ts(now), "n": 3}).to_string();
+        let mut appended = false;
+        let gone = prune_log_with(&log, PRUNE_AFTER, now, &mut || {
+            if !appended {
+                appended = true;
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+                writeln!(file, "{late}").unwrap();
+            }
+        });
+        assert_eq!(gone, 1);
+        let left = std::fs::read_to_string(&log).unwrap();
+        assert!(left.starts_with("{\"ts\":\"torn\n"), "{left}");
+        assert!(!left.contains("\"n\":1"), "{left}");
+        assert!(left.contains("\"n\":2") && left.contains("\"n\":3"), "{left}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Plan 40 B5: the lock beside a file makes two read-modify-write loops lose nothing.
+    #[test]
+    fn a_file_lock_keeps_both_writers_lines() {
+        let dir = scratch("file-lock");
+        let file = dir.join("NIRVANA.md");
+        std::fs::write(&file, "head\n").unwrap();
+        let writers: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|who| {
+                let file = file.clone();
+                std::thread::spawn(move || {
+                    for n in 0..100 {
+                        {
+                            let _lock = FileLock::take(&file).expect("lock");
+                            let mut text = std::fs::read_to_string(&file).unwrap();
+                            text.push_str(&format!("{who}{n}\n"));
+                            crate::nirvana_seat::write_atomic(&file, text.as_bytes()).unwrap();
+                        }
+                        // Out of the lock a moment, as real writers are, so the other's 50 ms poll finds it free.
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let text = std::fs::read_to_string(&file).unwrap();
+        for who in ["a", "b"] {
+            for n in 0..100 {
+                assert!(text.lines().any(|l| l == format!("{who}{n}")), "{who}{n} lost");
+            }
+        }
+        assert!(!dir.join("NIRVANA.md.lock").exists(), "the lock goes with the writer");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -496,25 +496,25 @@ pub fn board_line_text(root: &Path) -> String {
 /// Writes the project's board line into `<home>/nirvana/NIRVANA.md`, replacing its own line and nothing else; a
 /// new file gets a short head. Written only when it changes, so a session start is no write at all.
 pub fn write_board_line(home: &Path, root: &Path) -> std::io::Result<PathBuf> {
-    let path = home.join(nirvana_seat::DIR).join(MEMORY_FILE);
-    let text = std::fs::read_to_string(&path).ok();
     let mark = format!("{BOARD_MARK}{} -->", root.display());
     let line = board_line_text(root);
-    let mut lines: Vec<String> = text
-        .as_deref()
-        .unwrap_or(MEMORY_HEAD)
-        .lines()
-        .map(str::to_owned)
-        .collect();
-    match lines.iter().position(|known| known.ends_with(&mark)) {
-        Some(at) if lines[at] == line => return Ok(path),
-        Some(at) => lines[at] = line,
-        None => lines.push(line),
-    }
-    let mut out = lines.join("\n");
-    out.push('\n');
-    nirvana_seat::write_atomic(&path, out.as_bytes())?;
-    Ok(path)
+    // Plan 40 B5, 40d N9: one lock with the other NIRVANA.md writers, taken only to change the line, and at most
+    // a second's wait on this session-start path.
+    crate::nirvana_lessons::edit_memory_file_at_start(home, |text| {
+        let mut lines: Vec<String> = text
+            .unwrap_or(MEMORY_HEAD)
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        match lines.iter().position(|known| known.ends_with(&mark)) {
+            Some(at) if lines[at] == line => return None,
+            Some(at) => lines[at] = line.clone(),
+            None => lines.push(line.clone()),
+        }
+        let mut out = lines.join("\n");
+        out.push('\n');
+        Some(out)
+    })
 }
 
 fn digest_cli() -> std::io::Result<()> {

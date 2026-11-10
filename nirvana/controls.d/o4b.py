@@ -172,14 +172,14 @@ CONTROLS = (
             "the_board_line_is_written_once_beside_the_lessons_lines", "rust"),
     # The merge of O5: NIRVANA.md's two writers each keep the other's line.
     Control("o4b_md_board_drops_lessons", CLAUDE,
-            "        None => lines.push(line),\n", "        None => lines = vec![line],\n",
+            "            None => lines.push(line.clone()),\n", "            None => lines = vec![line.clone()],\n",
             "the_board_and_lessons_lines_survive_each_others_write", "rust"),
     Control("o4b_md_lessons_drops_board", "src/nirvana_lessons.rs",
             "        None => lines.push(line),\n", "        None => lines = vec![line],\n",
             "the_board_and_lessons_lines_survive_each_others_write", "rust"),
     Control("o4b_md_lessons_no_head", "src/nirvana_lessons.rs",
-            "        .unwrap_or_else(|_| crate::nirvana_claude::MEMORY_HEAD.to_owned());",
-            "        .unwrap_or_default();",
+            "        let text = text.unwrap_or(crate::nirvana_claude::MEMORY_HEAD);",
+            "        let text = text.unwrap_or_default();",
             "the_board_and_lessons_lines_survive_each_others_write", "rust"),
     # The digest reads O5's `nirvana_retro::open` since O5 merged (O4b's copy is gone), so these sabotage it there.
     Control("o4b_proposals_any_status", "src/nirvana_retro.rs",

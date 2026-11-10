@@ -1456,25 +1456,115 @@ pub fn offer(root: &Path, cwd: &Path, class: &str) -> String {
     offer_for(root, cwd, class, None)
 }
 
+/// The line that offers lessons to a worker. Plan 40, a hypothesis: "Open one only if it fits this order" read as
+/// "open as few as you can"; the 2026-11-09 census found 12 opens in 39 offers in one project, and a lesson never
+/// opened is retired after `DECAY_AFTER` offers. The test is now the work in hand, not the order as a whole, and it
+/// still says to skip the rest.
+///
+/// Plan 40d N11, the reviewer's point: "touches what that step does" re-tested every lesson at every step. A lesson is
+/// opened when its line names the step being done, which is narrower. Still a hypothesis: watch `herdr lessons stats`.
+pub const LESSONS_OFFER_LINE: &str = "Each was checked by herdr's gate. Open a lesson when its line names the \
+step you are doing, and leave the others closed.";
+
+/// A brief's lesson section before its offers are counted: the text, and the lessons it names.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Offer {
+    pub section: String,
+    pub slugs: Vec<String>,
+}
+
+/// The order lessons are offered in, best first: the counters the decay already keeps, helped (`passed_after_opened`),
+/// then opened, then the newest.
+fn rank(a: &Entry, b: &Entry) -> std::cmp::Ordering {
+    b.counters
+        .passed_after_opened
+        .cmp(&a.counters.passed_after_opened)
+        .then_with(|| b.counters.opened.cmp(&a.counters.opened))
+        .then_with(|| b.written_at.cmp(&a.written_at))
+}
+
+/// Plan 40d N2: of the `CARDS_OFFERED` places, this many go to the newest lessons never opened. Ranked by helped and
+/// opened alone, a new lesson behind 15 that were ever opened was never offered, so it never gained `opened` and the
+/// decay (`DECAY_AFTER` offers) never judged it.
+pub const NEW_LESSON_PLACES: usize = 3;
+
+/// The first `CARDS_OFFERED` of `ranked` (best first), with `NEW_LESSON_PLACES` of them kept for the newest lessons
+/// that were never opened and did not rank in on their own. Places the new lessons do not fill go back to the ranking.
+fn keep_places_for_new(
+    ranked: Vec<(String, String)>,
+    index: &Index,
+) -> Vec<(String, String)> {
+    if ranked.len() <= CARDS_OFFERED {
+        return ranked;
+    }
+    let ranked_in = CARDS_OFFERED - NEW_LESSON_PLACES;
+    let mut new: Vec<&(String, String)> = ranked[ranked_in..]
+        .iter()
+        .filter(|(slug, _)| {
+            index
+                .lessons
+                .get(slug)
+                .is_some_and(|entry| entry.counters.opened == 0)
+        })
+        .collect();
+    new.sort_by_key(|(slug, _)| {
+        std::cmp::Reverse(index.lessons.get(slug).map_or(0, |entry| entry.written_at))
+    });
+    new.truncate(NEW_LESSON_PLACES);
+    let mut chosen: Vec<(String, String)> = ranked[..ranked_in].to_vec();
+    chosen.extend(new.into_iter().cloned());
+    for line in &ranked[ranked_in..] {
+        if chosen.len() >= CARDS_OFFERED {
+            break;
+        }
+        if !chosen.iter().any(|(slug, _)| *slug == line.0) {
+            chosen.push(line.clone());
+        }
+    }
+    chosen
+}
+
 /// The section to add to a new order's brief, and each offered lesson's `offered` counted. Empty when nothing is
 /// live for the class and profile. The files are copied into the worker's folder when it is a worktree, since
 /// claude's print-mode file tools stay inside the working folder.
+///
+/// `seat run` calls this until it takes plan 40's T5 hunk (`offer_uncounted`, then `count_offered` after the
+/// journal write); with the hunk only tests reach it. The `allow` is for that state: remove the function, or make it
+/// `cfg(test)`, once the hunk is on master.
+#[allow(dead_code)]
 pub fn offer_for(root: &Path, cwd: &Path, class: &str, profile: Option<&str>) -> String {
+    let offer = offer_uncounted(root, cwd, class, profile);
+    count_offered(root, &offer);
+    offer.section
+}
+
+/// `offer_for` without the count. Plan 40 T5: an offer was counted when the brief was built, and `seat run` can still
+/// fail after that (the journal, the snapshot), so a lesson decayed on seatings that never launched. `seat run`
+/// counts with `count_offered` once the seat is written; `offer_for` keeps the old order for any other caller.
+///
+/// Plan 40 T2: at most `CARDS_OFFERED` lessons, as knowledge cards are, ranked by `rank`, and a line naming the
+/// command that lists the rest. Before, every live lesson of the class went in, with no cap.
+pub fn offer_uncounted(root: &Path, cwd: &Path, class: &str, profile: Option<&str>) -> Offer {
     let Ok(_lock) = lock(root) else {
-        return String::new();
+        return Offer::default();
     };
-    let mut index = read_index(root);
-    let lines = lines_for(&index, class, profile);
+    let index = read_index(root);
+    let mut lines = lines_for(&index, class, profile);
     if lines.is_empty() {
-        return String::new();
+        return Offer::default();
     }
+    lines.sort_by(|(a, _), (b, _)| match (index.lessons.get(a), index.lessons.get(b)) {
+        (Some(a), Some(b)) => rank(a, b),
+        _ => std::cmp::Ordering::Equal,
+    });
+    let rest = lines.len().saturating_sub(CARDS_OFFERED);
+    let lines = keep_places_for_new(lines, &index);
     let of = profile.map_or_else(
         || format!("{class} orders"),
         |profile| format!("{class} and {profile} orders"),
     );
-    let mut section = format!(
-        "\n\n## Lessons from earlier {of}\n\nEach was checked by herdr's gate. Open one only if it fits this order.\n\n"
-    );
+    let mut section = format!("\n\n## Lessons from earlier {of}\n\n{LESSONS_OFFER_LINE}\n\n");
+    let mut slugs = Vec::new();
     for (slug, line) in &lines {
         if cwd != root {
             let from = lesson_path(root, slug);
@@ -1486,12 +1576,32 @@ pub fn offer_for(root: &Path, cwd: &Path, class: &str, profile: Option<&str>) ->
         }
         section.push_str(line);
         section.push('\n');
+        slugs.push(slug.clone());
+    }
+    if rest > 0 {
+        let profile_arg = profile.map_or_else(String::new, |p| format!(" --profile {p}"));
+        section.push_str(&format!(
+            "\n{rest} more: `herdr lessons for --class {class}{profile_arg}`\n"
+        ));
+    }
+    Offer { section, slugs }
+}
+
+/// Counts one `offered` for each lesson an `Offer` named, once the order it went into is seated (plan 40 T5).
+pub fn count_offered(root: &Path, offer: &Offer) {
+    if offer.slugs.is_empty() {
+        return;
+    }
+    let Ok(_lock) = lock(root) else {
+        return;
+    };
+    let mut index = read_index(root);
+    for slug in &offer.slugs {
         if let Some(entry) = index.lessons.get_mut(slug) {
             entry.counters.offered += 1;
         }
     }
     let _ = write_index(root, &index);
-    section
 }
 
 // ---- measured, not assumed (§3.5) ----
@@ -1741,29 +1851,94 @@ pub fn write_index_line(home: &Path, root: &Path) -> std::io::Result<PathBuf> {
         .values()
         .filter(|entry| live(&entry.counters))
         .count();
-    let path = home.join(crate::nirvana_seat::DIR).join("NIRVANA.md");
-    // A new file gets O4b's head, as its board line's writer gives it: either may write first.
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| crate::nirvana_claude::MEMORY_HEAD.to_owned());
     let mark = format!("{INDEX_MARK}{} -->", root.display());
     let line = index_line_text(root, count);
-    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
-    match lines.iter().position(|existing| existing.ends_with(&mark)) {
-        Some(at) => lines[at] = line,
-        None => lines.push(line),
+    edit_memory_file(home, |text| {
+        // A new file gets O4b's head, as its board line's writer gives it: either may write first.
+        let text = text.unwrap_or(crate::nirvana_claude::MEMORY_HEAD);
+        let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+        match lines.iter().position(|existing| existing.ends_with(&mark)) {
+            Some(at) => lines[at] = line,
+            None => lines.push(line),
+        }
+        let mut out = lines.join("\n");
+        out.push('\n');
+        Some(out)
+    })
+}
+
+/// The one read-modify-write of `<home>/nirvana/NIRVANA.md`: `edit` gets the file's text (`None`: no file) and
+/// gives the new text, or `None` to leave it. Every writer of the file goes through here.
+///
+/// Plan 40 B5: two writers (this module's lessons line, from the gate and the review; `nirvana_claude`'s board
+/// line, from the SessionStart digest) each read the file, replaced their own line and wrote it back. An atomic
+/// write stops a torn file, not a lost update: a gate in one project and a digest in another read the same text,
+/// and the later write dropped the other's line. Now a `NIRVANA.md.lock` beside it holds for the whole edit.
+pub fn edit_memory_file(
+    home: &Path,
+    edit: impl FnOnce(Option<&str>) -> Option<String>,
+) -> std::io::Result<PathBuf> {
+    let path = home.join(crate::nirvana_seat::DIR).join("NIRVANA.md");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _lock = crate::nirvana_board::FileLock::take(&path)?;
+    let text = std::fs::read_to_string(&path).ok();
+    if let Some(out) = edit(text.as_deref()) {
+        crate::nirvana_seat::write_atomic(&path, out.as_bytes())?;
+    }
+    Ok(path)
+}
+
+/// Plan 40d N9: the longest the session-start path waits on `NIRVANA.md`'s lock. Every Claude session start runs the
+/// digest hook, which writes the folder's board line; a crashed holder's lock is only taken over after 15 s.
+pub const SESSION_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// `edit_memory_file` for the session-start path (`nirvana_claude::write_board_line`): the file is read first and
+/// the lock taken only when `edit` would change it, so an unchanged line costs no lock file. A lock it cannot take
+/// within `SESSION_LOCK_WAIT` skips the edit, says so on stderr (the hook's output, which Claude Code keeps), and
+/// returns the error. `edit` runs again under the lock, on the text read then.
+///
+/// `nirvana_claude::write_board_line` reaches it once it takes plan 40d's hunk; the `allow` is for the state before.
+pub fn edit_memory_file_at_start(
+    home: &Path,
+    edit: impl Fn(Option<&str>) -> Option<String>,
+) -> std::io::Result<PathBuf> {
+    edit_memory_file_within(home, SESSION_LOCK_WAIT, edit)
+}
+
+fn edit_memory_file_within(
+    home: &Path,
+    wait: std::time::Duration,
+    edit: impl Fn(Option<&str>) -> Option<String>,
+) -> std::io::Result<PathBuf> {
+    let path = home.join(crate::nirvana_seat::DIR).join("NIRVANA.md");
+    if edit(std::fs::read_to_string(&path).ok().as_deref()).is_none() {
+        return Ok(path);
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut out = lines.join("\n");
-    out.push('\n');
-    crate::nirvana_seat::write_atomic(&path, out.as_bytes())?;
+    let _lock = match crate::nirvana_board::FileLock::take_within(&path, wait) {
+        Ok(lock) => lock,
+        Err(err) => {
+            eprintln!(
+                "herdr: {} is held by another writer ({err}); its line for this session was skipped",
+                path.display()
+            );
+            return Err(err);
+        }
+    };
+    let text = std::fs::read_to_string(&path).ok();
+    if let Some(out) = edit(text.as_deref()) {
+        crate::nirvana_seat::write_atomic(&path, out.as_bytes())?;
+    }
     Ok(path)
 }
 
 // ---- the CLI ----
 
-const USAGE: &str = "usage: herdr lessons for --class <class> [--all]   one line per lesson: its path and description
+const USAGE: &str = "usage: herdr lessons for --class <class> [--profile <p>] [--all]   one line per lesson, most helpful first
        herdr lessons list [--json]                  every lesson with its counters
        herdr lessons stats                          per origin (worker, review, merge): offered, opened, passed after
        herdr lessons import [--run <run>] [--dry-run]  keep the lessons of gated-pass orders, through the gate's checks
@@ -1784,19 +1959,29 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
     match args.first().map(String::as_str) {
         Some("for") => {
             let mut class = None;
+            let mut profile = None;
             let mut all = false;
             let mut iter = args[1..].iter();
             while let Some(arg) = iter.next() {
                 match arg.as_str() {
                     "--class" => class = iter.next().cloned(),
+                    // Plan 40 T2: the brief's "n more" line of a profiled order names its profile, so the list is
+                    // the same set the brief was cut from (`fits`).
+                    "--profile" => profile = iter.next().cloned(),
                     "--all" => all = true,
                     _ => usage_exit(),
                 }
             }
             let Some(class) = class else { usage_exit() };
             let index = read_index(&root);
-            for (slug, entry) in &index.lessons {
-                if entry.class != class {
+            let mut listed: Vec<(&String, &Entry)> = index.lessons.iter().collect();
+            listed.sort_by(|a, b| rank(a.1, b.1));
+            for (slug, entry) in listed {
+                let wanted = match profile.as_deref() {
+                    Some(_) => fits(entry, &class, profile.as_deref()),
+                    None => class == entry.class,
+                };
+                if !wanted {
                     continue;
                 }
                 let is_live = live(&entry.counters);
@@ -2160,6 +2345,193 @@ mod tests {
             },
         );
         assert!(lines_for(&index, "build.bounded", None).is_empty());
+    }
+
+    /// Plan 40 T2 and T5: a brief offers at most `CARDS_OFFERED` lessons, the most helpful first, with a line naming
+    /// the command for the rest; an uncounted offer counts nothing until `count_offered`.
+    #[test]
+    fn a_brief_offers_at_most_fifteen_lessons_ranked_and_counts_only_when_seated() {
+        let root = temp("cap");
+        let mut index = Index::default();
+        for n in 0..40u32 {
+            index.lessons.insert(
+                format!("lesson-{n:02}"),
+                Entry {
+                    name: format!("Lesson {n}"),
+                    class: "build.bounded".into(),
+                    description: format!("Lesson {n}, a line about how a build of this kind goes right"),
+                    order: "o".into(),
+                    run: "r".into(),
+                    written_at: u64::from(n),
+                    counters: Counters {
+                        offered: 1,
+                        opened: u32::from(n == 3) * 5,
+                        passed_after_opened: u32::from(n == 7) * 2,
+                    },
+                    seen: Vec::new(),
+                    profile: None,
+                    origin: Origin::Worker,
+                },
+            );
+        }
+        write_index(&root, &index).unwrap();
+        let mut uncapped = format!(
+            "\n\n## Lessons from earlier build.bounded orders\n\n{LESSONS_OFFER_LINE}\n\n"
+        );
+        for (_, line) in lines_for(&index, "build.bounded", None) {
+            uncapped.push_str(&line);
+            uncapped.push('\n');
+        }
+        let offer = offer_uncounted(&root, &root, "build.bounded", None);
+        println!(
+            "plan 40 T2: lessons in a brief of 40 live, before {} chars, after {}",
+            uncapped.chars().count(),
+            offer.section.chars().count()
+        );
+        assert_eq!(offer.slugs.len(), CARDS_OFFERED);
+        // Helped first, then opened, then the newest.
+        assert_eq!(&offer.slugs[..3], ["lesson-07", "lesson-03", "lesson-39"]);
+        assert!(
+            offer
+                .section
+                .ends_with("\n25 more: `herdr lessons for --class build.bounded`\n"),
+            "{}",
+            offer.section
+        );
+        // Nothing counted yet: a seating that fails after the brief is built costs no lesson an offer.
+        assert!(read_index(&root)
+            .lessons
+            .values()
+            .all(|entry| entry.counters.offered == 1));
+        count_offered(&root, &offer);
+        let after = read_index(&root);
+        let counted = after
+            .lessons
+            .iter()
+            .filter(|(_, entry)| entry.counters.offered == 2)
+            .count();
+        assert_eq!(counted, CARDS_OFFERED);
+        assert_eq!(after.lessons["lesson-07"].counters.offered, 2);
+        assert_eq!(after.lessons["lesson-00"].counters.offered, 1, "not offered");
+        // The wording asks for every lesson that touches the step, not one at most.
+        assert!(!offer.section.contains("Open one only if"));
+        assert!(offer
+            .section
+            .contains("Open a lesson when its line names the step you are doing"));
+    }
+
+    /// Plan 40d N2: 18 lessons that were opened outrank four new ones that never were; the cap still keeps three of its
+    /// fifteen places for the newest of the new, so the decay can judge them.
+    #[test]
+    fn the_cap_keeps_three_places_for_new_lessons() {
+        let root = temp("cap-new");
+        let mut index = Index::default();
+        let entry = |n: u32, opened: u32| Entry {
+            name: format!("Lesson {n}"),
+            class: "build.bounded".into(),
+            description: format!("Lesson {n}, a line about how a build of this kind goes right"),
+            order: "o".into(),
+            run: "r".into(),
+            written_at: u64::from(n),
+            counters: Counters {
+                offered: 1,
+                opened,
+                passed_after_opened: 0,
+            },
+            seen: Vec::new(),
+            profile: None,
+            origin: Origin::Worker,
+        };
+        for n in 0..18u32 {
+            index.lessons.insert(format!("old-{n:02}"), entry(n, 1 + n));
+        }
+        for n in 100..104u32 {
+            index.lessons.insert(format!("new-{n}"), entry(n, 0));
+        }
+        write_index(&root, &index).unwrap();
+        let offer = offer_uncounted(&root, &root, "build.bounded", None);
+        assert_eq!(offer.slugs.len(), CARDS_OFFERED);
+        let new: Vec<&str> = offer
+            .slugs
+            .iter()
+            .map(String::as_str)
+            .filter(|slug| slug.starts_with("new-"))
+            .collect();
+        assert_eq!(new, ["new-103", "new-102", "new-101"]);
+        // The other twelve are the most opened, best first.
+        assert_eq!(offer.slugs[0], "old-17");
+        assert_eq!(offer.slugs[11], "old-06");
+        assert!(offer.section.ends_with("\n7 more: `herdr lessons for --class build.bounded`\n"));
+        // Fewer new lessons than places: the ranking fills the rest.
+        let mut one_new = index.clone();
+        for n in 101..104u32 {
+            one_new.lessons.remove(&format!("new-{n}"));
+        }
+        write_index(&root, &one_new).unwrap();
+        let offer = offer_uncounted(&root, &root, "build.bounded", None);
+        assert_eq!(offer.slugs.len(), CARDS_OFFERED);
+        assert_eq!(offer.slugs[12], "new-100");
+        assert_eq!(&offer.slugs[13..], ["old-05", "old-04"]);
+    }
+
+    /// Plan 40 B5: two writers of NIRVANA.md, each adding its own lines, lose none of the other's.
+    #[test]
+    fn two_writers_of_nirvana_md_lose_no_line() {
+        let home = temp("nirvana-md-lock");
+        let writers: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|who| {
+                let home = home.clone();
+                std::thread::spawn(move || {
+                    for n in 0..100 {
+                        edit_memory_file(&home, |text| {
+                            let mut text = text.unwrap_or("# head\n").to_owned();
+                            // Widen the read-to-write window, as a slow disk would.
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                            text.push_str(&format!("{who}{n}\n"));
+                            Some(text)
+                        })
+                        .expect("written");
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let text = std::fs::read_to_string(home.join("nirvana").join("NIRVANA.md")).unwrap();
+        let lost: Vec<String> = ["a", "b"]
+            .iter()
+            .flat_map(|who| (0..100).map(move |n| format!("{who}{n}")))
+            .filter(|line| !text.lines().any(|l| l == line))
+            .collect();
+        assert!(lost.is_empty(), "lost {} lines: {lost:?}", lost.len());
+    }
+
+    /// Plan 40d N9: at session start an unchanged line takes no lock, and a lock held by another writer stops the
+    /// edit after about a second (not the 3 s the other writers wait), with nothing written.
+    #[test]
+    fn the_session_start_edit_waits_about_a_second_and_skips() {
+        let home = temp("nirvana-md-start");
+        let path = home.join("nirvana").join("NIRVANA.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "# head\nline\n").unwrap();
+        let held = crate::nirvana_board::FileLock::take(&path).unwrap();
+        let started = std::time::Instant::now();
+        assert!(edit_memory_file_at_start(&home, |_| None).is_ok());
+        assert!(started.elapsed() < std::time::Duration::from_millis(200));
+        let started = std::time::Instant::now();
+        let edit = |text: Option<&str>| Some(format!("{}new\n", text.unwrap_or("")));
+        assert!(edit_memory_file_at_start(&home, edit).is_err());
+        let took = started.elapsed();
+        println!("plan 40d N9: a held lock stopped the session-start edit after {} ms", took.as_millis());
+        assert!(took >= SESSION_LOCK_WAIT, "{took:?}");
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# head\nline\n");
+        drop(held);
+        assert!(edit_memory_file_at_start(&home, edit).is_ok());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# head\nline\nnew\n");
     }
 
     #[test]

@@ -1427,3 +1427,28 @@ fn lrs_a_question_in_the_chain_or_the_one_that_started_it_keeps_the_review() {
         "another chain's question is not this order's"
     );
 }
+
+/// Plan 40: rule 6 keeps what it refused and names its one exception, a measured dead end that was resolved.
+#[test]
+fn rule_six_keeps_a_measured_and_resolved_dead_end() {
+    let six = RULES
+        .lines()
+        .skip_while(|line| !line.starts_with("6. "))
+        .take_while(|line| !line.starts_with("7. "))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(six.contains("a claim that a tool is broken or cannot be used"), "{six}");
+    assert!(six.contains("keep nothing"), "{six}");
+    assert!(
+        six.contains(
+            "One exception: a dead end the stream shows the worker measured and then worked around in the project's \
+own code or method"
+        ),
+        "{six}"
+    );
+    // Plan 40d N11: the exception is scoped, so "python was missing, the worker used py" stays a setup failure.
+    assert!(
+        six.contains("The exception never covers a missing program, a sign-in or a path on this machine."),
+        "{six}"
+    );
+}

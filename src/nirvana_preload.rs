@@ -897,14 +897,15 @@ fn jev_items(local: &Value, cwd: &Path) -> Vec<Item> {
         switch,
         file: None,
     };
-    let (today, _) = crate::nirvana_jev::today_line();
-    let mut memory = row(
-        "Jev memory",
-        crate::nirvana_jev_memory::detail(cwd),
-        Some(crate::nirvana_jev_install::guide_tokens(cwd)),
-        Some(Switch::JevGuide),
-    );
-    memory.file = Some(crate::nirvana_jev_memory::file());
+    let facts = jev_facts(cwd, jev_facts_now, !cfg!(test));
+    let (detail, tokens, today) = match facts {
+        Some(facts) => (facts.detail, Some(facts.tokens), facts.today),
+        None => ("JEV.md: measuring".to_owned(), None, "reading".to_owned()),
+    };
+    let mut memory = row("Jev memory", detail, tokens, Some(Switch::JevGuide));
+    // The path only: `nirvana_jev_memory::file()` writes the file when it is missing, and this is the draw path.
+    // The background read below makes it.
+    memory.file = Some(crate::nirvana_jev_memory::path());
     vec![
         memory,
         row(
@@ -915,6 +916,89 @@ fn jev_items(local: &Value, cwd: &Path) -> Vec<Item> {
         ),
         row("today", today, None, None),
     ]
+}
+
+/// What the Jev rows show for a folder, read off the draw path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct JevFacts {
+    detail: String,
+    tokens: u32,
+    today: String,
+}
+
+/// The Jev rows' facts are read again after this long.
+const JEV_FACTS_TTL: Duration = Duration::from_secs(5);
+
+#[derive(Default)]
+struct JevSlot {
+    read_at: Option<Instant>,
+    facts: Option<JevFacts>,
+    reading: bool,
+}
+
+fn jev_slots() -> &'static Mutex<HashMap<PathBuf, JevSlot>> {
+    static SLOTS: OnceLock<Mutex<HashMap<PathBuf, JevSlot>>> = OnceLock::new();
+    SLOTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The facts, read in full: a `git ls-files` child and a stat per tracked file (`nirvana_jev_memory::measure`),
+/// `JEV.md` read and written when missing, and today's Jev log.
+fn jev_facts_now(cwd: &Path) -> JevFacts {
+    let _ = crate::nirvana_jev_memory::file();
+    JevFacts {
+        detail: crate::nirvana_jev_memory::detail(cwd),
+        tokens: crate::nirvana_jev_install::guide_tokens(cwd),
+        today: crate::nirvana_jev::today_line().0,
+    }
+}
+
+/// The folder's Jev facts as last read, and a read on its own thread when they are missing or older than
+/// `JEV_FACTS_TTL`. `None` until the first read lands; the window repaints then (`CHANGED`).
+///
+/// Plan 40 B4: `items` runs on the client's draw path (`client/shell/nirvana_mods.rs` `panel_items`), and the Jev
+/// rows measured the project there: a `git` child with no bounded wait and up to 100,000 stats, once a minute, a
+/// write of `JEV.md` when it was missing, and a read of the whole Jev log every 5 s. On a 100k-file repository that
+/// froze the window for seconds. `background` is false only under test, where no thread is wanted.
+fn jev_facts(cwd: &Path, compute: fn(&Path) -> JevFacts, background: bool) -> Option<JevFacts> {
+    if !background {
+        return Some(compute(cwd));
+    }
+    let mut slots = jev_slots().lock().unwrap_or_else(|e| e.into_inner());
+    let slot = slots.entry(cwd.to_path_buf()).or_default();
+    let stale = slot
+        .read_at
+        .is_none_or(|at| at.elapsed() >= JEV_FACTS_TTL);
+    if stale && !slot.reading {
+        slot.reading = true;
+        let folder = cwd.to_path_buf();
+        let spawned = crate::thread_spawn::spawn_named("nirvana-preload-jev", move || {
+            // A panic in the read must not leave `reading` set, or the rows would never be read again.
+            let facts =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compute(&folder))).ok();
+            let mut slots = jev_slots().lock().unwrap_or_else(|e| e.into_inner());
+            let slot = slots.entry(folder).or_default();
+            if land(slot, facts) {
+                CHANGED.store(true, Ordering::Release);
+            }
+        });
+        if spawned.is_err() {
+            slot.reading = false;
+            slot.read_at = Some(Instant::now());
+        }
+    }
+    slot.facts.clone()
+}
+
+/// A finished read lands in its slot. True only when the facts differ from what the slot held. Plan 40d N12: every
+/// read set `CHANGED`, so a visible Preload panel repainted every `JEV_FACTS_TTL` with nothing new on it.
+fn land(slot: &mut JevSlot, facts: Option<JevFacts>) -> bool {
+    slot.read_at = Some(Instant::now());
+    slot.reading = false;
+    if facts.is_none() || facts == slot.facts {
+        return false;
+    }
+    slot.facts = facts;
+    true
 }
 
 fn array<'a>(object: &'a mut Map<String, Value>, key: &str) -> &'a mut Vec<Value> {
@@ -1045,24 +1129,41 @@ pub fn local_settings_path(cwd: &Path) -> PathBuf {
 /// The folder's local settings; an empty object when there is no file. A file that is not JSON is an
 /// error, never replaced: it is the owner's.
 pub fn read_local(cwd: &Path) -> Result<Value, String> {
+    read_local_bytes(cwd).map(|(value, _)| value)
+}
+
+/// The local settings and the bytes they were parsed from (`None`: no file), so a writer can see whether the file
+/// changed under it.
+fn read_local_bytes(cwd: &Path) -> Result<(Value, Option<Vec<u8>>), String> {
     let path = local_settings_path(cwd);
-    match std::fs::read_to_string(&path) {
-        Ok(text) if text.trim().is_empty() => Ok(Value::Object(Map::new())),
-        Ok(text) => serde_json::from_str(text.trim_start_matches('\u{feff}'))
-            .map_err(|err| format!("{} is not JSON: {err}", path.display())),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Value::Object(Map::new())),
+    match std::fs::read(&path) {
+        Ok(bytes) => parse_local(&path, &bytes).map(|value| (value, Some(bytes))),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Ok((Value::Object(Map::new()), None))
+        }
         Err(err) => Err(format!("{}: {err}", path.display())),
     }
 }
 
-/// Writes the folder's local settings through a temporary file, so Claude never reads half a file.
+fn parse_local(path: &Path, bytes: &[u8]) -> Result<Value, String> {
+    let text = String::from_utf8_lossy(bytes);
+    match text.trim() {
+        "" => Ok(Value::Object(Map::new())),
+        _ => serde_json::from_str(text.trim_start_matches('\u{feff}'))
+            .map_err(|err| format!("{} is not JSON: {err}", path.display())),
+    }
+}
+
+/// Writes the folder's local settings through a temporary file, so Claude never reads half a file. The temporary
+/// name is this call's own (plan 40 B6: one fixed name let two panes' switches in one folder rename each other's
+/// half-written temp).
 pub fn write_local(cwd: &Path, local: &Value) -> Result<(), String> {
     let path = local_settings_path(cwd);
     let dir = path.parent().expect("a parent");
     std::fs::create_dir_all(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
     let mut text = serde_json::to_string_pretty(local).map_err(|err| err.to_string())?;
     text.push('\n');
-    let temp = dir.join(".settings.local.json.nirvana-tmp");
+    let temp = crate::nirvana_session_record::temp_sibling(&path);
     std::fs::write(&temp, text).map_err(|err| format!("{}: {err}", temp.display()))?;
     std::fs::rename(&temp, &path).map_err(|err| {
         let _ = std::fs::remove_file(&temp);
@@ -1070,11 +1171,48 @@ pub fn write_local(cwd: &Path, local: &Value) -> Result<(), String> {
     })
 }
 
+#[cfg(test)]
+type OtherWriter = Box<dyn FnMut(&Path)>;
+
+#[cfg(test)]
+thread_local! {
+    /// A test's stand-in for another writer: runs between this module's read and its check before the write.
+    static BETWEEN_READ_AND_WRITE: std::cell::RefCell<Option<OtherWriter>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Reads the folder's local settings, applies `edit`, and writes them back, unless the file changed since the read.
+///
+/// Plan 40 B6: Claude Code writes this file itself when the owner picks "always allow" for a tool. A switch that read
+/// the file before that grant wrote the grant back out. Now the file is read again just before the write; when its
+/// bytes differ from the first read the edit is applied afresh to the new file, once, and a second change in that
+/// window is an error rather than a lost grant. The window left is the one between that check and the rename.
+pub fn update_local(cwd: &Path, edit: &dyn Fn(&mut Value)) -> Result<Value, String> {
+    for _ in 0..2 {
+        let (mut local, before) = read_local_bytes(cwd)?;
+        edit(&mut local);
+        #[cfg(test)]
+        BETWEEN_READ_AND_WRITE.with_borrow_mut(|hook| {
+            if let Some(hook) = hook.as_mut() {
+                hook(cwd);
+            }
+        });
+        let now = std::fs::read(local_settings_path(cwd)).ok();
+        if now != before {
+            continue;
+        }
+        write_local(cwd, &local)?;
+        return Ok(local);
+    }
+    Err(format!(
+        "{} changed while it was being written; nothing was written, try again",
+        local_settings_path(cwd).display()
+    ))
+}
+
 /// Switches one item in the folder's settings, then reads the folder's list again.
 pub fn switch_item(cwd: &Path, switch: &Switch, on: bool) -> Result<Value, String> {
-    let mut local = read_local(cwd)?;
-    set(&mut local, switch, on);
-    write_local(cwd, &local)?;
+    let local = update_local(cwd, &|local| set(local, switch, on))?;
     // The guide reaches the agents that are not Claude Code through their own files.
     if *switch == Switch::JevGuide {
         crate::nirvana_jev_install::others(cwd, on)?;
@@ -1268,7 +1406,7 @@ pub fn refresh(cwd: &Path) {
 }
 
 /// Refreshes the folder's preset view after p or pin_on (called by P2 route_preload_key and preload_switch).
-#[allow(dead_code)]
+/// Plan 40 D2: reached from `client/shell/nirvana_mods.rs` three times, so the `allow(dead_code)` it carried is gone.
 pub fn refresh_preset(cwd: &Path) {
     let preset = crate::nirvana_preset::view(cwd);
     #[cfg(test)]
@@ -1403,7 +1541,9 @@ pub fn set_trim_error(cwd: &Path, error: String) {
     CHANGED.store(true, Ordering::Release);
 }
 
-#[allow(dead_code)]
+/// Plan 40 D2: nothing outside a test reaches this (`client/shell/tests/nirvana_mods.rs` alone calls it), so it is
+/// built for tests only rather than kept alive with `allow(dead_code)`.
+#[cfg(test)]
 pub fn refresh_trim(cwd: &Path) {
     let trim = crate::nirvana_memory_trim::status(cwd);
     #[cfg(test)]
@@ -1820,6 +1960,112 @@ mod tests {
             assert!(!is_off(&local, switch), "{switch:?}");
         }
         assert_eq!(local, before);
+    }
+
+    /// Plan 40 B6: a grant another writer (Claude Code's "always allow") puts in the file between the read and the
+    /// write survives the switch, and two changes in that window are an error, not a lost grant.
+    #[test]
+    fn a_change_between_read_and_write_is_kept() {
+        let dir = std::env::temp_dir().join(format!("nirvana-preload-b6-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".claude")).expect("temp dir");
+        let path = local_settings_path(&dir);
+        std::fs::write(&path, r#"{"permissions": {"allow": ["Bash(ls:*)"]}}"#).unwrap();
+        let mut once = true;
+        BETWEEN_READ_AND_WRITE.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move |cwd: &Path| {
+                if std::mem::take(&mut once) {
+                    std::fs::write(
+                        local_settings_path(cwd),
+                        r#"{"permissions": {"allow": ["Bash(ls:*)", "Bash(git:*)"]}}"#,
+                    )
+                    .unwrap();
+                }
+            }));
+        });
+        let local = update_local(&dir, &|local| set(local, &Switch::Hooks, false)).expect("written");
+        assert_eq!(
+            local["permissions"]["allow"],
+            json!(["Bash(ls:*)", "Bash(git:*)"]),
+            "the grant made meanwhile is kept"
+        );
+        assert_eq!(read_local(&dir).unwrap(), local);
+        // A writer that changes the file every time: nothing is written, and the call says so.
+        let mut n = 0;
+        BETWEEN_READ_AND_WRITE.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move |cwd: &Path| {
+                n += 1;
+                std::fs::write(local_settings_path(cwd), format!("{{\"n\": {n}}}")).unwrap();
+            }));
+        });
+        assert!(update_local(&dir, &|local| set(local, &Switch::Hooks, true))
+            .unwrap_err()
+            .contains("changed while it was being written"));
+        BETWEEN_READ_AND_WRITE.with_borrow_mut(|hook| *hook = None);
+        // No temporary file is left behind, and none has the old fixed name.
+        let left: Vec<String> = std::fs::read_dir(dir.join(".claude"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, vec!["settings.local.json".to_owned()], "{left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Plan 40 B4: the Jev rows' facts are read on their own thread; the draw call returns at once, empty the
+    /// first time, and the read lands for the next.
+    #[test]
+    fn the_jev_rows_never_measure_on_the_draw_path() {
+        fn slow(_cwd: &Path) -> JevFacts {
+            std::thread::sleep(Duration::from_secs(2));
+            JevFacts {
+                detail: "JEV.md: in full".into(),
+                tokens: 7,
+                today: "0 calls".into(),
+            }
+        }
+        let cwd = Path::new(r"C:\work\b4-proj");
+        let started = Instant::now();
+        let first = jev_facts(cwd, slow, true);
+        let took = started.elapsed();
+        println!("plan 40 B4: the draw call took {} ms", took.as_millis());
+        assert!(took < Duration::from_millis(500), "{took:?}");
+        assert_eq!(first, None);
+        // A second draw while the read runs starts no second read and still returns at once.
+        let again = Instant::now();
+        assert_eq!(jev_facts(cwd, slow, true), None);
+        assert!(again.elapsed() < Duration::from_millis(500));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let landed = loop {
+            if let Some(facts) = jev_facts(cwd, slow, true) {
+                break Some(facts);
+            }
+            if Instant::now() > deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert_eq!(landed.map(|f| f.tokens), Some(7));
+    }
+
+    /// Plan 40d N12: a read that finds what the rows already show asks for no repaint; a changed one does.
+    #[test]
+    fn the_jev_rows_repaint_only_when_their_facts_change() {
+        let facts = |tokens| JevFacts {
+            detail: "JEV.md: in full".into(),
+            tokens,
+            today: "0 calls".into(),
+        };
+        let mut slot = JevSlot {
+            reading: true,
+            ..JevSlot::default()
+        };
+        assert!(land(&mut slot, Some(facts(7))));
+        assert!(!slot.reading && slot.read_at.is_some());
+        assert!(!land(&mut slot, Some(facts(7))));
+        assert!(!land(&mut slot, None));
+        assert_eq!(slot.facts, Some(facts(7)));
+        assert!(land(&mut slot, Some(facts(8))));
     }
 
     #[test]

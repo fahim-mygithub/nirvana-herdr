@@ -212,27 +212,27 @@ CONTROLS = (
     # Plan 27 §2 rule 5: output_tokens is not context
     Control(
         'p27_context_leaves_output',
-        'src/nirvana_idle_compact.rs',
-        '        "cache_creation_input_tokens",\n    ];\n',
-        '        "cache_creation_input_tokens",\n        "output_tokens",\n    ];\n',
+        'src/nirvana_jev_compact.rs',
+        '            "cache_creation_input_tokens",\n        ]\n',
+        '            "cache_creation_input_tokens",\n            "output_tokens",\n        ]\n',
         'context_tokens_leave_out_output',
         'rust',
     ),
     # Plan 27 §2 rule 5: no usage field is no reading
     Control(
         'p27_context_none_without_fields',
-        'src/nirvana_idle_compact.rs',
-        '    (!read.is_empty()).then(|| read.iter().sum())\n',
-        '    Some(read.iter().sum())\n',
+        'src/nirvana_jev_compact.rs',
+        '        if total > 0 {\n',
+        '        if true {\n',
         'context_tokens_leave_out_output',
         'rust',
     ),
     # Plan 27 §2 rule 5: only an assistant line holds a turn's context
     Control(
         'p27_context_assistant_only',
-        'src/nirvana_idle_compact.rs',
-        '        if value.get("type").and_then(Value::as_str) != Some("assistant") {\n',
-        '        if false && value.get("type").and_then(Value::as_str) != Some("assistant") {\n',
+        'src/nirvana_jev_compact.rs',
+        '        if value["type"] != "assistant"\n',
+        '        if false && value["type"] != "assistant"\n',
         'last_context_tokens_reads_the_last_assistant_line',
         'rust',
     ),
@@ -240,8 +240,8 @@ CONTROLS = (
     Control(
         'p27_context_tail_widens',
         'src/nirvana_idle_compact.rs',
-        '        if found.is_some() || window >= MAX_TAIL || len <= window {\n',
-        '        if true {\n',
+        '            ContextReading::Unknown => window = (window * 4).min(MAX_TAIL),\n',
+        '            ContextReading::Unknown => return None,\n',
         'transcript_facts_come_from_a_temporary_file',
         'rust',
     ),

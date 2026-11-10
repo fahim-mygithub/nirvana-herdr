@@ -110,19 +110,52 @@ fn tail_lines(path: &Path, limit: u64) -> Vec<String> {
     lines
 }
 
-/// The context size: what the last main-thread assistant call sent. `None` when a compaction came after it.
-pub fn context_tokens(lines: &[String]) -> Option<u64> {
+/// What the newest end of a transcript says about the context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextReading {
+    /// What the last main-thread assistant call sent.
+    Tokens(u64),
+    /// A compaction is newer than any assistant call: the context is the summary, not the last reading.
+    Compacted,
+    /// Neither was found in the lines read.
+    Unknown,
+}
+
+impl ContextReading {
+    pub fn tokens(self) -> Option<u64> {
+        match self {
+            ContextReading::Tokens(n) => Some(n),
+            _ => None,
+        }
+    }
+}
+
+/// The one reading of a transcript's context, shared by this Stop hook, idle compact and the fresh start (plan 40
+/// B1), over lines newest first.
+///
+/// A compaction is Claude Code's `compact_boundary` system line or the `isCompactSummary` user line it writes after
+/// it. Plan 40 B1: idle compact read the last assistant line through a compaction and typed `/compact` again every
+/// idle stretch. This module's own fixture (newest first: boundary, then the 320k assistant line) holds no assistant
+/// line for the compaction; either line counts, so the check holds if a summary line comes alone, and an assistant
+/// line after the boundary (if a Claude Code version writes one) is newer and is read first.
+pub fn read_context<'a>(lines: impl IntoIterator<Item = &'a str>) -> ContextReading {
     for line in lines {
         if line.contains("compact_boundary") {
-            let value: Value = serde_json::from_str(line).unwrap_or(Value::Null);
+            let value: Value = serde_json::from_str(line.trim()).unwrap_or(Value::Null);
             if value["type"] == "system" && value["subtype"] == "compact_boundary" {
-                return None;
+                return ContextReading::Compacted;
+            }
+        }
+        if line.contains("isCompactSummary") {
+            let value: Value = serde_json::from_str(line.trim()).unwrap_or(Value::Null);
+            if value["type"] == "user" && value["isCompactSummary"] == true {
+                return ContextReading::Compacted;
             }
         }
         if !line.contains("\"input_tokens\"") {
             continue;
         }
-        let value: Value = serde_json::from_str(line).unwrap_or(Value::Null);
+        let value: Value = serde_json::from_str(line.trim()).unwrap_or(Value::Null);
         if value["type"] != "assistant"
             || value["isSidechain"] == true
             || value["message"]["model"] == "<synthetic>"
@@ -139,10 +172,15 @@ pub fn context_tokens(lines: &[String]) -> Option<u64> {
         .map(|k| usage[*k].as_u64().unwrap_or(0))
         .sum::<u64>();
         if total > 0 {
-            return Some(total);
+            return ContextReading::Tokens(total);
         }
     }
-    None
+    ContextReading::Unknown
+}
+
+/// The context size: what the last main-thread assistant call sent. `None` when a compaction came after it.
+pub fn context_tokens(lines: &[String]) -> Option<u64> {
+    read_context(lines.iter().map(String::as_str)).tokens()
 }
 
 fn text_of(content: &Value, requests_only: bool) -> String {
@@ -454,14 +492,42 @@ fn load(session: &str) -> Memory {
 
 fn save(session: &str, memory: &Memory) {
     if let Some(path) = memory_path(session) {
+        let new_session = !path.exists();
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
+            // Plan 40 D1: one file per session, never removed. A new session is the time to sweep, once.
+            if new_session {
+                crate::nirvana_board::prune_dir(
+                    dir,
+                    0,
+                    crate::nirvana_board::PRUNE_AFTER,
+                    std::time::SystemTime::now(),
+                );
+            }
         }
         let _ = std::fs::write(path, serde_json::to_string(memory).unwrap_or_default());
     }
 }
 
 // ---- the hook ----------------------------------------------------------------------------------------
+
+/// The transcript lines the hook works from and the context they give. Plan 40 T6: it read and split a 4 MiB tail
+/// on every Stop of every turn, and under the first line (most turns) only the newest assistant line is needed. So
+/// one 128 KB chunk first, and the full `LIMIT` only when that chunk holds no reading or the context is at a line
+/// (the Jev state needs up to four earlier requests).
+fn read_for_hook(transcript: &Path, lines: [u64; 3]) -> (Vec<String>, Option<u64>) {
+    let small = tail_lines(transcript, CHUNK);
+    let reading = read_context(small.iter().map(String::as_str));
+    match reading {
+        ContextReading::Compacted => (small, None),
+        ContextReading::Tokens(n) if level_for(n, lines).is_none() => (small, Some(n)),
+        _ => {
+            let full = tail_lines(transcript, LIMIT);
+            let tokens = context_tokens(&full);
+            (full, tokens)
+        }
+    }
+}
 
 /// The Stop hook, on the hook's JSON as `herdr jev compact` read it from stdin: prints `{"systemMessage": ...}` or
 /// nothing. Never fails the turn: every problem prints nothing. The CLI reads stdin first, since `--plugin` (plan 12
@@ -475,10 +541,10 @@ pub fn hook_input(input: &str) {
     let Some(transcript) = hook["transcript_path"].as_str().map(PathBuf::from) else {
         return;
     };
-    let lines_read = tail_lines(&transcript, LIMIT);
+    let (lines_read, tokens) = read_for_hook(&transcript, lines());
     let mut memory = load(&session);
     memory.turn += 1;
-    let Some(tokens) = context_tokens(&lines_read) else {
+    let Some(tokens) = tokens else {
         save(&session, &memory);
         return;
     };
@@ -578,6 +644,12 @@ fn append(entry: &Value) {
         use std::io::Write;
         let _ = writeln!(file, "{entry}");
     }
+    // Plan 40 D1: the log only grew; lines past 30 days go when it is next written.
+    crate::nirvana_board::prune_log(
+        &path,
+        crate::nirvana_board::PRUNE_AFTER,
+        std::time::SystemTime::now(),
+    );
 }
 
 #[cfg(test)]
@@ -619,6 +691,66 @@ mod tests {
             assistant(320_000, "x", None),
         ];
         assert_eq!(context_tokens(&compacted), None);
+    }
+
+    /// Plan 40 B1: the summary line alone marks a compaction too, so the reading holds whichever line comes first.
+    #[test]
+    fn a_compact_summary_alone_resets_the_size() {
+        let compacted = vec![
+            line(json!({"type": "user", "isCompactSummary": true, "message": {"content": "summary"}})),
+            assistant(320_000, "x", None),
+        ];
+        assert_eq!(context_tokens(&compacted), None);
+        assert_eq!(
+            read_context(compacted.iter().map(String::as_str)),
+            ContextReading::Compacted
+        );
+        // A user line that only quotes the words is not a compaction.
+        let quoted = vec![user("what is compact_boundary?"), assistant(320_000, "x", None)];
+        assert_eq!(context_tokens(&quoted), Some(320_000));
+    }
+
+    /// Plan 40 T6: under the first line the Stop hook reads one 128 KB chunk, not the 4 MiB tail; at a line, or
+    /// with no reading in the chunk, it widens.
+    #[test]
+    fn the_stop_hook_reads_a_small_tail_first() {
+        let dir = std::env::temp_dir().join(format!("nirvana-jev-compact-t6-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("session.jsonl");
+        let filler = user(&"earlier words ".repeat(40));
+        let mut text = String::new();
+        while text.len() < 5 * 1024 * 1024 {
+            text.push_str(&filler);
+            text.push('\n');
+        }
+        let mut under = text.clone();
+        under.push_str(&assistant(90_000, "done", None));
+        under.push('\n');
+        std::fs::write(&path, &under).unwrap();
+        let chars = |lines: &[String]| lines.iter().map(|l| l.chars().count()).sum::<usize>();
+        let before = chars(&tail_lines(&path, LIMIT));
+        let (small, tokens) = read_for_hook(&path, LINES);
+        let after = chars(&small);
+        println!("plan 40 T6: Stop hook transcript read, before {before} chars, after {after}");
+        assert_eq!(tokens, Some(90_000));
+        assert!(after <= CHUNK as usize, "{after}");
+        assert!(before > 3 * 1024 * 1024, "{before}");
+        // At a line, the full tail is read for the state Jev is asked about.
+        let mut over = text.clone();
+        over.push_str(&assistant(200_000, "done", None));
+        over.push('\n');
+        std::fs::write(&path, &over).unwrap();
+        let (full, tokens) = read_for_hook(&path, LINES);
+        assert_eq!(tokens, Some(200_000));
+        assert!(chars(&full) > 3 * 1024 * 1024);
+        // A last turn further back than the chunk widens and is still found.
+        let mut far = String::new();
+        far.push_str(&assistant(120_000, "old", None));
+        far.push('\n');
+        far.push_str(&text[..300 * 1024]);
+        std::fs::write(&path, &far).unwrap();
+        assert_eq!(read_for_hook(&path, LINES).1, Some(120_000));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
