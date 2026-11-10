@@ -192,11 +192,14 @@ impl Site {
     }
 
     fn chat_payload(&self, found: &Found, messages: &[Value], transcript: bool) -> Value {
+        let live = self.live(found.id());
+        let status = found.agent["agent_status"].as_str().unwrap_or("");
         json!({
             "agent": found.row(),
             "messages": messages,
             "transcript": transcript,
-            "live": self.live(found.id()),
+            "picker": picker_hint(&live, status),
+            "live": live,
         })
     }
 
@@ -328,9 +331,18 @@ impl Site {
                                         }
                                         _ => {
                                             parts.push(stream::event("agent", &row.to_string()));
+                                            let live = self.live(&id);
+                                            let status = found
+                                                .as_ref()
+                                                .and_then(|found| {
+                                                    found.agent["agent_status"].as_str()
+                                                })
+                                                .unwrap_or("");
+                                            let picker = picker_hint(&live, status);
                                             parts.push(stream::event(
                                                 "live",
-                                                &json!({ "live": self.live(&id) }).to_string(),
+                                                &json!({ "live": live, "picker": picker })
+                                                    .to_string(),
                                             ));
                                         }
                                     }
@@ -412,6 +424,23 @@ impl Site {
         }
         let id = found.id().to_string();
         let mut stopped = None;
+        // Alpha 0.68.0: a message typed into an open picker is its search and an Enter, which picks whatever matched
+        // (the owner's "1" into `/resume`, 2026-11-10). So nothing is typed, and the page is sent the picker's keys.
+        if !matches!(
+            found.agent["agent_status"].as_str().unwrap_or(""),
+            "working" | "blocked"
+        ) {
+            match self.prompt_now(&found) {
+                Ok((now, Some(_))) => {
+                    return Response::json(
+                        409,
+                        &json!({"picker": true, "error": "a picker is open on the PC: use its keys", "prompt": now}),
+                    )
+                }
+                Ok(_) => {}
+                Err(refused) => return refused,
+            }
+        }
         match found.agent["agent_status"].as_str().unwrap_or("") {
             "blocked" => {
                 return error(
@@ -606,4 +635,14 @@ impl Write for Counted<'_> {
     fn flush(&mut self) -> std::io::Result<()> {
         self.sink.flush()
     }
+}
+
+/// Alpha 0.68.0: whether the bottom of the live screen reads as a picker open on an agent that is not working, so the
+/// page offers its keys without a tap. A hint only: the keys go through `/api/prompt`'s own read (`prompt::picker`).
+fn picker_hint(live: &str, status: &str) -> bool {
+    if matches!(status, "working" | "blocked") {
+        return false;
+    }
+    let rows: Vec<String> = live.lines().map(str::to_string).collect();
+    super::prompt::picker_footer(&rows).is_some()
 }

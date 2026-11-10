@@ -292,6 +292,11 @@
         const r = await nv.postJson('/api/send', { agent: id, text, files: ready.map((p) => p.file), mode: mode || null })
           .catch(() => ({ ok: false, status: 0, data: {} }));
         if (r.status === 409 && r.data.choose) { agent.status = 'working'; drawHead(); choose((m) => send(m, skip)); return; }
+        // Alpha 0.68.0: a picker is open on the PC, and the message would be its search and an Enter. The draft stays.
+        if (r.status === 409 && r.data.picker && r.data.prompt) {
+          prompts.open(r.data.prompt, 'A picker is open on the PC, so the message was not sent. Pick here, or Esc to close it.');
+          return;
+        }
         if (!r.ok) { note.textContent = r.data.error || 'Not sent: the PC did not answer.'; return; }
         if (r.data.stopped === false) note.textContent = 'It did not stop in time, so the message waits in its queue.';
         for (const p of ready) local.push(bubble({ kind: 'file', text: p.label, sub: size(p.size) + ' · ' + p.file }));
@@ -301,6 +306,8 @@
         fitDraft();
         pending.splice(0, pending.length);
         drawPending();
+        // A slash command may open a picker on the PC (/resume, /model): its keys come up here.
+        if (text.startsWith('/')) prompts.watch();
       }
 
       attach.addEventListener('click', openAttach);
@@ -342,6 +349,7 @@
           }
           upsert(data.messages || []);
           drawLive(data.live);
+          prompts.picker(data.picker);
         },
         messages: (data) => {
           const messages = data.messages || [];
@@ -350,7 +358,7 @@
           upsert(messages);
         },
         agent: (data) => { agent = Object.assign(agent, data); drawHead(); },
-        live: (data) => drawLive(data.live),
+        live: (data) => { drawLive(data.live); prompts.picker(data.picker); },
         // Over for good: the view ends here, so EventSource does not reconnect to a 404 and overwrite the note.
         gone: (_, close) => { close(); note.textContent = 'This agent has closed on the PC.'; },
         state: (on) => { if (!on) note.textContent = 'Reconnecting to the PC…'; else if (note.textContent.startsWith('Reconnecting')) note.textContent = ''; },

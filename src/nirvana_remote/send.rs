@@ -231,7 +231,7 @@ pub fn save(
 /// keys: a `\r` submits, an `ESC` interrupts. Every C0 control but `\n` and `\t` goes (`ESC` with them, so no
 /// sequence can start), and DEL, and the C1 controls (U+0080-U+009F: U+009B is a one-character CSI to a terminal
 /// that reads C1).
-fn typed(c: char) -> bool {
+pub(crate) fn typed(c: char) -> bool {
     c == '\n' || c == '\t' || !c.is_control()
 }
 

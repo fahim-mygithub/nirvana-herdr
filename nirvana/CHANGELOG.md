@@ -3,6 +3,31 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.68.0: the phone works a picker the PC opened
+
+- **Changed:** when an agent that is not working shows a picker (Claude Code's `/resume`, `/model`, any screen whose
+  last row names a way out such as "Esc to cancel" or "Esc to exit"), the phone opens a sheet for it. The sheet shows
+  the PC's list from its top border down with the row Enter picks marked, and has ↑, ↓, Backspace, Esc and Enter. It
+  reads the PC again after each key and stays open while the owner moves. Where the picker offers a search, a search
+  box pastes the text with no Enter (`POST /api/type`, `pane.send_input` with no keys). The sheet opens by itself when
+  the live screen shows a picker, a few times after a slash command is sent, and when a message is refused because a
+  picker is open. The Answer button reads Keys and opens it again. A message sent while a picker is open is no longer
+  typed into it: the server answers 409 with the picker, and the draft stays. A blocked raw screen also takes the
+  arrows now, so an MCP form's Accept and Decline can be chosen.
+- **Because:** the owner, 2026-11-10, with a phone screenshot: "Update the mobile side of this app to address this".
+  They sent `/resume` and then "1". herdr does not mark a picker blocked (the pane read "done"), so no sheet opened.
+  The "1" went in as the picker's search with an Enter, and the PC read `No sessions match "1"`.
+- **Measured:** 2026-11-10 on a scratch herdr session (`pk1`) with Claude Code 2.1.322. The `/resume` highlight is a
+  `❯` in plain text, and its footer wraps over two rows. The search took "ses" pasted through `pane.send_input` with
+  no keys, and ignored the same letters sent as plain bytes (`pane.send_text`) or as keys. The picker's `seen` is its
+  footer's hash, so moving the highlight or typing a search keeps it. The arrows and Backspace are not spent. Enter
+  and Esc are spent for 3 s, like a menu's digit. 7 new tests and 23 controls, each red alone; 3 plan 39c controls retargeted to the
+  lines this rewrote. Full suite 4984 of 4985, the one failure the known `windows_plugin_pane` test. One probe turn went to Haiku in the scratch pane when Git Bash rewrote `/resume` into a path. Not
+  tried on the phone itself: the owner's live check. The 700 ms, 1.5 s and 3 s waits after a slash command are
+  guesses.
+- **If you remove this:** a picker opened from the phone can only be closed from the PC, and the next message sent
+  becomes its search and picks whatever matched.
+
 ## alpha 0.67.1: a server that never ran Claude leaves `herdr compact why`'s reading alone
 
 - **Changed:** the server writes its idle compact reading (`idle-compact.json` under the Nirvana home) only once it

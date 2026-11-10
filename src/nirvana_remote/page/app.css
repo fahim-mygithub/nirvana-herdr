@@ -275,6 +275,14 @@ a:hover { color: #86CBD2; }
 .pad-key { min-height: 52px; border-radius: 14px; background: var(--hover); font-size: 17px; text-align: center; }
 .pad-key.wide { font-size: 14px; }
 .prompt-note:empty { display: none; }
+/* Alpha 0.68.0: a picker's sheet. The PC's rows, the one Enter picks marked; a search box; five keys. */
+.pick-box { max-height: 36vh; }
+.pick-line { display: block; }
+.pick-line.sel { background: rgba(95, 179, 188, 0.18); color: var(--teal-ink); border-radius: 6px; }
+.pick-search-row { display: flex; gap: 8px; }
+.pick-search { flex-grow: 1; min-width: 0; height: 44px; border-radius: 12px; border: 1px solid #2A2F34; background: var(--card); color: var(--text); padding: 0 14px; font: inherit; font-size: 16px; box-sizing: border-box; }
+.pick-search-go { height: 44px; padding: 0 16px; border-radius: 12px; background: var(--teal); color: #0E1B1D; font-weight: 600; flex-shrink: 0; }
+.pick-pad { grid-template-columns: repeat(3, 1fr); }
 /* One press per prompt (review S2, S4): a key on its way, and Esc for 3 s after it went, reads as off. */
 .prompt button:disabled, .esc-button:disabled { opacity: .45; }
 /* P39d: screen 2's cards and + button, and screen 6's sheet (the prototype's, as drawn there). */

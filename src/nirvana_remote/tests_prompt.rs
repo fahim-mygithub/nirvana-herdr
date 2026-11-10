@@ -30,6 +30,17 @@ const PERMISSION_NEXT: &str = "\u{25CF} earlier output\n────────
 /// An MCP form (claude.toml `mcp_elicitation_prompt`): blocked, with no numbers, under a numbered list Claude wrote.
 const MCP_FORM: &str = "Here is the plan:\n  1. Read the file\n  2. Write the patch\n\nMCP server \"bladebro\" requests your input\n\u{276F} Accept\n  Decline\nEsc to cancel";
 
+/// Claude Code 2.1.322's `/resume` picker as `agent.read` gave it on 2026-11-10 (a scratch session, `pk1`): the
+/// conversation above, a `▔` border, the search box, one session with the `❯` highlight, and a footer wrapped over
+/// two rows.
+const RESUME: &str = "  3. Run something at the Git path.\n\u{273B} Saut\u{e9}ed for 8s \u{b7} done 12:34 AM\n\u{2594}\u{2594}\u{2594}\u{2594}\u{2594}\u{2594}\u{2594}\u{2594}\n   Resume session\n   \u{256D}\u{2500}\u{2500}\u{2500}\u{2500}\u{256E}\n   \u{2502} \u{2315} Search\u{2026}  \u{2502}\n   \u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{256F}\n     Nirvana-Herdr\n   \u{276F} (session)\n     3 weeks ago \u{b7} master \u{b7} 16.1KB\n     Ctrl+A to show all projects \u{b7} Ctrl+B to only show current branch \u{b7} Space to preview \u{b7} Ctrl+R to rename \u{b7} Type\n     to search \u{b7} Esc to cancel\n\n";
+
+/// An idle Claude: its input box and status line, no dialog.
+const IDLE: &str = "\u{25CF} Done.\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\u{276F}\u{a0}\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n  Haiku 5.5 | Ctx 73k/1.0M (7%)\n  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle)\n";
+
+/// A working Claude: its footer names Esc too, as an interrupt, which is not a way out of a picker.
+const WORKING: &str = "\u{273B} Thinking\u{2026} (esc to interrupt)\n\u{2500}\u{2500}\u{2500}\n\u{276F}\u{a0}\n\u{2500}\u{2500}\u{2500}\n  esc to interrupt\n";
+
 struct PromptHerdr {
     agents: Mutex<Vec<Value>>,
     screen: Mutex<String>,
@@ -100,7 +111,7 @@ impl Herdr for PromptHerdr {
             "agent.send_keys" if self.keys_fail.load(Ordering::SeqCst) => {
                 Err("herdr is not answering".into())
             }
-            "agent.send_keys" => Ok(json!({"type": "ok"})),
+            "agent.send_keys" | "pane.send_input" | "agent.prompt" => Ok(json!({"type": "ok"})),
             other => Err(format!("unexpected {other}")),
         }
     }
@@ -229,9 +240,10 @@ fn a_screen_that_is_not_a_claude_menu_is_shown_raw_with_every_key() {
     let form = prompt::shown(&claude, MCP_FORM);
     assert_eq!(form.menu, None);
     assert!(form.screen.contains("requests your input"));
+    // Alpha 0.68.0: and the arrows, which choose the form's Accept or Decline; Backspace is a picker's alone.
     assert_eq!(
         form.keys(),
-        vec!["1", "2", "3", "4", "5", "6", "7", "8", "9", "enter", "esc"]
+        vec!["1", "2", "3", "4", "5", "6", "7", "8", "9", "enter", "esc", "up", "down"]
     );
     // A numbered menu with no Esc footer under it is not read either.
     let no_footer = PERMISSION.replace(" Esc to cancel \u{b7} Tab to amend\n", "");
@@ -525,7 +537,8 @@ fn esc_stops_a_working_agent_and_goes_nowhere_else() {
         herdr.calls("agent.send_keys"),
         vec![json!({"target": "p1", "keys": ["esc"]})]
     );
-    // An idle agent has nothing to stop.
+    // An idle agent has nothing to stop. (Its screen is its input box: one that ends on "Esc to cancel" is a picker.)
+    herdr.set_screen(IDLE);
     let (status, answer) = press(
         running.addr,
         json!({"agent": "p6", "key": "esc", "seen": null}),
@@ -539,6 +552,7 @@ fn esc_stops_a_working_agent_and_goes_nowhere_else() {
     );
     assert_eq!(status, 409);
     // The phone saw it working and it is asking now: no key, and the page gets the prompt.
+    herdr.set_screen(PERMISSION);
     let (status, answer) = press(
         running.addr,
         json!({"agent": "p3", "key": "esc", "seen": null}),
@@ -607,6 +621,255 @@ fn a_refused_caller_gets_nothing_from_the_prompt_routes() {
     );
 }
 
+// --- Pickers (alpha 0.68.0) ------------------------------------------------------------------------------------------
+
+#[test]
+fn a_picker_reads_from_its_border_with_its_own_keys_and_a_stable_seen() {
+    let shown = prompt::picker(RESUME).expect("/resume's picker");
+    assert_eq!(shown.menu, None);
+    assert_eq!(shown.picker, Some(true), "its footer offers a search");
+    assert!(
+        shown.screen.starts_with("   Resume session"),
+        "{}",
+        shown.screen
+    );
+    assert!(
+        !shown.screen.contains("Saut"),
+        "the conversation above the border is not the picker"
+    );
+    assert!(
+        shown.screen.contains("\u{276F} (session)"),
+        "the highlight is kept"
+    );
+    assert_eq!(
+        shown.keys(),
+        vec!["enter", "esc", "up", "down", "backspace"]
+    );
+    // The highlight moving, or a search typed, is the same picker.
+    let moved = RESUME.replace("   \u{276F} (session)", "     (session)");
+    let searched = RESUME.replace("Search\u{2026}", "tempo");
+    assert_eq!(prompt::picker(&moved).unwrap().seen, shown.seen);
+    assert_eq!(prompt::picker(&searched).unwrap().seen, shown.seen);
+    // An input box, a working footer, and an "Esc to cancel" that is not the last row are not pickers.
+    assert_eq!(prompt::picker(IDLE), None);
+    assert_eq!(prompt::picker(WORKING), None);
+    assert_eq!(prompt::picker(&format!("{RESUME}{IDLE}")), None);
+    assert_eq!(
+        prompt::picker(&format!(
+            "{RESUME}  a line drawn under it
+"
+        )),
+        None,
+        "the way out must be the last row"
+    );
+    // A picker without a search: Claude's /model ("Enter to confirm · Esc to exit").
+    let model = "\u{2594}\u{2594}\u{2594}\n Select model\n \u{276F} 1. Default\n   2. Opus\n Enter to confirm \u{b7} Esc to exit\n";
+    assert_eq!(prompt::picker(model).unwrap().picker, Some(false));
+    assert_eq!(
+        prompt::search_text("tem\u{1b}[201~po\r\n\tx"),
+        "tem[201~pox",
+        "no control reaches the pane"
+    );
+}
+
+#[test]
+fn api_prompt_answers_a_picker_on_an_agent_that_is_not_working() {
+    let herdr = PromptHerdr::new();
+    herdr.set_screen(RESUME);
+    let running = serve(site(herdr.clone()));
+    let data = prompt_of(running.addr, "p6");
+    assert_eq!(data["blocked"], false);
+    assert_eq!(data["picker"], true);
+    assert_eq!(data["search"], true);
+    assert_eq!(
+        data["keys"],
+        json!(["enter", "esc", "up", "down", "backspace"])
+    );
+    assert!(data["screen"].as_str().unwrap().contains("(session)"));
+    // A working agent's screen is not read, so no picker.
+    let data = prompt_of(running.addr, "p1");
+    assert_eq!(data["picker"], Value::Null);
+    assert_eq!(herdr.calls("agent.read").len(), 1);
+    // An idle agent at its input box: nothing.
+    herdr.set_screen(IDLE);
+    assert_eq!(prompt_of(running.addr, "p6")["picker"], Value::Null);
+}
+
+#[test]
+fn a_pickers_arrows_go_every_tap_and_its_enter_once() {
+    let herdr = PromptHerdr::new();
+    herdr.set_screen(RESUME);
+    let running = serve(site(herdr.clone()));
+    let seen = prompt_of(running.addr, "p6")["seen"].clone();
+    for key in ["down", "down", "up", "backspace"] {
+        let (status, answer) = press(
+            running.addr,
+            json!({"agent": "p6", "key": key, "seen": seen}),
+        );
+        assert_eq!(status, 200, "{key}: {answer}");
+    }
+    let (status, _) = press(
+        running.addr,
+        json!({"agent": "p6", "key": "enter", "seen": seen}),
+    );
+    assert_eq!(status, 200);
+    let (status, answer) = press(
+        running.addr,
+        json!({"agent": "p6", "key": "enter", "seen": seen}),
+    );
+    assert_eq!(status, 409, "a second Enter in the window: {answer}");
+    let sent: Vec<Value> = herdr
+        .calls("agent.send_keys")
+        .into_iter()
+        .map(|call| call["keys"][0].clone())
+        .collect();
+    assert_eq!(
+        sent,
+        vec![
+            json!("down"),
+            json!("down"),
+            json!("up"),
+            json!("backspace"),
+            json!("enter")
+        ]
+    );
+    // A digit is not a picker's key: it would be typed into the search.
+    let (status, answer) = press(
+        running.addr,
+        json!({"agent": "p6", "key": "1", "seen": seen}),
+    );
+    assert_eq!(status, 400);
+    assert_eq!(answer["error"], "not one of this prompt's keys");
+    // A menu takes no arrow and a raw screen no Backspace.
+    herdr.set_screen(PERMISSION);
+    let seen = prompt_of(running.addr, "p3")["seen"].clone();
+    let (status, _) = press(
+        running.addr,
+        json!({"agent": "p3", "key": "down", "seen": seen}),
+    );
+    assert_eq!(status, 400);
+    let seen = prompt_of(running.addr, "p5")["seen"].clone();
+    let (status, _) = press(
+        running.addr,
+        json!({"agent": "p5", "key": "backspace", "seen": seen}),
+    );
+    assert_eq!(status, 400);
+}
+
+fn type_search(addr: std::net::SocketAddr, body: Value) -> (u16, Value) {
+    let (status, _, text) = post(
+        addr,
+        "/api/type",
+        "application/json",
+        body.to_string().as_bytes(),
+        OWNER,
+    );
+    (status, json_of(&text))
+}
+
+#[test]
+fn a_search_is_typed_into_the_picker_the_phone_saw_with_no_enter() {
+    let herdr = PromptHerdr::new();
+    herdr.set_screen(RESUME);
+    let running = serve(site(herdr.clone()));
+    let seen = prompt_of(running.addr, "p6")["seen"].clone();
+    let (status, answer) = type_search(
+        running.addr,
+        json!({"agent": "p6", "text": "tempo\r\n", "seen": seen}),
+    );
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        herdr.calls("pane.send_input"),
+        vec![json!({"pane_id": "p6", "text": "tempo", "keys": []})],
+        "the text alone, as a paste: no Enter"
+    );
+    // Another picker than the one seen, or none: nothing is typed.
+    let (status, answer) = type_search(
+        running.addr,
+        json!({"agent": "p6", "text": "x", "seen": "0000000000000000"}),
+    );
+    assert_eq!(status, 409);
+    assert_eq!(answer["prompt"]["picker"], true);
+    herdr.set_screen(IDLE);
+    let (status, _) = type_search(
+        running.addr,
+        json!({"agent": "p6", "text": "x", "seen": seen}),
+    );
+    assert_eq!(status, 409);
+    // A picker with no search takes none.
+    herdr.set_screen("\u{2594}\u{2594}\u{2594}\n Select model\n \u{276F} 1. Default\n Enter to confirm \u{b7} Esc to exit\n");
+    let seen = prompt_of(running.addr, "p6")["seen"].clone();
+    let (status, answer) = type_search(
+        running.addr,
+        json!({"agent": "p6", "text": "x", "seen": seen}),
+    );
+    assert_eq!(status, 400);
+    assert_eq!(answer["error"], "this picker has no search");
+    let (status, _) = type_search(
+        running.addr,
+        json!({"agent": "p6", "text": "\u{1b}\r", "seen": seen}),
+    );
+    assert_eq!(status, 400, "nothing left to type");
+    assert_eq!(herdr.calls("pane.send_input").len(), 1);
+}
+
+#[test]
+fn the_chat_says_when_its_live_screen_is_a_picker() {
+    let herdr = PromptHerdr::new();
+    herdr.set_screen(RESUME);
+    let running = serve(site(herdr.clone()));
+    let chat = |pane: &str| {
+        let (status, _, text) = get(running.addr, &format!("/api/chat?agent={pane}"), OWNER);
+        assert_eq!(status, 200, "{text}");
+        json_of(&text)
+    };
+    assert_eq!(chat("p6")["picker"], true, "idle, its screen a picker");
+    assert_eq!(
+        chat("p1")["picker"],
+        false,
+        "a working agent's footer is not read as one"
+    );
+    herdr.set_screen(IDLE);
+    assert_eq!(chat("p6")["picker"], false);
+}
+
+#[test]
+fn a_message_to_an_open_picker_is_not_typed_and_the_page_gets_its_keys() {
+    let herdr = PromptHerdr::new();
+    herdr.set_screen(RESUME);
+    let running = serve(site(herdr.clone()));
+    let (status, _, text) = post(
+        running.addr,
+        "/api/send",
+        "application/json",
+        json!({"agent": "p6", "text": "1", "files": []})
+            .to_string()
+            .as_bytes(),
+        OWNER,
+    );
+    let answer = json_of(&text);
+    assert_eq!(status, 409, "{text}");
+    assert_eq!(answer["picker"], true);
+    assert_eq!(answer["prompt"]["picker"], true);
+    assert!(
+        herdr.calls("agent.prompt").is_empty(),
+        "the owner's \"1\" is not typed into /resume"
+    );
+    // At its input box, the message goes.
+    herdr.set_screen(IDLE);
+    let (status, _, text) = post(
+        running.addr,
+        "/api/send",
+        "application/json",
+        json!({"agent": "p6", "text": "hello", "files": []})
+            .to_string()
+            .as_bytes(),
+        OWNER,
+    );
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(herdr.calls("agent.prompt").len(), 1);
+}
+
 // --- The page -------------------------------------------------------------------------------------------------------
 
 #[test]
@@ -643,4 +906,30 @@ fn the_page_has_the_prompt_sheet_and_the_esc_button() {
     assert!(chat.contains("return () => { prompts.close(); ended(); };"));
     let (_, _, css) = get(running.addr, "/app.css", OWNER);
     assert!(css.contains(".esc-button {"));
+}
+
+/// Alpha 0.68.0: the page's picker. A picker's prompt opens its own sheet with the arrows, Enter, Esc and Backspace,
+/// marks the row Enter picks, reads the PC again after each key, and types a search through `/api/type`. The chat
+/// opens it from the live hint, after a slash command, and when a message is refused for an open picker.
+#[test]
+fn the_page_has_the_picker_sheet_and_opens_it() {
+    let herdr = PromptHerdr::new();
+    let running = serve(site(herdr));
+    let (_, _, js) = get(running.addr, "/prompt.js", OWNER);
+    assert!(js.contains("if (data.picker) { showPicker(data, why); return; }"));
+    assert!(js.contains("['up', '\\u2191'], ['down', '\\u2193'], ['backspace', '\\u232B'], ['esc', 'Esc'], ['enter', 'Enter']"));
+    assert!(js.contains("class: 'pick-line' + (/^\\s*\\u276F/.test(line) ? ' sel' : '')"));
+    assert!(js.contains("if (r.ok) { pressed = true; await refresh("));
+    assert!(js.contains("if (now && now.picker) { update(now); return; }"));
+    assert!(js.contains("nv.postJson('/api/type', { agent: id, text, seen })"));
+    assert!(js.contains("if (picking && !was && !(open() && body.picker)) read();"));
+    assert!(js.contains("answer.textContent = status !== 'needs' && picking ? 'Keys' : 'Answer';"));
+    assert!(!js.contains("innerHTML"));
+    let (_, _, chat) = get(running.addr, "/chat.js", OWNER);
+    assert!(chat.contains("if (r.status === 409 && r.data.picker && r.data.prompt) {"));
+    assert!(chat.contains("if (text.startsWith('/')) prompts.watch();"));
+    assert!(chat.contains("live: (data) => { drawLive(data.live); prompts.picker(data.picker); },"));
+    assert!(chat.contains("          prompts.picker(data.picker);\n"));
+    let (_, _, css) = get(running.addr, "/app.css", OWNER);
+    assert!(css.contains(".pick-line.sel {"));
 }

@@ -24,6 +24,15 @@
 //!
 //! **Keys** come from `KEYS` only: the request names one of them and the name sent to herdr is the table's own
 //! `&'static str`, never the request's text.
+//!
+//! **Pickers** (alpha 0.68.0). The owner, 2026-11-10, sent `/resume` from the phone and then "1": the PC opened Claude
+//! Code's session picker, which herdr does not mark blocked (the pane read "done"), so no sheet opened, and the "1"
+//! went in as a search with an Enter ("No sessions match "1""). A picker is any agent's screen, not working, whose
+//! bottom rows close on a footer that names a way out (`PICKER_EXITS`: "Esc to cancel", "Esc to exit"); measured on
+//! Claude Code 2.1.322's `/resume`, whose footer wraps over two rows and whose highlight is a `❯` in plain text. The
+//! phone gets its screen from its top border down and the arrows, Enter, Esc and Backspace, and may type a search
+//! (`/api/type`, pasted, without Enter) where the footer offers one. Its `seen` is the footer's hash, so moving the
+//! highlight or typing a search is the same picker; the arrows and Backspace are not spent, Enter and Esc are.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -52,7 +61,27 @@ pub const KEYS: &[(&str, &str)] = &[
     ("9", "9"),
     ("enter", "enter"),
     ("esc", "esc"),
+    // A picker's keys (alpha 0.68.0): taken only by a picker (`Shown::takes`).
+    ("up", "up"),
+    ("down", "down"),
+    ("backspace", "backspace"),
 ];
+
+/// The keys a picker takes. The arrows and Backspace only move or edit within it, so they are pressed as often as
+/// the owner taps (`NAVIGATION`); Enter and Esc leave it, and are spent like a menu's digit.
+const PICKER_KEYS: &[&str] = &["up", "down", "enter", "esc", "backspace"];
+const NAVIGATION: &[&str] = &["up", "down", "backspace"];
+/// A footer that ends a picker: the way out. "esc to interrupt" (a working Claude) is not one.
+const PICKER_EXITS: &[&str] = &[
+    "esc to cancel",
+    "esc to exit",
+    "esc to close",
+    "esc to go back",
+];
+/// How many bottom rows a picker's footer may wrap over (`/resume`'s takes two at 120 columns).
+const FOOTER_ROWS: usize = 3;
+/// The most a typed search may be.
+pub const SEARCH_MOST: usize = 200;
 
 /// A key's body is `{"agent", "key", "seen"}`: a few dozen bytes.
 pub const KEY_MOST: u64 = 4 * 1024;
@@ -80,12 +109,21 @@ pub struct Shown {
     pub screen: String,
     /// The hash the tap carries back (`seen`).
     pub seen: String,
+    /// A picker, not a blocked prompt (`picker`): `Some(true)` when its footer offers a typed search.
+    pub picker: Option<bool>,
 }
 
 impl Shown {
     /// The keys this prompt takes: a menu's own digits and Esc, no Enter (the highlighted option can move on the
-    /// PC without the menu's text changing); a raw screen takes every key.
+    /// PC without the menu's text changing); a picker its own (`PICKER_KEYS`); a raw screen every key but Backspace
+    /// (an MCP form's Accept and Decline are chosen with the arrows).
     pub fn takes(&self, key: &str) -> bool {
+        if self.picker.is_some() {
+            return PICKER_KEYS.contains(&key);
+        }
+        if key == "backspace" {
+            return false;
+        }
         match &self.menu {
             Some(menu) => {
                 key == "esc"
@@ -119,8 +157,62 @@ impl Shown {
             "screen": if self.menu.is_some() { "" } else { self.screen.as_str() },
             "seen": self.seen,
             "keys": self.keys(),
+            "picker": self.picker.is_some(),
+            "search": self.picker == Some(true),
         })
     }
+}
+
+/// The footer of a picker at the bottom of `rows`, lowercased, its wrapped rows joined; `None` when the bottom is not
+/// one (`PICKER_EXITS`).
+pub fn picker_footer(rows: &[String]) -> Option<String> {
+    let bottom: Vec<&str> = rows
+        .iter()
+        .map(|row| row.trim())
+        .filter(|row| !row.is_empty())
+        .collect();
+    let from = bottom.len().saturating_sub(FOOTER_ROWS);
+    let footer = bottom[from..].join(" ").to_lowercase();
+    // The way out closes the footer: on its last row, so an "Esc to cancel" further up is a prompt Claude drew
+    // earlier, not one open now.
+    let last = bottom.last()?.to_lowercase();
+    PICKER_EXITS
+        .iter()
+        .any(|exit| last.contains(exit) && footer.contains(exit))
+        .then_some(footer)
+}
+
+/// The picker on `screen`, as the phone is shown it: the rows from its top border (`▔`) down, or the bottom
+/// `RAW_LINES` when it has none.
+pub fn picker(screen: &str) -> Option<Shown> {
+    let rows: Vec<String> = screen
+        .lines()
+        .map(|row| row.trim_end().to_string())
+        .collect();
+    let footer = picker_footer(&rows)?;
+    let mut bottom: Vec<&str> = rows.iter().map(String::as_str).collect();
+    while bottom.last().is_some_and(|row| row.trim().is_empty()) {
+        bottom.pop();
+    }
+    let border = |row: &&str| {
+        let row = row.trim();
+        row.chars().count() >= 3 && row.chars().all(|c| c == '\u{2594}')
+    };
+    let top = bottom
+        .iter()
+        .rposition(border)
+        .map_or(bottom.len().saturating_sub(RAW_LINES), |at| at + 1);
+    let shown: Vec<&str> = bottom[top..]
+        .iter()
+        .copied()
+        .filter(|row| !row.trim().is_empty())
+        .collect();
+    Some(Shown {
+        menu: None,
+        screen: shown.join("\n"),
+        seen: hash(&format!("picker\n{footer}")),
+        picker: Some(footer.contains("type to search")),
+    })
 }
 
 /// What each pane was last pressed with (`seen <hash>`, or `esc`), and when: one press per prompt (review S2, S4).
@@ -271,7 +363,12 @@ pub fn shown(agent: &Value, screen: &str) -> Shown {
         Some(menu) => hash(&format!("menu\n{}", whole_prompt(&rows, menu))),
         None => hash(&format!("raw\n{screen}")),
     };
-    Shown { menu, screen, seen }
+    Shown {
+        menu,
+        screen,
+        seen,
+        picker: None,
+    }
 }
 
 fn error(status: u16, why: impl Into<String>) -> Response {
@@ -303,12 +400,26 @@ impl Site {
             .map_err(|why| error(502, why))
     }
 
-    /// `{"blocked": false}`, or the prompt the phone is shown for a blocked agent.
-    fn prompt_now(&self, found: &super::live::Found) -> Result<(Value, Option<Shown>), Response> {
+    /// `{"blocked": false}`, or the prompt the phone is shown for a blocked agent, or the picker open on an agent
+    /// that is not working (`picker`).
+    pub(super) fn prompt_now(
+        &self,
+        found: &super::live::Found,
+    ) -> Result<(Value, Option<Shown>), Response> {
         let mut row = spaces::agent_row(&found.agent);
         row["space"] = json!(found.space);
-        if found.agent["agent_status"].as_str() != Some("blocked") {
+        let status = found.agent["agent_status"].as_str().unwrap_or("");
+        if status == "working" {
             return Ok((json!({"blocked": false, "agent": row}), None));
+        }
+        if status != "blocked" {
+            let Some(shown) = picker(&self.screen(found.id())?) else {
+                return Ok((json!({"blocked": false, "agent": row}), None));
+            };
+            let mut payload = shown.json();
+            payload["blocked"] = json!(false);
+            payload["agent"] = row;
+            return Ok((payload, Some(shown)));
         }
         let shown = shown(&found.agent, &self.screen(found.id())?);
         let mut payload = shown.json();
@@ -397,12 +508,14 @@ impl Site {
                 }
             }
         }
-        // One press per prompt, one Esc per stop: past every check above, so only a key that would go spends it.
+        // One press per prompt, one Esc per stop: past every check above, so only a key that would go spends it. A
+        // picker's arrows and Backspace only move within it, and go as often as they are tapped.
         let what = match body.seen.as_deref() {
             Some(seen) => format!("seen {seen}"),
             None => "esc".to_string(),
         };
-        if !self.spent.claim(found.id(), &what) {
+        let moves = now["picker"] == true && NAVIGATION.contains(&key);
+        if !moves && !self.spent.claim(found.id(), &what) {
             let why = if body.seen.is_some() {
                 SPENT
             } else {
@@ -416,9 +529,86 @@ impl Site {
         ) {
             Ok(_) => Response::json(200, &json!({"sent": key})),
             Err(why) => {
-                self.spent.release(found.id(), &what);
+                if !moves {
+                    self.spent.release(found.id(), &what);
+                }
                 error(502, why)
             }
         }
     }
+
+    /// `POST /api/type` `{"agent", "text", "seen"}`: a search typed into the picker the phone saw, with no Enter, so
+    /// the list narrows and the owner picks from it. Only a picker whose footer offers a search takes it.
+    pub(super) fn type_search(&self, request: &Request, conn: &mut Conn) -> Response {
+        let json_body = request.header("Content-Type").first().is_some_and(|kind| {
+            kind.trim()
+                .to_ascii_lowercase()
+                .starts_with("application/json")
+        });
+        if !json_body {
+            return error(415, "a search is JSON");
+        }
+        if conn.framing() == Framing::None {
+            return error(411, "a search has a length");
+        }
+        let mut body = Vec::new();
+        if let Err(why) = conn.read_body(KEY_MOST, &mut body) {
+            return error(why.status(), "the search could not be read");
+        }
+        let Ok(body) = serde_json::from_slice::<TypeBody>(&body) else {
+            return error(400, "a search is {agent, text, seen}");
+        };
+        let text = search_text(&body.text);
+        if text.is_empty() {
+            return error(400, "nothing to type");
+        }
+        let found = match self.found(&body.agent) {
+            Ok(found) => found,
+            Err(refused) => return refused,
+        };
+        let (now, shown) = match self.prompt_now(&found) {
+            Ok(read) => read,
+            Err(refused) => return refused,
+        };
+        match shown {
+            Some(shown) if shown.picker == Some(true) && shown.seen == body.seen => {}
+            Some(shown) if shown.picker.is_some() && shown.seen == body.seen => {
+                return error(400, "this picker has no search")
+            }
+            _ => {
+                return Response::json(
+                    409,
+                    &json!({"error": "the picker changed on the PC", "prompt": now}),
+                )
+            }
+        }
+        // A paste with no key after it: `pane.send_input` wraps the text in bracketed paste when the pane asked for
+        // it. Measured 2026-11-10 on `/resume`: the search took "ses" pasted this way, and ignored the same letters
+        // sent as plain bytes (`pane.send_text`) or as keys.
+        match self.herdr.call(
+            "pane.send_input",
+            json!({"pane_id": found.id(), "text": text, "keys": []}),
+        ) {
+            Ok(_) => Response::json(200, &json!({"typed": text.chars().count()})),
+            Err(why) => error(502, why),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct TypeBody {
+    agent: String,
+    text: String,
+    seen: String,
+}
+
+/// A search as typed into a picker: printable characters only, no newline or tab (either would be a key: Enter picks,
+/// Tab may move), no control or escape (`send::typed`), at most `SEARCH_MOST`.
+pub fn search_text(text: &str) -> String {
+    text.chars()
+        .filter(|&c| c != '\n' && c != '\t' && super::send::typed(c))
+        .take(SEARCH_MOST)
+        .collect::<String>()
+        .trim()
+        .to_string()
 }

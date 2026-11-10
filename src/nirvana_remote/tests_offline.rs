@@ -440,8 +440,9 @@ fn the_review_round_keeps_the_draft_and_reloads_the_new_build() {
         prompt
             .matches("nv.getJson('/api/prompt?agent=' + encodeURIComponent(id), { quiet: true }).catch(() => null);")
             .count(),
-        2,
-        "both of the prompt's reads are quiet"
+        // Alpha 0.68.0: the picker sheet's refresh is the third.
+        3,
+        "every one of the prompt's reads is quiet"
     );
     assert!(!prompt.contains("encodeURIComponent(id)).catch"));
 

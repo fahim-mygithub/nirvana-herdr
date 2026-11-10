@@ -59,9 +59,11 @@ CONTROLS = (
             T_API, "rust"),
     # Item 1: an agent that is not blocked has no prompt, and its screen is not read
     Control("p39c_blocked_only", PROMPT,
-            '        if found.agent["agent_status"].as_str() != Some("blocked") {\n',
+            '        if status != "blocked" {\n',
             "        if false {\n",
-            T_API, "rust"),
+            # Alpha 0.68.0: the old test asks only a working agent, which now returns before this line; the picker
+            # test asks an idle one at its input box, which this sabotage reads as blocked.
+            "nirvana_remote::tests_prompt::api_prompt_answers_a_picker_on_an_agent_that_is_not_working", "rust"),
     # Item 1: a menu takes no Enter (the highlight can move on the PC under the same text)
     Control("p39c_menu_no_enter", PROMPT,
             '                key == "esc"\n',
@@ -192,8 +194,8 @@ CONTROLS = (
             T_WHOLE_PROMPT, "rust"),
     # S2: a pressed seen is spent
     Control("p39c_spent_claimed", PROMPT,
-            "        if !self.spent.claim(found.id(), &what) {\n",
-            "        if body.seen.is_none() && !self.spent.claim(found.id(), &what) {\n",
+            "        if !moves && !self.spent.claim(found.id(), &what) {\n",
+            "        if !moves && body.seen.is_none() && !self.spent.claim(found.id(), &what) {\n",
             T_SPENT, "rust"),
     # S2: only the same seen is refused, the next prompt is not
     Control("p39c_spent_same_only", PROMPT,
@@ -212,8 +214,8 @@ CONTROLS = (
             T_SPENT, "rust"),
     # S4: a second Esc to the same pane is refused
     Control("p39c_esc_spent", PROMPT,
-            "        if !self.spent.claim(found.id(), &what) {\n",
-            "        if body.seen.is_some() && !self.spent.claim(found.id(), &what) {\n",
+            "        if !moves && !self.spent.claim(found.id(), &what) {\n",
+            "        if !moves && body.seen.is_some() && !self.spent.claim(found.id(), &what) {\n",
             T_ESC_SPENT, "rust"),
     # S2: the sheet's keys are off until the answer
     Control("p39c_page_hold", PROMPT_JS,

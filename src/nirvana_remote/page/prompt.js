@@ -4,8 +4,16 @@
 // server's hash of what this sheet shows: when the PC has answered or the prompt has changed, nothing is pressed and
 // the sheet says so, or shows the new prompt (prompt.rs). Esc stops a working agent, the key the PC sends.
 //
-// chat.js makes one per chat screen: nv.prompts(id, agent, say) gives { answer, esc, status(s), close() }; the two
-// buttons go in the composer row, status runs on each draw of the agent's state, close as the screen leaves.
+// chat.js makes one per chat screen: nv.prompts(id, agent, say) gives { answer, esc, status(s), picker(on), open(data,
+// why), watch(), close() }; the two buttons go in the composer row, status runs on each draw of the agent's state,
+// close as the screen leaves.
+//
+// Pickers (alpha 0.68.0). The owner, 2026-11-10, sent `/resume` and then "1": the PC opened Claude Code's session
+// picker, the phone had no way to move in it, and the "1" was typed in as a search. A picker (prompt.rs `picker`) now
+// gets its own sheet: the PC's list with the highlighted row marked, the arrows, Enter, Esc and Backspace, and a
+// search box where the picker has one. The sheet stays open while the owner moves, and reads the PC again after
+// each key. It opens by itself when the live screen shows a picker (`picker`), after a slash command (`watch`), and
+// when a message is refused because a picker is open (`open`); the Keys button opens it again.
 (function () {
   'use strict';
   const nv = window.Nirvana;
@@ -63,8 +71,102 @@
       sheetClose();
     }
 
+    // ---- A picker ----
+    const PICKER_REST = 350;
+    const PAD = [['up', '\u2191'], ['down', '\u2193'], ['backspace', '\u232B'], ['esc', 'Esc'], ['enter', 'Enter']];
+
+    // The PC's rows, the highlighted one (`\u276F`) marked so the owner sees where Enter lands.
+    function pickerRows(screen) {
+      return (screen || '').split('\n').map((line) => h('span', {
+        class: 'pick-line' + (/^\s*\u276F/.test(line) ? ' sel' : ''), text: line + '\n' }));
+    }
+
+    function showPicker(data, why) {
+      if (over) return;
+      sheetClose();
+      let seen = data.seen;
+      let busy = false;
+      nv.sheet((close) => {
+        const note = h('span', { class: 'note prompt-note', role: 'status', text: why || '' });
+        const first = (data.screen || '').split('\n').map((l) => l.trim()).find((l) => l && !/^[\u256D\u2570\u2502]/.test(l));
+        const box = h('pre', { class: 'prompt-box mono pick-box' }, ...pickerRows(data.screen));
+        const keys = PAD.map(([k, label]) => h('button', { class: 'press pad-key mono' + (label.length > 1 ? ' wide' : ''),
+          type: 'button', 'aria-label': k, text: label, onclick: () => key(k) }));
+        const search = h('input', { class: 'pick-search', type: 'search', autocomplete: 'off', enterkeyhint: 'search',
+          placeholder: 'Search the list' });
+        const searchRow = data.search ? h('div', { class: 'pick-search-row' }, search,
+          h('button', { class: 'press pick-search-go', type: 'button', text: 'Search', onclick: () => typeSearch() })) : null;
+        search.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return;
+          event.preventDefault();
+          typeSearch();
+        });
+
+        function update(now) {
+          seen = now.seen;
+          box.replaceChildren(...pickerRows(now.screen));
+          const sel = box.querySelector('.sel');
+          if (sel) sel.scrollIntoView({ block: 'nearest' });
+        }
+
+        // Read the PC again: the picker as it is now, or closed when it is gone (Enter opened what was picked).
+        async function refresh(said) {
+          await new Promise((go) => setTimeout(go, PICKER_REST));
+          if (over || !open()) return;
+          const now = await nv.getJson('/api/prompt?agent=' + encodeURIComponent(id), { quiet: true }).catch(() => null);
+          if (!open()) return;
+          if (now && now.picker) { update(now); return; }
+          if (now && now.blocked) { show(now, 'The PC asks this now.'); return; }
+          sheetClose();
+          if (said) say(said);
+        }
+
+        async function key(k) {
+          if (busy) return;
+          busy = true;
+          note.textContent = '';
+          const r = await nv.postJson('/api/key', { agent: id, key: k, seen })
+            .catch(() => ({ ok: false, status: 0, data: {} }));
+          busy = false;
+          if (r.ok) { pressed = true; await refresh(k === 'enter' ? 'Sent Enter: the PC took the pick.' : k === 'esc' ? 'Closed the picker on the PC.' : ''); return; }
+          const now = r.data.prompt;
+          if (r.status === 409 && now && now.picker) { update(now); note.textContent = 'The picker changed on the PC: tap again.'; return; }
+          if (r.status === 409 && now) { sheetClose(); say('The picker closed on the PC.'); return; }
+          note.textContent = r.data.error || 'Not sent: the PC did not answer.';
+        }
+
+        async function typeSearch() {
+          const text = search.value.trim();
+          if (!text || busy) return;
+          busy = true;
+          const r = await nv.postJson('/api/type', { agent: id, text, seen })
+            .catch(() => ({ ok: false, status: 0, data: {} }));
+          busy = false;
+          if (r.ok) { search.value = ''; note.textContent = 'Typed. Pick with the arrows and Enter.'; await refresh(''); return; }
+          const now = r.data.prompt;
+          if (r.status === 409 && now && now.picker) { update(now); note.textContent = 'The picker changed on the PC: search again.'; return; }
+          note.textContent = r.data.error || 'Not typed: the PC did not answer.';
+        }
+
+        const el = h('div', { class: 'sheet-body prompt' },
+          h('div', { class: 'prompt-head' }, h('span', { class: 'prompt-dot pulse-p' }),
+            h('span', { class: 'prompt-title', text: first || 'A picker is open on the PC' })),
+          box,
+          h('span', { class: 'prompt-sub', text: 'Move with the arrows: the marked row is the one Enter picks.' }),
+          searchRow,
+          h('div', { class: 'keypad pick-pad' }, ...keys),
+          note);
+        el.close = close;
+        el.picker = true;
+        body = el;
+        requestAnimationFrame(() => { const sel = box.querySelector('.sel'); if (sel) sel.scrollIntoView({ block: 'nearest' }); });
+        return el;
+      });
+    }
+
     function show(data, why) {
       if (over) return;
+      if (data.picker) { showPicker(data, why); return; }
       sheetClose();
       const a = agent();
       nv.sheet((close) => {
@@ -101,6 +203,15 @@
     async function read() {
       const data = await nv.getJson('/api/prompt?agent=' + encodeURIComponent(id), { quiet: true }).catch(() => null);
       if (data && data.blocked && status === 'needs') show(data);
+      else if (data && data.picker && !(open() && body.picker)) show(data);
+      return data;
+    }
+
+    // The Answer button is Keys while a picker is open and nothing is asked.
+    let picking = false;
+    function drawAnswer() {
+      answer.hidden = !(status === 'needs' || picking);
+      answer.textContent = status !== 'needs' && picking ? 'Keys' : 'Answer';
     }
 
     // Each draw of the agent's state. Into "needs you": the sheet opens with the prompt. Out of it with the sheet
@@ -109,9 +220,31 @@
       const was = status;
       status = now;
       esc.hidden = now !== 'working';
-      answer.hidden = now !== 'needs';
+      if (now === 'working') picking = false;
+      drawAnswer();
       if (now === 'needs' && was !== 'needs') { pressed = false; read(); }
-      if (now !== 'needs' && was === 'needs' && open()) { sheetClose(); if (!pressed) say('Answered on the PC.'); }
+      if (now !== 'needs' && was === 'needs' && open() && !body.picker) { sheetClose(); if (!pressed) say('Answered on the PC.'); }
+    }
+
+    // The live screen's hint (live.rs `picker_hint`). Into a picker: its sheet opens. Out of one with its sheet open:
+    // read again, which closes the sheet when the picker really is gone.
+    function pickerHint(on) {
+      const was = picking;
+      picking = !!on && status !== 'working';
+      drawAnswer();
+      if (picking && !was && !(open() && body.picker)) read();
+      if (!picking && was && open() && body.picker) read().then((data) => { if (!data || !data.picker) sheetClose(); });
+    }
+
+    // After a slash command: the PC may open a picker the stream does not tell of (its status need not change), so
+    // the page asks a few times.
+    async function watch() {
+      for (const wait of [700, 1500, 3000]) {
+        await new Promise((go) => setTimeout(go, wait));
+        if (over || (open() && body.picker)) return;
+        const data = await read();
+        if (data && (data.picker || data.blocked)) { picking = !!data.picker; drawAnswer(); return; }
+      }
     }
 
     answer.addEventListener('click', read);
@@ -129,6 +262,10 @@
       say(r.data.error || 'Not sent: the PC did not answer.');
     });
 
-    return { answer, esc, status: draw, close() { over = true; sheetClose(); } };
+    return {
+      answer, esc, status: draw, picker: pickerHint, watch,
+      open(data, why) { picking = !!data.picker; drawAnswer(); show(data, why); },
+      close() { over = true; sheetClose(); },
+    };
   };
 })();

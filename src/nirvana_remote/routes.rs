@@ -400,6 +400,8 @@ impl Site {
                 "/api/upload" => return self.upload(request, conn),
                 // P39c: one key to the prompt the phone saw, or Esc (prompt.rs).
                 "/api/key" => return self.key(request, conn),
+                // Alpha 0.68.0: a search typed into the picker the phone saw, with no Enter (prompt.rs).
+                "/api/type" => return self.type_search(request, conn),
                 _ => {}
             }
         }
