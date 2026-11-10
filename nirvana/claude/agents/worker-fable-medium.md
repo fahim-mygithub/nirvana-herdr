@@ -1,6 +1,6 @@
 ---
 name: worker-fable-medium
-description: Nirvana worker on the fable seat at medium effort (Fable 5.2 at medium, the max pool and its own Fable week). A booking comes first: herdr seat pick --book <order>, which refuses Fable unless the Fable week was read fresh and keeps its reserve. For a short order that needs no pane: a plan or a review that wants Fable's judgment at an everyday effort. The brief starts with Class, Order and Run lines.
+description: Nirvana worker on the fable seat at medium effort (Fable 5.2 at medium, the max pool and its own Fable week). A booking comes first: herdr seat pick --book <order>, which refuses Fable unless the Fable week was read fresh and keeps its reserve. That check runs at the booking, not at this spawn: book the order just before you spawn it. For a short order that needs no pane: a plan or a review that wants Fable's judgment at an everyday effort. The brief starts with Class, Order and Run lines.
 model: claude-fable-5-2
 effort: medium
 tools: Read, Grep, Glob, Bash, Edit, Write

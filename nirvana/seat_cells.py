@@ -2,13 +2,19 @@
 
 CLAUDE.md rule 4: a count in prose rots, so the numbers live here. Every cell of a `max` seat is
 
-    P4's tokens x the seat's price row in force on the cell's `at` date x the effort's multiplier x per_usd[window]
+    P4's tokens x the seat's price row in force on the cell's `at` date x the effort's multiplier x fit x per_usd[window]
 
 P4 is probe P4's order (one `slugify` function and its tests): 43,807 cache reads and 1,286 output tokens, measured on
 sonnet medium (plan 12 §15). The effort multipliers are the table's priors (low x0.6, high x1.6, xhigh x2.5 of medium).
-`per_usd` is the pool's: `5h` a prior, `week` derived from the week of 2026-10-16, `week.fable` derived from the
-published 50% rule (twice the week's factor). Review M3 found the week cells 6.4 times too high: they were still on the
-old $200 week factor 0.005 after plan 14 moved `per_usd.week` to 0.00078.
+`per_usd` is the pool's: `week` derived from the week of 2026-10-16, `5h` and `week.fable` each measured once on
+2026-11-09 (the pool's basis). Review M3 found the week cells 6.4 times too high: they were still on the old $200 week
+factor 0.005 after plan 14 moved `per_usd.week` to 0.00078.
+
+`fit` is the record's word on P4 (the review round, Part 2 item 4): `nirvana/seat_fit.py` prints, per seat and effort,
+the median of what medium orders spent against the cell, and a cell outside 0.5 to 2.0 at n of 5 or more carries that
+ratio as `fit x<ratio> (<source>)` in its basis. A cell without a fit of its own takes its seat's medium fit, so an
+effort's cell never falls under a cheaper effort's for want of a measurement. The fit lives in the toml's basis, the one
+place the number is written; this script reads it from there and writes it back.
 
     python nirvana/seat_cells.py           # print the cells as toml rows
     python nirvana/seat_cells.py --check   # exit 1 when a cell in the toml differs from the computed one
@@ -16,6 +22,7 @@ old $200 week factor 0.005 after plan 14 moved `per_usd.week` to 0.00078.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -30,6 +37,21 @@ EFFORT = {"low": 0.6, "medium": 1.0, "high": 1.6, "xhigh": 2.5}
 POOL = "max"
 # Relative slack for --check: the toml holds four significant digits.
 SLACK = 1e-3
+
+
+FIT = re.compile(r"fit x([0-9.]+) \(([^)]*)\)")
+
+
+def fit_of(seat: dict, effort: str) -> tuple[float, str]:
+    """The cell's own fit, else its seat's medium fit marked as taken from medium, else (1.0, "")."""
+    cells = {cell["effort"]: cell for cell in seat.get("use", [])}
+    own = FIT.search(cells.get(effort, {}).get("basis", ""))
+    if own and own.group(2) != "medium's":
+        return float(own.group(1)), own.group(2)
+    medium = FIT.search(cells.get("medium", {}).get("basis", ""))
+    if medium and effort != "medium":
+        return float(medium.group(1)), "medium's"
+    return 1.0, ""
 
 
 def sig4(value: float) -> float:
@@ -58,18 +80,21 @@ def cells(table: dict, day: str | None = None):
         usd = cost(price_at(seat, at))
         windows = list(pool["windows"]) + list(seat.get("extra_windows", []))
         for effort in seat["efforts"]:
-            mult = EFFORT[effort]
+            mult = EFFORT[effort] * fit_of(seat, effort)[0]
             yield seat["id"], effort, at, usd, {w: sig4(usd * mult * pool["per_usd"][w]) for w in windows}
 
 
-def row(seat: str, effort: str, at: str, usd: float, windows: dict) -> str:
+def row(seat: dict, effort: str, at: str, usd: float, windows: dict) -> str:
     inner = ", ".join(f'"{w}" = {v}' if not w.isalnum() or w[0].isdigit() else f"{w} = {v}"
                       for w, v in windows.items())
+    fit, source = fit_of(seat, effort)
+    fitted = f", fit x{fit:g} ({source})" if source else ""
+    name = seat["id"]
     if effort == "medium":
-        basis = (f"derived: P4's 43,807 cache reads and 1,286 out at {seat}'s {at} prices, ${usd:.4f}, "
+        basis = (f"derived: P4's 43,807 cache reads and 1,286 out at {name}'s {at} prices, ${usd:.4f}{fitted}, "
                  "times per_usd (nirvana/seat_cells.py)")
     else:
-        basis = f"prior: medium x {EFFORT[effort]} (nirvana/seat_cells.py)"
+        basis = f"prior: medium x {EFFORT[effort]}{fitted} (nirvana/seat_cells.py)"
     return f'  {{ effort = "{effort}", windows = {{ {inner} }}, at = "{at}", basis = "{basis}" }},'
 
 
@@ -107,11 +132,12 @@ def main() -> int:
         print(f"seat_cells --check: {'FAIL' if wrong else 'ok'}, {len(wrong)} cell(s) differ")
         return 1 if wrong else 0
     last = None
+    seats = {seat["id"]: seat for seat in table["seat"]}
     for seat, effort, at, usd, windows in cells(table):
         if seat != last:
             print(f"# {seat}")
             last = seat
-        print(row(seat, effort, at, usd, windows))
+        print(row(seats[seat], effort, at, usd, windows))
     return 0
 
 

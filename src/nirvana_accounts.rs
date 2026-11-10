@@ -206,6 +206,11 @@ pub const AGY_LOG_SETTLING: Duration = Duration::from_secs(30);
 /// for up to eight starts (about 32 minutes at the foot's 240 s), or forever with no window open. A newest log younger
 /// than `AGY_LOG_SETTLING` with no line yet is a start still writing and is passed over, once; the one before it must
 /// then name the sign-in. `now` is the caller's clock, so a test can age a log.
+///
+/// The age is the log's creation time, never its modification time (package review a, S3): a running agy appends to
+/// its log, so a signed-out start kept its mtime under 30 s for as long as its window was open, and the gate passed
+/// over it forever and read the account from the start before. A file system that keeps no creation time reads as
+/// old: the gate then says signed out, which is the safe side.
 pub fn agy_gate_account_in(dir: &Path, now: SystemTime) -> Option<String> {
     let mut logs: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
@@ -224,7 +229,7 @@ pub fn agy_gate_account_in(dir: &Path, now: SystemTime) -> Option<String> {
         return Some(account);
     }
     let settling = std::fs::metadata(first)
-        .and_then(|meta| meta.modified())
+        .and_then(|meta| meta.created())
         .ok()
         .and_then(|at| now.duration_since(at).ok())
         .is_some_and(|age| age < AGY_LOG_SETTLING);
@@ -857,6 +862,22 @@ mod tests {
         assert_eq!(
             agy_gate_account_in(&dir, SystemTime::now()).as_deref(),
             Some("me@example.com")
+        );
+        // Package review a, S3: a signed-out agy still running keeps writing its log. Its mtime stays young; its
+        // creation time does not, so an hour on it is signed out though the file was written five seconds ago.
+        let running = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("cli-20261109_130000.log"))
+            .unwrap();
+        std::io::Write::write_all(&mut &running, b"I1109 still running\n").unwrap();
+        running
+            .set_modified(later - Duration::from_secs(5))
+            .unwrap();
+        drop(running);
+        assert_eq!(
+            agy_gate_account_in(&dir, later),
+            None,
+            "a running signed-out agy keeps the gate open"
         );
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(agy_gate_account_in(&dir, later), None);

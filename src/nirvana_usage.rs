@@ -509,6 +509,11 @@ fn claude_used(rest: &str) -> Option<f32> {
 /// Claude Code's `/usage` text. "Current session" is the 5 h window, "Current week (all models)" the week,
 /// and any other "Current week (X)" a week scoped to X, `week.x`: today "(Fable)", which spends the all-models
 /// week with a 50% allowance (P6). Text with neither of the first two (signed out, an error) is no reading.
+///
+/// The Fable line's percent is a share of Fable's own allowance, not of the whole week (package review a, N5): the
+/// `CLAUDE_TEXT` fixture below, a real `/usage` answer, reads Fable 83% while all models read 70%. Fable's spend is
+/// inside the all-models week, so a share of the whole week could never pass it. `week.fable` at 100% is therefore
+/// the line where `claude -p` starts billing Fable to usage credits, and `fable_reserve` is a share of that allowance.
 pub fn claude_readings(text: &str, read_at: u64) -> Option<Vec<Reading>> {
     let mut readings: Vec<Reading> = Vec::new();
     for line in text.lines().map(str::trim) {

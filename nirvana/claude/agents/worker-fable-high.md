@@ -1,6 +1,6 @@
 ---
 name: worker-fable-high
-description: Nirvana worker on the fable seat at high effort (Fable 5.2 at high, the max pool and its own Fable week). A booking comes first: herdr seat pick --book <order>, which refuses Fable unless the Fable week was read fresh and keeps its reserve. For a short order that needs no pane: the hardest plan, build or review an order names Fable for: a load-bearing change, an adversary review, a root cause the others missed. The brief starts with Class, Order and Run lines.
+description: Nirvana worker on the fable seat at high effort (Fable 5.2 at high, the max pool and its own Fable week). A booking comes first: herdr seat pick --book <order>, which refuses Fable unless the Fable week was read fresh and keeps its reserve. That check runs at the booking, not at this spawn: book the order just before you spawn it. For a short order that needs no pane: the hardest plan, build or review an order names Fable for: a load-bearing change, an adversary review, a root cause the others missed. The brief starts with Class, Order and Run lines.
 model: claude-fable-5-2
 effort: high
 tools: Read, Grep, Glob, Bash, Edit, Write

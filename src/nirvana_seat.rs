@@ -297,9 +297,10 @@ fn default_subagent_default() -> String {
     "sonnet".to_owned()
 }
 
-/// Plan 40a's `autocompact_tokens` when a table written before it leaves the line out.
+/// Plan 40a's `autocompact_tokens` when a table written before it leaves the line out: 0, no flag. The review round
+/// measured that Claude Code already compacts far below a 400k cap (the toml's comment), so the flag changed nothing.
 fn default_autocompact_tokens() -> u64 {
-    400_000
+    0
 }
 
 /// Plan 14 §2.2's `spare_weight` when a table written before it leaves the line out.
@@ -1864,19 +1865,16 @@ fn evaluate(
             }
             None => override_target.trim(),
         };
-        #[allow(clippy::collapsible_if)]
-        // preserves the target line of the seat_override_cap control
-        if !request.inherited_override {
-            if world.overrides_used >= constants.overrides_per_run {
-                return Err(fail(
-                    format!(
-                        "override {override_target} refused: {} of {} overrides already taken in this run; more is the owner's call",
-                        world.overrides_used, constants.overrides_per_run
-                    ),
-                    &candidates,
-                    false,
-                ));
-            }
+        // Review a, N9: one condition, no longer nested under a clippy allow that only kept an old control's find text.
+        if !request.inherited_override && world.overrides_used >= constants.overrides_per_run {
+            return Err(fail(
+                format!(
+                    "override {override_target} refused: {} of {} overrides already taken in this run; more is the owner's call",
+                    world.overrides_used, constants.overrides_per_run
+                ),
+                &candidates,
+                false,
+            ));
         }
         let Some(cand) = candidates
             .iter()
@@ -2426,6 +2424,125 @@ fn scoped_skip(table: &Table, world: &World, seat: &Seat, windows: &[WindowState
         }
     }
     None
+}
+
+/// Plan 40a fix S1: may `seat` spend its own scoped windows right now, for `order` at `effort`? `scoped_skip` ran only
+/// in `candidate`, so only on a fresh pick, and a live lease was reused by `pick --book` and `seat run` without it: a
+/// Fable booking made at 40% used was started at 95%, or after its reading went stale, and `claude -p` bills past the
+/// week without asking (package review a, S1). This asks the same question on `world` as it is now, with the order's
+/// own booking taken out of `booked`. A seat with no scoped window is never refused here, and its usage is not read.
+/// A seat turned off since its booking is refused too: the owner took it away.
+pub fn may_spend_now(
+    table: &Table,
+    world: &World,
+    seat_id: &str,
+    effort: Effort,
+    class_id: &str,
+    size: SizeName,
+    order: &str,
+) -> Result<(), String> {
+    let Some(seat) = table.seat(seat_id) else {
+        return Ok(());
+    };
+    if seat.extra_windows.is_empty() {
+        return Ok(());
+    }
+    if !seat.enabled {
+        return Err(format!("{}: off in seats.toml", seat.id));
+    }
+    let Some(class) = table.class(class_id) else {
+        return Err(format!("{}: no class {class_id} in seats.toml", seat.id));
+    };
+    let mut request = Request::new(class_id);
+    request.size = size;
+    request.order = Some(order.to_owned());
+    let mut cand = Candidate {
+        index: 0,
+        in_class: true,
+        effort: Some(effort),
+        effort_note: None,
+        score: 0.0,
+        record_note: None,
+        use_basis: None,
+        windows: Vec::new(),
+        skip: None,
+        stepped: false,
+    };
+    populate_windows(
+        table,
+        world,
+        &request,
+        class,
+        table.size(size),
+        seat,
+        &mut cand,
+        effort,
+    );
+    match scoped_skip(table, world, seat, &cand.windows) {
+        Some(skip) => Err(format!("{}: {}", seat.id, skip.why)),
+        None => Ok(()),
+    }
+}
+
+/// A booking's size from its stored pick. A pick that does not say reads as large: the largest expected use, so the
+/// reserve check errs toward refusing.
+pub fn lease_size(lease: &Lease) -> SizeName {
+    lease
+        .pick
+        .get("size")
+        .and_then(|size| serde_json::from_value(size.clone()).ok())
+        .unwrap_or(SizeName::Large)
+}
+
+/// What a refused spend says: what to do first, then why (the RULES.md style).
+pub fn spend_refused(order: &str, why: &str) -> String {
+    format!(
+        "Book {order} again with `herdr seat pick --book {order}`. Its booking was released and nothing was started. \
+         {why}"
+    )
+}
+
+/// `may_spend_now` at the moment a worker starts, from the live world and the live bookings. On a refusal the order's
+/// lease is released under `leases.lock`, and the message is `spend_refused`. A `leases.json` that does not parse
+/// refuses a scoped seat: what others booked is not known, so its reserve cannot be checked.
+// Called from `nirvana_worker::exec` by the S1 hunk this package hands to the worker builder; until it lands nothing
+// in this crate calls it. Drop the allow with that hunk.
+#[allow(dead_code)]
+pub fn check_before_spend(
+    root: &Path,
+    seat_id: &str,
+    effort: Effort,
+    class_id: &str,
+    size: SizeName,
+    order: &str,
+) -> Result<(), String> {
+    let table = table_for(root)?;
+    if table
+        .seat(seat_id)
+        .is_none_or(|seat| seat.extra_windows.is_empty())
+    {
+        return Ok(());
+    }
+    let dir = dir();
+    let path = dir.join(LEASES_FILE);
+    let mut world = live_world(&table);
+    world.leases = load_leases(&path)?.leases;
+    world.now = now();
+    let Err(why) = may_spend_now(&table, &world, seat_id, effort, class_id, size, order) else {
+        return Ok(());
+    };
+    let released = Lock::take(&dir).is_ok_and(|_lock| {
+        load_leases(&path).is_ok_and(|mut leases| {
+            !leases.release(order, now()) || write_leases(&path, &leases).is_ok()
+        })
+    });
+    if released {
+        Err(spend_refused(order, &why))
+    } else {
+        Err(format!(
+            "Release {order} with `herdr seat release {order}`, then book it again. Nothing was started. {why}"
+        ))
+    }
 }
 
 /// §5.3: a window with more than `reset_left` left and under `reset_within_min` to its reset is discounted by
@@ -2991,8 +3108,8 @@ pub struct RecordLine {
     pub class: String,
     #[serde(default)]
     pub chain: Option<String>,
-    /// One of O5's words, `nirvana_gate::Outcome`: pass, sent_back, failed, asked, reseated. "pass" counts as a
-    /// pass in the blend, "reseated" not at all, any other word as a failure.
+    /// One of O5's words, `nirvana_gate::Outcome`: pass, sent_back, failed, asked, reseated, and the worker's newer
+    /// ones. What each counts as in the blend is `tally_word`.
     pub outcome: String,
     #[serde(default)]
     pub tokens: Option<Tokens>,
@@ -3067,9 +3184,39 @@ pub struct Tally {
     pub orders: u32,
 }
 
+/// The review round (Part 2 item 6): what a record word counts as, for old and new words alike. The worker builder is
+/// changing the word for an accepted order (`accepted`, where the record said `failed`: the usage audit's finding 2,
+/// 65 lines) and for a subagent order, so the tally reads both. `Some(true)` a pass, `Some(false)` an order that did
+/// not pass, `None` neither. A word this herdr does not know is neither: O2 counted it a failure, which is how 65
+/// accepted orders read as failures the day a new word came in.
+pub fn tally_word(word: &str) -> Option<bool> {
+    match word {
+        "accepted" => Some(true),
+        // O5's words keep the gate's own answer: pass a pass, failed and sent_back failures, reseated not counted, and
+        // `blocked` not counted: plan 37b review S1 ruled a login wall the owner's input, not the seat's failure
+        // (`nirvana_gate::Outcome::BLOCKED`). The work order listed blocked as a failure; that is reported, not made.
+        "pass" | "failed" | "sent_back" | "blocked" | "reseated" => {
+            crate::nirvana_gate::Outcome::tally(word)
+        }
+        _ => None,
+    }
+}
+
 pub fn tally(lines: &[RecordLine]) -> BTreeMap<RecordKey, Tally> {
     let mut tallies: BTreeMap<RecordKey, Tally> = BTreeMap::new();
+    // Several lines for one order and run: the last one decides (a later line is a later verdict on the same work).
+    let mut last: BTreeMap<(&str, Option<&str>), &RecordLine> = BTreeMap::new();
     for line in lines {
+        last.insert((line.order.as_str(), line.run.as_deref()), line);
+    }
+    let decided: Vec<&RecordLine> = lines
+        .iter()
+        .filter(|line| {
+            last.get(&(line.order.as_str(), line.run.as_deref()))
+                .is_some_and(|kept| std::ptr::eq(*kept, *line))
+        })
+        .collect();
+    for line in decided {
         let Some(chain) = &line.chain else {
             continue;
         };
@@ -3078,9 +3225,7 @@ pub fn tally(lines: &[RecordLine]) -> BTreeMap<RecordKey, Tally> {
         if chain == crate::nirvana_claude::SUBAGENT_CHAIN {
             continue;
         }
-        // Plan 12 O5's outcome words (`nirvana_gate::Outcome::tally`): pass is a pass, a re-seat is not counted
-        // (its pool ran out, not its work), every other word a failure.
-        let Some(passed) = crate::nirvana_gate::Outcome::tally(&line.outcome) else {
+        let Some(passed) = tally_word(&line.outcome) else {
             continue;
         };
         let entry = tallies
@@ -3427,6 +3572,23 @@ fn orchestrator_from(
         }
     }
     // A table whose every named choice is off: any claude seat that is on and has no window of its own, else R1's.
+    // Review a, N4: the reason says which of the two, so an owner who turned sonnet or opus off reads why the
+    // orchestrator sits where it does.
+    if taken.is_none() {
+        let any_on = table
+            .seats
+            .iter()
+            .any(|seat| seat.enabled && seat.cli == "claude" && seat.extra_windows.is_empty());
+        passed.push(if any_on {
+            "no named seat can be taken, so the first claude seat on".to_owned()
+        } else {
+            format!(
+                "every claude seat is off, so {} {} as the last resort",
+                LAST_RESORT.0,
+                LAST_RESORT.1.word()
+            )
+        });
+    }
     let (seat, effort, model) = match taken.or_else(|| {
         table
             .seats
@@ -4572,8 +4734,33 @@ pub(crate) fn pick_and_book(
     let mut leases = load_leases(&leases_path).map_err(BookError::Leases)?;
     world.now = now();
     if let Some(order) = book {
-        match existing_booking(&leases, order, over, world.now) {
+        match existing_booking(&leases, order, over, world.now).map(|found| found.cloned()) {
             Some(Ok(known)) => {
+                // Plan 40a fix S1: the stored pick is answered again only while its seat may still spend. A Fable
+                // booking whose week went stale or ran down since is released, under this lock, and refused.
+                world.leases = leases.leases.clone();
+                if let Err(why) = may_spend_now(
+                    table,
+                    &world,
+                    &known.seat,
+                    known.effort,
+                    &known.class,
+                    lease_size(&known),
+                    order,
+                ) {
+                    leases.release(order, world.now);
+                    write_leases(&leases_path, &leases)?;
+                    drop(lock);
+                    let refused = NoSeat {
+                        class: request.class.clone(),
+                        reason: spend_refused(order, &why),
+                        earliest_reset: None,
+                        defer: false,
+                        skipped: Vec::new(),
+                    };
+                    return Ok(Booking::None(refused, world.now));
+                }
+                let known = &known;
                 let mut out = known.pick.clone();
                 out["booked"] = "existing".into();
                 out["lease"] = lease_view(known)?;
@@ -4916,7 +5103,8 @@ mod tests {
                 .abs()
                 < 1e-9
         );
-        assert!((table.pool("max").unwrap().per_usd["week.fable"] - 0.00156).abs() < 1e-9);
+        // The review round: Fable's week and the 5 h window each measured once on 2026-11-09 (the pool's basis).
+        assert!((table.pool("max").unwrap().per_usd["week.fable"] - 0.005).abs() < 1e-9);
         for cell in &fable.uses {
             assert_eq!(
                 cell.windows.len(),
@@ -4929,7 +5117,7 @@ mod tests {
         assert!(close(c.fable_reserve, 0.10) && close(c.fable_orchestrator_left, 0.25));
         assert_eq!(
             (c.subagent_default.as_str(), c.autocompact_tokens),
-            ("sonnet", 400_000)
+            ("sonnet", 0)
         );
         assert_eq!(
             table.orchestrator.sota,
@@ -4946,7 +5134,7 @@ mod tests {
             before.orchestrator.sota,
             OrchestratorChoice::new("opus", Effort::High)
         );
-        assert_eq!(before.constants.autocompact_tokens, 400_000);
+        assert_eq!(before.constants.autocompact_tokens, 0);
         // §5.2's nineteen classes, in the nine chains of §5.4.
         let classes: Vec<&str> = table.classes.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(
@@ -5128,19 +5316,21 @@ mod tests {
 
         let max = table.pool("max").unwrap();
         assert!(close(max.per_usd["week"] as f32, 0.00078));
-        assert!(close(max.per_usd["5h"] as f32, 0.04));
+        // Plan 40a's review round measured the 5 h factor once (0.0073, the pool's basis); plan 19's was a prior.
+        assert!(close(max.per_usd["5h"] as f32, 0.0073));
 
         let flash = table.seat("flash").unwrap();
         let cell_low = flash.uses.iter().find(|u| u.effort == Effort::Low).unwrap();
-        assert!(close(cell_low.windows["5h"], 0.000017424));
-        assert!(close(cell_low.windows["week"], 0.000008712));
+        // The review round refit low and medium to the record (`nirvana/seat_fit.py`: x8.97 n 12, x2.73 n 17).
+        assert!(close(cell_low.windows["5h"], 0.0001563));
+        assert!(close(cell_low.windows["week"], 7.815e-05));
         let cell_med = flash
             .uses
             .iter()
             .find(|u| u.effort == Effort::Medium)
             .unwrap();
-        assert!(close(cell_med.windows["5h"], 0.00016632));
-        assert!(close(cell_med.windows["week"], 0.00008316));
+        assert!(close(cell_med.windows["5h"], 0.0004541));
+        assert!(close(cell_med.windows["week"], 0.000227));
         let cell_high = flash
             .uses
             .iter()
@@ -5509,10 +5699,14 @@ mod tests {
     fn pressure_is_the_worst_window_and_a_weeks_share_is_not_a_5h_windows() {
         let table = table();
         let mut world = world();
-        // Gemini's and Argon's weeks 90% used: neither has spare, and flash's binding window is the week.
+        // Gemini's and Argon's weeks 90% used: neither has spare, and flash's binding window is the week. Anthropic's
+        // seats are left out: since the review round's refit (flash low x8.97) sonnet wins this world, and the test is
+        // flash's pressure, not who wins.
         set(&mut world, "gemini", "week", 0.90);
         set(&mut world, "argon", "week", 0.90);
-        let got = chosen(&table, &world, &request("research.web"));
+        let mut req = request("research.web");
+        req.not_family = vec!["anthropic".into()];
+        let got = chosen(&table, &world, &req);
         assert_eq!(got.seat, "flash");
         let term =
             |w: &WindowState| w.expected / w.headroom.unwrap() * w.pace.unwrap() * w.reset_factor;
@@ -6497,8 +6691,10 @@ mod tests {
         let dir = temp_dir("record");
         let path = dir.join(RECORD_FILE);
         append_record(&path, &line).unwrap();
+        // Another order: since the review round one order and run is decided by its last line (`tally`).
         let mut fail = line.clone();
-        fail.outcome = "sent back".into();
+        fail.order = "o-2".into();
+        fail.outcome = "sent_back".into();
         append_record(&path, &fail).unwrap();
         let lines = read_record(&path);
         assert_eq!(lines, vec![line, fail]);
@@ -6980,9 +7176,14 @@ mod tests {
 
         // 3. Filter 6 (headroom) is bypassed in SOTA:
         let mut world_f6 = world_zero.clone();
-        set(&mut world_f6, "max", "5h", 0.79); // left = 0.21 > reserve 0.20, but headroom 0.01 < use 0.015
+        // Left 30%: Fable's 5 h share since the review round's refit (about 6% at the 2026-10-17 price) keeps the 15%.
+        set(&mut world_f6, "max", "5h", 0.70);
         let pick_f6 = chosen(&table, &world_f6, &req_plan);
-        assert_eq!(pick_f6.seat, "fable");
+        assert_eq!(
+            pick_f6.seat, "fable",
+            "{}: {:?}",
+            pick_f6.reason, pick_f6.runners_up
+        );
     }
 
     #[test]
@@ -7055,6 +7256,13 @@ mod tests {
         assert_eq!(seat.model, "claude-sonnet-5-5");
         assert_eq!(seat.line, "nirvana claude -> sonnet medium: Efficient");
         assert_eq!(seat.square_summary(), "Efficient");
+        // A table without `[orchestrator]` (an owner's edited one) seats Efficient as before plan 40a: Sonnet medium.
+        let mut old = parse(include_str!("nirvana_seats_v12.toml")).unwrap();
+        old.mode = Mode::Efficient;
+        assert_eq!(
+            orchestrator_seat(&old, &world).line,
+            "nirvana claude -> sonnet medium: Efficient"
+        );
     }
 
     #[test]
@@ -7707,17 +7915,18 @@ mod tests {
             "fable"
         )
         .starts_with("max week not read; "));
-        // Over the reserve: 91% used leaves 9%, under 10%. The general floor (5%) would not have caught it.
+        // Over the reserve: 91% used leaves 9% before the order, under 10% after it. The general floor (5%) would not
+        // have caught it.
         let got = sota(&with_fable_week(Some(0.91))).unwrap();
         assert_eq!(got.seat, "opus");
         assert!(
-            why(&got.runners_up, "fable")
-                .starts_with("would leave Fable week at 9%, under the reserve 10%; "),
+            why(&got.runners_up, "fable").starts_with("would leave Fable week at ")
+                && why(&got.runners_up, "fable").contains(", under the reserve 10%; "),
             "{}",
             why(&got.runners_up, "fable")
         );
-        // 89% used leaves 11% less the order: it holds.
-        assert_eq!(sota(&with_fable_week(Some(0.89))).unwrap().seat, "fable");
+        // 85% used leaves 15% less the order (about 4% since the review round's refit): it holds.
+        assert_eq!(sota(&with_fable_week(Some(0.85))).unwrap().seat, "fable");
         // The general floor still applies: the 5 h at 96%.
         let mut floored = with_fable_week(Some(0.0));
         set(&mut floored, "max", "5h", 0.96);
@@ -7890,5 +8099,270 @@ mod tests {
             Some("agy not signed in")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The test module's readings moved to the wall clock (`pick_and_book` reads `now()`), the Fable week at `fable`
+    /// (`None` not read), every reading `age` seconds old.
+    fn world_now(fable: Option<f32>, age: u64) -> World {
+        let shift = now().saturating_sub(NOW);
+        let mut world = with_fable_week(fable);
+        for reading in &mut world.readings {
+            reading.read_at = now() - age;
+            reading.resets_at = reading.resets_at.map(|at| at + shift);
+        }
+        world.now = now();
+        world
+    }
+
+    fn sota_plan() -> Request {
+        let mut req = request("plan");
+        req.mode = Mode::Sota;
+        req.order = Some("o-s1".into());
+        req
+    }
+
+    fn book_again(dir: &Path, table: &Table, world: World) -> Booking {
+        let req = sota_plan();
+        pick_and_book(
+            dir,
+            table,
+            world,
+            &req,
+            Some("o-s1"),
+            None,
+            Vec::new(),
+            |_, p| p,
+        )
+        .unwrap_or_else(|_| panic!("pick_and_book errs"))
+    }
+
+    fn booked_seat(out: &Booking) -> Option<(String, String)> {
+        match out {
+            Booking::Seat(out) => Some((
+                out["seat"].as_str().unwrap_or("").to_owned(),
+                out["booked"].as_str().unwrap_or("").to_owned(),
+            )),
+            Booking::None(..) => None,
+        }
+    }
+
+    /// Package review a, S1: a live Fable booking is answered again only while Fable may spend. A week that went stale
+    /// or ran under the reserve since the booking refuses it, releases the lease, and says what to do first; a fresh
+    /// week reuses it; a seat with no scoped window is reused untouched while the Fable week is not read at all.
+    #[test]
+    fn c40a_s1_a_reused_fable_lease_is_checked_again() {
+        let table = table();
+        let fresh = || world_now(Some(0.02), 30);
+        for (name, later, refused) in [
+            (
+                "stale",
+                world_now(Some(0.02), STALE_AFTER_TEST),
+                Some("Fable week reading is stale"),
+            ),
+            (
+                "over the reserve",
+                world_now(Some(0.95), 30),
+                Some("under the reserve"),
+            ),
+            ("fresh", fresh(), None),
+        ] {
+            let dir = temp_dir(&format!("c40a-s1-{}", name.replace(' ', "-")));
+            let first = book_again(&dir, &table, fresh());
+            assert_eq!(
+                booked_seat(&first),
+                Some(("fable".into(), "new".into())),
+                "{name}"
+            );
+            match (book_again(&dir, &table, later), refused) {
+                (Booking::None(no_seat, _), Some(why)) => {
+                    assert!(
+                        no_seat
+                            .reason
+                            .starts_with("Book o-s1 again with `herdr seat pick --book o-s1`"),
+                        "{name}: {}",
+                        no_seat.reason
+                    );
+                    assert!(no_seat.reason.contains(why), "{name}: {}", no_seat.reason);
+                    let leases = load_leases(&dir.join(LEASES_FILE)).unwrap();
+                    assert!(
+                        leases.live("o-s1", now()).is_none(),
+                        "{name}: the lease stays"
+                    );
+                }
+                (out @ Booking::Seat(_), None) => {
+                    assert_eq!(booked_seat(&out), Some(("fable".into(), "existing".into())));
+                }
+                (Booking::Seat(out), Some(_)) => panic!("{name}: reused {out}"),
+                (Booking::None(no_seat, _), None) => panic!("{name}: refused {}", no_seat.reason),
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        // A seat with no scoped window: booked on opus while the Fable week is not read, reused as it was.
+        let dir = temp_dir("c40a-s1-opus");
+        let first = book_again(&dir, &table, world_now(None, 30));
+        assert_eq!(booked_seat(&first), Some(("opus".into(), "new".into())));
+        let again = book_again(&dir, &table, world_now(None, 30));
+        assert_eq!(
+            booked_seat(&again),
+            Some(("opus".into(), "existing".into()))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const STALE_AFTER_TEST: u64 = nirvana_usage::STALE_AFTER + 60;
+
+    /// The review round, Part 2 items 4 and 5: the sizes and the two scores the record set (`nirvana/seat_fit.py`, the
+    /// usage audit's finding 7). Flash is no longer seated for load-bearing work at Efficient; sonnet clears the
+    /// adversary review's Balanced bar.
+    #[test]
+    fn c40a_the_record_sets_the_sizes_and_two_scores() {
+        let table = table();
+        assert!(close(table.size(SizeName::Small).use_factor, 3.0));
+        assert!(close(table.size(SizeName::Medium).use_factor, 5.0));
+        assert!(close(table.size(SizeName::Large).use_factor, 4.1));
+        let score = |class: &str, seat: &str| {
+            let class = table.class(class).unwrap();
+            let entry = class.seats.iter().find(|e| e.seat == seat).unwrap();
+            (entry.score, table.bars(class))
+        };
+        let (flash, bars) = score("build.load_bearing", "flash");
+        assert!(flash < bars.at(Mode::Efficient), "flash {flash}");
+        let (sonnet, bars) = score("review.adversary", "sonnet");
+        assert!(sonnet >= bars.at(Mode::Balanced), "sonnet {sonnet}");
+        let mut req = request("build.load_bearing");
+        req.mode = Mode::Efficient;
+        req.not_family = vec!["anthropic".into()];
+        let got = pick(&table, &world(), &req);
+        assert!(!got.as_ref().is_ok_and(|p| p.seat == "flash"), "{got:?}");
+    }
+
+    /// Review a, N4: an owner's table that turns sonnet and opus off seats Nirvana Claude on the first claude seat still
+    /// on, and the reason says each seat passed over and why; with every claude seat off, the last resort says so.
+    #[test]
+    fn c40a_n4_an_off_seat_is_named_in_the_orchestrators_reason() {
+        let mut table = table();
+        table.mode = Mode::Efficient;
+        for seat in table.seats.iter_mut() {
+            if seat.id == "sonnet" || seat.id == "opus" {
+                seat.enabled = false;
+            }
+        }
+        let seat = orchestrator_seat(&table, &world());
+        assert_eq!(
+            seat.line,
+            "nirvana claude -> haiku medium: Efficient, sonnet off in seats.toml, opus off in seats.toml, \
+             no named seat can be taken, so the first claude seat on"
+        );
+        for seat in table.seats.iter_mut().filter(|seat| seat.cli == "claude") {
+            seat.enabled = false;
+        }
+        let seat = orchestrator_seat(&table, &world());
+        assert!(
+            seat.line
+                .ends_with("every claude seat is off, so opus medium as the last resort"),
+            "{}",
+            seat.line
+        );
+    }
+
+    /// The review round, Part 2 item 6: old and new outcome words, and the last line for one order and run decides.
+    #[test]
+    fn c40a_tally_reads_old_and_new_words_and_the_last_line_decides() {
+        let line = |order: &str, run: &str, outcome: &str| -> RecordLine {
+            serde_json::from_value(serde_json::json!({
+                "order": order, "run": run, "seat": "sonnet", "effort": "medium",
+                "class": "build.bounded", "chain": "build.bounded", "outcome": outcome,
+            }))
+            .unwrap()
+        };
+        for (word, want) in [
+            ("pass", Some(true)),
+            ("accepted", Some(true)),
+            ("failed", Some(false)),
+            ("sent_back", Some(false)),
+            ("blocked", None),
+            ("subagent-no-report", None),
+            ("subagent-prose-report", None),
+            ("delivered", None),
+            ("reseated", None),
+            ("asked", None),
+            ("stopped", None),
+            ("a word from next year", None),
+        ] {
+            assert_eq!(tally_word(word), want, "{word}");
+        }
+        let key = (
+            "sonnet".to_owned(),
+            Effort::Medium,
+            "build.bounded".to_owned(),
+        );
+        let lines = vec![
+            line("o-1", "r-1", "failed"),
+            line("o-1", "r-1", "accepted"),
+            line("o-2", "r-1", "pass"),
+            line("o-2", "r-1", "delivered"),
+            line("o-1", "r-2", "sent_back"),
+            line("o-3", "r-1", "subagent-no-report"),
+        ];
+        // o-1 r-1 accepted (its last line), o-2 r-1 neither (its last is delivered), o-1 r-2 a failure, o-3 neither.
+        assert_eq!(
+            tally(&lines)[&key],
+            Tally {
+                passes: 1,
+                orders: 2
+            }
+        );
+    }
+
+    /// S1's question by itself: the order's own booking is not counted against it, others' are, an effort raised past
+    /// the booking is priced at that effort, and a seat with no scoped window is never asked.
+    #[test]
+    fn c40a_s1_may_spend_now_reads_the_world_as_it_is() {
+        let table = table();
+        let mut world = with_fable_week(Some(0.80));
+        let ask = |world: &World, effort: Effort| {
+            may_spend_now(
+                &table,
+                world,
+                "fable",
+                effort,
+                "plan",
+                SizeName::Large,
+                "o-1",
+            )
+        };
+        assert_eq!(ask(&world, Effort::High), Ok(()));
+        let mut own = Lease {
+            order: "o-1".into(),
+            seat: "fable".into(),
+            effort: Effort::High,
+            pool: "max".into(),
+            class: "plan".into(),
+            run: None,
+            expected: BTreeMap::from([("week.fable".into(), 0.15)]),
+            booked_at: NOW,
+            expires_at: NOW + 3600,
+            pick: serde_json::Value::Null,
+        };
+        world.leases = vec![own.clone()];
+        assert_eq!(ask(&world, Effort::High), Ok(()), "its own booking counted");
+        own.order = "o-2".into();
+        world.leases = vec![own];
+        assert!(ask(&world, Effort::High)
+            .unwrap_err()
+            .contains("under the reserve"));
+        assert!(may_spend_now(
+            &table,
+            &with_fable_week(None),
+            "sonnet",
+            Effort::Medium,
+            "plan",
+            SizeName::Large,
+            "o-1"
+        )
+        .is_ok());
+        assert!(ask(&with_fable_week(None), Effort::High)
+            .unwrap_err()
+            .starts_with("fable: Fable week not read"));
     }
 }

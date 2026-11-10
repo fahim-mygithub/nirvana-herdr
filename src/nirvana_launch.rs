@@ -1073,9 +1073,7 @@ mod tests {
                 plugin.join("settings.json").display().to_string(),
                 "--rc".into(),
                 "--chrome".into(),
-                // Plan 40a: herdr's default `autocompact_tokens` when the home has no table.
-                "--autocompact".into(),
-                "400000".into(),
+                // Plan 40a review round: herdr's default `autocompact_tokens` is 0, so no `--autocompact`.
             ]
         );
         assert_eq!(
@@ -1667,7 +1665,7 @@ mod tests {
                     "subagent_default = \"sonnet\"",
                     "subagent_default = \"haiku\"",
                 )
-                .replace("autocompact_tokens = 400000", "autocompact_tokens = 250000"),
+                .replace("autocompact_tokens = 0", "autocompact_tokens = 250000"),
         )
         .unwrap();
         let args = launch_args_in(&home, folder, None, Some(&claude));
@@ -1684,8 +1682,8 @@ mod tests {
         std::fs::write(
             &seats,
             crate::nirvana_seat::DEFAULT
-                .replace("subagent_default = \"sonnet\"", "subagent_default = \"\"")
-                .replace("autocompact_tokens = 400000", "autocompact_tokens = 0"),
+                // The shipped 0: no flag.
+                .replace("subagent_default = \"sonnet\"", "subagent_default = \"\""),
         )
         .unwrap();
         let args = launch_args_in(&home, folder, None, Some(&claude));
@@ -1694,7 +1692,7 @@ mod tests {
         // A window outside Claude Code's range is a refused table, never a flag Claude Code would refuse.
         assert!(crate::nirvana_seat::parse(
             &crate::nirvana_seat::DEFAULT
-                .replace("autocompact_tokens = 400000", "autocompact_tokens = 50000")
+                .replace("autocompact_tokens = 0", "autocompact_tokens = 50000")
         )
         .unwrap_err()
         .contains("autocompact_tokens 50000"));

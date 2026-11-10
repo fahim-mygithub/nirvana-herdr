@@ -64,10 +64,11 @@ fable_orchestrator_left = 0.25
 # orchestrator's Fable or Opus. A worker-* agent file's own `model` still wins (Claude Code's order: the call's model,
 # the agent file's, this variable, then the main conversation's).
 subagent_default = "sonnet"
-# Plan 40a: `--autocompact <tokens>` for Nirvana Claude; 0 passes no flag and leaves Claude Code's own (about 967K on a
-# 1M-context model). A hypothesis: 400K keeps a long session's turns cheaper. fresh_above starts a fresh session between
-# runs; this compacts inside one run that grows past it.
-autocompact_tokens = 400000
+# Plan 40a: `--autocompact <tokens>` for Nirvana Claude; 0 passes no flag. Measured 2026-11-09 from this machine's
+# transcripts: 55 automatic compactions since 2026-10-23, the context before them 201k at least, 249k median, 429k at
+# most. Claude Code already compacts far below the 967K the docs give, so a 400K cap changed nothing and is off. The
+# knob stays for a cap under 200K. fresh_above starts a fresh session between runs; this would compact inside one.
+autocompact_tokens = 0
 
 # Plan 40a (review M5): Nirvana Claude's own seat by mode, a seat and an effort each. The seat must be on and offer the
 # effort, else the nearest effort it offers below. `balanced` is the cool climb, `balanced_hot` the climb at t >= 0.5,
@@ -82,11 +83,16 @@ sota_fallback = { seat = "opus", effort = "high" }
 unread = { seat = "opus", effort = "medium" }
 
 # An order's size scales its expected use and its lease. `use` is a multiple of probe P4's order (one
-# `slugify` function and its tests, about 45k tokens read and 1.3k written): small is that order.
+# `slugify` function and its tests, about 45k tokens read and 1.3k written), against `medium = 5`.
+# small and large are measured from the record (the review round, `python nirvana/seat_fit.py`, section 2): the median
+# across seat-and-effort groups of what an order of that size spent against a medium one, small 0.59 of medium (6
+# groups, n 115), large 0.83 (4 groups, n 27). Large under medium is the record's word, not a slip: the orchestrator's
+# size labels do not separate large from medium orders yet. The old priors were 1 and 20.
 # `minutes` is how long an order runs, for the reset discount; `lease_minutes` how long a booking holds
-# when its runner never releases it. All priors.
+# when its runner never releases it. Priors, kept: seat_fit.py section 3 prints the record's p90 at 16, 35 and 108
+# minutes, inside each `lease_minutes`.
 [size.small]
-use = 1.0
+use = 3.0
 minutes = 15
 lease_minutes = 60
 
@@ -96,7 +102,7 @@ minutes = 45
 lease_minutes = 180
 
 [size.large]
-use = 20.0
+use = 4.1
 minutes = 120
 lease_minutes = 480
 
@@ -107,8 +113,8 @@ lease_minutes = 480
 [[pool]]
 id = "max"
 windows = ["5h", "week"]
-per_usd = { "5h" = 0.04, week = 0.00078, "week.fable" = 0.00156 }
-basis = "derived: week of 2026-10-16, $796 at list price for 62%; 5h stays a prior ($25 of list price per 5 h window, not measured); week.fable derived from the doc, not measured: Fable may use up to 50% of the week (support.claude.com, read 2026-11-09), so twice the week's factor"
+per_usd = { "5h" = 0.0073, week = 0.00078, "week.fable" = 0.005 }
+basis = "derived: week of 2026-10-16, $796 at list price for 62%, the week. 5h measured once, 2026-11-09: every Claude response on this machine from the window's start at 19:49Z to 23:48Z summed to $78.40 at list price while /usage read 57%, so 0.0073 ($137 a window, not the $25 prior); whole percents, other devices not counted; the usage audit's finding 4 (5 h ratios 6.5 times the week's, n 72) disagreed the same way. week.fable measured once, 2026-11-09: about $10 of Fable 5.2 at list price moved the Fable week 0% to 5%, so 0.005 (coarse: whole percents, one day), three times the 0.00156 the doc's 50% sentence gave. The Fable line is a share of Fable's own allowance (nirvana_usage.rs, N5)"
 
 [[pool]]
 id = "gemini"
@@ -154,10 +160,10 @@ prices = [
   { from = "2026-10-17", input = 4.0, output = 20.0, cache_read = 0.20, cache_write = 5.0, basis = "claude-api skill price table, cached 2026-10-06; cache write at 1.25x input" },
 ]
 use = [
-  { effort = "low", windows = { "5h" = 0.0008276, week = 1.614e-05 }, at = "2026-10-17", basis = "prior: medium x 0.6 (nirvana/seat_cells.py)" },
-  { effort = "medium", windows = { "5h" = 0.001379, week = 2.69e-05 }, at = "2026-10-17", basis = "derived: P4's 43,807 cache reads and 1,286 out at opus's 2026-10-17 prices, $0.0345, times per_usd (nirvana/seat_cells.py)" },
-  { effort = "high", windows = { "5h" = 0.002207, week = 4.303e-05 }, at = "2026-10-17", basis = "prior: medium x 1.6 (nirvana/seat_cells.py)" },
-  { effort = "xhigh", windows = { "5h" = 0.003448, week = 6.724e-05 }, at = "2026-10-17", basis = "prior: medium x 2.5 (nirvana/seat_cells.py)" },
+  { effort = "low", windows = { "5h" = 0.001598, week = 0.0001707 }, at = "2026-10-17", basis = "prior: medium x 0.6, fit x10.58 (medium's) (nirvana/seat_cells.py)" },
+  { effort = "medium", windows = { "5h" = 0.002663, week = 0.0002846 }, at = "2026-10-17", basis = "derived: P4's 43,807 cache reads and 1,286 out at opus's 2026-10-17 prices, $0.0345, fit x10.58 (seat_fit.py, n 8), times per_usd (nirvana/seat_cells.py)" },
+  { effort = "high", windows = { "5h" = 0.002859, week = 0.0003055 }, at = "2026-10-17", basis = "prior: medium x 1.6, fit x7.1 (seat_fit.py, n 9) (nirvana/seat_cells.py)" },
+  { effort = "xhigh", windows = { "5h" = 0.006658, week = 0.0007114 }, at = "2026-10-17", basis = "prior: medium x 2.5, fit x10.58 (medium's) (nirvana/seat_cells.py)" },
 ]
 
 [[seat]]
@@ -174,9 +180,9 @@ prices = [
   { from = "2026-11-09", input = 2.0, output = 10.0, cache_read = 0.10, cache_write = 2.5, basis = "Claude docs pricing, read 2026-11-09: cache read 0.10, not the 0.20 the old table had (review M4)" },
 ]
 use = [
-  { effort = "low", windows = { "5h" = 0.0004138, week = 8.069e-06 }, at = "2026-11-09", basis = "prior: medium x 0.6 (nirvana/seat_cells.py)" },
-  { effort = "medium", windows = { "5h" = 0.0006896, week = 1.345e-05 }, at = "2026-11-09", basis = "derived: P4's 43,807 cache reads and 1,286 out at sonnet's 2026-11-09 prices, $0.0172, times per_usd (nirvana/seat_cells.py)" },
-  { effort = "high", windows = { "5h" = 0.001103, week = 2.152e-05 }, at = "2026-11-09", basis = "prior: medium x 1.6 (nirvana/seat_cells.py)" },
+  { effort = "low", windows = { "5h" = 0.0005143, week = 5.495e-05 }, at = "2026-11-09", basis = "prior: medium x 0.6, fit x6.81 (medium's) (nirvana/seat_cells.py)" },
+  { effort = "medium", windows = { "5h" = 0.0008571, week = 9.158e-05 }, at = "2026-11-09", basis = "derived: P4's 43,807 cache reads and 1,286 out at sonnet's 2026-11-09 prices, $0.0172, fit x6.81 (seat_fit.py, n 66), times per_usd (nirvana/seat_cells.py)" },
+  { effort = "high", windows = { "5h" = 0.001371, week = 0.0001465 }, at = "2026-11-09", basis = "prior: medium x 1.6, fit x6.81 (medium's) (nirvana/seat_cells.py)" },
 ]
 
 [[seat]]
@@ -192,8 +198,8 @@ prices = [
   { from = "2026-10-17", input = 0.10, output = 0.50, cache_read = 0.01, cache_write = 0.125, basis = "claude-api skill price table, cached 2026-10-06, up to 100K tokens; cache read at a tenth of input, unverified" },
 ]
 use = [
-  { effort = "low", windows = { "5h" = 2.595e-05, week = 5.059e-07 }, at = "2026-10-17", basis = "prior: medium x 0.6 (nirvana/seat_cells.py)" },
-  { effort = "medium", windows = { "5h" = 4.324e-05, week = 8.432e-07 }, at = "2026-10-17", basis = "derived: P4's 43,807 cache reads and 1,286 out at haiku's 2026-10-17 prices, $0.0011, times per_usd (nirvana/seat_cells.py)" },
+  { effort = "low", windows = { "5h" = 3.225e-05, week = 3.445e-06 }, at = "2026-10-17", basis = "prior: medium x 0.6, fit x6.81 (medium's) (nirvana/seat_cells.py)" },
+  { effort = "medium", windows = { "5h" = 5.374e-05, week = 5.742e-06 }, at = "2026-10-17", basis = "derived: P4's 43,807 cache reads and 1,286 out at haiku's 2026-10-17 prices, $0.0011, fit x6.81 (sonnet medium's, a prior: haiku has n 1 in the record), times per_usd (nirvana/seat_cells.py)" },
 ]
 
 [[seat]]
@@ -216,10 +222,10 @@ prices = [
   { from = "2026-11-09", input = 8.0, output = 40.0, cache_read = 0.20, cache_write = 10.0, basis = "Claude docs pricing for Fable 5.2, read 2026-11-09; cache write is the 5-minute one" },
 ]
 use = [
-  { effort = "low", windows = { "5h" = 0.001445, week = 2.817e-05, "week.fable" = 5.635e-05 }, at = "2026-11-09", basis = "prior: medium x 0.6 (nirvana/seat_cells.py)" },
-  { effort = "medium", windows = { "5h" = 0.002408, week = 4.696e-05, "week.fable" = 9.391e-05 }, at = "2026-11-09", basis = "derived: P4's 43,807 cache reads and 1,286 out at fable's 2026-11-09 prices, $0.0602, times per_usd (nirvana/seat_cells.py)" },
-  { effort = "high", windows = { "5h" = 0.003853, week = 7.513e-05, "week.fable" = 0.0001503 }, at = "2026-11-09", basis = "prior: medium x 1.6 (nirvana/seat_cells.py)" },
-  { effort = "xhigh", windows = { "5h" = 0.00602, week = 0.0001174, "week.fable" = 0.0002348 }, at = "2026-11-09", basis = "prior: medium x 2.5 (nirvana/seat_cells.py)" },
+  { effort = "low", windows = { "5h" = 0.00279, week = 0.0002981, "week.fable" = 0.001911 }, at = "2026-11-09", basis = "prior: medium x 0.6, fit x10.58 (medium's) (nirvana/seat_cells.py)" },
+  { effort = "medium", windows = { "5h" = 0.00465, week = 0.0004968, "week.fable" = 0.003185 }, at = "2026-11-09", basis = "derived: P4's 43,807 cache reads and 1,286 out at fable's 2026-11-09 prices, $0.0602, fit x10.58 (opus medium's, a prior: no Fable order in the record), times per_usd (nirvana/seat_cells.py)" },
+  { effort = "high", windows = { "5h" = 0.004992, week = 0.0005334, "week.fable" = 0.003419 }, at = "2026-11-09", basis = "prior: medium x 1.6, fit x7.1 (opus high's, a prior: no Fable order in the record) (nirvana/seat_cells.py)" },
+  { effort = "xhigh", windows = { "5h" = 0.01162, week = 0.001242, "week.fable" = 0.007962 }, at = "2026-11-09", basis = "prior: medium x 2.5, fit x10.58 (medium's) (nirvana/seat_cells.py)" },
 ]
 
 # Plan 35 R2: every agy seat lists `browser`. herdr grants a browser order bladebro on either CLI (plan 35c), and
@@ -297,8 +303,8 @@ prices = [
   { from = "2026-10-17", input = 0.75, output = 3.75, cache_read = 0.075, cache_write = 0.75, basis = "aggregators, medium confidence (plan 12 §2); cache read at a tenth of input, unverified" },
 ]
 use = [
-  { effort = "low", windows = { "5h" = 0.000017424, week = 0.000008712 }, at = "2026-10-20", basis = "derived: plan 19 §2, scaled by 0.0396 from P4 tokens" },
-  { effort = "medium", windows = { "5h" = 0.00016632, week = 0.00008316 }, at = "2026-10-20", basis = "derived: plan 19 §2, scaled by 0.0396 from P4 tokens" },
+  { effort = "low", windows = { "5h" = 0.0001563, week = 7.815e-05 }, at = "2026-10-20", basis = "derived: plan 19 §2, scaled by 0.0396 from P4 tokens, fit x8.97 (seat_fit.py, n 12)" },
+  { effort = "medium", windows = { "5h" = 0.0004541, week = 0.000227 }, at = "2026-10-20", basis = "derived: plan 19 §2, scaled by 0.0396 from P4 tokens, fit x2.73 (seat_fit.py, n 17)" },
   { effort = "high", windows = { "5h" = 0.00026928, week = 0.00013464 }, at = "2026-10-20", basis = "measured: plan 19 §2, scaled by 0.0396 from P4 flash high" },
 ]
 
@@ -369,13 +375,13 @@ efficient_effort = "medium"
 sota_effort = "high"
 weight = 3.0
 bars = { efficient = 70, balanced = 90, sota = 100 }
-why = "plan 19 §4: quality first; plan 40a: fable 97, a prior (decision 0012), the prompting guide's hard-coding seat"
+why = "plan 19 §4: quality first; plan 40a: fable 97, a prior (decision 0012), the prompting guide's hard-coding seat; the review round: flash 74 to 68, under the Efficient bar, because the record has it at 9 passes of 28 with 15 send-backs, $5.47 a pass against sonnet's $1.44 (usage audit finding 7, section B)"
 seats = [
   { seat = "opus", score = 95 },
   { seat = "fable", score = 97 },
   { seat = "argon", score = 86 },
   { seat = "sonnet", score = 85 },
-  { seat = "flash", score = 74 },
+  { seat = "flash", score = 68 },
   { seat = "g-opus", score = 95 },
 ]
 
@@ -482,12 +488,12 @@ efficient_effort = "medium"
 sota_effort = "high"
 weight = 1.5
 bars = { efficient = 74, balanced = 88, sota = 100 }
-why = "plan 19 §4: adversary review across families; plan 40a: fable 96, a prior (decision 0012), the prompting guide's hard-coding seat"
+why = "plan 19 §4: adversary review across families; plan 40a: fable 96, a prior (decision 0012), the prompting guide's hard-coding seat; the review round: sonnet 86 to 89, over the Balanced bar, because the record has it at 17 passes of 17, $0.21 a pass (usage audit finding 7, section B)"
 seats = [
   { seat = "opus", score = 94 },
   { seat = "fable", score = 96 },
   { seat = "argon", score = 90 },
-  { seat = "sonnet", score = 86 },
+  { seat = "sonnet", score = 89 },
   { seat = "flash", score = 76 },
   { seat = "g-opus", score = 94 },
 ]

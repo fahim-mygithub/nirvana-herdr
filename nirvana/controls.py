@@ -958,9 +958,10 @@ CONTROLS: tuple[Control, ...] = (
             '            .create(true)\n            .truncate(false)\n',
             '            .create_new(true)\n',
             'the_lease_lock_is_exclusive_and_a_file_left_behind_does_not_hold_it', "rust"),
+    # Retargeted in plan 40a's review round (N9): the nested `if` this found was collapsed.
     Control('seat_override_cap', 'src/nirvana_seat.rs',
-            '        if world.overrides_used >= constants.overrides_per_run {',
-            '        if false {',
+            '        if !request.inherited_override && world.overrides_used >= constants.overrides_per_run {',
+            '        if !request.inherited_override && false {',
             'an_override_passes_every_filter_and_three_are_taken_per_run', "rust"),
     Control('seat_override_unfiltered', 'src/nirvana_seat.rs',
             '        if let Some(skip) = &cand.skip {',
