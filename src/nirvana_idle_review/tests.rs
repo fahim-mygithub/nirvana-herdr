@@ -1377,3 +1377,54 @@ fn learn_a_seated_review_that_never_started_is_settled_once_its_lease_ends() {
         .and_then(|l| l.result)
         .is_some_and(|r| r.contains("never started")));
 }
+
+/// Review B5: a damaged `idle-review.json` is a doubt. It never reads as "on" with zero caps, and it is never written
+/// over: the owner's "off" survives until they fix or delete the file.
+#[test]
+fn c40a_a_damaged_idle_review_file_is_a_doubt_never_on() {
+    let _home = quiet("c40a-b5");
+    let world = world(3_600, 10);
+    let root = ready_project("c40a-b5", &world);
+    seed_samples(&world);
+    let path = global_path();
+    let good = std::fs::read_to_string(&path).expect("global");
+    std::fs::write(&path, "{").expect("damage");
+    let lines = tick_with(std::slice::from_ref(&root), &table(), &world, None);
+    assert!(
+        lines.iter().any(|line| line.contains("cannot tell")),
+        "{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("queued:")),
+        "{lines:?}"
+    );
+    assert!(read_space(&root).last.is_none(), "nothing reserved");
+    assert_eq!(std::fs::read_to_string(&path).expect("kept"), "{");
+    assert!(PathBuf::from(format!("{}.bad", path.display())).exists());
+    assert!(
+        set_on(true).is_err(),
+        "a switch over a damaged file is refused"
+    );
+    // A damaged space file is a doubt for that space too.
+    std::fs::write(&path, &good).expect("restore");
+    let space = space_path(&root);
+    std::fs::create_dir_all(space.parent().unwrap()).expect("runs");
+    std::fs::write(&space, "[").expect("damage space");
+    let lines = tick_with(std::slice::from_ref(&root), &table(), &world, None);
+    assert!(
+        !lines.iter().any(|line| line.contains("queued:")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("does not parse")),
+        "{lines:?}"
+    );
+    // Both files good again (the space's gone, so its default): the same tick queues, so the refusals above came from
+    // the damage alone.
+    std::fs::remove_file(&space).expect("remove space");
+    let lines = tick_with(std::slice::from_ref(&root), &table(), &world, None);
+    assert!(
+        lines.iter().any(|line| line.contains("queued:")),
+        "{lines:?}"
+    );
+}

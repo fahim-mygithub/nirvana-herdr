@@ -11,7 +11,7 @@ CONTROLS = (
             '        effort,\n        "--system-prompt-file".into(),\n',
             "nirvana_claude_takes_the_plugin_agent_name_and_settings_from_home", "rust"),
     Control("o4b_launch_wrong_model", "src/nirvana_launch.rs",
-            "        model,\n", '        "claude-fable-5-1".into(),\n',
+            "        model,\n", '        "claude-fable-5-2".into(),\n',
             "nirvana_claude_takes_the_plugin_agent_name_and_settings_from_home", "rust"),
     Control("o4b_launch_no_agent", "src/nirvana_launch.rs",
             'plugin.display().to_string(),\n        "--agent".into(),\n        "nirvana".into(),\n',

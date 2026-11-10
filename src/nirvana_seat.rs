@@ -22,9 +22,15 @@
 //!    holds the order; then a seat with a window not read, or a pool with no windows at all; then a known
 //!    window too small for the order, which is nearer exhausted than free. Ties go to the higher score, then
 //!    to the class's own seat order, which is §5.4's row.
-//! 4. **Effort** (§5.5) follows the class and its blast radius; SOTA lifts plan and load-bearing builds to
-//!    xhigh; max is never chosen. Under pressure the same model on another pool comes first (equal scores),
-//!    then the other family at full effort (the bar drop), and only when nothing is left one effort step down.
+//! 4. **Effort** (§5.5) follows the class and its blast radius; SOTA lifts to the class's `sota_effort`, and the
+//!    rule never chooses above high (plan 19's ruling "no automatic effort above high"): `xhigh` comes only from an
+//!    override or a parent's effort, and max never. Under pressure the same model on another pool comes first
+//!    (equal scores), then the other family at full effort (the bar drop), and only when nothing is left one effort
+//!    step down.
+//! 5. **A seat with its own window fails closed** (plan 40a, Fable 5.2): every window it spends must have a fresh
+//!    reading and its own window must keep `fable_reserve` after the order, in every mode and under `--override`.
+//!    Claude Code's `-p` "never asks for consent. When a Fable request there would bill to usage credits, Claude
+//!    Code bills it without asking" (code.claude.com model-config, read 2026-11-09).
 //!
 //! Every number the rule uses lives in `seats.toml`, so the owner changes a bar or a prior with an edit and
 //! the next pick reads it; the hypotheses are tagged there.
@@ -56,6 +62,9 @@ pub const HISTORICAL_DEFAULTS: &[&str] = &[
     include_str!("nirvana_seats_v9.toml"),
     include_str!("nirvana_seats_v10.toml"),
     include_str!("nirvana_seats_v11.toml"),
+    // Plan 40a: the default before Fable 5.2 took its seat (86b37c7e), copied before the edit so an installed copy
+    // upgrades.
+    include_str!("nirvana_seats_v12.toml"),
 ];
 pub const DIR: &str = "nirvana";
 pub const SEATS_FILE: &str = "seats.toml";
@@ -207,6 +216,90 @@ pub struct Table {
     pub seats: Vec<Seat>,
     #[serde(rename = "class")]
     pub classes: Vec<Class>,
+    /// Plan 40a (review M5): Nirvana Claude's own seat by mode. A table without the section seats it as before.
+    #[serde(default)]
+    pub orchestrator: OrchestratorTable,
+}
+
+/// One seat and effort for Nirvana Claude.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrchestratorChoice {
+    pub seat: String,
+    pub effort: Effort,
+}
+
+impl OrchestratorChoice {
+    fn new(seat: &str, effort: Effort) -> Self {
+        Self {
+            seat: seat.to_owned(),
+            effort,
+        }
+    }
+}
+
+/// Plan 40a: `[orchestrator]`. Each field defaults to the seat `orchestrator_seat` hard-coded before it, so an owner's
+/// edited table without the section (`maybe_upgrade` never touches an edited file) behaves exactly as before.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct OrchestratorTable {
+    pub efficient: OrchestratorChoice,
+    /// Balanced while the climb is under t = 0.5.
+    pub balanced: OrchestratorChoice,
+    /// Balanced at t >= 0.5.
+    pub balanced_hot: OrchestratorChoice,
+    pub sota: OrchestratorChoice,
+    /// SOTA when `sota` cannot be taken: off, or a seat with its own window not read or under
+    /// `fable_orchestrator_left`.
+    pub sota_fallback: OrchestratorChoice,
+    /// Balanced with the pool's readings missing or stale.
+    pub unread: OrchestratorChoice,
+}
+
+impl Default for OrchestratorTable {
+    fn default() -> Self {
+        Self {
+            efficient: OrchestratorChoice::new("sonnet", Effort::Medium),
+            balanced: OrchestratorChoice::new("opus", Effort::Medium),
+            balanced_hot: OrchestratorChoice::new("sonnet", Effort::Medium),
+            sota: OrchestratorChoice::new("opus", Effort::High),
+            sota_fallback: OrchestratorChoice::new("opus", Effort::High),
+            unread: OrchestratorChoice::new("opus", Effort::Medium),
+        }
+    }
+}
+
+impl OrchestratorTable {
+    fn named(&self) -> [(&'static str, &OrchestratorChoice); 6] {
+        [
+            ("efficient", &self.efficient),
+            ("balanced", &self.balanced),
+            ("balanced_hot", &self.balanced_hot),
+            ("sota", &self.sota),
+            ("sota_fallback", &self.sota_fallback),
+            ("unread", &self.unread),
+        ]
+    }
+}
+
+/// Plan 40a's `fable_reserve` when a table written before it leaves the line out.
+fn default_fable_reserve() -> f32 {
+    0.10
+}
+
+/// Plan 40a's `fable_orchestrator_left` when a table written before it leaves the line out.
+fn default_fable_orchestrator_left() -> f32 {
+    0.25
+}
+
+/// Plan 40a's `subagent_default` when a table written before it leaves the line out.
+fn default_subagent_default() -> String {
+    "sonnet".to_owned()
+}
+
+/// Plan 40a's `autocompact_tokens` when a table written before it leaves the line out.
+fn default_autocompact_tokens() -> u64 {
+    400_000
 }
 
 /// Plan 14 §2.2's `spare_weight` when a table written before it leaves the line out.
@@ -267,6 +360,18 @@ pub struct Constants {
     /// Plan 33 §3.3: lesson reviews a project may queue per UTC day; 0 turns them off.
     #[serde(default = "default_lesson_reviews_per_day")]
     pub lesson_reviews_per_day: u32,
+    /// Plan 40a: a seat with its own window is skipped when the order would leave less than this of it.
+    #[serde(default = "default_fable_reserve")]
+    pub fable_reserve: f32,
+    /// Plan 40a: SOTA seats Nirvana Claude on a seat with its own window only while that window has this left.
+    #[serde(default = "default_fable_orchestrator_left")]
+    pub fable_orchestrator_left: f32,
+    /// Plan 40a: `CLAUDE_CODE_SUBAGENT_MODEL` for Nirvana Claude; empty sets nothing.
+    #[serde(default = "default_subagent_default")]
+    pub subagent_default: String,
+    /// Plan 40a: Nirvana Claude's `--autocompact <tokens>`; 0 passes no flag.
+    #[serde(default = "default_autocompact_tokens")]
+    pub autocompact_tokens: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -470,9 +575,28 @@ impl Table {
             ("record_prior", c.record_prior),
             ("climb_start", c.climb_start),
             ("climb_full", c.climb_full),
+            ("fable_reserve", c.fable_reserve),
+            ("fable_orchestrator_left", c.fable_orchestrator_left),
         ] {
             if !(0.0..=1.0).contains(&value) {
                 problems.push(format!("constants.{name} {value} is not between 0 and 1"));
+            }
+        }
+        // Claude Code takes "auto, or 100k-1M tokens" (`claude --help`, 2.1.321); 0 is herdr's "pass no flag".
+        if c.autocompact_tokens != 0 && !(100_000..=1_000_000).contains(&c.autocompact_tokens) {
+            problems.push(format!(
+                "constants.autocompact_tokens {} is not 0 or between 100000 and 1000000",
+                c.autocompact_tokens
+            ));
+        }
+        for (name, choice) in self.orchestrator.named() {
+            match self.seat(&choice.seat) {
+                None => problems.push(format!("orchestrator.{name}: no seat {}", choice.seat)),
+                Some(seat) if seat.cli != "claude" => problems.push(format!(
+                    "orchestrator.{name}: {} is not a claude seat; Nirvana Claude is Claude Code",
+                    choice.seat
+                )),
+                Some(_) => {}
             }
         }
         if c.climb_start >= c.climb_full {
@@ -599,8 +723,10 @@ impl Seat {
             .map(|(_, price)| *price)
     }
 
-    /// The use cell for an effort, else the nearest above it (dearer, so a guess errs safe), else below.
-    fn use_cell(&self, effort: Effort) -> Option<&Use> {
+    /// The use cell for an effort, else the nearest above it (dearer, so a guess errs safe), else below. Public so
+    /// the spawn guard prices a subagent the way the rule does (review D6: `nirvana_claude::expected_share` wrote this
+    /// lookup a second time).
+    pub fn use_cell(&self, effort: Effort) -> Option<&Use> {
         self.uses
             .iter()
             .find(|cell| cell.effort == effort)
@@ -732,6 +858,100 @@ fn maybe_upgrade(path: &Path) -> Option<()> {
     let upgraded = replace_mode_line(&current_canonical, mode_line);
     let _ = write_atomic(path, upgraded.as_bytes());
     Some(())
+}
+
+/// The text as `maybe_upgrade` compares it: LF line ends and the top-level mode line fixed.
+fn canonical(text: &str) -> String {
+    replace_mode_line(&text.replace("\r\n", "\n"), "mode = \"balanced\"")
+}
+
+/// Review M2: the owner's file is neither herdr's default nor an old default the next read upgrades, so a changed
+/// default never reaches it (`maybe_upgrade` leaves an edited file alone, and should). `seat list` and the Seats square
+/// say so in one line, and `herdr seat diff` shows the difference.
+pub fn differs_from_default(text: &str) -> bool {
+    let text = canonical(text);
+    text != canonical(DEFAULT) && !HISTORICAL_DEFAULTS.iter().any(|old| text == canonical(old))
+}
+
+/// The line `seat list` and the Seats square show when `differs_from_default`.
+pub const DIFFERS_LINE: &str =
+    "seats.toml differs from herdr's default. herdr seat diff shows how.";
+
+/// `herdr seat diff`: a unified difference from the owner's `seats.toml` to herdr's default with the owner's mode line,
+/// three lines of context, so the mode they chose never shows as a change.
+pub fn diff_to_default(installed: &str, label: &str) -> String {
+    let installed = installed.replace("\r\n", "\n");
+    let default = match extract_mode_line(&installed) {
+        Some(mode) => replace_mode_line(&DEFAULT.replace("\r\n", "\n"), mode),
+        None => DEFAULT.replace("\r\n", "\n"),
+    };
+    let body = unified(&installed, &default, 3);
+    if body.is_empty() {
+        return "seats.toml is herdr's default.\n".to_owned();
+    }
+    format!("--- {label}\n+++ herdr's default\n{body}")
+}
+
+/// A line diff by longest common subsequence: `seats.toml` is under a thousand lines, so the table is small.
+fn unified(old: &str, new: &str, context: usize) -> String {
+    let a: Vec<&str> = old.lines().collect();
+    let b: Vec<&str> = new.lines().collect();
+    let (n, m) = (a.len(), b.len());
+    let mut lcs = vec![0u32; (n + 1) * (m + 1)];
+    let at = |i: usize, j: usize| i * (m + 1) + j;
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[at(i, j)] = if a[i] == b[j] {
+                lcs[at(i + 1, j + 1)] + 1
+            } else {
+                lcs[at(i + 1, j)].max(lcs[at(i, j + 1)])
+            };
+        }
+    }
+    // The edit script: (' ', '-', '+'), each with its line and its numbers in old and new.
+    let mut ops: Vec<(char, &str, usize, usize)> = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < n || j < m {
+        if i < n && j < m && a[i] == b[j] {
+            ops.push((' ', a[i], i, j));
+            i += 1;
+            j += 1;
+        } else if i < n && (j == m || lcs[at(i + 1, j)] >= lcs[at(i, j + 1)]) {
+            // A removal before an addition, as `diff -u` prints a changed line.
+            ops.push(('-', a[i], i, j));
+            i += 1;
+        } else {
+            ops.push(('+', b[j], i, j));
+            j += 1;
+        }
+    }
+    let changed: Vec<usize> = (0..ops.len()).filter(|&k| ops[k].0 != ' ').collect();
+    let mut out = String::new();
+    let mut k = 0;
+    while k < changed.len() {
+        let start = changed[k].saturating_sub(context);
+        let mut end = changed[k];
+        while k + 1 < changed.len() && changed[k + 1] <= end + 2 * context + 1 {
+            k += 1;
+            end = changed[k];
+        }
+        let end = (end + context + 1).min(ops.len());
+        let hunk = &ops[start..end];
+        let old_len = hunk.iter().filter(|op| op.0 != '+').count();
+        let new_len = hunk.iter().filter(|op| op.0 != '-').count();
+        out.push_str(&format!(
+            "@@ -{},{old_len} +{},{new_len} @@\n",
+            hunk[0].2 + 1,
+            hunk[0].3 + 1
+        ));
+        for (kind, line, _, _) in hunk {
+            out.push(*kind);
+            out.push_str(line);
+            out.push('\n');
+        }
+        k += 1;
+    }
+    out
 }
 
 /// Plan 12 O8a: the table's text with its top-level `mode` set, every other byte as it was. The Seats square's
@@ -982,6 +1202,9 @@ enum SkipKind {
     Floor,
     Headroom,
     Reserve,
+    /// Plan 40a: a seat with its own window, one of whose windows has no fresh reading. Not priced: a cheaper effort
+    /// reads nothing.
+    Unread,
 }
 
 impl SkipKind {
@@ -1627,20 +1850,20 @@ fn evaluate(
     };
 
     if let Some((override_target, reason)) = &request.override_seat {
-        let (seat_id, override_effort) = match override_target.split_once(':') {
+        // The effort is applied in `candidate`; here it is only checked (review D3: it was parsed and dropped).
+        let seat_id = match override_target.split_once(':') {
             Some((id, eff_str)) => {
-                let Some(eff) = Effort::parse(eff_str) else {
+                if Effort::parse(eff_str).is_none() {
                     return Err(fail(
                         format!("override {override_target} refused: unknown effort {eff_str}"),
                         &candidates,
                         false,
                     ));
-                };
-                (id.trim(), Some(eff))
+                }
+                id.trim()
             }
-            None => (override_target.trim(), None),
+            None => override_target.trim(),
         };
-        let _ = override_effort;
         #[allow(clippy::collapsible_if)]
         // preserves the target line of the seat_override_cap control
         if !request.inherited_override {
@@ -2110,7 +2333,99 @@ fn candidate(
             resets_at: free_at,
         });
     }
+    if cand.skip.is_none() {
+        cand.skip = scoped_skip(table, world, seat, &cand.windows);
+    }
     cand
+}
+
+/// "Fable week" for `week.fable`, "max 5h" for a pool window: what a skip or the orchestrator's reason names.
+fn window_label(pool: &str, window: &str) -> String {
+    match window.split_once('.') {
+        Some((base, scope)) => format!("{} {base}", capitalized(scope)),
+        None => format!("{pool} {window}"),
+    }
+}
+
+fn capitalized(word: &str) -> String {
+    let mut chars = word.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
+/// Why a window of `seat` has no fresh reading: never read, or read but stale. `None` when it is fresh.
+fn unread_why(world: &World, pool: &str, window: &str) -> Option<String> {
+    let label = window_label(pool, window);
+    let any = world
+        .readings
+        .iter()
+        .find(|reading| reading.pool == pool && reading.window == window && reading.used.is_some());
+    match any {
+        None => Some(format!("{label} not read")),
+        Some(reading) if nirvana_usage::freshness(reading, world.now) != Freshness::Fresh => {
+            Some(format!("{label} reading is stale"))
+        }
+        Some(_) => None,
+    }
+}
+
+/// Plan 40a, the fail-closed rule for a seat with its own window (Fable's `week.fable`): skipped unless every window it
+/// spends, its pool's and its own, has a fresh reading, and the order leaves `fable_reserve` of each of its own. It
+/// runs in `candidate`, so it holds in every mode, SOTA's included (SOTA ignores pressure, not filters), and the
+/// override path refuses a skipped seat. The reason is the owner's: `claude -p` bills a Fable request past the week to
+/// usage credits without asking (code.claude.com model-config).
+fn scoped_skip(table: &Table, world: &World, seat: &Seat, windows: &[WindowState]) -> Option<Skip> {
+    if seat.extra_windows.is_empty() {
+        return None;
+    }
+    let model = seat
+        .extra_windows
+        .first()
+        .and_then(|window| window.split_once('.'))
+        .map_or_else(|| seat.id.clone(), |(_, scope)| capitalized(scope));
+    let cost = format!("a headless {model} run past its week bills usage credits without asking");
+    // Its own windows first: "Fable week not read" is the reason that names the money.
+    let own = |window: &&WindowState| seat.extra_windows.contains(&window.window);
+    for window in windows
+        .iter()
+        .filter(own)
+        .chain(windows.iter().filter(|w| !own(w)))
+    {
+        if let Some(why) = window
+            .used
+            .is_none()
+            .then(|| unread_why(world, &seat.pool, &window.window))
+            .flatten()
+        {
+            return Some(Skip {
+                kind: SkipKind::Unread,
+                why: format!("{why}; {cost}"),
+                resets_at: None,
+            });
+        }
+    }
+    let reserve = table.constants.fable_reserve;
+    for window in windows
+        .iter()
+        .filter(|window| seat.extra_windows.contains(&window.window))
+    {
+        let left = window.left.unwrap_or(0.0);
+        let after = left - window.expected;
+        if after + EDGE < reserve {
+            return Some(Skip {
+                kind: SkipKind::Reserve,
+                why: format!(
+                    "would leave {} at {}, under the reserve {}; {cost}",
+                    window_label(&seat.pool, &window.window),
+                    pct(after.max(0.0)),
+                    pct(reserve)
+                ),
+                resets_at: window.resets_at,
+            });
+        }
+    }
+    None
 }
 
 /// §5.3: a window with more than `reset_left` left and under `reset_within_min` to its reset is discounted by
@@ -2997,212 +3312,264 @@ pub struct OrchestratorSeat {
 }
 
 impl OrchestratorSeat {
-    /// Format for the Seats square row: "Balanced, climb 1.18" or "Efficient", etc.
+    /// Format for the Seats square row: "Balanced, climb 1.18", "Efficient", "SOTA, Fable week 82% used".
     pub fn square_summary(&self) -> String {
-        if self.mode == Mode::Balanced {
-            if let Some(climb) = self.climb {
-                format!("Balanced, climb {:.2}", climb)
-            } else {
-                self.reason.clone()
-            }
-        } else {
-            self.mode.title().to_string()
+        match (self.mode, self.climb) {
+            (Mode::Balanced, Some(climb)) => format!("Balanced, climb {climb:.2}"),
+            _ => self.reason.clone(),
         }
     }
 }
 
-/// Plan 20 §3.1: decides the orchestrator's seat from the table's mode and readings.
+/// What Nirvana Claude runs on when the table names nothing it can take: R1's Opus 5.5 at medium, the last resort
+/// only (a table whose every claude seat is off). Every other answer comes from `[orchestrator]`.
+const LAST_RESORT: (&str, Effort, &str) = ("opus", Effort::Medium, "claude-opus-5-5");
+
+/// A choice as Nirvana Claude can take it: the seat on, at the effort it offers nearest at or below the one named
+/// (else its lowest). Why not, in words, when the seat is missing or off.
+fn take_choice<'a>(
+    table: &'a Table,
+    choice: &OrchestratorChoice,
+) -> Result<(&'a Seat, Effort), String> {
+    let seat = table
+        .seat(&choice.seat)
+        .ok_or_else(|| format!("no seat {}", choice.seat))?;
+    if !seat.enabled {
+        return Err(format!("{} off in seats.toml", seat.id));
+    }
+    let effort = seat
+        .efforts
+        .iter()
+        .copied()
+        .filter(|effort| *effort <= choice.effort)
+        .max()
+        .or_else(|| seat.efforts.iter().copied().min())
+        .ok_or_else(|| format!("{} has no efforts", seat.id))?;
+    Ok((seat, effort))
+}
+
+/// Plan 40a: a seat with its own window (Fable) seats Nirvana Claude only when every window it spends was read fresh
+/// and its own keeps `fable_orchestrator_left` after what is booked. The reason when not: "Fable week 82% used",
+/// "Fable week not read". A seat without its own window passes: plan 20's rule never asked that of Opus or Sonnet.
+fn scoped_orchestrator_ok(table: &Table, world: &World, seat: &Seat) -> Result<(), String> {
+    if seat.extra_windows.is_empty() {
+        return Ok(());
+    }
+    let Some(pool) = table.pool(&seat.pool) else {
+        return Err(format!("no pool {}", seat.pool));
+    };
+    let windows = seat_windows(seat, pool);
+    for window in windows
+        .iter()
+        .filter(|w| seat.extra_windows.contains(w))
+        .chain(windows.iter().filter(|w| !seat.extra_windows.contains(w)))
+    {
+        if let Some(why) = unread_why(world, &seat.pool, window) {
+            return Err(why);
+        }
+    }
+    for window in &seat.extra_windows {
+        let used = world
+            .readings
+            .iter()
+            .find(|r| r.pool == seat.pool && &r.window == window)
+            .and_then(|r| r.used)
+            .unwrap_or(1.0);
+        let booked: f32 = world
+            .leases
+            .iter()
+            .filter(|lease| lease.live(world.now) && lease.pool == seat.pool)
+            .filter_map(|lease| lease.expected.get(window))
+            .sum();
+        if 1.0 - used - booked + EDGE < table.constants.fable_orchestrator_left {
+            let booked = if booked > 0.0005 {
+                format!(", {} booked", pct(booked))
+            } else {
+                String::new()
+            };
+            return Err(format!(
+                "{} {} used{booked}",
+                window_label(&seat.pool, window),
+                pct(used)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// One constructor for every branch (review D6: five copies of the same block). `wanted` is the mode's choice, then
+/// the choices it falls back to in order; the first Nirvana Claude can take wins, and each one passed over adds its
+/// reason to `reason` ("SOTA, Fable week 82% used").
+fn orchestrator_from(
+    table: &Table,
+    world: &World,
+    mode: Mode,
+    reason: String,
+    wanted: &[&OrchestratorChoice],
+    climb: Option<(f32, f32, String)>,
+) -> OrchestratorSeat {
+    let mut reason = reason;
+    let mut passed: Vec<String> = Vec::new();
+    let mut taken = None;
+    for choice in wanted {
+        match take_choice(table, choice).and_then(|(seat, effort)| {
+            scoped_orchestrator_ok(table, world, seat).map(|()| (seat, effort))
+        }) {
+            Ok(got) => {
+                taken = Some(got);
+                break;
+            }
+            Err(why) => {
+                if !passed.contains(&why) {
+                    passed.push(why);
+                }
+            }
+        }
+    }
+    // A table whose every named choice is off: any claude seat that is on and has no window of its own, else R1's.
+    let (seat, effort, model) = match taken.or_else(|| {
+        table
+            .seats
+            .iter()
+            .filter(|seat| seat.enabled && seat.cli == "claude" && seat.extra_windows.is_empty())
+            .find_map(|seat| {
+                take_choice(table, &OrchestratorChoice::new(&seat.id, Effort::Medium)).ok()
+            })
+    }) {
+        Some((seat, effort)) => (seat.id.clone(), effort, seat.model_for(effort)),
+        None => (
+            LAST_RESORT.0.to_owned(),
+            LAST_RESORT.1,
+            LAST_RESORT.2.to_owned(),
+        ),
+    };
+    if !passed.is_empty() {
+        reason = format!("{reason}, {}", passed.join(", "));
+    }
+    let line = format!("nirvana claude -> {seat} {}: {reason}", effort.word());
+    let (climb, t, window) = match climb {
+        Some((climb, t, window)) => (Some(climb), Some(t), Some(window)),
+        None => (None, None, None),
+    };
+    OrchestratorSeat {
+        seat,
+        effort,
+        mode,
+        model,
+        climb,
+        t,
+        window,
+        reason,
+        line,
+    }
+}
+
+/// Plan 20 §3.1 and plan 40a: Nirvana Claude's seat from the table's mode, its `[orchestrator]` choices and the
+/// readings. Balanced climbs on the pool of its `balanced` seat.
 pub fn orchestrator_seat(table: &Table, world: &World) -> OrchestratorSeat {
+    let o = &table.orchestrator;
     let mode = table.mode;
     match mode {
-        Mode::Efficient => {
-            let seat = "sonnet".to_string();
-            let effort = Effort::Medium;
-            let model = table
-                .seat(&seat)
-                .map(|s| s.model.clone())
-                .unwrap_or_else(|| "claude-sonnet-5-5".into());
-            let reason = "Efficient".to_string();
-            let line = format!("nirvana claude -> {seat} {}: {reason}", effort.word());
-            OrchestratorSeat {
-                seat,
-                effort,
-                mode,
-                model,
-                climb: None,
-                t: None,
-                window: None,
-                reason,
-                line,
-            }
-        }
-        Mode::Sota => {
-            let seat = "opus".to_string();
-            let effort = Effort::High;
-            let model = table
-                .seat(&seat)
-                .map(|s| s.model.clone())
-                .unwrap_or_else(|| "claude-opus-5-5".into());
-            let reason = "SOTA".to_string();
-            let line = format!("nirvana claude -> {seat} {}: {reason}", effort.word());
-            OrchestratorSeat {
-                seat,
-                effort,
-                mode,
-                model,
-                climb: None,
-                t: None,
-                window: None,
-                reason,
-                line,
-            }
-        }
+        Mode::Efficient => orchestrator_from(
+            table,
+            world,
+            mode,
+            "Efficient".into(),
+            &[&o.efficient, &o.unread],
+            None,
+        ),
+        Mode::Sota => orchestrator_from(
+            table,
+            world,
+            mode,
+            "SOTA".into(),
+            &[&o.sota, &o.sota_fallback, &o.unread],
+            None,
+        ),
         Mode::Balanced => {
-            let pool_name = "max";
+            let pool_name = table
+                .seat(&o.balanced.seat)
+                .map_or("max", |seat| seat.pool.as_str());
             let window_names: Vec<String> = table
                 .pool(pool_name)
                 .map(|p| p.windows.clone())
                 .unwrap_or_else(|| vec!["5h".into(), "week".into()]);
-
             let pool_readings: Vec<&Reading> = world
                 .readings
                 .iter()
                 .filter(|r| r.pool == pool_name && r.used.is_some())
                 .collect();
-
-            if pool_readings.is_empty() {
-                let seat = "opus".to_string();
-                let effort = Effort::Medium;
-                let model = table
-                    .seat(&seat)
-                    .map(|s| s.model.clone())
-                    .unwrap_or_else(|| "claude-opus-5-5".into());
-                let reason = "Balanced, readings missing".to_string();
-                let line = format!("nirvana claude -> {seat} {}: {reason}", effort.word());
-                return OrchestratorSeat {
-                    seat,
-                    effort,
-                    mode,
-                    model,
-                    climb: None,
-                    t: None,
-                    window: None,
-                    reason,
-                    line,
-                };
-            }
-
             let fresh_readings: Vec<&Reading> = pool_readings
                 .iter()
                 .copied()
                 .filter(|r| nirvana_usage::freshness(r, world.now) == Freshness::Fresh)
                 .collect();
-
+            let unread = |why: &str| {
+                orchestrator_from(
+                    table,
+                    world,
+                    mode,
+                    format!("Balanced, readings {why}"),
+                    &[&o.unread],
+                    None,
+                )
+            };
+            if pool_readings.is_empty() {
+                return unread("missing");
+            }
             if fresh_readings.is_empty() {
-                let seat = "opus".to_string();
-                let effort = Effort::Medium;
-                let model = table
-                    .seat(&seat)
-                    .map(|s| s.model.clone())
-                    .unwrap_or_else(|| "claude-opus-5-5".into());
-                let reason = "Balanced, readings stale".to_string();
-                let line = format!("nirvana claude -> {seat} {}: {reason}", effort.word());
-                return OrchestratorSeat {
-                    seat,
-                    effort,
-                    mode,
-                    model,
-                    climb: None,
-                    t: None,
-                    window: None,
-                    reason,
-                    line,
-                };
+                return unread("stale");
             }
-
-            let mut windows = Vec::new();
-            for win_name in &window_names {
-                let fresh = fresh_readings.iter().find(|r| &r.window == win_name);
-                let booked: f32 = world
-                    .leases
-                    .iter()
-                    .filter(|lease| lease.live(world.now) && lease.pool == pool_name)
-                    .filter_map(|lease| lease.expected.get(win_name))
-                    .fold(0.0, |sum, share| sum + share);
-                let used = fresh.and_then(|r| r.used);
-                let elapsed = fresh.and_then(|r| nirvana_usage::elapsed(r));
-                windows.push(WindowState {
-                    window: win_name.clone(),
-                    used,
-                    booked,
-                    left: used.map(|u| 1.0 - u - booked),
-                    headroom: None,
-                    resets_at: fresh.and_then(|r| r.resets_at),
-                    elapsed,
-                    projected: None,
-                    spare: None,
-                    pace: None,
-                    reset_factor: 1.0,
-                    spare_weight: table.constants.spare_weight,
-                    expected: 0.0,
-                });
-            }
-
-            if let Some((climb, best_window)) = windows_climb(&windows, table.constants.pace_ease) {
-                let t = climb_t(
-                    climb,
-                    table.constants.climb_start,
-                    table.constants.climb_full,
-                );
-                let (seat, effort) = if t < 0.5 {
-                    ("opus".to_string(), Effort::Medium)
-                } else {
-                    ("sonnet".to_string(), Effort::Medium)
-                };
-                let model = table
-                    .seat(&seat)
-                    .map(|s| s.model.clone())
-                    .unwrap_or_else(|| {
-                        if seat == "opus" {
-                            "claude-opus-5-5".into()
-                        } else {
-                            "claude-sonnet-5-5".into()
-                        }
-                    });
-                let reason = format!("Balanced, {pool_name} {best_window} climb {:.2}", climb);
-                let line = format!("nirvana claude -> {seat} {}: {reason}", effort.word());
-                OrchestratorSeat {
-                    seat,
-                    effort,
-                    mode,
-                    model,
-                    climb: Some(climb),
-                    t: Some(t),
-                    window: Some(best_window),
-                    reason,
-                    line,
-                }
+            let windows: Vec<WindowState> = window_names
+                .iter()
+                .map(|win_name| {
+                    let fresh = fresh_readings.iter().find(|r| &r.window == win_name);
+                    let booked: f32 = world
+                        .leases
+                        .iter()
+                        .filter(|lease| lease.live(world.now) && lease.pool == pool_name)
+                        .filter_map(|lease| lease.expected.get(win_name))
+                        .fold(0.0, |sum, share| sum + share);
+                    let used = fresh.and_then(|r| r.used);
+                    WindowState {
+                        window: win_name.clone(),
+                        used,
+                        booked,
+                        left: used.map(|u| 1.0 - u - booked),
+                        headroom: None,
+                        resets_at: fresh.and_then(|r| r.resets_at),
+                        elapsed: fresh.and_then(|r| nirvana_usage::elapsed(r)),
+                        projected: None,
+                        spare: None,
+                        pace: None,
+                        reset_factor: 1.0,
+                        spare_weight: table.constants.spare_weight,
+                        expected: 0.0,
+                    }
+                })
+                .collect();
+            let Some((climb, best_window)) = windows_climb(&windows, table.constants.pace_ease)
+            else {
+                return unread("missing");
+            };
+            let t = climb_t(
+                climb,
+                table.constants.climb_start,
+                table.constants.climb_full,
+            );
+            let choice = if t < 0.5 {
+                &o.balanced
             } else {
-                let seat = "opus".to_string();
-                let effort = Effort::Medium;
-                let model = table
-                    .seat(&seat)
-                    .map(|s| s.model.clone())
-                    .unwrap_or_else(|| "claude-opus-5-5".into());
-                let reason = "Balanced, readings missing".to_string();
-                let line = format!("nirvana claude -> {seat} {}: {reason}", effort.word());
-                OrchestratorSeat {
-                    seat,
-                    effort,
-                    mode,
-                    model,
-                    climb: None,
-                    t: None,
-                    window: None,
-                    reason,
-                    line,
-                }
-            }
+                &o.balanced_hot
+            };
+            orchestrator_from(
+                table,
+                world,
+                mode,
+                format!("Balanced, {pool_name} {best_window} climb {climb:.2}"),
+                &[choice, &o.unread],
+                Some((climb, t, best_window)),
+            )
         }
     }
 }
@@ -3216,6 +3583,7 @@ const USAGE: &str = "usage: herdr seat list [--json]
        herdr seat release <order>
        herdr seat record --json '<line>'
        herdr seat orchestrator [--json]
+       herdr seat diff   (how your seats.toml differs from herdr's default)
        herdr seat mode [efficient|balanced|sota]   (prints the mode, or sets seats.toml's; plan 12 O8a)
        herdr seat run|exec|status|read|stop|cleanup ...   (plan 12 O3; `herdr seat run` alone prints its usage)
 --size defaults to medium (seats.toml's [size.medium]); --mode to seats.toml's mode.
@@ -3469,16 +3837,72 @@ pub fn set_test_world(clis: Option<BTreeMap<String, String>>) {
     TEST_CLIS.with_borrow_mut(|slot| *slot = clis);
 }
 
-/// Why a CLI cannot take an order, from the Accounts readers; `None` when it is signed in.
+/// Why a CLI cannot take an order, from the Accounts readers; `None` when it is signed in. agy's is read from its newest
+/// log only (review B2: the gate is a spend decision and fails closed), and each answer is kept `SIGNIN_KEEP_S`
+/// (review T2: `claude auth status` cost a process per pick).
 fn cli_state(cli: &str) -> Option<String> {
-    use crate::nirvana_accounts::{read, Cli};
+    use crate::nirvana_accounts::{read_for_gate, Cli};
     let which = match cli {
         "claude" => Cli::Claude,
         "agy" => Cli::Antigravity,
         "codex" => Cli::Codex,
         other => return Some(format!("{other} is not a CLI herdr knows")),
     };
-    signed_within(cli, ACCOUNTS_TIMEOUT, move || read(which))
+    cached_cli_state(&dir(), cli, now(), || {
+        signed_within(cli, ACCOUNTS_TIMEOUT, move || read_for_gate(which))
+    })
+}
+
+/// Review T2: how long a sign-in answer is kept. A sign-in does not change in a minute, and a logout shows within one.
+pub const SIGNIN_KEEP_S: u64 = 60;
+/// `<home>/nirvana/signin.json`: each CLI's last gate answer and when it was read.
+pub const SIGNIN_FILE: &str = "signin.json";
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct SigninCache {
+    #[serde(default)]
+    clis: BTreeMap<String, SigninEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SigninEntry {
+    /// `None`: signed in.
+    why: Option<String>,
+    at: u64,
+}
+
+/// `read`'s answer for `cli`, or the one kept in `<dir>/signin.json` when it is under `SIGNIN_KEEP_S` old. A file that
+/// does not parse is read as empty: it holds nothing but answers that can be read again.
+fn cached_cli_state(
+    dir: &Path,
+    cli: &str,
+    now: u64,
+    read: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    let path = dir.join(SIGNIN_FILE);
+    let mut cache: SigninCache = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    if let Some(entry) = cache
+        .clis
+        .get(cli)
+        .filter(|entry| entry.at <= now && now - entry.at < SIGNIN_KEEP_S)
+    {
+        return entry.why.clone();
+    }
+    let why = read();
+    cache.clis.insert(
+        cli.to_owned(),
+        SigninEntry {
+            why: why.clone(),
+            at: now,
+        },
+    );
+    if let Ok(bytes) = serde_json::to_vec_pretty(&cache) {
+        let _ = write_atomic(&path, &bytes);
+    }
+    why
 }
 
 /// A sign-in read with a deadline. `claude auth status` runs with no deadline of its own at every pick
@@ -3626,6 +4050,7 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         Some("release") => release_cli(&args[1..]),
         Some("record") => record_cli(&args[1..]),
         Some("orchestrator") => orchestrator_cli(&args[1..]),
+        Some("diff") => diff_cli(&args[1..]),
         // Plan 12 O8a: the mode the Seats square shows and changes.
         Some("mode") => crate::nirvana_seats_square::mode_cli(&args[1..]),
         // Plan 12 O3: the runner's verbs live in `nirvana_worker`.
@@ -3662,6 +4087,17 @@ fn orchestrator_cli(args: &[String]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Review M2: `herdr seat diff` prints how the owner's `seats.toml` differs from herdr's default.
+fn diff_cli(args: &[String]) -> std::io::Result<()> {
+    if !args.is_empty() {
+        usage_exit();
+    }
+    let path = dir().join(SEATS_FILE);
+    let text = read_or_create(&path);
+    print!("{}", diff_to_default(&text, &path.display().to_string()));
+    std::io::stdout().flush()
+}
+
 fn list_cli(args: &[String]) -> std::io::Result<()> {
     let json = match args {
         [] => false,
@@ -3679,11 +4115,19 @@ fn list_cli(args: &[String]) -> std::io::Result<()> {
     let mut world = live_world(&table);
     let dir = dir();
     world.leases = leases_or_exit(&dir.join(LEASES_FILE)).leases;
-    let view = list_view(&table, &world);
+    let mut view = list_view(&table, &world);
+    let differs =
+        std::fs::read_to_string(dir.join(SEATS_FILE)).is_ok_and(|text| differs_from_default(&text));
+    view["differs_from_default"] = differs.into();
     if json {
         println!("{}", serde_json::to_string_pretty(&view)?);
     } else {
-        print!("{}", list_text(&table, &world, &dir));
+        let mut text = list_text(&table, &world, &dir);
+        if differs {
+            text.push_str(DIFFERS_LINE);
+            text.push('\n');
+        }
+        print!("{text}");
     }
     Ok(())
 }
@@ -4008,24 +4452,133 @@ fn pick_cli(args: &[String]) -> std::io::Result<()> {
         request.override_seat = Some((seat.clone(), reason.clone()));
     }
     request.order = book.clone();
-    let mut world = live_world(&table);
+    let world = live_world(&table);
     let dir = dir();
+    // Plan 12 O8b (§9 role 3): Jev's advice over the seats left, in shadow unless `jev.toml` says on.
+    let client = crate::nirvana_jev::live_client().map(|(client, _)| client);
+    let setting = crate::nirvana_jev_roles::settings_in(&dir).seating;
+    let outcome = pick_and_book(
+        &dir,
+        &table,
+        world,
+        &request,
+        book.as_deref(),
+        run.as_deref(),
+        needs,
+        |world, chosen| {
+            crate::nirvana_jev_roles::advise_seating(
+                client.as_ref(),
+                &dir,
+                setting,
+                &table,
+                world,
+                &request,
+                chosen,
+                true,
+            )
+        },
+    );
+    match outcome {
+        Ok(Booking::Seat(out)) => print_pick(&out, json),
+        Ok(Booking::None(no_seat, now)) => no_seat_exit(&no_seat, now, json),
+        Err(BookError::Lock(err)) => {
+            eprintln!("herdr seat: {err}; nothing was changed, try again");
+            std::process::exit(LOCK_EXIT);
+        }
+        Err(BookError::Leases(err)) => {
+            eprintln!("herdr seat: {err}");
+            std::process::exit(2);
+        }
+        Err(BookError::Io(err)) => Err(err),
+    }
+}
+
+/// What `pick_and_book` gave: the pick to print (the booking in it), or no seat at that time.
+pub(crate) enum Booking {
+    Seat(serde_json::Value),
+    None(NoSeat, u64),
+}
+
+pub(crate) enum BookError {
+    /// Another herdr held `leases.lock` for all of `Lock::take`.
+    Lock(std::io::Error),
+    /// `leases.json` does not parse: a table-class error, never read as empty.
+    Leases(String),
+    Io(std::io::Error),
+}
+
+impl From<std::io::Error> for BookError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err)
+    }
+}
+
+impl From<serde_json::Error> for BookError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::Io(err.into())
+    }
+}
+
+/// Whether two picks were made among the same seats: the same seat and effort won, out of the same contenders.
+fn same_contest(a: &Pick, b: &Pick) -> bool {
+    let line = |pick: &Pick| -> Vec<(String, Effort)> {
+        pick.contenders
+            .iter()
+            .map(|c| (c.seat.clone(), c.effort))
+            .collect()
+    };
+    a.seat == b.seat && a.effort == b.effort && line(a) == line(b)
+}
+
+/// Review B1: `seat pick` held `leases.lock` across Jev's network call (20 s and a retry), so three parallel picks and
+/// a worker's `seat record` timed out at the lock's 10 s. Now Jev is asked first, on a pick from the bookings read
+/// without the lock; under the lock the rule picks again on the bookings as they are, and the advice is kept only when
+/// that pick was made among the same seats. Otherwise the rule's new pick stands and says why. The lock is held for the
+/// read, the pick and the write alone.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn pick_and_book(
+    dir: &Path,
+    table: &Table,
+    mut world: World,
+    request: &Request,
+    book: Option<&str>,
+    run: Option<&str>,
+    needs: Vec<String>,
+    advise: impl FnOnce(&World, Pick) -> Pick,
+) -> Result<Booking, BookError> {
     let leases_path = dir.join(LEASES_FILE);
-    let lock = take_lock(&dir)?;
-    let mut leases = leases_or_exit(&leases_path);
+    let over = request
+        .override_seat
+        .as_ref()
+        .map(|(seat, _)| seat.as_str());
+    // Before the lock: the bookings as they stand, read only, for Jev's question.
+    let before = load_leases(&leases_path).map_err(BookError::Leases)?;
     world.now = now();
-    if let Some(order) = &book {
-        let over = request
-            .override_seat
-            .as_ref()
-            .map(|(seat, _)| seat.as_str());
+    let booked_already =
+        book.is_some_and(|order| existing_booking(&before, order, over, world.now).is_some());
+    let advised = if booked_already {
+        None
+    } else {
+        world.leases = before.leases.clone();
+        world.overrides_used = run.map_or(0, |run| before.overrides(run));
+        pick(table, &world, request)
+            .ok()
+            .map(|rule| (rule.clone(), advise(&world, rule)))
+    };
+    let lock = Lock::take(dir).map_err(|err| match err.kind() {
+        std::io::ErrorKind::TimedOut => BookError::Lock(err),
+        _ => BookError::Io(err),
+    })?;
+    let mut leases = load_leases(&leases_path).map_err(BookError::Leases)?;
+    world.now = now();
+    if let Some(order) = book {
         match existing_booking(&leases, order, over, world.now) {
             Some(Ok(known)) => {
                 let mut out = known.pick.clone();
                 out["booked"] = "existing".into();
                 out["lease"] = lease_view(known)?;
                 drop(lock);
-                return print_pick(&out, json);
+                return Ok(Booking::Seat(out));
             }
             Some(Err(reason)) => {
                 drop(lock);
@@ -4036,37 +4589,31 @@ fn pick_cli(args: &[String]) -> std::io::Result<()> {
                     defer: false,
                     skipped: Vec::new(),
                 };
-                return no_seat_exit(&refused, world.now, json);
+                return Ok(Booking::None(refused, world.now));
             }
             None => {}
         }
     }
     world.leases = leases.leases.clone();
-    world.overrides_used = run.as_deref().map_or(0, |run| leases.overrides(run));
-    match pick(&table, &world, &request) {
-        Ok(chosen) => {
-            // Plan 12 O8b (§9 role 3): Jev's advice over the seats left, in shadow unless `jev.toml` says on.
-            let client = crate::nirvana_jev::live_client().map(|(client, _)| client);
-            let chosen = crate::nirvana_jev_roles::advise_seating(
-                client.as_ref(),
-                &dir,
-                crate::nirvana_jev_roles::settings_in(&dir).seating,
-                &table,
-                &world,
-                &request,
-                chosen,
-                true,
-            );
+    world.overrides_used = run.map_or(0, |run| leases.overrides(run));
+    match pick(table, &world, request) {
+        Ok(mut chosen) => {
+            chosen = match advised {
+                Some((rule, advised)) if advised.jev_pick.is_some() => {
+                    if same_contest(&rule, &chosen) {
+                        advised
+                    } else {
+                        chosen.reason.push_str(
+                            "; Jev's advice dropped: the bookings moved while Jev was asked",
+                        );
+                        chosen
+                    }
+                }
+                _ => chosen,
+            };
             let chosen = Pick { needs, ..chosen };
             let mut out = serde_json::to_value(&chosen)?;
-            let (booked, changed) = book_pick(
-                &mut leases,
-                &table,
-                &chosen,
-                book.as_deref(),
-                run.as_deref(),
-                world.now,
-            );
+            let (booked, changed) = book_pick(&mut leases, table, &chosen, book, run, world.now);
             if let Some(booked) = &booked {
                 out["booked"] = "new".into();
                 out["lease"] = lease_view(booked)?;
@@ -4075,11 +4622,11 @@ fn pick_cli(args: &[String]) -> std::io::Result<()> {
                 write_leases(&leases_path, &leases)?;
             }
             drop(lock);
-            print_pick(&out, json)
+            Ok(Booking::Seat(out))
         }
         Err(no_seat) => {
             drop(lock);
-            no_seat_exit(&no_seat, world.now, json)
+            Ok(Booking::None(no_seat, world.now))
         }
     }
 }
@@ -4312,7 +4859,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), DEFAULT);
         let table = parse(&read_or_create(&path)).expect("parses");
         assert!(table.problems().is_empty(), "{:?}", table.problems());
-        // Plan 12 §4: seven seats in the first version; fable, gpt-oss and local present but off.
+        // Plan 12 §4: seven seats in the first version; plan 40a turned Fable 5.2 on; gpt-oss and local stay off.
         let on: Vec<&str> = table
             .seats
             .iter()
@@ -4321,7 +4868,7 @@ mod tests {
             .collect();
         assert_eq!(
             on,
-            ["opus", "sonnet", "haiku", "g-opus", "g-sonnet", "argon", "flash"]
+            ["opus", "sonnet", "haiku", "fable", "g-opus", "g-sonnet", "argon", "flash"]
         );
         let off: Vec<&str> = table
             .seats
@@ -4329,7 +4876,77 @@ mod tests {
             .filter(|s| !s.enabled)
             .map(|s| s.id.as_str())
             .collect();
-        assert_eq!(off, ["fable", "gpt-oss", "local"]);
+        assert_eq!(off, ["gpt-oss", "local"]);
+        // Plan 40a: Fable 5.2's seat, as the Claude docs gave it on 2026-11-09.
+        let fable = table.seat("fable").unwrap();
+        assert_eq!(fable.model, "claude-fable-5-2");
+        assert_eq!(
+            fable.efforts,
+            [Effort::Low, Effort::Medium, Effort::High, Effort::Xhigh]
+        );
+        assert_eq!(fable.extra_windows, ["week.fable"]);
+        assert!(fable.capabilities.contains(&"browser".to_owned()));
+        let price = fable.price_at(date("2026-11-09").unwrap()).unwrap();
+        assert_eq!(
+            (
+                price.input,
+                price.output,
+                price.cache_read,
+                price.cache_write
+            ),
+            (8.0, 40.0, 0.20, 10.0)
+        );
+        assert_eq!(fable.prices.len(), 2, "the old row is kept");
+        let sonnet = table.seat("sonnet").unwrap();
+        assert!(
+            (sonnet
+                .price_at(date("2026-11-09").unwrap())
+                .unwrap()
+                .cache_read
+                - 0.10)
+                .abs()
+                < 1e-9
+        );
+        assert!(
+            (sonnet
+                .price_at(date("2026-10-20").unwrap())
+                .unwrap()
+                .cache_read
+                - 0.20)
+                .abs()
+                < 1e-9
+        );
+        assert!((table.pool("max").unwrap().per_usd["week.fable"] - 0.00156).abs() < 1e-9);
+        for cell in &fable.uses {
+            assert_eq!(
+                cell.windows.len(),
+                3,
+                "{:?}: 5h, week, week.fable",
+                cell.effort
+            );
+        }
+        let c = &table.constants;
+        assert!(close(c.fable_reserve, 0.10) && close(c.fable_orchestrator_left, 0.25));
+        assert_eq!(
+            (c.subagent_default.as_str(), c.autocompact_tokens),
+            ("sonnet", 400_000)
+        );
+        assert_eq!(
+            table.orchestrator.sota,
+            OrchestratorChoice::new("fable", Effort::High)
+        );
+        assert_eq!(
+            table.orchestrator.sota_fallback,
+            OrchestratorChoice::new("opus", Effort::High)
+        );
+        // A table without the section, or the constants, seats Nirvana Claude as before plan 40a.
+        let before = parse(include_str!("nirvana_seats_v12.toml")).unwrap();
+        assert_eq!(before.orchestrator, OrchestratorTable::default());
+        assert_eq!(
+            before.orchestrator.sota,
+            OrchestratorChoice::new("opus", Effort::High)
+        );
+        assert_eq!(before.constants.autocompact_tokens, 400_000);
         // §5.2's nineteen classes, in the nine chains of §5.4.
         let classes: Vec<&str> = table.classes.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(
@@ -5293,7 +5910,8 @@ mod tests {
             effort("plan", Mode::Balanced),
             ("flash".into(), Effort::High)
         );
-        assert_eq!(effort("plan", Mode::Sota), ("opus".into(), Effort::High));
+        // Plan 40a: Fable 97 heads plan at SOTA while its week was read fresh (this world's 0%).
+        assert_eq!(effort("plan", Mode::Sota), ("fable".into(), Effort::High));
         // An override asking xhigh on g-opus gets high because g-opus offers no xhigh.
         let mut over = request("plan");
         over.override_seat = Some(("g-opus:xhigh".into(), "trickier".into()));
@@ -5967,7 +6585,10 @@ mod tests {
                 .unwrap()
                 .clone()
         };
-        assert_eq!(seat("fable")["why_not"], "off in seats.toml");
+        assert_eq!(seat("gpt-oss")["why_not"], "off in seats.toml");
+        // Plan 40a: Fable is on, and its own week is one of its windows.
+        assert!(seat("fable")["why_not"].is_null());
+        assert_eq!(seat("fable")["windows"][2]["window"], "week.fable");
         assert_eq!(seat("g-opus")["why_not"], "agy not signed in");
         assert!(seat("opus")["why_not"].is_null());
         let five = &seat("opus")["windows"][0];
@@ -6307,10 +6928,14 @@ mod tests {
         // World with non-floored pools:
         // Gemini and Argon at 94% (so left = 6% > floor 5%).
         // Max: week at 94%, 5h at 75% (so left = 25% > reserve 20% + expected use).
+        // Plan 40a: Fable's own week stays at 0% here. Its fail-closed reserve is the one usage rule SOTA keeps per
+        // seat (`scoped_skip`), tested on its own below.
         let mut world_94 = world();
         for r in &mut world_94.readings {
             if r.pool == "max" && r.window == "5h" {
                 r.used = Some(0.75);
+            } else if r.window == "week.fable" {
+                r.used = Some(0.0);
             } else {
                 r.used = Some(0.94);
             }
@@ -6322,7 +6947,7 @@ mod tests {
             let pick_zero = chosen(&table, &world_zero, &req);
             let pick_94 = chosen(&table, &world_94, &req);
             if class.id == "plan" {
-                assert_eq!(pick_zero.seat, "opus");
+                assert_eq!(pick_zero.seat, "fable");
             }
             assert_eq!(
                 pick_zero.seat, pick_94.seat,
@@ -6357,7 +6982,7 @@ mod tests {
         let mut world_f6 = world_zero.clone();
         set(&mut world_f6, "max", "5h", 0.79); // left = 0.21 > reserve 0.20, but headroom 0.01 < use 0.015
         let pick_f6 = chosen(&table, &world_f6, &req_plan);
-        assert_eq!(pick_f6.seat, "opus");
+        assert_eq!(pick_f6.seat, "fable");
     }
 
     #[test]
@@ -6434,15 +7059,105 @@ mod tests {
 
     #[test]
     fn orchestrator_seat_sota_mode() {
+        // Plan 40a: the shipped table seats SOTA on Fable high while the Fable week was read fresh (0% here).
         let mut table = table();
         table.mode = Mode::Sota;
         let world = world();
         let seat = orchestrator_seat(&table, &world);
-        assert_eq!(seat.seat, "opus");
+        assert_eq!(seat.seat, "fable");
         assert_eq!(seat.effort, Effort::High);
-        assert_eq!(seat.model, "claude-opus-5-5");
-        assert_eq!(seat.line, "nirvana claude -> opus high: SOTA");
+        assert_eq!(seat.model, "claude-fable-5-2");
+        assert_eq!(seat.line, "nirvana claude -> fable high: SOTA");
         assert_eq!(seat.square_summary(), "SOTA");
+        // A table without `[orchestrator]` (an owner's edited one) seats as before: Opus high.
+        let mut old = parse(include_str!("nirvana_seats_v12.toml")).unwrap();
+        old.mode = Mode::Sota;
+        let seat = orchestrator_seat(&old, &world);
+        assert_eq!(seat.line, "nirvana claude -> opus high: SOTA");
+    }
+
+    /// Plan 40a: SOTA takes Fable only when the Fable seat is on, every window it spends was read fresh, and the Fable
+    /// week keeps `fable_orchestrator_left`; otherwise `sota_fallback`, and the reason says why.
+    #[test]
+    fn c40a_sota_orchestrator_falls_back_to_opus_with_why() {
+        let mut table = table();
+        table.mode = Mode::Sota;
+        let line = |table: &Table, world: &World| {
+            let seat = orchestrator_seat(table, world);
+            (seat.line.clone(), seat.square_summary())
+        };
+        // The Fable week at 82%: 18% left, under 25%.
+        let mut hot = world();
+        set(&mut hot, "max", "week.fable", 0.82);
+        assert_eq!(
+            line(&table, &hot),
+            (
+                "nirvana claude -> opus high: SOTA, Fable week 82% used".into(),
+                "SOTA, Fable week 82% used".into()
+            )
+        );
+        // At 74%: 26% left, Fable stays.
+        let mut warm = world();
+        set(&mut warm, "max", "week.fable", 0.74);
+        assert_eq!(line(&table, &warm).0, "nirvana claude -> fable high: SOTA");
+        // Booked Fable orders count against what is left.
+        warm.leases.push(lease(
+            "o-f",
+            "fable",
+            "max",
+            &[("week.fable", 0.02)],
+            NOW + 600,
+        ));
+        assert_eq!(
+            line(&table, &warm).0,
+            "nirvana claude -> opus high: SOTA, Fable week 74% used, 2% booked"
+        );
+        // Not read at all.
+        let mut unread = world();
+        unread.readings.retain(|r| r.window != "week.fable");
+        assert_eq!(line(&table, &unread).1, "SOTA, Fable week not read");
+        // Read, but stale.
+        let mut stale = world();
+        stale.now = NOW + 10_000;
+        assert_eq!(
+            line(&table, &stale).0,
+            "nirvana claude -> opus high: SOTA, Fable week reading is stale"
+        );
+        // The pool's own windows too: the 5 h not read.
+        let mut no_5h = world();
+        no_5h
+            .readings
+            .retain(|r| !(r.pool == "max" && r.window == "5h"));
+        assert_eq!(line(&table, &no_5h).1, "SOTA, max 5h not read");
+        // The Fable seat off.
+        let mut off = table.clone();
+        off.seats
+            .iter_mut()
+            .find(|s| s.id == "fable")
+            .unwrap()
+            .enabled = false;
+        assert_eq!(
+            line(&off, &world()).0,
+            "nirvana claude -> opus high: SOTA, fable off in seats.toml"
+        );
+        // An effort the seat does not offer takes the nearest below it.
+        let mut capped = table.clone();
+        capped.orchestrator.sota.effort = Effort::Max;
+        assert_eq!(orchestrator_seat(&capped, &world()).effort, Effort::Xhigh);
+        // Every choice off: any claude seat that is on and has no window of its own.
+        let mut bare = table.clone();
+        for seat in bare
+            .seats
+            .iter_mut()
+            .filter(|s| s.id == "opus" || s.id == "fable")
+        {
+            seat.enabled = false;
+        }
+        let seat = orchestrator_seat(&bare, &world());
+        assert_eq!(
+            (seat.seat.as_str(), seat.effort),
+            ("sonnet", Effort::Medium)
+        );
     }
 
     #[test]
@@ -6863,6 +7578,7 @@ mod tests {
             (9, include_str!("nirvana_seats_v9.toml")),
             (10, include_str!("nirvana_seats_v10.toml")),
             (11, include_str!("nirvana_seats_v11.toml")),
+            (12, include_str!("nirvana_seats_v12.toml")),
         ] {
             assert!(HISTORICAL_DEFAULTS.contains(&old), "v{n} is historical");
             assert_ne!(old.replace("\r\n", "\n"), DEFAULT.replace("\r\n", "\n"));
@@ -6882,5 +7598,297 @@ mod tests {
             );
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    // ---- plan 40a ----
+
+    /// Plan 40a step 1: the shipped default parses clean and is none of the historical ones, so `maybe_upgrade` moves
+    /// every one of them to it; and none of them reads as "differs" (the next read upgrades it).
+    #[test]
+    fn c40a_the_shipped_default_is_new_and_every_old_one_upgrades() {
+        let table = parse(DEFAULT).expect("the shipped default parses");
+        assert!(table.problems().is_empty());
+        for (n, old) in HISTORICAL_DEFAULTS.iter().enumerate() {
+            assert_ne!(
+                canonical(old),
+                canonical(DEFAULT),
+                "v{} is the default",
+                n + 1
+            );
+            assert!(!differs_from_default(old), "v{}", n + 1);
+        }
+        assert_eq!(
+            HISTORICAL_DEFAULTS.last().copied(),
+            Some(include_str!("nirvana_seats_v12.toml"))
+        );
+        assert!(!differs_from_default(DEFAULT));
+        assert!(!differs_from_default(&replace_mode_line(
+            DEFAULT,
+            "mode = \"sota\""
+        )));
+    }
+
+    /// Review M2: an edited table says so in one line, and `seat diff` shows the change and not the mode.
+    #[test]
+    fn c40a_an_edited_table_differs_and_seat_diff_shows_the_change() {
+        let edited =
+            replace_mode_line(DEFAULT, "mode = \"sota\"").replace("floor = 0.05", "floor = 0.08");
+        assert!(differs_from_default(&edited));
+        let diff = diff_to_default(&edited, "seats.toml");
+        assert!(
+            diff.starts_with("--- seats.toml\n+++ herdr's default\n@@ "),
+            "{diff}"
+        );
+        assert!(diff.contains("\n-floor = 0.08\n+floor = 0.05\n"), "{diff}");
+        assert!(
+            !diff.contains("mode ="),
+            "the owner's mode is never a change: {diff}"
+        );
+        assert_eq!(diff.matches("@@ -").count(), 1, "{diff}");
+        assert_eq!(
+            diff_to_default(&replace_mode_line(DEFAULT, "mode = \"sota\""), "x"),
+            "seats.toml is herdr's default.\n"
+        );
+        let text = list_text(&table(), &world(), Path::new("home"));
+        assert!(
+            !text.contains(DIFFERS_LINE),
+            "list_text adds it in list_cli only"
+        );
+    }
+
+    /// One `max` window set to a share, or dropped with `None`.
+    fn with_fable_week(used: Option<f32>) -> World {
+        let mut world = world();
+        match used {
+            Some(used) => set(&mut world, "max", "week.fable", used),
+            None => world.readings.retain(|r| r.window != "week.fable"),
+        }
+        world
+    }
+
+    /// Plan 40a: Fable fails closed. Not read, read stale, or a reserve it would break: skipped with why, in every
+    /// mode, SOTA included, and an override is refused for the same reason.
+    #[test]
+    fn c40a_fable_is_skipped_unless_its_windows_are_fresh_and_its_reserve_holds() {
+        let table = table();
+        let sota = |world: &World| {
+            let mut req = request("plan");
+            req.mode = Mode::Sota;
+            pick(&table, world, &req)
+        };
+        // Fresh at 0%: SOTA seats it.
+        assert_eq!(sota(&with_fable_week(Some(0.0))).unwrap().seat, "fable");
+        // Not read.
+        let got = sota(&with_fable_week(None)).unwrap();
+        assert_eq!(got.seat, "opus");
+        assert_eq!(
+            why(&got.runners_up, "fable"),
+            "Fable week not read; a headless Fable run past its week bills usage credits without asking"
+        );
+        // Stale: a reading three hours old.
+        let mut stale = with_fable_week(Some(0.0));
+        for r in stale
+            .readings
+            .iter_mut()
+            .filter(|r| r.window == "week.fable")
+        {
+            r.read_at = NOW - 3 * 3600;
+        }
+        let got = sota(&stale).unwrap();
+        assert_eq!(got.seat, "opus");
+        assert!(why(&got.runners_up, "fable").starts_with("Fable week reading is stale; "));
+        // The pool's own window, not read, skips it too.
+        let mut no_week = with_fable_week(Some(0.0));
+        no_week
+            .readings
+            .retain(|r| !(r.pool == "max" && r.window == "week"));
+        assert!(why(
+            &sota(&no_week).unwrap_or_else(|_| panic!()).runners_up,
+            "fable"
+        )
+        .starts_with("max week not read; "));
+        // Over the reserve: 91% used leaves 9%, under 10%. The general floor (5%) would not have caught it.
+        let got = sota(&with_fable_week(Some(0.91))).unwrap();
+        assert_eq!(got.seat, "opus");
+        assert!(
+            why(&got.runners_up, "fable")
+                .starts_with("would leave Fable week at 9%, under the reserve 10%; "),
+            "{}",
+            why(&got.runners_up, "fable")
+        );
+        // 89% used leaves 11% less the order: it holds.
+        assert_eq!(sota(&with_fable_week(Some(0.89))).unwrap().seat, "fable");
+        // The general floor still applies: the 5 h at 96%.
+        let mut floored = with_fable_week(Some(0.0));
+        set(&mut floored, "max", "5h", 0.96);
+        assert!(why(&sota(&floored).unwrap().runners_up, "fable").contains("floor"));
+        // An override is refused for the same reason, and so is an inherited one.
+        for inherited in [false, true] {
+            let mut over = request("plan");
+            over.mode = Mode::Sota;
+            over.override_seat = Some(("fable:xhigh".into(), "hard plan".into()));
+            over.inherited_override = inherited;
+            let refused = pick(&table, &with_fable_week(None), &over).unwrap_err();
+            assert!(
+                refused
+                    .reason
+                    .starts_with("override fable:xhigh refused: Fable week not read; "),
+                "{}",
+                refused.reason
+            );
+        }
+        // Fresh, an override to xhigh is taken (the rule never lifts above high by itself).
+        let mut over = request("plan");
+        over.override_seat = Some(("fable:xhigh".into(), "hard plan".into()));
+        let got = pick(&table, &with_fable_week(Some(0.0)), &over).unwrap();
+        assert_eq!((got.seat.as_str(), got.effort), ("fable", Effort::Xhigh));
+        // A seat without a window of its own is not touched by the rule: Opus with week.fable unread.
+        assert!(scoped_skip(
+            &table,
+            &with_fable_week(None),
+            table.seat("opus").unwrap(),
+            &[]
+        )
+        .is_none());
+    }
+
+    /// Plan 40a step 2: what each mode picks for the six classes that list Fable, on three worlds. Expected before the
+    /// run (the order's): SOTA seats Fable in the first world and Opus in the other two; Balanced and Efficient seat
+    /// Fable in none. The table is printed for the record (`--nocapture`).
+    #[test]
+    fn c40a_the_pick_table_on_three_worlds() {
+        let table = table();
+        let classes = [
+            "plan",
+            "build.load_bearing",
+            "review.adversary",
+            "fix.debug",
+            "build.frontend",
+            "judge.visual",
+        ];
+        let worlds = [
+            ("fable week 2%", with_fable_week(Some(0.02))),
+            ("fable week 95%", with_fable_week(Some(0.95))),
+            ("fable week unread", with_fable_week(None)),
+        ];
+        for (name, world) in &worlds {
+            for class in classes {
+                let mut row = Vec::new();
+                for mode in [Mode::Efficient, Mode::Balanced, Mode::Sota] {
+                    let mut req = request(class);
+                    req.mode = mode;
+                    let got = chosen(&table, world, &req);
+                    row.push(format!(
+                        "{} {} {}",
+                        mode.word(),
+                        got.seat,
+                        got.effort.word()
+                    ));
+                    let fable = got.seat == "fable";
+                    let want = mode == Mode::Sota && *name == "fable week 2%";
+                    assert_eq!(
+                        fable,
+                        want,
+                        "{name} {class} {}: {}",
+                        mode.word(),
+                        got.reason
+                    );
+                    if mode == Mode::Sota && !want {
+                        assert_eq!(got.seat, "opus", "{name} {class}");
+                    }
+                }
+                println!("c40a pick | {name} | {class} | {}", row.join(" | "));
+            }
+        }
+    }
+
+    /// Plan 40a: `step_up` (plan 37's redo after invented sources) takes Fable as the last rung of a class that lists
+    /// it, and the redo's override then meets the fail-closed rule like any other.
+    #[test]
+    fn c40a_step_up_ends_at_fable_through_the_same_check() {
+        let table = table();
+        let now = date("2026-11-10").unwrap();
+        assert_eq!(
+            step_up(&table, "plan", "opus", now).as_deref(),
+            Some("fable")
+        );
+        assert_eq!(step_up(&table, "plan", "fable", now), None);
+        // Today's research.web (no Fable): a sent-back opus order steps up to flash, 84 over 82, the cheaper of the two.
+        assert_eq!(
+            step_up(&table, "research.web", "opus", now).as_deref(),
+            Some("flash")
+        );
+        let mut redo = request("plan");
+        redo.override_seat = Some(("fable".into(), "step up".into()));
+        redo.inherited_override = true;
+        assert!(pick(&table, &with_fable_week(None), &redo)
+            .unwrap_err()
+            .reason
+            .contains("Fable week not read"));
+    }
+
+    /// Review B1: Jev is asked with the lease lock free, and the pick under the lock keeps the advice only when it was
+    /// made among the same seats.
+    #[test]
+    fn c40a_jev_is_asked_outside_the_lease_lock() {
+        let dir = temp_dir("c40a-b1");
+        let table = table();
+        let req = request("build.bounded");
+        let mut asked = false;
+        let out = pick_and_book(
+            &dir,
+            &table,
+            World::default(),
+            &req,
+            Some("o-b1"),
+            None,
+            Vec::new(),
+            |_, pick| {
+                asked = true;
+                // Another herdr takes the lock while Jev is being asked: it must get it at once.
+                let other = Lock::try_take(&dir, 1);
+                assert!(other.is_ok(), "the lease lock is held across Jev's call");
+                pick
+            },
+        );
+        assert!(asked);
+        assert!(matches!(out, Ok(Booking::Seat(_))));
+        assert!(load_leases(&dir.join(LEASES_FILE))
+            .unwrap()
+            .live("o-b1", now())
+            .is_some());
+        // Advice from a contest the bookings changed is dropped with why.
+        let rule = chosen(&table, &world(), &req);
+        let mut moved = rule.clone();
+        moved.contenders.pop();
+        assert!(!same_contest(&rule, &moved));
+        assert!(same_contest(&rule, &rule.clone()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review T2: a sign-in answer is kept a minute in `signin.json`, then read again.
+    #[test]
+    fn c40a_a_sign_in_is_read_once_a_minute() {
+        let dir = temp_dir("c40a-t2");
+        let mut reads = 0;
+        let mut read = |why: Option<&str>| {
+            cached_cli_state(&dir, "claude", NOW, || {
+                reads += 1;
+                why.map(str::to_owned)
+            })
+        };
+        assert_eq!(read(None), None);
+        assert_eq!(read(Some("claude not signed in")), None, "kept");
+        assert_eq!(reads, 1);
+        let later = cached_cli_state(&dir, "claude", NOW + SIGNIN_KEEP_S, || {
+            Some("claude not signed in".into())
+        });
+        assert_eq!(later.as_deref(), Some("claude not signed in"));
+        // Another CLI has its own answer.
+        assert_eq!(
+            cached_cli_state(&dir, "agy", NOW, || Some("agy not signed in".into())).as_deref(),
+            Some("agy not signed in")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

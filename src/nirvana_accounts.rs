@@ -197,6 +197,59 @@ pub fn agy_account_in(dir: &Path) -> Option<String> {
         .find_map(|path| agy_log_account(&std::fs::read_to_string(path).ok()?))
 }
 
+/// A log this young may be an agy start still writing: its sign-in line may come in the next second.
+pub const AGY_LOG_SETTLING: Duration = Duration::from_secs(30);
+
+/// Review B2, the seat gate's reading: the account only if the newest log names it. `agy_account_in` takes the newest
+/// of the last eight that names one, which is right for the panel's display and wrong for a spend decision: after a
+/// `/logout` the next start writes no sign-in line, the older logs still have one, and every agy seat stayed `ready`
+/// for up to eight starts (about 32 minutes at the foot's 240 s), or forever with no window open. A newest log younger
+/// than `AGY_LOG_SETTLING` with no line yet is a start still writing and is passed over, once; the one before it must
+/// then name the sign-in. `now` is the caller's clock, so a test can age a log.
+pub fn agy_gate_account_in(dir: &Path, now: SystemTime) -> Option<String> {
+    let mut logs: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("cli-") && name.ends_with(".log"))
+        })
+        .collect();
+    logs.sort_unstable();
+    let mut newest = logs.iter().rev();
+    let first = newest.next()?;
+    if let Some(account) = agy_log_account(&std::fs::read_to_string(first).ok()?) {
+        return Some(account);
+    }
+    let settling = std::fs::metadata(first)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|at| now.duration_since(at).ok())
+        .is_some_and(|age| age < AGY_LOG_SETTLING);
+    if !settling {
+        return None;
+    }
+    agy_log_account(&std::fs::read_to_string(newest.next()?).ok()?)
+}
+
+/// The sign-in a spend decision reads (`herdr seat pick`'s gate): as `read`, but agy's from the newest log only
+/// (`agy_gate_account_in`). The panel keeps `read`'s scan for its display.
+pub fn read_for_gate(cli: Cli) -> Signed {
+    match cli {
+        Cli::Antigravity => {
+            if !crate::nirvana_usage::on_path(cli.program()) {
+                return Signed::NotInstalled;
+            }
+            agy_log_dir()
+                .and_then(|dir| agy_gate_account_in(&dir, SystemTime::now()))
+                .map_or(Signed::Out, Signed::In)
+        }
+        other => read(other),
+    }
+}
+
 /// Runs a CLI the way a shell finds it: an `.exe` straight, anything else (Codex is an npm `.cmd`) through
 /// `cmd /C` on Windows, which `Command` alone cannot start.
 fn cli_command(program: &str) -> Command {
@@ -770,6 +823,43 @@ mod tests {
         assert_eq!(agy_account_in(&dir).as_deref(), Some("new@example.com"));
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(agy_account_in(&dir), None);
+    }
+
+    /// Review B2: the seat gate reads the newest log only. After a logout the newest start names nobody, so agy is
+    /// signed out for a spend decision while the panel still shows the last account it saw.
+    #[test]
+    fn c40a_the_gate_reads_agys_newest_log_only() {
+        let dir = std::env::temp_dir().join(format!("nirvana-c40a-agy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = |email: &str| {
+            format!("I1109 12:00:12.211749       1 server_oauth.go:229] {AGY_SIGNED_IN}{email}\n")
+        };
+        std::fs::write(dir.join("cli-20261109_110000.log"), line("me@example.com")).unwrap();
+        let later = SystemTime::now() + Duration::from_secs(3600);
+        assert_eq!(
+            agy_gate_account_in(&dir, later).as_deref(),
+            Some("me@example.com")
+        );
+        // The start after a logout: no sign-in line.
+        std::fs::write(dir.join("cli-20261109_130000.log"), "I1109 nothing here\n").unwrap();
+        assert_eq!(
+            agy_gate_account_in(&dir, later),
+            None,
+            "an hour old: signed out"
+        );
+        assert_eq!(
+            agy_account_in(&dir).as_deref(),
+            Some("me@example.com"),
+            "the panel keeps its scan"
+        );
+        // A start a second old may still be writing its line: the one before it answers.
+        assert_eq!(
+            agy_gate_account_in(&dir, SystemTime::now()).as_deref(),
+            Some("me@example.com")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(agy_gate_account_in(&dir, later), None);
     }
 
     #[test]

@@ -827,9 +827,10 @@ CONTROLS: tuple[Control, ...] = (
             'floor = 0.05\n',
             'floor = 0.06\n',
             'the_default_table_is_written_once_parses_and_holds_the_plans_seats_and_classes', "rust"),
+    # Plan 40a: Fable 5.2 is on (it was off as R1's "the orchestrator or nothing"); the sabotage turns it off again.
     Control('seat_toml_fable_on', 'src/nirvana_seats.toml',
-            '# Plan 12 §12 R1: the orchestrator or nothing; an escalation seat for one hard plan or review.\nenabled = false\n',
-            '# Plan 12 §12 R1: the orchestrator or nothing; an escalation seat for one hard plan or review.\nenabled = true\n',
+            '# was read fresh and its own week keeps `fable_reserve` after the order, in every mode and under --override.\nenabled = true\n',
+            '# was read fresh and its own week keeps `fable_reserve` after the order, in every mode and under --override.\nenabled = false\n',
             'the_default_table_is_written_once_parses_and_holds_the_plans_seats_and_classes', "rust"),
     Control('seat_filter_off', 'src/nirvana_seat.rs',
             '    if !seat.enabled {\n        cand.skip',

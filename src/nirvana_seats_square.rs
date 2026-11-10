@@ -104,6 +104,8 @@ pub struct View {
     pub runs: Vec<RunLine>,
     pub rows: Vec<Row>,
     pub orchestrator: Option<OrchestratorRow>,
+    /// Review M2: the installed `seats.toml` is neither herdr's default nor an old one the next read upgrades.
+    pub differs: bool,
 }
 
 impl View {
@@ -284,17 +286,19 @@ fn signature(path: &Path) -> Signature {
 
 /// The table and why it is not used. A missing `seats.toml` reads as herdr's default, which is what the
 /// next `seat pick` writes; this read never writes it.
-fn read_table(seats_dir: &Path) -> (Option<Table>, Option<String>) {
+fn read_table(seats_dir: &Path) -> (Option<Table>, Option<String>, bool) {
     let path = seats_dir.join(nirvana_seat::SEATS_FILE);
     let text = std::fs::read_to_string(&path).unwrap_or_else(|_| nirvana_seat::DEFAULT.to_owned());
+    let differs = nirvana_seat::differs_from_default(&text);
     match nirvana_seat::parse(&text) {
-        Ok(table) => (Some(table), None),
+        Ok(table) => (Some(table), None, differs),
         Err(_) => (
             None,
             Some(format!(
                 "{} is refused: herdr seat pick says why",
                 nirvana_seat::SEATS_FILE
             )),
+            differs,
         ),
     }
 }
@@ -346,7 +350,7 @@ fn read(root: &Path, seats_dir: &Path, replays: &mut Replays, now: u64) -> View 
         };
         runs.push((run, state));
     }
-    let (mut table, mut note) = read_table(seats_dir);
+    let (mut table, mut note, differs) = read_table(seats_dir);
     let mut mode_source = None;
     if let Some(t) = table.as_mut() {
         match nirvana_seat::project_mode(root, t) {
@@ -374,6 +378,7 @@ fn read(root: &Path, seats_dir: &Path, replays: &mut Replays, now: u64) -> View 
     };
     let mut view = compose(table.as_ref(), note, &runs, &leases, now);
     view.mode_source = mode_source;
+    view.differs = differs;
     if let Some(table) = table.as_ref() {
         // The cache alone, never a CLI read from the square (nirvana_seat::cached_world).
         let mut world = nirvana_seat::cached_world(seats_dir, now);
@@ -585,7 +590,7 @@ pub fn log_mode(root: &Path, from: Mode, to: Mode, by: &str) -> std::io::Result<
 
 /// Sets the mode in `<project>/.nirvana/seats.toml` and logs it in the project's open runs; what to tell the owner.
 pub fn change_mode(root: &Path, to: Mode, by: &str) -> Result<String, String> {
-    let (machine_table, _) = read_table(&seats_dir());
+    let (machine_table, _, _) = read_table(&seats_dir());
     let machine_table = machine_table.ok_or_else(|| {
         format!(
             "{} is refused: herdr seat pick says why",
@@ -617,7 +622,7 @@ pub fn change_mode(root: &Path, to: Mode, by: &str) -> Result<String, String> {
 /// Sets the global machine mode in `seats.toml` and updates the project view if following machine.
 pub fn change_machine_mode(root: &Path, to: Mode, by: &str) -> Result<String, String> {
     let previous = nirvana_seat::set_mode_in(&seats_dir(), to)?;
-    let (machine_table, _) = read_table(&seats_dir());
+    let (machine_table, _, _) = read_table(&seats_dir());
     let mut follows_machine = true;
     if let Some(table) = machine_table {
         if let Ok((effective_mode, source)) = nirvana_seat::project_mode(root, &table) {
@@ -648,7 +653,7 @@ pub fn change_machine_mode(root: &Path, to: Mode, by: &str) -> Result<String, St
 
 /// Clears `<project>/.nirvana/seats.toml` so the project follows the machine mode again.
 pub fn clear_mode(root: &Path, by: &str) -> Result<String, String> {
-    let (machine_table, _) = read_table(&seats_dir());
+    let (machine_table, _, _) = read_table(&seats_dir());
     let machine_table = machine_table.ok_or_else(|| {
         format!(
             "{} is refused: herdr seat pick says why",

@@ -14,7 +14,7 @@ already show the pools; read `herdr usage` when a decision turns on a figure.
 
 - `pools[]`: `pool`, `state` (`ok`, `failed`, `reading`, `not installed`, `not exposed`, `off`), `tightest`,
   and `windows[]` with `used` (0 to 1), `resets_in_s`, `fresh`, `stale` (`old` or `reset passed`), `pace`.
-- The pools: `max` (Claude Max: `5h`, `week`, `week.fable` for Fable only), `gemini` (agy's Gemini models),
+- The pools: `max` (Claude Max: `5h`, `week`, and `week.fable`, Fable's up to half of the week), `gemini` (agy's Gemini models),
   `google3p` (agy's Claude and GPT, the `g-opus` and `g-sonnet` seats: a small overflow pool), `argon` (week only),
   `local`. The foot hides `google3p` and `argon`; `seat pick` still prices them.
 - `used: null` is **unknown, never 0**. A reading past its reset says nothing about the new window.
