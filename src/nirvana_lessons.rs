@@ -1483,6 +1483,11 @@ fn rank(a: &Entry, b: &Entry) -> std::cmp::Ordering {
 /// The section to add to a new order's brief, and each offered lesson's `offered` counted. Empty when nothing is
 /// live for the class and profile. The files are copied into the worker's folder when it is a worktree, since
 /// claude's print-mode file tools stay inside the working folder.
+///
+/// `seat run` calls this until it takes plan 40's T5 hunk (`offer_uncounted`, then `count_offered` after the
+/// journal write); with the hunk only tests reach it. The `allow` is for that state: remove the function, or make it
+/// `cfg(test)`, once the hunk is on master.
+#[allow(dead_code)]
 pub fn offer_for(root: &Path, cwd: &Path, class: &str, profile: Option<&str>) -> String {
     let offer = offer_uncounted(root, cwd, class, profile);
     count_offered(root, &offer);

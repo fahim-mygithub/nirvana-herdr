@@ -599,6 +599,10 @@ pub fn line(profile: &str, card: &Card) -> String {
 /// §2.3: the section a new order seated with `profile` gets, and each offered card's `offered` counted. Empty for a
 /// profile that is one file or keeps no card. The offered files are copied into the worker's folder when it is a
 /// worktree, as lessons are: claude's print-mode file tools stay inside the working folder.
+///
+/// `seat run` calls this until it takes plan 40's T5 hunk, as `nirvana_lessons::offer_for` says; the `allow` is for
+/// the state with the hunk, where only tests reach it.
+#[allow(dead_code)]
 pub fn offer(root: &Path, cwd: &Path, profile: &str) -> String {
     let offer = offer_uncounted(root, cwd, profile);
     count_offered(root, profile, &offer);
