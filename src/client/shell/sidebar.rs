@@ -360,7 +360,12 @@ pub(crate) fn render_sidebar(
         let Some(workspace) = snapshot.workspaces.get(entry.index) else {
             continue;
         };
-        let status = displayed_workspace_status(snapshot, workspace, state.collapsed_groups);
+        // Alpha 0.69.0: a space whose working agents all wait on background work does not read working.
+        let status = super::nirvana_spaces::shown_space_status(
+            snapshot,
+            &workspace.workspace_id,
+            displayed_workspace_status(snapshot, workspace, state.collapsed_groups),
+        );
         let rows = workspace_rows(workspace, status, entry.indented, &config.spaces);
         let space_rows = rows.len().max(1);
         let agents = super::nirvana_spaces::space_agents(

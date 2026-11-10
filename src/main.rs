@@ -35,6 +35,7 @@ mod metadata_tokens;
 mod nirvana;
 mod nirvana_accounts;
 mod nirvana_agy_tools;
+mod nirvana_bgwait;
 mod nirvana_bladebro;
 mod nirvana_board;
 mod nirvana_claude;

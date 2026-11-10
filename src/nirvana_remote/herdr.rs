@@ -93,11 +93,11 @@ pub fn summary(herdr: &dyn Herdr) -> Result<Summary, String> {
     let working = agents["agents"].as_array().map_or(0, |agents| {
         agents
             .iter()
-            .filter(|agent| {
-                matches!(
-                    agent["agent_status"].as_str(),
-                    Some("working") | Some("blocked")
-                )
+            .filter(|agent| match agent["agent_status"].as_str() {
+                Some("blocked") => true,
+                // Alpha 0.69.0: waiting on background work is not at work (`spaces::agent_row_at`).
+                Some("working") => super::spaces::background(agent).is_none(),
+                _ => false,
             })
             .count()
     });

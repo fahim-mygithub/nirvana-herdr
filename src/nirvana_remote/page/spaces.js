@@ -9,13 +9,16 @@
 
   // herdr's own sparkle (src/nirvana_spaces.rs SPARKLE_FRAMES), four frames a second while a space works.
   const SPARKLE = ['✧', '✦', '✶', '✷', '✸', '✷', '✶', '✦'];
-  const LABEL = { working: 'working', needs: 'needs you', done: 'done', idle: 'idle' };
+  const LABEL = { working: 'working', needs: 'needs you', done: 'done', idle: 'idle', bg: 'waiting' };
 
-  function chip(status) {
+  // Alpha 0.69.0: `bg` is an agent whose turn ended and that waits on background work; its chip says waiting or quiet
+  // (the PC's reading, src/nirvana_bgwait.rs), with no pulse: nothing of the agent's own is at work.
+  function chip(status, bg) {
     const word = LABEL[status] ? status : 'idle';
+    const text = word === 'bg' && bg && bg.state ? bg.state : LABEL[word];
     return h('span', { class: 'chip ' + word },
       h('span', { class: 'chip-dot' + (word === 'working' ? ' pulse-t' : word === 'needs' ? ' pulse-p' : '') }),
-      h('span', { class: word === 'working' ? 'shim' : '', text: LABEL[word] }));
+      h('span', { class: word === 'working' ? 'shim' : '', text }));
   }
 
   nv.screen('spaces', {
@@ -66,7 +69,9 @@
             onclick: () => nv.go('chat', 'r', { agent: agent.id, name: agent.name, space: space.name }),
           }, h('span', { class: 'agent-text' },
             h('span', { class: 'agent-name', text: agent.name }),
-            h('span', { class: 'agent-line', text: agent.line || '' })), chip(agent.status)));
+            // Alpha 0.69.0: the background-wait reading in words takes the task's place while it shows.
+            h('span', { class: 'agent-line' + (agent.bg ? ' bg-line' : ''), text: (agent.bg && agent.bg.line) || agent.line || '' })),
+          chip(agent.status, agent.bg)));
           if (agents.length) quiet.delete(space.id);
           else agents.push(h('span', { class: 'agent-none',
             text: quiet.has(space.id) ? 'Open, no agent running. Nothing was started.' : 'No agents' }));

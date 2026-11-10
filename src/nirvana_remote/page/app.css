@@ -185,6 +185,10 @@ a:hover { color: #86CBD2; }
 .chip.needs .chip-dot { background: var(--purple); }
 .chip.done { background: rgba(99, 185, 141, 0.14); color: #86CFA8; }
 .chip.done .chip-dot { background: var(--green); }
+/* Alpha 0.69.0: waiting on background work. Muted like idle, its dot teal and still: the turn is over, its work is not. */
+.chip.bg .chip-dot { background: var(--teal); opacity: 0.6; }
+.bg-line { color: var(--muted); }
+.msg.at-bg { font-size: 13px; }
 
 /* Screen 3: the chat. */
 .chat { background: var(--bg); }

@@ -44,6 +44,9 @@ pub(super) struct SpaceAgent {
     pub(super) status: crate::api::schema::AgentStatus,
     pub(super) focused: bool,
     pub(super) is_folded: bool,
+    /// Alpha 0.69.0: the agent's turn ended and it waits on background work (`crate::nirvana_bgwait`); its state word
+    /// says so in place of herdr's, and `status` is the shown one (`shown_status`), so a background wait never spins.
+    pub(super) bg: Option<crate::nirvana_bgwait::Shown>,
 }
 
 /// Folds two or more idle agents of the same kind that have no task into a single row (plan 26 §4).
@@ -74,6 +77,7 @@ pub(super) fn fold_space_agents(agents: Vec<SpaceAgent>) -> Vec<SpaceAgent> {
                     status: crate::api::schema::AgentStatus::Idle,
                     focused: false,
                     is_folded: true,
+                    bg: None,
                 });
             }
         } else {
@@ -186,9 +190,11 @@ pub(super) fn space_agents(
                 .or_else(|| agent.name.clone())
                 .unwrap_or_else(|| "agent".into());
             let model = crate::nirvana_spaces::compact_model(&raw_model);
+            let bg = background(agent);
+            let status = crate::nirvana_bgwait::shown_status(agent.agent_status, bg.as_ref());
             SpaceAgent {
                 pane_id: agent.pane_id.clone(),
-                icon: kind.map_or_else(|| status_icon(agent.agent_status, indicators), Kind::icon),
+                icon: kind.map_or_else(|| status_icon(status, indicators), Kind::icon),
                 who,
                 task: {
                     let t = task_title(agent.terminal_title_stripped.as_deref());
@@ -199,13 +205,63 @@ pub(super) fn space_agents(
                     }
                 },
                 model,
-                status: agent.agent_status,
+                status,
                 focused: agent.focused,
                 is_folded: false,
+                bg: bg.as_ref().map(crate::nirvana_bgwait::View::shown),
             }
         })
         .collect();
     fold_space_agents(raw)
+}
+
+/// Alpha 0.69.0: the agent's background-wait reading, from the server's token (`crate::nirvana_bgwait::TOKEN`).
+pub(super) fn background(agent: &ClientShellAgent) -> Option<crate::nirvana_bgwait::View> {
+    crate::nirvana_bgwait::from_tokens(
+        agent
+            .tokens
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str())),
+    )
+}
+
+/// The state the window shows for `agent`: herdr's, except that a background wait is not a turn at work.
+pub(super) fn shown_agent_status(agent: &ClientShellAgent) -> crate::api::schema::AgentStatus {
+    crate::nirvana_bgwait::shown_status(agent.agent_status, background(agent).as_ref())
+}
+
+/// The state a space shows: herdr's for the space, except Working when every agent of the space herdr reads as
+/// working waits on background work instead (alpha 0.69.0). herdr ranks the space by its agents, so its Working came
+/// from those agents; the next status down among the space's agents takes its place.
+pub(super) fn shown_space_status(
+    snapshot: &ClientShellSnapshot,
+    workspace_id: &str,
+    status: crate::api::schema::AgentStatus,
+) -> crate::api::schema::AgentStatus {
+    use crate::api::schema::AgentStatus;
+    if status != AgentStatus::Working {
+        return status;
+    }
+    let members: Vec<&ClientShellAgent> = snapshot
+        .agents
+        .iter()
+        .filter(|agent| agent.workspace_id == workspace_id)
+        .collect();
+    let working = members
+        .iter()
+        .filter(|agent| agent.agent_status == AgentStatus::Working);
+    if working.clone().next().is_none() || working.clone().any(|agent| background(agent).is_none())
+    {
+        return status;
+    }
+    let shown: Vec<AgentStatus> = members
+        .iter()
+        .map(|agent| shown_agent_status(agent))
+        .collect();
+    [AgentStatus::Blocked, AgentStatus::Done, AgentStatus::Idle]
+        .into_iter()
+        .find(|candidate| shown.contains(candidate))
+        .unwrap_or(AgentStatus::Idle)
 }
 
 /// The agent's kind: the server's token, else its herdr name.
@@ -326,10 +382,11 @@ pub(super) fn ladder_row(agent: &SpaceAgent, step: usize, max_who: usize) -> Lad
         line.push_str(&agent.model);
     }
     let model_end = cells(&line);
-    let word = if full {
-        status_word(agent.status)
-    } else {
-        short_status_word(agent.status)
+    let word = match (agent.bg.map(crate::nirvana_bgwait::Shown::words), full) {
+        (Some((long, _)), true) => long,
+        (Some((_, short)), false) => short,
+        (None, true) => status_word(agent.status),
+        (None, false) => short_status_word(agent.status),
     };
     if !word.is_empty() {
         line.push(' ');
@@ -493,6 +550,8 @@ pub(super) fn space_working(
 ) -> bool {
     use crate::api::schema::AgentStatus;
     let busy = |status: AgentStatus| matches!(status, AgentStatus::Working | AgentStatus::Blocked);
+    // Alpha 0.69.0: an agent waiting on background work is not at work, so it does not sparkle its space.
+    let status = shown_space_status(snapshot, &workspace.workspace_id, status);
     if busy(status) || workers.iter().any(|worker| worker.working) {
         return true;
     }
@@ -517,7 +576,7 @@ pub(super) fn space_working(
     snapshot
         .agents
         .iter()
-        .any(|agent| busy(agent.agent_status) && member(&agent.workspace_id))
+        .any(|agent| busy(shown_agent_status(agent)) && member(&agent.workspace_id))
 }
 
 /// The space's marker and the status whose colour it takes. Working shows the sparkle's `frame` in the working
@@ -560,6 +619,7 @@ pub(super) fn listed_space_marker(
         Vec::new()
     };
     let working = space_working(snapshot, workspace, status, collapsed_groups, &workers);
+    let status = shown_space_status(snapshot, &workspace.workspace_id, status);
     space_marker(status, working, indicators, frame)
 }
 

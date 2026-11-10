@@ -3,6 +3,39 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.70.0: an agent waiting on background work says so, and a ghost is never shown running
+
+- **Changed:** when a Claude's turn has ended and it waits on background work (a Bash or PowerShell command run in the
+  background, a Monitor, a background Agent), the window and the phone say so in words. The sidebar row reads
+  `bg wait` or `bg quiet` in place of the state word, with the idle colour and no sparkle. The agents panel adds a
+  line such as "waiting on 1 background task: npm test, started 4m ago, last output 20s ago". The phone's chip reads
+  waiting or quiet and its line and chat show the same sentence. The reading comes from the Claude transcript, not
+  the screen. A task is open from its launch's result to its notification or its TaskStop. Each open task is then
+  checked: a process under that Claude that is the task's, its output file, its last output, and whether Claude
+  restarted since the launch. A live task with no output for 3 minutes reads quiet. One with no process, a gone
+  output file or a Claude that restarted reads lost, and a lost task is dropped an hour after its launch. A working
+  state from the screen with such a reading shows idle. herdr's own agent state is unchanged: `agent wait`, the
+  routes that act on an agent and the alerts' source still see what herdr detected. The phone's list is built again
+  4 s after each event and every 15 s while a reading shows. No new alert: the done alert now comes when the agent
+  is done after its background work, not when its turn ended with work still running.
+- **Because:** the owner, 2026-11-10: "One of the agent is working on some sort background testing that needs to
+  deliver then alerts the agent I'd like ui to tell me that instead of speeding one. Ensure we are testing accurately
+  for this feature I can foresee an issue where we easily show that a bg task is working but it's actually idling or
+  ghosting".
+- **Measured:** 2026-11-10 on a scratch herdr session with Claude Code 2.1.322 on Haiku. A background `sleep 90` read
+  running from 16 s after the turn ended and was gone 8 s after its notification. herdr read the pane done, not
+  working, the whole time. The screen's footer read `1 shell` while it ran, and `← 1 agent` with or without a task,
+  so that count is not a background count. Killing only the task's `sleep.exe` read lost, no process, 3 s later, and
+  the reading was gone 6 s after that, when the notification came. The first probe showed a reading kept for 8 s
+  after the notification started a turn, so a reading made under another herdr state is no longer shown. Git Bash
+  gives the task's `sleep.exe` a parent outside the Claude process tree; the `bash.exe` running the command is the
+  task's process. "Exit and stop tasks" left both sleeps running after Claude exited. After Claude came back with
+  `--continue` there was no reading at all; lost by a restart is covered by tests only. 32 tests and 47 controls,
+  each red alone; 4 older controls moved to the lines this rewrote. The 3 minute, 1 hour, 4 s and 15 s figures are
+  guesses. Not run on the owner's own panes or on the phone itself.
+- **If you remove this:** a Claude waiting on its tests shows as done or as a spinner with no word of what it waits
+  on, and a task whose process died shows nothing different from one still running.
+
 ## alpha 0.69.0: Gemini 4 Carbon takes Argon's seat
 
 - **Changed:** the seat table has a `carbon` seat. It runs `gemini-4-carbon-{effort}` on agy at low, medium and high,

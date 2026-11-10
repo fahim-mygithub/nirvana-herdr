@@ -96,9 +96,8 @@ CONTROLS = (
             T_SUBS, "rust"),
     # §2 failures, herdr side: a stream that ends is subscribed again
     Control("p39b_feed_resubscribes_on_end", SPACES,
-            "                    // The stream ended (herdr fell behind, or its server is going): subscribe again.\n"
-            "                    break;\n",
-            "                    return;\n",
+            "                    None => match rx.recv() {\n                        Ok(_) => true,\n                        Err(_) => break,\n",
+            "                    None => match rx.recv() {\n                        Ok(_) => true,\n                        Err(_) => return,\n",
             T_RESUB, "rust"),
     # Stopping ends every live view
     Control("p39b_close_all_ends_views", STREAM,

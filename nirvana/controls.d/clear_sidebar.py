@@ -282,8 +282,8 @@ CONTROLS = (
     Control(
         'p26_space_row_ladder_step3',
         'src/client/shell/nirvana_spaces.rs',
-        '    let word = if full {\n',
-        '    let word = if true {\n',
+        '    let word = match (agent.bg.map(crate::nirvana_bgwait::Shown::words), full) {\n',
+        '    let word = match (agent.bg.map(crate::nirvana_bgwait::Shown::words), true) {\n',
         'space_row_whole_row_equality_at_26_cells',
         'rust',
     ),

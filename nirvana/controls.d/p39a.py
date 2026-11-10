@@ -188,8 +188,8 @@ CONTROLS = (
             T_LINE, "rust"),
     # §1.3: agents at work count the blocked ones (the prototype's "agents at work")
     Control("p39a_summary_counts_blocked", HERDR,
-            '                    Some("working") | Some("blocked")\n',
-            '                    Some("working")\n',
+            '                Some("blocked") => true,\n',
+            '                Some("blocked") => false,\n',
             T_SUMMARY, "rust"),
     # §1.1: a socket API error is read as an error
     Control("p39a_answer_reads_error", HERDR,

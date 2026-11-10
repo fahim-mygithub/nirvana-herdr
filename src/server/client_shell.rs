@@ -38,6 +38,33 @@ fn nirvana_agent_model(
     )
 }
 
+/// Nirvana fork, alpha 0.69.0: the background-wait reading of the Claude in this pane, read off the server's loop
+/// (`nirvana_bgwait::cached`), as the token value the sidebar draws.
+fn nirvana_bgwait_token(
+    app: &app::App,
+    pane_id: &str,
+    cwd: Option<&str>,
+    status: crate::api::schema::AgentStatus,
+) -> Option<String> {
+    let (workspace_index, pane) = app.parse_pane_id(pane_id)?;
+    let terminal_id = &app
+        .state
+        .workspaces
+        .get(workspace_index)?
+        .pane_state(pane)?
+        .attached_terminal_id;
+    let shell_pid = app.terminal_runtimes.get(terminal_id)?.child_pid()?;
+    crate::nirvana_bgwait::cached(
+        shell_pid,
+        cwd,
+        status,
+        &crate::nirvana_spaces::Waker {
+            dirty: app.render_dirty.clone(),
+            notify: app.render_notify.clone(),
+        },
+    )
+}
+
 /// Nirvana fork: the ports servers listen on inside this space's panes, read off the server's loop.
 fn nirvana_space_ports(app: &app::App, workspace_index: usize, workspace_id: &str) -> Vec<u16> {
     let shell_pids = app
@@ -221,6 +248,15 @@ pub(super) fn snapshot_with_completions(
                 agent.foreground_cwd.as_deref().or(agent.cwd.as_deref()),
             ) {
                 tokens.extend(model.tokens());
+            }
+            // Nirvana fork, alpha 0.69.0: waiting on background work (src/nirvana_bgwait.rs).
+            if let Some(bg) = nirvana_bgwait_token(
+                app,
+                &pane_id,
+                agent.foreground_cwd.as_deref().or(agent.cwd.as_deref()),
+                agent.agent_status,
+            ) {
+                tokens.push((crate::nirvana_bgwait::TOKEN.to_owned(), bg));
             }
             tokens.sort_by(|left, right| left.0.cmp(&right.0));
             protocol::ClientShellAgent {

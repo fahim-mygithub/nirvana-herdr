@@ -17,6 +17,9 @@ pub(super) struct AgentRow {
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
     pub(super) subagents: Vec<crate::nirvana_subagents::Subagent>,
     pub(super) subagents_overflow: usize,
+    /// Alpha 0.69.0: what the agent waits on, in words, on its own line under the agent (`crate::nirvana_bgwait`). The
+    /// default rows do not show the state text, so the reading has a line of its own.
+    pub(super) bg_line: Option<String>,
 }
 
 pub(super) fn is_narrow_agent_panel(width: u16) -> bool {
@@ -232,7 +235,8 @@ pub(super) fn agent_row_lines(row: &AgentRow, width: u16) -> usize {
             }
         })
         .sum();
-    let overflow_line = usize::from(row.subagents_overflow > 0);
+    let overflow_line =
+        usize::from(row.subagents_overflow > 0) + usize::from(row.bg_line.is_some());
     // Seat-order workers under their run headers: a header, two lines per live worker, one per finished one.
     let run_lines: usize = group_subagents_by_run(&row.subagents)
         .iter()
@@ -572,10 +576,20 @@ pub(super) fn agent_row(
         .cloned()
         .collect::<HashMap<_, _>>();
     let tokens = agent.tokens.iter().cloned().collect::<HashMap<_, _>>();
-    let state_text = labels
-        .get(status_text(agent.agent_status))
-        .map(String::as_str)
-        .unwrap_or_else(|| sidebar_status_text(agent.agent_status));
+    // Alpha 0.69.0: a Claude whose turn ended and that waits on background work says so in words, and its icon is not
+    // a working one (`crate::nirvana_bgwait`).
+    let bg = super::nirvana_spaces::background(agent);
+    let status = crate::nirvana_bgwait::shown_status(agent.agent_status, bg.as_ref());
+    let bg_text = bg
+        .as_ref()
+        .map(|view| view.sentence(crate::nirvana_bgwait::now_secs()));
+    let state_text = match bg_text.as_deref() {
+        Some(text) => text,
+        None => labels
+            .get(status_text(agent.agent_status))
+            .map(String::as_str)
+            .unwrap_or_else(|| sidebar_status_text(agent.agent_status)),
+    };
     let canonical_agent = agent
         .agent
         .as_deref()
@@ -615,11 +629,12 @@ pub(super) fn agent_row(
 
     Some(AgentRow {
         pane_id: agent.pane_id.clone(),
-        status: agent.agent_status,
+        status,
         focused: agent.focused,
         rows,
         subagents,
         subagents_overflow,
+        bg_line: bg_text,
     })
 }
 
@@ -688,6 +703,19 @@ pub(super) fn render_agent_row(
     }
 
     let mut current_y = rect.y + main_height;
+    if let Some(line) = row.bg_line.as_deref() {
+        if current_y < rect.bottom() {
+            let width = usize::from(rect.width.saturating_sub(3));
+            let text = super::nirvana_spaces::fit(line, width);
+            Paragraph::new(Line::from(vec![
+                ratatui::text::Span::raw("   "),
+                ratatui::text::Span::styled(text, secondary),
+            ]))
+            .style(row_style)
+            .render(Rect::new(rect.x, current_y, rect.width, 1), buffer);
+            current_y += 1;
+        }
+    }
     let narrow = is_narrow_agent_panel(rect.width);
     let drop_version = rect.width < 30;
     let drop_elapsed = rect.width < 25;

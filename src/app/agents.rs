@@ -379,6 +379,27 @@ impl App {
             return None;
         }
         let pane = self.pane_metadata(ws_idx, pane_id)?;
+        let mut tokens = pane.tokens;
+        // Nirvana fork, alpha 0.69.0: the background-wait reading (src/nirvana_bgwait.rs), so the phone, which reads
+        // `agent.list`, words it as the sidebar does. Display-only: `agent_status` is still herdr's own.
+        if let Some(bg) = self
+            .terminal_runtimes
+            .get(&pane_state.attached_terminal_id)
+            .and_then(|runtime| runtime.child_pid())
+            .and_then(|shell_pid| {
+                crate::nirvana_bgwait::cached(
+                    shell_pid,
+                    pane.foreground_cwd.as_deref().or(pane.cwd.as_deref()),
+                    pane.agent_status,
+                    &crate::nirvana_spaces::Waker {
+                        dirty: self.render_dirty.clone(),
+                        notify: self.render_notify.clone(),
+                    },
+                )
+            })
+        {
+            tokens.insert(crate::nirvana_bgwait::TOKEN.to_owned(), bg);
+        }
         Some(crate::api::schema::AgentInfo {
             terminal_id: pane.terminal_id,
             name: terminal.agent_name.clone(),
@@ -390,7 +411,7 @@ impl App {
             agent_status: pane.agent_status,
             screen_detection_skipped: terminal.full_lifecycle_hook_authority_active(),
             state_labels: pane.state_labels,
-            tokens: pane.tokens,
+            tokens,
             agent_session: pane.agent_session,
             workspace_id: pane.workspace_id,
             tab_id: pane.tab_id,

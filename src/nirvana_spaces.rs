@@ -566,6 +566,20 @@ pub fn compact_model(model: &str) -> String {
     }
 }
 
+/// The transcript of the Claude process `pid`: its own session file (`<config>/sessions/<pid>.json`) names the
+/// session and its folder. Shared by the model probe here and the background-wait reader (`nirvana_bgwait`), so both
+/// read the same conversation.
+pub fn claude_transcript(config: &Path, pid: u32, pane_cwd: Option<&str>) -> Option<PathBuf> {
+    let session = crate::nirvana::read_claude_session(config, pid)?;
+    let cwd = session.cwd.or_else(|| pane_cwd.map(PathBuf::from))?;
+    Some(
+        config
+            .join("projects")
+            .join(claude_project_slug(&cwd))
+            .join(format!("{}.jsonl", session.session_id)),
+    )
+}
+
 /// The agent in a pane's shell and its model, read now. Runs on the worker thread only.
 fn probe(shell_pid: u32, pane_cwd: Option<&str>) -> Option<AgentModel> {
     let job = crate::detect::foreground_job(shell_pid)?;
@@ -580,16 +594,8 @@ fn probe(shell_pid: u32, pane_cwd: Option<&str>) -> Option<AgentModel> {
     let from_args = argv_model(&args);
     match agent {
         crate::detect::Agent::Claude => {
-            let path = crate::nirvana::claude_config_dir().and_then(|config| {
-                let session = crate::nirvana::read_claude_session(&config, pid)?;
-                let cwd = session.cwd.or_else(|| pane_cwd.map(PathBuf::from))?;
-                Some(
-                    config
-                        .join("projects")
-                        .join(claude_project_slug(&cwd))
-                        .join(format!("{}.jsonl", session.session_id)),
-                )
-            });
+            let path = crate::nirvana::claude_config_dir()
+                .and_then(|config| claude_transcript(&config, pid, pane_cwd));
             let transcript = path
                 .as_deref()
                 .and_then(read_tail)

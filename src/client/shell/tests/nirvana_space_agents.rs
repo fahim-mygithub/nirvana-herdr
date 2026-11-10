@@ -386,6 +386,7 @@ fn space_row_whole_row_equality_at_26_cells() {
         status,
         focused: false,
         is_folded: false,
+        bg: None,
     };
     let claude = row("pane_1", "\u{273B}", "Claude", "S5.5", AgentStatus::Working);
     let nirvana = row(
@@ -516,4 +517,96 @@ fn the_agents_panel_lists_the_selected_space_only() {
         .map(|cell| cell.symbol.as_str())
         .collect();
     assert!(text.contains("no agents in this space"));
+}
+
+/// Alpha 0.69.0 (src/nirvana_bgwait.rs): a Claude herdr reads as working whose transcript says its turn ended and that
+/// waits on one live background task, as the server's token carries it.
+fn claude_waiting_on_background() -> ClientShellAgent {
+    let now = crate::nirvana_bgwait::now_secs();
+    let view = crate::nirvana_bgwait::View {
+        tasks: vec![crate::nirvana_bgwait::Reading {
+            id: "b24g7efc5".into(),
+            kind: crate::nirvana_bgwait::Kind::Shell,
+            label: "sleep 90".into(),
+            started: now - 240,
+            last_output: Some(now - 20),
+            state: crate::nirvana_bgwait::State::Running,
+            why: None,
+        }],
+        live: 1,
+        lost: 0,
+    };
+    let mut claude = claude_sonnet();
+    claude
+        .tokens
+        .push((crate::nirvana_bgwait::TOKEN.into(), view.token()));
+    claude
+}
+
+fn sparkles(row: &str) -> bool {
+    crate::nirvana_spaces::SPARKLE_FRAMES
+        .iter()
+        .any(|glyph| row.contains(glyph))
+}
+
+#[test]
+fn a_claude_waiting_on_background_work_says_so_and_does_not_spin() {
+    // The control: the same Claude without the reading is a working row in a sparkling space.
+    let (state, frame, rows, space) = compose(vec![claude_sonnet()]);
+    let agent_y = usize::from(space.bottom() - 1);
+    assert!(rows[agent_y].contains("working"), "{:?}", rows[agent_y]);
+    assert!(
+        sparkles(&rows[usize::from(space.y)]),
+        "{:?}",
+        rows[usize::from(space.y)]
+    );
+    let _ = (state, frame);
+
+    let (state, frame, rows, space) = compose(vec![claude_waiting_on_background()]);
+    let agent_y = usize::from(space.bottom() - 1);
+    assert!(
+        rows[agent_y].contains("bg") && !rows[agent_y].contains("working"),
+        "agent row: {:?}",
+        rows[agent_y]
+    );
+    assert!(
+        !sparkles(&rows[usize::from(space.y)]),
+        "space row: {:?}",
+        rows[usize::from(space.y)]
+    );
+    // The icon takes the idle colour, not working's yellow.
+    let icon_x = rows[agent_y].chars().position(|c| c == '\u{273B}').unwrap();
+    assert_ne!(
+        frame.cells[agent_y * frame.width as usize + icon_x].fg,
+        crate::protocol::color_to_u32(state.config.palette.yellow)
+    );
+}
+
+#[test]
+fn the_agents_panel_words_the_background_wait() {
+    use crate::client::shell::agent_sidebar::agent_rows;
+    let mut snap = snapshot();
+    snap.agents = vec![claude_waiting_on_background()];
+    let config = ClientShellConfig::from_config(&Config::default());
+    let rows = agent_rows(&snap, &config, None);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, AgentStatus::Idle);
+    let mut state = ClientShellState::new(config);
+    state.set_snapshot(Box::new(snap));
+    state.set_pane_surface(surface());
+    let frame = state.compose(106, 30).expect("composed frame").frame;
+    let text: String = frame
+        .cells
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect();
+    let rows: Vec<String> = frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| row.iter().map(|cell| cell.symbol.as_str()).collect())
+        .collect();
+    assert!(
+        text.contains("waiting on"),
+        "panel did not word it: {rows:#?}"
+    );
 }

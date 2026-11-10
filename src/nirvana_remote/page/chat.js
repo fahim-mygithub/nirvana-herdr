@@ -17,18 +17,21 @@
   // The box grows to six lines of 22 px (16 px text) plus its padding, then scrolls inside: room for a paragraph
   // while the thread stays in view above the keyboard.
   const DRAFT_MOST = 6 * 22 + 22;
-  const LABEL = { working: 'working', needs: 'needs you', done: 'done', idle: 'idle' };
+  const LABEL = { working: 'working', needs: 'needs you', done: 'done', idle: 'idle', bg: 'waiting' };
 
   function size(bytes) {
     if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
     return Math.max(1, Math.round(bytes / 1024)) + ' KB';
   }
 
-  function chip(status) {
+  // Alpha 0.69.0: `bg` is an agent whose turn ended and that waits on background work; its chip says waiting or quiet
+  // (the PC's reading, src/nirvana_bgwait.rs), with no pulse: nothing of the agent's own is at work.
+  function chip(status, bg) {
     const word = LABEL[status] ? status : 'idle';
+    const text = word === 'bg' && bg && bg.state ? bg.state : LABEL[word];
     return h('span', { class: 'chip ' + word },
       h('span', { class: 'chip-dot' + (word === 'working' ? ' pulse-t' : word === 'needs' ? ' pulse-p' : '') }),
-      h('span', { class: word === 'working' ? 'shim' : '', text: LABEL[word] }));
+      h('span', { class: word === 'working' ? 'shim' : '', text }));
   }
 
   function option(label, sub, icon, onclick) {
@@ -56,7 +59,7 @@
       // The head: back, the agent and where it runs, its state.
       const name = h('span', { class: 'top-title small', text: agent.name });
       const where = h('span', { class: 'top-sub mono', text: agent.space });
-      const state = h('span', { class: 'top-chip' }, chip(agent.status));
+      const state = h('span', { class: 'top-chip' }, chip(agent.status, agent.bg));
       const back = h('button', { class: 'press icon-button', type: 'button', 'aria-label': 'Back to spaces',
         onclick: () => history.back() }, nv.icon('back', 22, '#E9EAEB'));
       el.append(h('div', { class: 'top ruled' }, back, h('span', { class: 'top-text' }, name, where), state));
@@ -70,7 +73,9 @@
       const working = h('div', { class: 'msg at-work', hidden: true },
         h('span', { class: 'dots' }, h('span'), h('span'), h('span')),
         h('span', { class: 'shim', text: 'working' }));
-      el.append(h('div', { class: 'scroll thread' }, h('div', { class: 'thread-in' }, list, working, liveBox)));
+      // Alpha 0.69.0: what the agent waits on, in place of the working dots, while its turn is over.
+      const waiting = h('div', { class: 'msg at-bg bg-line', hidden: true });
+      el.append(h('div', { class: 'scroll thread' }, h('div', { class: 'thread-in' }, list, working, waiting, liveBox)));
 
       // The box.
       const note = h('span', { class: 'note', role: 'status' });
@@ -114,8 +119,10 @@
         name.textContent = agent.name;
         where.textContent = [agent.space, agent.model].filter(Boolean).join(' · ');
         input.placeholder = 'Message ' + agent.name;
-        state.replaceChildren(chip(agent.status));
+        state.replaceChildren(chip(agent.status, agent.bg));
         working.hidden = agent.status !== 'working';
+        waiting.hidden = !agent.bg;
+        waiting.textContent = agent.bg ? agent.bg.line || '' : '';
         prompts.status(agent.status);
       }
 
@@ -338,7 +345,7 @@
       requestAnimationFrame(fitDraft);
       const stop = nv.stream('/api/chat/events?agent=' + encodeURIComponent(id), {
         chat: (data) => {
-          agent = Object.assign(agent, data.agent || {});
+          agent = Object.assign(agent, { bg: null }, data.agent || {});
           drawHead();
           list.replaceChildren();
           nodes.clear();
@@ -357,7 +364,7 @@
           if (messages.some((m) => m.kind === 'user' && !byId.has(m.id))) { for (const node of local) node.remove(); local = []; }
           upsert(messages);
         },
-        agent: (data) => { agent = Object.assign(agent, data); drawHead(); },
+        agent: (data) => { agent = Object.assign(agent, { bg: null }, data); drawHead(); },
         live: (data) => { drawLive(data.live); prompts.picker(data.picker); },
         // Over for good: the view ends here, so EventSource does not reconnect to a 404 and overwrite the note.
         gone: (_, close) => { close(); note.textContent = 'This agent has closed on the PC.'; },

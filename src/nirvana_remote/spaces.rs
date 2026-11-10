@@ -26,6 +26,12 @@ const SETTLE_MOST: Duration = Duration::from_secs(1);
 /// Before each subscription after the first the feed waits this, doubling to `RETRY_MOST` (`Feed::watch`).
 const RETRY_FIRST: Duration = Duration::from_millis(500);
 const RETRY_MOST: Duration = Duration::from_secs(10);
+/// Alpha 0.69.0: a background-wait reading changes with no herdr event (`crate::nirvana_bgwait`: running turns quiet,
+/// a task is lost, the server's worker finishes its first read a moment after the event that asked for it). So the
+/// feed builds the list once more this long after each event, longer than the reader's `REFRESH`, and every
+/// `BACKGROUND_EVERY` while any agent shows a reading. Neither runs while nothing waits.
+pub const FOLLOW_UP: Duration = Duration::from_secs(4);
+pub const BACKGROUND_EVERY: Duration = Duration::from_secs(15);
 
 /// herdr's status as the phone says it (the prototype's chips): working, needs you, done, idle.
 pub fn status_word(status: &str) -> &'static str {
@@ -54,19 +60,55 @@ fn token<'a>(agent: &'a Value, name: &str) -> Option<&'a str> {
 
 /// One agent as the phone draws it. `id` is herdr's public pane id: the only handle the page ever sends back.
 pub fn agent_row(agent: &Value) -> Value {
+    agent_row_at(agent, crate::nirvana_bgwait::now_secs())
+}
+
+/// The background-wait reading in herdr's row (`crate::nirvana_bgwait::TOKEN`).
+pub fn background(agent: &Value) -> Option<crate::nirvana_bgwait::View> {
+    agent["tokens"][crate::nirvana_bgwait::TOKEN]
+        .as_str()
+        .and_then(crate::nirvana_bgwait::View::from_token)
+}
+
+/// `agent_row` at `now`. Alpha 0.69.0: an agent whose turn ended and that waits on background work reads `bg`, with
+/// its reading in words under `bg` (`{"state": "waiting" | "quiet" | "lost", "line"}`), not `working`; one whose tasks
+/// are all lost reads herdr's state, except that a Working from the screen reads idle. A blocked agent is the owner's
+/// to answer and keeps `needs`. Display only: the routes that act on an agent read herdr's `agent_status`.
+pub fn agent_row_at(agent: &Value, now: u64) -> Value {
     let name = agent["name"]
         .as_str()
         .or_else(|| agent["display_agent"].as_str())
         .or_else(|| agent["agent"].as_str())
         .unwrap_or("agent");
-    json!({
+    let mut row = json!({
         "id": agent["pane_id"],
         "name": name,
         "model": token(agent, crate::nirvana_spaces::MODEL_TOKEN).unwrap_or(""),
         "kind": token(agent, crate::nirvana_spaces::KIND_TOKEN).unwrap_or(""),
         "line": crate::nirvana_spaces::task_title(agent["title"].as_str()),
         "status": status_word(agent["agent_status"].as_str().unwrap_or("")),
-    })
+    });
+    let herdr_status = agent["agent_status"].as_str().unwrap_or("");
+    if let Some(view) = background(agent).filter(|_| herdr_status != "blocked") {
+        let shown = view.shown();
+        row["status"] = json!(match shown {
+            crate::nirvana_bgwait::Shown::Waiting | crate::nirvana_bgwait::Shown::Quiet => "bg",
+            crate::nirvana_bgwait::Shown::Lost if herdr_status == "working" => "idle",
+            crate::nirvana_bgwait::Shown::Lost => status_word(herdr_status),
+        });
+        row["bg"] = json!({ "state": shown.phone(), "line": view.sentence(now) });
+    }
+    row
+}
+
+/// Whether any agent in a list from `build` shows a background-wait reading.
+pub fn any_background(snapshot: &Value) -> bool {
+    snapshot["spaces"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|space| space["agents"].as_array().cloned().unwrap_or_default())
+        .any(|agent| agent.get("bg").is_some())
 }
 
 /// The list the phone draws, from `workspace.list` and `agent.list` answers. An agent whose space is not in this
@@ -134,6 +176,18 @@ pub fn subscriptions(panes: &BTreeSet<String>) -> Value {
             .map(|pane| json!({ "type": "pane.agent_status_changed", "pane_id": pane })),
     );
     Value::Array(list)
+}
+
+/// How long the feed waits for an event before it builds the list anyway (alpha 0.69.0): `FOLLOW_UP` after an event,
+/// so a reading the event's own build asked for shows; `BACKGROUND_EVERY` while a reading shows; else only on events.
+pub fn next_build(after_event: bool, background: bool) -> Option<Duration> {
+    if after_event {
+        Some(FOLLOW_UP)
+    } else if background {
+        Some(BACKGROUND_EVERY)
+    } else {
+        None
+    }
 }
 
 /// Sets its flag when dropped: the subscription it guards is told to end.
@@ -258,9 +312,12 @@ impl Feed {
             };
             // The stream ends when this subscription is left, however it is left.
             let _ends = Stop(stop);
+            // Alpha 0.69.0: when the next list is built with no event (`next_build`).
+            let mut timed;
             match snapshot(self.herdr.as_ref()) {
                 Ok(again) => {
                     let moved = panes(&again) != watched;
+                    timed = next_build(false, any_background(&again));
                     if !self.send(Some(again.to_string())) {
                         return;
                     }
@@ -286,26 +343,37 @@ impl Feed {
             }
             let mut heard = false;
             loop {
-                if rx.recv().is_err() {
-                    // The stream ended (herdr fell behind, or its server is going): subscribe again.
-                    break;
-                }
-                if !std::mem::replace(&mut heard, true) {
-                    retry = RETRY_FIRST;
-                }
-                let started = Instant::now();
-                loop {
-                    let left = SETTLE_MOST.saturating_sub(started.elapsed());
-                    match rx.recv_timeout(SETTLE.min(left)) {
-                        Ok(_) if !left.is_zero() => {}
-                        Ok(_) | Err(RecvTimeoutError::Timeout) => break,
+                let event = match timed {
+                    Some(wait) => match rx.recv_timeout(wait) {
+                        Ok(_) => true,
+                        Err(RecvTimeoutError::Timeout) => false,
+                        // The stream ended (herdr fell behind, or its server is going): subscribe again.
                         Err(RecvTimeoutError::Disconnected) => break,
+                    },
+                    None => match rx.recv() {
+                        Ok(_) => true,
+                        Err(_) => break,
+                    },
+                };
+                if event {
+                    if !std::mem::replace(&mut heard, true) {
+                        retry = RETRY_FIRST;
+                    }
+                    let started = Instant::now();
+                    loop {
+                        let left = SETTLE_MOST.saturating_sub(started.elapsed());
+                        match rx.recv_timeout(SETTLE.min(left)) {
+                            Ok(_) if !left.is_zero() => {}
+                            Ok(_) | Err(RecvTimeoutError::Timeout) => break,
+                            Err(RecvTimeoutError::Disconnected) => break,
+                        }
                     }
                 }
                 let Ok(list) = snapshot(self.herdr.as_ref()) else {
                     break;
                 };
                 let changed_agents = panes(&list) != watched;
+                timed = next_build(event, any_background(&list));
                 if !self.send(Some(list.to_string())) {
                     return;
                 }
