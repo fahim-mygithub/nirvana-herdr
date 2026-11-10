@@ -47,6 +47,12 @@ fn why_written() -> &'static std::sync::Mutex<Option<Instant>> {
     &WRITTEN
 }
 
+/// True once this server has written a reading that held a Claude pane. Every herdr server on the machine writes the
+/// one file under the Nirvana home. On 2026-11-09 a test's server, which ran no Claude, wrote an empty reading over
+/// the installed home's while `herdr compact why` was the live check (alpha 0.67.1). So a server that never ran
+/// Claude writes nothing; one that did keeps writing, and its last Claude pane closing reads "No pane runs Claude".
+static WHY_SPOKE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// An `Instant` as a Unix second, through the pair (`now`, `wall`) read at one moment.
 fn unix_of(at: Instant, now: Instant, wall: u64) -> u64 {
     if at <= now {
@@ -327,6 +333,14 @@ impl App {
             return;
         };
         let snapshot = self.idle_compact_why_snapshot(now, crate::nirvana_run::now());
+        let holds_a_pane = snapshot["panes"]
+            .as_array()
+            .is_some_and(|panes| !panes.is_empty());
+        if holds_a_pane {
+            WHY_SPOKE.store(true, std::sync::atomic::Ordering::Relaxed);
+        } else if !WHY_SPOKE.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         let path = crate::nirvana_idle_compact::why_path(&home);
         let text = serde_json::to_string_pretty(&snapshot).unwrap_or_default();
         if let Err(err) = crate::nirvana_seat::write_atomic(&path, text.as_bytes()) {
@@ -927,6 +941,31 @@ mod tests {
             .after(AgentState::Working, t0)
             .after(AgentState::Idle, t0 + 60 * MIN);
         assert_eq!(app.state.terminals[&terminal_id].idle_stretch.logged, None);
+    }
+
+    /// Alpha 0.67.1: a server that never ran Claude leaves the reading alone (a test's server wrote an empty one over
+    /// the installed home's on 2026-11-09). One that did write a pane keeps writing, so "No pane runs Claude" is said.
+    #[tokio::test]
+    async fn idle_compact_server_that_never_ran_claude_writes_no_reading() {
+        let _guard = crate::nirvana::with_test_home("idle-compact-quiet");
+        let home = crate::nirvana::home().unwrap();
+        let path = crate::nirvana_idle_compact::why_path(&home);
+        let t0 = Instant::now();
+        let bare = test_app();
+        bare.idle_compact_why(t0, true);
+        assert!(!path.exists(), "a server with no Claude pane wrote a reading");
+        // A server that runs Claude writes its pane.
+        let mut app = test_app();
+        let _receiver = idle_claude(&mut app, t0, RECORDED_EMPTY);
+        app.idle_compact_why(t0, true);
+        let why: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(why["panes"].as_array().unwrap().len(), 1);
+        // Having spoken, the process writes the empty reading too: the last Claude pane closed.
+        bare.idle_compact_why(t0, true);
+        let why: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(why["panes"].as_array().unwrap().len(), 0);
     }
 
     #[tokio::test]

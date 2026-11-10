@@ -3,6 +3,24 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.67.1: a server that never ran Claude leaves `herdr compact why`'s reading alone
+
+- **Changed:** the server writes its idle compact reading (`idle-compact.json` under the Nirvana home) only once it
+  has seen a Claude pane. After that it keeps writing, so the last Claude pane closing still reads "No pane runs
+  Claude".
+- **Because:** every herdr server on the machine writes the one file, and the integration tests start real servers
+  that find the real home. On 2026-11-09, in the first live check of 0.67.0, `herdr compact why` printed "No pane
+  runs Claude" from a reading a test's server had written over the installed home's.
+- **Measured:** the installed home's reading held `"panes": []` with a write time of 22:37, inside the full test
+  run and before the 22:41 install. With the fix a full run (4977 of 4978, the one failure the known
+  `windows_plugin_pane_commands_resolve_from_plugin_root_with_cwd_override`) left that write time as it was. A new
+  test and two controls that go red alone; `nirvana/gate.py` 5 of 5 steps (clippy, 94 idle compact tests, three
+  controls); 3481 of 3481 controls find their text. Which test's server wrote the reading was not traced. Two live
+  servers that both run Claude still share the file and the last writer wins: not changed. The old empty reading
+  stays in the installed home until the owner's server restarts onto this build and writes its own.
+- **If you remove this:** any test run, and any second herdr server with no Claude in it, blanks the reading the
+  owner's server wrote, and `herdr compact why` answers for the wrong server.
+
 ## alpha 0.67.0: `herdr look`, an image or PDF read that returns text
 
 - **Changed:** `herdr look <file> --ask "<question>" [--detail low|high] [--pages a-b] [--seat <id>] [--json]
