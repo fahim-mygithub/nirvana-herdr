@@ -68,7 +68,7 @@ CONTROLS = (
             "a_spawn_with_no_model_or_no_effort_is_refused", "rust"),
     Control("o4b_guard_fork_passes", CLAUDE,
             'if spawn.agent_type == "fork" {', 'if spawn.agent_type == "fork-x" {',
-            "a_spawn_with_no_model_or_no_effort_is_refused", "rust"),
+            "c40b_the_guard_names_the_sessions_own_seat", "rust"),
     Control("o4b_guard_ignores_agent_file", CLAUDE,
             "        .or_else(|| def.and_then(|def| def.effort.clone()));", "        .or(None);",
             "a_spawn_with_no_model_or_no_effort_is_refused", "rust"),

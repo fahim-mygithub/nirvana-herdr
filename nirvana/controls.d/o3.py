@@ -284,7 +284,7 @@ CONTROLS = (
             "a_rejected_limit_stops_the_worker_at_once", "rust"),
     # Not in the job: `kill` and the job's close both miss the worker's child. (A first control that swapped
     # `job.kill()` for `child.kill()` stayed green, rightly: dropping the kill-on-close job ended ping anyway.)
-    Control("worker_tree_outside_the_job", WORKER,
+    Control("worker_tree_outside_the_job", "src/nirvana_worker/job.rs",
             "if unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle().cast()) } == 0 {",
             "if false && unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle().cast()) } == 0 {",
             "a_stop_ends_the_workers_whole_process_tree", "rust"),

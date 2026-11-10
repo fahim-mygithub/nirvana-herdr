@@ -27,7 +27,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -41,7 +41,9 @@ use crate::nirvana_usage::Reading;
 
 /// The Work Report every worker ends with, passed to both CLIs as `--json-schema` (P3: both take it).
 /// `lesson` is O5's: a worker's proposed lesson, which the gate checks before it is written.
-pub const REPORT_SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["status","summary","files","tests","gotchas"],"properties":{"status":{"type":"string","enum":["done","blocked","needs_answer"]},"summary":{"type":"string","minLength":1},"question":{"type":"string"},"files":{"type":"array","items":{"type":"string"}},"tests":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["name","result"],"properties":{"name":{"type":"string"},"result":{"type":"string","enum":["pass","fail","not_run"]}}}},"gotchas":{"type":"array","items":{"type":"string"}},"lesson":{"type":"object","additionalProperties":false,"required":["name","class","steps","evidence"],"properties":{"name":{"type":"string","minLength":1},"class":{"type":"string","minLength":1},"steps":{"type":"string","minLength":1},"evidence":{"type":"string","minLength":1}}},"lesson_ops":{"type":"array","items":{"type":"object","required":["op"],"properties":{"op":{"type":"string","enum":["new","patch","merge","retire"]},"from":{"type":"string"},"slug":{"type":"string"},"base_sha":{"type":"string"},"name":{"type":"string"},"class":{"type":"string"},"steps":{"type":"string"},"evidence":{"type":"string"},"slugs":{"type":"array","items":{"type":"string"}}}}},"card_ops":{"type":"array","items":{"type":"object","required":["op"],"properties":{"op":{"type":"string","enum":["new","patch"]},"slug":{"type":"string"},"base_sha":{"type":"string"},"name":{"type":"string"},"when":{"type":"string"},"verdict":{"type":"string","enum":["keep","reject","dead-end"]},"effect":{"type":"string"},"source":{"type":"string"},"date":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"body":{"type":"string"},"evidence":{"type":"string"}}}},"sources":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["url","used_for"],"properties":{"url":{"type":"string","minLength":1},"used_for":{"type":"string","minLength":1}}}}}}"#;
+/// Plan 40 T3: `files` and `tests` are allowed and no longer required. The gate runs its own `test:` and reads its own
+/// diff, so a worker paid output tokens for two lists nothing read; the pane shows them when present.
+pub const REPORT_SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["status","summary","gotchas"],"properties":{"status":{"type":"string","enum":["done","blocked","needs_answer"]},"summary":{"type":"string","minLength":1},"question":{"type":"string"},"files":{"type":"array","items":{"type":"string"}},"tests":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["name","result"],"properties":{"name":{"type":"string"},"result":{"type":"string","enum":["pass","fail","not_run"]}}}},"gotchas":{"type":"array","items":{"type":"string"}},"lesson":{"type":"object","additionalProperties":false,"required":["name","class","steps","evidence"],"properties":{"name":{"type":"string","minLength":1},"class":{"type":"string","minLength":1},"steps":{"type":"string","minLength":1},"evidence":{"type":"string","minLength":1}}},"lesson_ops":{"type":"array","items":{"type":"object","required":["op"],"properties":{"op":{"type":"string","enum":["new","patch","merge","retire"]},"from":{"type":"string"},"slug":{"type":"string"},"base_sha":{"type":"string"},"name":{"type":"string"},"class":{"type":"string"},"steps":{"type":"string"},"evidence":{"type":"string"},"slugs":{"type":"array","items":{"type":"string"}}}}},"card_ops":{"type":"array","items":{"type":"object","required":["op"],"properties":{"op":{"type":"string","enum":["new","patch"]},"slug":{"type":"string"},"base_sha":{"type":"string"},"name":{"type":"string"},"when":{"type":"string"},"verdict":{"type":"string","enum":["keep","reject","dead-end"]},"effect":{"type":"string"},"source":{"type":"string"},"date":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"body":{"type":"string"},"evidence":{"type":"string"}}}},"sources":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["url","used_for"],"properties":{"url":{"type":"string","minLength":1},"used_for":{"type":"string","minLength":1}}}}}}"#;
 
 /// The schema's properties, which the check below allows and nothing else.
 pub const REPORT_KEYS: [&str; 10] = [
@@ -94,19 +96,26 @@ pub fn check_report(report: &Value) -> Result<(), String> {
     if object.get("question").is_some_and(|q| !q.is_string()) {
         return Err("question is not a string".into());
     }
-    for key in ["files", "gotchas"] {
-        let list = object
-            .get(key)
-            .and_then(Value::as_array)
+    // Plan 40 T3: `gotchas` is required, `files` and `tests` only checked when present (the schema above).
+    for (key, required) in [("files", false), ("gotchas", true)] {
+        let Some(found) = object.get(key) else {
+            if required {
+                return Err(format!("{key} is not a list"));
+            }
+            continue;
+        };
+        let list = found
+            .as_array()
             .ok_or_else(|| format!("{key} is not a list"))?;
         if list.iter().any(|item| !item.is_string()) {
             return Err(format!("{key} holds something that is not a string"));
         }
     }
-    let tests = object
-        .get("tests")
-        .and_then(Value::as_array)
-        .ok_or("tests is not a list")?;
+    let no_tests: Vec<Value> = Vec::new();
+    let tests = match object.get("tests") {
+        None => &no_tests,
+        Some(tests) => tests.as_array().ok_or("tests is not a list")?,
+    };
     for test in tests {
         let test = test.as_object().ok_or("a test is not an object")?;
         if test.keys().any(|key| key != "name" && key != "result") {
@@ -219,6 +228,9 @@ pub const ENV_REMOVED: [&str; 7] = [
     crate::nirvana_launch::SUBAGENT_MODEL_ENV,
 ];
 
+/// Claude Code's flag that keeps per-folder sections out of the system prompt (plan 40, `argv`).
+pub const EXCLUDE_DYNAMIC: &str = "--exclude-dynamic-system-prompt-sections";
+
 /// The worker's argv, program first. A list, never a shell line.
 pub fn argv(spec: &LaunchSpec) -> Result<Vec<String>, String> {
     let mut argv: Vec<String> = Vec::new();
@@ -235,6 +247,12 @@ pub fn argv(spec: &LaunchSpec) -> Result<Vec<String>, String> {
                     "--setting-sources",
                     "project",
                     "--strict-mcp-config",
+                    // Plan 40: the dynamic sections (the folder, the git state) leave the system prompt, so workers in
+                    // different worktrees share more of the cached prefix. Measured by the owner 2026-11-09 on Haiku
+                    // with these flags in empty folders: a start in a new folder wrote 7,315 cache tokens and read
+                    // 16,785 without it, 5,390 and 18,463 with it, about 1,900 fewer written per start. Small
+                    // against a whole order.
+                    EXCLUDE_DYNAMIC,
                     "--model",
                     &spec.model,
                     "--effort",
@@ -529,10 +547,18 @@ pub fn continue_line(order_file: &str, why: &str) -> String {
     )
 }
 
-/// What herdr adds to every order it copies: the rules a worker cannot be trusted to know.
+/// What herdr adds to every order it copies: the rules a worker cannot be trusted to know, and only those. Plan 40
+/// T2: "work only in this folder" is the prompt line's (`first_line`) and the Work Report's fields are the schema's
+/// (`--json-schema`); the footer said both again on every order, send-back and reseat. The finish sentence is the
+/// owner's (plan 40 order): the Claude Fable 5.2 guide measured that models stop early more often at low and medium
+/// effort, and a send-back costs a whole new run. Review round (S2): the first wording named "a locked file" ordinary and
+/// left `blocked` only for the forbidden and the owner's decisions, so it pushed a worker past a missing credential
+/// (CLAUDE.md rule 12) and a file another agent holds (rule 2). The blockers are now named, and a credential is never
+/// looked for elsewhere.
 pub const ORDER_FOOTER: &str = "\n\n---\nFrom herdr (plan 12 §4): do not start subagents or background processes unless this order allows it. \
-Work only in this folder. Your last message is the Work Report: status (done, blocked or needs_answer), summary, \
-files you changed, tests with their results, gotchas, and, when a step is worth keeping, a lesson.\n";
+Finish the whole order before you report. Work through ordinary obstacles such as an error or a timeout. \
+Report `blocked` for anything the order forbids, anything only the owner can decide, a missing credential or sign-in \
+(never look for one elsewhere), and a file you do not own or that another agent holds.\n";
 pub(crate) const FOOTER_MARK: &str = "From herdr (plan 12 §4)";
 
 // ---- the stream ----
@@ -647,6 +673,12 @@ impl Stream {
     pub fn in_dir(mut self, cwd: &str) -> Self {
         self.cwd = Some(cwd.to_owned());
         self
+    }
+
+    /// A call the stream started and has not answered (plan 40 review B7): claude's `tool_use` before its
+    /// `tool_result`, agy's tool step `ACTIVE` before `DONE` or `ERROR`. A hidden call counts: it runs all the same.
+    pub fn tool_open(&self) -> bool {
+        !self.calls.is_empty()
     }
 
     fn call(&mut self, id: String, raw: &str, params: &Value) -> Option<Note> {
@@ -766,7 +798,10 @@ impl Stream {
                 if info.get("status").and_then(Value::as_str) == Some("rejected") {
                     notes.push(Note::RateLimited(RateLimit {
                         signal: "rate_limit_event".into(),
-                        pool: Some("max".into()),
+                        // Plan 40 review M3: the stream does not know the pool. `rate_limited` spends the seated
+                        // order's own (`seated.pool`), as the agy path does; a typed "max" spent the wrong pool's
+                        // windows once a claude seat sat on another pool.
+                        pool: None,
                         window,
                         resets_at,
                         detail: format!("rate_limit_event status rejected: {info}"),
@@ -778,7 +813,7 @@ impl Stream {
                     let (window, resets_at) = self.last_limit.clone().unwrap_or((None, None));
                     notes.push(Note::RateLimited(RateLimit {
                         signal: "api_retry".into(),
-                        pool: Some("max".into()),
+                        pool: None,
                         window,
                         resets_at,
                         detail: format!("api_retry error=rate_limit: {value}"),
@@ -933,6 +968,62 @@ impl Stream {
                 AGY_UNFINISHED.join(", ")
             )
         })
+    }
+}
+
+/// Plan 40 X1: a stream line shorter than this is teed as it is, unparsed. A base64 image is far longer: the
+/// smallest screenshot a worker reads is tens of KB.
+pub const TEE_PARSE_FROM: usize = 16 * 1024;
+/// A string under a `data` or `base64` key this long, all base64, is an image's or a file's bytes.
+const TEE_BASE64_FROM: usize = 1024;
+
+/// The line `run_attempt` writes to the order's stream file. Plan 40 X1: an image block (a claude `Read` of a
+/// screenshot, an MCP screenshot) keeps its type, media type and length, and its base64 is dropped: the gate reads the
+/// whole stream file several times per gate (`stream_text`, `stream_reads`, the lesson check), and ten 4 MB
+/// screenshots left a 50 MB file. Every other field is kept, so the readers find each call, path, URL and text as
+/// before. The pane's view is fed the line as it came.
+pub fn tee_line(line: &str) -> std::borrow::Cow<'_, str> {
+    if line.len() < TEE_PARSE_FROM {
+        return line.into();
+    }
+    let Ok(mut value) = serde_json::from_str::<Value>(line) else {
+        return line.into();
+    };
+    if strip_base64(&mut value) {
+        value.to_string().into()
+    } else {
+        line.into()
+    }
+}
+
+fn strip_base64(value: &mut Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            let mut changed = false;
+            for key in ["data", "base64"] {
+                let long = map.get(key).and_then(Value::as_str).filter(|text| {
+                    text.len() >= TEE_BASE64_FROM
+                        && text
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'\n' | b'\r'))
+                });
+                if let Some(text) = long {
+                    let len = text.len();
+                    map.insert(key.to_owned(), Value::String(String::new()));
+                    map.insert(
+                        format!("{key}_omitted_chars"),
+                        Value::Number(serde_json::Number::from(len)),
+                    );
+                    changed = true;
+                }
+            }
+            for child in map.values_mut() {
+                changed |= strip_base64(child);
+            }
+            changed
+        }
+        Value::Array(items) => items.iter_mut().fold(false, |changed, item| strip_base64(item) | changed),
+        _ => false,
     }
 }
 
@@ -1210,120 +1301,7 @@ fn stop_file(project: &Project, run: &str, order: &str) -> PathBuf {
     live_dir(project, run).join(format!("{order}.stop"))
 }
 
-// ---- the job object: a worker's whole process tree ends with it (§4, Argon's review F5) ----
-
-#[cfg(windows)]
-mod job {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
-    };
-    use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-        SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    };
-    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
-
-    /// A kill-on-close job: closing it, or `kill`, ends every process the worker started.
-    pub struct Job(HANDLE);
-
-    impl Job {
-        pub fn new() -> std::io::Result<Self> {
-            let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-            if job.is_null() {
-                return Err(std::io::Error::last_os_error());
-            }
-            let job = Self(job);
-            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            let ok = unsafe {
-                SetInformationJobObject(
-                    job.0,
-                    JobObjectExtendedLimitInformation,
-                    std::ptr::from_ref(&limits).cast(),
-                    size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-                )
-            };
-            if ok == 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(job)
-        }
-
-        /// Puts a child started suspended in the job, then lets it run, so nothing it starts escapes.
-        pub fn adopt(&self, child: &std::process::Child) -> std::io::Result<()> {
-            if unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle().cast()) } == 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            resume(child.id())
-        }
-
-        pub fn kill(&self) {
-            unsafe {
-                TerminateJobObject(self.0, 1);
-            }
-        }
-    }
-
-    impl Drop for Job {
-        fn drop(&mut self) {
-            unsafe {
-                CloseHandle(self.0);
-            }
-        }
-    }
-
-    fn resume(pid: u32) -> std::io::Result<()> {
-        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
-        if snapshot == INVALID_HANDLE_VALUE {
-            return Err(std::io::Error::last_os_error());
-        }
-        let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
-        entry.dwSize = size_of::<THREADENTRY32>() as u32;
-        let mut resumed = false;
-        let mut ok = unsafe { Thread32First(snapshot, &mut entry) } != 0;
-        while ok {
-            if entry.th32OwnerProcessID == pid {
-                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
-                if !thread.is_null() {
-                    unsafe {
-                        ResumeThread(thread);
-                        CloseHandle(thread);
-                    }
-                    resumed = true;
-                }
-            }
-            ok = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
-        }
-        unsafe {
-            CloseHandle(snapshot);
-        }
-        if resumed {
-            Ok(())
-        } else {
-            Err(std::io::Error::other(
-                "the worker's thread could not be resumed",
-            ))
-        }
-    }
-}
-
-/// Off Windows the child is killed alone; not built or measured there.
-#[cfg(not(windows))]
-mod job {
-    pub struct Job;
-    impl Job {
-        pub fn new() -> std::io::Result<Self> {
-            Ok(Self)
-        }
-        pub fn adopt(&self, _child: &std::process::Child) -> std::io::Result<()> {
-            Ok(())
-        }
-        pub fn kill(&self) {}
-    }
-}
+// ---- the job object: job.rs (plan 40 review B2 shares it with the gate) ----
 
 // ---- running one attempt ----
 
@@ -1387,19 +1365,8 @@ fn run_attempt(
     for (key, value) in crate::nirvana_bladebro::worker_env(argv) {
         command.env(key, value);
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
-        // Suspended until it is in the job, so nothing it starts escapes the job.
-        command.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
-    }
-    let job = job::Job::new()?;
-    let mut child = command.spawn()?;
-    if let Err(err) = job.adopt(&child) {
-        let _ = child.kill();
-        return Err(err);
-    }
+    // Suspended until it is in the job, so nothing it starts escapes the job (`job::spawn`).
+    let (job, mut child) = job::spawn(&mut command)?;
     journal.append(
         now(),
         Kind::Started {
@@ -1417,14 +1384,11 @@ fn run_attempt(
     )?;
     let (send, lines) = mpsc::channel::<Line>();
     let stdout = child.stdout.take();
+    // Plan 40 review B3: lossy lines. `lines()` returned an error on a line that was not UTF-8 and the reader stopped,
+    // then the supervisor took that for the end and blocked in `wait()` on a child writing to a pipe nobody read.
     let reader = std::thread::spawn(move || {
         if let Some(stdout) = stdout {
-            for line in std::io::BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                if send.send(Line::Out(line)).is_err() {
-                    break;
-                }
-            }
+            job::lossy_lines(stdout, |line| send.send(Line::Out(line)).is_ok());
         }
         let _ = send.send(Line::Done);
     });
@@ -1433,14 +1397,14 @@ fn run_attempt(
     let stderr_sink = stderr_text.clone();
     let stderr_reader = std::thread::spawn(move || {
         if let Some(stderr) = stderr {
-            for line in std::io::BufReader::new(stderr).lines() {
-                let Ok(line) = line else { break };
+            job::lossy_lines(stderr, |line| {
                 let mut text = stderr_sink.lock().unwrap_or_else(|e| e.into_inner());
                 if text.len() < 256 * 1024 {
                     text.push_str(&line);
                     text.push('\n');
                 }
-            }
+                true
+            });
         }
     });
     let mut tee = std::fs::OpenOptions::new()
@@ -1462,11 +1426,54 @@ fn run_attempt(
             },
         )
     };
+    // Review B3: set once stdout has ended. The child may still run (it closed its stdout, or an escaped grandchild
+    // holds nothing); it is waited for with the same stop and stall rules, never a bare `wait()`.
+    let mut stdout_ended = false;
     let end = 'read: loop {
+        if stdout_ended {
+            match child.try_wait()? {
+                Some(status) => {
+                    let _ = job::join_within(stderr_reader, Duration::from_secs(5));
+                    let stderr = stderr_text
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                    if let Some(limit) = agy_rate_limit(status.code(), &stderr, &seated.pool)
+                        .filter(|_| seated.cli == "agy")
+                    {
+                        break AttemptEnd::RateLimited(limit);
+                    }
+                    break AttemptEnd::Exited {
+                        code: status.code(),
+                        stderr,
+                    };
+                }
+                None => {
+                    if stop.exists() {
+                        job.kill();
+                        let _ = child.wait();
+                        break AttemptEnd::Stopped;
+                    }
+                    let silent = last_line.elapsed().as_secs();
+                    if nirvana_run::stalled_silence(silent, stream.tool_open()) {
+                        job.kill();
+                        let _ = child.wait();
+                        break AttemptEnd::Stalled { silent_s: silent };
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                    continue;
+                }
+            }
+        }
         match lines.recv_timeout(Duration::from_millis(500)) {
             Ok(Line::Out(line)) => {
                 last_line = Instant::now();
-                writeln!(tee, "{line}")?;
+                {
+                    // Plan 40 X1: the tee keeps an image block's type and size, not its base64 (`tee_line`); the
+                    // stream reader below is fed the line as it came.
+                    let line = tee_line(&line);
+                    writeln!(tee, "{line}")?;
+                }
                 for note in stream.feed(&line) {
                     match note {
                         Note::Usage | Note::Session(_) => usage_dirty = true,
@@ -1497,21 +1504,7 @@ fn run_attempt(
                 }
             }
             Ok(Line::Done) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let status = child.wait()?;
-                let _ = stderr_reader.join();
-                let stderr = stderr_text
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                if let Some(limit) = agy_rate_limit(status.code(), &stderr, &seated.pool)
-                    .filter(|_| seated.cli == "agy")
-                {
-                    break AttemptEnd::RateLimited(limit);
-                }
-                break AttemptEnd::Exited {
-                    code: status.code(),
-                    stderr,
-                };
+                stdout_ended = true;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if stop.exists() {
@@ -1519,9 +1512,10 @@ fn run_attempt(
                     let _ = child.wait();
                     break AttemptEnd::Stopped;
                 }
-                // `stalled` takes two clock readings; the silence is measured on a monotonic clock here.
+                // The silence is measured on a monotonic clock here. Review B7: an open tool call (a long foreground
+                // build) is allowed `TOOL_STALL_AFTER_S`; model silence keeps `STALL_AFTER_S`.
                 let silent = last_line.elapsed().as_secs();
-                if nirvana_run::stalled(0, silent) {
+                if nirvana_run::stalled_silence(silent, stream.tool_open()) {
                     job.kill();
                     let _ = child.wait();
                     break AttemptEnd::Stalled { silent_s: silent };
@@ -1530,7 +1524,7 @@ fn run_attempt(
         }
     };
     drop(job);
-    let _ = reader.join();
+    let _ = job::join_within(reader, Duration::from_secs(5));
     if usage_dirty || stream.lines > 0 {
         write_usage(&stream)?;
     }
@@ -2656,11 +2650,13 @@ pub(crate) fn herdr_json(args: &[&str]) -> Result<Value, String> {
 /// `herdr_json` with herdr's error `code` beside the message, `None` when herdr printed no error response: a wake
 /// tells a gone pane (`pane_not_found`) from a herdr that did not answer (fix wake-pane).
 pub(crate) fn herdr_json_coded(args: &[&str]) -> Result<Value, (Option<String>, String)> {
-    let out = herdr_command(args)
-        .output()
-        .map_err(|err| (None, format!("herdr {}: {err}", args.join(" "))))?;
-    herdr_answer(args, &out)
+    herdr_json_within(args, HERDR_CALL_LIMIT)
 }
+
+/// Plan 40 review B10: every herdr call herdr's own code makes gives up after this, the call killed. A supervisor
+/// that holds an order's live lock ran `pane layout` and `pane close` with no limit, so one wedged herdr server kept
+/// the order "running" for ever. A hypothesis: these verbs answer in well under a second when herdr is well.
+pub const HERDR_CALL_LIMIT: Duration = Duration::from_secs(10);
 
 /// `herdr_json_coded` that gives up after `limit`, the call killed: the dead-pane sweep's calls (review S1), so one
 /// herdr that never answers cannot hold the sweep for ever.
@@ -2716,9 +2712,8 @@ pub(crate) fn herdr_error(stdout: &str, stderr: &str) -> (Option<String>, String
 
 /// For the verbs that answer with nothing on success (`pane run` printed no JSON, measured 2026-10-18).
 pub(crate) fn herdr_ok(args: &[&str]) -> Result<(), String> {
-    let out = herdr_command(args)
-        .output()
-        .map_err(|err| format!("herdr {}: {err}", args.join(" ")))?;
+    let out = crate::nirvana_dead::output_within(herdr_command(args), HERDR_CALL_LIMIT)
+        .map_err(|why| format!("herdr {}: {why}", args.join(" ")))?;
     if out.status.success() {
         Ok(())
     } else {
@@ -2732,7 +2727,7 @@ pub(crate) fn herdr_ok(args: &[&str]) -> Result<(), String> {
 }
 
 pub(crate) fn herdr_text(args: &[&str]) -> Option<String> {
-    let out = herdr_command(args).output().ok()?;
+    let out = crate::nirvana_dead::output_within(herdr_command(args), HERDR_CALL_LIMIT).ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
@@ -2745,7 +2740,7 @@ pub fn in_herdr() -> bool {
         || std::env::var_os("HERDR_PANE_ID").is_some()
 }
 
-fn find_str<'a>(value: &'a Value, pointers: &[&str]) -> Option<&'a str> {
+pub(crate) fn find_str<'a>(value: &'a Value, pointers: &[&str]) -> Option<&'a str> {
     pointers
         .iter()
         .find_map(|pointer| value.pointer(pointer).and_then(Value::as_str))
@@ -3387,7 +3382,8 @@ pub fn mover(
 
 /// Books the order on the seat (the rule must agree, or the caller gives a reason: an override, 3 a run). The tests'
 /// entry; `seat_order_with` books through `book_with`.
-#[cfg_attr(not(test), allow(dead_code))]
+// Plan 40 review D4: compiled for the tests only, as `write_order_config` is.
+#[cfg(test)]
 fn book(project: &Project, request: &SeatRequest) -> Result<Booked, (i32, String)> {
     book_with(project, request, None)
 }
@@ -3484,20 +3480,10 @@ fn book_with(
             pick_request.override_seat = Some((request.seat.clone(), reason.clone()));
             pick = nirvana_seat::pick(&table, &world, &pick_request);
         }
-        // Plan 12 O8b (§9 role 3): the caller named its seat, so Jev's advice is recorded and never acts here.
-        let client = crate::nirvana_jev::live_client().map(|(client, _)| client);
-        let pick = pick.map(|chosen| {
-            crate::nirvana_jev_roles::advise_seating(
-                client.as_ref(),
-                &dir,
-                crate::nirvana_jev_roles::settings_in(&dir).seating,
-                &table,
-                &world,
-                &pick_request,
-                chosen,
-                false,
-            )
-        });
+        // Plan 40 (seat review B1, the worker's half): Jev's shadow advice was asked here, a network call of up
+        // to 20 s while `leases.lock` is held, so parallel `seat run`s and an ending worker's record line timed
+        // out at 10 s. The caller named its seat and the advice never acted here, so it is no longer asked on
+        // this path; `herdr seat pick` still asks it, before it takes the lock.
         let mut pick = pick.map_err(|no_seat| {
             (
                 nirvana_seat::NO_SEAT_EXIT,
@@ -3566,7 +3552,8 @@ fn git_in(root: &Path, args: &[&str]) -> Result<String, String> {
 
 /// `herdr seat run`: book, copy the order, open the worktree, journal `seated`, start the worker. The tests' entry;
 /// the CLI passes its `--profile` to `seat_order_with`.
-#[cfg_attr(not(test), allow(dead_code))]
+// Plan 40 review D4: compiled for the tests only, as `write_order_config` is.
+#[cfg(test)]
 pub fn seat_order(project: &Project, request: &SeatRequest) -> Result<Value, (i32, String)> {
     seat_order_with(project, request, None)
 }
@@ -4219,6 +4206,7 @@ pub fn cleanup(
     Ok(true)
 }
 
+pub(crate) mod job;
 mod place;
 mod view;
 

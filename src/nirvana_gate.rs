@@ -121,6 +121,10 @@ impl Outcome {
     /// tells a real block from a give-up).
     pub const BLOCKED: &'static str = "blocked";
 
+    /// Plan 40 addendum A: the record's word for an order the orchestrator accepted after the gate (`herdr run log`,
+    /// verdict `accepted` with a reason). Its journal verdict is the same word; the tally counts it a pass.
+    pub const ACCEPTED: &'static str = "accepted";
+
     /// What the seat record's tally counts (decision 0029's blend): `Some(true)` a pass, `Some(false)` a failure,
     /// `None` not counted. A re-seat is not counted: the pool's window ran out, which says nothing of the seat's
     /// work, and its child's own line carries the outcome. Nor is a `blocked` one (`BLOCKED`). A word this herdr does
@@ -128,6 +132,11 @@ impl Outcome {
     pub fn tally(word: &str) -> Option<bool> {
         if word == Self::BLOCKED {
             return None;
+        }
+        // Plan 40 addendum A: the orchestrator took the delivery with a reason, which `nirvana_lessons` already counts
+        // as a pass (`PASS_WORDS`). Read as a failure, 65 of 323 record lines called delivered work failed.
+        if word == Self::ACCEPTED {
+            return Some(true);
         }
         match Self::parse(word) {
             Some(Self::Pass) => Some(true),
@@ -177,6 +186,21 @@ impl Axis {
     }
 }
 
+/// Plan 40 T1: the most file paths an axis keeps. The lines are printed in the ruling, journaled in the `Gated`
+/// event and copied into a send-back's brief; the 2026-10 MotoProject incident (`order_changes`) listed 3,958 files,
+/// about 100k tokens into one child's brief. 40 is `KEPT_LINES`, the test output's cap.
+pub const FILE_LINES_MOST: usize = KEPT_LINES;
+
+/// `paths`, at most `FILE_LINES_MOST` of them, then one `+N more` line for the rest.
+pub fn capped(mut paths: Vec<String>) -> Vec<String> {
+    if paths.len() > FILE_LINES_MOST {
+        let more = paths.len() - FILE_LINES_MOST;
+        paths.truncate(FILE_LINES_MOST);
+        paths.push(format!("+{more} more"));
+    }
+    paths
+}
+
 pub fn failing(axes: &[Axis]) -> Vec<&Axis> {
     axes.iter().filter(|axis| axis.mark == Mark::Fail).collect()
 }
@@ -211,6 +235,27 @@ fn strip_key<'a>(line: &'a str, key: &str) -> Option<&'a str> {
         .map(|_| &line[key.len()..])
 }
 
+/// Review round (N1): with the case ignored (B6), an order's prose "Check: the page loads" read as three check names and
+/// sent the order back. So a `check:` value is names only when it looks like names: every word (split on spaces,
+/// commas and tabs, backticks trimmed) is letters, digits and `_ : . -` and does not end a sentence with `.`, and the
+/// value is one word, or carries a backtick, or every word carries a digit or one of `_ : . -` as test names do
+/// (`test_mul`, `gate::lock`, `c40b-a`). Otherwise the line is prose and names nothing. The cost: a list of plain
+/// words with no mark (`check: alpha beta`) is prose now; write it in backticks.
+fn check_names(rest: &str) -> Option<Vec<String>> {
+    let names: Vec<String> = words(rest).collect();
+    let name_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '.' | '-');
+    let marked = |word: &str| {
+        word.chars()
+            .any(|c| c.is_ascii_digit() || matches!(c, '_' | ':' | '.' | '-'))
+    };
+    (!names.is_empty()
+        && names
+            .iter()
+            .all(|word| word.chars().all(name_char) && !word.ends_with('.'))
+        && (names.len() == 1 || rest.contains('`') || names.iter().all(|word| marked(word))))
+    .then_some(names)
+}
+
 /// The gate lines of an order file (the syntax in the module comment). herdr's own footer and a send-back's brief
 /// never start a line with one of these words, so a child order reads its root's lines unchanged.
 pub fn spec(text: &str) -> Spec {
@@ -220,14 +265,16 @@ pub fn spec(text: &str) -> Spec {
         if let Some(rest) = strip_key(line, "owns:") {
             spec.owns
                 .extend(words(rest).map(|path| path.replace('\\', "/")));
-        } else if let Some(rest) = line.strip_prefix("test:") {
+        // Plan 40 review B6: `test:`, `check:` and `serves:` are read as `owns:` is, the case ignored. A `Test:` line
+        // read case-sensitively dropped the tests axis to a Note and the delivery passed with no test run.
+        } else if let Some(rest) = strip_key(line, "test:") {
             let command = rest.trim().trim_matches('`').trim();
             if !command.is_empty() {
                 spec.test = Some(command.to_owned());
             }
-        } else if let Some(rest) = line.strip_prefix("check:") {
-            spec.checks.extend(words(rest));
-        } else if let Some(rest) = line.strip_prefix("serves:") {
+        } else if let Some(rest) = strip_key(line, "check:") {
+            spec.checks.extend(check_names(rest).unwrap_or_default());
+        } else if let Some(rest) = strip_key(line, "serves:") {
             spec.serves
                 .extend(words(rest).filter_map(|port| port.parse::<u16>().ok()));
         } else if let Some(rest) = line.strip_prefix("Profile:") {
@@ -285,6 +332,10 @@ pub fn requires_owns(class: &str) -> bool {
 pub fn owned_axis(class: &str, changed: &[String], owns: &[String]) -> Axis {
     let changed: Vec<&String> = changed.iter().filter(|path| !harness_path(path)).collect();
     if owns.is_empty() {
+        // Plan 40 T1: the paths shown are capped (`capped`); the count said is the whole list's.
+        let total = changed.len();
+        let shown = capped(changed.iter().map(|path| (*path).clone()).collect());
+        let changed: Vec<&String> = shown.iter().collect();
         if requires_owns(class) {
             return Axis::new(
                 "owned",
@@ -297,8 +348,7 @@ pub fn owned_axis(class: &str, changed: &[String], owns: &[String]) -> Axis {
             "owned",
             Mark::Note,
             format!(
-                "the order names no owned file; {} file(s) changed, not checked",
-                changed.len()
+                "the order names no owned file; {total} file(s) changed, not checked"
             ),
         )
         .with(changed.iter().map(|path| (*path).clone()).collect());
@@ -323,7 +373,7 @@ pub fn owned_axis(class: &str, changed: &[String], owns: &[String]) -> Axis {
                 outside.len()
             ),
         )
-        .with(outside)
+        .with(capped(outside))
     }
 }
 
@@ -372,18 +422,44 @@ fn keep_line(line: &str, checks: &[String]) -> bool {
 }
 
 pub fn filter(output: &str, checks: &[String]) -> Vec<String> {
-    let kept: Vec<String> = output
+    let clip = |line: &str| -> String { line.chars().take(300).collect() };
+    let kept: Vec<&str> = output
         .lines()
         .map(str::trim_end)
         .filter(|line| keep_line(line, checks))
-        .map(|line| line.chars().take(300).collect())
         .collect();
-    if kept.len() > KEPT_LINES {
-        // The last lines hold the summary a reader reads first.
-        kept[kept.len() - KEPT_LINES..].to_vec()
-    } else {
-        kept
+    if kept.len() <= KEPT_LINES {
+        return kept.into_iter().map(clip).collect();
     }
+    // Plan 40 review B4: the first line naming each check survives the cut, so the reader still sees it ran when 70
+    // `... PASSED` lines follow it. The rest is cut from the front: the last lines hold the summary a reader reads
+    // first. Review round (N2): the pinned line is the one that reports the check's result (a pass or fail word
+    // besides the name), else the last line naming it: the first may be `Compiling <name>`, which says nothing ran.
+    let reports = |line: &str, check: &str| {
+        line.replace(check, " ")
+            .to_ascii_lowercase()
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| matches!(word, "ok" | "pass" | "passed" | "fail" | "failed" | "error" | "panicked"))
+    };
+    let mut pinned = vec![false; kept.len()];
+    for check in checks {
+        let naming = || {
+            kept.iter()
+                .enumerate()
+                .filter(|(_, line)| line.contains(check.as_str()))
+        };
+        let result = naming().find(|(_, line)| reports(line, check)).or_else(|| naming().next_back());
+        if let Some((at, _)) = result {
+            pinned[at] = true;
+        }
+    }
+    let room = KEPT_LINES.saturating_sub(pinned.iter().filter(|pin| **pin).count());
+    let others: Vec<usize> = (0..kept.len()).filter(|at| !pinned[*at]).collect();
+    let tail = &others[others.len().saturating_sub(room)..];
+    (0..kept.len())
+        .filter(|at| pinned[*at] || tail.contains(at))
+        .map(|at| clip(kept[at]))
+        .collect()
 }
 
 /// Axis 2, from a finished run of the order's test command.
@@ -415,11 +491,12 @@ pub fn tests_axis(test: Option<&str>, run: Option<&CommandRun>, checks: &[String
         )
         .with(lines);
     }
-    // The named checks are looked for in the FILTERED output, which is what the reader is shown: a check the
-    // filter dropped was not seen.
+    // Plan 40 review B4: the named checks are looked for in the WHOLE output. Read from the filtered lines, which are
+    // cut to the last `KEPT_LINES`, a check that passed early was cut by 70 later `PASSED` lines and a correct order
+    // was sent back. A check absent from the whole output still fails (Nirvana CLAUDE.md rule 9).
     let absent: Vec<&String> = checks
         .iter()
-        .filter(|check| !lines.iter().any(|line| line.contains(check.as_str())))
+        .filter(|check| !run.output.lines().any(|line| line.contains(check.as_str())))
         .collect();
     if run.exit != Some(0) {
         return Axis::new(
@@ -1234,6 +1311,97 @@ pub struct Reads {
     texts: Vec<String>,
     outputs: Vec<String>,
     paths: Vec<String>,
+    /// Addendum B (plan 40), for `media_read` only: each URL (normalized) a call that fetches or opens media named
+    /// (`command_media`). The report's own calls (`finish`, `StructuredOutput`) and writes are not here: a cite names
+    /// itself there.
+    media_urls: Vec<String>,
+    /// Each media file (`media_file`) a call opened and that was answered without an error: a `Read`/`read_file`/
+    /// `view_file` result, or an ffprobe or ffmpeg input whose command exited 0.
+    media_files: Vec<String>,
+}
+
+/// Addendum B (plan 40): a `media.*` order's cited source counts as read when a call that fetches or opens media names
+/// it (`yt-dlp <url>`, `ffprobe <url>`, `ffmpeg -i <url>`), or, for a YouTube URL, when its video id stands in a media
+/// file the worker opened without an error (`...\youtube\8aQ8SoQl5EY\proxy.mp4`). Four of six `media.video` orders on
+/// argon were sent back on 2026-10-31; `yt-breakdown` and `yt-breakdown-illit` cited the video whose downloaded copy
+/// they had watched, which no fetch in their streams named. Review round (S1): the first cut counted any command or
+/// `Read` path that named the URL or the id, so `echo <url>` or a `Read` of a missing `...\<id>\x` passed. `research.*`
+/// keeps the stricter rules above. The oEmbed check of a cited video (`invented_videos`) still runs. A cited local
+/// file keeps plan 35a's rule (`stable_read`, any class).
+pub fn media_read(url: &str, reads: &Reads) -> bool {
+    let norm = normalize_url(url);
+    if !norm.is_empty() && reads.media_urls.contains(&norm) {
+        return true;
+    }
+    match stable_id(url) {
+        Some(id @ StableId::Video(_)) => reads.media_files.iter().any(|file| id_in(file, &id)),
+        _ => false,
+    }
+}
+
+/// Review round (S1): the files that hold a video's media: what a download leaves (video, audio, yt-dlp's
+/// `.info.json`), the frames a worker cuts from it, and its captions. A plain `.json`, `.md` or `.txt` is not here:
+/// the worker's own notes in the id's folder (yt-breakdown's `ingest.json`) are no sign it watched anything.
+const MEDIA_EXTENSIONS: &[&str] = &[
+    "mp4", "webm", "mkv", "mov", "m4v", "avi", "m4a", "mp3", "wav", "opus", "ogg", "flac", "aac", "jpg", "jpeg",
+    "png", "webp", "gif", "vtt", "srt", "ttml", "sbv", "json3",
+];
+
+fn media_file(path: &str) -> bool {
+    let lower = path
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | ',' | '(' | ')' | '[' | ']'))
+        .to_ascii_lowercase();
+    lower.ends_with(".info.json")
+        || lower.rsplit_once('.').is_some_and(|(stem, ext)| {
+            !stem.is_empty() && !stem.ends_with(['/', '\\']) && MEDIA_EXTENSIONS.contains(&ext)
+        })
+}
+
+/// Review round (S1): what one shell command shows of media, for `media_read`. URLs: every URL of a command that
+/// fetches (`command_fetches`, the filter `research.*` uses), and the URLs a segment hands to ffprobe or to ffmpeg as
+/// its `-i` input. Files: the media files (`media_file`) a segment hands to ffprobe, or to ffmpeg as `-i`; they count
+/// only once the call is answered without an error, which the caller judges. ffmpeg's output file is not an input: a
+/// command that writes `<id>\x.mp4` opened nothing of that video. ffprobe or ffmpeg inside a script's string
+/// (`subprocess.run(["ffmpeg", ...])`) is not a command word (`segment_code` blanks strings); those workers' own
+/// `read_file` of the media still counts.
+fn command_media(cmd: &str) -> (Vec<String>, Vec<String>) {
+    let mut urls = Vec::new();
+    if command_fetches(cmd) {
+        urls.extend(extract_url_tokens(cmd).iter().map(|token| normalize_url(token)));
+    }
+    let mut files = Vec::new();
+    for segment in segments(cmd) {
+        let code = segment_code(segment).to_ascii_lowercase();
+        let probe = command_words(&code, "ffprobe").next().is_some();
+        let mpeg = command_words(&code, "ffmpeg").next().is_some();
+        if !probe && !mpeg {
+            continue;
+        }
+        let words: Vec<&str> = segment
+            .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\''))
+            .filter(|word| !word.is_empty())
+            .collect();
+        for (at, word) in words.iter().enumerate() {
+            let input = probe || (at > 0 && words[at - 1] == "-i");
+            if !input {
+                continue;
+            }
+            urls.extend(extract_url_tokens(word).iter().map(|token| normalize_url(token)));
+            if media_file(word) {
+                files.push((*word).to_owned());
+            }
+        }
+    }
+    (urls, files)
+}
+
+/// agy's `run_command` output leads with `Command exited with code N.` when N is not 0 (`view::agy_result`).
+fn agy_command_ok(output: &str) -> bool {
+    output
+        .strip_prefix("Command exited with code ")
+        .and_then(|rest| rest.split('.').next())
+        .and_then(|code| code.trim().parse::<i64>().ok())
+        .is_none_or(|code| code == 0)
 }
 
 fn segments(cmd: &str) -> impl Iterator<Item = &str> {
@@ -1392,6 +1560,9 @@ fn json_text(val: &Value) -> String {
 pub fn stream_reads(stream: &str) -> Reads {
     let mut reads = Reads::default();
     let mut fetch_ids: Vec<String> = Vec::new();
+    // Review round (S1): a Claude call's media files wait here for its `tool_result`; only one without `is_error`
+    // counts them. A `Read` of a missing file or a failed ffprobe answers with `is_error: true`.
+    let mut media_pending: Vec<(String, Vec<String>)> = Vec::new();
     for line in stream.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
@@ -1404,6 +1575,15 @@ pub fn stream_reads(stream: &str) -> Reads {
                         let input = block.get("input").unwrap_or(&Value::Null);
                         let id = block.get("id").and_then(Value::as_str).unwrap_or("");
                         // Review round (S2): WebFetch's `prompt` is the worker's own text; only its `url` was read.
+                        if let Some(command) = input
+                            .get("command")
+                            .and_then(Value::as_str)
+                            .filter(|_| matches!(name, "Bash" | "PowerShell"))
+                        {
+                            let (urls, files) = command_media(command);
+                            reads.media_urls.extend(urls);
+                            media_pending.push((id.to_owned(), files));
+                        }
                         let text = match name {
                             "Bash" | "PowerShell" => input
                                 .get("command")
@@ -1423,6 +1603,9 @@ pub fn stream_reads(stream: &str) -> Reads {
                             "Read" => {
                                 if let Some(path) = input.get("file_path").and_then(Value::as_str) {
                                     reads.paths.push(local_path(path));
+                                    if media_file(path) {
+                                        media_pending.push((id.to_owned(), vec![path.to_owned()]));
+                                    }
                                 }
                                 None
                             }
@@ -1445,6 +1628,12 @@ pub fn stream_reads(stream: &str) -> Reads {
                                 .outputs
                                 .push(json_text(block.get("content").unwrap_or(&Value::Null)));
                         }
+                        if let Some(at) = media_pending.iter().position(|(call, _)| call == id) {
+                            let (_, files) = media_pending.swap_remove(at);
+                            if block.get("is_error").and_then(Value::as_bool) != Some(true) {
+                                reads.media_files.extend(files);
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -1457,15 +1646,27 @@ pub fn stream_reads(stream: &str) -> Reads {
         let tool = step.get("tool_name").and_then(Value::as_str).unwrap_or("");
         let params = &step["tool_info"]["parameters"];
         let output = step["tool_info"]["output"].as_str().unwrap_or("");
+        // Review round (S1): agy answers a step on a later line with the same step, `DONE` or `ERROR` (an error under
+        // `tool_info.error`); the `ACTIVE` line is the call alone.
+        let answered = step.get("state").and_then(Value::as_str) == Some("DONE")
+            && step["tool_info"].get("error").is_none_or(Value::is_null);
         let text = match tool {
             "run_command" => {
                 let command = params["CommandLine"].as_str().unwrap_or("");
+                let (urls, files) = command_media(command);
+                reads.media_urls.extend(urls);
+                if answered && agy_command_ok(output) {
+                    reads.media_files.extend(files);
+                }
                 command_fetches(command).then(|| command.to_owned())
             }
             "read_file" | "view_file" => {
                 for key in ["Path", "AbsolutePath", "file_path"] {
                     if let Some(path) = params.get(key).and_then(Value::as_str) {
                         reads.paths.push(local_path(path));
+                        if answered && media_file(path) {
+                            reads.media_files.push(path.to_owned());
+                        }
                     }
                 }
                 None
@@ -1757,6 +1958,9 @@ pub fn sources_axis(
         };
         let norm = normalize_url(url);
         if stable_read(url, &reads) {
+            continue;
+        }
+        if class.starts_with("media.") && media_read(url, &reads) {
             continue;
         }
         if !url_in_stream(&norm, stream) {
@@ -2118,6 +2322,9 @@ pub fn run_command(cwd: &Path, line: &str, timeout: Duration) -> CommandRun {
             ..CommandRun::default()
         };
     };
+    // Plan 40 review B2: the test runs in a job object, so a timeout ends its whole tree. `child.kill()` ended only
+    // `cmd` or `cargo`; a hung test binary kept the pipes open, the readers never reached EOF, and the gate held the
+    // project's gate lock with them.
     let spawn = |program: &str, args: &[String]| {
         let mut command = std::process::Command::new(program);
         command
@@ -2126,8 +2333,7 @@ pub fn run_command(cwd: &Path, line: &str, timeout: Duration) -> CommandRun {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        crate::platform::configure_background_command(&mut command);
-        command.spawn()
+        crate::nirvana_worker::job::spawn(&mut command)
     };
     let child = match spawn(program, args) {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound && cfg!(windows) => {
@@ -2137,8 +2343,8 @@ pub fn run_command(cwd: &Path, line: &str, timeout: Duration) -> CommandRun {
         }
         other => other,
     };
-    let mut child = match child {
-        Ok(child) => child,
+    let (job, mut child) = match child {
+        Ok(started) => started,
         Err(err) => {
             return CommandRun {
                 error: Some(err.to_string()),
@@ -2174,15 +2380,28 @@ pub fn run_command(cwd: &Path, line: &str, timeout: Duration) -> CommandRun {
             Ok(Some(status)) => break Some(status),
             Ok(None) if started.elapsed() > timeout => {
                 timed_out = true;
-                let _ = child.kill();
+                job.kill();
                 break child.wait().ok();
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
             Err(_) => break None,
         }
     };
-    let mut output = out.join().unwrap_or_default();
-    let stderr = err.join().unwrap_or_default();
+    // The job closes here, which ends anything of the test's still running (kill on close). The readers then reach
+    // EOF; a deadline keeps a pipe some process outside the job still holds from holding the gate.
+    drop(job);
+    let read_for = Duration::from_secs(if timed_out { 5 } else { 30 });
+    let output = crate::nirvana_worker::job::join_within(out, read_for);
+    let stderr = crate::nirvana_worker::job::join_within(err, read_for);
+    let unread = output.is_none() || stderr.is_none();
+    let mut output = output.unwrap_or_default();
+    let stderr = stderr.unwrap_or_default();
+    if unread {
+        if !output.is_empty() && !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push_str("herdr gate: the output pipes were still open after the test ended; the rest was not read\n");
+    }
     if !stderr.is_empty() {
         if !output.is_empty() && !output.ends_with('\n') {
             output.push('\n');
@@ -2401,6 +2620,7 @@ pub fn commit_work(cwd: &Path, order: &str, owns: &[String]) -> Result<Vec<Strin
         cwd,
         &[
             "status",
+            "-z",
             "--porcelain=v1",
             "--untracked-files=all",
             "--",
@@ -2408,14 +2628,20 @@ pub fn commit_work(cwd: &Path, order: &str, owns: &[String]) -> Result<Vec<Strin
             ":(exclude).nirvana",
         ],
     )?;
+    // Plan 40 review B5: `-z`, parsed as `uncommitted()` parses it. Without it git quotes a non-ASCII name
+    // (`"caf\303\251.md"`), `git add` of the quoted spelling matched nothing, and the gate failed the order on
+    // "the worker's work could not be committed".
     let (mut tracked, mut new, mut left_out) = (false, Vec::new(), Vec::new());
-    for line in status.lines().filter(|line| line.len() > 3) {
-        let path = line[3..]
-            .rsplit(" -> ")
-            .next()
-            .unwrap_or("")
-            .trim_matches('"')
-            .to_owned();
+    let mut entries = status.split('\0');
+    while let Some(line) = entries.next() {
+        if line.len() < 4 {
+            continue;
+        }
+        // A rename or copy is `XY <to>`, then its source as an entry of its own.
+        if matches!(line.as_bytes()[0], b'R' | b'C') {
+            entries.next();
+        }
+        let path = line[3..].to_owned();
         if !line.starts_with("??") {
             tracked = true;
         } else if owns.is_empty() || owns.iter().any(|pattern| glob_match(pattern, &path)) {
@@ -2578,7 +2804,8 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
                             left_out.len()
                         ),
                     )
-                    .with(left_out),
+                    // Plan 40 T1: a file list, capped like the owned axis's.
+                    .with(capped(left_out)),
                 ),
                 Ok(_) => {}
                 Err(why) => {
@@ -2612,7 +2839,7 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
                                 files.len()
                             ),
                         )
-                        .with(files),
+                        .with(capped(files)),
                     );
                     det.base = Some(base);
                     det.axes = axes;
@@ -2795,14 +3022,24 @@ pub(crate) fn gate_lock(project: &Project) -> std::io::Result<GateLock> {
 
 // ---- chains, sizes and families ----
 
-/// The order a send-back chain started from, and how many send-backs it has had, this order's own included.
+/// The order a chain of send-backs and reseats started from, and how many send-backs it has had, this order's own
+/// included. Plan 40 review B1: a rate-limit reseat (`why = "reseat"`) is followed to the root too, as `helps_of`,
+/// `nirvana_learning` and `nirvana_review` follow it. Stopping at it lost the root's held-out check and seat snapshot,
+/// and restarted the send-back cap after each reseat. A reseat is not a send-back, so it adds nothing to the depth.
 pub fn chain(state: &nirvana_run::RunState, order: &str) -> (String, u32) {
     let mut current = order.to_owned();
     let mut depth = 0;
-    while let Some(known) = state.order(&current) {
-        match (&known.seated.why, &known.seated.parent) {
-            (Some(why), Some(parent)) if why == "send_back" => {
-                depth += 1;
+    // A journal is append-only and a child names an earlier parent, so a loop cannot happen; the bound is for a
+    // hand-edited journal.
+    for _ in 0..1000 {
+        let Some(known) = state.order(&current) else {
+            break;
+        };
+        match (known.seated.why.as_deref(), &known.seated.parent) {
+            (Some(why @ ("send_back" | "reseat")), Some(parent)) => {
+                if why == "send_back" {
+                    depth += 1;
+                }
                 current = parent.clone();
             }
             _ => break,

@@ -141,7 +141,8 @@ fn the_report_check_and_the_schema_name_the_same_fields() {
         .iter()
         .filter_map(Value::as_str)
         .collect();
-    assert_eq!(required, ["status", "summary", "files", "tests", "gotchas"]);
+    // Plan 40 T3: `files` and `tests` are allowed, not required (`c40b_a_report_without_tests_or_files_passes`).
+    assert_eq!(required, ["status", "summary", "gotchas"]);
     assert_eq!(
         schema["properties"]["status"]["enum"],
         serde_json::json!(["done", "blocked", "needs_answer"])
@@ -315,7 +316,8 @@ fn only_a_rejected_rate_limit_event_or_a_rate_limited_retry_stops_a_claude_worke
     assert_eq!(limit.signal, "rate_limit_event");
     assert_eq!(limit.window.as_deref(), Some("5h"));
     assert_eq!(limit.resets_at, Some(1_792_284_600));
-    assert_eq!(limit.pool.as_deref(), Some("max"));
+    // Plan 40 M3: the stream names no pool; `rate_limited` spends the seated order's own (`seated.pool`).
+    assert_eq!(limit.pool, None);
     // An api_retry for a rate limit, after the recorded event: the reset comes from the event.
     let retry = r#"{"type":"system","subtype":"api_retry","attempt":1,"max_retries":10,"retry_delay_ms":1000,"error_status":429,"error":"rate_limit","session_id":"s"}"#;
     let (_, notes) = feed("claude", &format!("{allowed}\n{retry}"));
@@ -2965,4 +2967,154 @@ fn gsrc_seat_run_reads_the_needs_the_booking_was_made_with() {
         serde_json::json!(["bladebro"])
     );
     nirvana_seat::set_test_world(None);
+}
+
+// ---- plan 40 (c40b): a lighter worker start, the report's optional lists, the tee, the readers ----
+
+/// Plan 40: every claude worker drops the dynamic system prompt sections; agy has no such flag.
+#[test]
+fn c40b_a_claude_worker_excludes_the_dynamic_system_prompt_sections() {
+    let claude = argv(&spec("claude", "claude-haiku-5-5", None)).expect("argv");
+    assert_eq!(
+        claude.iter().filter(|arg| *arg == EXCLUDE_DYNAMIC).count(),
+        1,
+        "{claude:?}"
+    );
+    let resumed = argv(&spec("claude", "claude-haiku-5-5", Some("s1"))).expect("argv");
+    assert!(resumed.iter().any(|arg| arg == EXCLUDE_DYNAMIC));
+    let agy = argv(&spec("agy", "gemini-3.8-flash-low", None)).expect("argv");
+    assert!(!agy.iter().any(|arg| arg == EXCLUDE_DYNAMIC), "{agy:?}");
+}
+
+/// Plan 40 T2: the footer says only what the prompt and the schema do not, and the owner's finish sentence.
+#[test]
+fn c40b_the_order_footer_says_finish_the_order_and_nothing_twice() {
+    assert!(ORDER_FOOTER.contains(FOOTER_MARK));
+    assert!(ORDER_FOOTER.contains(
+        "Finish the whole order before you report. Work through ordinary obstacles such as an error or a timeout. \
+         Report `blocked` for anything the order forbids, anything only the owner can decide, a missing credential or \
+         sign-in (never look for one elsewhere), and a file you do not own or that another agent holds."
+    ));
+    // Review round (S2): a locked file is not an ordinary obstacle; it may be another agent's.
+    assert!(!ORDER_FOOTER.contains("locked file"));
+    assert!(!ORDER_FOOTER.contains("Work only in this folder"));
+    assert!(!ORDER_FOOTER.contains("Your last message is the Work Report"));
+    assert!(first_line("o.md").contains("Work only in this folder"));
+}
+
+/// Plan 40 T3: a report without `tests` or `files` passes; either one in a wrong shape still fails.
+#[test]
+fn c40b_a_report_without_tests_or_files_passes() {
+    let mut lean = good_report();
+    let object = lean.as_object_mut().expect("object");
+    object.remove("tests");
+    object.remove("files");
+    assert!(check_report(&lean).is_ok(), "{lean}");
+    for (key, wrong) in [
+        ("tests", serde_json::json!("3 pass")),
+        ("tests", serde_json::json!([{"name": "t"}])),
+        ("files", serde_json::json!("calc.py")),
+    ] {
+        let mut report = lean.clone();
+        report[key] = wrong.clone();
+        assert!(check_report(&report).is_err(), "{key}: {wrong}");
+    }
+    let mut no_gotchas = lean.clone();
+    no_gotchas.as_object_mut().expect("object").remove("gotchas");
+    assert!(check_report(&no_gotchas).is_err());
+}
+
+fn image_line(bytes: usize) -> String {
+    serde_json::json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result",
+        "tool_use_id": "t1", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png",
+        "data": "A".repeat(bytes)}}, {"type": "text", "text": "evidence words"}]}]}})
+    .to_string()
+}
+
+/// Plan 40 X1: the tee keeps an image block's type, media type and length, and drops its base64; every other line
+/// is teed as it came, and the gate's readers still find the file the worker read.
+#[test]
+fn c40b_the_tee_drops_an_images_base64_and_keeps_the_rest() {
+    let line = image_line(200_000);
+    let teed = tee_line(&line);
+    assert!(teed.len() < 1_000, "{} bytes", teed.len());
+    let value: Value = serde_json::from_str(&teed).expect("JSON");
+    let block = &value["message"]["content"][0]["content"][0];
+    assert_eq!(block["type"], "image");
+    assert_eq!(block["source"]["media_type"], "image/png");
+    assert_eq!(block["source"]["data"], "");
+    assert_eq!(block["source"]["data_omitted_chars"], 200_000);
+    assert!(teed.contains("evidence words"));
+    // A short line, and a long line with no base64 in it, are teed byte for byte.
+    let short = image_line(100);
+    assert_eq!(tee_line(&short), short.as_str());
+    let prose = serde_json::json!({"type": "assistant", "message": {"content": [{"type": "text",
+        "text": "word ".repeat(10_000)}]}})
+    .to_string();
+    assert_eq!(tee_line(&prose), prose.as_str());
+    // The gate still reads the Read call before it: a cited screenshot counts as read.
+    let read = serde_json::json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1",
+        "name": "Read", "input": {"file_path": r"C:\shots\a.png"}}]}})
+    .to_string();
+    let stream = format!("{}\n{teed}", tee_line(&read));
+    let report = serde_json::json!({"status": "done", "summary": "s", "gotchas": [],
+        "sources": [{"url": "file:///C:/shots/a.png", "used_for": "the screen"}]});
+    let axis = crate::nirvana_gate::sources_axis("media.image", None, Some(&report), &stream)
+        .expect("an axis");
+    assert_eq!(axis.mark, crate::nirvana_gate::Mark::Pass, "{axis:?}");
+}
+
+/// Review B3: a byte that is not UTF-8 never ends a reader; lines go on after it.
+#[test]
+fn c40b_a_non_utf8_line_is_read_lossily_and_reading_goes_on() {
+    let bytes: &[u8] = b"{\"type\":\"assistant\"}\r\n\xff\xfe half\n{\"type\":\"result\"}\nlast";
+    let mut lines = Vec::new();
+    job::lossy_lines(bytes, |line| {
+        lines.push(line);
+        true
+    });
+    assert_eq!(
+        lines,
+        vec![
+            "{\"type\":\"assistant\"}".to_owned(),
+            "\u{fffd}\u{fffd} half".to_owned(),
+            "{\"type\":\"result\"}".to_owned(),
+            "last".to_owned(),
+        ]
+    );
+    // `each` returning false stops it.
+    let mut first = Vec::new();
+    job::lossy_lines(bytes, |line| {
+        first.push(line);
+        false
+    });
+    assert_eq!(first.len(), 1);
+}
+
+/// Review B7: what "a tool call is open" means in the recorded streams. claude: a `tool_use` until the `user` line
+/// whose `tool_result` names its id; agy: a tool step `ACTIVE` until the same `step_index` is `DONE` or `ERROR`.
+#[test]
+fn c40b_a_tool_call_is_open_from_its_call_to_its_answer() {
+    for (cli, text) in [("claude", LIVE_HAIKU), ("agy", LIVE_FLASH)] {
+        let mut stream = Stream::new(cli);
+        let mut opened = 0;
+        for line in text.lines() {
+            stream.feed(line);
+            if stream.tool_open() {
+                opened += 1;
+            }
+        }
+        assert!(opened > 0, "{cli}: a call was open at some line");
+        assert!(!stream.tool_open(), "{cli}: every call was answered by the end");
+    }
+    let mut stream = Stream::new("claude");
+    stream.feed(r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t9","name":"Bash","input":{"command":"cargo build"}}]}}"#);
+    assert!(stream.tool_open());
+    stream.feed(r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t9","content":"ok"}]}}"#);
+    assert!(!stream.tool_open());
+    let mut stream = Stream::new("agy");
+    stream.feed(r#"{"event":"step_update","step_update":{"step_index":3,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"parameters":{"CommandLine":"cargo build"}}}}"#);
+    assert!(stream.tool_open());
+    stream.feed(r#"{"event":"step_update","step_update":{"step_index":3,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{"parameters":{}}}}"#);
+    assert!(!stream.tool_open());
 }

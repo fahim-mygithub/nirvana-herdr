@@ -2507,7 +2507,6 @@ pub fn spend_refused(order: &str, why: &str) -> String {
 /// refuses a scoped seat: what others booked is not known, so its reserve cannot be checked.
 // Called from `nirvana_worker::exec` by the S1 hunk this package hands to the worker builder; until it lands nothing
 // in this crate calls it. Drop the allow with that hunk.
-#[allow(dead_code)]
 pub fn check_before_spend(
     root: &Path,
     seat_id: &str,

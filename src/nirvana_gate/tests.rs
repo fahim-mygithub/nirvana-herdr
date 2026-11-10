@@ -4099,3 +4099,400 @@ fn gsrc_the_docs_say_sources_only_when_the_order_asks_for_the_web() {
         .contains("one that asks for the web, or whose worker opened a page, cites at least one"));
     assert!(!gate.contains("their Work Report must carry a `sources` array"));
 }
+
+// ---- plan 40 (c40b): the review's B findings, T1 and the addenda ----
+
+fn seated_why(order: &str, parent: Option<&str>, why: &str) -> Seated {
+    let mut seated = seated(order, parent);
+    seated.why = parent.map(|_| why.to_owned());
+    seated
+}
+
+fn chain_state_why(orders: &[(&str, Option<&str>, &str)]) -> RunState {
+    let events: Vec<Event> = orders
+        .iter()
+        .enumerate()
+        .map(|(index, (order, parent, why))| Event {
+            v: V,
+            seq: index as u64 + 1,
+            at: 100 + index as u64,
+            kind: Kind::Seated(Box::new(seated_why(order, *parent, why))),
+        })
+        .collect();
+    replay(&events)
+}
+
+/// Review B1: a reseat child belongs to its parent's chain (the root's held-out check and snapshot are found), and a
+/// reseat is no send-back (the cap counts send-backs only, across the reseat).
+#[test]
+fn c40b_a_reseat_child_is_part_of_its_parents_chain() {
+    let state = chain_state_why(&[("o1", None, ""), ("o1-r1", Some("o1"), "reseat")]);
+    assert_eq!(chain(&state, "o1-r1"), ("o1".into(), 0));
+    let state = chain_state_why(&[
+        ("o1", None, ""),
+        ("o1-s1", Some("o1"), "send_back"),
+        ("o1-s1-r1", Some("o1-s1"), "reseat"),
+        ("o1-s2", Some("o1-s1-r1"), "send_back"),
+    ]);
+    assert_eq!(chain(&state, "o1-s2"), ("o1".into(), 2));
+    // The next send-back is the third, named from the root.
+    assert_eq!(
+        plan_send_back(&state, "o1-s2"),
+        SendBack::Child {
+            id: "o1-s3".into(),
+            n: 3
+        }
+    );
+    // Any other why still ends the chain.
+    let state = chain_state_why(&[("o1", None, ""), ("o1-x", Some("o1"), "teach")]);
+    assert_eq!(chain(&state, "o1-x"), ("o1-x".into(), 0));
+}
+
+/// Review B2: a test that times out ends with its whole tree. `cmd` starts `ping`, which holds the pipes; with `cmd`
+/// alone killed, or the test outside the job, the gate waited the full 29 s (and, for a hung binary, for ever).
+#[cfg(windows)]
+#[test]
+fn c40b_a_timed_out_test_is_killed_with_its_whole_tree() {
+    let cwd = temp("tree");
+    let started = std::time::Instant::now();
+    let run = run_command(&cwd, "cmd /C ping -n 30 127.0.0.1", Duration::from_secs(1));
+    let took = started.elapsed();
+    assert!(run.timed_out, "{run:?}");
+    assert!(took < Duration::from_secs(15), "took {took:?}: {run:?}");
+}
+
+/// Review B4: a named check that passed early survives 60 later `PASSED` lines, and is judged on the whole output.
+#[test]
+fn c40b_a_check_that_ran_early_is_not_cut_by_later_passed_lines() {
+    let checks = vec!["test_gate_lock".to_owned()];
+    let mut output = "test_gate_lock ... ok\n".to_owned();
+    for n in 0..60 {
+        output.push_str(&format!("tests/test_{n}.py::case PASSED\n"));
+    }
+    let run = CommandRun {
+        exit: Some(0),
+        output: output.clone(),
+        ..CommandRun::default()
+    };
+    let axis = tests_axis(Some("pytest -v"), Some(&run), &checks);
+    assert_eq!(axis.mark, Mark::Pass, "{axis:?}");
+    let kept = filter(&output, &checks);
+    assert_eq!(kept.len(), KEPT_LINES);
+    assert_eq!(kept[0], "test_gate_lock ... ok");
+    assert_eq!(kept[KEPT_LINES - 1], "tests/test_59.py::case PASSED");
+    // A check absent from the whole output still fails (Nirvana CLAUDE.md rule 9).
+    let absent = CommandRun {
+        exit: Some(0),
+        output: output.replace("test_gate_lock", "test_other"),
+        ..CommandRun::default()
+    };
+    assert_eq!(
+        tests_axis(Some("pytest -v"), Some(&absent), &checks).mark,
+        Mark::Fail
+    );
+    // The shown lines are clipped at 300 characters; a check named past the clip still ran.
+    let long = CommandRun {
+        exit: Some(0),
+        output: format!("{} test_gate_lock ok\n", "x".repeat(320)),
+        ..CommandRun::default()
+    };
+    assert_eq!(
+        tests_axis(Some("pytest -v"), Some(&long), &checks).mark,
+        Mark::Pass
+    );
+}
+
+/// Review round (N2): the pinned line is the check's result, not a compile line that names it first.
+#[test]
+fn c40b_the_pinned_check_line_is_its_result() {
+    let checks = vec!["c40b_probe".to_owned()];
+    let mut output = "   Compiling c40b_probe v0.1.0\ntest c40b_probe ... ok\n".to_owned();
+    for n in 0..60 {
+        output.push_str(&format!("tests/test_{n}.py::case PASSED\n"));
+    }
+    let kept = filter(&output, &checks);
+    assert_eq!(kept.len(), KEPT_LINES);
+    assert_eq!(kept[0], "test c40b_probe ... ok", "{kept:?}");
+    assert!(!kept.iter().any(|line| line.contains("Compiling")), "{kept:?}");
+    // A name holding a result word (`fail`) is not its own result.
+    let checks = vec!["test_fail_case".to_owned()];
+    let output = format!(
+        "collecting test_fail_case\ntest_fail_case PASSED\n{}",
+        "tests/x.py::y PASSED\n".repeat(60)
+    );
+    assert_eq!(filter(&output, &checks)[0], "test_fail_case PASSED");
+}
+
+/// Review B5: an untracked file with a non-ASCII name is committed (git quoted it without `-z`).
+#[test]
+fn c40b_a_non_ascii_new_file_is_committed() {
+    let root = repo("cafe");
+    let cwd = worktree(&root, "cafe");
+    std::fs::write(cwd.join("caf\u{e9}.md"), "menu\n").expect("cafe");
+    let left = commit_work(&cwd, "cafe", &["*.md".to_owned()]).expect("commit");
+    assert!(left.is_empty(), "{left:?}");
+    let files = sh(
+        &cwd,
+        &["-c", "core.quotepath=false", "show", "--name-only", "--format=", "HEAD"],
+    );
+    assert_eq!(files.lines().collect::<Vec<_>>(), vec!["caf\u{e9}.md"]);
+}
+
+/// Review B6: `Test:`, `Check:` and `Serves:` are read as `owns:` is, the case ignored.
+#[test]
+fn c40b_test_check_and_serves_ignore_case() {
+    let spec = spec("Test: cargo nextest run\nCHECK: gate_lock\nServes: 8770\nOwns: a.rs");
+    assert_eq!(spec.test.as_deref(), Some("cargo nextest run"));
+    assert_eq!(spec.checks, vec!["gate_lock".to_owned()]);
+    assert_eq!(spec.serves, vec![8770]);
+    assert_eq!(spec.owns, vec!["a.rs".to_owned()]);
+}
+
+/// Review round (N1): a `check:` line in any case is names only when it looks like names; prose stays prose. `test:`
+/// and `serves:` keep the simple rule.
+#[test]
+fn c40b_a_check_line_of_prose_names_no_check() {
+    for prose in [
+        "Check: the page loads",
+        "check: the form submits and the toast shows",
+        "Check: everything.",
+        "CHECK: test_mul and test_add",
+    ] {
+        assert!(spec(prose).checks.is_empty(), "{prose}");
+    }
+    for (names, want) in [
+        ("check: test_mul test_add", &["test_mul", "test_add"][..]),
+        ("Check: gate::lock, c40b-a", &["gate::lock", "c40b-a"][..]),
+        ("CHECK: smoke", &["smoke"][..]),
+        ("Check: `alpha` `beta`", &["alpha", "beta"][..]),
+    ] {
+        assert_eq!(spec(names).checks, want, "{names}");
+    }
+    // `test:` and `serves:` are read in any case, as B6 made them.
+    let spec = spec("TEST: cargo test the thing\nSERVES: 8770 8771");
+    assert_eq!(spec.test.as_deref(), Some("cargo test the thing"));
+    assert_eq!(spec.serves, vec![8770, 8771]);
+}
+
+/// Plan 40 T1: a file list is capped at 40 lines and one `+N more`.
+#[test]
+fn c40b_file_lists_are_capped_with_a_count_of_the_rest() {
+    let changed: Vec<String> = (0..100).map(|n| format!("f{n}.rs")).collect();
+    let axis = owned_axis("build.bounded", &changed, &["a.rs".to_owned()]);
+    assert_eq!(axis.mark, Mark::Fail);
+    assert_eq!(axis.lines.len(), FILE_LINES_MOST + 1);
+    assert_eq!(axis.lines.last().map(String::as_str), Some("+60 more"));
+    assert!(axis.why.contains("100"), "{}", axis.why);
+    assert_eq!(capped(vec!["a".into()]), vec!["a".to_owned()]);
+}
+
+/// Plan 40 addendum A: an accepted order counts as a pass in the seat's tally.
+#[test]
+fn c40b_an_accepted_order_counts_as_a_pass() {
+    assert_eq!(Outcome::tally(Outcome::ACCEPTED), Some(true));
+    assert_eq!(Outcome::tally("failed"), Some(false));
+    assert_eq!(Outcome::tally(Outcome::BLOCKED), None);
+}
+
+/// An answered agy step, as the real fixtures hold them (`state: DONE`).
+fn agy_tool(index: u64, tool: &str, parameters: Value) -> String {
+    agy_step(index, "DONE", tool, parameters, "")
+}
+
+fn agy_step(index: u64, state: &str, tool: &str, parameters: Value, output: &str) -> String {
+    serde_json::json!({"event": "step_update", "step_update": {"step_index": index, "state": state, "step_type": "tool",
+        "tool_name": tool, "tool_info": {"name": tool, "parameters": parameters, "output": output}}})
+    .to_string()
+}
+
+/// A Claude tool call and its answer.
+fn claude_call(id: &str, tool: &str, input: Value, is_error: bool) -> String {
+    [
+        serde_json::json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": id, "name": tool, "input": input}]}}),
+        serde_json::json!({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": id, "content": "x", "is_error": is_error}]}}),
+    ]
+    .map(|line| line.to_string())
+    .join("\n")
+}
+
+fn cites(urls: &[&str]) -> Value {
+    serde_json::json!({"status": "done", "summary": "s", "gotchas": [],
+        "sources": urls.iter().map(|url| serde_json::json!({"url": url, "used_for": "the video"})).collect::<Vec<_>>()})
+}
+
+/// Plan 40 addendum B, from the three real shapes of 2026-10-31 (paths shortened, no personal content). yt-breakdown:
+/// the cited video's downloaded copy was opened and probed by path, and no fetch named its URL.
+#[test]
+fn c40b_a_media_order_cites_the_video_it_opened_by_path() {
+    let kit = r"C:\Users\me\AppData\Local\groove-authoring\youtube\8aQ8SoQl5EY";
+    let probe = format!(r#"python -c "video_path = r'{kit}\proxy.mp4'""#);
+    let finish = agy_tool(
+        150,
+        "finish",
+        serde_json::json!({"sources": [{"url": "https://www.youtube.com/watch?v=8aQ8SoQl5EY"}]}),
+    );
+    let notes = [
+        agy_tool(6, "read_file", serde_json::json!({"Path": format!(r"{kit}\ingest.json")})),
+        agy_tool(35, "run_command", serde_json::json!({ "CommandLine": probe })),
+        finish.clone(),
+    ]
+    .join("\n");
+    let report = cites(&["https://www.youtube.com/watch?v=8aQ8SoQl5EY"]);
+    // Review round (S1): its notes file and a script that names the path are no sign it watched the video.
+    let axis = sources_axis("media.video", None, Some(&report), &notes).expect("an axis");
+    assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+    // Its `read_file` of the downloaded proxy, answered: the video was opened.
+    let stream = format!(
+        "{notes}\n{}",
+        agy_tool(9, "read_file", serde_json::json!({"Path": format!(r"{kit}\proxy.mp4")}))
+    );
+    let axis = sources_axis("media.video", None, Some(&report), &stream).expect("an axis");
+    assert_eq!(axis.mark, Mark::Pass, "{axis:?}");
+    // The real streams, whole: each cited video passes under media.video.
+    for (order, fixture, video) in [
+        ("yt-breakdown", include_str!("fixtures/yt-breakdown.jsonl"), "8aQ8SoQl5EY"),
+        ("yt-breakdown-illit", include_str!("fixtures/yt-breakdown-illit.jsonl"), "KuKVOfwBPQI"),
+    ] {
+        let (_, real) = fixture.split_once('\n').expect("head line");
+        let report = cites(&[&format!("https://www.youtube.com/watch?v={video}")]);
+        let axis = sources_axis("media.video", None, Some(&report), real).expect("an axis");
+        assert_eq!(axis.mark, Mark::Pass, "{order}: {axis:?}");
+    }
+    // research.* keeps its rule: the same stream does not vouch for the page.
+    let axis = sources_axis("research.web", None, Some(&report), &stream).expect("an axis");
+    assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+    // The report's own `finish` call never vouches.
+    let axis = sources_axis("media.video", None, Some(&report), &finish).expect("an axis");
+    assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+}
+
+/// yt-breakdown-illit: the video passes by its kit; the two tempo pages it never fetched still fail, until a command
+/// names one.
+#[test]
+fn c40b_a_media_order_still_fails_pages_it_never_fetched() {
+    let kit = r"C:\Users\me\AppData\Local\groove-authoring\youtube\KuKVOfwBPQI";
+    let stream = agy_tool(
+        10,
+        "read_file",
+        serde_json::json!({"Path": format!(r"{kit}\contact_sheet.jpg")}),
+    );
+    let tunebat = "https://tunebat.com/Info/Do-the-Dance/6A1s2x4N6C9w7Y6tH7xX7P";
+    let songbpm = "https://songbpm.com/@illit/do-the-dance";
+    let report = cites(&["https://www.youtube.com/watch?v=KuKVOfwBPQI", tunebat, songbpm]);
+    let axis = sources_axis("media.video", None, Some(&report), &stream).expect("an axis");
+    assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+    assert_eq!(axis.lines, vec![tunebat.to_owned(), songbpm.to_owned()]);
+    let fetched = format!(
+        "{stream}\n{}",
+        agy_tool(
+            11,
+            "run_command",
+            serde_json::json!({ "CommandLine": format!("ffprobe {songbpm}") })
+        )
+    );
+    let axis = sources_axis("media.video", None, Some(&report), &fetched).expect("an axis");
+    assert_eq!(axis.lines, vec![tunebat.to_owned()]);
+}
+
+const S1_VIDEO: &str = "https://www.youtube.com/watch?v=8aQ8SoQl5EY";
+
+fn s1_mark(stream: &str) -> Mark {
+    sources_axis("media.video", None, Some(&cites(&[S1_VIDEO])), stream)
+        .expect("an axis")
+        .mark
+}
+
+/// Review round (S1): a call that only names the cited video, or one that tried to open it and failed, is no read.
+/// Each refusal has its own control in `c40b.py`.
+#[test]
+fn c40b_a_media_cite_needs_a_call_that_opened_it() {
+    let bash = |command: &str, is_error: bool| {
+        claude_call("t1", "Bash", serde_json::json!({ "command": command }), is_error)
+    };
+    let proxy = r"C:\x\8aQ8SoQl5EY\proxy.mp4";
+    // echo: names the URL, fetches nothing.
+    assert_eq!(s1_mark(&bash(&format!("echo {S1_VIDEO}"), false)), Mark::Fail, "echo");
+    // A heredoc that writes the URL into a notes file.
+    let heredoc = format!("cat > notes.md <<'EOF'\n{S1_VIDEO}\nEOF");
+    assert_eq!(s1_mark(&bash(&heredoc, false)), Mark::Fail, "heredoc");
+    // ls of the id's folder and of its media file: it lists, it does not open.
+    assert_eq!(s1_mark(&bash(r"ls C:\x\8aQ8SoQl5EY", false)), Mark::Fail, "ls folder");
+    assert_eq!(s1_mark(&bash(&format!("ls {proxy}"), false)), Mark::Fail, "ls file");
+    // A Read of a missing path: the answer is an error.
+    let read = |path: &str, is_error: bool| {
+        claude_call("t2", "Read", serde_json::json!({ "file_path": path }), is_error)
+    };
+    assert_eq!(s1_mark(&read(proxy, true)), Mark::Fail, "missing Read");
+    assert_eq!(
+        s1_mark(&agy_step(3, "ERROR", "read_file", serde_json::json!({ "Path": proxy }), "")),
+        Mark::Fail,
+        "missing read_file"
+    );
+    // An unanswered agy call is the call alone.
+    assert_eq!(
+        s1_mark(&agy_step(3, "ACTIVE", "read_file", serde_json::json!({ "Path": proxy }), "")),
+        Mark::Fail,
+        "unanswered read_file"
+    );
+    // A file in the id's folder that holds no media.
+    assert_eq!(s1_mark(&read(r"C:\x\8aQ8SoQl5EY\notes.md", false)), Mark::Fail, "notes Read");
+    // A failed ffprobe, in both streams.
+    assert_eq!(s1_mark(&bash(&format!("ffprobe {proxy}"), true)), Mark::Fail, "ffprobe Bash");
+    let failed = agy_step(
+        4,
+        "DONE",
+        "run_command",
+        serde_json::json!({ "CommandLine": format!("ffprobe {proxy}") }),
+        "Command exited with code 1.\n\nCommand output:\nNo such file",
+    );
+    assert_eq!(s1_mark(&failed), Mark::Fail, "ffprobe agy");
+    // ffmpeg's output file is not something it opened.
+    let writes = format!(r"ffmpeg -i C:\x\other.mp4 {proxy}");
+    assert_eq!(s1_mark(&bash(&writes, false)), Mark::Fail, "ffmpeg output");
+}
+
+/// Review round (S1): the calls that do open the cited video count: a fetch or a probe naming its URL, ffmpeg with the
+/// URL as input, a media file of its id read or probed without an error.
+#[test]
+fn c40b_a_media_cite_counts_a_call_that_opened_it() {
+    let bash = |command: &str| claude_call("t1", "Bash", serde_json::json!({ "command": command }), false);
+    let proxy = r"C:\x\8aQ8SoQl5EY\proxy.mp4";
+    assert_eq!(s1_mark(&bash(&format!("ffprobe -v error {S1_VIDEO}"))), Mark::Pass, "ffprobe url");
+    assert_eq!(s1_mark(&bash(&format!("ffmpeg -i \"{S1_VIDEO}\" out.mp4"))), Mark::Pass, "ffmpeg url");
+    assert_eq!(s1_mark(&bash(&format!("ffprobe \"{proxy}\""))), Mark::Pass, "ffprobe file");
+    assert_eq!(s1_mark(&bash(&format!("ffmpeg -ss 0 -i {proxy} -frames:v 1 f.jpg"))), Mark::Pass, "ffmpeg file");
+    let ok = agy_step(
+        4,
+        "DONE",
+        "run_command",
+        serde_json::json!({ "CommandLine": format!("ffprobe {proxy}") }),
+        "Command output:\nDuration: 00:03:10",
+    );
+    assert_eq!(s1_mark(&ok), Mark::Pass, "ffprobe agy");
+    let frame = claude_call(
+        "t2",
+        "Read",
+        serde_json::json!({ "file_path": r"C:\x\8aQ8SoQl5EY\frame_001.jpg" }),
+        false,
+    );
+    assert_eq!(s1_mark(&frame), Mark::Pass, "frame Read");
+    // The fetch filter research.* uses: a cut python command that imports yt_dlp.
+    let cut = format!("python -c \"\nimport yt_dlp\nurl = '{S1_VIDEO}'\n\u{2026}");
+    assert_eq!(s1_mark(&bash(&cut)), Mark::Pass, "cut yt_dlp");
+}
+
+/// video-breakdown: a local file cited as `file:///` and opened by `read_file`. It passes since plan 35a round 2,
+/// which landed after this order was gated; kept as the third shape.
+#[test]
+fn c40b_a_media_order_cites_the_local_file_it_opened() {
+    let stream = agy_tool(
+        4,
+        "read_file",
+        serde_json::json!({"Path": r"C:\Users\me\Downloads\IMG_4941.mov"}),
+    );
+    let report = cites(&["file:///C:/Users/me/Downloads/IMG_4941.mov"]);
+    let axis = sources_axis("media.video", None, Some(&report), &stream).expect("an axis");
+    assert_eq!(axis.mark, Mark::Pass, "{axis:?}");
+}

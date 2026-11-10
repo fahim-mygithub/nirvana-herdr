@@ -29,7 +29,7 @@ CONTROLS = (
             "a_new_file_no_owns_pattern_names_stays_out_of_the_commit_and_is_said", "rust"),
     # Axis 2: tests, with the named check in the filtered output.
     Control("gate_named_check_unchecked", GATE,
-            ".filter(|check| !lines.iter().any(|line| line.contains(check.as_str())))",
+            ".filter(|check| !run.output.lines().any(|line| line.contains(check.as_str())))",
             ".filter(|_| false)",
             "the_named_check_absent_from_the_output_fails_the_tests_though_the_suite_passed", "rust"),
     Control("gate_exit_ignored", GATE,

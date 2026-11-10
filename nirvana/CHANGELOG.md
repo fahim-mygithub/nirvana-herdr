@@ -3,6 +3,33 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.66.0: the gate and the record say what happened, a lighter worker start, and an image guard
+
+- **Changed:** the seat record ends with the final decision: an order the orchestrator accepts after a failed or
+  sent-back gate is corrected in place to `accepted` (the first word kept as `gated_outcome`), and a Claude
+  subagent that ended with a message is `subagent-delivered`, not "no report". Gate: a reseat child stays in its
+  parent's chain (held-out check, seat snapshot, send-back cap); a timed-out test is killed with its whole tree
+  and the gate lock is released; a named check is judged on the whole output; `Test:`, `Check:` and `Serves:` are
+  read in any capitalisation; file lists are capped at 40 lines; a `media.*` order's cited video counts when a call
+  that fetched or opened it was answered without an error. Worker: `--exclude-dynamic-system-prompt-sections` on
+  every claude worker; a non-UTF-8 byte no longer ends a reader; silence with a tool call open is a stall only
+  after 30 min; herdr calls under the live lock have a timeout; the stream keeps an image block's type and length,
+  not its base64; `tests` and `files` are optional in the Work Report; one short footer that says to finish the
+  order and to report `blocked` for a missing credential, an unowned file or the owner's decision. Nirvana Claude:
+  a `Read` hook refuses an image over 300 KB and names `herdr look`; the guard messages say "your own seat". Jev's
+  shadow advice is no longer asked under the lease lock on `seat run`.
+- **Because:** the owner, 2026-11-09: "improve project output", "create new features that would help improve token
+  efficenccy" and "ifx any bugs". The audit: 65 accepted orders were recorded as failures and all 24 subagent
+  orders as "no report"; four of six video orders were sent back for citing the video they had watched; 406 images
+  entered the orchestrator's own context.
+- **Measured:** under the new rule the installed record reads 183 passes of 289 tallied orders, not 118. A worker
+  start in a fresh folder writes 5,390 cache tokens with the flag and 7,315 without (Haiku, 2026-11-09). 587 scoped
+  tests pass, clippy clean, 3415 of 3415 controls find their text. The 300 KB image cap, the 30 min tool ceiling
+  and the 10 s herdr limit are hypotheses. Old record lines are not rewritten; a one-time repair is the owner's
+  call.
+- **If you remove this:** `use_record` would punish seats for work that was delivered and taken, a hung test holds
+  the project's gate lock for good, and the orchestrator keeps every image it reads for the rest of its session.
+
 ## alpha 0.65.0: phone photos say what they are, labels come from the model, and a gate runner that cleans its temp
 
 - **Changed:** a phone upload's path is followed by a short note built by the server: an image's pixel size and

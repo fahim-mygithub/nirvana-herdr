@@ -268,6 +268,7 @@ fn room(used: f32) -> Reserve {
         resets_at: Some(NOW + 2 * 3600),
         booked: 0.0,
         now: NOW,
+        own_seat: None,
     }
 }
 
@@ -744,8 +745,15 @@ fn a_worker_subagents_outcome_is_recorded_under_its_seat_effort_and_class() {
         "the use is computed from the tokens"
     );
 
-    let no_report = json!({"agent_type": "nirvana:worker-opus-high", "agent_id": "a1b2", "last_assistant_message": "I looked."});
-    let line = subagent_line(&table, &no_report, &transcript())
+    // Plan 40 addendum A: a final message in prose is a delivery, an empty end is no report.
+    let prose = json!({"agent_type": "nirvana:worker-opus-high", "agent_id": "a1b2", "last_assistant_message": "I looked."});
+    let line = subagent_line(&table, &prose, &transcript())
+        .unwrap()
+        .unwrap();
+    assert_eq!(line.outcome, SUBAGENT_DELIVERED);
+    assert_eq!(line.extra["summary"].as_str(), Some("I looked."));
+    let empty = json!({"agent_type": "nirvana:worker-opus-high", "agent_id": "a1b2", "last_assistant_message": "  "});
+    let line = subagent_line(&table, &empty, &transcript())
         .unwrap()
         .unwrap();
     assert_eq!(line.outcome, "subagent-no-report");
@@ -2682,4 +2690,103 @@ fn the_statusline_keeps_a_deferral_until_due_and_an_open_question() {
     assert_eq!(names(until + grace), vec!["asks asked"], "due and past it");
     assert_eq!(names(10_000_000), vec!["asks asked"], "unanswered");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---- plan 40 (c40b): M1's seat words, X2's image guard ----
+
+/// Plan 40 M1: the refusals name the session's recorded seat, or "your own seat" alone; never a model typed in.
+#[test]
+fn c40b_the_guard_names_the_sessions_own_seat() {
+    let table = table();
+    let mut reserve = room(0.2);
+    reserve.own_seat = Some("fable medium".into());
+    // A fork that names a model and an effort is still refused as a fork (o4b's control `o4b_guard_fork_passes` read
+    // a test whose fork was refused by a later check too).
+    let fork = guard(&spawn("fork", Some("haiku"), Some("low")), None, &table, &reserve);
+    let missing = guard(&spawn("Explore", None, None), None, &table, &reserve);
+    for (verdict, lead) in [(fork, "herdr guard: a fork always runs on"), (missing, "herdr guard: this spawn of")] {
+        match verdict {
+            Verdict::Deny(why) => {
+                assert!(why.starts_with(lead), "{why}");
+                assert!(why.contains("your own seat (fable medium)"), "{why}");
+                assert!(!why.contains("Opus 5.5") && !why.contains("worker-sonnet-medium"), "{why}");
+            }
+            Verdict::Allow => panic!("let through"),
+        }
+    }
+    assert_eq!(own_seat_words(None), "your own seat");
+    assert_eq!(own_seat_words(Some("  ")), "your own seat");
+}
+
+fn image_temp(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "herdr-c40b-read-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    dir
+}
+
+fn read_hook(path: &str) -> Value {
+    json!({"tool_name": "Read", "tool_input": {"file_path": path}})
+}
+
+/// Plan 40 X2: the orchestrator's `Read` of an image over `IMAGE_READ_MOST` is refused with what to do instead;
+/// everything else is allowed (the guard fails open).
+#[test]
+fn c40b_the_orchestrator_may_not_read_a_large_image() {
+    let dir = image_temp("guard");
+    let big = dir.join("Shot.PNG");
+    std::fs::write(&big, vec![0u8; IMAGE_READ_MOST as usize + 1]).expect("big");
+    let small = dir.join("crop.jpg");
+    std::fs::write(&small, vec![0u8; IMAGE_READ_MOST as usize]).expect("small");
+    let text = dir.join("notes.txt");
+    std::fs::write(&text, vec![b'a'; IMAGE_READ_MOST as usize * 2]).expect("text");
+    let big_text = big.display().to_string();
+    let denied = guard_read_decision(&read_hook(&big_text), Some(&dir), true).expect("a refusal");
+    assert_eq!(denied["hookSpecificOutput"]["permissionDecision"], "deny");
+    let why = denied["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("a reason");
+    assert!(
+        why.starts_with(&format!("Ask about this image without reading it here: `herdr look \"{big_text}\" --ask")),
+        "{why}"
+    );
+    assert!(why.contains(&format!("herdr media shrink \"{big_text}\"")), "{why}");
+    // A relative path is read from the hook's folder.
+    assert!(guard_read_decision(&read_hook("Shot.PNG"), Some(&dir), true).is_some());
+    // Allowed: a small image, a non-image of any size, a missing file, a folder, no path.
+    for path in [
+        small.display().to_string(),
+        text.display().to_string(),
+        dir.join("gone.png").display().to_string(),
+        dir.display().to_string(),
+    ] {
+        assert!(guard_read_decision(&read_hook(&path), Some(&dir), true).is_none(), "{path}");
+    }
+    assert!(guard_read_decision(&json!({"tool_input": {}}), Some(&dir), true).is_none());
+    // Not the orchestrator: a plain Claude Code pane, a subagent, a worker in its worktree.
+    assert!(guard_read_decision(&read_hook(&big_text), Some(&dir), false).is_none());
+    let mut sub = read_hook(&big_text);
+    sub["agent_id"] = json!("a1");
+    assert!(guard_read_decision(&sub, Some(&dir), true).is_none());
+    let worktree = dir.join(".nirvana").join("worktrees").join("o1");
+    assert!(guard_read_decision(&read_hook(&big_text), Some(&worktree), true).is_none());
+}
+
+/// The hook is wired: `PreToolUse` on `Read` runs `herdr nirvana guard-read`, a subcommand the CLI knows.
+#[test]
+fn c40b_the_image_guard_is_a_read_hook() {
+    let hooks: Value = serde_json::from_str(include_str!("../../nirvana/claude/hooks/hooks.json")).expect("JSON");
+    let entries = hooks["hooks"]["PreToolUse"].as_array().expect("PreToolUse");
+    let read = entries
+        .iter()
+        .find(|entry| entry["matcher"] == "Read")
+        .expect("a Read matcher");
+    assert_eq!(read["hooks"][0]["args"], json!(["nirvana", "guard-read"]));
+    assert!(SUBCOMMANDS.contains(&"guard-read"));
 }
