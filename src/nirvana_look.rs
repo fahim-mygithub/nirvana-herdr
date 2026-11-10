@@ -14,6 +14,14 @@
 //!
 //! A look is not an order: no order file, no gate, no journal. It is still seated by the rule (`nirvana_seat::pick`
 //! over the `look.image` class), leased while it runs, recorded when it ends, and its lease is released on every path.
+//!
+//! The picture is untrusted content (review round, 2026-11-09): a phone screenshot of a web page can carry text
+//! written to steer a model. So a look can do exactly one thing, read the copy it was given. It runs only on a claude
+//! seat (agy has no tool filter, so a steered agy turn would have a shell), in a folder under the Nirvana home that
+//! holds nothing but copies, with `Read(./**)` as its only allowed tool. Measured 2026-11-09 (Haiku 5.5 low, Claude
+//! Code 2.1.321), a canary one folder up from the image: with a bare `Read` rule the turn quoted the canary, 0
+//! permission denials; with `Read(./**)` and the folder as cwd it answered REFUSED and `permission_denials` had 1
+//! entry. Its answer is data for the caller to judge, and the refused reads are counted back to the caller.
 
 use crate::nirvana_seat::{self, Effort, Pick, Request, SizeName, Table, Tokens, World};
 use serde::{Deserialize, Serialize};
@@ -40,10 +48,9 @@ sota_effort = "low"
 needs = ["image"]
 weight = 0.2
 bars = { efficient = 70, balanced = 80, sota = 100 }
-why = "plan 40c: herdr look, one question about one image or PDF; weight 0.2 is a prior (10.4k tokens measured against P4's 45k)"
+why = "plan 40c: herdr look, one question about one image or PDF; weight 0.2 is a prior (10.4k tokens measured against P4's 45k); claude seats only: agy has no tool filter and the picture is untrusted (plan 34a: no agy seat teaches)"
 seats = [
   { seat = "haiku", score = 84 },
-  { seat = "flash", score = 84 },
   { seat = "sonnet", score = 86 },
 ]
 "#;
@@ -61,9 +68,12 @@ const TILE: u64 = 28;
 pub const PDF_WHOLE_PAGES: u32 = 10;
 /// One cheap turn: the measured read took 3.8 s.
 pub const TIMEOUT: Duration = Duration::from_secs(120);
-/// agy stops itself before herdr's limit kills it, so its own result line still arrives.
-const AGY_PRINT_TIMEOUT_S: u64 = 110;
-/// `<project>\.nirvana\look\`: the copies and the answer cache.
+/// A look's booking: a look ends within `TIMEOUT`, so an interrupted one (Ctrl-C skips the drop guard, review N5)
+/// holds its seat 5 minutes, not the small size's 60.
+pub const LEASE_MINUTES: u64 = 5;
+/// Copies older than this are deleted when a look runs (review N4). The answer caches are kept.
+pub const PRUNE_AFTER: Duration = Duration::from_secs(30 * 24 * 3600);
+/// `<project>\.nirvana\look\` for `herdr media shrink`'s copies; `<home>\nirvana\look\<hash>\` for a look's.
 pub const DIR: &str = "look";
 /// As `uploads\` holds (`nirvana_remote::send::IGNORE`): git leaves the folder alone in any project.
 pub const IGNORE: &str = "*\n";
@@ -71,7 +81,11 @@ pub const IGNORE: &str = "*\n";
 /// class is in this one.
 pub const CACHE_CHAIN: &str = "look-cache";
 pub const POPPLER_FIX: &str =
-    "`winget install oschwartz10612.Poppler` or an Antigravity sign-in fixes it";
+    "Install Poppler with `winget install oschwartz10612.Poppler` so Claude Code can read long PDFs, then pass --pages in ranges of at most 10.";
+/// The demuxers a still copy may be read with. A file named `.png` that is really a concat or HLS playlist would
+/// otherwise make ffmpeg read other files, local or remote, into the copy the model sees (review N3). `mov` is
+/// HEIC's. Checked with ffmpeg 8.0.1 on this PC: a concat text named `evil.png` is refused, "Format not on whitelist".
+pub const STILL_FORMATS: &str = "png_pipe,jpeg_pipe,image2,gif,webp_pipe,bmp_pipe,mov";
 
 // ---- the file ----
 
@@ -156,6 +170,11 @@ fn le24(b: &[u8], at: usize) -> Option<u32> {
 /// screen, BMP's DIB header, WebP's VP8, VP8L or VP8X chunk. `None` for a header it cannot read; the caller then asks
 /// ffprobe.
 pub fn image_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    // A side of 0 is no size at all: a PNG whose IHDR says 0x0 was sent as it was with an estimate of 0 (review N8).
+    header_size(bytes).filter(|(w, h)| *w > 0 && *h > 0)
+}
+
+fn header_size(bytes: &[u8]) -> Option<(u32, u32)> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.get(12..16) == Some(b"IHDR") {
         let w = u32::from_be_bytes(bytes.get(16..20)?.try_into().ok()?);
         let h = u32::from_be_bytes(bytes.get(20..24)?.try_into().ok()?);
@@ -288,9 +307,102 @@ pub fn look_dir(root: &Path) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// `<stem>-<first 12 of sha256>-<edge>.<ext>`: two files with one name never share a copy, and a copy is made once.
-pub fn copy_name(input: &Path, sha: &str, edge: u32, kind: Kind) -> String {
-    let stem: String = input
+/// `<home>\nirvana\look\`: every project's look folder sits in it.
+pub fn looks_root() -> PathBuf {
+    nirvana_seat::dir().join(DIR)
+}
+
+/// A look's folder, `<home>\nirvana\look\<first 12 of sha256 of the project root>\`, made when missing. Not inside
+/// the project (review round, departing from the first order's `<project>\.nirvana\look\`): a folder inside a project
+/// loads that project's CLAUDE.md and settings into the turn, which costs tokens and lets a project file steer or
+/// slow a look. The root is hashed lowercased, as Windows paths compare.
+pub fn look_home(root: &Path) -> Result<PathBuf, String> {
+    let key = sha256_hex(root.display().to_string().to_lowercase().as_bytes());
+    let dir = looks_root().join(&key[..12]);
+    std::fs::create_dir_all(&dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+    Ok(dir)
+}
+
+/// A CLAUDE.md or a `.claude` in the look folder, or in any folder between it and the Nirvana home, that would load
+/// into the turn. The folder must hold copies only.
+pub fn steering_file(dir: &Path) -> Option<PathBuf> {
+    let home = nirvana_seat::dir();
+    let top = home.parent().unwrap_or(&home);
+    dir.ancestors()
+        .take_while(|folder| folder.starts_with(top))
+        .flat_map(|folder| {
+            ["CLAUDE.md", "CLAUDE.local.md", ".claude"].map(|name| folder.join(name))
+        })
+        .find(|path| path.exists())
+}
+
+/// `<stem>-<first 12 of sha256>.<ext>`: the byte-identical copy of a file that needs no shrinking.
+pub fn same_name(input: &Path, sha: &str, kind: Kind) -> String {
+    let ext = match kind {
+        Kind::Png => "png",
+        Kind::Jpeg | Kind::Heic => "jpg",
+        Kind::Gif => "gif",
+        Kind::Webp => "webp",
+        Kind::Bmp => "bmp",
+        Kind::Pdf => "pdf",
+    };
+    format!("{}-{}.{ext}", safe_stem(input), &sha[..12.min(sha.len())])
+}
+
+/// `input` copied byte for byte to `dest`, through a temp name and a rename, so a copy cut short is never reused
+/// (review N1). A `dest` already there with the input's length is reused: its name carries the input's sha256.
+pub fn place_copy(input: &Path, dest: &Path) -> Result<(), String> {
+    let len = std::fs::metadata(input)
+        .map_err(|err| format!("{}: {err}", input.display()))?
+        .len();
+    if std::fs::metadata(dest).is_ok_and(|meta| meta.len() == len) {
+        return Ok(());
+    }
+    let part = part_name(dest);
+    std::fs::copy(input, &part)
+        .and_then(|_| std::fs::rename(&part, dest))
+        .map_err(|err| {
+            let _ = std::fs::remove_file(&part);
+            format!("could not copy {} for the look: {err}", input.display())
+        })
+}
+
+/// Deletes the copies under `root` older than `keep`, one folder deep, and keeps every `*.look.jsonl` (review N4).
+/// How many went.
+pub fn prune(root: &Path, now: std::time::SystemTime, keep: Duration) -> usize {
+    let Ok(folders) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    let mut gone = 0;
+    for folder in folders.flatten().filter(|entry| entry.path().is_dir()) {
+        let Ok(files) = std::fs::read_dir(folder.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            let is_cache = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".look.jsonl"));
+            let old = file
+                .metadata()
+                .ok()
+                .filter(std::fs::Metadata::is_file)
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age > keep);
+            if !is_cache && old && std::fs::remove_file(&path).is_ok() {
+                gone += 1;
+            }
+        }
+    }
+    gone
+}
+
+/// The file's stem in `[A-Za-z0-9_-]`, at most 40 characters: no separator, `..` or drive reaches a copy's name, and
+/// the name stays plain for the prompt that names it.
+fn safe_stem(input: &Path) -> String {
+    input
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or("image")
@@ -303,7 +415,12 @@ pub fn copy_name(input: &Path, sha: &str, edge: u32, kind: Kind) -> String {
             }
         })
         .take(40)
-        .collect();
+        .collect()
+}
+
+/// `<stem>-<first 12 of sha256>-<edge>.<ext>`: two files with one name never share a copy, and a copy is made once.
+pub fn copy_name(input: &Path, sha: &str, edge: u32, kind: Kind) -> String {
+    let stem = safe_stem(input);
     // A JPEG or a phone's HEIC stays a JPEG (a photo); a screenshot, chart or GIF frame keeps its lossless PNG.
     let ext = if matches!(kind, Kind::Jpeg | Kind::Heic) {
         "jpg"
@@ -321,6 +438,10 @@ pub fn still_argv(input: &Path, output: &Path, edge: u32) -> Vec<String> {
         "-y",
         "-v",
         "error",
+        "-protocol_whitelist",
+        "file",
+        "-format_whitelist",
+        STILL_FORMATS,
         "-i",
         &input.display().to_string(),
         "-vf",
@@ -355,9 +476,16 @@ pub type OnPath<'a> = &'a dyn Fn(&str) -> bool;
 
 /// Width and height from ffprobe, when the header could not be read.
 pub fn probed_size(tool: Tool, input: &Path) -> Option<(u32, u32)> {
-    let json: Value =
-        serde_json::from_str(&tool("ffprobe", &crate::nirvana_media::probe_argv(input)).ok()?)
-            .ok()?;
+    let mut argv: Vec<String> = [
+        "-protocol_whitelist",
+        "file",
+        "-format_whitelist",
+        STILL_FORMATS,
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    argv.extend(crate::nirvana_media::probe_argv(input));
+    let json: Value = serde_json::from_str(&tool("ffprobe", &argv).ok()?).ok()?;
     let stream = json
         .get("streams")?
         .as_array()?
@@ -367,6 +495,7 @@ pub fn probed_size(tool: Tool, input: &Path) -> Option<(u32, u32)> {
         u32::try_from(stream.get("width")?.as_u64()?).ok()?,
         u32::try_from(stream.get("height")?.as_u64()?).ok()?,
     ))
+    .filter(|(w, h)| *w > 0 && *h > 0)
 }
 
 /// The still a seat reads, at most `edge` on the long side: the file itself when it already fits (never copied), else
@@ -431,12 +560,16 @@ pub fn still_copy(
             input.display()
         ));
     }
+    // Only a finished copy ever has the final name: ffmpeg writes a temp name that is renamed when it ends, so a
+    // copy cut short by a kill is never reused or cached (review N1).
     let made = std::fs::metadata(&output).is_ok_and(|meta| meta.len() > 0) && out.is_none();
     if !made {
         if let Some(parent) = output.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        tool("ffmpeg", &still_argv(input, &output, edge)).map_err(|err| {
+        let part = part_name(&output);
+        tool("ffmpeg", &still_argv(input, &part, edge)).map_err(|err| {
+            let _ = std::fs::remove_file(&part);
             if kind == Kind::Heic {
                 format!(
                     "ffmpeg could not turn {} into a JPEG: {err}",
@@ -445,6 +578,10 @@ pub fn still_copy(
             } else {
                 err
             }
+        })?;
+        std::fs::rename(&part, &output).map_err(|err| {
+            let _ = std::fs::remove_file(&part);
+            format!("ffmpeg left no copy at {}: {err}", part.display())
         })?;
     }
     let read = std::fs::read(&output)
@@ -458,23 +595,18 @@ pub fn still_copy(
     })
 }
 
-/// ffmpeg or ffprobe run with a list argv, never through a shell.
+/// `<name>.part<pid>.<ext>` beside `output`: ffmpeg picks the format by the last extension, so it stays.
+pub fn part_name(output: &Path) -> PathBuf {
+    let ext = output
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("part");
+    output.with_extension(format!("part{}.{ext}", std::process::id()))
+}
+
+/// ffmpeg or ffprobe run with a list argv, never through a shell, stopped after 60 s (review N2).
 pub fn real_tool(program: &str, args: &[String]) -> Result<String, String> {
-    let mut command = Command::new(program);
-    command
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    crate::platform::configure_background_command(&mut command);
-    let output = command
-        .output()
-        .map_err(|err| format!("{program} did not start: {err}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("{program} failed: {}", stderr.trim()));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    crate::nirvana_media::run_list_argv(program, args, Some(crate::nirvana_media::TOOL_TIMEOUT))
 }
 
 pub fn real_on_path(program: &str) -> bool {
@@ -524,12 +656,16 @@ pub fn fresh(table: &Table, world: &World, seat: &nirvana_seat::Seat) -> bool {
         })
 }
 
-/// Which seats a look may take: `--seat`, and a CLI when the PDF route asks for one.
+/// Which seats a look may take: `--seat`.
 #[derive(Debug, Clone, Default)]
 pub struct Narrowing {
     pub seat: Option<String>,
-    pub cli: Option<String>,
 }
+
+/// The one CLI a look runs on. claude has a tool filter (`--tools Read`) and a path rule (`Read(./**)`); agy has
+/// neither, so a picture that steers an agy turn would have a shell (review S1). An owner's table that lists an agy
+/// seat in `look.image` is not obeyed on that seat.
+pub const LOOK_CLI: &str = "claude";
 
 /// The rule's pick over the class's seats that this look may take and that have a fresh reading. Everything else
 /// (floors, reserves, the mode's bar, signed-out CLIs) is the rule's own.
@@ -553,13 +689,24 @@ pub fn choose(
             listed.join(", ")
         ));
     }
+    if let Some(seat) = narrow
+        .seat
+        .as_deref()
+        .and_then(|id| table.seats.iter().find(|seat| seat.id == id))
+        .filter(|seat| seat.cli != LOOK_CLI)
+    {
+        return Err(format!(
+            "seat {} runs {}, which has no tool filter. A look runs only on a {LOOK_CLI} seat.",
+            seat.id, seat.cli
+        ));
+    }
     let mut narrowed = table.clone();
     let mut any = false;
     let mut stale = Vec::new();
     for seat in narrowed.seats.iter_mut().filter(|seat| seat.enabled) {
         let taken = listed.contains(&seat.id.as_str())
-            && narrow.seat.as_ref().is_none_or(|only| *only == seat.id)
-            && narrow.cli.as_ref().is_none_or(|cli| *cli == seat.cli);
+            && seat.cli == LOOK_CLI
+            && narrow.seat.as_ref().is_none_or(|only| *only == seat.id);
         if !taken {
             seat.enabled = false;
             continue;
@@ -628,8 +775,11 @@ fn book(
     world.now = crate::nirvana_run::now();
     world.leases = leases.leases.clone();
     let pick = choose(table, &world, request, narrow)?;
+    // The booking's length comes from the size; a look's is its own (`LEASE_MINUTES`, review N5).
+    let mut short = table.clone();
+    short.size.small.lease_minutes = LEASE_MINUTES;
     let (lease, _) =
-        nirvana_seat::book_pick(&mut leases, table, &pick, Some(order), None, world.now);
+        nirvana_seat::book_pick(&mut leases, &short, &pick, Some(order), None, world.now);
     if lease.is_none() {
         return Err(format!("{order} was not booked"));
     }
@@ -644,8 +794,12 @@ fn book(
 
 // ---- the launch ----
 
-/// The measured line (module docs): one Read, no MCP, no user settings, no saved session, plain JSON out. Never a
-/// schema: a Work Report would be forced on a one-line answer.
+/// The allow rule: Read of the cwd and below, the look folder that holds only copies. A bare `Read` permitted every
+/// path the user can read; the measured canary was quoted with it (module docs). Spelled exactly as measured.
+pub const READ_RULE: &str = "Read(./**)";
+
+/// The measured line (module docs): one Read scoped to the cwd, no MCP, no user settings, no saved session, plain
+/// JSON out. Never a schema: a Work Report would be forced on a one-line answer.
 pub fn claude_argv(model: &str, effort: Effort, prompt: &str) -> Vec<String> {
     [
         "claude",
@@ -665,39 +819,22 @@ pub fn claude_argv(model: &str, effort: Effort, prompt: &str) -> Vec<String> {
         "--tools",
         "Read",
         "--allowedTools",
-        "Read",
+        READ_RULE,
     ]
     .map(str::to_owned)
     .to_vec()
 }
 
-/// agy reads the file with `view_file` (probe P2's shape, `nirvana_media::still_prompt_line`); the effort is in the
-/// model id. The flags are the worker's (`nirvana_worker::argv`) without `--json-schema`: no schema here either.
-pub fn agy_argv(model: &str, prompt: &str) -> Vec<String> {
-    vec![
-        "agy".to_owned(),
-        "--output-format".to_owned(),
-        "stream-json".to_owned(),
-        "--model".to_owned(),
-        model.to_owned(),
-        "--print-timeout".to_owned(),
-        format!("{AGY_PRINT_TIMEOUT_S}s"),
-        // As the worker: agy's auto mode needs the terminal sandbox, which is off on this machine (plan 35 §3.6).
-        "--dangerously-skip-permissions".to_owned(),
-        format!("--print={prompt}"),
-    ]
-}
-
-/// The claude seat's question, naming the full path as the measured run did.
-pub fn claude_prompt(path: &Path, ask: &str, pages: Option<(u32, u32)>, kind: Kind) -> String {
+/// The claude seat's question. It names the copy by its file name in the cwd, as the measured scoped run did: an
+/// absolute path would point the reader outside the folder its rule allows.
+pub fn claude_prompt(name: &str, ask: &str, pages: Option<(u32, u32)>, kind: Kind) -> String {
     let what = if kind == Kind::Pdf { "PDF" } else { "image" };
     let pages = pages.map_or(String::new(), |(first, last)| {
         format!(" Read only pages {first}-{last}, with the Read tool's pages option.")
     });
     format!(
-        "Read the {what} at \"{}\" with the Read tool.{pages} Then answer in plain text, in a few short lines, giving \
-         numbers and copying visible text exactly: {}",
-        path.display(),
+        "Read the {what} \"{name}\" in the current folder with the Read tool.{pages} Then answer in plain text, in a \
+         few short lines, giving numbers and copying visible text exactly: {}",
         one_line(ask)
     )
 }
@@ -792,7 +929,9 @@ pub enum End {
     TimedOut,
 }
 
-fn drain(pipe: Option<impl std::io::Read + Send + 'static>) -> std::sync::mpsc::Receiver<String> {
+pub(crate) fn drain(
+    pipe: Option<impl std::io::Read + Send + 'static>,
+) -> std::sync::mpsc::Receiver<String> {
     let (send, receive) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut bytes = Vec::new();
@@ -866,67 +1005,71 @@ pub fn launch(program: &[String], cwd: &Path, cli: &str, timeout: Duration) -> R
     })
 }
 
-/// The answer and its tokens from what the CLI printed, or why there is none. claude's `--output-format json` prints
-/// one JSON array of events whose last `result` holds the answer (measured); agy prints stream-json lines. Both are
-/// read by the worker's own `Stream`.
-pub fn answer_of(cli: &str, stdout: &str) -> Result<(String, Tokens), String> {
-    let mut stream = crate::nirvana_worker::Stream::new(cli);
-    if cli == "claude" {
-        let value: Value =
-            serde_json::from_str(stdout.trim()).map_err(|_| "claude printed no JSON".to_owned())?;
-        let events = match value {
-            Value::Array(events) => events,
-            other => vec![other],
-        };
-        let result = events
-            .iter()
-            .rev()
-            .find(|event| event.get("type").and_then(Value::as_str) == Some("result"))
-            .ok_or_else(|| "claude printed no result".to_owned())?;
-        stream.feed(&result.to_string());
-    } else {
-        for line in stdout.lines() {
-            stream.feed(line);
-        }
-    }
-    let result = stream
-        .result
-        .clone()
-        .ok_or_else(|| format!("{cli} printed no result"))?;
-    let (failed, text) = if cli == "claude" {
-        let is_error = result.get("is_error").and_then(Value::as_bool) == Some(true);
-        let subtype = result.get("subtype").and_then(Value::as_str).unwrap_or("");
-        (
-            (is_error || subtype != "success")
-                .then(|| format!("claude ended with {subtype:?}, is_error {is_error}")),
-            result
-                .get("result")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-        )
-    } else {
-        let status = result.get("status").and_then(Value::as_str).unwrap_or("");
-        let reason = result.get("finished_reason").and_then(Value::as_str);
-        (
-            (status != "SUCCESS"
-                || reason.is_some_and(|why| crate::nirvana_worker::AGY_UNFINISHED.contains(&why)))
-            .then(|| format!("agy status {status:?}, finished {reason:?}")),
-            result
-                .get("response")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .or_else(|| stream.last_text.clone()),
-        )
+/// What a look's turn gave back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Answer {
+    pub text: String,
+    pub tokens: Tokens,
+    /// Reads the path rule refused: the picture asked the reader for other files.
+    pub refused_reads: u64,
+}
+
+/// The answer, its tokens and its refused reads from what claude printed, or why there is none. claude's
+/// `--output-format json` prints one JSON array of events whose last `result` holds the answer and the
+/// `permission_denials` array (measured); the tokens are read by the worker's own `Stream`.
+pub fn answer_of(stdout: &str) -> Result<Answer, String> {
+    let mut stream = crate::nirvana_worker::Stream::new(LOOK_CLI);
+    let value: Value =
+        serde_json::from_str(stdout.trim()).map_err(|_| "claude printed no JSON".to_owned())?;
+    let events = match value {
+        Value::Array(events) => events,
+        other => vec![other],
     };
-    if let Some(why) = failed {
-        return Err(why);
+    let result = events
+        .iter()
+        .rev()
+        .find(|event| event.get("type").and_then(Value::as_str) == Some("result"))
+        .ok_or_else(|| "claude printed no result".to_owned())?;
+    stream.feed(&result.to_string());
+    let is_error = result.get("is_error").and_then(Value::as_bool) == Some(true);
+    let subtype = result.get("subtype").and_then(Value::as_str).unwrap_or("");
+    if is_error || subtype != "success" {
+        return Err(format!(
+            "claude ended with {subtype:?}, is_error {is_error}"
+        ));
     }
-    let text = text.unwrap_or_default().trim().to_owned();
+    let text = result
+        .get("result")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
     if text.is_empty() {
-        // Probe P2: agy ended a turn that never opened the file with an empty answer and status SUCCESS.
         return Err("an empty answer, though the CLI said it succeeded".to_owned());
     }
-    Ok((text, stream.tokens))
+    let refused_reads = result
+        .get("permission_denials")
+        .and_then(Value::as_array)
+        .map_or(0, |denials| denials.len() as u64);
+    Ok(Answer {
+        text,
+        tokens: stream.tokens,
+        refused_reads,
+    })
+}
+
+/// The line the plain output ends with when the path rule refused a read.
+pub fn refused_line(refused: u64, kind: Kind) -> Option<String> {
+    let what = if kind == Kind::Pdf { "PDF" } else { "image" };
+    match refused {
+        0 => None,
+        1 => Some(format!(
+            "The {what} asked for 1 other file; it was refused."
+        )),
+        n => Some(format!(
+            "The {what} asked for {n} other files; they were refused."
+        )),
+    }
 }
 
 // ---- the cache ----
@@ -945,6 +1088,8 @@ pub struct CacheLine {
     pub answer: String,
     pub read: String,
     pub at: u64,
+    #[serde(default)]
+    pub refused_reads: u64,
 }
 
 pub fn cache_path(dir: &Path, input: &Path) -> PathBuf {
@@ -955,13 +1100,16 @@ pub fn cache_path(dir: &Path, input: &Path) -> PathBuf {
     dir.join(format!("{name}.look.jsonl"))
 }
 
-/// The last answer for this file's bytes, question, detail and pages.
+/// The last answer for this file's bytes, question, detail and pages, and from `seat` when one is named. A named seat
+/// is a request for that seat's reading, often a second opinion, so another seat's answer is not it (review N7);
+/// without `--seat` any seat's answer serves, and `--json` says which seat gave it.
 pub fn cached(
     path: &Path,
     sha: &str,
     question: &str,
     detail: &str,
     pages: Option<&str>,
+    seat: Option<&str>,
 ) -> Option<CacheLine> {
     std::fs::read_to_string(path)
         .ok()?
@@ -973,6 +1121,7 @@ pub fn cached(
                 && line.question == question
                 && line.detail == detail
                 && line.pages.as_deref() == pages
+                && seat.is_none_or(|seat| line.seat == seat)
         })
 }
 
@@ -1055,13 +1204,16 @@ pub struct Outcome {
     pub effort: Effort,
     pub tokens: Tokens,
     pub cached: bool,
-    /// The file the seat read: the copy, or the file itself.
+    /// The copy the seat read, in the look folder.
     pub read: String,
+    pub kind: Kind,
     pub width: Option<u32>,
     pub height: Option<u32>,
     /// What the image costs the model (`token_estimate`); none for a PDF.
     pub estimate_tokens: Option<u64>,
     pub pages: Option<u32>,
+    /// Reads outside the look folder that the path rule refused. Not 0 means the picture tried to steer its reader.
+    pub refused_reads: u64,
     pub order: String,
     /// What was started and where: the tests read them; `--json` leaves them out (the prompt is long).
     #[serde(skip)]
@@ -1168,16 +1320,47 @@ pub fn look(args: &Args, env: &Env) -> Result<Outcome, Refused> {
     if pages.is_some() && kind != Kind::Pdf {
         return Err(refuse(2)("--pages is for a PDF.".to_owned()));
     }
+    // Claude Code's Read takes at most 10 pages of a PDF at a time.
+    if let Some((first, last)) = pages.filter(|(first, last)| last - first >= PDF_WHOLE_PAGES) {
+        return Err(refuse(2)(format!(
+            "--pages takes at most {PDF_WHOLE_PAGES} pages at a time, not {first}-{last}. Ask again per range."
+        )));
+    }
     let pages_word = pages.map(|(first, last)| format!("{first}-{last}"));
     let bytes =
         std::fs::read(&input).map_err(|err| refuse(2)(format!("{}: {err}", input.display())))?;
     let sha = sha256_hex(&bytes);
-    let dir = look_dir(&env.root).map_err(refuse(2))?;
+    // A PDF over 10 pages, or of unknown length, needs pdftoppm for Claude Code's Read, and a page range. No agy seat
+    // takes it instead (review S1), so it is refused before anything is spent.
+    let page_count = (kind == Kind::Pdf).then(|| pdf_pages(&bytes)).flatten();
+    let long_pdf = kind == Kind::Pdf && page_count.is_none_or(|count| count > PDF_WHOLE_PAGES);
+    let length = page_count.map_or("an unknown number of pages".to_owned(), |count| {
+        format!("{count} pages")
+    });
+    if long_pdf && !(env.on_path)("pdftoppm") {
+        return Err(refuse(2)(format!(
+            "{POPPLER_FIX} This PDF has {length}, over the {PDF_WHOLE_PAGES} Claude Code reads without it."
+        )));
+    }
+    if long_pdf && pages.is_none() {
+        return Err(refuse(2)(format!(
+            "Pass --pages in ranges of at most {PDF_WHOLE_PAGES}: this PDF has {length}."
+        )));
+    }
+    let dir = look_home(&env.root).map_err(refuse(2))?;
+    let _ = prune(&looks_root(), std::time::SystemTime::now(), PRUNE_AFTER);
     let detail = if args.high { "high" } else { "low" };
     let table = look_table(&env.root).map_err(refuse(2))?;
     let cache = cache_path(&dir, &input);
     if !args.fresh {
-        if let Some(hit) = cached(&cache, &sha, &question, detail, pages_word.as_deref()) {
+        if let Some(hit) = cached(
+            &cache,
+            &sha,
+            &question,
+            detail,
+            pages_word.as_deref(),
+            args.seat.as_deref(),
+        ) {
             let order = order_id(&sha);
             record_hit(&table, &hit, &order, Effort::Low);
             return Ok(Outcome {
@@ -1188,10 +1371,12 @@ pub fn look(args: &Args, env: &Env) -> Result<Outcome, Refused> {
                 tokens: hit.tokens,
                 cached: true,
                 read: hit.read.clone(),
+                kind,
                 width: None,
                 height: None,
                 estimate_tokens: None,
                 pages: None,
+                refused_reads: hit.refused_reads,
                 order,
                 argv: Vec::new(),
                 cwd: PathBuf::new(),
@@ -1199,16 +1384,31 @@ pub fn look(args: &Args, env: &Env) -> Result<Outcome, Refused> {
         }
     }
 
-    // The file the seat reads.
+    // The file the seat reads: always a copy in the look folder, shrunk or byte for byte, so the copy is the only
+    // thing the reader's path rule reaches (review S2).
     let edge = if args.high { HIGH_EDGE } else { LOW_EDGE };
-    let (read, width, height, page_count) = if kind.is_still() {
+    let (read, width, height) = if kind.is_still() {
         let copy = still_copy(env.tool, env.on_path, &input, kind, edge, &dir, &sha, None)
             .map_err(refuse(2))?;
-        (copy.path, copy.width, copy.height, None)
+        if copy.copied {
+            (copy.path, copy.width, copy.height)
+        } else {
+            let dest = dir.join(same_name(&input, &sha, kind));
+            place_copy(&input, &dest).map_err(refuse(2))?;
+            (dest, copy.width, copy.height)
+        }
     } else {
-        (input.clone(), None, None, pdf_pages(&bytes))
+        let dest = dir.join(same_name(&input, &sha, kind));
+        place_copy(&input, &dest).map_err(refuse(2))?;
+        (dest, None, None)
     };
     let estimate = width.zip(height).map(|(w, h)| token_estimate(w, h));
+    if let Some(found) = steering_file(&dir) {
+        return Err(refuse(2)(format!(
+            "{} would load into the look's turn. The look folder must hold copies only; remove it.",
+            found.display()
+        )));
+    }
 
     // The seat.
     let world = env
@@ -1229,51 +1429,22 @@ pub fn look(args: &Args, env: &Env) -> Result<Outcome, Refused> {
     }
     let narrow = Narrowing {
         seat: args.seat.clone(),
-        cli: None,
     };
-    // A PDF over 10 pages (or of unknown length), or a page range: agy reads a PDF whole; a claude seat needs
-    // pdftoppm for it, which is not installed on this PC (2026-11-09).
-    let long_pdf = kind == Kind::Pdf
-        && (pages.is_some() || page_count.is_none_or(|count| count > PDF_WHOLE_PAGES));
-    let (pick, guard) = if long_pdf {
-        let agy = Narrowing {
-            cli: Some("agy".to_owned()),
-            ..narrow.clone()
-        };
-        match book(&table, &world, &request, &agy, &order) {
-            Ok(booked) => booked,
-            Err(agy_why) => {
-                if !(env.on_path)("pdftoppm") {
-                    return Err(refuse(nirvana_seat::NO_SEAT_EXIT)(format!(
-                        "This PDF needs a seat that reads past {PDF_WHOLE_PAGES} pages. No agy seat took it ({agy_why}), \
-                         and pdftoppm is missing for a claude seat. {POPPLER_FIX}."
-                    )));
-                }
-                let claude = Narrowing {
-                    cli: Some("claude".to_owned()),
-                    ..narrow
-                };
-                book(&table, &world, &request, &claude, &order)
-                    .map_err(|why| refuse(nirvana_seat::NO_SEAT_EXIT)(format!("No seat: {why}.")))?
-            }
-        }
-    } else {
-        book(&table, &world, &request, &narrow, &order)
-            .map_err(|why| refuse(nirvana_seat::NO_SEAT_EXIT)(format!("No seat: {why}.")))?
-    };
+    let (pick, guard) = book(&table, &world, &request, &narrow, &order)
+        .map_err(|why| refuse(nirvana_seat::NO_SEAT_EXIT)(format!("No seat: {why}.")))?;
 
-    // The launch.
-    let argv = if pick.cli == "agy" {
-        let prompt = crate::nirvana_media::still_prompt_line(&read, &question, pages);
-        agy_argv(&pick.model, &prompt)
-    } else {
-        claude_argv(
-            &pick.model,
-            pick.effort,
-            &claude_prompt(&read, &question, pages, kind),
-        )
-    };
-    let cwd = read.parent().map_or_else(|| dir.clone(), Path::to_path_buf);
+    // The launch: in the look folder, the copy named by its file name.
+    let name = read
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_owned();
+    let argv = claude_argv(
+        &pick.model,
+        pick.effort,
+        &claude_prompt(&name, &question, pages, kind),
+    );
+    let cwd = dir.clone();
     let program = env.stand_in.clone().unwrap_or_else(|| argv.clone());
     let extra = serde_json::json!({"cached": false, "detail": detail, "kind": kind});
     let end = launch(&program, &cwd, &pick.cli, env.timeout);
@@ -1282,7 +1453,7 @@ pub fn look(args: &Args, env: &Env) -> Result<Outcome, Refused> {
             stdout,
             stderr,
             code,
-        }) => answer_of(&pick.cli, &stdout).map_err(|why| {
+        }) => answer_of(&stdout).map_err(|why| {
             let tail: String = stderr
                 .trim()
                 .lines()
@@ -1311,15 +1482,17 @@ pub fn look(args: &Args, env: &Env) -> Result<Outcome, Refused> {
         )),
         Err(why) => Err(why),
     };
-    let (answer, tokens) = match answered {
-        Ok(answered) => answered,
+    let answer = match answered {
+        Ok(answer) => answer,
         Err(why) => {
             record(&table, &pick, &order, "failed", Tokens::default(), extra);
             drop(guard);
             return Err(refuse(1)(why));
         }
     };
-    record(&table, &pick, &order, "pass", tokens, extra);
+    let mut extra = extra;
+    extra["refused_reads"] = answer.refused_reads.into();
+    record(&table, &pick, &order, "pass", answer.tokens, extra);
     drop(guard);
     let _ = append_cache(
         &cache,
@@ -1330,24 +1503,27 @@ pub fn look(args: &Args, env: &Env) -> Result<Outcome, Refused> {
             pages: pages_word,
             seat: pick.seat.clone(),
             model: pick.model.clone(),
-            tokens,
-            answer: answer.clone(),
+            tokens: answer.tokens,
+            answer: answer.text.clone(),
             read: read.display().to_string(),
             at: crate::nirvana_run::now(),
+            refused_reads: answer.refused_reads,
         },
     );
     Ok(Outcome {
-        answer,
+        answer: answer.text,
         seat: pick.seat,
         model: pick.model,
         effort: pick.effort,
-        tokens,
+        tokens: answer.tokens,
         cached: false,
         read: read.display().to_string(),
+        kind,
         width,
         height,
         estimate_tokens: estimate,
         pages: page_count,
+        refused_reads: answer.refused_reads,
         order,
         argv,
         cwd,
@@ -1376,13 +1552,21 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             Ok(())
         }
         Ok(outcome) => {
-            println!("{}", outcome.answer);
+            println!("{}", plain_output(&outcome));
             Ok(())
         }
         Err(refused) => {
             eprintln!("herdr look: {}", refused.line);
             std::process::exit(refused.code);
         }
+    }
+}
+
+/// The answer, and one last line when the path rule refused a read.
+pub fn plain_output(outcome: &Outcome) -> String {
+    match refused_line(outcome.refused_reads, outcome.kind) {
+        Some(line) => format!("{}\n{line}", outcome.answer),
+        None => outcome.answer.clone(),
     }
 }
 

@@ -308,21 +308,6 @@ pub fn plain_path_text(text: &str) -> String {
     strip_verbatim(PathBuf::from(text)).display().to_string()
 }
 
-/// The one-line agy prompt for a still or a PDF (`herdr look`), in the shape probe P2 found agy needs: the full
-/// absolute path and `view_file` without line numbers. Plain text back, no timestamps (a still has none).
-pub fn still_prompt_line(path: &Path, ask: &str, pages: Option<(u32, u32)>) -> String {
-    let question = ask.split_whitespace().collect::<Vec<_>>().join(" ");
-    let pages = pages.map_or(String::new(), |(first, last)| {
-        format!(" Look only at pages {first}-{last}.")
-    });
-    format!(
-        "Open \"{}\" with the view_file tool (AbsolutePath, no StartLine, no EndLine) and look at it yourself; do not \
-         start subagents or background commands.{pages} Answer in plain text, in a few short lines, giving numbers and \
-         copying visible text exactly: {question}",
-        absolute_media_path(path).display()
-    )
-}
-
 /// Resolves `path` to a clean absolute path without requiring the file to exist on disk.
 pub fn absolute_media_path(path: &Path) -> PathBuf {
     if let Ok(canon) = std::fs::canonicalize(path) {
@@ -475,38 +460,62 @@ pub struct StillProbe {
     pub estimate_tokens: Option<u64>,
 }
 
-const STILL_EXTENSIONS: [&str; 8] = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "heif"];
+/// Codecs that only ever hold a picture. Not `mjpeg`: Motion JPEG is also a video codec in AVI and MOV, and a JPEG
+/// file is told by its `image2` demuxer instead.
+const STILL_CODECS: [&str; 5] = ["png", "bmp", "webp", "gif", "tiff"];
 
-/// A still, not a recording: a still's extension, an image demuxer, or no duration at all. ffprobe 8.0.1 on this PC
-/// (2026-11-09): PNG (`png_pipe`), WebP (`webp_pipe`) and BMP (`bmp_pipe`) have no duration; a JPEG (`image2`) and a
-/// GIF (`gif`) read 0.04 s. So duration alone does not tell, and `shrink` made a one-frame mp4 of a JPEG.
+/// A still, not a recording, decided by what the file is: an image demuxer (`*_pipe`, `image2`, `gif`), a picture
+/// codec, exactly one frame, or a HEIC (ffprobe opens one with the mov demuxer, so its name is the only tell).
+/// Never by a missing duration (review S4): a Chrome MediaRecorder `.webm`, an MPEG-TS or a cut capture has none and
+/// is still a recording. ffprobe 8.0.1 on this PC (2026-11-09): PNG `png_pipe`, WebP `webp_pipe`, BMP `bmp_pipe`
+/// have no duration; a JPEG (`image2`) and a GIF (`gif`, `nb_frames` 1) read 0.04 s, so duration never told either way.
 pub fn is_still(json: &str, path: &Path) -> bool {
     let ext = path
         .extension()
         .and_then(|ext| ext.to_str())
         .map(str::to_ascii_lowercase)
         .unwrap_or_default();
-    if STILL_EXTENSIONS.contains(&ext.as_str()) {
+    if matches!(ext.as_str(), "heic" | "heif") {
         return true;
     }
     let Ok(root) = serde_json::from_str::<Value>(json) else {
         return false;
     };
-    let format = root.get("format");
-    let name = format
+    let name = root
+        .get("format")
         .and_then(|format| format.get("format_name"))
         .and_then(Value::as_str)
         .unwrap_or("");
-    let timed = format.and_then(|format| format.get("duration")).is_some()
-        || root
-            .get("streams")
-            .and_then(Value::as_array)
-            .is_some_and(|streams| {
-                streams
-                    .iter()
-                    .any(|stream| stream.get("duration").is_some())
-            });
-    name.ends_with("_pipe") || name == "image2" || !timed
+    if name.ends_with("_pipe") || name == "image2" || name == "gif" {
+        return true;
+    }
+    let videos: Vec<&Value> = root
+        .get("streams")
+        .and_then(Value::as_array)
+        .map(|streams| {
+            streams
+                .iter()
+                .filter(|stream| stream.get("codec_type").and_then(Value::as_str) == Some("video"))
+                .collect()
+        })
+        .unwrap_or_default();
+    let has_audio = root
+        .get("streams")
+        .and_then(Value::as_array)
+        .is_some_and(|streams| {
+            streams
+                .iter()
+                .any(|stream| stream.get("codec_type").and_then(Value::as_str) == Some("audio"))
+        });
+    let [video] = videos.as_slice() else {
+        return false;
+    };
+    let codec = video
+        .get("codec_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let one_frame = video.get("nb_frames").and_then(parse_u64_field) == Some(1);
+    !has_audio && (STILL_CODECS.contains(&codec) || one_frame)
 }
 
 /// A still's probe from ffprobe's JSON.
@@ -675,11 +684,13 @@ pub fn doctor_lines(
         "ffprobe: missing. media probe and media shrink stop. Install ffmpeg, which brings ffprobe."
             .to_owned()
     });
+    // Plan 40c review S1: no agy seat looks, so without pdftoppm nothing reads a PDF over 10 pages.
     lines.push(if on_path("pdftoppm") {
-        "pdftoppm: found. A claude seat can read a PDF over 10 pages.".to_owned()
+        "pdftoppm: found. herdr look reads a PDF over 10 pages with --pages, 10 pages at a time."
+            .to_owned()
     } else {
         format!(
-            "pdftoppm: missing. A claude seat cannot read a PDF over 10 pages; an agy seat still can. {}.",
+            "pdftoppm: missing. herdr look cannot read a PDF over 10 pages. {}",
             crate::nirvana_look::POPPLER_FIX
         )
     });
@@ -776,7 +787,18 @@ fn ensure_tool(program: &str, subcommand: &str) {
     }
 }
 
-fn run_list_argv(program: &str, args: &[String]) -> Result<String, String> {
+/// ffprobe on one file, and ffmpeg on one still: a hostile 50 MB file must not hold the command silently (review
+/// N2). 60 s is a prior; the measured still reads take well under a second.
+pub const TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// `program` with a list argv, never through a shell. `timeout` kills it at the limit; `None` waits, which only the
+/// video encode uses: its length scales with the recording and was never measured, so a limit would be a guess that
+/// fails a long, legitimate encode.
+pub fn run_list_argv(
+    program: &str,
+    args: &[String],
+    timeout: Option<std::time::Duration>,
+) -> Result<String, String> {
     let mut command = Command::new(program);
     command
         .args(args)
@@ -784,23 +806,48 @@ fn run_list_argv(program: &str, args: &[String]) -> Result<String, String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::platform::configure_background_command(&mut command);
-    let output = command.output().map_err(|err| {
+    let mut child = command.spawn().map_err(|err| {
         if err.kind() == std::io::ErrorKind::NotFound {
             format!("{program} not found on PATH")
         } else {
             format!("failed to run {program}: {err}")
         }
     })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = stderr.trim();
+    // Both pipes drain on their own threads, so a chatty program never blocks on a full pipe while it is waited on.
+    let stdout = crate::nirvana_look::drain(child.stdout.take());
+    let stderr = crate::nirvana_look::drain(child.stderr.take());
+    let deadline = timeout.map(|limit| std::time::Instant::now() + limit);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(err) => {
+                let _ = child.kill();
+                return Err(format!("failed to run {program}: {err}"));
+            }
+        }
+        if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "{program} was stopped after {} s",
+                timeout.unwrap_or_default().as_secs()
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let wait = std::time::Duration::from_secs(5);
+    let out = stdout.recv_timeout(wait).unwrap_or_default();
+    let err = stderr.recv_timeout(wait).unwrap_or_default();
+    if !status.success() {
+        let detail = err.trim();
         return Err(if detail.is_empty() {
-            format!("{program} exited with {}", output.status)
+            format!("{program} exited with {status}")
         } else {
             format!("{program} failed: {detail}")
         });
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(out)
 }
 
 /// ffprobe's JSON for `file`, its absolute path and its size on disk.
@@ -811,12 +858,11 @@ fn ffprobe_json(file: &Path) -> Result<(String, PathBuf, Option<u64>), String> {
     let fallback_size = std::fs::metadata(file).ok().map(|m| m.len());
     let abs = absolute_media_path(file);
     let argv = probe_argv(&abs);
-    Ok((run_list_argv("ffprobe", &argv)?, abs, fallback_size))
-}
-
-fn run_probe(file: &Path) -> Result<Probe, String> {
-    let (stdout, abs, fallback_size) = ffprobe_json(file)?;
-    parse_ffprobe(&stdout, Some(&abs), fallback_size)
+    Ok((
+        run_list_argv("ffprobe", &argv, Some(TOOL_TIMEOUT))?,
+        abs,
+        fallback_size,
+    ))
 }
 
 pub fn cli(args: &[String]) -> std::io::Result<()> {
@@ -844,10 +890,18 @@ fn probe_cli(args: &[String]) -> std::io::Result<()> {
         usage_exit();
     };
     ensure_tool("ffprobe", "probe");
-    // Plan 40c: a still is reported as an image, with its size, pixel count and token cost.
-    if let Ok((stdout, abs, fallback_size)) = ffprobe_json(&file) {
+    // Plan 40c: a still is reported as an image, with its size, pixel count and token cost. One ffprobe run serves
+    // both paths (review N10: the video path ran it twice).
+    let probed = ffprobe_json(&file).and_then(|(stdout, abs, fallback_size)| {
         if is_still(&stdout, &abs) {
-            match still_probe(&stdout, &abs, fallback_size) {
+            Ok(Err(still_probe(&stdout, &abs, fallback_size)))
+        } else {
+            parse_ffprobe(&stdout, Some(&abs), fallback_size).map(Ok)
+        }
+    });
+    let probed = match probed {
+        Ok(Err(still)) => {
+            match still {
                 Ok(still) if json => println!("{}", serde_json::to_string_pretty(&still)?),
                 Ok(still) => print!("{}", still_probe_text(&still)),
                 Err(err) => {
@@ -857,8 +911,10 @@ fn probe_cli(args: &[String]) -> std::io::Result<()> {
             }
             return Ok(());
         }
-    }
-    let probe = match run_probe(&file) {
+        Ok(Ok(probe)) => Ok(probe),
+        Err(err) => Err(err),
+    };
+    let probe = match probed {
         Ok(probe) => probe,
         Err(err) => {
             eprintln!("herdr media probe: {err}");
@@ -910,8 +966,10 @@ fn shrink_cli(args: &[String]) -> std::io::Result<()> {
     ensure_tool("ffprobe", "shrink");
     ensure_tool("ffmpeg", "shrink");
     // Review X3: a still went through the video path and came out a one-frame H.264 mp4 no seat reads as an image.
-    if let Ok((stdout, abs, _)) = ffprobe_json(&file) {
-        if is_still(&stdout, &abs) {
+    let probed = ffprobe_json(&file);
+    if let Ok((stdout, abs, _)) = &probed {
+        if is_still(stdout, abs) {
+            let abs = abs.clone();
             let root = crate::nirvana_run::Project::from_env().root;
             let tool = crate::nirvana_look::real_tool;
             let on_path = crate::nirvana_look::real_on_path;
@@ -934,7 +992,9 @@ fn shrink_cli(args: &[String]) -> std::io::Result<()> {
             return Ok(());
         }
     }
-    let probe = match run_probe(&file) {
+    let probe = match probed
+        .and_then(|(stdout, abs, fallback_size)| parse_ffprobe(&stdout, Some(&abs), fallback_size))
+    {
         Ok(probe) => probe,
         Err(err) => {
             eprintln!("herdr media shrink: {err}");
@@ -957,7 +1017,7 @@ fn shrink_cli(args: &[String]) -> std::io::Result<()> {
     if let Some(parent) = out_abs.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(err) = run_list_argv("ffmpeg", &argv1) {
+    if let Err(err) = run_list_argv("ffmpeg", &argv1, None) {
         eprintln!("herdr media shrink: {err}");
         std::process::exit(1);
     }
@@ -977,7 +1037,7 @@ fn shrink_cli(args: &[String]) -> std::io::Result<()> {
                 std::process::exit(2);
             }
         };
-        if let Err(err) = run_list_argv("ffmpeg", &argv2) {
+        if let Err(err) = run_list_argv("ffmpeg", &argv2, None) {
             eprintln!("herdr media shrink: retry failed: {err}");
             std::process::exit(1);
         }
@@ -1261,6 +1321,45 @@ mod tests {
         assert!(is_still(JPEG_PROBE, Path::new("tall.bin")));
         assert!(is_still(PNG_PROBE, Path::new("big.bin")));
         assert!(!is_still(FFPROBE_FIXTURE, Path::new("fixture.mp4")));
+        // Review S4: a recording with no duration anywhere is still a recording, whatever its name.
+        assert!(!is_still(WEBM_NO_DURATION, Path::new("capture.webm")));
+        assert!(!is_still(WEBM_NO_DURATION, Path::new("capture.png")));
+        assert!(!is_still(TS_NO_DURATION, Path::new("stream.ts")));
+        // Exactly one frame is a still, in any container; a HEIC is told by its name (ffprobe opens it as mov).
+        assert!(is_still(ONE_FRAME_MP4, Path::new("frame.mp4")));
+        assert!(is_still("{}", Path::new("IMG_0042.HEIC")));
+        assert!(!is_still("not json", Path::new("x.png")));
+    }
+
+    /// A Chrome MediaRecorder `.webm` as ffprobe reports it: matroska, VP8 and Opus, no duration in the format or
+    /// in any stream (the shape review S4 names).
+    const WEBM_NO_DURATION: &str = r#"{"streams":[{"index":0,"codec_name":"vp8","codec_type":"video","width":1280,"height":720,"avg_frame_rate":"30/1"},{"index":1,"codec_name":"opus","codec_type":"audio"}],
+        "format":{"filename":"capture.webm","nb_streams":2,"format_name":"matroska,webm","probe_score":100}}"#;
+    /// An MPEG-TS cut with no duration and no audio.
+    const TS_NO_DURATION: &str = r#"{"streams":[{"index":0,"codec_name":"h264","codec_type":"video","width":1920,"height":1080,"avg_frame_rate":"25/1"}],
+        "format":{"filename":"stream.ts","nb_streams":1,"format_name":"mpegts"}}"#;
+    /// An mp4 holding exactly one frame.
+    const ONE_FRAME_MP4: &str = r#"{"streams":[{"index":0,"codec_name":"h264","codec_type":"video","width":640,"height":480,"nb_frames":"1","duration":"0.100000"}],
+        "format":{"filename":"frame.mp4","nb_streams":1,"format_name":"mov,mp4,m4a,3gp,3g2,mj2","duration":"0.100000"}}"#;
+
+    #[cfg(windows)]
+    #[test]
+    fn c40c_media_a_tool_is_stopped_at_its_timeout() {
+        // Review N2: ffmpeg and ffprobe had no limit. `ping` stands in for a stuck tool; it starts no child.
+        let started = std::time::Instant::now();
+        let argv = ["-n", "30", "127.0.0.1"].map(str::to_owned);
+        let why = run_list_argv("ping.exe", &argv, Some(std::time::Duration::from_secs(1)))
+            .expect_err("stopped");
+        assert!(why.contains("was stopped after 1 s"), "{why}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(15),
+            "{:?}",
+            started.elapsed()
+        );
+        // A tool that ends in time gives its output.
+        let argv = ["/c", "echo still"].map(str::to_owned);
+        let out = run_list_argv("cmd.exe", &argv, Some(TOOL_TIMEOUT)).expect("echo");
+        assert_eq!(out.trim(), "still");
     }
 
     #[test]
