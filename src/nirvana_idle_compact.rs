@@ -17,8 +17,6 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use serde_json::Value;
-
 use crate::config::IdleCompactRule;
 use crate::detect::{Agent, AgentState};
 
@@ -542,46 +540,39 @@ fn apply_sgr(params: &str, faint: &mut bool, inverse: &mut bool) {
 
 // ---- the transcript (review S3, S4) ----
 
-/// The context a turn read: `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`. Unlike
-/// `nirvana_subagents::parse_claude_usage` (a turn's whole traffic, for the agents panel), `output_tokens` is left
-/// out: it is what the turn wrote, not what the next one re-reads. `None` when none of the three is there.
-pub fn context_tokens(usage: &Value) -> Option<u64> {
-    let fields = [
-        "input_tokens",
-        "cache_read_input_tokens",
-        "cache_creation_input_tokens",
-    ];
-    let read: Vec<u64> = fields
-        .iter()
-        .filter_map(|field| usage.get(field).and_then(Value::as_u64))
-        .collect();
-    (!read.is_empty()).then(|| read.iter().sum())
+// The context a turn read is `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`. Unlike
+// `nirvana_subagents::parse_claude_usage` (a turn's whole traffic, for the agents panel), `output_tokens` is left
+// out: it is what the turn wrote, not what the next one re-reads. The sum is `nirvana_jev_compact::read_context`'s.
+
+/// What a transcript's text says about its context, newest line first: the one reading `nirvana_jev_compact` makes
+/// (plan 40 B1). It was a scan for the last assistant line, which read a compacted session as its pre-compaction
+/// size, so `/compact` was typed again after every idle stretch until the owner spoke.
+pub fn last_context(text: &str) -> crate::nirvana_jev_compact::ContextReading {
+    crate::nirvana_jev_compact::read_context(text.lines().rev())
 }
 
-/// The context of the last assistant line in a transcript's text.
+/// The context of the last assistant line in a transcript's text; `None` when a compaction came after it.
+#[cfg(test)]
 pub fn last_context_tokens(text: &str) -> Option<u64> {
-    text.lines().rev().find_map(|line| {
-        let value: Value = serde_json::from_str(line.trim()).ok()?;
-        if value.get("type").and_then(Value::as_str) != Some("assistant") {
-            return None;
-        }
-        Some(context_tokens(value.pointer("/message/usage")?))
-    })?
+    last_context(text).tokens()
 }
 
 /// The last assistant turn's context, read from the file's tail, widened from 64 KB up to `MAX_TAIL` (the agents
-/// panel widens to 8 MB, `nirvana_subagents::read_transcript_tail_with_expansion`; this runs on the server loop).
+/// panel widens to 8 MB, `nirvana_subagents::read_transcript_tail_with_expansion`; this runs on the server loop). A
+/// compaction found in the tail ends the search with `None`: a wider read holds the same newest lines.
 pub fn read_context_tokens(path: &Path) -> Option<u64> {
+    use crate::nirvana_jev_compact::ContextReading;
     use crate::nirvana_subagents::{read_file_tail, INITIAL_TAIL_WINDOW};
     let len = std::fs::metadata(path).ok()?.len();
     let mut window = INITIAL_TAIL_WINDOW.min(MAX_TAIL);
     loop {
         let text = read_file_tail(path, window).ok()?;
-        let found = last_context_tokens(&text);
-        if found.is_some() || window >= MAX_TAIL || len <= window {
-            return found;
+        match last_context(&text) {
+            ContextReading::Tokens(n) => return Some(n),
+            ContextReading::Compacted => return None,
+            ContextReading::Unknown if window >= MAX_TAIL || len <= window => return None,
+            ContextReading::Unknown => window = (window * 4).min(MAX_TAIL),
         }
-        window = (window * 4).min(MAX_TAIL);
     }
 }
 
@@ -1527,16 +1518,62 @@ mod tests {
 
     #[test]
     fn context_tokens_leave_out_output() {
-        let usage = serde_json::json!({
+        let line = serde_json::json!({"type": "assistant", "message": {"usage": {
             "input_tokens": 10,
             "cache_read_input_tokens": 60_000,
             "cache_creation_input_tokens": 500,
             "output_tokens": 9_000,
-        });
-        assert_eq!(context_tokens(&usage), Some(60_510));
+        }}});
+        assert_eq!(last_context_tokens(&line.to_string()), Some(60_510));
+        // A turn that read nothing is no reading (the shared reading's `total > 0`).
+        let output_only = serde_json::json!({"type": "assistant", "message": {"usage": {
+            "input_tokens": 0,
+            "output_tokens": 5,
+        }}});
+        assert_eq!(last_context_tokens(&output_only.to_string()), None);
+    }
+
+    /// Plan 40 B1: a compaction newer than the last assistant line is no reading, so a compacted session that sat
+    /// idle again is not compacted again. Both the boundary line and the summary line count alone.
+    #[test]
+    fn a_compaction_after_the_last_turn_is_no_reading() {
+        let assistant = r#"{"type":"assistant","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":319990}}}"#;
+        let boundary = r#"{"type":"system","subtype":"compact_boundary","content":"Conversation compacted"}"#;
+        let summary = r#"{"type":"user","isCompactSummary":true,"message":{"content":"This session is being continued"}}"#;
+        assert_eq!(last_context_tokens(assistant), Some(320_000));
+        let both = format!("{assistant}\n{boundary}\n{summary}\n");
+        assert_eq!(last_context_tokens(&both), None);
         assert_eq!(
-            context_tokens(&serde_json::json!({"output_tokens": 5})),
+            last_context(&both),
+            crate::nirvana_jev_compact::ContextReading::Compacted
+        );
+        assert_eq!(
+            last_context_tokens(&format!("{assistant}\n{summary}\n")),
             None
+        );
+        assert_eq!(
+            last_context_tokens(&format!("{assistant}\n{boundary}\n")),
+            None
+        );
+        // A turn after the compaction is read as it is.
+        let after = r#"{"type":"assistant","message":{"usage":{"input_tokens":12000}}}"#;
+        assert_eq!(
+            last_context_tokens(&format!("{both}{after}\n")),
+            Some(12_000)
+        );
+        // The file read stops at the compaction rather than widening past it.
+        let dir = temp_dir("compacted");
+        let path = dir.join("session.jsonl");
+        std::fs::write(&path, &both).unwrap();
+        assert_eq!(read_context_tokens(&path), None);
+        let _ = std::fs::remove_dir_all(dir);
+        let facts = Facts {
+            context_tokens: None,
+            ..sending()
+        };
+        assert_eq!(
+            decide(&facts),
+            Decision::Skip("the transcript holds no context reading".into())
         );
     }
 

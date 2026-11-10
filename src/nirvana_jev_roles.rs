@@ -202,6 +202,12 @@ fn log_call(
     {
         let _ = writeln!(file, "{entry}");
     }
+    // Plan 40 D1: the call log only grew; lines past 30 days go when it is next written.
+    crate::nirvana_board::prune_log(
+        &dir.join(CALLS_FILE),
+        crate::nirvana_board::PRUNE_AFTER,
+        std::time::SystemTime::now(),
+    );
 }
 
 /// What `herdr jev agree` counts.

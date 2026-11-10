@@ -133,17 +133,16 @@ fn binary_name(rel: &str) -> bool {
         .is_some_and(|(_, ext)| BINARY_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
 }
 
+/// The longest `git ls-files` is waited for (plan 40 B4: it had no bound, and a git that hangs on a network drive or
+/// a lock held the SessionStart hook and the Preload read with it). The bound `nirvana_learning::GIT_WAIT` uses.
+const GIT_WAIT: Duration = Duration::from_secs(5);
+
 fn measure_uncached(root: &Path) -> Size {
     let mut sizes: Vec<(String, u64)> = Vec::new();
-    let tracked = std::process::Command::new("git")
-        .args(["ls-files", "-z"])
-        .current_dir(root)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned());
+    // `run_cmd` polls the child and kills it at the bound. Its text puts stderr before stdout; `git ls-files` on
+    // success writes none, and a warning there would cost one file's size, never a wrong total of many.
+    let out = crate::nirvana_git::run_cmd(root, "git", &["ls-files", "-z"], GIT_WAIT, &[]);
+    let tracked = (out.code == 0).then_some(out.text);
     match tracked {
         Some(list) => {
             for rel in list
@@ -235,15 +234,12 @@ pub fn render(text: &str, exe: &Path, size: &Size) -> String {
     let (mut values, body) = split(text);
     values.insert("herdr".into(), exe.to_string_lossy().replace('\\', "/"));
     values.insert("project".into(), project_words(size));
-    values
-        .entry("min_project_kb".into())
-        .or_insert_with(|| "1024".into());
-    values
-        .entry("ask_file_kb".into())
-        .or_insert_with(|| "50".into());
-    values
-        .entry("output_lines".into())
-        .or_insert_with(|| "200".into());
+    // Plan 40 B7: only three sizes had a default, so a front matter edited without `files_kb` or `read_file_kb`
+    // told every agent "over {files_kb} KB", braces and all. Every size `DEFAULT` names is now the default for
+    // one the owner's file leaves out, so a size added to `DEFAULT` gets its default with it.
+    for (name, value) in split(DEFAULT).0 {
+        values.entry(name).or_insert(value);
+    }
     if !is_full(&values, size) {
         return fill(FLAG, &values);
     }
@@ -287,6 +283,26 @@ pub fn file() -> PathBuf {
 pub fn for_folder(folder: &Path, exe: &Path) -> String {
     let root = crate::nirvana_board::root(folder).unwrap_or_else(|| folder.to_path_buf());
     render(&text(), exe, &measure(&root))
+}
+
+/// What the `SessionStart` hook prints, `None` for nothing.
+///
+/// - Plan 40 T3: with no Jev key every agent was told to call a tool that answers `failed: unavailable (read it
+///   yourself)`, a wasted tool turn each. No key, no text: the agent searches and reads as it would anyway.
+/// - Plan 40 T4: the hook's stdin names its `source` (`startup`, `resume`, `clear`, `compact`; Claude Code's hook
+///   input, which `integration/assets/claude/herdr-agent-state.sh` and `nirvana_claude` read the same way). A
+///   resumed session holds the text from its start already, so `resume` prints nothing. A `clear` or `compact` has
+///   lost it, so they keep it, as does a hook input with no `source`.
+/// - `guide` is called only when the text is to be printed, so a resume or a missing key measures nothing.
+pub fn hook_text(
+    key_present: bool,
+    source: Option<&str>,
+    guide: impl FnOnce() -> String,
+) -> Option<String> {
+    if !key_present || source == Some("resume") {
+        return None;
+    }
+    Some(guide())
 }
 
 /// Preload's detail for the row: whether this folder gets the flag or everything.
@@ -364,6 +380,43 @@ mod tests {
         assert!(text.contains("under 7 KB"), "{text}");
         let flag = render(&edited, exe, &size(50 * 1024));
         assert!(flag.contains("under 100 KB"), "{flag}");
+    }
+
+    /// Plan 40 B7: a front matter that keeps only one size still fills every placeholder of the shipped body.
+    #[test]
+    fn every_placeholder_has_a_default() {
+        let exe = Path::new("herdr");
+        let (_, body) = split(DEFAULT);
+        let sparse = format!("---\nmin_project_kb: 1\n---\n{body}");
+        let text = render(&sparse, exe, &size(568 * 1024));
+        assert!(!text.contains('{'), "{text}");
+        assert!(text.contains("under 20 KB") && text.contains("over 200 KB in all"));
+        let flag = render("---\nmin_project_kb: 9999\n---\n", exe, &size(10));
+        assert!(!flag.contains('{'), "{flag}");
+    }
+
+    /// Plan 40 T3 and T4: no key, no guide; a resume does not print it again; startup, clear and compact do.
+    #[test]
+    fn the_hook_prints_the_guide_only_with_a_key_and_never_on_resume() {
+        let exe = Path::new(r"C:\h\bin\herdr.exe");
+        let guide = || render(DEFAULT, exe, &size(2 * 1024 * 1024));
+        let before = guide().chars().count();
+        let no_key = hook_text(false, Some("startup"), guide).map_or(0, |t| t.chars().count());
+        let resumed = hook_text(true, Some("resume"), guide).map_or(0, |t| t.chars().count());
+        println!("plan 40 T3: guide with no Jev key, before {before} chars, after {no_key}");
+        println!("plan 40 T4: guide on a resume, before {before} chars, after {resumed}");
+        assert_eq!(no_key, 0);
+        assert_eq!(resumed, 0);
+        for source in [Some("startup"), Some("clear"), Some("compact"), None] {
+            assert_eq!(
+                hook_text(true, source, guide).map(|t| t.chars().count()),
+                Some(before),
+                "{source:?}"
+            );
+        }
+        // Nothing is measured when nothing is printed.
+        assert!(hook_text(false, None, || panic!("measured")).is_none());
+        assert!(hook_text(true, Some("resume"), || panic!("measured")).is_none());
     }
 
     #[test]

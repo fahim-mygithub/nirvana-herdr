@@ -291,6 +291,21 @@ fn http_post(
     }
 }
 
+/// The wait a `Retry-After` asks for, never a panic. Plan 40 B2: `Duration::from_secs_f64` panics on a negative,
+/// NaN, infinite or overflowing value, and the header is the server's text; a Stop hook, an agent's Jev call or a
+/// herdr server thread died on it. An unreadable, NaN or negative value waits `RETRY_WAIT`; any other, infinite or
+/// too large for a `Duration` included, is capped just past the call's whole deadline, so a long wait still means no
+/// retry and no `Instant` sum can overflow.
+fn retry_wait(after: Option<&str>, deadline: Duration) -> Duration {
+    let cap = deadline + Duration::from_secs(1);
+    match after.and_then(|a| a.trim().parse::<f64>().ok()) {
+        Some(secs) if secs >= 0.0 => Duration::try_from_secs_f64(secs)
+            .unwrap_or(Duration::MAX)
+            .min(cap),
+        _ => RETRY_WAIT,
+    }
+}
+
 pub struct Client {
     endpoint: String,
     model: String,
@@ -357,9 +372,7 @@ impl Client {
                     }
                 })?;
             if matches!(status, 429 | 502 | 503) && attempts == 1 {
-                let wait = after
-                    .and_then(|a| a.trim().parse::<f64>().ok())
-                    .map_or(RETRY_WAIT, Duration::from_secs_f64);
+                let wait = retry_wait(after.as_deref(), self.timeout);
                 if Instant::now() + wait + Duration::from_millis(50) < deadline {
                     std::thread::sleep(wait);
                     continue;
@@ -1461,6 +1474,12 @@ fn append(entry: &Value) {
     {
         let _ = writeln!(file, "{entry}");
     }
+    // Plan 40 D1: the log only grew; lines past 30 days go when it is next written.
+    crate::nirvana_board::prune_log(
+        &path,
+        crate::nirvana_board::PRUNE_AFTER,
+        std::time::SystemTime::now(),
+    );
 }
 
 /// What the log says for one day (UTC, `YYYY-MM-DD`): the Preload row's figures.
@@ -1633,10 +1652,18 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
                 if crate::nirvana_jev_install::claude_reads_agents_block(&folder) {
                     return Ok(());
                 }
-                print!(
-                    "{}",
-                    crate::nirvana_jev_memory::for_folder(&folder, &crate::nirvana_board::exe())
-                );
+                if let Some(text) = crate::nirvana_jev_memory::hook_text(
+                    find_key().is_some(),
+                    hook["source"].as_str(),
+                    || {
+                        crate::nirvana_jev_memory::for_folder(
+                            &folder,
+                            &crate::nirvana_board::exe(),
+                        )
+                    },
+                ) {
+                    print!("{text}");
+                }
                 return Ok(());
             }
             print!(
@@ -1976,6 +2003,52 @@ mod tests {
         let error = client.ask(&json!({}), &questions).unwrap_err();
         assert_eq!(*calls.lock().unwrap(), 2);
         assert!(!error.why().contains("mock-key"), "{}", error.why());
+    }
+
+    /// Plan 40 B2: a hostile or odd `Retry-After` never panics. An unreadable one waits the plain retry; one past
+    /// the deadline is no retry.
+    #[test]
+    fn a_hostile_retry_after_never_panics() {
+        for (header, calls_expected) in [
+            ("-1", 2),
+            ("NaN", 2),
+            ("inf", 1),
+            ("-inf", 2),
+            ("1e30", 1),
+            ("18446744073709551616", 1),
+            ("soon", 2),
+        ] {
+            let calls = Arc::new(Mutex::new(0));
+            let counter = calls.clone();
+            let client = Client::mock(Box::new(move |_url, _body, _key, _left| {
+                *counter.lock().unwrap() += 1;
+                if *counter.lock().unwrap() == 1 {
+                    Ok((429, String::new(), Some(header.into())))
+                } else {
+                    Ok((200, noul_reply(0.5), None))
+                }
+            }));
+            let mut questions = Map::new();
+            questions.insert("q".into(), Question::Bool("x?".into()).wire("").unwrap());
+            let result = client.ask(&json!({}), &questions);
+            assert_eq!(*calls.lock().unwrap(), calls_expected, "{header}");
+            if calls_expected == 1 {
+                assert!(
+                    matches!(result, Err(JevError::Http(429))),
+                    "{header}: {result:?}"
+                );
+            }
+        }
+        assert_eq!(retry_wait(Some("-1"), CALL_TIMEOUT), RETRY_WAIT);
+        assert_eq!(retry_wait(Some("NaN"), CALL_TIMEOUT), RETRY_WAIT);
+        assert_eq!(
+            retry_wait(Some("1e30"), CALL_TIMEOUT),
+            CALL_TIMEOUT + Duration::from_secs(1)
+        );
+        assert_eq!(
+            retry_wait(Some(" 1.5 "), CALL_TIMEOUT),
+            Duration::from_millis(1500)
+        );
     }
 
     #[test]

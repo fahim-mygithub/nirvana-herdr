@@ -698,12 +698,14 @@ pub fn template(servers: &[String]) -> String {
     } else {
         servers.join(", ")
     };
+    // Plan 40 M1: the model line points at the seat table rather than naming an id. It was the only model id this
+    // area wrote into shipped text, and an id rots when the seats move on.
     format!(
         "---\n\
 description: One line, at most 120 characters, that Nirvana Claude picks this profile by.\n\
 # The other keys are optional; take the # off to use one.\n\
 # class: build.bounded\n\
-# model: claude-sonnet-5-5\n\
+# model: a model id that herdr seat list shows\n\
 # family: anthropic\n\
 # effort: medium\n\
 # needs: [a-server]\n\

@@ -600,24 +600,40 @@ pub fn line(profile: &str, card: &Card) -> String {
 /// profile that is one file or keeps no card. The offered files are copied into the worker's folder when it is a
 /// worktree, as lessons are: claude's print-mode file tools stay inside the working folder.
 pub fn offer(root: &Path, cwd: &Path, profile: &str) -> String {
+    let offer = offer_uncounted(root, cwd, profile);
+    count_offered(root, profile, &offer);
+    offer.section
+}
+
+/// The line that offers cards to a worker. Plan 40, a hypothesis, worded as `nirvana_lessons::LESSONS_OFFER_LINE`
+/// is and for the same census: "Open one when it fits this order" read as "open as few as you can".
+pub const CARDS_OFFER_LINE: &str = "Each is one measured finding, dead end or owner preference with its source \
+line. Before a step, open each card whose line touches what that step does, and leave the others closed; a \
+`do not:` line is a warning.";
+
+/// `offer` without the count (plan 40 T5): `seat run` counts with `count_offered` once the seat is written.
+pub fn offer_uncounted(root: &Path, cwd: &Path, profile: &str) -> nirvana_lessons::Offer {
     let Some(dir) = nirvana_profiles::knowledge_dir(root, profile) else {
-        return String::new();
+        return nirvana_lessons::Offer::default();
     };
     // Review nit: a locked profile says so; an empty section would read as a profile with no cards.
     let _lock = match lock(root, profile) {
         Ok(lock) => lock,
         Err(err) => {
-            return format!(
-                "\n\n## Knowledge cards of the profile {profile}\n\nNot listed: herdr could not take the profile's \
-lock ({err}). `herdr kb search --profile {profile} <words>` finds them.\n"
-            )
+            return nirvana_lessons::Offer {
+                section: format!(
+                    "\n\n## Knowledge cards of the profile {profile}\n\nNot listed: herdr could not take the \
+profile's lock ({err}). `herdr kb search --profile {profile} <words>` finds them.\n"
+                ),
+                slugs: Vec::new(),
+            }
         }
     };
     let found = known_cards(&dir);
     if found.is_empty() {
-        return String::new();
+        return nirvana_lessons::Offer::default();
     }
-    let mut index = read_index(&dir);
+    let index = read_index(&dir);
     // Review S2: a warning is read from the brief and never needs opening, so it never decays, and it is listed first.
     let mut live: Vec<&(PathBuf, Card)> = found
         .iter()
@@ -640,9 +656,9 @@ lock ({err}). `herdr kb search --profile {profile} <words>` finds them.\n"
     });
     live.truncate(nirvana_lessons::CARDS_OFFERED);
     let mut section = format!(
-        "\n\n## Knowledge cards of the profile {profile}\n\nEach is one measured finding, dead end or owner preference \
-with its source line. Open one when it fits this order; a `do not:` line is a warning.\n\n"
+        "\n\n## Knowledge cards of the profile {profile}\n\n{CARDS_OFFER_LINE}\n\n"
     );
+    let mut slugs = Vec::new();
     for (file, card) in &live {
         if cwd != root {
             let to = cwd.join(brief_path(profile, &card.slug));
@@ -653,12 +669,7 @@ with its source line. Open one when it fits this order; a `do not:` line is a wa
         }
         section.push_str(&line(profile, card));
         section.push('\n');
-        index
-            .cards
-            .entry(card.slug.clone())
-            .or_default()
-            .counters
-            .offered += 1;
+        slugs.push(card.slug.clone());
     }
     let rest = found.len() - live.len();
     if rest > 0 {
@@ -666,8 +677,30 @@ with its source line. Open one when it fits this order; a `do not:` line is a wa
             "\n{rest} more: `herdr kb search --profile {profile} <words>`\n"
         ));
     }
+    nirvana_lessons::Offer { section, slugs }
+}
+
+/// Counts one `offered` for each card an offer named, once the order it went into is seated (plan 40 T5).
+pub fn count_offered(root: &Path, profile: &str, offer: &nirvana_lessons::Offer) {
+    if offer.slugs.is_empty() {
+        return;
+    }
+    let Some(dir) = nirvana_profiles::knowledge_dir(root, profile) else {
+        return;
+    };
+    let Ok(_lock) = lock(root, profile) else {
+        return;
+    };
+    let mut index = read_index(&dir);
+    for slug in &offer.slugs {
+        index
+            .cards
+            .entry(slug.clone())
+            .or_default()
+            .counters
+            .offered += 1;
+    }
     let _ = write_index(root, profile, &dir, &index);
-    section
 }
 
 /// Whether the worker opened card `slug`: a tool call naming `<slug>.md` (`opened_in_stream`, the whole file name),

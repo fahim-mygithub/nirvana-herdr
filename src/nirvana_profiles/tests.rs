@@ -1018,3 +1018,12 @@ fn p37_profile_new_from_web_researcher_writes_the_template() {
     assert!(!path(&project.root, "other").exists());
     assert_eq!(template_text("web-researcher"), Some(WEB_RESEARCHER));
 }
+
+/// Plan 40 M1: the new-profile template names no model id; its model line points at the seat table.
+#[test]
+fn the_template_points_at_the_seat_table_for_a_model() {
+    let text = template(&[]);
+    let model = text.lines().find(|line| line.starts_with("# model:")).expect("a model line");
+    assert_eq!(model, "# model: a model id that herdr seat list shows");
+    assert!(!text.contains("claude-"), "{text}");
+}

@@ -314,7 +314,9 @@ fn chain_root(state: &nirvana_run::RunState, order: &str) -> String {
 /// The rules every lesson review carries. Nirvana's own text, from Hermes' review prompts read on 2026-10-30
 /// (`agent/background_review.py`: `_SKILL_REVIEW_PROMPT`, `_LESSON_LAYER_BLOCK`, `_DO_NOT_CAPTURE_BLOCK`), rewritten
 /// for lessons. One departure: Hermes says "'Nothing to save.' ... should NOT be the default"; the plan (§3.3) makes
-/// it the default, since a lesson costs a line in every brief of its class (decision 0023).
+/// it the default, since a lesson costs a line in every brief of its class (decision 0023). Plan 40, a hypothesis: rule
+/// 6's "a claim that a tool cannot be used" also threw away the one lesson that stops a repeated dead end, so the rule
+/// now names that exception itself: measured in the stream, then resolved or worked around.
 pub const RULES: &str = "## The rules
 
 1. Nothing to keep is a valid answer, and the usual one. An order that went as its brief said teaches nothing new: \
@@ -328,7 +330,8 @@ order: no order ids, dates or quoted chatter as content.
 A lesson that would have saved a send-back is worth keeping.
 6. Do not capture: a failure of this machine or its setup (a missing program, a sign-in, a path); a claim that a tool \
 is broken or cannot be used; the story of one order; a failure that was never resolved, written up as a method. When \
-the worker tried several things and none worked, keep nothing.
+the worker tried several things and none worked, keep nothing. One exception: a dead end the stream shows the worker \
+measured and then resolved or worked around is worth keeping, as the way through, so the next worker does not repeat it.
 7. Each op's evidence is a quote, word for word, from the worker's own stream (named below): a command's output, a \
 tool's result. herdr refuses an op whose evidence is not there; the Work Report's own words do not count.
 8. Steps are at most 120 lines. Name a lesson by its kind of task, never by this order.

@@ -1956,3 +1956,32 @@ fn p34_the_review_round_caps_and_names_cards_safely() {
     assert!(!card_opened(&shown, "hol"));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Plan 40 T5 and the offer line: an uncounted offer counts no card until `count_offered`, and the line asks for each
+/// card that touches the step in hand.
+#[test]
+fn an_uncounted_card_offer_counts_only_when_seated() {
+    let (_home, project) = project("p40-uncounted");
+    let cards: Vec<(String, String)> = (1..=3)
+        .map(|n| (format!("card-{n:02}"), card(&format!("Card {n:02}"), &format!("When {n:02}."), "keep")))
+        .collect();
+    let borrowed: Vec<(&str, String)> = cards
+        .iter()
+        .map(|(slug, text)| (slug.as_str(), text.clone()))
+        .collect();
+    let dir = folder_profile(&project.root, "reel", REEL, &borrowed);
+    let offer = offer_uncounted(&project.root, &project.root, "reel");
+    assert_eq!(offer.slugs.len(), 3, "{}", offer.section);
+    assert!(offer.section.contains(CARDS_OFFER_LINE), "{}", offer.section);
+    assert!(!offer.section.contains("Open one when it fits"));
+    let offered = |dir: &Path| {
+        let index = read_index(dir);
+        (1..=3)
+            .map(|n| index.cards.get(&format!("card-{n:02}")).map_or(0, |e| e.counters.offered))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(offered(&dir), vec![0, 0, 0], "nothing counted before the seat");
+    count_offered(&project.root, "reel", &offer);
+    assert_eq!(offered(&dir), vec![1, 1, 1]);
+    nirvana_seat::set_test_world(None);
+}
