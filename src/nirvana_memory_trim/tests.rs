@@ -356,8 +356,8 @@ fn old_backups_are_pruned_but_the_newest_five_stay() {
     let left: Vec<bool> = names.iter().map(|p| p.exists()).collect();
     assert_eq!(
         left,
-        vec![false, false, false, true, true, true, true, true],
-        "the three oldest went, the newest five stayed"
+        vec![true, false, false, true, true, true, true, true],
+        "the oldest (the fullest index) and the newest five stayed; the two between went"
     );
     assert!(other.exists(), "another folder's backup is not this folder's to prune");
 }

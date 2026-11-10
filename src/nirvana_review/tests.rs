@@ -1440,7 +1440,15 @@ fn rule_six_keeps_a_measured_and_resolved_dead_end() {
     assert!(six.contains("a claim that a tool is broken or cannot be used"), "{six}");
     assert!(six.contains("keep nothing"), "{six}");
     assert!(
-        six.contains("One exception: a dead end the stream shows the worker measured and then resolved or worked around"),
+        six.contains(
+            "One exception: a dead end the stream shows the worker measured and then worked around in the project's \
+own code or method"
+        ),
+        "{six}"
+    );
+    // Plan 40d N11: the exception is scoped, so "python was missing, the worker used py" stays a setup failure.
+    assert!(
+        six.contains("The exception never covers a missing program, a sign-in or a path on this machine."),
         "{six}"
     );
 }

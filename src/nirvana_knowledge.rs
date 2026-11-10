@@ -612,8 +612,8 @@ pub fn offer(root: &Path, cwd: &Path, profile: &str) -> String {
 /// The line that offers cards to a worker. Plan 40, a hypothesis, worded as `nirvana_lessons::LESSONS_OFFER_LINE`
 /// is and for the same census: "Open one when it fits this order" read as "open as few as you can".
 pub const CARDS_OFFER_LINE: &str = "Each is one measured finding, dead end or owner preference with its source \
-line. Before a step, open each card whose line touches what that step does, and leave the others closed; a \
-`do not:` line is a warning.";
+line. Open a card when its line names the step you are doing, and leave the others closed; a `do not:` line is a \
+warning.";
 
 /// `offer` without the count (plan 40 T5): `seat run` counts with `count_offered` once the seat is written.
 pub fn offer_uncounted(root: &Path, cwd: &Path, profile: &str) -> nirvana_lessons::Offer {

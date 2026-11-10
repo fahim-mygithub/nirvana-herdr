@@ -999,7 +999,8 @@ pub fn discard(cwd: &Path) -> Result<bool, String> {
 pub const KEEP_BACKUPS: usize = 5;
 
 /// Plan 40 D1: one backup was written per accept and none was ever removed. Of this folder's backups, those past
-/// the newest `KEEP_BACKUPS` of their kind and older than `crate::nirvana_board::PRUNE_AFTER` are deleted. The two
+/// the newest `KEEP_BACKUPS` of their kind, not the oldest of it, and older than `crate::nirvana_board::PRUNE_AFTER`
+/// are deleted. The two
 /// kinds (`.md` from accept, `.pre-restore` from restore) are counted apart, so copies of one kind never push the
 /// only backup of the other out.
 fn prune_backups(ctx: &Ctx, folder: &Path) {
@@ -1024,6 +1025,11 @@ fn prune_backups(ctx: &Ctx, folder: &Path) {
             .collect();
         // The names sort in time order (`compact_now`).
         kind.sort();
+        // Plan 40d N5: the oldest of each kind stays too. After six trims in a day the first backup, the index
+        // before any trim and so the fullest, was the one deleted 30 days later.
+        if !kind.is_empty() {
+            kind.remove(0);
+        }
         crate::nirvana_board::prune_old_files(
             kind,
             KEEP_BACKUPS,
@@ -1207,7 +1213,11 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             Ok(r) => {
                 println!("restored from {}", r.backup.display());
                 if let Some(kept) = &r.kept {
-                    println!("the index it replaced is kept in {}", kept.display());
+                    // Plan 40d N6: no verb restores this copy; the line says how.
+                    println!(
+                        "the index it replaced is kept in {}. To put it back, copy that file over the index.",
+                        kept.display()
+                    );
                 }
             }
             Err(why) => fail(&format!("not restored: {why}")),

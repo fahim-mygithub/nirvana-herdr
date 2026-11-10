@@ -60,6 +60,10 @@ pub struct IdleStretch {
     /// Plan 25 §2: the fresh start's own checks and paste in this stretch (`nirvana_fresh`). On the stretch, so any
     /// state but `Idle` ends it too.
     pub fresh: crate::nirvana_fresh::FreshStretch,
+    /// Plan 40d Part 1: the last skip reason logged at INFO in this stretch, its numbers left out (`reason_key`). The
+    /// live server's log held 20,049 INFO lines from 2026-10-15 to 2026-11-09 and not one about idle compact, because
+    /// a skip logged at DEBUG only; now each new reason in a stretch is one INFO line, at most one per check.
+    pub logged: Option<String>,
 }
 
 /// A pasted `/compact` whose Enter has not gone: the pane it went to, when, and which read is next.
@@ -167,7 +171,8 @@ pub struct Facts {
     pub idle_for: Option<Duration>,
     /// `/compact` already went in this idle stretch.
     pub sent_in_stretch: bool,
-    /// How long ago the pane's own transcript was last written; `None` when `choose_transcript` found none.
+    /// How long ago the pane's own session last did something (`transcript_age`: its newest line that is not an idle
+    /// recap, else the file's write time); `None` when `choose_transcript` found none.
     pub transcript_age: Option<Duration>,
     /// The last assistant turn's context (`context_tokens`).
     pub context_tokens: Option<u64>,
@@ -328,6 +333,212 @@ pub fn after_paste(step: Step, line: &InputLine, owner_key: &OwnerKey) -> AfterP
 /// A worker's Claude runs `-p`/`--print` and ends when done; it is never compacted.
 pub fn is_headless(argv: &[String]) -> bool {
     argv.iter().any(|arg| arg == "-p" || arg == "--print")
+}
+
+// ---- why a pane was or was not compacted (plan 40d Part 1) ----
+//
+// Plan 27 shipped on 2026-10-23 and the owner's server never typed `/compact` once by 2026-11-09, while 118 of the
+// orchestrator's turns after an idle gap over the hour re-bought their cache (usage audit, finding 6). Every skip
+// logged at DEBUG, so nothing said which rule held. The server now writes its reading of each Claude pane to
+// `why_path` (`app/nirvana_idle_compact.rs`), and `herdr compact why` prints it without touching a pane.
+
+/// The server's last reading of every Claude pane, for `herdr compact why`.
+pub fn why_path(home: &Path) -> PathBuf {
+    home.join(crate::nirvana_seat::DIR)
+        .join("idle-compact.json")
+}
+
+/// A skip reason with its numbers left out: "the owner typed in the pane 12 s ago" and "... 40 s ago" are one reason,
+/// logged once per stretch.
+pub fn reason_key(reason: &str) -> String {
+    reason.chars().filter(|c| !c.is_ascii_digit()).collect()
+}
+
+/// The setting as one line.
+pub fn setting_text(rule: Option<IdleCompactRule>) -> String {
+    rule.map_or_else(
+        || "off".to_owned(),
+        |rule| {
+            format!(
+                "on, at {} min idle, from {} tokens",
+                rule.minutes.as_secs() / 60,
+                rule.min_tokens
+            )
+        },
+    )
+}
+
+/// The decision as one line.
+pub fn decision_text(decision: &Decision) -> String {
+    match decision {
+        Decision::Send => format!("send {COMMAND}"),
+        Decision::Skip(reason) => format!("skip: {reason}"),
+    }
+}
+
+/// Each fact `decide` reads, in its order, as a name and a value. The input line's text is the owner's, so only its
+/// length is shown.
+pub fn fact_rows(facts: &Facts) -> Vec<(&'static str, String)> {
+    let minutes = |d: Duration| format!("{} min", d.as_secs() / 60);
+    vec![
+        ("setting", setting_text(facts.rule)),
+        (
+            "agent",
+            facts
+                .agent
+                .map_or_else(|| "none".to_owned(), |agent| format!("{agent:?}")),
+        ),
+        (
+            "seat worker",
+            if facts.seat_worker { "yes" } else { "no" }.to_owned(),
+        ),
+        (
+            "process",
+            match facts.argv.as_deref() {
+                None => "not read".to_owned(),
+                Some(argv) if is_headless(argv) => "headless (-p)".to_owned(),
+                Some(_) => "interactive".to_owned(),
+            },
+        ),
+        ("state", format!("{:?}", facts.state)),
+        (
+            "idle for",
+            facts.idle_for.map_or_else(|| "not known".to_owned(), minutes),
+        ),
+        (
+            "sent in this stretch",
+            if facts.sent_in_stretch { "yes" } else { "no" }.to_owned(),
+        ),
+        (
+            "last activity",
+            facts.transcript_age.map_or_else(
+                || "no transcript of its own found".to_owned(),
+                |age| format!("{} ago", minutes(age)),
+            ),
+        ),
+        (
+            "context",
+            facts.context_tokens.map_or_else(
+                || "no reading (compacted since, or no turn in the last 1 MB)".to_owned(),
+                |tokens| format!("{tokens} tokens"),
+            ),
+        ),
+        (
+            "owner's last key",
+            match &facts.owner_key {
+                OwnerKey::Never => "never in this pane".to_owned(),
+                OwnerKey::SecsAgo(ago) => format!("{ago} s ago"),
+                OwnerKey::Unknown(why) => format!("not known: {why}"),
+            },
+        ),
+        (
+            "input line",
+            match &facts.input_line {
+                InputLine::Empty => "empty".to_owned(),
+                InputLine::Text(text) => format!("holds {} characters", text.chars().count()),
+                InputLine::Unsure(why) => format!("not provably empty: {why}"),
+            },
+        ),
+    ]
+}
+
+/// What `herdr compact why` prints for the server's snapshot `why` at Unix second `now`.
+pub fn render_why(why: &serde_json::Value, now: u64) -> String {
+    use serde_json::Value;
+    let ago = |at: &Value| at.as_u64().map(|at| now.saturating_sub(at));
+    let span = |secs: u64| {
+        if secs < 120 {
+            format!("{secs} s")
+        } else {
+            format!("{} min", secs / 60)
+        }
+    };
+    let mut out = format!(
+        "Idle compact is {}. The server read its panes {} ago.\n",
+        why["setting"].as_str().unwrap_or("not known"),
+        ago(&why["written"]).map_or_else(|| "at an unknown time".to_owned(), span)
+    );
+    let panes = why["panes"].as_array().cloned().unwrap_or_default();
+    if panes.is_empty() {
+        out.push_str("No pane runs Claude.\n");
+        return out;
+    }
+    for pane in &panes {
+        let name = pane["pane"].as_str().unwrap_or("?");
+        let state = pane["state"].as_str().unwrap_or("?");
+        let idle = ago(&pane["idle_since"]);
+        let mut now_line = match idle {
+            Some(idle) => format!("{state}, idle {}", span(idle)),
+            None => format!("{state}, not in an idle stretch"),
+        };
+        if pane["sent"].as_bool() == Some(true) {
+            now_line.push_str(", /compact went in this stretch");
+        } else if let Some(at) = pane["next_check"].as_u64() {
+            if at > now {
+                now_line.push_str(&format!(", next check in {}", span(at - now)));
+            } else {
+                now_line.push_str(", a check is due now");
+            }
+        } else if idle.is_some() {
+            now_line.push_str(", no check is due before the cache expires");
+        }
+        match pane["decision"].as_str() {
+            Some(decision) => {
+                let when = ago(&pane["checked"]).map_or_else(String::new, |secs| {
+                    format!(" (checked {} ago)", span(secs))
+                });
+                out.push_str(&format!("{name}: {decision}{when}\n  now: {now_line}\n"));
+                for row in pane["facts"].as_array().into_iter().flatten() {
+                    out.push_str(&format!(
+                        "  {}: {}\n",
+                        row[0].as_str().unwrap_or("?"),
+                        row[1].as_str().unwrap_or("?")
+                    ));
+                }
+            }
+            None => out.push_str(&format!("{name}: not checked yet\n  now: {now_line}\n")),
+        }
+    }
+    out
+}
+
+const USAGE: &str = "usage: herdr compact why [--json]   why each Claude pane was or was not compacted when idle";
+
+/// `herdr compact why [--json]`: reads the server's snapshot, never a pane. `main.rs` reaches it once it takes plan
+/// 40d's hunk (`herdr compact` routed here); the `allow` is for the state before it: remove it once that is on master.
+#[allow(dead_code)]
+pub fn cli(args: &[String]) -> std::io::Result<()> {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    let json = match words.as_slice() {
+        ["why"] => false,
+        ["why", "--json"] => true,
+        _ => {
+            eprintln!("{USAGE}");
+            std::process::exit(2);
+        }
+    };
+    let Some(home) = crate::nirvana::home() else {
+        eprintln!("The Nirvana home is not known, so there is no snapshot to read.");
+        std::process::exit(1);
+    };
+    let path = why_path(&home);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!(
+                "No snapshot at {}: {err}. The server writes it within a minute of starting.",
+                path.display()
+            );
+            std::process::exit(1);
+        }
+    };
+    if json {
+        println!("{}", text.trim_end());
+        return Ok(());
+    }
+    let why: serde_json::Value = serde_json::from_str(&text).map_err(std::io::Error::other)?;
+    print!("{}", render_why(&why, crate::nirvana_run::now()));
+    Ok(())
 }
 
 // ---- the input line (review B1, B2) ----
@@ -582,6 +793,58 @@ pub fn file_age(path: &Path, now: SystemTime) -> Option<Duration> {
     now.duration_since(modified).ok()
 }
 
+/// Lines Claude Code writes into a session that has no turn behind them, by their `subtype`. Plan 40d, measured over
+/// the 127 idle gaps of over 60 min in this machine's transcripts from 2026-10-24 to 2026-11-09
+/// (`gap_probe3.py` in the record): the away recap (`away_summary`, about 3 min after the last turn) and the remote
+/// control's status (`bridge_status`) kept the file's write time young, so rule 4 first held at 54 min in 45 of the
+/// gaps and never inside the hour in 7. The end-of-turn bookkeeping is here so a recap is not hidden behind it.
+const IDLE_LINES: &[&str] = &[
+    "away_summary",
+    "bridge_status",
+    "turn_duration",
+    "stop_hook_summary",
+];
+
+/// When the session last did something: the `timestamp` of the newest line in `text` that is not one of
+/// `IDLE_LINES`. `None` when that line has no readable timestamp (a torn append, an unknown shape), so the caller
+/// falls back to the file's write time, which is never older than this.
+pub fn last_activity(text: &str) -> Option<SystemTime> {
+    let idle_line = |line: &str| {
+        IDLE_LINES.iter().any(|kind| line.contains(kind))
+            && serde_json::from_str::<serde_json::Value>(line).is_ok_and(|value| {
+                value["type"] == "system"
+                    && value["subtype"]
+                        .as_str()
+                        .is_some_and(|subtype| IDLE_LINES.contains(&subtype))
+            })
+    };
+    let line = text
+        .lines()
+        .rev()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .find(|line| !idle_line(line))?;
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let stamp = value["timestamp"].as_str()?;
+    time::OffsetDateTime::parse(stamp, &time::format_description::well_known::Rfc3339)
+        .ok()
+        .map(SystemTime::from)
+}
+
+/// Rule 4's age: how long ago the session last did something (`last_activity` over the file's tail), else how long
+/// ago the file was written. Never younger than the file's own age would say for a line herdr cannot read.
+pub fn transcript_age(path: &Path, now: SystemTime) -> Option<Duration> {
+    let by_file = file_age(path, now)?;
+    let tail =
+        crate::nirvana_subagents::read_file_tail(path, crate::nirvana_subagents::INITIAL_TAIL_WINDOW)
+            .ok();
+    let by_turn = tail
+        .as_deref()
+        .and_then(last_activity)
+        .and_then(|at| now.duration_since(at).ok());
+    Some(by_turn.map_or(by_file, |turn| turn.max(by_file)))
+}
+
 /// A file's last write, in Unix seconds; `None` when it is not a file.
 fn written_secs(path: &Path) -> Option<u64> {
     let meta = std::fs::metadata(path).ok()?;
@@ -751,7 +1014,7 @@ pub fn read_outside_and_transcript(
             return (outside, None);
         }
     };
-    outside.transcript_age = file_age(&transcript, now);
+    outside.transcript_age = transcript_age(&transcript, now);
     outside.context_tokens = read_context_tokens(&transcript);
     (outside, Some(transcript))
 }
@@ -1640,6 +1903,130 @@ mod tests {
         transcript_with_filler(&long, 100 * 1024);
         assert_eq!(read_context_tokens(&long), Some(60_000));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Plan 40d Part 1: Claude Code writes its away recap into an idle session about 3 min after the last turn
+    /// (433 recaps in the gaps measured), and the remote control's status line too. Rule 4 reads the age of the newest
+    /// line that is not one of those, so the recap no longer pushes the first passing check from 50 min to 54.
+    #[test]
+    fn rule4_reads_the_last_turn_past_the_away_recap() {
+        let at = |secs: u64| {
+            time::OffsetDateTime::from_unix_timestamp(1_800_000_000 + secs as i64)
+                .unwrap()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap()
+        };
+        let turn = format!(
+            r#"{{"type":"assistant","timestamp":"{}","message":{{"usage":{{"input_tokens":60000}}}}}}"#,
+            at(0)
+        );
+        let recap = format!(
+            r#"{{"type":"system","subtype":"away_summary","timestamp":"{}","content":"recap"}}"#,
+            at(180)
+        );
+        let bridge = format!(
+            r#"{{"type":"system","subtype":"bridge_status","timestamp":"{}"}}"#,
+            at(600)
+        );
+        let turn_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        assert_eq!(
+            last_activity(&format!("{turn}\n{recap}\n{bridge}\n")),
+            Some(turn_at)
+        );
+        // A prompt after the turn is activity; so is any line of a kind not known to be idle.
+        let prompt = format!(
+            r#"{{"type":"user","timestamp":"{}","message":{{"content":"go on"}}}}"#,
+            at(300)
+        );
+        assert_eq!(
+            last_activity(&format!("{turn}\n{prompt}\n{recap}\n")),
+            Some(turn_at + Duration::from_secs(300))
+        );
+        let other = format!(r#"{{"type":"queue-operation","timestamp":"{}"}}"#, at(240));
+        assert_eq!(
+            last_activity(&format!("{turn}\n{other}\n{recap}\n")),
+            Some(turn_at + Duration::from_secs(240))
+        );
+        // A torn last line, or a line with no time, gives no reading: the caller keeps the file's age.
+        assert_eq!(last_activity(&format!("{turn}\n{{\"type\":\"assi")), None);
+        assert_eq!(last_activity(r#"{"type":"assistant"}"#), None);
+        // The file: written at the recap (3 min after the turn) and read 51 min after the turn.
+        let dir = temp_dir("recap");
+        let path = dir.join("session.jsonl");
+        std::fs::write(&path, format!("{turn}\n{recap}\n")).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_modified(turn_at + Duration::from_secs(180)).unwrap();
+        drop(file);
+        let read_at = turn_at + 51 * MIN;
+        assert_eq!(file_age(&path, read_at), Some(48 * MIN));
+        assert_eq!(transcript_age(&path, read_at), Some(51 * MIN));
+        let facts = Facts {
+            transcript_age: transcript_age(&path, read_at),
+            ..sending()
+        };
+        assert_eq!(decide(&facts), Decision::Send);
+        // A torn tail: the file's own age, never younger.
+        std::fs::write(&path, format!("{turn}\n{recap}\n{{\"ty")).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_modified(turn_at + Duration::from_secs(180)).unwrap();
+        drop(file);
+        assert_eq!(transcript_age(&path, read_at), Some(48 * MIN));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Plan 40d Part 1: `herdr compact why` names every fact and the decision; the owner's text is only counted.
+    #[test]
+    fn why_names_every_fact_and_the_decision() {
+        let facts = Facts {
+            input_line: InputLine::Text("a private draft".into()),
+            ..sending()
+        };
+        let rows = fact_rows(&facts);
+        let names: Vec<&str> = rows.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            [
+                "setting",
+                "agent",
+                "seat worker",
+                "process",
+                "state",
+                "idle for",
+                "sent in this stretch",
+                "last activity",
+                "context",
+                "owner's last key",
+                "input line"
+            ]
+        );
+        assert!(rows.contains(&("input line", "holds 15 characters".into())));
+        assert!(rows.contains(&("process", "interactive".into())));
+        assert_eq!(
+            reason_key("the owner typed in the pane 12 s ago"),
+            reason_key("the owner typed in the pane 40 s ago")
+        );
+        let why = serde_json::json!({
+            "written": 10_000,
+            "setting": setting_text(Some(rule())),
+            "panes": [
+                {"pane": "w1:p1", "state": "Idle", "idle_since": 10_000 - 52 * 60, "sent": false,
+                 "next_check": 10_030, "checked": 9_990,
+                 "decision": decision_text(&decide(&facts)),
+                 "facts": rows.iter().map(|(n, v)| serde_json::json!([n, v])).collect::<Vec<_>>()},
+                {"pane": "w1:p2", "state": "Working", "idle_since": null, "sent": false,
+                 "next_check": null, "checked": null, "decision": null, "facts": null},
+            ],
+        });
+        let shown = render_why(&why, 10_000);
+        println!("{shown}");
+        assert!(shown.starts_with("Idle compact is on, at 50 min idle, from 50000 tokens."));
+        assert!(shown.contains("w1:p1: skip: the input line holds text (checked 10 s ago)\n"));
+        assert!(shown.contains("  now: Idle, idle 52 min, next check in 30 s\n"));
+        assert!(shown.contains("  input line: holds 15 characters\n"));
+        assert!(shown.contains("w1:p2: not checked yet\n  now: Working, not in an idle stretch\n"));
+        assert!(!shown.contains("a private draft"));
+        assert!(render_why(&serde_json::json!({"written": 1_000, "setting": "off", "panes": []}), 1_000)
+            .ends_with("No pane runs Claude.\n"));
     }
 
     /// Review S4: the read stops at 1 MB from the end; a last turn further back is no reading.

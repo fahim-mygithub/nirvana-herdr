@@ -977,12 +977,9 @@ fn jev_facts(cwd: &Path, compute: fn(&Path) -> JevFacts, background: bool) -> Op
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compute(&folder))).ok();
             let mut slots = jev_slots().lock().unwrap_or_else(|e| e.into_inner());
             let slot = slots.entry(folder).or_default();
-            if facts.is_some() {
-                slot.facts = facts;
+            if land(slot, facts) {
+                CHANGED.store(true, Ordering::Release);
             }
-            slot.read_at = Some(Instant::now());
-            slot.reading = false;
-            CHANGED.store(true, Ordering::Release);
         });
         if spawned.is_err() {
             slot.reading = false;
@@ -990,6 +987,18 @@ fn jev_facts(cwd: &Path, compute: fn(&Path) -> JevFacts, background: bool) -> Op
         }
     }
     slot.facts.clone()
+}
+
+/// A finished read lands in its slot. True only when the facts differ from what the slot held. Plan 40d N12: every
+/// read set `CHANGED`, so a visible Preload panel repainted every `JEV_FACTS_TTL` with nothing new on it.
+fn land(slot: &mut JevSlot, facts: Option<JevFacts>) -> bool {
+    slot.read_at = Some(Instant::now());
+    slot.reading = false;
+    if facts.is_none() || facts == slot.facts {
+        return false;
+    }
+    slot.facts = facts;
+    true
 }
 
 fn array<'a>(object: &'a mut Map<String, Value>, key: &str) -> &'a mut Vec<Value> {
@@ -2037,6 +2046,26 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         };
         assert_eq!(landed.map(|f| f.tokens), Some(7));
+    }
+
+    /// Plan 40d N12: a read that finds what the rows already show asks for no repaint; a changed one does.
+    #[test]
+    fn the_jev_rows_repaint_only_when_their_facts_change() {
+        let facts = |tokens| JevFacts {
+            detail: "JEV.md: in full".into(),
+            tokens,
+            today: "0 calls".into(),
+        };
+        let mut slot = JevSlot {
+            reading: true,
+            ..JevSlot::default()
+        };
+        assert!(land(&mut slot, Some(facts(7))));
+        assert!(!slot.reading && slot.read_at.is_some());
+        assert!(!land(&mut slot, Some(facts(7))));
+        assert!(!land(&mut slot, None));
+        assert_eq!(slot.facts, Some(facts(7)));
+        assert!(land(&mut slot, Some(facts(8))));
     }
 
     #[test]

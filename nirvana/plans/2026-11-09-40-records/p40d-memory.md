@@ -7,6 +7,62 @@ any bugs." The review this fixes from is `scratchpad/c40/review-memory.md`; ever
 first. Controls: `nirvana/controls.d/c40d.py`. Sizes are printed by the tests named, so they are recomputed on every
 run; the numbers below are the run of 2026-11-09 and rot like any count in prose.
 
+## Review round (2026-11-09, "Opus high - memory review round")
+
+### The owner's live check, first
+
+After the merge and the daemon restart: leave a Claude pane with a large context idle for over 50 minutes, then run
+`herdr compact why`. It prints each Claude pane's state, idle time, next check, and the last check's facts and
+decision. The server's log has one INFO line per new skip reason in a stretch, `nirvana: idle compact left the pane
+alone`, and `nirvana: idle Claude sent /compact` when it fires. If it skips, the reason it prints is the blocker this
+round could not see from the code.
+
+### Part 1: idle compact never fired
+
+- The suspicion is overturned. "done" is the agents view's name for `Idle` on a pane nobody has looked at yet
+  (`src/app/agent_view.rs:327`). The terminal's state is `Idle`, and idle compact never reads the pane's seen mark.
+  Test `idle_compact_server_compacts_a_finished_pane_nobody_has_looked_at`.
+- Claude's state comes from its screen. herdr's Claude hook reports only `SessionStart`, so the stretch starts and
+  ends with screen detection (`detect/manifests/claude.toml`).
+- Nothing in the code is never true for an unattended pane. Rules 4 and 5 were replayed over the 127 idle gaps of
+  over 60 min in this machine's transcripts since 2026-10-24 (`C:\Users\fahim\AppData\Local\Temp\c40d\gap_probe3.py`,
+  `gap_probe4.py`, numbers from their run). Both rules held inside the hour in 109 gaps before this round and 115
+  after.
+- Fixed: Claude Code writes an `away_summary` recap about 3 min after a turn, and a `bridge_status` line. These kept
+  the file's write time young, so rule 4 first held at 54 min in 45 gaps. Rule 4 now reads the newest line that is not
+  one of those (`transcript_age`). A torn line falls back to the file's age.
+- Not fixed, and not known: argv, the transcript choice, the owner key and the strict input line all need the live
+  pane. The input line was recorded from Claude Code 2.1.302; the gaps ran 2.1.310 to 2.1.319. `herdr compact why`
+  exists to answer this.
+- Found: Claude Code compacts an idle session on its own at 55 min (`compact_boundary`, trigger `auto`). That
+  happened in 25 of the 127 gaps, every one with a context over 200k. Only the owner can say if herdr's compact is
+  still worth it below 200k.
+- Every skip used to log at DEBUG, so the live log's 20,049 INFO lines held nothing about idle compact. Now each new
+  reason in a stretch is one INFO line, and the server writes `<home>\nirvana\idle-compact.json` after each check and
+  at most once a minute otherwise. The owner's typed text is never written there, only its length.
+
+### Part 2
+
+| Finding | What changed | Test | Control |
+|---|---|---|---|
+| S1 seven stale controls | Already in the hunk script. Dry-run: 3246 of 3253 without it, 3253 of 3253 with it, in a throwaway copy. | (the controls') | `c40d_context_not_summed` on `read_context`'s sum |
+| N2 the cap starved new lessons | `keep_places_for_new`: 3 of the 15 places go to the newest lessons never opened. | `the_cap_keeps_three_places_for_new_lessons` | `c40d_new_lessons_no_places` |
+| N4 a damaged first line | The trigger reads to the first readable `ts`, at most 64 lines. | `a_damaged_head_is_pruned_past_and_a_late_append_is_kept` | `c40d_prune_head_first_line_only` |
+| N4 a late append was lost | The size is read again before the rename; if it grew, the rewrite starts again (3 tries). | same | `c40d_prune_late_append_lost` |
+| N3, N4 the 30-day horizon | `herdr jev agree`'s help and `prune_log`'s doc say it. The audit script sees 30 days too. `PRUNE_AFTER` is the owner's to change. | none | none |
+| N5 the first backup | The oldest backup of each kind stays too. | `old_backups_are_pruned_but_the_newest_five_stay` | `c40d_backups_oldest_deleted` |
+| N6 the pre-restore copy | `restore` prints how to put it back by hand. | none | none |
+| N9 the session start waited 3 s | `edit_memory_file_at_start`: reads first, locks only to change, waits 1 s, then skips its line with a message on stderr. The `nirvana_claude.rs` hunk in the script uses it and replaces the first round's hunk. | `the_session_start_edit_waits_about_a_second_and_skips` | `c40d_session_lock_waits_long`, `c40d_session_lock_always_taken` |
+| N10 the fresh note | The claim was wrong: `nirvana_fresh` is unchanged since master. The comment at `FIRST_NOTICE_WHOLE_CHARS` now says so. | none | none |
+| N11 the wording | Offer lines: "Open a lesson (card) when its line names the step you are doing". Rule 6's exception covers a dead end worked around "in the project's own code or method" and "never covers a missing program, a sign-in or a path on this machine". Both are hypotheses. | `rule_six_keeps_a_measured_and_resolved_dead_end`, T2's and T5's tests | `c40d_rule6_scope_missing`, the two wording controls re-pointed |
+| N12 repaint every 5 s | `land` asks for a repaint only when the facts differ. | `the_jev_rows_repaint_only_when_their_facts_change` | `c40d_preload_repaints_always` |
+| Part 1 rule 4 | `transcript_age`, `last_activity` | `rule4_reads_the_last_turn_past_the_away_recap` | `c40d_rule4_file_time_only`, `c40d_rule4_recap_is_activity`, `c40d_rule4_torn_line_skipped` |
+| Part 1 why | `fact_rows`, `render_why`, `cli`, the server's snapshot and INFO line | `why_names_every_fact_and_the_decision`, `idle_compact_server_says_why_it_left_a_pane_alone` | `c40d_why_shows_typed_text`, `c40d_why_not_written`, `c40d_skip_reason_not_noted` |
+
+Recorded, not fixed: N4, a clock set a year forward drops every log line. N7, the residuals stand, and `serde_json`
+still re-sorts the owner's keys. N9, a stale lock takeover is still not race-free. N1, a session with no Jev key that
+gets one later and then resumes has no guide until `clear` or `compact`.
+
 ## Bugs
 
 | Finding | What changed | Test | Control |
@@ -36,17 +92,20 @@ failed before, 16 of 16 passed after. The lock now waits on that error as on a h
 
 ## Lessons that get read: two wording changes, both hypotheses
 
-- The offer lines (`LESSONS_OFFER_LINE`, `CARDS_OFFER_LINE`) now say "Before a step, open each lesson whose line touches
-  what that step does, and leave the others closed." A hypothesis from the census (12 opens in 39 offers in one
-  project): watch `herdr lessons stats` opened over offered after it lands.
+- The offer lines (`LESSONS_OFFER_LINE`, `CARDS_OFFER_LINE`) now say "Open a lesson when its line names the step you
+  are doing, and leave the others closed." (review round N11; the first round's "touches what that step does" re-tested
+  every lesson at every step). A hypothesis from the census (12 opens in 39 offers in one project): watch
+  `herdr lessons stats` opened over offered after it lands.
 - Review rule 6 keeps all it said and adds: "One exception: a dead end the stream shows the worker measured and then
-  resolved or worked around is worth keeping, as the way through, so the next worker does not repeat it." A hypothesis:
-  watch for kept lessons that are setup failures in disguise.
+  worked around in the project's own code or method is worth keeping, as the way through, so the next worker does not
+  repeat it. The exception never covers a missing program, a sign-in or a path on this machine." A hypothesis: watch
+  for kept lessons that are setup failures in disguise.
 
 ## Cleanup
 
 - D1: `board-seen/` and `jev/compact/<session>.json` are swept of files past 30 days when a new session first writes
-  there; `jev/calls.jsonl`, `jev/compact.jsonl` and `nirvana/jev-calls.jsonl` (both writers) drop lines past 30 days
+  there; `jev/calls.jsonl`, `jev/compact.jsonl` and `nirvana/jev-calls.jsonl` drop lines past 30 days (`jev-calls.jsonl`
+  has three writers; `nirvana_preset.rs` does not prune, the other two do, so it stays bounded)
   when written, rewritten at most about daily (only once the first line is 31 days old). Memory backups: past 30 days
   go, but the newest five of a folder, of each kind, stay whatever their age.
 - D2: `refresh_preset` is reached from `client/shell/nirvana_mods.rs` three times (the review was wrong); its

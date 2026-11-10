@@ -331,7 +331,8 @@ A lesson that would have saved a send-back is worth keeping.
 6. Do not capture: a failure of this machine or its setup (a missing program, a sign-in, a path); a claim that a tool \
 is broken or cannot be used; the story of one order; a failure that was never resolved, written up as a method. When \
 the worker tried several things and none worked, keep nothing. One exception: a dead end the stream shows the worker \
-measured and then resolved or worked around is worth keeping, as the way through, so the next worker does not repeat it.
+measured and then worked around in the project's own code or method is worth keeping, as the way through, so the next \
+worker does not repeat it. The exception never covers a missing program, a sign-in or a path on this machine.
 7. Each op's evidence is a quote, word for word, from the worker's own stream (named below): a command's output, a \
 tool's result. herdr refuses an op whose evidence is not there; the Work Report's own words do not count.
 8. Steps are at most 120 lines. Name a lesson by its kind of task, never by this order.

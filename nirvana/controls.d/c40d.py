@@ -31,6 +31,16 @@ T_RULE6 = "rule_six_keeps_a_measured_and_resolved_dead_end"
 T_D1_LOG = "old_files_and_log_lines_are_pruned"
 T_D1_BACKUPS = "old_backups_are_pruned_but_the_newest_five_stay"
 T_M1 = "the_template_points_at_the_seat_table_for_a_model"
+# Plan 40d review round (the record's "Review round" section).
+APP_IDLE = "src/app/nirvana_idle_compact.rs"
+T_SUM = "context_tokens_leave_out_output"
+T_RULE4 = "rule4_reads_the_last_turn_past_the_away_recap"
+T_WHY_FACTS = "why_names_every_fact_and_the_decision"
+T_WHY_SERVER = "idle_compact_server_says_why_it_left_a_pane_alone"
+T_N2 = "the_cap_keeps_three_places_for_new_lessons"
+T_N4 = "a_damaged_head_is_pruned_past_and_a_late_append_is_kept"
+T_N9 = "the_session_start_edit_waits_about_a_second_and_skips"
+T_N12 = "the_jev_rows_repaint_only_when_their_facts_change"
 
 CONTROLS = (
     # B1: one reading for idle compact and the Stop hook; a compaction newer than the last turn is no reading.
@@ -79,15 +89,16 @@ CONTROLS = (
             "            if size <= FIRST_NOTICE_WHOLE_CHARS {\n",
             "            if size <= usize::MAX {\n", T_T1, "rust"),
     # T2: at most CARDS_OFFERED lessons, ranked by the counters, and the offer line's new wording.
+    # Plan 40d: the cap moved into keep_places_for_new; its early return is the cap's edge.
     Control("c40d_lessons_uncapped", LESSONS,
-            "    lines.truncate(CARDS_OFFERED);\n",
-            "    lines.truncate(usize::MAX);\n", T_T2, "rust"),
+            "    if ranked.len() <= CARDS_OFFERED {\n        return ranked;\n",
+            "    if true {\n        return ranked;\n", T_T2, "rust"),
     Control("c40d_lessons_unranked", LESSONS,
             "        (Some(a), Some(b)) => rank(a, b),\n",
             "        (Some(_), Some(_)) => std::cmp::Ordering::Equal,\n", T_T2, "rust"),
     Control("c40d_lessons_old_wording", LESSONS,
-            "line touches what that step does, and leave the others closed.\";\n",
-            "line touches what that step does, and leave the others closed. Open one only if it fits this order.\";\n",
+            "step you are doing, and leave the others closed.\";\n",
+            "step you are doing, and leave the others closed. Open one only if it fits this order.\";\n",
             T_T2, "rust"),
     # T5: an offer counts nothing until the seat is written (`count_offered`).
     Control("c40d_lessons_counted_early", LESSONS,
@@ -100,8 +111,8 @@ CONTROLS = (
             "    count_offered(root, profile, &offer);\n    offer\n}\n",
             T_T5_CARDS, "rust"),
     Control("c40d_cards_old_wording", KNOWLEDGE,
-            "line. Before a step, open each card",
-            "line. Open one when it fits this order. Before a step, open each card", T_T5_CARDS, "rust"),
+            "line. Open a card when its line names",
+            "line. Open one when it fits this order. Open a card when its line names", T_T5_CARDS, "rust"),
     # T3 and T4: no Jev key, no guide; a resume does not print it again.
     Control("c40d_guide_without_key", JEV_MEMORY,
             "    if !key_present || source == Some(\"resume\") {\n",
@@ -122,8 +133,9 @@ CONTROLS = (
             "A dead end the stream shows the worker \\\n", T_RULE6, "rust"),
     # D1: old log lines go; the newest five backups of a folder stay whatever their age.
     Control("c40d_prune_log_keeps_old", BOARD,
-            "            .is_some_and(|at| SystemTime::from(at) < when)\n",
-            "            .is_some_and(|at| SystemTime::from(at) < when && false)\n", T_D1_LOG, "rust"),
+            "    let old = |line: &str| line_time(line).is_some_and(|at| at < cutoff);\n",
+            "    let old = |line: &str| line_time(line).is_some_and(|at| at < cutoff && false);\n",
+            T_D1_LOG, "rust"),
     Control("c40d_backups_keep_none", TRIM,
             "pub const KEEP_BACKUPS: usize = 5;\n",
             "pub const KEEP_BACKUPS: usize = 0;\n", T_D1_BACKUPS, "rust"),
@@ -134,4 +146,60 @@ CONTROLS = (
     Control("c40d_template_names_a_model", PROFILES,
             "# model: a model id that herdr seat list shows\\n\\\n",
             "# model: claude-sonnet-5-5\\n\\\n", T_M1, "rust"),
+    # S1: the shared reading sums input, cache read and cache write (the test's 60,510 is no single one of them).
+    Control("c40d_context_not_summed", JEV_COMPACT,
+            "        .sum::<u64>();\n        if total > 0 {\n",
+            "        .max()\n        .unwrap_or(0);\n        if total > 0 {\n", T_SUM, "rust"),
+    # Part 1: rule 4 reads the last turn past Claude Code's idle recap; a torn line falls back to the file's age.
+    Control("c40d_rule4_file_time_only", IDLE,
+            "    Some(by_turn.map_or(by_file, |turn| turn.max(by_file)))\n",
+            "    Some(by_file)\n", T_RULE4, "rust"),
+    Control("c40d_rule4_recap_is_activity", IDLE,
+            "    \"away_summary\",\n",
+            "    \"away_summary_never\",\n", T_RULE4, "rust"),
+    Control("c40d_rule4_torn_line_skipped", IDLE,
+            "        .find(|line| !idle_line(line))?;\n",
+            "        .find(|line| !idle_line(line) && serde_json::from_str::<serde_json::Value>(line).is_ok())?;\n",
+            T_RULE4, "rust"),
+    # Part 1: why. The owner's text is counted, never shown; every check writes the snapshot; a reason is noted once.
+    Control("c40d_why_shows_typed_text", IDLE,
+            "                InputLine::Text(text) => format!(\"holds {} characters\", text.chars().count()),\n",
+            "                InputLine::Text(text) => format!(\"holds {text}\"),\n", T_WHY_FACTS, "rust"),
+    Control("c40d_why_not_written", APP_IDLE,
+            "        self.idle_compact_why(now, true);\n        typed\n",
+            "        typed\n", T_WHY_SERVER, "rust"),
+    Control("c40d_skip_reason_not_noted", APP_IDLE,
+            "                        if new {\n                            terminal.idle_stretch.logged = Some(key);\n",
+            "                        if false {\n                            terminal.idle_stretch.logged = Some(key);\n",
+            T_WHY_SERVER, "rust"),
+    # N2: three of the fifteen places go to the newest lessons never opened.
+    Control("c40d_new_lessons_no_places", LESSONS,
+            "pub const NEW_LESSON_PLACES: usize = 3;\n",
+            "pub const NEW_LESSON_PLACES: usize = 0;\n", T_N2, "rust"),
+    # N4: the prune reads past a damaged head, and starts again when the log grew under it.
+    Control("c40d_prune_head_first_line_only", BOARD,
+            "            .take(PRUNE_PROBE_LINES)\n",
+            "            .take(1)\n", T_N4, "rust"),
+    Control("c40d_prune_late_append_lost", BOARD,
+            "        if grown {\n",
+            "        if false {\n", T_N4, "rust"),
+    # N9: the session-start edit waits about a second, and an unchanged line takes no lock.
+    Control("c40d_session_lock_waits_long", LESSONS,
+            "    edit_memory_file_within(home, SESSION_LOCK_WAIT, edit)\n",
+            "    edit_memory_file_within(home, std::time::Duration::from_secs(3), edit)\n", T_N9, "rust"),
+    Control("c40d_session_lock_always_taken", LESSONS,
+            "    if edit(std::fs::read_to_string(&path).ok().as_deref()).is_none() {\n",
+            "    if false {\n", T_N9, "rust"),
+    # N12: equal facts ask for no repaint.
+    Control("c40d_preload_repaints_always", PRELOAD,
+            "    if facts.is_none() || facts == slot.facts {\n",
+            "    if facts.is_none() {\n", T_N12, "rust"),
+    # N5: the oldest backup of each kind stays.
+    Control("c40d_backups_oldest_deleted", TRIM,
+            "            kind.remove(0);\n",
+            "            kind.retain(|_| true);\n", T_D1_BACKUPS, "rust"),
+    # N11: rule 6's exception never covers this machine's setup.
+    Control("c40d_rule6_scope_missing", REVIEW,
+            "worker does not repeat it. The exception never covers a missing program, a sign-in or a path on this machine.",
+            "worker does not repeat it.", T_RULE6, "rust"),
 )
