@@ -101,7 +101,19 @@ the effort instead); no token budget is shown to a model.
 | P40c LOOK | `herdr look` (an image or PDF read that returns text, leased, cached, downsized), still images in `herdr media shrink`, `herdr media doctor` | `p40c-look.md` |
 | P40d MEMORY | seven memory-area bugs; capped board notice and lessons; no Jev guide without a key; lessons worded to be opened | `p40d-memory.md` |
 | P40e SHELL | model labels from the model id; installer steps that cannot leave a half install; phone photos say what they are; `nirvana/gate.py` and `nirvana/clean_temp.py` for 35,326 leaked test folders | `p40e-shell.md` |
-| Round 2 | the record's outcomes (accepted, subagent orders), sizes and the 5-hour factor refit from the record, idle compact that fires, media orders at the gate | §7, after the first merges |
+| Review rounds | each package had one Sonnet review and one fresh fix round (`pkg-review-*.md`). The audit's follow-ups went into those rounds: the record's outcomes (P40b), sizes, the 5-hour and Fable-week factors and two scores refit from the record (P40a), idle compact's transcript-age rule and `herdr compact why` (P40d), media orders at the gate (P40b) | each package record |
+
+Landed as alpha 0.63.0 (AUDIT and P40a), 0.64.0 (P40d), 0.65.0 (P40e), 0.66.0 (P40b), 0.67.0 (P40c).
+
+What the builds overturned in this plan's own first draft:
+- Idle compact was not blocked by the pane's "done" state: that is only the agents view's name for an idle pane
+  nobody has looked at. The rule that failed was the transcript's age, which Claude Code's own recap lines kept
+  young. What still blocks it live is not known; `herdr compact why` is the tool to find out.
+- Claude Code compacts by itself well below the 967k the docs give (median 249k here), and compacts an idle session
+  over 200k at 55 minutes. So `autocompact_tokens` ships as 0 (off), a knob only.
+- The first `herdr look` design ran in the project folder and could use an Antigravity seat. The review showed a
+  steered picture could then read other files or reach a shell. A look now runs in its own folder under the
+  Nirvana home, with `Read(./**)` as its only permission, on Claude seats only.
 
 ## 7. Rulings for the owner
 
@@ -114,6 +126,12 @@ the effort instead); no token budget is shown to a model.
 3. **`use_record`.** Leave it off until round 2 has fixed the outcomes, then turn it on.
 4. **Jev's shadow seat advice** costs a network call per pick and acts on nothing. Proposed: off until wanted.
 5. **Phone uploads** are never deleted. Proposed: nothing automatic; a command lists them.
+6. **Old record lines.** 65 accepted orders are still recorded as failures in the installed `record.jsonl`; new
+   accepts are corrected as they happen. A one-time repair of the old lines is the owner's call.
+7. **Poppler.** `pdftoppm` is not installed, so no Claude seat can read a PDF over 10 pages and `herdr look`
+   refuses one. `winget install oschwartz10612.Poppler` fixes it; not run.
+8. **Effort on my own spawns.** Every agent of this cycle was launched as "high" through the Agent tool and ran
+   at medium by its own transcript (`perTurnEffort`). The labels in the records say what was asked, not what ran.
 
 ## 8. Live checks owed
 

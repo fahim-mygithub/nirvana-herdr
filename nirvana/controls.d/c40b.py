@@ -210,6 +210,10 @@ CONTROLS = (
             T_IMAGE, "rust"),
     Control("c40b_image_hook_unwired", HOOKS,
             '"guard-read"', '"guard-reed"', T_HOOK, "rust"),
+    # Merge 5: the plugin's hook sweep counts the image guard and names its matcher.
+    Control("c40b_image_hook_wrong_matcher", HOOKS,
+            '"matcher": "Read",', '"matcher": "Reed",',
+            "every_hook_names_a_herdr_subcommand_that_runs_quiet_and_fast", "rust"),
     # Addendum A: a subagent's prose end is a delivery.
     Control("c40b_subagent_prose_is_no_report", CLAUDE,
             "                            SUBAGENT_DELIVERED.to_owned()\n",

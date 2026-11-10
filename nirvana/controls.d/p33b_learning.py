@@ -81,8 +81,9 @@ CONTROLS = (
             '  { seat = "flash", score = 80 },\n  { seat = "sonnet", score = 78 },\n]',
             '  { seat = "sonnet", score = 78 },\n]', T_SEAT, "rust"),
     Control("p33b_review_effort_medium", SEATS,
-            'effort = "low"\nefficient_effort = "low"\nsota_effort = "low"',
-            'effort = "low"\nefficient_effort = "medium"\nsota_effort = "low"', T_SEAT, "rust"),
+            # Plan 40c's look.image has the same three effort lines; the weight line names lesson-review's.
+            'effort = "low"\nefficient_effort = "low"\nsota_effort = "low"\nweight = 0.3',
+            'effort = "low"\nefficient_effort = "medium"\nsota_effort = "low"\nweight = 0.3', T_SEAT, "rust"),
     # The brief: the stream named, never held; the send-back reasons; the reviewer's own lesson never kept.
     Control("p33b_brief_no_stream_path", REVIEW,
             "        subject.stream.display(),\n", "        \"the stream\",\n", T_PASS, "rust"),

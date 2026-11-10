@@ -5154,6 +5154,8 @@ mod tests {
                 "write.docs",
                 "media.video",
                 "media.audio",
+                // Plan 40c: `herdr look`'s class, in the media chain.
+                "look.image",
                 "sweep.mechanical",
                 "chore.memory",
                 "chore.script",

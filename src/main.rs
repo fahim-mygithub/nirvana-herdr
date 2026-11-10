@@ -56,6 +56,7 @@ mod nirvana_launch;
 mod nirvana_lean;
 mod nirvana_learning;
 mod nirvana_lessons;
+mod nirvana_look;
 mod nirvana_media;
 mod nirvana_memory_trim;
 mod nirvana_preload;
@@ -630,6 +631,10 @@ fn main() -> io::Result<()> {
     // Nirvana fork, plan 12 O6: media probe, ffmpeg shrink under 100 MB, and the view_file worker prompt.
     if args.get(1).map(String::as_str) == Some("media") {
         return nirvana_media::cli(&args[2..]);
+    }
+    // Nirvana fork, plan 40c: one image or PDF read on a cheap seat, back as text, never in the caller's context.
+    if args.get(1).map(String::as_str) == Some("look") {
+        return nirvana_look::cli(&args[2..]);
     }
     // Nirvana fork, plan 12 O3: a run's journal, waking, receipt; the workers are `herdr seat run|exec|...`.
     if args.get(1).map(String::as_str) == Some("run") {

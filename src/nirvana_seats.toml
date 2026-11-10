@@ -617,6 +617,24 @@ seats = [
   { seat = "argon", score = 85 },
 ]
 
+# Plan 40c: `herdr look` reads one image or PDF on a cheap claude seat and returns text. The same text as
+# `nirvana_look::CLASS_TOML`, which is appended in memory to an owner's table that lacks the class.
+[[class]]
+id = "look.image"
+chain = "media"
+blast = "bounded"
+effort = "low"
+efficient_effort = "low"
+sota_effort = "low"
+needs = ["image"]
+weight = 0.2
+bars = { efficient = 70, balanced = 80, sota = 100 }
+why = "plan 40c: herdr look, one question about one image or PDF; weight 0.2 is a prior (10.4k tokens measured against P4's 45k); claude seats only: agy has no tool filter and the picture is untrusted (plan 34a: no agy seat teaches)"
+seats = [
+  { seat = "haiku", score = 84 },
+  { seat = "sonnet", score = 86 },
+]
+
 [[class]]
 id = "sweep.mechanical"
 chain = "chore"

@@ -3,6 +3,34 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.67.0: `herdr look`, an image or PDF read that returns text
+
+- **Changed:** `herdr look <file> --ask "<question>" [--detail low|high] [--pages a-b] [--seat <id>] [--json]
+  [--fresh]` starts one headless turn on a cheap Claude seat (new class `look.image`: haiku, sonnet) and prints the
+  answer as text, so the caller never holds the picture. The input is copied (downsized to 1024 px, or 2576 px with
+  `--detail high`; HEIC becomes JPEG) into a look folder under the Nirvana home, the turn runs there with only the
+  Read tool and the permission `Read(./**)`, and the answer says how many other reads the picture asked for and
+  was refused. The read is leased through `seat pick` (fails closed with no fresh reading, 5-minute lease, 120 s
+  limit on the whole process tree), recorded, and cached by file hash, question and detail. No Antigravity seat
+  takes a look. A PDF over 10 pages is refused with the Poppler fix. `herdr media shrink` and `probe` take a still
+  image (a still is told by what the file is, never by a missing duration); `herdr media doctor` lists the media
+  tools and which seats take image, PDF, video and audio. A `look` skill; the media skill points at it.
+- **Because:** the owner, 2026-11-09: "improve multi modal usage" and "create new features that would help improve
+  token efficenccy". The audit: 406 images entered the orchestrator's own context (up to 12% of its spend carried
+  into later turns) and `herdr media` ran twice in the fork's life; phone uploads now bring photos in daily.
+- **Measured:** 2026-11-09 on Haiku 5.5 low: one look of a 1024x683 JPEG, 2 turns, 3.8 s, 10.4k tokens of context,
+  $0.00016 at list price; the same read with every tool loaded carried 48.9k. With a canary file one folder up,
+  `--allowedTools Read` quoted the canary and `--allowedTools "Read(./**)"` refused it (1 permission denial). All
+  62 `c40c_` controls went red alone on the builder's tree. At the merge two had lost their bite and were repaired:
+  the class now sits in the default table, so a test holds the two texts equal, and plan 40a's prices rank haiku
+  over flash, so the no-agy test also asks a table that lists only flash. Full checkpoint: 4976 of 4977 tests, the
+  one failure the known `windows_plugin_pane_commands_resolve_from_plugin_root_with_cwd_override`; it also caught
+  two counts the cycle had outgrown (the class list, fifteen hooks). 3479 of 3479 controls find their text. No look
+  has run through the installed binary yet: that is the owner's first live check. The class weight and scores are
+  priors.
+- **If you remove this:** an image is read by whoever is handed its path, usually the orchestrator on the dearest
+  seat, and stays in that session's context for every later turn.
+
 ## alpha 0.66.0: the gate and the record say what happened, a lighter worker start, and an image guard
 
 - **Changed:** the seat record ends with the final decision: an order the orchestrator accepts after a failed or
