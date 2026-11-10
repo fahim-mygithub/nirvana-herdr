@@ -163,9 +163,10 @@ CONTROLS = (
     Control("seat_tally_counts_subagents", SEAT,
             "        if chain == crate::nirvana_claude::SUBAGENT_CHAIN {", "        if false {",
             "the_outcome_words_and_what_the_tally_counts", "rust"),
+    # Retargeted in plan 40a's review round: the seat record's words are `nirvana_seat::tally_word` now.
     Control("seat_tally_ignores_the_words", SEAT,
-            "crate::nirvana_gate::Outcome::tally(&line.outcome) else {",
-            "crate::nirvana_gate::Outcome::tally(&line.outcome).or(Some(false)) else {",
+            "        let Some(passed) = tally_word(&line.outcome) else {",
+            "        let Some(passed) = tally_word(&line.outcome).or(Some(false)) else {",
             "the_outcome_words_and_what_the_tally_counts", "rust"),
     Control("run_record_word_unknown_kept", RUN,
             "        _ => Outcome::Failed.word().into(),", "        _ => Outcome::Asked.word().into(),",

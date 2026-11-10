@@ -739,8 +739,9 @@ fn the_outcome_words_and_what_the_tally_counts() {
     assert_eq!(Outcome::tally("reseated"), None);
     // Plan 37b review S1: an order asked on its own block is the record's `blocked`, and not counted.
     assert_eq!(Outcome::tally(Outcome::BLOCKED), None);
+    // Plan 40a's review round: one order and run is decided by its last line, so each line is its own order.
     let on = |chain: &str, outcome: &str| -> nirvana_seat::RecordLine {
-        serde_json::from_value(serde_json::json!({"order":"o","seat":"sonnet","effort":"medium","class":"build.bounded",
+        serde_json::from_value(serde_json::json!({"order":format!("o-{chain}-{outcome}"),"seat":"sonnet","effort":"medium","class":"build.bounded",
             "chain":chain,"outcome":outcome}))
         .expect("line")
     };
@@ -762,7 +763,8 @@ fn the_outcome_words_and_what_the_tally_counts() {
         Effort::Medium,
         "build.bounded".to_owned(),
     )];
-    assert_eq!((tally.passes, tally.orders), (1, 3));
+    // `asked` is no longer a failure in the seat record (`nirvana_seat::tally_word`): pass and sent_back count.
+    assert_eq!((tally.passes, tally.orders), (1, 2));
 }
 
 #[test]

@@ -3,6 +3,36 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.63.0: Fable 5.2 takes a seat, the seat table is refit from the record, and the lifetime usage audit
+
+- **Changed:** the `fable` seat is `claude-fable-5-2`, on, with efforts low to xhigh and its own `week.fable`
+  window. It fails closed: no Fable seat unless every window it spends has a fresh reading and the order leaves
+  `fable_reserve` (0.10) of the Fable week, in every mode, under an override, and again when a booked lease is reused
+  or launched (`may_spend_now`, `check_before_spend`). SOTA seats Fable for plan, load-bearing build, adversary
+  review, debug, frontend and visual judging; Balanced and Efficient never do. The orchestrator's own seat comes from
+  a new `[orchestrator]` table section (defaults equal the old code): SOTA is Fable high while the Fable week has a
+  quarter left, else Opus high with the reason shown. Nirvana Claude's launch sets `CLAUDE_CODE_SUBAGENT_MODEL` so a
+  subagent with no model cannot inherit Fable or Opus. `nirvana/seat_cells.py` recomputes every Max cell from tokens,
+  prices and `per_usd`; `nirvana/seat_fit.py` refits cells and sizes from `record.jsonl`. Refit: Sonnet cache read
+  0.10, the Max 5 h factor 0.0073, the Fable week factor 0.005, sizes small 3.0 and large 4.1, flash below the
+  load-bearing bar, sonnet above the adversary review bar; `tally` counts `accepted` as a pass and the last line
+  for an order decides. Seat review fixes: the lease lock is no longer held across the Jev call, a signed-out agy
+  is not seated from old logs, `usage.json` has a cross-process lock, a usage read cannot hang on a held pipe, a
+  damaged `idle-review.json` is a doubt. `herdr seat diff` and a one-line notice when the installed table differs.
+  New `nirvana/usage_audit.py` and plan `nirvana/plans/2026-11-09-40-improvement-cycle.md`.
+- **Because:** the owner, 2026-11-09: "Fable 5.2 has now released check the claude documentation and update the apps
+  seating now that we have this model avaiable", "validate how we have been using Nirvana over its lifetime from its
+  usage logs with each model", "Do a project lceanup / code review and ifx any bugs." Claude Code's docs: on Max,
+  Fable may use "up to 50% of your weekly usage limits", and with `-p` past that "Claude Code bills it without
+  asking".
+- **Measured:** lifetime list price $10,060, under 9% of it seated by the fork (`usage_audit.py --now 1794267000`);
+  57% of a 5 h window was $78.40 of list price on 2026-11-09; about $10 of Fable moved its week 5 points; small
+  orders cost 4 to 27 times their prior. 418 scoped tests pass, clippy clean, 3257 of 3257 controls find their text,
+  `seat_cells.py --check` clean. The 5 h and Fable factors are one reading each; `fable_reserve` and
+  `fable_orchestrator_left` are hypotheses.
+- **If you remove this:** a Fable order can launch on a stale reading and spend usage credits unasked, SOTA cannot
+  seat the strongest model, and the table goes back to priors the record contradicts by up to 27 times.
+
 ## alpha 0.62.0: lessons reach the orders they would help, and a memory review runs in idle time on spare usage
 
 - **Changed:** the gate keeps a worker's lesson under the class its order was seated with (the worker's own words stay

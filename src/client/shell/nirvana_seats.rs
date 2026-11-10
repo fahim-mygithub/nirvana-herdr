@@ -222,6 +222,13 @@ fn lines(view: &SeatsView, inner: usize, now: u64) -> Vec<Line> {
     if let Some(note) = &view.note {
         lines.push(Line::Text(note.clone(), Tone::Attention));
     }
+    // Review M2: an edited seats.toml never takes a changed default, so the square says so.
+    if view.differs {
+        lines.push(Line::Text(
+            crate::nirvana_seat::DIFFERS_LINE.to_owned(),
+            Tone::Muted,
+        ));
+    }
     if let Some(orch) = &view.orchestrator {
         let mut text = format!(
             "Nirvana Claude \u{b7} {} {} \u{b7} {}",

@@ -54,20 +54,22 @@ owner's words where they matter. Then:
   `--send-ok "<the owner's words>"`, copied exactly from the owner's prompt of the last 6 hours (4 words or more);
   herdr refuses a quote it cannot find, and a send-back or reseat never inherits it.
   `--needs browser` or `--needs bladebro` gives the worker bladebro, a headless browser with its own profile, on a
-  claude or an agy seat. `browser` also limits the pick to the seats that list it, opus, sonnet and the four agy
-  seats now, so `--needs browser` is the way to a browser on agy too; `bladebro` does not limit the pick. A
+  claude or an agy seat. `browser` also limits the pick to the seats that list it, opus, sonnet, fable and the four
+  agy seats now, so `--needs browser` is the way to a browser on agy too; `bladebro` does not limit the pick. A
   profile that denies `mcp__bladebro__*` wins, and so does an agy workspace whose own `.agents/mcp_config.json` names
   one. A desktop server need (`bambu-studio-beta`, `xtool`) still takes a claude seat.
   An order picked with `--profile <name>` is run with the same `--profile <name>`: herdr copies the profile into the
   run, gives the worker its persona (a system prompt on Claude, the top of the order on agy), and a send-back or
   reseat keeps the copy. Design one with `herdr profile new <name>`, then `herdr profile check <name>`.
 - **A worker subagent** (a short read, review or chore on Claude that needs no pane): spawn
-  `nirvana:worker-<seat>-<effort>` with the seat and effort the pick gave (`opus-high`, `opus-medium`,
+  `nirvana:worker-<seat>-<effort>` with the seat and effort the pick gave (`fable-high`, `fable-medium`, `opus-high`, `opus-medium`,
   `sonnet-medium`, `sonnet-low`, `haiku-low`). Every subagent is seated first: `herdr seat pick --book <order>`,
   then spawn the seat it gives, or `herdr seat run` when it gives an agy seat. The hook refuses a spawn without a
   booking. Start its brief with three lines, `Class: <class>`, `Order: <order>`, `Run: <run>`; herdr records its
   outcome under them when it stops. A spawn that names no model or effort, or that would break your reserve on `max`,
   is refused by the `PreToolUse` hook.
+  Fable 5.2 is seated only when the Fable week was read fresh and keeps its reserve: past its week a headless
+  Fable run bills usage credits without asking, so never name Fable by hand to get around a skip.
 
 ### An agy research or media order
 

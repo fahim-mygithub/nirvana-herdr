@@ -164,9 +164,14 @@ pub fn plugin_dir(home: &Path) -> PathBuf {
 
 /// The orchestrator's role, appended to Claude Code's own system prompt.
 pub const ROLE_FILE: &str = "ROLE.md";
-/// §12 R1: "The orchestrator is Opus 5.5 at medium."
+/// §12 R1: "The orchestrator is Opus 5.5 at medium." The seat when the table is missing or refused (and the hooks'
+/// guess at a session's model when the hook names none); otherwise `[orchestrator]` decides.
 pub const MODEL: &str = "claude-opus-5-5";
 pub const EFFORT: &str = "medium";
+/// Plan 40a: Claude Code's subagent model when neither the call nor the agent file names one (code.claude.com
+/// model-config's order: the call's `model`, the agent file's `model`, this variable, then the main conversation's).
+/// Unset, a subagent with no model inherited Nirvana Claude's own seat, Fable or Opus.
+pub const SUBAGENT_MODEL_ENV: &str = "CLAUDE_CODE_SUBAGENT_MODEL";
 
 /// The orchestrator's seat at launch for a specific folder/project (plan 20 §3.2, plan 23 §5).
 pub fn orchestrator_launch_seat_for(home: &Path, folder: &Path) -> (String, String) {
@@ -204,10 +209,56 @@ pub fn orchestrator_launch_seat(home: &Path) -> (String, String) {
     launch_seat(home, None)
 }
 
-/// The arguments after `claude` (plan 12 §6, O4b), in its order.
+/// Plan 40a: the machine table's `subagent_default` and `autocompact_tokens` (machine-wide: a project's file holds a
+/// mode only), herdr's default's when the table is missing or refused.
+fn launch_constants(home: &Path) -> (String, u64) {
+    let seats_path = home
+        .join(crate::nirvana_seat::DIR)
+        .join(crate::nirvana_seat::SEATS_FILE);
+    let constants = std::fs::read_to_string(&seats_path)
+        .ok()
+        .and_then(|text| crate::nirvana_seat::parse(&text).ok())
+        .or_else(|| crate::nirvana_seat::parse(crate::nirvana_seat::DEFAULT).ok())
+        .map(|table| table.constants);
+    constants.map_or((String::new(), 0), |c| {
+        (c.subagent_default.trim().to_owned(), c.autocompact_tokens)
+    })
+}
+
+/// Plan 40a: `CLAUDE_CODE_SUBAGENT_MODEL` written into the launch settings file's `env`, where the plugin's settings
+/// already put `NIRVANA_ORCHESTRATOR=1` for the verb's fresh space, whose shell started without it
+/// (app/nirvana_new.rs). The file is the per-folder one `nirvana_superpowers::launch_settings_in` just wrote, never the
+/// plugin's own. An empty model sets nothing.
+fn with_subagent_env(file: &Path, model: &str) -> Result<(), String> {
+    if model.is_empty() {
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(file).map_err(|err| format!("{}: {err}", file.display()))?;
+    let mut value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|err| format!("{}: {err}", file.display()))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| format!("{} is not a JSON object", file.display()))?;
+    let env = object
+        .entry("env")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let env = env
+        .as_object_mut()
+        .ok_or_else(|| format!("{}: env is not an object", file.display()))?;
+    env.insert(SUBAGENT_MODEL_ENV.to_owned(), model.into());
+    let mut bytes = serde_json::to_vec_pretty(&value).map_err(|err| err.to_string())?;
+    bytes.push(b'\n');
+    crate::nirvana_seat::write_atomic(file, &bytes)
+        .map_err(|err| format!("{}: {err}", file.display()))
+}
+
+/// The arguments after `claude` (plan 12 §6, O4b), in its order. The seat is the machine's mode with no folder known
+/// (plan 20 §3.2), or R1's when the table fails to load. Not the process's own folder: herdr's server runs in whatever
+/// folder started it, which is no space's project. `launch_args` puts the folder's seat over it.
 pub fn nirvana_claude_args(home: &Path) -> Vec<String> {
     let plugin = plugin_dir(home);
     let (model, effort) = orchestrator_launch_seat(home);
+    let (_, autocompact) = launch_constants(home);
     vec![
         "--plugin-dir".into(),
         plugin.display().to_string(),
@@ -229,6 +280,20 @@ pub fn nirvana_claude_args(home: &Path) -> Vec<String> {
         "--rc".into(),
         "--chrome".into(),
     ]
+    .into_iter()
+    .chain(autocompact_flag(autocompact))
+    .collect()
+}
+
+/// Plan 40a: `--autocompact <tokens>` (`claude --help` 2.1.321: "auto, or 100k-1M tokens", "200000" taken as is). Its
+/// default on a 1M-context model is about 967K tokens; `fresh_above` starts a fresh session between runs, and this
+/// compacts inside one run that grows past it. 0 passes nothing.
+fn autocompact_flag(tokens: u64) -> Vec<String> {
+    if tokens > 0 {
+        vec!["--autocompact".to_owned(), tokens.to_string()]
+    } else {
+        Vec::new()
+    }
 }
 
 /// Plan 13: `nirvana_claude_args` with the folder's generated settings file in place of the plugin's, when one was
@@ -280,6 +345,22 @@ pub fn launch_args_in(
                 "nirvana: superpowers stay as the settings say for {seat_model}: {why}"
             ),
         }
+    }
+    // Plan 40a: the subagent model goes into the launch file only, the per-folder one written just above; when that
+    // write failed the argv names the plugin's or the preset's file, which herdr does not change, and the variable is
+    // not set (the warning says so).
+    let launch = crate::nirvana_superpowers::launch_settings_path(
+        &home.join(crate::nirvana_seat::DIR),
+        folder,
+    );
+    if args.iter().any(|arg| Path::new(arg) == launch) {
+        if let Err(why) = with_subagent_env(&launch, &launch_constants(home).0) {
+            tracing::warn!("nirvana: {SUBAGENT_MODEL_ENV} not set for {seat_model}: {why}");
+        }
+    } else {
+        tracing::warn!(
+            "nirvana: {SUBAGENT_MODEL_ENV} not set for {seat_model}: no launch settings file"
+        );
     }
     // Plan 25 §3: the built-in tools the probe showed cost 500 tokens or more of the first turn, as many as the owner
     // ruled cut on 2026-10-26 (`nirvana_lean::DISALLOWED`). Before `--resume`, so the flag's list never meets the
@@ -493,17 +574,14 @@ pub struct WindowMark {
 }
 
 // Plan 21 §3.1: window mark and liveness facts, wired into window and open in step 2.
-#[allow(dead_code)]
 pub const WINDOW_MARK_FILE: &str = "window.json";
 
 /// `<home>/nirvana/window.json`
-#[allow(dead_code)]
 pub fn window_mark_path(home: &Path) -> PathBuf {
     home.join("nirvana").join(WINDOW_MARK_FILE)
 }
 
 /// Writes `mark` to `<home>/nirvana/window.json` with write_bytes semantics (single file write).
-#[allow(dead_code)]
 pub fn write_window_mark(home: &Path, mark: &WindowMark) -> std::io::Result<()> {
     let path = window_mark_path(home);
     if let Some(parent) = path.parent() {
@@ -515,7 +593,6 @@ pub fn write_window_mark(home: &Path, mark: &WindowMark) -> std::io::Result<()> 
 }
 
 /// Reads the mark at `<home>/nirvana/window.json`; empty or torn files read as no mark.
-#[allow(dead_code)]
 pub fn read_window_mark(home: &Path) -> Option<WindowMark> {
     let path = window_mark_path(home);
     let bytes = std::fs::read(path).ok()?;
@@ -526,7 +603,6 @@ pub fn read_window_mark(home: &Path) -> Option<WindowMark> {
 }
 
 /// Removes the mark at `<home>/nirvana/window.json` only when its pid matches `pid`.
-#[allow(dead_code)]
 pub fn remove_window_mark(home: &Path, pid: u32) -> std::io::Result<bool> {
     let path = window_mark_path(home);
     let Some(mark) = read_window_mark(home) else {
@@ -542,7 +618,6 @@ pub fn remove_window_mark(home: &Path, pid: u32) -> std::io::Result<bool> {
 
 /// Pure liveness check over the three facts (plan 21 §3.1):
 /// process at pid runs and is herdr.exe, IsWindow(hwnd) is true, server is listening.
-#[allow(dead_code)]
 pub fn is_mark_live(
     process_runs_herdr: bool,
     window_is_window: bool,
@@ -552,7 +627,6 @@ pub fn is_mark_live(
 }
 
 /// Pure helper parameterized with predicates for unit testing without a real window.
-#[allow(dead_code)]
 pub fn check_mark_live_with<F1, F2, F3>(
     mark: &WindowMark,
     mut process_runs_herdr: F1,
@@ -572,7 +646,6 @@ where
 }
 
 #[cfg(windows)]
-#[allow(dead_code)]
 pub fn is_herdr_process(pid: u32) -> bool {
     if pid <= 4 {
         return false;
@@ -619,13 +692,11 @@ pub fn is_herdr_image(name: &str) -> bool {
 }
 
 #[cfg(not(windows))]
-#[allow(dead_code)]
 pub fn is_herdr_process(_pid: u32) -> bool {
     false
 }
 
 #[cfg(windows)]
-#[allow(dead_code)]
 pub fn is_valid_window(hwnd: usize) -> bool {
     if hwnd == 0 {
         return false;
@@ -635,18 +706,15 @@ pub fn is_valid_window(hwnd: usize) -> bool {
 }
 
 #[cfg(not(windows))]
-#[allow(dead_code)]
 pub fn is_valid_window(_hwnd: usize) -> bool {
     false
 }
 
-#[allow(dead_code)]
 pub fn is_server_listening_now() -> bool {
     crate::server::autodetect::is_server_listening().unwrap_or(false)
 }
 
 /// Checks if a mark is live against the real system facts.
-#[allow(dead_code)]
 pub fn is_live_window_mark(mark: &WindowMark) -> bool {
     check_mark_live_with(
         mark,
@@ -1005,6 +1073,7 @@ mod tests {
                 plugin.join("settings.json").display().to_string(),
                 "--rc".into(),
                 "--chrome".into(),
+                // Plan 40a review round: herdr's default `autocompact_tokens` is 0, so no `--autocompact`.
             ]
         );
         assert_eq!(
@@ -1523,7 +1592,8 @@ mod tests {
         assert_eq!(
             written,
             serde_json::json!({
-                "env": {"NIRVANA_ORCHESTRATOR": "1"},
+                // Plan 40a: a subagent with no model runs on Sonnet, never on Nirvana Claude's own seat.
+                "env": {"NIRVANA_ORCHESTRATOR": "1", "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"},
                 "statusLine": {"type": "command", "command": "herdr"},
                 "enabledPlugins": {
                     "superpowers@claude-plugins-official": false,
@@ -1566,6 +1636,66 @@ mod tests {
                 "superpowers@superpowers-marketplace": false,
             })
         );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Plan 40a: the table's `subagent_default` and `autocompact_tokens` reach the launch: the variable in the launch
+    /// settings file's `env`, the flag in the argv. Empty and 0 pass nothing.
+    #[test]
+    fn c40a_the_launch_carries_the_subagent_model_and_the_autocompact_window() {
+        let (home, claude) = p28_home("c40a-launch");
+        let folder = Path::new(r"C:\work\print");
+        let launch =
+            crate::nirvana_superpowers::launch_settings_path(&home.join("nirvana"), folder);
+        let env = || -> serde_json::Value {
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&launch).unwrap())
+                .unwrap()["env"]
+                .clone()
+        };
+        let flag = |args: &[String]| {
+            args.iter()
+                .position(|a| a == "--autocompact")
+                .map(|at| args[at + 1].clone())
+        };
+        let seats = home.join("nirvana").join("seats.toml");
+        std::fs::write(
+            &seats,
+            crate::nirvana_seat::DEFAULT
+                .replace(
+                    "subagent_default = \"sonnet\"",
+                    "subagent_default = \"haiku\"",
+                )
+                .replace("autocompact_tokens = 0", "autocompact_tokens = 250000"),
+        )
+        .unwrap();
+        let args = launch_args_in(&home, folder, None, Some(&claude));
+        assert_eq!(env()[SUBAGENT_MODEL_ENV], "haiku");
+        assert_eq!(
+            env()["NIRVANA_ORCHESTRATOR"],
+            "1",
+            "the plugin's env is kept"
+        );
+        assert_eq!(flag(&args).as_deref(), Some("250000"));
+        // Before the cuts and the resume: the wake guard and the resume stay where they were.
+        let resumed = launch_args_in(&home, folder, Some("abc"), Some(&claude));
+        assert_eq!(resumed[resumed.len() - 2..], ["--resume", "abc"]);
+        std::fs::write(
+            &seats,
+            crate::nirvana_seat::DEFAULT
+                // The shipped 0: no flag.
+                .replace("subagent_default = \"sonnet\"", "subagent_default = \"\""),
+        )
+        .unwrap();
+        let args = launch_args_in(&home, folder, None, Some(&claude));
+        assert!(env().get(SUBAGENT_MODEL_ENV).is_none(), "{}", env());
+        assert_eq!(flag(&args), None);
+        // A window outside Claude Code's range is a refused table, never a flag Claude Code would refuse.
+        assert!(crate::nirvana_seat::parse(
+            &crate::nirvana_seat::DEFAULT
+                .replace("autocompact_tokens = 0", "autocompact_tokens = 50000")
+        )
+        .unwrap_err()
+        .contains("autocompact_tokens 50000"));
         let _ = std::fs::remove_dir_all(&home);
     }
 

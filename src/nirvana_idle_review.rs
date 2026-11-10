@@ -349,10 +349,20 @@ pub fn global_path() -> PathBuf {
 }
 
 fn read_json<T: Default + for<'de> Deserialize<'de>>(path: &Path) -> T {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+    read_checked(path).unwrap_or_default()
+}
+
+/// Review B5: a state file as it is, its default only when it is not there. Any other read error (an editor or backup
+/// tool holding it, a sharing violation on Windows) and any text that does not parse is `Err`: the module's rule is
+/// "any fact it cannot read is a reason not to run", and a damaged `idle-review.json` read as its default switched
+/// idle review back on (`off` defaults to false) and reset its per-window caps.
+fn read_checked<T: Default + for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map_err(|err| format!("{} does not parse: {err}", path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+        Err(err) => Err(format!("{} cannot be read: {err}", path.display())),
+    }
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
@@ -385,7 +395,20 @@ where
         .truncate(false)
         .open(PathBuf::from(format!("{}.lock", path.display())))?;
     file.lock()?;
-    let mut value: T = read_json(path);
+    // Review B5: a file there that does not read is never written over with a default. It stays as it is (a copy goes
+    // to `<file>.bad` for the owner) and the change is refused, so every tick reads a doubt until it is fixed or
+    // deleted.
+    let mut value: T = match read_checked(path) {
+        Ok(value) => value,
+        Err(why) => {
+            if path.exists() {
+                let _ = std::fs::copy(path, PathBuf::from(format!("{}.bad", path.display())));
+            }
+            return Err(std::io::Error::other(format!(
+                "{why}; fix it or delete it, herdr will not write over it"
+            )));
+        }
+    };
     let out = change(&mut value);
     write_json(path, &value)?;
     drop(file);
@@ -1022,15 +1045,21 @@ pub fn tick_with(
         }
     }
     // S5: this tick's readings join the history before it is read.
-    let global = change_global(|global| {
+    let mut doubt = doubt;
+    // Review B5: a global file that does not read is a doubt, never its default (`off` false, caps zero).
+    let global = match change_global(|global| {
         record_samples(global, world);
         global.clone()
-    })
-    .unwrap_or_else(|_| read_global());
+    }) {
+        Ok(global) => global,
+        Err(err) => {
+            doubt = doubt.or(Some(err.to_string()));
+            Global::default()
+        }
+    };
     let busy = busy(world);
     let owner = owner_key(&nirvana_seat::dir());
     let mut activity = None;
-    let mut doubt = doubt;
     for root in projects {
         match self::activity(root) {
             Ok(at) => activity = activity.max(at.map(|at| (at, root.display().to_string()))),
@@ -1048,7 +1077,11 @@ pub fn tick_with(
     let mut queued = false;
     for root in projects {
         let project = Project::at(root);
-        let state = read_space(root);
+        // Review B5: the space's own file likewise (its day count and backoff).
+        let (state, space_doubt) = match read_checked::<SpaceState>(&space_path(root)) {
+            Ok(state) => (state, None),
+            Err(why) => (SpaceState::default(), Some(why)),
+        };
         let since = state
             .last
             .as_ref()
@@ -1056,7 +1089,7 @@ pub fn tick_with(
         let mut facts = Facts {
             now,
             on: !global.off,
-            doubt: doubt.clone(),
+            doubt: doubt.clone().or(space_doubt),
             busy: if queued {
                 Some("an idle review was queued in this tick".into())
             } else {

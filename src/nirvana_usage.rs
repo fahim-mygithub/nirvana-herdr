@@ -473,6 +473,29 @@ fn add_unknown(readings: &mut Vec<Reading>, pool: &str, read_at: u64, source: &s
     }
 }
 
+/// The scope of a "Current week (X)" line as a window name: "Fable" is `fable`, and so are "Fable 5.2" and "Fable
+/// models" (plan 40a). The seat table names `week.fable`; a line renamed with the model's version would otherwise have
+/// become `week.fable-5-2`, a window no seat spends, and the Fable seat would read "not read" forever (review, Fable
+/// change list item 9). Trailing words that are a version (digits and dots) or "model"/"models" are dropped; the
+/// first word always stays. The scope is the start of `name`, for `slug`.
+fn week_scope(name: &str) -> &str {
+    let mut scope = name.trim();
+    while let Some((rest, last)) = scope.rsplit_once(char::is_whitespace) {
+        let versionish = last
+            .trim_start_matches(['v', 'V'])
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.')
+            && last.chars().any(|c| c.is_ascii_digit());
+        let models = last.eq_ignore_ascii_case("model") || last.eq_ignore_ascii_case("models");
+        if versionish || models {
+            scope = rest.trim_end();
+        } else {
+            break;
+        }
+    }
+    scope
+}
+
 /// "35% used · resets ...": the share used. "<1%" reads as 0.
 fn claude_used(rest: &str) -> Option<f32> {
     let rest = rest.trim_start();
@@ -486,6 +509,11 @@ fn claude_used(rest: &str) -> Option<f32> {
 /// Claude Code's `/usage` text. "Current session" is the 5 h window, "Current week (all models)" the week,
 /// and any other "Current week (X)" a week scoped to X, `week.x`: today "(Fable)", which spends the all-models
 /// week with a 50% allowance (P6). Text with neither of the first two (signed out, an error) is no reading.
+///
+/// The Fable line's percent is a share of Fable's own allowance, not of the whole week (package review a, N5): the
+/// `CLAUDE_TEXT` fixture below, a real `/usage` answer, reads Fable 83% while all models read 70%. Fable's spend is
+/// inside the all-models week, so a share of the whole week could never pass it. `week.fable` at 100% is therefore
+/// the line where `claude -p` starts billing Fable to usage credits, and `fable_reserve` is a share of that allowance.
 pub fn claude_readings(text: &str, read_at: u64) -> Option<Vec<Reading>> {
     let mut readings: Vec<Reading> = Vec::new();
     for line in text.lines().map(str::trim) {
@@ -498,6 +526,7 @@ pub fn claude_readings(text: &str, read_at: u64) -> Option<Vec<Reading>> {
             if name == "all models" {
                 ("week".to_owned(), rest)
             } else {
+                let name = week_scope(name);
                 (format!("week.{}", slug(name)), rest)
             }
         } else {
@@ -803,11 +832,25 @@ pub(crate) fn run_in(
     crate::platform::configure_background_command(&mut command);
     let mut child = command.spawn().ok()?;
     let mut stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stdout.read_to_string(&mut text);
-        text
-    });
+    // What the child wrote so far, kept as it arrives, and a signal at EOF.
+    let read = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let (eof, reader) = std::sync::mpsc::channel::<()>();
+    {
+        let read = std::sync::Arc::clone(&read);
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match stdout.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => read
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .extend_from_slice(&chunk[..n]),
+                }
+            }
+            let _ = eof.send(());
+        });
+    }
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
@@ -822,8 +865,18 @@ pub(crate) fn run_in(
             }
         }
     }
-    reader.join().ok()
+    // Review B4: the reader ends at the pipe's EOF, and a grandchild that inherited stdout (an update helper, a
+    // background MCP or browser process the CLI started) keeps it open after the child exits. A bare `join` then
+    // never returned: the usage thread froze and `seat pick` hung in `current_sources`. The child is gone, so all it
+    // wrote is in the pipe: EOF is waited for `AFTER_EXIT`, then what was read is the answer, and the reader thread
+    // is left to end with the pipe.
+    let _ = reader.recv_timeout(AFTER_EXIT);
+    let bytes = read.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
+
+/// How long `run_in` waits for stdout's EOF after the child exited.
+const AFTER_EXIT: Duration = Duration::from_secs(2);
 
 /// What one read gave.
 #[derive(Debug, Clone, PartialEq)]
@@ -1044,6 +1097,19 @@ pub fn read_cache(path: &Path) -> Cache {
 pub fn write_source(path: &Path, provider: Provider, source: &Source) -> std::io::Result<()> {
     static WRITING: Mutex<()> = Mutex::new(());
     let _writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = path.parent().expect("a parent");
+    std::fs::create_dir_all(dir)?;
+    // Review B3: the mutex serialises one process's threads only. A window and a worker's `herdr seat pick` are two
+    // processes; each read the whole file, put in its own provider and renamed, and the later rename dropped the
+    // other's entry, so readings flickered to "not read" and the next pick spent another `claude -p /usage`. The
+    // read, the merge and the rename are now under an OS lock on `usage.json.lock`, as `change_json` in
+    // nirvana_idle_review.rs holds one. The OS lets it go when the handle closes, a dying process included.
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(dir.join(format!("{CACHE_FILE}.lock")))?;
+    lock.lock()?;
     let mut cache = read_cache(path);
     cache.version = 1;
     let newer = cache
@@ -1056,10 +1122,9 @@ pub fn write_source(path: &Path, provider: Provider, source: &Source) -> std::io
     cache
         .sources
         .insert(provider.key().to_owned(), source.clone());
-    let dir = path.parent().expect("a parent");
-    std::fs::create_dir_all(dir)?;
     let temp = dir.join(format!(".{CACHE_FILE}.{}.tmp", std::process::id()));
     std::fs::write(&temp, serde_json::to_vec_pretty(&cache)?)?;
+    // `lock` is held to the end of this function, the rename included.
     std::fs::rename(&temp, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&temp);
     })
@@ -2171,12 +2236,19 @@ mod tests {
         older.readings.clear();
         write_source(&path, Provider::Claude, &older).unwrap();
         assert_eq!(read_cache(&path).sources["claude"], sources[0]);
-        // No temp file is left behind.
-        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+        // No temp file is left behind; the lock file stays (review B3), as `leases.lock` does.
+        let mut names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
-        assert_eq!(names, [std::ffi::OsString::from(CACHE_FILE)]);
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                std::ffi::OsString::from(CACHE_FILE),
+                std::ffi::OsString::from(format!("{CACHE_FILE}.lock"))
+            ]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2273,5 +2345,86 @@ mod tests {
         assert_eq!(figure_two.fill(), Some(0.65));
         assert_eq!(Figure::Word("off".into()).fill(), None);
         assert_eq!(Figure::Reading.fill(), None);
+    }
+
+    /// Plan 40a: the Fable week keeps its window name if `/usage` renames the line. "Current week (Fable): 2% used"
+    /// was the live answer on 2026-11-09.
+    #[test]
+    fn c40a_a_renamed_fable_line_is_still_week_fable() {
+        for name in [
+            "Fable",
+            "Fable 5.2",
+            "Fable models",
+            "Fable 5.2 models",
+            "fable v5",
+        ] {
+            let text = format!(
+                "Current session: 2% used \u{b7} resets Nov 9, 9pm (UTC)\nCurrent week (all models): 10% used \u{b7} resets Nov 13, 11am (UTC)\nCurrent week ({name}): 2% used \u{b7} resets Nov 13, 11am (UTC)\n"
+            );
+            let readings = claude_readings(&text, READ_1017).unwrap();
+            assert!(
+                close(used(&readings, MAX, "week.fable"), 0.02),
+                "{name}: {readings:?}"
+            );
+        }
+        // A scope that is not a version keeps its words: a new model's week is its own window.
+        assert_eq!(slug(week_scope("Opus Plus")), "opus-plus");
+        assert_eq!(week_scope("models"), "models");
+        assert_eq!(week_scope(" Fable  5.2 "), "Fable");
+    }
+
+    /// Review B3: `write_source` takes the OS lock on `usage.json.lock`, so a second process's write waits for it.
+    #[test]
+    fn c40a_a_write_waits_for_another_processs_lock_on_the_cache() {
+        let dir = std::env::temp_dir().join(format!("nirvana-c40a-b3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CACHE_FILE);
+        // Another handle holds the lock, as another herdr would.
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(dir.join(format!("{CACHE_FILE}.lock")))
+            .unwrap();
+        held.lock().unwrap();
+        let writer = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let source = Source {
+                    read_at: Some(READ_1017),
+                    ..Source::default()
+                };
+                write_source(&path, Provider::Claude, &source)
+            })
+        };
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(
+            !path.exists(),
+            "write_source wrote while another held the lock"
+        );
+        drop(held);
+        writer.join().unwrap().unwrap();
+        assert!(read_cache(&path).sources.contains_key("claude"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review B4: a child that exits while a grandchild still holds its stdout no longer hangs `run`: what it wrote
+    /// comes back within `AFTER_EXIT`. `start /b` leaves ping writing to the inherited pipe for about 19 s.
+    #[cfg(windows)]
+    #[test]
+    fn c40a_run_returns_when_the_child_exits_and_a_grandchild_holds_stdout() {
+        let started = Instant::now();
+        let out = run(
+            "cmd",
+            &["/D", "/C", "echo herdr-b4& start /b ping -n 20 127.0.0.1"],
+            Duration::from_secs(15),
+        );
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(8), "run took {took:?}");
+        assert!(
+            out.as_deref().is_some_and(|text| text.contains("herdr-b4")),
+            "{out:?}"
+        );
     }
 }

@@ -394,10 +394,12 @@ fn a_spawn_on_max_that_would_break_the_reserve_is_refused() {
     let table = table();
     let def = worker_def("claude-opus-5-5", "high");
     let opus = spawn("nirvana:worker-opus-high", None, None);
-    // opus high spends 0.224% of the 5 h window for a small order at weight 1 (seats.toml's prior); review.adversary's
-    // weight scales it. The reserve is 15%.
+    // opus high's 5 h share for a subagent's size, read from seats.toml so a refit does not rot the test (plan 40a's
+    // review round moved both the cell and `size.small`); review.adversary's weight scales it. The reserve is 15%.
     let weight = table.class("review.adversary").expect("a class").weight;
-    let expected = 0.00224 * weight;
+    let expected = expected_share(table.seat("opus").expect("opus"), Effort::High, "5h")
+        * table.size(SUBAGENT_SIZE).use_factor
+        * weight;
     let fits = 1.0 - 0.15 - expected - 0.001;
     let breaks = 1.0 - 0.15 - expected + 0.001;
     assert_eq!(
@@ -589,9 +591,10 @@ fn models_and_aliases_find_their_seat_and_cells_price_like_the_seat_engine() {
     }
     assert!(seat_for_model(&table, "gemini-4-argon-high").is_none());
     let haiku = table.seat("haiku").expect("haiku");
-    assert!((expected_share(haiku, Effort::Low, "5h") - 0.000026).abs() < 1e-9);
+    // The cells since plan 40a's review round (`nirvana/seat_cells.py`: haiku takes sonnet's fit as a prior).
+    assert!((expected_share(haiku, Effort::Low, "5h") - 0.00003225).abs() < 1e-9);
     // No high cell: the dearest below stands in, as the engine's use_cell does.
-    assert!((expected_share(haiku, Effort::High, "5h") - 0.000044).abs() < 1e-9);
+    assert!((expected_share(haiku, Effort::High, "5h") - 0.00005374).abs() < 1e-9);
 }
 
 #[test]
@@ -676,6 +679,8 @@ fn every_worker_agent_names_its_model_and_effort() {
     assert_eq!(
         names,
         [
+            "worker-fable-high",
+            "worker-fable-medium",
             "worker-haiku-low",
             "worker-opus-high",
             "worker-opus-medium",

@@ -659,3 +659,75 @@ fn the_seats_square_shows_orchestrator_row_with_and_without_restart_to_switch() 
 
     done(root, home);
 }
+
+/// Plan 40a: the square shows SOTA's fallback with why ("SOTA, Fable week 82% used") and the restart line against a
+/// session on Fable; and review M2's line when the installed seats.toml differs from herdr's default.
+#[test]
+fn c40a_the_square_shows_sotas_fallback_and_an_edited_table() {
+    let (mut state, root, home) = state_for("c40a-square", "nirvana");
+    let usage = |fable: f32| {
+        format!(
+            r#"{{"version":1,"sources":{{"claude":{{"read_at":{NOW},"readings":[{{"pool":"max","window":"5h","used":0.1,"resets_at":{r},"read_at":{NOW},"source":"claude /usage"}},{{"pool":"max","window":"week","used":0.2,"resets_at":{r},"read_at":{NOW},"source":"claude /usage"}},{{"pool":"max","window":"week.fable","used":{fable},"resets_at":{r},"read_at":{NOW},"source":"claude /usage"}}]}}}}}}"#,
+            r = NOW + 86_400
+        )
+    };
+    std::fs::write(
+        home.join("seats.toml"),
+        crate::nirvana_seat::DEFAULT.replace("mode = \"balanced\"", "mode = \"sota\""),
+    )
+    .unwrap();
+    std::fs::write(home.join("usage.json"), usage(0.82)).unwrap();
+    let sessions_dir = home.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    std::fs::write(
+        sessions_dir.join(format!(
+            "{}.json",
+            crate::nirvana_launch::folder_hash(&root)
+        )),
+        r#"{"session_id":"c40a-sess","at":"2026-11-09T00:00:00Z","transcript":"t.jsonl"}"#,
+    )
+    .unwrap();
+    let running = crate::nirvana_claude::SessionSeatRecord {
+        session_id: "c40a-sess".into(),
+        model: "claude-fable-5-2".into(),
+        seat: "fable".into(),
+        effort: "high".into(),
+        last_notified_seat: None,
+        last_notified_effort: None,
+    };
+    std::fs::write(
+        sessions_dir.join("c40a-sess.json"),
+        serde_json::to_string(&running).unwrap(),
+    )
+    .unwrap();
+    let rows = open(&mut state, 200);
+    let orch = line(&rows, "Nirvana Claude");
+    assert!(
+        orch.contains("Nirvana Claude \u{b7} opus high \u{b7} SOTA, Fable week 82% used \u{b7} restart to switch"),
+        "{orch}"
+    );
+    assert!(!rows
+        .iter()
+        .any(|row| row.contains("differs from herdr's default")));
+    // An edited table: one line says so.
+    std::fs::write(
+        home.join("seats.toml"),
+        crate::nirvana_seat::DEFAULT
+            .replace("mode = \"balanced\"", "mode = \"sota\"")
+            .replace("floor = 0.05", "floor = 0.06"),
+    )
+    .unwrap();
+    std::fs::write(home.join("usage.json"), usage(0.02)).unwrap();
+    let rows = rows_of(&mut state, 200, 40);
+    let _ = line(
+        &rows,
+        "seats.toml differs from herdr's default. herdr seat diff shows how.",
+    );
+    let orch = line(&rows, "Nirvana Claude");
+    assert!(
+        orch.contains("Nirvana Claude \u{b7} fable high \u{b7} SOTA"),
+        "{orch}"
+    );
+    assert!(!orch.contains("restart to switch"), "{orch}");
+    done(root, home);
+}

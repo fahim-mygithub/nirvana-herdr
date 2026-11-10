@@ -38,21 +38,23 @@ CONTROLS = (
         'guard_spawn_booking_rules_and_refusal_messages',
         'rust',
     ),
-    # Step 2 (§3.1): Orchestrator seat in Efficient mode is sonnet medium
+    # Step 2 (§3.1): Orchestrator seat in Efficient mode is sonnet medium. Plan 40a moved the seat into
+    # `OrchestratorTable::default()`, which a table without `[orchestrator]` reads (review a, S2: retargeted there).
     Control(
         'p20_orchestrator_efficient_mode',
         'src/nirvana_seat.rs',
-        '            let seat = "sonnet".to_string();\n',
-        '            let seat = "opus".to_string();\n',
+        '            efficient: OrchestratorChoice::new("sonnet", Effort::Medium),\n',
+        '            efficient: OrchestratorChoice::new("opus", Effort::Medium),\n',
         'orchestrator_seat_efficient_mode',
         'rust',
     ),
-    # Step 2 (§3.1): Orchestrator seat in SOTA mode is opus high
+    # Step 2 (§3.1): Orchestrator seat in SOTA mode is opus high: the default a table without `[orchestrator]` reads
+    # (review a, S2: retargeted from the hard-coded branch plan 40a removed).
     Control(
         'p20_orchestrator_sota_mode',
         'src/nirvana_seat.rs',
-        '            let effort = Effort::High;\n',
-        '            let effort = Effort::Medium;\n',
+        '            sota: OrchestratorChoice::new("opus", Effort::High),\n',
+        '            sota: OrchestratorChoice::new("opus", Effort::Medium),\n',
         'orchestrator_seat_sota_mode',
         'rust',
     ),
@@ -60,8 +62,8 @@ CONTROLS = (
     Control(
         'p20_orchestrator_balanced_t_threshold',
         'src/nirvana_seat.rs',
-        '                let (seat, effort) = if t < 0.5 {\n',
-        '                let (seat, effort) = if t < 0.6 {\n',
+        '            let choice = if t < 0.5 {\n',
+        '            let choice = if t < 0.6 {\n',
         'orchestrator_seat_balanced_at_t_0_5',
         'rust',
     ),

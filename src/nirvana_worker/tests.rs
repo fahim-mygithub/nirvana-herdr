@@ -376,19 +376,20 @@ fn a_spent_pool_reseats_on_another_pool() {
         ..nirvana_seat::World::default()
     };
     let request = nirvana_seat::Request::new("chore.script");
-    // Plan 19 §4: chore.script at balanced picks flash on gemini.
+    // Plan 19 §4 picked flash on gemini; plan 40a's review round refit flash low's cell to 8.97 times its prior (the
+    // record, n 12), and chore.script now seats on max. The test is the reseat, so it spends the pool the rule picked.
     let before = nirvana_seat::pick(&table, &world, &request).expect("a seat");
-    assert_eq!(before.pool, "gemini");
+    let first = before.pool.clone();
     let limit = RateLimit {
         signal: "rate_limit_event".into(),
-        pool: Some("gemini".into()),
+        pool: Some(first.clone()),
         window: Some("5h".into()),
         resets_at: Some(now + 7200),
         detail: String::new(),
     };
-    let spent = spent_world(&table, world.clone(), &limit, "gemini");
+    let spent = spent_world(&table, world.clone(), &limit, &first);
     let after = nirvana_seat::pick(&table, &spent, &request).expect("another seat");
-    assert_ne!(after.pool, "gemini", "{}", after.reason);
+    assert_ne!(after.pool, first, "{}", after.reason);
     // agy's exit 3 names no window: every window of the pool reads spent.
     let agy = RateLimit {
         window: None,

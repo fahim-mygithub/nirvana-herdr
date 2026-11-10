@@ -37,8 +37,9 @@ CONTROLS = (
             'spare_weight = 1.0\n',
             SPEND_DOWN, "rust"),
     Control('p14_toml_max_week_per_usd', 'src/nirvana_seats.toml',
-            'per_usd = { "5h" = 0.04, week = 0.00078 }\n',
-            'per_usd = { "5h" = 0.04, week = 0.005 }\n',
+            # Review a, S2: the line gained `"week.fable"` in plan 40a and new 5h and Fable factors in its review round.
+            'per_usd = { "5h" = 0.0073, week = 0.00078, "week.fable" = 0.005 }\n',
+            'per_usd = { "5h" = 0.0073, week = 0.005, "week.fable" = 0.005 }\n',
             TABLE, "rust"),
     Control('p14_toml_build_bounded_g_sonnet_score', 'src/nirvana_seats.toml',
             '  { seat = "haiku", score = 70 },\n  { seat = "g-sonnet", score = 88 },',

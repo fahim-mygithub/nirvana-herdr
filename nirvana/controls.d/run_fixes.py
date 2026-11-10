@@ -119,12 +119,13 @@ CONTROLS = (
         'send_back_inherits_override_and_does_not_count_against_run_overrides',
         'rust',
     ),
-    # Plan 24 §4: evaluate exempts inherited override from override cap
+    # Plan 24 §4: evaluate exempts inherited override from override cap. Retargeted in plan 40a's review round (N9):
+    # the nested `if` this found was collapsed into one condition.
     Control(
         'p24_send_back_cap_exempt',
         'src/nirvana_seat.rs',
-        '        if !request.inherited_override {\n',
-        '        if true {\n',
+        '        if !request.inherited_override && world.overrides_used',
+        '        if true && world.overrides_used',
         'send_back_inherits_override_and_does_not_count_against_run_overrides',
         'rust',
     ),

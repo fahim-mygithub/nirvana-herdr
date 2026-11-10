@@ -206,14 +206,17 @@ pub struct LaunchSpec {
 pub const CLAUDE_ENV: [(&str, &str); 1] = [("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1")];
 
 /// What a worker must not inherit from the orchestrator that started it: a worker is not a child session
-/// of the orchestrator's Claude (the same list herdr's `pane.rs` removes from a new pane).
-pub const ENV_REMOVED: [&str; 6] = [
+/// of the orchestrator's Claude (the same list herdr's `pane.rs` removes from a new pane). Nor Nirvana Claude's
+/// `CLAUDE_CODE_SUBAGENT_MODEL` (plan 40a review a, N1): its launch settings put it in the orchestrator's env, and a
+/// worker's `herdr seat run` would pass it on, so a seated worker's own subagents keep Claude Code's default.
+pub const ENV_REMOVED: [&str; 7] = [
     "CODEX_THREAD_ID",
     "OMPCODE",
     "CLAUDECODE",
     "CLAUDE_CODE_CHILD_SESSION",
     "CLAUDE_CODE_SESSION_ID",
     "CLAUDE_CODE_MESSAGING_TOKEN",
+    crate::nirvana_launch::SUBAGENT_MODEL_ENV,
 ];
 
 /// The worker's argv, program first. A list, never a shell line.
@@ -1727,6 +1730,21 @@ pub fn exec(
         // Plan 35 §3.1: a tools folder a crash left behind is never handed to this attempt; it is written afresh.
         crate::nirvana_gui_tools::remove_order_config(&run_dir, &seated.order, out);
         ensure_sources_line(&seated, out);
+        // Plan 40a review a, S1: the moment of launch. A booking made an hour ago is checked again on the live world, at
+        // the effort this attempt runs (a caller's `--effort` included, review a N3), so a Fable week gone stale or run
+        // down since refuses the start. The lease is released and the order ends failed, saying what to do first.
+        if let Err(why) = nirvana_seat::check_before_spend(
+            &project.root,
+            &seated.seat,
+            seated.effort,
+            &seated.class,
+            seated.size,
+            &seated.order,
+        ) {
+            end_failed(project, &journal, run, &seated, &why, None)?;
+            writeln!(out, "{why}")?;
+            return Ok(nirvana_seat::NO_SEAT_EXIT);
+        }
         // Plan 29 review F3: an order that cannot get a server it was seated for fails here and never starts without.
         let argv = match worker_argv(
             &nirvana_seat::dir(),
@@ -3399,8 +3417,28 @@ fn book_with(
     // run's override count (the O2 fix round's exit 2).
     let mut leases = nirvana_seat::load_leases(&leases_path).map_err(|why| (2, why))?;
     world.now = now();
-    let mut booked: Booked = if let Some(lease) = leases.live(&request.order, world.now) {
-        serde_json::from_value(lease.pick.clone()).map_err(|err| (2, err.to_string()))?
+    let mut booked: Booked = if let Some(lease) = leases.live(&request.order, world.now).cloned() {
+        // Plan 40a review a, S1: a reused booking is checked again on the live world, at the effort this run asks for.
+        // A Fable week gone stale or under its reserve since the booking refuses it: the lease is released under this
+        // lock and nothing starts.
+        world.leases = leases.leases.clone();
+        if let Err(why) = nirvana_seat::may_spend_now(
+            &table,
+            &world,
+            &lease.seat,
+            request.effort.unwrap_or(lease.effort),
+            &lease.class,
+            nirvana_seat::lease_size(&lease),
+            &request.order,
+        ) {
+            leases.release(&request.order, world.now);
+            nirvana_seat::write_leases(&leases_path, &leases).map_err(|err| (2, err.to_string()))?;
+            return Err((
+                nirvana_seat::NO_SEAT_EXIT,
+                nirvana_seat::spend_refused(&request.order, &why),
+            ));
+        }
+        serde_json::from_value(lease.pick).map_err(|err| (2, err.to_string()))?
     } else {
         let Some(class) = &request.class else {
             return Err((
