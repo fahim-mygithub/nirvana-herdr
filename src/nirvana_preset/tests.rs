@@ -6,7 +6,28 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static SCRATCH_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-/// A scratch folder of this test process, emptied first.
+/// The scratch folders this thread made, removed when the thread ends. Plan 40: `scratch()` left every folder behind
+/// (measured 2026-11-09: one run of the 36 `nirvana_preset` tests left 52 `nirvana-p13a-*` folders in TEMP, and the
+/// pattern was among the largest in a backlog of 35,326). A guard returned from `scratch()` would change its 35 call
+/// sites; libtest runs each test on its own thread, so a thread-local whose destructor runs at the thread's end, a
+/// panic included, removes them with no call site touched. A folder a test hands to another thread lives until the
+/// test's own thread ends, which is after that test.
+struct ScratchDirs(std::cell::RefCell<Vec<PathBuf>>);
+
+impl Drop for ScratchDirs {
+    fn drop(&mut self) {
+        // `remove_dir_all` does not follow a junction or a symbolic link out of the folder.
+        for dir in self.0.get_mut().drain(..) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+thread_local! {
+    static SCRATCH_DIRS: ScratchDirs = const { ScratchDirs(std::cell::RefCell::new(Vec::new())) };
+}
+
+/// A scratch folder of this test process, emptied first, removed when the test's thread ends.
 fn scratch(name: &str) -> PathBuf {
     let count = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!(
@@ -15,6 +36,7 @@ fn scratch(name: &str) -> PathBuf {
     ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
+    SCRATCH_DIRS.with(|dirs| dirs.0.borrow_mut().push(dir.clone()));
     dir
 }
 

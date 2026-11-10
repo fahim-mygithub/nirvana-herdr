@@ -22,6 +22,11 @@ Controls: `nirvana/controls.d/c40e.py`, prefix `c40e_`.
 | X | "For an image ... add, after its path, one short note in parentheses" | `send::{message, note_for, header_size}` | `a_sent_photo_carries_a_note_naming_herdr_look`, `the_note_comes_from_the_servers_name_and_bytes_not_the_phones_text`, `image_headers_give_their_size_cheaply` |
 | gate | "`nirvana/gate.py`: the one way to run the scoped gates" | `nirvana/gate.py` | `GateTest` |
 | clean | "`nirvana/clean_temp.py`: removes the backlog. Default is a dry run" | `nirvana/clean_temp.py` | `CleanTempTest` |
+| S1 | "`remove_tree` must refuse a link at its own top at the moment it deletes" | `clean_temp.{remove_tree, apply}`, `gate.{run, sweep_stale}` | `CleanTempTest`, `GateTest` junction tests |
+| S2 | "one `controls.py` run per worktree at a time" | `controls.{take_lock, release_lock, main}` | `ControlsRepairTest.test_a_second_run_in_the_worktree_is_refused_and_touches_nothing` |
+| N2 | "ends its whole child tree before it removes the private TEMP" | `gate.{_Tree, run_child}` | `GateTest.test_an_interrupt_ends_the_whole_tree_before_the_temp_goes`, `test_a_killed_gate_takes_its_tree_with_it` |
+| N5 | "the install reports which files are stale and exits non-zero after finishing the copy" | `windows_shell.{_overlay, StaleFiles, install_plugin}`, `install.main` | `ReplaceTreeTest`, `InstallTest.test_a_stale_plugin_folder_finishes_the_install_and_exits_non_zero` |
+| scratch | "make `scratch()` in `src/nirvana_preset/tests.rs` stop leaving a folder per test" | `nirvana_preset::tests::scratch` | the folder count, 52 before and 0 after |
 
 ## Decisions
 
@@ -34,7 +39,33 @@ Controls: `nirvana/controls.d/c40e.py`, prefix `c40e_`.
 - `clean_temp.py` renames a folder to `<name>.cleaning-<pid>` before removing it, a stronger form of the order's
   "rename-to-self test": Windows refuses either rename while a file inside is open, and the tombstone means a folder
   is never half removed under its own name. It also skips a folder whose pid still runs.
-- `clean_temp.py` follows the order's name rule strictly: a name must end in a pid or a pid and a timestamp. The two
-  largest creators do not: old Nirvana's `ui/dev/fake-daemon.py` (`tempfile.mkdtemp`, a random suffix) and
-  `src/nirvana_preset/tests.rs scratch()` (`nirvana-p13a-<pid>-<count>-<name>`). The dry run lists them as kept.
+- `clean_temp.py` first followed the order's name rule strictly: a name must end in a pid or a pid and a timestamp.
+  The two largest creators do not. The review round added both as named rules: old Nirvana's `ui/dev/fake-daemon.py`
+  (`nirvana-fake-daemon-` and `mkdtemp`'s 8-character suffix, no pid: age, link, in-use and top-level rules only) and
+  `src/nirvana_preset/tests.rs scratch()` (`nirvana-p13a-<pid>-<count>-<name>`, the pid rule too).
 - `herdr remote uploads` is not built; recorded here as the next step for D1.
+
+## Review round (`pkg-review-e.md`)
+
+- S1: `remove_tree` tests for a link on every folder right before it lists it, so a top that became a junction is
+  refused where the delete is; `clean_temp.apply` asks again before the rename and after it (a link renamed by mistake
+  is renamed back). `gate.py` takes its private TEMP with `tempfile.mkdtemp` (`ng-<pid>-<random>`), so its `finally`
+  only ever removes a folder that run made. Tests make real junctions with `mklink /J`. A race of milliseconds is
+  left between the last test and `os.scandir`; closing it needs a handle opened with `FILE_FLAG_OPEN_REPARSE_POINT`.
+- S2: one `controls.py` run per worktree, by an OS lock on `target/controls-restore/run.lock` taken before the repair.
+  Windows drops the lock when its holder dies however it dies, so a dead holder's lock is free by itself;
+  `run.lock.info` names the holder for a refused run and is reported as taken over. The retarget script and the tests
+  call `run_one` directly and take no lock.
+- N2: each gate step runs in a kill-on-close job object, started suspended and resumed once inside it; an interrupt
+  ends the job before the `finally`, and a killed gate's job ends with its last handle. A step times out at 90 min.
+- N5: the overlay copies each file beside its target and renames it over, never enters a link, and raises
+  `StaleFiles` naming each file it could not replace or remove, after the rest is down; `install.py` goes on and exits
+  1 with the list. Only `claude.new-<digits>` and `claude.old-<digits>` siblings are removed.
+- N7: the phone note keeps the path first for every agent kind and names the command as "in a Nirvana pane, herdr
+  look ...". `herdr look` exists only once c40c merges: merge c40c first.
+- N8: the order asked only that a bare Antigravity is not cut to `Antigr`; `Agy` is this package's choice of word,
+  for the CHANGELOG at the merge.
+- N1, N3, N6, N9 fixed (help text, the allowed test by its path tail, `.nirvana` junction refused by the sweep, one
+  `pid_alive`). N4's optional refusal of an odd `--root` is not built.
+- `scratch()` removes its folders when the test's thread ends (a thread-local's destructor): measured with a private
+  TEMP, one run of the `nirvana_preset` tests left 52 `nirvana-p13a-*` folders before and 0 after.

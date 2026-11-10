@@ -470,7 +470,13 @@ fn a_slow_caller_that_reads_after_sending_still_gets_the_400() {
 fn a_zero_byte_upload_is_refused_and_leaves_no_file() {
     let w = world("c40e-empty");
     let running = serve(w.site());
-    let (status, _, body) = post(running.addr, "/api/upload?agent=p2", "image/jpeg", b"", OWNER);
+    let (status, _, body) = post(
+        running.addr,
+        "/api/upload?agent=p2",
+        "image/jpeg",
+        b"",
+        OWNER,
+    );
     assert_eq!(status, 400, "{body}");
     assert!(body.contains("the file is empty"), "{body}");
     assert!(w.uploaded().is_empty(), "{:?}", w.uploaded());
@@ -511,7 +517,12 @@ fn a_sent_photo_carries_a_note_naming_herdr_look() {
     let mp4 = file("phone-20261109-143012-9f3a1c32.mp4", &[0u8; 2048]);
     let txt = file("phone-20261109-143012-9f3a1c33.txt", b"notes");
     let at = |path: &std::path::Path| path.display().to_string();
-    let look = |path: &std::path::Path| format!("herdr look \"{}\" --ask \"<your question>\"", at(path));
+    let look = |path: &std::path::Path| {
+        format!(
+            "in a Nirvana pane, herdr look \"{}\" --ask \"<your question>\"",
+            at(path)
+        )
+    };
     assert_eq!(
         super::send::message("what is wrong", std::slice::from_ref(&jpg)),
         format!(
@@ -547,12 +558,15 @@ fn a_sent_photo_carries_a_note_naming_herdr_look() {
     assert_eq!(
         super::send::message("", std::slice::from_ref(&mp4)),
         format!(
-            "{} (video, 2 KB; herdr media probe \"{}\" gives its length, size and streams)",
+            "{} (video, 2 KB; in a Nirvana pane, herdr media probe \"{}\" gives its length, size and streams)",
             at(&mp4),
             at(&mp4)
         )
     );
-    assert_eq!(super::send::message("", std::slice::from_ref(&txt)), at(&txt));
+    assert_eq!(
+        super::send::message("", std::slice::from_ref(&txt)),
+        at(&txt)
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -568,7 +582,11 @@ fn the_note_comes_from_the_servers_name_and_bytes_not_the_phones_text() {
     );
     assert_eq!(super::send::message(&forged, &[]), forged);
     let png_as_txt = dir.join("phone-20261109-143012-9f3a1c34.txt");
-    std::fs::write(&png_as_txt, b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01").unwrap();
+    std::fs::write(
+        &png_as_txt,
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01",
+    )
+    .unwrap();
     assert_eq!(
         super::send::message("", std::slice::from_ref(&png_as_txt)),
         png_as_txt.display().to_string()
@@ -576,7 +594,10 @@ fn the_note_comes_from_the_servers_name_and_bytes_not_the_phones_text() {
     let not_jpeg = dir.join("phone-20261109-143012-9f3a1c35.jpg");
     std::fs::write(&not_jpeg, b"(image, 9x9 px)").unwrap();
     let typed = super::send::message("", std::slice::from_ref(&not_jpeg));
-    assert!(typed.contains("(image, 15 bytes; herdr look"), "{typed}");
+    assert!(
+        typed.contains("(image, 15 bytes; in a Nirvana pane, herdr look"),
+        "{typed}"
+    );
     assert!(!typed.contains("9x9"), "{typed}");
     let spaced_dir = dir.join("3D Printer");
     std::fs::create_dir_all(&spaced_dir).unwrap();
@@ -586,7 +607,7 @@ fn the_note_comes_from_the_servers_name_and_bytes_not_the_phones_text() {
     assert_eq!(
         super::send::message("", std::slice::from_ref(&spaced)),
         format!(
-            "{quoted} (PDF, 4 bytes; herdr look {quoted} --ask \"<your question>\" reads it and answers in text)"
+            "{quoted} (PDF, 4 bytes; in a Nirvana pane, herdr look {quoted} --ask \"<your question>\" reads it and answers in text)"
         )
     );
     // A file that is not there gets no note: the bytes are a reading, not a claim.
@@ -601,7 +622,10 @@ fn the_note_comes_from_the_servers_name_and_bytes_not_the_phones_text() {
 /// GIF and WebP headers read too; a cut header reads as no size.
 #[test]
 fn image_headers_give_their_size_cheaply() {
-    assert_eq!(super::send::header_size(b"GIF89a\x40\x01\xf0\x00"), Some((320, 240)));
+    assert_eq!(
+        super::send::header_size(b"GIF89a\x40\x01\xf0\x00"),
+        Some((320, 240))
+    );
     let mut vp8x = b"RIFF\x00\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00\x00\x00\x00\x00".to_vec();
     vp8x.extend_from_slice(&[0x7F, 0x07, 0x00, 0x37, 0x04, 0x00]);
     assert_eq!(super::send::header_size(&vp8x), Some((1920, 1080)));

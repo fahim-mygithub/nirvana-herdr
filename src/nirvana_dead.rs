@@ -541,8 +541,10 @@ pub fn sweep_partials(folders: &[PathBuf], now: u64, dry_run: bool) -> Vec<Strin
     use crate::nirvana_remote::send;
     let mut lines = Vec::new();
     for folder in folders {
-        let uploads = folder.join(nirvana_run::DIR).join("uploads");
-        if !send::plain_dir(&uploads) {
+        let dot = folder.join(nirvana_run::DIR);
+        let uploads = dot.join("uploads");
+        // Review N6: `.nirvana` itself may be a junction, which `uploads_dir` refuses; so does the sweep.
+        if !send::plain_dir(&dot) || !send::plain_dir(&uploads) {
             continue;
         }
         let Ok(entries) = std::fs::read_dir(&uploads) else {
@@ -572,11 +574,17 @@ pub fn sweep_partials(folders: &[PathBuf], now: u64, dry_run: bool) -> Vec<Strin
             }
             let path = entry.path();
             if dry_run {
-                lines.push(format!("would remove {}: an upload never finished", path.display()));
+                lines.push(format!(
+                    "would remove {}: an upload never finished",
+                    path.display()
+                ));
                 continue;
             }
             match std::fs::remove_file(&path) {
-                Ok(()) => lines.push(format!("removed {}: an upload never finished", path.display())),
+                Ok(()) => lines.push(format!(
+                    "removed {}: an upload never finished",
+                    path.display()
+                )),
                 Err(err) => lines.push(format!("failed to remove {}: {err}", path.display())),
             }
         }

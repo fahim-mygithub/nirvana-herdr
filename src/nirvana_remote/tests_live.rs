@@ -1530,7 +1530,7 @@ fn a_send_adds_the_uploaded_files_paths_and_refuses_any_other_name() {
     assert_eq!(
         typed,
         format!(
-            "look {path} (image, 4 bytes; herdr look \"{path}\" --ask \"<your question>\" reads it and answers in text)"
+            "look {path} (image, 4 bytes; in a Nirvana pane, herdr look \"{path}\" --ask \"<your question>\" reads it and answers in text)"
         ),
         "after a space, not a newline: an Enter in a pane without bracketed paste"
     );
@@ -2098,7 +2098,10 @@ fn the_message_box_grows_with_its_text_and_comes_back_at_the_end() {
     let running = serve(w.site());
     let (_, _, chat) = get(running.addr, "/chat.js", OWNER);
     let (_, _, css) = get(running.addr, "/app.css", OWNER);
-    assert!(chat.contains("h('textarea', { id: 'nv-draft'"), "a box that wraps");
+    assert!(
+        chat.contains("h('textarea', { id: 'nv-draft'"),
+        "a box that wraps"
+    );
     assert!(
         chat.contains("input.style.height = Math.min(input.scrollHeight, DRAFT_MOST) + 'px';"),
         "the box fits its text"
@@ -2115,7 +2118,10 @@ fn the_message_box_grows_with_its_text_and_comes_back_at_the_end() {
         chat.contains("input.addEventListener('focus', () => requestAnimationFrame(toEnd));"),
         "the caret goes to the end"
     );
-    assert!(css.contains("resize: none; overflow-y: hidden;"), "no grab handle");
+    assert!(
+        css.contains("resize: none; overflow-y: hidden;"),
+        "no grab handle"
+    );
 }
 
 #[test]

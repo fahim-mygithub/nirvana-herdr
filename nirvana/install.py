@@ -112,8 +112,17 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     ver = version()
     root = home()
-    plugin = windows_shell.install_plugin(root)
-    print(f"installed the Nirvana Claude plugin at {plugin}")
+    # Review N5: a plugin folder that could not be renamed is overlaid, and a file in it a running Nirvana Claude
+    # holds keeps its old bytes. The rest of the install goes on, and the exit says the folder is mixed.
+    stale: list = []
+    try:
+        plugin = windows_shell.install_plugin(root)
+        print(f"installed the Nirvana Claude plugin at {plugin}")
+    except windows_shell.StaleFiles as err:
+        stale = err.paths
+        print(f"the Nirvana Claude plugin is installed with {len(stale)} old files a running program holds:")
+        for path in stale:
+            print(f"  stale {path}")
     target = install(built, root, ver, built_open=built_open)
     print(f"installed Nirvana-Herdr alpha {ver} at {target}")
     if os.name == "nt" and not ns.no_shell:
@@ -126,6 +135,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Windows Terminal profile: {report['fragment']}; JetBrains Mono: "
               f"{'installed' if isinstance(report['font'], dict) else report['font']}")
     print("a running Nirvana-Herdr shows a reload badge within 5 s; press it twice to restart onto this build")
+    if stale:
+        print(f"install: {len(stale)} plugin files are stale. Close every Nirvana Claude and run the install again")
+        return 1
     return 0
 
 

@@ -254,21 +254,64 @@ class ReplaceTreeTest(unittest.TestCase):
             self.assertEqual(_tree(dst), _tree(src))
             self.assertEqual(sorted(p.name for p in dst.parent.iterdir()), ["claude"])
 
+    @unittest.skipUnless(os.name == "nt", "Windows refuses to rename a folder with an open file")
     def test_a_folder_that_cannot_be_renamed_is_overlaid_in_place(self):
-        from unittest import mock
+        """Review N5: this test patched `os.replace`, so the old `rmtree` + `copytree` (which never calls it) passed
+        it too. Now a real open file holds the folder: the old code's `rmtree` stops on it and raises; the overlay
+        lays every other file down, prunes, keeps the held file whole and names it."""
         with tempfile.TemporaryDirectory() as tmp:
             src, dst, _ = self._world(Path(tmp))
-            real = ws.os.replace
-
-            def held(a, b):
-                if Path(a) == dst:
-                    raise PermissionError(5, "a file inside is open")
-                return real(a, b)
-
-            with mock.patch.object(ws.os, "replace", held):
+            with open(dst / "ROLE.md", "rb"), self.assertRaises(ws.StaleFiles) as raised:
                 ws._replace_tree(src, dst)
-            self.assertEqual(_tree(dst), _tree(src))
+            self.assertEqual(raised.exception.paths, [dst / "ROLE.md"])
+            want = dict(_tree(src), **{"ROLE.md": b"old role"})
+            self.assertEqual(_tree(dst), want, "every other file is the new one, the held one whole")
             self.assertEqual(sorted(p.name for p in dst.parent.iterdir()), ["claude"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows refuses to rename a folder with an open file")
+    def test_the_overlay_removes_a_junction_inside_as_a_link(self):
+        """Review N5: the prune walked `rglob`, which descends a junction before Python 3.13."""
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            src, dst, _ = self._world(Path(tmp))
+            outside = Path(tmp) / "outside"
+            outside.mkdir()
+            (outside / "keep.txt").write_bytes(b"the owner's file")
+            done = subprocess.run(["cmd", "/C", "mklink", "/J", str(dst / "linked"), str(outside)], capture_output=True)
+            self.assertEqual(done.returncode, 0, done)
+            with open(dst / "ROLE.md", "rb"), self.assertRaises(ws.StaleFiles):
+                ws._replace_tree(src, dst)
+            self.assertTrue((outside / "keep.txt").is_file(), "the junction was followed")
+            self.assertFalse(os.path.lexists(dst / "linked"))
+            self.assertEqual((outside / "keep.txt").read_bytes(), b"the owner's file")
+
+    def test_only_this_installs_own_leftovers_are_removed_beside_the_folder(self):
+        """Review N5: `claude.old-*` also took a sibling the owner named so by hand."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src, dst, _ = self._world(Path(tmp))
+            for name in ("claude.old-123", "claude.new-77", "claude.old-2025-backup", "claude.old-mine"):
+                (dst.parent / name).mkdir()
+            ws._replace_tree(src, dst)
+            self.assertEqual(sorted(p.name for p in dst.parent.iterdir()),
+                             ["claude", "claude.old-2025-backup", "claude.old-mine"])
+
+    def test_install_plugin_writes_the_settings_and_then_says_the_folder_is_stale(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = tmp / "src"
+            src.mkdir()
+            (src / "settings.json").write_bytes(b"{}")
+            dst = tmp / "home" / "nirvana" / "claude"
+
+            def half(a, b):
+                ws.shutil.copytree(a, b, dirs_exist_ok=True)
+                raise ws.StaleFiles([b / "hooks.json"])
+
+            with mock.patch.object(ws, "_replace_tree", half), self.assertRaises(ws.StaleFiles) as raised:
+                ws.install_plugin(tmp / "home", src)
+            self.assertEqual(raised.exception.paths, [dst / "hooks.json"])
+            self.assertIn("statusLine", json.loads((dst / "settings.json").read_bytes()))
 
 
 class FontFailureTest(unittest.TestCase):

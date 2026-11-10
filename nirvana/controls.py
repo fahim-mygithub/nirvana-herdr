@@ -16,8 +16,12 @@ import json
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import clean_temp  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 TIMEOUT = 900
@@ -1081,29 +1085,64 @@ def command(c: Control) -> list[str]:
 RESTORE = ROOT / "target" / "controls-restore"
 
 
-def _pid_alive(pid: int) -> bool:
-    """Whether `pid` runs. Never `os.kill(pid, 0)`: on Windows that is TerminateProcess."""
-    if pid == os.getpid():
-        return True
-    if os.name == "nt":
-        import ctypes
-        kernel = ctypes.windll.kernel32
-        handle = kernel.OpenProcess(0x1000, False, pid)    # PROCESS_QUERY_LIMITED_INFORMATION
-        if not handle:
-            return False
-        try:
-            code = ctypes.c_ulong()
-            ok = kernel.GetExitCodeProcess(handle, ctypes.byref(code))
-            return bool(ok) and code.value == 259          # STILL_ACTIVE
-        finally:
-            kernel.CloseHandle(handle)
+# Review N9: this file had its own copy that read "access denied" as dead, the opposite of `clean_temp`'s. One
+# function now, and denied reads as alive: a backup is then left to its run rather than written over it.
+_pid_alive = clean_temp.pid_alive
+
+# Plan 40 review S2: two live runs in one worktree undid each other. Run B read a file run A had sabotaged as its
+# original, A restored the true bytes, then B's `finally` wrote A's sabotage back and dropped its note, so the repair
+# never saw it. One run per worktree: an OS lock on `run.lock` (released by Windows when the holder dies, however it
+# dies), taken before any file is touched; `run.lock.info` names the holder for a run that is refused.
+LOCK = "run.lock"
+LOCK_INFO = "run.lock.info"     # not .json: `repair` reads every .json as a backup note
+
+
+def take_lock() -> tuple[int | None, dict | None]:
+    """(the lock's descriptor, the note a run that died left), or (None, the holder's note) when a live run holds
+    it."""
+    RESTORE.mkdir(parents=True, exist_ok=True)
+    fd = os.open(RESTORE / LOCK, os.O_RDWR | os.O_CREAT, 0o644)
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None, _lock_note()
+    left = _lock_note()
+    tmp = RESTORE / (LOCK_INFO + ".tmp")
+    tmp.write_text(json.dumps({"pid": os.getpid(), "since": time.strftime("%Y-%m-%d %H:%M:%S")}), encoding="utf-8")
+    os.replace(tmp, RESTORE / LOCK_INFO)
+    return fd, left
+
+
+def _lock_note() -> dict | None:
+    try:
+        data = json.loads((RESTORE / LOCK_INFO).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def release_lock(fd: int) -> None:
+    try:
+        (RESTORE / LOCK_INFO).unlink()
+    except FileNotFoundError:
+        pass
+    try:
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    os.close(fd)
 
 
 def _save_original(c: Control, original: bytes, sabotaged: bytes) -> Path:
@@ -1192,11 +1231,30 @@ def run_one(c: Control) -> tuple[bool, str]:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="controls")
-    ap.add_argument("--dry-run", action="store_true")
+    # Review N1: the repair runs first in every run, a dry run too, and it may write a source file back.
+    ap.add_argument("--dry-run", action="store_true",
+                    help="count each control's find text and run nothing. The repair of a dead run's sabotage still "
+                         "runs first and may put a source file back")
     ap.add_argument("--only")
     ns = ap.parse_args(argv)
-    for line in repair():
-        print(line, flush=True)
+    fd, left = take_lock()
+    if fd is None:
+        who = f"pid {left.get('pid')}, since {left.get('since')}" if left else "a run that has not named itself yet"
+        print(f"controls: another controls run holds this worktree: {who}. Nothing was touched; run again when it ends",
+              flush=True)
+        return 2
+    try:
+        for line in repair():
+            print(line, flush=True)
+        if left and left.get("pid") != os.getpid():
+            print(f"controls: took over the run lock of pid {left.get('pid')}, since {left.get('since')}, "
+                  f"which is gone", flush=True)
+        return _main(ns)
+    finally:
+        release_lock(fd)
+
+
+def _main(ns: argparse.Namespace) -> int:
     chosen = [c for c in CONTROLS if ns.only is None or c.name == ns.only.strip()]
     if not chosen:
         print(f"unknown control {ns.only!r}; names: {', '.join(c.name for c in CONTROLS)}")

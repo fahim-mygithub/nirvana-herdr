@@ -301,14 +301,18 @@ fn media_of(file: &Path) -> Option<Media> {
 fn note_for(file: &Path, path: &str) -> Option<String> {
     let media = media_of(file)?;
     // Only a file that is there: the bytes are the server's own reading, not a claim.
-    let meta = std::fs::metadata(file).ok().filter(std::fs::Metadata::is_file)?;
+    let meta = std::fs::metadata(file)
+        .ok()
+        .filter(std::fs::Metadata::is_file)?;
     let size = Some(human_bytes(meta.len()));
     let quoted = if path.starts_with('"') {
         path.to_string()
     } else {
         format!("\"{path}\"")
     };
-    let look = format!("herdr look {quoted} --ask \"<your question>\"");
+    // Review N7: the note goes to every agent kind and the path stays first, so one that reads the file itself still
+    // can; the command is named for where it runs, since a pane outside Nirvana may have no `herdr` on PATH.
+    let look = format!("in a Nirvana pane, herdr look {quoted} --ask \"<your question>\"");
     let mut facts: Vec<String> = Vec::new();
     let note = match media {
         Media::Image => {
@@ -336,7 +340,7 @@ fn note_for(file: &Path, path: &str) -> Option<String> {
             facts.push("video".into());
             facts.extend(size);
             format!(
-                "{}; herdr media probe {quoted} gives its length, size and streams",
+                "{}; in a Nirvana pane, herdr media probe {quoted} gives its length, size and streams",
                 facts.join(", ")
             )
         }

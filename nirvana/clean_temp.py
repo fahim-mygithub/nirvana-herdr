@@ -38,6 +38,18 @@ from pathlib import Path
 NAME = re.compile(
     r"^(?P<kind>herdr|nirvana)-(?P<stem>.+?)-(?P<pid>\d{1,7})(?:-(?P<ts>\d{10,}))?(?:\.cleaning-\d{1,7})?$"
 )
+# Two named makers whose folders do not end in a pid (plan 40 review round: the pid rule alone kept 20,864 of the
+# 35,326 folders the first dry run counted). Each is matched before `NAME`, so a p13a folder whose test name happens to
+# end in digits is not read as a pid there.
+#   `nirvana-fake-daemon-<8 of [a-z0-9_]>`: old Nirvana's `ui/dev/fake-daemon.py`, `tempfile.mkdtemp(prefix=...)`. No
+#   pid in the name, so only the age, link, in-use and top-level rules decide.
+#   `nirvana-p13a-<pid>-<count>-<name>`: `scratch()` in the fork's `src/nirvana_preset/tests.rs`.
+NAMED = (
+    ("nirvana-fake-daemon-<random>",
+     re.compile(r"^nirvana-fake-daemon-[a-z0-9_]{8}(?:\.cleaning-\d{1,7})?$")),
+    ("nirvana-p13a-<pid>-<n>-<name>",
+     re.compile(r"^nirvana-p13a-(?P<pid>\d{1,7})-\d+-[A-Za-z0-9_-]+(?:\.cleaning-\d{1,7})?$")),
+)
 PREFIXES = ("herdr-", "nirvana-")
 
 
@@ -99,10 +111,18 @@ def _unlink(path: str) -> None:
 
 def remove_tree(top: str | os.PathLike) -> list[str]:
     """Removes `top` and what it holds without following any link out of it; the failures, one line each (empty
-    when all went). `top` itself must not be a link (the caller checks)."""
+    when all went).
+
+    Plan 40 review S1: this trusted its caller to have checked `top`, and the callers checked minutes earlier (a
+    scan of 35,326 folders) or never (`gate.py`'s private TEMP). A name swapped for a junction in between was walked
+    and the junction's target emptied. So the link test is made here, on `top` and on every folder, right before
+    the folder is listed: a link at the top is refused and left as it is, a link inside is removed as a link."""
     failures: list[str] = []
 
     def walk(folder: str) -> None:
+        if is_link(folder):
+            failures.append(f"{folder}: a link or junction, not followed")
+            return
         try:
             entries = list(os.scandir(folder))
         except OSError as err:
@@ -161,9 +181,22 @@ class Found:
     size: int = 0
 
 
+def rule_of(name: str) -> tuple[str, re.Match] | None:
+    """The named rule the name falls under and its match, or None (then `--apply` never takes it)."""
+    for label, rule in NAMED:
+        m = rule.match(name)
+        if m:
+            return label, m
+    m = NAME.match(name)
+    return ("pid", m) if m else None
+
+
 def pattern_of(name: str) -> str:
-    """The name with its pid suffix as `<pid>` (and `<ts>`), the group a dry run counts it under; any other name with
-    each digit run as `N`."""
+    """The name with its pid suffix as `<pid>` (and `<ts>`), the group a dry run counts it under; a named rule's
+    label; any other name with each digit run as `N`."""
+    for label, rule in NAMED:
+        if rule.match(name):
+            return label
     m = NAME.match(name)
     if m:
         return f"{m['kind']}-{m['stem']}-<pid>" + ("-<ts>" if m["ts"] else "")
@@ -191,10 +224,11 @@ def scan(root: Path, now: float, older_than_hours: float, alive=pid_alive, sizes
                 continue
             if sizes:
                 item.size = tree_bytes(path)
-            m = NAME.match(name)
-            if not m:
+            ruled = rule_of(name)
+            if ruled is None:
                 item.why = "its name does not end in a pid"
                 continue
+            m = ruled[1]
             try:
                 age = now - entry.stat(follow_symlinks=False).st_mtime
             except OSError as err:
@@ -203,7 +237,7 @@ def scan(root: Path, now: float, older_than_hours: float, alive=pid_alive, sizes
             if age < limit:
                 item.why = f"younger than {older_than_hours:g} h"
                 continue
-            if alive(int(m["pid"])):
+            if m.re.groupindex.get("pid") and alive(int(m["pid"])):
                 item.why = f"pid {m['pid']} still runs"
                 continue
             item.removable, item.why = True, "removable"
@@ -218,6 +252,13 @@ def apply(found: list[Found]) -> tuple[list[str], int, int]:
     for item in found:
         if not item.removable:
             continue
+        # Plan 40 review S1: the scan saw a folder, minutes ago. Asked again now, right before the rename, and again
+        # after it (`remove_tree` asks a third time before it lists anything): a name that became a link since is
+        # left, and a link renamed by mistake is renamed back.
+        if is_link(item.path):
+            item.removable, item.why = False, "became a link or junction since the scan: left as it is"
+            lines.append(f"skipped {item.name}: {item.why}")
+            continue
         if ".cleaning-" in item.name:
             tomb = item.path        # a dead run's tombstone already
         else:
@@ -228,6 +269,15 @@ def apply(found: list[Found]) -> tuple[list[str], int, int]:
                 item.removable, item.why = False, f"in use: {err.strerror or err}"
                 lines.append(f"skipped {item.name}: {item.why}")
                 continue
+        if is_link(tomb):
+            if tomb != item.path:
+                try:
+                    os.rename(tomb, item.path)
+                except OSError:
+                    pass
+            item.removable, item.why = False, "a link or junction after the rename: renamed back, left as it is"
+            lines.append(f"skipped {item.name}: {item.why}")
+            continue
         failures = remove_tree(tomb)
         if failures:
             lines.append(f"failed {item.name}: {len(failures)} entries left, first {failures[0]}")

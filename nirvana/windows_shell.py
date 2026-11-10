@@ -30,7 +30,9 @@ import ctypes
 import hashlib
 import json
 import os
+import re
 import shutil
+import stat
 import subprocess
 import urllib.request
 import zipfile
@@ -118,8 +120,98 @@ def _copy_file(src, dst):
 
 
 def _remove_quietly(path: Path) -> None:
-    """A tree removed as far as it goes: a file a running Nirvana Claude holds stays until the next install."""
+    """A tree removed as far as it goes: a file a running Nirvana Claude holds stays until the next install. Python
+    3.8 and later remove a junction inside as a link, not through it."""
     shutil.rmtree(path, ignore_errors=True)
+
+
+class StaleFiles(OSError):
+    """The plugin folder could not be renamed and these files in it could not be replaced or removed: it now holds
+    old and new files mixed. Raised after the rest of the copy is done."""
+
+    def __init__(self, paths: list[Path]):
+        super().__init__(f"{len(paths)} plugin files are stale, first {paths[0] if paths else '-'}")
+        self.paths = paths
+
+
+def _is_link(path) -> bool:
+    """A symbolic link or any reparse point; `Path.is_symlink` does not see a junction."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & 0x400)
+
+
+def _remove_link(path) -> None:
+    """The link itself, never its target: a directory link or junction by `rmdir`, a file link by `unlink`."""
+    if os.name == "nt" and getattr(os.lstat(path), "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_DIRECTORY:
+        os.rmdir(path)
+    else:
+        os.unlink(path)
+
+
+def _overlay(new: Path, dst: Path) -> list[Path]:
+    """`new` laid over `dst`, then what `new` does not have removed from `dst`; the paths left stale.
+
+    Review N5: the first overlay was `copytree(dirs_exist_ok=True)`, which truncates a file and then writes it (a
+    full disk left a corrupt file) and stopped at its end with old and new files mixed and nothing said; its prune
+    walked `rglob`, which before Python 3.13 descends a junction inside `dst`. Now each file is copied beside its
+    target and renamed over it, so a file is whole old or whole new; nothing is entered through a link; and every
+    file that kept its old bytes, or that should have gone and did not, is named."""
+    stale: list[Path] = []
+
+    def lay(s_dir: Path, d_dir: Path) -> None:
+        for entry in os.scandir(s_dir):
+            target = d_dir / entry.name
+            if entry.is_dir(follow_symlinks=False):
+                try:
+                    if _is_link(target):
+                        _remove_link(target)
+                    elif os.path.lexists(target) and not target.is_dir():
+                        os.unlink(target)
+                    target.mkdir(exist_ok=True)
+                except OSError:
+                    stale.append(target)
+                    continue
+                lay(Path(entry.path), target)
+                continue
+            tmp = target.with_name(f"{target.name}.install-{os.getpid()}")
+            try:
+                if _is_link(target):
+                    _remove_link(target)
+                _copy_file(entry.path, tmp)
+                os.replace(tmp, target)
+            except OSError:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                stale.append(target)
+
+    def prune(s_dir: Path | None, d_dir: Path) -> None:
+        """`s_dir` None: nothing under `d_dir` is kept."""
+        for entry in os.scandir(d_dir):
+            path = Path(entry.path)
+            mirror = None if s_dir is None else s_dir / entry.name
+            try:
+                if _is_link(path):
+                    if mirror is None or not os.path.lexists(mirror):
+                        _remove_link(path)
+                elif entry.is_dir(follow_symlinks=False):
+                    if mirror is not None and mirror.is_dir() and not _is_link(mirror):
+                        prune(mirror, path)
+                    else:
+                        prune(None, path)
+                        path.rmdir()
+                elif mirror is None or not (mirror.is_file() and not _is_link(mirror)):
+                    os.unlink(path)
+            except OSError:
+                stale.append(path)
+
+    lay(new, dst)
+    prune(new, dst)
+    return stale
 
 
 def _replace_tree(src: Path, dst: Path) -> None:
@@ -130,13 +222,15 @@ def _replace_tree(src: Path, dst: Path) -> None:
     before the binary. Now the new tree is copied whole beside it first, and only a finished copy takes the name: a
     failed copy leaves `dst` as it was. If `dst` itself cannot be renamed (Windows refuses a folder with an open
     file), the copy is laid over it file by file and only files the tree no longer has are removed; every file is
-    then the old one or the new one, never missing."""
+    then the old one or the new one, never missing, and a file that could not be replaced raises `StaleFiles` once
+    the rest is laid down."""
     src, dst = Path(src), Path(dst)
     tag = f"{os.getpid()}"
-    for stale in dst.parent.glob(f"{dst.name}.new-*"):
-        _remove_quietly(stale)
-    for stale in dst.parent.glob(f"{dst.name}.old-*"):
-        _remove_quietly(stale)
+    # Review N5: `claude.old-*` also took a sibling the owner named so by hand; only this function's own names go.
+    own = re.compile(rf"{re.escape(dst.name)}\.(?:new|old)-\d+")
+    for stale in dst.parent.iterdir() if dst.parent.is_dir() else ():
+        if own.fullmatch(stale.name) and not _is_link(stale):
+            _remove_quietly(stale)
     new = dst.with_name(f"{dst.name}.new-{tag}")
     try:
         shutil.copytree(src, new, copy_function=_copy_file)
@@ -152,20 +246,11 @@ def _replace_tree(src: Path, dst: Path) -> None:
     except OSError:
         # A held file: overlay in place.
         try:
-            shutil.copytree(new, dst, copy_function=_copy_file, dirs_exist_ok=True)
-            keep = {p.relative_to(new) for p in new.rglob("*")}
-            for path in sorted(dst.rglob("*"), reverse=True):
-                if path.relative_to(dst) in keep:
-                    continue
-                try:
-                    if path.is_dir() and not path.is_symlink():
-                        path.rmdir()
-                    else:
-                        path.unlink()
-                except OSError:
-                    pass
+            stale = _overlay(new, dst)
         finally:
             _remove_quietly(new)
+        if stale:
+            raise StaleFiles(stale)
         return
     try:
         os.replace(new, dst)
@@ -192,12 +277,18 @@ def install_plugin(home: Path, src: Path | None = None) -> Path:
     src = ROOT / "nirvana" / "claude" if src is None else Path(src)
     dst = Path(home) / "nirvana" / "claude"
     dst.parent.mkdir(parents=True, exist_ok=True)
-    _replace_tree(src, dst)
+    stale = None
+    try:
+        _replace_tree(src, dst)
+    except StaleFiles as err:
+        stale = err          # the rest of the copy is down; the settings below still name the installed binary
     settings_path = dst / "settings.json"
     settings = json.loads(settings_path.read_bytes())
     settings["statusLine"] = statusline(home)
     # `.gitattributes` pins LF, and Claude Code reads either; bytes keep Windows from writing CRLF.
     settings_path.write_bytes((json.dumps(settings, indent=2) + "\n").encode("utf-8"))
+    if stale is not None:
+        raise stale
     return dst
 
 
