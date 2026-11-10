@@ -4097,3 +4097,231 @@ fn gsrc_the_docs_say_sources_only_when_the_order_asks_for_the_web() {
         .contains("one that asks for the web, or whose worker opened a page, cites at least one"));
     assert!(!gate.contains("their Work Report must carry a `sources` array"));
 }
+
+// ---- plan 40 (c40b): the review's B findings, T1 and the addenda ----
+
+fn seated_why(order: &str, parent: Option<&str>, why: &str) -> Seated {
+    let mut seated = seated(order, parent);
+    seated.why = parent.map(|_| why.to_owned());
+    seated
+}
+
+fn chain_state_why(orders: &[(&str, Option<&str>, &str)]) -> RunState {
+    let events: Vec<Event> = orders
+        .iter()
+        .enumerate()
+        .map(|(index, (order, parent, why))| Event {
+            v: V,
+            seq: index as u64 + 1,
+            at: 100 + index as u64,
+            kind: Kind::Seated(Box::new(seated_why(order, *parent, why))),
+        })
+        .collect();
+    replay(&events)
+}
+
+/// Review B1: a reseat child belongs to its parent's chain (the root's held-out check and snapshot are found), and a
+/// reseat is no send-back (the cap counts send-backs only, across the reseat).
+#[test]
+fn c40b_a_reseat_child_is_part_of_its_parents_chain() {
+    let state = chain_state_why(&[("o1", None, ""), ("o1-r1", Some("o1"), "reseat")]);
+    assert_eq!(chain(&state, "o1-r1"), ("o1".into(), 0));
+    let state = chain_state_why(&[
+        ("o1", None, ""),
+        ("o1-s1", Some("o1"), "send_back"),
+        ("o1-s1-r1", Some("o1-s1"), "reseat"),
+        ("o1-s2", Some("o1-s1-r1"), "send_back"),
+    ]);
+    assert_eq!(chain(&state, "o1-s2"), ("o1".into(), 2));
+    // The next send-back is the third, named from the root.
+    assert_eq!(
+        plan_send_back(&state, "o1-s2"),
+        SendBack::Child {
+            id: "o1-s3".into(),
+            n: 3
+        }
+    );
+    // Any other why still ends the chain.
+    let state = chain_state_why(&[("o1", None, ""), ("o1-x", Some("o1"), "teach")]);
+    assert_eq!(chain(&state, "o1-x"), ("o1-x".into(), 0));
+}
+
+/// Review B2: a test that times out ends with its whole tree. `cmd` starts `ping`, which holds the pipes; with `cmd`
+/// alone killed, or the test outside the job, the gate waited the full 29 s (and, for a hung binary, for ever).
+#[cfg(windows)]
+#[test]
+fn c40b_a_timed_out_test_is_killed_with_its_whole_tree() {
+    let cwd = temp("tree");
+    let started = std::time::Instant::now();
+    let run = run_command(&cwd, "cmd /C ping -n 30 127.0.0.1", Duration::from_secs(1));
+    let took = started.elapsed();
+    assert!(run.timed_out, "{run:?}");
+    assert!(took < Duration::from_secs(15), "took {took:?}: {run:?}");
+}
+
+/// Review B4: a named check that passed early survives 60 later `PASSED` lines, and is judged on the whole output.
+#[test]
+fn c40b_a_check_that_ran_early_is_not_cut_by_later_passed_lines() {
+    let checks = vec!["test_gate_lock".to_owned()];
+    let mut output = "test_gate_lock ... ok\n".to_owned();
+    for n in 0..60 {
+        output.push_str(&format!("tests/test_{n}.py::case PASSED\n"));
+    }
+    let run = CommandRun {
+        exit: Some(0),
+        output: output.clone(),
+        ..CommandRun::default()
+    };
+    let axis = tests_axis(Some("pytest -v"), Some(&run), &checks);
+    assert_eq!(axis.mark, Mark::Pass, "{axis:?}");
+    let kept = filter(&output, &checks);
+    assert_eq!(kept.len(), KEPT_LINES);
+    assert_eq!(kept[0], "test_gate_lock ... ok");
+    assert_eq!(kept[KEPT_LINES - 1], "tests/test_59.py::case PASSED");
+    // A check absent from the whole output still fails (Nirvana CLAUDE.md rule 9).
+    let absent = CommandRun {
+        exit: Some(0),
+        output: output.replace("test_gate_lock", "test_other"),
+        ..CommandRun::default()
+    };
+    assert_eq!(
+        tests_axis(Some("pytest -v"), Some(&absent), &checks).mark,
+        Mark::Fail
+    );
+    // The shown lines are clipped at 300 characters; a check named past the clip still ran.
+    let long = CommandRun {
+        exit: Some(0),
+        output: format!("{} test_gate_lock ok\n", "x".repeat(320)),
+        ..CommandRun::default()
+    };
+    assert_eq!(
+        tests_axis(Some("pytest -v"), Some(&long), &checks).mark,
+        Mark::Pass
+    );
+}
+
+/// Review B5: an untracked file with a non-ASCII name is committed (git quoted it without `-z`).
+#[test]
+fn c40b_a_non_ascii_new_file_is_committed() {
+    let root = repo("cafe");
+    let cwd = worktree(&root, "cafe");
+    std::fs::write(cwd.join("caf\u{e9}.md"), "menu\n").expect("cafe");
+    let left = commit_work(&cwd, "cafe", &["*.md".to_owned()]).expect("commit");
+    assert!(left.is_empty(), "{left:?}");
+    let files = sh(
+        &cwd,
+        &["-c", "core.quotepath=false", "show", "--name-only", "--format=", "HEAD"],
+    );
+    assert_eq!(files.lines().collect::<Vec<_>>(), vec!["caf\u{e9}.md"]);
+}
+
+/// Review B6: `Test:`, `Check:` and `Serves:` are read as `owns:` is, the case ignored.
+#[test]
+fn c40b_test_check_and_serves_ignore_case() {
+    let spec = spec("Test: cargo nextest run\nCHECK: gate_lock\nServes: 8770\nOwns: a.rs");
+    assert_eq!(spec.test.as_deref(), Some("cargo nextest run"));
+    assert_eq!(spec.checks, vec!["gate_lock".to_owned()]);
+    assert_eq!(spec.serves, vec![8770]);
+    assert_eq!(spec.owns, vec!["a.rs".to_owned()]);
+}
+
+/// Plan 40 T1: a file list is capped at 40 lines and one `+N more`.
+#[test]
+fn c40b_file_lists_are_capped_with_a_count_of_the_rest() {
+    let changed: Vec<String> = (0..100).map(|n| format!("f{n}.rs")).collect();
+    let axis = owned_axis("build.bounded", &changed, &["a.rs".to_owned()]);
+    assert_eq!(axis.mark, Mark::Fail);
+    assert_eq!(axis.lines.len(), FILE_LINES_MOST + 1);
+    assert_eq!(axis.lines.last().map(String::as_str), Some("+60 more"));
+    assert!(axis.why.contains("100"), "{}", axis.why);
+    assert_eq!(capped(vec!["a".into()]), vec!["a".to_owned()]);
+}
+
+/// Plan 40 addendum A: an accepted order counts as a pass in the seat's tally.
+#[test]
+fn c40b_an_accepted_order_counts_as_a_pass() {
+    assert_eq!(Outcome::tally(Outcome::ACCEPTED), Some(true));
+    assert_eq!(Outcome::tally("failed"), Some(false));
+    assert_eq!(Outcome::tally(Outcome::BLOCKED), None);
+}
+
+fn agy_tool(index: u64, tool: &str, parameters: Value) -> String {
+    serde_json::json!({"event": "step_update", "step_update": {"step_index": index, "state": "ACTIVE", "step_type": "tool",
+        "tool_name": tool, "tool_info": {"name": tool, "parameters": parameters}}})
+    .to_string()
+}
+
+fn cites(urls: &[&str]) -> Value {
+    serde_json::json!({"status": "done", "summary": "s", "gotchas": [],
+        "sources": urls.iter().map(|url| serde_json::json!({"url": url, "used_for": "the video"})).collect::<Vec<_>>()})
+}
+
+/// Plan 40 addendum B, from the three real shapes of 2026-10-31 (paths shortened, no personal content). yt-breakdown:
+/// the cited video's downloaded copy was opened and probed by path, and no fetch named its URL.
+#[test]
+fn c40b_a_media_order_cites_the_video_it_opened_by_path() {
+    let kit = r"C:\Users\me\AppData\Local\groove-authoring\youtube\8aQ8SoQl5EY";
+    let probe = format!(r#"python -c "video_path = r'{kit}\proxy.mp4'""#);
+    let finish = agy_tool(
+        150,
+        "finish",
+        serde_json::json!({"sources": [{"url": "https://www.youtube.com/watch?v=8aQ8SoQl5EY"}]}),
+    );
+    let stream = [
+        agy_tool(6, "read_file", serde_json::json!({"Path": format!(r"{kit}\ingest.json")})),
+        agy_tool(35, "run_command", serde_json::json!({ "CommandLine": probe })),
+        finish.clone(),
+    ]
+    .join("\n");
+    let report = cites(&["https://www.youtube.com/watch?v=8aQ8SoQl5EY"]);
+    let axis = sources_axis("media.video", None, Some(&report), &stream).expect("an axis");
+    assert_eq!(axis.mark, Mark::Pass, "{axis:?}");
+    // research.* keeps its rule: the same stream does not vouch for the page.
+    let axis = sources_axis("research.web", None, Some(&report), &stream).expect("an axis");
+    assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+    // The report's own `finish` call never vouches.
+    let axis = sources_axis("media.video", None, Some(&report), &finish).expect("an axis");
+    assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+}
+
+/// yt-breakdown-illit: the video passes by its kit; the two tempo pages it never fetched still fail, until a command
+/// names one.
+#[test]
+fn c40b_a_media_order_still_fails_pages_it_never_fetched() {
+    let kit = r"C:\Users\me\AppData\Local\groove-authoring\youtube\KuKVOfwBPQI";
+    let stream = agy_tool(
+        10,
+        "read_file",
+        serde_json::json!({"Path": format!(r"{kit}\contact_sheet.jpg")}),
+    );
+    let tunebat = "https://tunebat.com/Info/Do-the-Dance/6A1s2x4N6C9w7Y6tH7xX7P";
+    let songbpm = "https://songbpm.com/@illit/do-the-dance";
+    let report = cites(&["https://www.youtube.com/watch?v=KuKVOfwBPQI", tunebat, songbpm]);
+    let axis = sources_axis("media.video", None, Some(&report), &stream).expect("an axis");
+    assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+    assert_eq!(axis.lines, vec![tunebat.to_owned(), songbpm.to_owned()]);
+    let fetched = format!(
+        "{stream}\n{}",
+        agy_tool(
+            11,
+            "run_command",
+            serde_json::json!({ "CommandLine": format!("ffprobe {songbpm}") })
+        )
+    );
+    let axis = sources_axis("media.video", None, Some(&report), &fetched).expect("an axis");
+    assert_eq!(axis.lines, vec![tunebat.to_owned()]);
+}
+
+/// video-breakdown: a local file cited as `file:///` and opened by `read_file`. It passes since plan 35a round 2,
+/// which landed after this order was gated; kept as the third shape.
+#[test]
+fn c40b_a_media_order_cites_the_local_file_it_opened() {
+    let stream = agy_tool(
+        4,
+        "read_file",
+        serde_json::json!({"Path": r"C:\Users\me\Downloads\IMG_4941.mov"}),
+    );
+    let report = cites(&["file:///C:/Users/me/Downloads/IMG_4941.mov"]);
+    let axis = sources_axis("media.video", None, Some(&report), &stream).expect("an axis");
+    assert_eq!(axis.mark, Mark::Pass, "{axis:?}");
+}

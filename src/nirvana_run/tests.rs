@@ -369,6 +369,17 @@ fn a_stream_silent_for_ten_minutes_is_stalled_and_restarts_back_off_to_a_refusal
     );
 }
 
+/// Plan 40 review B7: a foreground tool call that runs past 600 s is not a stall; one that never answers is, later.
+#[test]
+fn c40b_an_open_tool_call_is_allowed_the_longer_ceiling() {
+    assert!(!stalled_silence(700, true));
+    assert!(!stalled_silence(TOOL_STALL_AFTER_S - 1, true));
+    assert!(stalled_silence(TOOL_STALL_AFTER_S, true));
+    assert!(stalled_silence(1900, true));
+    // Model silence keeps the ten minutes.
+    assert!(stalled_silence(700, false));
+}
+
 #[test]
 fn a_refused_restart_fails_the_order_and_asks() {
     let mut events = delivered_run()[..3].to_vec();
@@ -1712,4 +1723,91 @@ fn p37_the_first_verdict_after_a_delivery_queues_whatever_was_woken() {
         "{:?}",
         replay(&review).queue
     );
+}
+
+// ---- plan 40 addendum A (c40b): the record ends with the final decision ----
+
+fn record_temp(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "herdr-c40b-record-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    dir
+}
+
+fn record_of(order: &str, run: &str, outcome: &str) -> crate::nirvana_seat::RecordLine {
+    serde_json::from_value(serde_json::json!({"order": order, "run": run, "seat": "sonnet", "effort": "medium",
+        "class": "ops.terminal", "chain": "ops", "outcome": outcome, "v": 1}))
+    .expect("a line")
+}
+
+/// An accept after the gate failed corrects the order's one line: its outcome is `accepted`, the gate's word is kept,
+/// every other line stays byte for byte, and nothing is written twice.
+#[test]
+fn c40b_an_accept_after_a_failed_gate_corrects_the_orders_line() {
+    let dir = record_temp("accept");
+    let path = dir.join(crate::nirvana_seat::RECORD_FILE);
+    let other = serde_json::to_string(&record_of("o2", "r1", "failed")).expect("json");
+    let failed = serde_json::to_string(&record_of("o1", "r1", "failed")).expect("json");
+    std::fs::write(&path, format!("{other}\nnot json\n{failed}\n")).expect("record");
+    let accepted = record_of("o1", "r1", crate::nirvana_gate::Outcome::ACCEPTED);
+    assert!(correct_record(&dir, &accepted).expect("corrected"));
+    let text = std::fs::read_to_string(&path).expect("record");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0], other);
+    assert_eq!(lines[1], "not json");
+    let line: crate::nirvana_seat::RecordLine = serde_json::from_str(lines[2]).expect("a line");
+    assert_eq!(line.outcome, "accepted");
+    assert_eq!(line.extra["gated_outcome"], "failed");
+    // Once corrected, a second accept changes nothing; a failure never overwrites a pass.
+    assert!(!correct_record(&dir, &accepted).expect("read"));
+    assert!(!correct_record(&dir, &record_of("o2", "r1", "sent_back")).expect("read"));
+    let tallies = crate::nirvana_seat::tally(&crate::nirvana_seat::read_record(&path));
+    let entry = &tallies[&("sonnet".to_owned(), crate::nirvana_seat::Effort::Medium, "ops".to_owned())];
+    assert_eq!((entry.orders, entry.passes), (2, 1));
+}
+
+/// The journal verdict `accepted` is the record's outcome word.
+#[test]
+fn c40b_an_accepted_verdict_is_the_records_outcome() {
+    let events = [
+        Event {
+            v: V,
+            seq: 1,
+            at: T0,
+            kind: Kind::Seated(Box::new(seated("o1"))),
+        },
+        Event {
+            v: V,
+            seq: 2,
+            at: T0 + 1,
+            kind: Kind::Gated {
+                order: "o1".into(),
+                verdict: "sent_back".into(),
+                reason: Some("tests failed".into()),
+                axes: Vec::new(),
+            },
+        },
+        Event {
+            v: V,
+            seq: 3,
+            at: T0 + 2,
+            kind: Kind::Gated {
+                order: "o1".into(),
+                verdict: "accepted".into(),
+                reason: Some("the failing test is the owner's flake".into()),
+                axes: Vec::new(),
+            },
+        },
+    ];
+    let state = replay(&events[..2]);
+    assert_eq!(outcome_word(state.order("o1").expect("o1")), "sent_back");
+    let state = replay(&events);
+    assert_eq!(outcome_word(state.order("o1").expect("o1")), "accepted");
 }

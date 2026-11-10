@@ -57,11 +57,14 @@ chore, can go to a `worker-*` subagent instead of a pane worker; the agent's nam
 - A question is answered, never built. A triage that fell back to a build turned a code-tour question into a
   7.72M-token build.
 - Never read a large file or a video into its own context. Ask Jev, or seat flash or argon.
+- Ask about an image over 300 KB with `herdr look "<path>" --ask "<your question>"`, or read the small copy that
+  `herdr media shrink "<path>"` makes; the `guard-read` hook refuses the full image. An image read here is re-sent
+  with every later turn of the session: one session on the parent project carried 118 MiB of them.
 - Never resume a finished worker for a new question; seat a new one with the question. The one exception is a
   read-only follow-up to a `read.huge` agy session, which resumes it by `--conversation <id>`: a new session would
   re-read the whole input, and cached input costs a twentieth.
 - Every subagent you spawn names its model and its effort: a `worker-*` agent names both. One that names neither
-  runs on your own seat, Opus at your effort, and the `PreToolUse` hook refuses it.
+  runs on your own seat at your own effort, and the `PreToolUse` hook refuses it.
 - A merge to `main` asks the owner, except in auto mode within its budgets (§12 R6).
 - Some skills, MCP servers and plugins may be off in this folder by its Preload preset (`herdr preload why`). When
   you need one, say which, and the owner presses `p` in Preload or switches it on there (plan 13 §4).

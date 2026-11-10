@@ -272,11 +272,6 @@ pub fn list_claude_tasks_in(
     tasks
 }
 
-/// Lists newest 10 Claude tasks for `space_folder` in the system `%TEMP%`.
-pub fn list_claude_tasks(space_folder: &Path) -> Vec<ClaudeTask> {
-    list_claude_tasks_in(&std::env::temp_dir(), space_folder, now())
-}
-
 /// A view of recent and running jobs for the Jobs square and panel.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct JobsView {
@@ -588,29 +583,10 @@ pub fn open_tail_pane(
     Ok((space_id, pane_id))
 }
 
-/// Current Unix timestamp in seconds.
+/// Current Unix timestamp in seconds. Plan 40 review D2/D3: `nirvana_run::now`, the one clock; its test stand-in
+/// (`with_test_now`) had no caller, so the branch that read it never ran.
 pub fn now() -> u64 {
-    #[cfg(test)]
-    if let Some(now) = TEST_NOW.with_borrow(|now| *now) {
-        return now;
-    }
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-#[cfg(test)]
-thread_local! {
-    static TEST_NOW: std::cell::RefCell<Option<u64>> = const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-pub fn with_test_now<T>(time: u64, f: impl FnOnce() -> T) -> T {
-    TEST_NOW.with_borrow_mut(|now| *now = Some(time));
-    let result = f();
-    TEST_NOW.with_borrow_mut(|now| *now = None);
-    result
+    crate::nirvana_run::now()
 }
 
 /// Generates a unique, valid job ID.
@@ -1091,41 +1067,54 @@ pub fn run_exec(home: &Path, id: &str) -> std::io::Result<i32> {
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     let tx_err = tx.clone();
 
+    // Plan 40 review B3: lossy lines. `lines().map_while(Result::ok)` ended a reader at the first line that was not
+    // UTF-8 (a tool printing in the OEM code page), the job's pipe filled and the job hung as "running", its log
+    // frozen.
     let stdout = child.stdout.take();
     let t_out = std::thread::spawn(move || {
         if let Some(stdout) = stdout {
-            use std::io::BufRead;
-            let reader = std::io::BufReader::new(stdout);
-            for line in reader.lines().map_while(Result::ok) {
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
+            crate::nirvana_worker::job::lossy_lines(stdout, |line| tx.send(line).is_ok());
         }
     });
 
     let stderr = child.stderr.take();
     let t_err = std::thread::spawn(move || {
         if let Some(stderr) = stderr {
-            use std::io::BufRead;
-            let reader = std::io::BufReader::new(stderr);
-            for line in reader.lines().map_while(Result::ok) {
-                if tx_err.send(line).is_err() {
-                    break;
-                }
-            }
+            crate::nirvana_worker::job::lossy_lines(stderr, |line| tx_err.send(line).is_ok());
         }
     });
 
-    while let Ok(line) = rx.recv() {
+    let mut write_line = |line: String| {
         println!("{line}");
         let _ = writeln!(log_file, "{line}");
         let _ = log_file.flush();
+    };
+    // Review B3: the end is the child's exit, read with `try_wait`, not the pipes' EOF: a process the child left
+    // behind can hold a pipe open after the child is gone. A job has no stall rule: a silent build is a job's normal
+    // state, and `herdr job stop` ends one.
+    let status = loop {
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(line) => write_line(line),
+            Err(err) => {
+                if let Some(status) = child.try_wait()? {
+                    break status;
+                }
+                if err == std::sync::mpsc::RecvTimeoutError::Disconnected {
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+        }
+    };
+    // What the readers still hold, for at most 5 s after the exit.
+    let drained = std::time::Instant::now();
+    while let Some(left) = Duration::from_secs(5).checked_sub(drained.elapsed()) {
+        match rx.recv_timeout(left) {
+            Ok(line) => write_line(line),
+            Err(_) => break,
+        }
     }
-    let _ = t_out.join();
-    let _ = t_err.join();
-
-    let status = child.wait()?;
+    let _ = crate::nirvana_worker::job::join_within(t_out, Duration::from_secs(1));
+    let _ = crate::nirvana_worker::job::join_within(t_err, Duration::from_secs(1));
     let exit_code = status.code().unwrap_or(1);
     let elapsed = now().saturating_sub(record.started);
     let end_line = format!("[job {}: exit {exit_code} after {elapsed}s]", record.name);
@@ -1211,73 +1200,9 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
     })
 }
 
-fn herdr_command(args: &[&str]) -> std::process::Command {
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("herdr"));
-    let mut command = std::process::Command::new(exe);
-    command
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    crate::platform::configure_background_command(&mut command);
-    command
-}
-
-fn herdr_json(args: &[&str]) -> Result<Value, String> {
-    let out = herdr_command(args)
-        .output()
-        .map_err(|err| format!("herdr {}: {err}", args.join(" ")))?;
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let value: Option<Value> = serde_json::from_str(text.trim()).ok();
-    if !out.status.success() {
-        let errors: Option<Value> =
-            serde_json::from_str(String::from_utf8_lossy(&out.stderr).trim()).ok();
-        let why = value
-            .as_ref()
-            .or(errors.as_ref())
-            .and_then(|value| value.pointer("/error/message"))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                format!(
-                    "{} {}",
-                    text.trim(),
-                    String::from_utf8_lossy(&out.stderr).trim()
-                )
-            });
-        return Err(why);
-    }
-    value.ok_or_else(|| format!("herdr {}: not JSON: {}", args.join(" "), text.trim()))
-}
-
-fn herdr_ok(args: &[&str]) -> Result<(), String> {
-    let out = herdr_command(args)
-        .output()
-        .map_err(|err| format!("herdr {}: {err}", args.join(" ")))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "herdr {}: {} {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stdout).trim(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))
-    }
-}
-
-pub(crate) fn herdr_text(args: &[&str]) -> Option<String> {
-    let out = herdr_command(args).output().ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
-fn find_str<'a>(value: &'a Value, pointers: &[&str]) -> Option<&'a str> {
-    pointers
-        .iter()
-        .find_map(|pointer| value.pointer(pointer).and_then(Value::as_str))
-}
+// Plan 40 review D1: herdr's own API through the worker's helpers, which `nirvana_job` repeated by hand: one owner,
+// the richer error reading (`herdr_error`) and, since review B10, a time limit on every call.
+use crate::nirvana_worker::{find_str, herdr_json, herdr_ok, herdr_text};
 
 pub fn in_herdr() -> bool {
     if std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR).is_some()

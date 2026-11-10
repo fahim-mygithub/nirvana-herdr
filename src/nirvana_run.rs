@@ -1278,9 +1278,25 @@ pub fn rate_decision(
     }
 }
 
+/// Plan 40 review B7: the silence allowed while a tool call is open. A hypothesis, unmeasured: stream-json prints
+/// nothing while a foreground Bash runs, and this repository's own builds and test runs take 9 to 10 minutes, so a
+/// worker that ran one and then thought passed 600 s and was killed and resumed at a new turn's price.
+pub const TOOL_STALL_AFTER_S: u64 = 1800;
+
 /// §7.2: silent for 10 minutes.
 pub fn stalled(last_line_at: u64, now: u64) -> bool {
     now.saturating_sub(last_line_at) >= STALL_AFTER_S
+}
+
+/// The stall rule with what the stream says: `tool_open` is a call the stream started and has not answered (a claude
+/// `tool_use` whose `tool_result` has not come, an agy tool step `ACTIVE` and not yet `DONE` or `ERROR`). Model
+/// silence keeps `STALL_AFTER_S`; a call that never answers is stalled at `TOOL_STALL_AFTER_S`.
+pub fn stalled_silence(silent_s: u64, tool_open: bool) -> bool {
+    if tool_open {
+        silent_s >= TOOL_STALL_AFTER_S
+    } else {
+        stalled(0, silent_s)
+    }
 }
 
 /// The wait before the restart that follows a stall, given the stalls before it; `None` is the crash-loop
@@ -2207,6 +2223,11 @@ pub fn receipt_text(receipt: &Receipt) -> String {
 /// did not deliver gated work: `failed`, its why kept on the journal.
 pub fn outcome_word(order: &OrderState) -> String {
     use crate::nirvana_gate::Outcome;
+    // Plan 40 addendum A: an accept is the final decision. `Outcome::parse` knows only the gate's five words, so an
+    // accepted order fell to its phase (`Gated`) and was recorded `failed`.
+    if order.verdict.as_deref() == Some(Outcome::ACCEPTED) {
+        return Outcome::ACCEPTED.into();
+    }
     if let Some(verdict) = order.verdict.as_deref().and_then(Outcome::parse) {
         // Plan 37b review S1: asked on its own block, which the seat's tally does not count.
         let blocked = order
@@ -2282,8 +2303,65 @@ pub fn write_record(
         }
         Err(_) => line,
     };
-    let (written, _) = nirvana_seat::record_once(&nirvana_seat::dir(), line, true, now())?;
+    let dir = nirvana_seat::dir();
+    let (written, line) = nirvana_seat::record_once(&dir, line, true, now())?;
+    if !written {
+        // Plan 40 addendum A: the gate's failure was recorded first, then the orchestrator accepted the order. The
+        // record keeps one line per order and run, so that line is corrected to the final decision.
+        correct_record(&dir, &line)?;
+    }
     Ok(written)
+}
+
+/// Plan 40 addendum A: the record ends with the final decision. When `line` is a pass (`accepted`, or a later
+/// `pass`) and the record already holds a failure for the same order and run (`failed`, `sent_back`, `asked`: the
+/// gate's ruling before the orchestrator took the delivery), that line's `outcome` becomes `line`'s and the old word
+/// is kept as `gated_outcome`. The one-line-per-order rule (`record_once`) stays: the line is corrected in place,
+/// under `leases.lock`, never written twice, so every reader (tally, measured use, the receipt) counts the order once.
+/// Measured on the installed record (323 lines, 2026-11-09): 65 lines of accepted orders read `failed` or
+/// `sent_back`. `Ok(true)` when a line was corrected.
+pub fn correct_record(dir: &Path, line: &nirvana_seat::RecordLine) -> std::io::Result<bool> {
+    use crate::nirvana_gate::Outcome;
+    if Outcome::tally(&line.outcome) != Some(true) {
+        return Ok(false);
+    }
+    let _lock = nirvana_seat::Lock::take(dir)?;
+    let path = dir.join(nirvana_seat::RECORD_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err),
+    };
+    let mut corrected = false;
+    let mut out = String::with_capacity(text.len() + 64);
+    for raw in text.lines() {
+        let old = (!corrected)
+            .then(|| serde_json::from_str::<nirvana_seat::RecordLine>(raw.trim()).ok())
+            .flatten()
+            .filter(|old| {
+                old.order == line.order
+                    && old.run == line.run
+                    && Outcome::tally(&old.outcome) == Some(false)
+            });
+        match old {
+            Some(mut old) => {
+                old.extra
+                    .insert("gated_outcome".into(), Value::String(old.outcome.clone()));
+                old.outcome = line.outcome.clone();
+                out.push_str(&serde_json::to_string(&old)?);
+                corrected = true;
+            }
+            // Every other line is kept byte for byte, one that does not parse included.
+            None => out.push_str(raw),
+        }
+        out.push('\n');
+    }
+    if corrected {
+        let temp = dir.join(format!("{}.correct", nirvana_seat::RECORD_FILE));
+        std::fs::write(&temp, out)?;
+        std::fs::rename(&temp, &path)?;
+    }
+    Ok(corrected)
 }
 
 /// The journal reference a record line carries.

@@ -353,10 +353,36 @@ fn report_lines(text: &str, paint: &Paint) -> Option<Vec<String>> {
             if files.len() == 1 { "" } else { "s" }
         ));
     }
-    if let Some(tests) = value.get("tests").and_then(Value::as_str) {
-        lines.push(format!("  tests: {}", clip(tests)));
+    // Plan 40 review B9: `tests` is the schema's list of `{name, result}`, read as a string before, so the line was
+    // never drawn. It shows as counts, and only when the worker sent the list (T3 made it optional).
+    // A worker's text that is not schema-bound (agy's answer as JSON text) may still say them as a string.
+    match value.get("tests") {
+        Some(Value::Array(tests)) => {
+            if let Some(counts) = test_counts(tests) {
+                lines.push(format!("  tests: {counts}"));
+            }
+        }
+        Some(Value::String(tests)) => lines.push(format!("  tests: {}", clip(tests))),
+        _ => {}
     }
     Some(lines)
+}
+
+/// `3 pass, 1 fail, 1 not run` from a Work Report's tests, the zero counts left out; `None` for an empty list.
+pub fn test_counts(tests: &[Value]) -> Option<String> {
+    let count = |word: &str| {
+        tests
+            .iter()
+            .filter(|test| test.get("result").and_then(Value::as_str) == Some(word))
+            .count()
+    };
+    let parts: Vec<String> = [("pass", "pass"), ("fail", "fail"), ("not_run", "not run")]
+        .into_iter()
+        .map(|(word, shown)| (count(word), shown))
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, shown)| format!("{n} {shown}"))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(", "))
 }
 
 /// The lines a note draws in the worker's tab. `paint` adds colour; `herdr seat read` passes false.
@@ -763,5 +789,19 @@ mod tests {
             "✻ delivered: done · 4m 12s · 131.4k in, 958 out"
         );
         assert!(footer("failed: x", false, 5, tokens, false).starts_with("✗ failed: x · 5s"));
+    }
+
+    /// Plan 40 review B9: the report's tests show as counts, and a report without them draws no tests line.
+    #[test]
+    fn c40b_a_reports_tests_show_as_counts() {
+        let report = json!({"status": "done", "summary": "s", "files": ["a.rs"], "gotchas": [], "tests": [
+            {"name": "a", "result": "pass"}, {"name": "b", "result": "pass"}, {"name": "c", "result": "fail"},
+            {"name": "d", "result": "not_run"}]});
+        let lines = report_lines(&report.to_string(), &Paint(false)).expect("a report");
+        assert_eq!(lines.last().map(String::as_str), Some("  tests: 2 pass, 1 fail, 1 not run"));
+        let lean = json!({"status": "done", "summary": "s", "gotchas": []});
+        let lines = report_lines(&lean.to_string(), &Paint(false)).expect("a report");
+        assert!(!lines.iter().any(|line| line.contains("tests:")), "{lines:?}");
+        assert_eq!(test_counts(&[]), None);
     }
 }

@@ -68,9 +68,8 @@ pub const PLUGIN: &str = "nirvana";
 /// Scores, shares: the seat engine's slack (nirvana_seat's EDGE).
 const EDGE: f32 = 1e-4;
 
-fn now() -> u64 {
-    nirvana_usage::unix(std::time::SystemTime::now())
-}
+// Plan 40 review D2: the one clock, `nirvana_run::now`.
+use crate::nirvana_run::now;
 
 fn read_stdin() -> Value {
     let mut input = String::new();
@@ -778,6 +777,9 @@ pub struct Reserve {
     /// What live leases on the pool expect to spend of the window.
     pub booked: f32,
     pub now: u64,
+    /// Plan 40 M1: the orchestrator's seat and effort as its session recorded them at start (`read_session_seat`),
+    /// for the refusals that say a spawn would run on it. `None` says "your own seat" alone.
+    pub own_seat: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -907,8 +909,8 @@ pub fn guard_with_leases(
     reserve: &Reserve,
     leases: &Leases,
 ) -> Verdict {
-    // The orchestrator's own agent file has no prompt (it keeps Claude Code's), so a spawn of it is a bare Opus
-    // subagent at the orchestrator's effort, not a worker.
+    // The orchestrator's own agent file has no prompt (it keeps Claude Code's), so a spawn of it is a bare
+    // subagent on the orchestrator's own seat and effort, not a worker.
     if matches!(spawn.agent_type.as_str(), "nirvana" | "nirvana:nirvana") {
         return Verdict::Deny(
             "herdr guard: nirvana is the orchestrator's own seat, not a worker. Spawn a nirvana:worker-* agent, or \
@@ -916,12 +918,14 @@ pub fn guard_with_leases(
                 .to_owned(),
         );
     }
+    // Plan 40 M1: the seat is the session's recorded one, never a model name typed here ("Opus 5.5" was wrong for a
+    // Fable session), and no worker name is offered as an example: the plugin has no fable or xhigh worker.
+    let own = own_seat_words(reserve.own_seat.as_deref());
     if spawn.agent_type == "fork" {
-        return Verdict::Deny(
-            "herdr guard: a fork always runs on your own seat (Opus 5.5 at your effort). Spawn a worker agent that \
-             names its seat and effort, such as nirvana:worker-sonnet-medium, or seat the order with `herdr seat pick`."
-                .to_owned(),
-        );
+        return Verdict::Deny(format!(
+            "herdr guard: a fork always runs on {own}. Spawn a nirvana:worker-<seat>-<effort> agent that matches the \
+             order's booking, or seat the order with `herdr seat pick`."
+        ));
     }
     let model = spawn
         .model
@@ -940,9 +944,9 @@ pub fn guard_with_leases(
     };
     if let Some(missing) = missing {
         return Verdict::Deny(format!(
-            "herdr guard: this spawn of {} names {missing}, in its call or its agent file, so it would inherit your \
-             seat (Opus 5.5 at your effort). Spawn a worker agent that names both, such as \
-             nirvana:worker-sonnet-medium, or pass model and effort.",
+            "herdr guard: this spawn of {} names {missing}, in its call or its agent file, so it would inherit \
+             {own}. Spawn a nirvana:worker-<seat>-<effort> agent that matches the order's booking, or pass model and \
+             effort.",
             spawn.agent_type,
         ));
     }
@@ -1049,6 +1053,14 @@ pub fn guard_with_leases(
     ))
 }
 
+/// "your own seat", with the session's recorded seat and effort when known: "your own seat (opus high)".
+pub fn own_seat_words(seat: Option<&str>) -> String {
+    match seat.map(str::trim).filter(|seat| !seat.is_empty()) {
+        Some(seat) => format!("your own seat ({seat})"),
+        None => "your own seat".to_owned(),
+    }
+}
+
 /// The reserve window as the guard reads it: the fresher of the statusline's reading and `usage.json`'s, each only
 /// while fresh; and the live leases' bookings on the pool.
 fn live_reserve(table: &Table, home: &Path, now: u64) -> Reserve {
@@ -1076,6 +1088,7 @@ fn live_reserve(table: &Table, home: &Path, now: u64) -> Reserve {
         resets_at: reading.as_ref().and_then(|r| r.resets_at),
         booked,
         now,
+        own_seat: None,
     }
 }
 
@@ -1107,7 +1120,12 @@ fn guard_cli() -> std::io::Result<()> {
     let table = table().unwrap_or_else(|| {
         nirvana_seat::parse(nirvana_seat::DEFAULT).expect("herdr's default seat table parses")
     });
-    let reserve = live_reserve(&table, &home_dir(), now());
+    let mut reserve = live_reserve(&table, &home_dir(), now());
+    reserve.own_seat = hook
+        .get("session_id")
+        .and_then(Value::as_str)
+        .and_then(|session| read_session_seat(&home_dir(), session))
+        .map(|record| format!("{} {}", record.seat, record.effort));
     if let Verdict::Deny(reason) = guard(&spawn, def.as_ref(), &table, &reserve) {
         println!(
             "{}",
@@ -1252,6 +1270,9 @@ pub fn report_in(message: &str) -> Result<Value, String> {
     Err(last_err)
 }
 
+/// Plan 40 addendum A: the record's word for a worker subagent that ended normally with a final message in prose.
+pub const SUBAGENT_DELIVERED: &str = "subagent-delivered";
+
 /// The record line for a finished worker subagent, or why there is none. `None` back means the agent is not one of
 /// this plugin's workers, which records nothing and says nothing.
 pub fn subagent_line(
@@ -1296,13 +1317,26 @@ pub fn subagent_line(
             ),
             // A handback that says what it did in prose has reported, in the wrong shape: not the same fact as a
             // worker that said nothing, so it gets its own word and the start of what it said.
-            Err(_) => match handback.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
-                Some(message) => {
-                    summary = Some(message.chars().take(200).collect::<String>());
-                    "subagent-prose-report".to_owned()
+            // Plan 40 addendum A: a subagent has no output schema, so its last message is prose far more often than a
+            // Work Report, and all 24 such orders in the installed record read "no report" whatever they delivered.
+            // A subagent that ended with a final message in prose delivered; "no report" is kept for an empty end.
+            // Neither word counts for or against the seat (`nirvana_seat::tally` skips the subagent chain): its pass
+            // or fail is the orchestrator's to judge.
+            Err(_) => {
+                let handed = handback.as_deref().map(str::trim).filter(|m| !m.is_empty());
+                let final_text = Some(said.trim()).filter(|m| !m.is_empty());
+                match handed.or(final_text) {
+                    Some(message) => {
+                        summary = Some(message.chars().take(200).collect::<String>());
+                        if handed.is_some() {
+                            "subagent-prose-report".to_owned()
+                        } else {
+                            SUBAGENT_DELIVERED.to_owned()
+                        }
+                    }
+                    None => "subagent-no-report".to_owned(),
                 }
-                None => "subagent-no-report".to_owned(),
-            },
+            }
         };
         let tokens = (tokens != Tokens::default()).then_some(tokens);
         let mut line = json!({
@@ -2116,7 +2150,8 @@ pub fn parse_numstat_z(mut raw: &[u8]) -> Vec<NumstatEntry> {
     entries
 }
 
-#[allow(dead_code)] // Helper for callers or tests that do not pass cached previous state
+// Plan 40 review D4: only tests call it; production passes the cached state (`capture_edit_state_cached`).
+#[cfg(test)]
 pub fn capture_edit_state(root: &Path) -> EditState {
     capture_edit_state_cached(root, None)
 }
@@ -2662,9 +2697,73 @@ fn check_edit_cli() -> std::io::Result<()> {
     Ok(())
 }
 
+// ---- guard-read (PreToolUse on Read): the image guard (plan 40 X2) ----
+
+/// The largest image Nirvana Claude may `Read` itself. A hypothesis: a phone screenshot is 1 to 3 MB, a cropped UI
+/// shot under 300 KB. Nirvana CLAUDE.md rule 7 measured an image read in the orchestrator at 118 MiB, 52% of one
+/// session, since an image read is re-sent with every later turn.
+pub const IMAGE_READ_MOST: u64 = 300 * 1024;
+/// The file names `guard-read` treats as images, lower case.
+pub const IMAGE_EXTENSIONS: [&str; 8] = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "heif"];
+
+/// The refusal for a large image, leading with what to do instead.
+pub fn image_read_reason(path: &str, bytes: u64) -> String {
+    format!(
+        "Ask about this image without reading it here: `herdr look \"{path}\" --ask \"<your question>\"` returns the \
+         answer as text, and the image never enters this session. To see it yourself, read a small copy made by \
+         `herdr media shrink \"{path}\"`. This image is {} KB; Nirvana Claude reads images up to {} KB, because an \
+         image read here is re-sent with every later turn of the session.",
+        bytes / 1024,
+        IMAGE_READ_MOST / 1024
+    )
+}
+
+/// The `PreToolUse` answer for a `Read` call, or `None` to allow it. Only the orchestrator is guarded: a subagent, a
+/// worker in its worktree and a plain Claude Code pane are skipped (`should_skip_orchestrator_hook`), since a leaf may
+/// read an image. This guard fails open: it protects the orchestrator's context, not money or data, so a missing file,
+/// a name that is not an image, a size it cannot read and a hook it cannot parse are all allowed.
+pub fn guard_read_decision(hook: &Value, cwd: Option<&Path>, is_orchestrator: bool) -> Option<Value> {
+    if should_skip_orchestrator_hook(hook, cwd, is_orchestrator) {
+        return None;
+    }
+    let file_path = hook
+        .pointer("/tool_input/file_path")
+        .and_then(Value::as_str)?;
+    let path = Path::new(file_path);
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    if !IMAGE_EXTENSIONS.contains(&extension.as_str()) {
+        return None;
+    }
+    let full = match cwd {
+        Some(cwd) if path.is_relative() => cwd.join(path),
+        _ => path.to_path_buf(),
+    };
+    let bytes = std::fs::metadata(&full).ok().filter(|meta| meta.is_file())?.len();
+    if bytes <= IMAGE_READ_MOST {
+        return None;
+    }
+    let reason = image_read_reason(file_path, bytes);
+    Some(json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }))
+}
+
+fn guard_read_cli() -> std::io::Result<()> {
+    let hook = read_stdin();
+    let cwd = hook_cwd(&hook).or_else(|| std::env::current_dir().ok());
+    if let Some(decision) = guard_read_decision(&hook, cwd.as_deref(), is_orchestrator_env()) {
+        println!("{decision}");
+    }
+    Ok(())
+}
+
 // ---- the CLI ----
 
-pub const SUBCOMMANDS: [&str; 9] = [
+pub const SUBCOMMANDS: [&str; 10] = [
     "digest",
     "guard-spawn",
     "subagent-stop",
@@ -2674,9 +2773,10 @@ pub const SUBCOMMANDS: [&str; 9] = [
     "prompt-baseline",
     "guard-edit",
     "check-edit",
+    "guard-read",
 ];
 
-/// `herdr nirvana <digest|guard-spawn|subagent-stop|stop|statusline|log-usage|prompt-baseline|guard-edit|check-edit>`, each reading Claude Code's JSON on stdin.
+/// `herdr nirvana <digest|guard-spawn|subagent-stop|stop|statusline|log-usage|prompt-baseline|guard-edit|check-edit|guard-read>`, each reading Claude Code's JSON on stdin.
 /// `None` when `name` is not one of these.
 pub fn cli(name: &str) -> Option<std::io::Result<()>> {
     Some(match name {
@@ -2689,6 +2789,7 @@ pub fn cli(name: &str) -> Option<std::io::Result<()>> {
         "prompt-baseline" => prompt_baseline_cli(),
         "guard-edit" => guard_edit_cli(),
         "check-edit" => check_edit_cli(),
+        "guard-read" => guard_read_cli(),
         _ => return None,
     })
 }

@@ -47,8 +47,9 @@ pub fn path_in(home: &Path, folder: &Path) -> PathBuf {
 }
 
 /// `text` without a Windows verbatim prefix: `\\?\C:\x` is `C:\x` and `\\?\UNC\srv\share` is `\\srv\share`. Any other
-/// verbatim form (`\\?\Volume{...}`) has no plain spelling and is left alone (`None`).
-fn strip_verbatim(text: &str) -> Option<String> {
+/// verbatim form (`\\?\Volume{...}`) has no plain spelling and is left alone (`None`). Plan 40 review B8/D2: shared,
+/// so `nirvana_media` drops its own copy, which turned `\\?\UNC\srv\share` into the relative-looking `UNC\srv\share`.
+pub(crate) fn strip_verbatim(text: &str) -> Option<String> {
     if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
         return Some(format!(r"\\{rest}"));
     }
