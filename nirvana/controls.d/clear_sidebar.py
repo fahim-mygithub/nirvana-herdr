@@ -102,14 +102,10 @@ CONTROLS = (
         'rust',
     ),
     # Plan 26 S1: short model Claude family initial and version
-    Control(
-        'p26_short_model_claude',
-        'src/nirvana_spaces.rs',
-        '        return match ver {\n            Some(v) => format!("{family_initial}{v}"),\n            None => family_initial.to_string(),\n        };\n',
-        '        return match ver {\n            Some(v) => format!("X{v}"),\n            None => family_initial.to_string(),\n        };\n',
-        'compact_model_table_test',
-        'rust',
-    ),
+    Control("p26_short_model_claude", 'src/nirvana_spaces.rs',
+            '        Family::Claude(initial, Some(version)) => format!("{initial}{version}"),\n',
+            '        Family::Claude(initial, Some(version)) => format!("X{version}"),\n',
+            'compact_model_table_test', 'rust'),
     # Plan 26 S2: MouseEventKind::Moved sets hovered space agent pane
     Control(
         'p26_mouse_moved_sets_hover',
@@ -174,23 +170,15 @@ CONTROLS = (
         'rust',
     ),
     # Plan 26 §4 & Review: compact model extracts family initial for standard models
-    Control(
-        'p26_compact_model_family',
-        'src/nirvana_spaces.rs',
-        '        let family_initial = if lower.contains("sonnet") {\n            \'S\'\n',
-        '        let family_initial = if false && lower.contains("sonnet") {\n            \'S\'\n',
-        'compact_model_table_test',
-        'rust',
-    ),
+    Control("p26_compact_model_family", 'src/nirvana_spaces.rs',
+            '    let initial = [(\'S\', "sonnet"), (\'O\', "opus"), (\'H\', "haiku"), (\'F\', "fable")]\n',
+            '    let initial = [(\'S\', "sonnet-x"), (\'O\', "opus"), (\'H\', "haiku"), (\'F\', "fable")]\n',
+            'compact_model_table_test', 'rust'),
     # Plan 26 §4 & Review: compact model extracts Flash for Gemini models
-    Control(
-        'p26_compact_model_gemini_flash',
-        'src/nirvana_spaces.rs',
-        '    if lower.contains("flash") {\n        return "Flash".to_string();\n    }\n',
-        '    if false && lower.contains("flash") {\n        return "Flash".to_string();\n    }\n',
-        'space_row_whole_row_equality_at_26_cells',
-        'rust',
-    ),
+    Control("p26_compact_model_gemini_flash", 'src/nirvana_spaces.rs',
+            '        let line = if has("flash") {\n',
+            '        let line = if false && has("flash") {\n',
+            'space_row_whole_row_equality_at_26_cells', 'rust'),
     # Plan 26 §5: agents panel renders Run header for grouped runs
     Control(
         'p26_subagents_run_header',

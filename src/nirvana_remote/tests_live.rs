@@ -1525,9 +1525,13 @@ fn a_send_adds_the_uploaded_files_paths_and_refuses_any_other_name() {
         .as_str()
         .unwrap()
         .to_string();
+    // Plan 40: an image's path is followed by its note (send::note_for); the path still comes first.
+    let path = w.uploads().join(&name).display().to_string();
     assert_eq!(
         typed,
-        format!("look {}", w.uploads().join(&name).display()),
+        format!(
+            "look {path} (image, 4 bytes; in a Nirvana pane, herdr look \"{path}\" --ask \"<your question>\" reads it and answers in text)"
+        ),
         "after a space, not a newline: an Enter in a pane without bracketed paste"
     );
     for bad in [
@@ -2094,7 +2098,10 @@ fn the_message_box_grows_with_its_text_and_comes_back_at_the_end() {
     let running = serve(w.site());
     let (_, _, chat) = get(running.addr, "/chat.js", OWNER);
     let (_, _, css) = get(running.addr, "/app.css", OWNER);
-    assert!(chat.contains("h('textarea', { id: 'nv-draft'"), "a box that wraps");
+    assert!(
+        chat.contains("h('textarea', { id: 'nv-draft'"),
+        "a box that wraps"
+    );
     assert!(
         chat.contains("input.style.height = Math.min(input.scrollHeight, DRAFT_MOST) + 'px';"),
         "the box fits its text"
@@ -2111,7 +2118,10 @@ fn the_message_box_grows_with_its_text_and_comes_back_at_the_end() {
         chat.contains("input.addEventListener('focus', () => requestAnimationFrame(toEnd));"),
         "the caret goes to the end"
     );
-    assert!(css.contains("resize: none; overflow-y: hidden;"), "no grab handle");
+    assert!(
+        css.contains("resize: none; overflow-y: hidden;"),
+        "no grab handle"
+    );
 }
 
 #[test]

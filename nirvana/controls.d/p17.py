@@ -38,14 +38,10 @@ CONTROLS = (
         'rust',
     ),
     # §2: Claude model spellings match strip doctrine (e.g. Sonnet 5.5).
-    Control(
-        'p17_model_spelling_claude_sonnet',
-        'src/nirvana_subagents.rs',
-        "            if let Some(label) = crate::nirvana_spaces::claude_label(m) {\n                if let Some(stripped) = label.strip_prefix(\"Claude \") {\n                    stripped.to_string()\n                } else {\n                    label\n                }",
-        "            if let Some(label) = crate::nirvana_spaces::claude_label(m) {\n                if let Some(_stripped) = label.strip_prefix(\"Claude \") {\n                    \"Claude-Unknown\".to_string()\n                } else {\n                    label\n                }",
-        'model_spellings_match_doctrine',
-        'rust',
-    ),
+    Control("p17_model_spelling_claude_sonnet", 'src/nirvana_subagents.rs',
+            '            Some(stripped) => stripped.to_string(),\n            None => label,\n',
+            '            Some(_stripped) => "Claude-Unknown".to_string(),\n            None => label,\n',
+            'model_spellings_match_doctrine', 'rust'),
     # §4: agy argv extracts model from --model flag.
     Control(
         'p17_agy_argv_model_flag',

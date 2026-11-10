@@ -130,10 +130,10 @@ CONTROLS = (
             "            .filter(|(path, _, _)| *path != \"/sw.js\")\n",
             "",
             T_SHELL, "rust"),
-    Control("p39o_shell_pick_scripts", SHELL,
-            "    all.extend_from_slice(PICK_SCRIPTS);\n",
-            "",
-            T_SHELL, "rust"),
+    Control("p39o_shell_pick_scripts", 'src/nirvana_remote/shell.rs',
+            '        .map(|(path, _, body)| (*path, body.as_bytes()))\n',
+            '        .filter(|(path, _, _)| !matches!(*path, "/cards.js" | "/newspace.js"))\n        .map(|(path, _, body)| (*path, body.as_bytes()))\n',
+            'nirvana_remote::tests_offline::every_shell_file_is_served_whole_and_the_page_loads_nothing_outside_it', 'rust'),
 
     # Item 1, a new build replaces the old shell: the tag changes with a version, a byte, a path boundary
     Control("p39o_tag_version", SHELL,

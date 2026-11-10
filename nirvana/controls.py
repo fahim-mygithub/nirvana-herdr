@@ -11,10 +11,17 @@ The file is restored in a `finally`. Rust controls recompile the crate (about 30
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import clean_temp  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 TIMEOUT = 900
@@ -103,8 +110,8 @@ CONTROLS: tuple[Control, ...] = (
             'tmp.write_bytes((ver + "\\n").encode("utf-8"))', 'tmp.write_bytes(b"0.0.0\\n")',
             "nirvana.test_scripts.InstallTest.test_install_moves_the_old_build_aside_and_stamps_last", "python"),
     Control("install_overwrites_old_build", "nirvana/install.py",
-            "    if target.exists():\n        target.rename(",
-            "    if False:\n        target.rename(",
+            "    if target.exists():\n        aside = bin_dir",
+            "    if False:\n        aside = bin_dir",
             "nirvana.test_scripts.InstallTest.test_install_moves_the_old_build_aside_and_stamps_last", "python"),
     Control("bump_feature_keeps_fix", "nirvana/version.py",
             'return f"{major}.{feature + 1}.0"', 'return f"{major}.{feature + 1}.{fix}"',
@@ -1066,7 +1073,136 @@ assert len(_names) == len(set(_names)), f"duplicate control names: {sorted({n fo
 def command(c: Control) -> list[str]:
     if c.kind == "rust":
         return ["cargo", "nextest", "run", "--locked", "--no-fail-fast", c.test]
-    return [sys.executable, "-m", "unittest", c.test]
+    # `-B`: no bytecode is written for a sabotaged file. Two controls on one file whose replacements change its size
+    # by the same bytes, run within one second, matched the first one's .pyc (it checks mtime in seconds and size)
+    # and ran its sabotage instead (plan 40: c40e_clean_top_link_skipped read green after
+    # c40e_clean_never_through_a_link; memory note same-size-sabotage-runs-stale-bytecode).
+    return [sys.executable, "-B", "-m", "unittest", c.test]
+
+
+# Plan 40 review B6: the restore was only the `finally` below, which dies with the process. A TaskStop, a closed
+# terminal or a power cut during a 900 s build left the sabotage in the source, and the next run read the broken bytes
+# as the original (the "find text occurs 0 times" line then hid it). So the original goes to disk before the sabotage,
+# and every run starts by putting back any it finds. `target/` is git-ignored and per worktree.
+RESTORE = ROOT / "target" / "controls-restore"
+
+
+# Review N9: this file had its own copy that read "access denied" as dead, the opposite of `clean_temp`'s. One
+# function now, and denied reads as alive: a backup is then left to its run rather than written over it.
+_pid_alive = clean_temp.pid_alive
+
+# Plan 40 review S2: two live runs in one worktree undid each other. Run B read a file run A had sabotaged as its
+# original, A restored the true bytes, then B's `finally` wrote A's sabotage back and dropped its note, so the repair
+# never saw it. One run per worktree: an OS lock on `run.lock` (released by Windows when the holder dies, however it
+# dies), taken before any file is touched; `run.lock.info` names the holder for a run that is refused.
+LOCK = "run.lock"
+LOCK_INFO = "run.lock.info"     # not .json: `repair` reads every .json as a backup note
+
+
+def take_lock() -> tuple[int | None, dict | None]:
+    """(the lock's descriptor, the note a run that died left), or (None, the holder's note) when a live run holds
+    it."""
+    RESTORE.mkdir(parents=True, exist_ok=True)
+    fd = os.open(RESTORE / LOCK, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None, _lock_note()
+    left = _lock_note()
+    tmp = RESTORE / (LOCK_INFO + ".tmp")
+    tmp.write_text(json.dumps({"pid": os.getpid(), "since": time.strftime("%Y-%m-%d %H:%M:%S")}), encoding="utf-8")
+    os.replace(tmp, RESTORE / LOCK_INFO)
+    return fd, left
+
+
+def _lock_note() -> dict | None:
+    try:
+        data = json.loads((RESTORE / LOCK_INFO).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def release_lock(fd: int) -> None:
+    try:
+        (RESTORE / LOCK_INFO).unlink()
+    except FileNotFoundError:
+        pass
+    try:
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    os.close(fd)
+
+
+def _save_original(c: Control, original: bytes, sabotaged: bytes) -> Path:
+    """`<name>.bak` holds the bytes, `<name>.json` the file, this run's pid and the sabotaged bytes' sha256; the bytes
+    land before the note, so a note always names a whole backup."""
+    RESTORE.mkdir(parents=True, exist_ok=True)
+    bak = RESTORE / f"{c.name}.bak"
+    tmp = bak.with_suffix(".bak.tmp")
+    tmp.write_bytes(original)
+    os.replace(tmp, bak)
+    note = RESTORE / f"{c.name}.json"
+    note.write_text(json.dumps({"file": c.file, "pid": os.getpid(),
+                                "sabotaged": hashlib.sha256(sabotaged).hexdigest()}), encoding="utf-8")
+    return note
+
+
+def _drop_original(c: Control) -> None:
+    for suffix in (".json", ".bak"):
+        try:
+            (RESTORE / f"{c.name}{suffix}").unlink()
+        except FileNotFoundError:
+            pass
+
+
+def repair() -> list[str]:
+    """Puts back every file a run that died left sabotaged; a line each. A backup whose run still lives is left to
+    that run's own `finally`."""
+    lines: list[str] = []
+    if not RESTORE.is_dir():
+        return lines
+    for note in sorted(RESTORE.glob("*.json")):
+        try:
+            data = json.loads(note.read_text(encoding="utf-8"))
+            rel, pid, sabotaged = str(data["file"]), int(data["pid"]), str(data["sabotaged"])
+        except (OSError, ValueError, KeyError, TypeError) as err:
+            lines.append(f"repair: {note.name} unreadable ({err}); left for a person")
+            continue
+        if _pid_alive(pid):
+            lines.append(f"repair: {rel} is under a live run (pid {pid}); left to it")
+            continue
+        bak = note.with_suffix(".bak")
+        path = ROOT / rel
+        try:
+            original = bak.read_bytes()
+        except OSError as err:
+            lines.append(f"repair: no backup for {rel} ({err}); left for a person")
+            continue
+        now = path.read_bytes() if path.is_file() else b""
+        if now != original:
+            if hashlib.sha256(now).hexdigest() != sabotaged:
+                # Someone edited the file after the run died: their bytes are not overwritten.
+                lines.append(f"repair: {rel} changed since a run died (pid {pid}); its original is {bak}")
+                continue
+            path.write_bytes(original)
+            lines.append(f"repair: restored {rel} from a run that died (pid {pid})")
+        note.unlink()
+        bak.unlink()
+    return lines
 
 
 def run_one(c: Control) -> tuple[bool, str]:
@@ -1075,7 +1211,9 @@ def run_one(c: Control) -> tuple[bool, str]:
     find, replace = c.find.encode("utf-8"), c.replace.encode("utf-8")
     if original.count(find) != 1:
         return False, f"find text occurs {original.count(find)} times, not once"
-    path.write_bytes(original.replace(find, replace))
+    sabotaged = original.replace(find, replace)
+    _save_original(c, original, sabotaged)
+    path.write_bytes(sabotaged)
     try:
         p = subprocess.run(command(c), cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=TIMEOUT)
@@ -1090,13 +1228,35 @@ def run_one(c: Control) -> tuple[bool, str]:
         return False, f"timed out after {TIMEOUT}s"
     finally:
         path.write_bytes(original)
+        _drop_original(c)
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="controls")
-    ap.add_argument("--dry-run", action="store_true")
+    # Review N1: the repair runs first in every run, a dry run too, and it may write a source file back.
+    ap.add_argument("--dry-run", action="store_true",
+                    help="count each control's find text and run nothing. The repair of a dead run's sabotage still "
+                         "runs first and may put a source file back")
     ap.add_argument("--only")
     ns = ap.parse_args(argv)
+    fd, left = take_lock()
+    if fd is None:
+        who = f"pid {left.get('pid')}, since {left.get('since')}" if left else "a run that has not named itself yet"
+        print(f"controls: another controls run holds this worktree: {who}. Nothing was touched; run again when it ends",
+              flush=True)
+        return 2
+    try:
+        for line in repair():
+            print(line, flush=True)
+        if left and left.get("pid") != os.getpid():
+            print(f"controls: took over the run lock of pid {left.get('pid')}, since {left.get('since')}, "
+                  f"which is gone", flush=True)
+        return _main(ns)
+    finally:
+        release_lock(fd)
+
+
+def _main(ns: argparse.Namespace) -> int:
     chosen = [c for c in CONTROLS if ns.only is None or c.name == ns.only.strip()]
     if not chosen:
         print(f"unknown control {ns.only!r}; names: {', '.join(c.name for c in CONTROLS)}")

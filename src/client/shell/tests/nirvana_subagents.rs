@@ -1103,7 +1103,8 @@ fn compact_model_table_test() {
     assert_eq!(compact_model("Claude Sonnet 5.5"), "S5.5");
     assert_eq!(compact_model("Claude Opus 5.5"), "O5.5");
     assert_eq!(compact_model("Claude Haiku 5.5"), "H5.5");
-    assert_eq!(compact_model("Claude Flash 5.1"), "F5.1");
+    // Review D4: "Claude Flash" is no label this code makes; the `F` came from that dead arm. Fable is `F`.
+    assert_eq!(compact_model("Claude Fable 5.2"), "F5.2");
     assert_eq!(compact_model("Sonnet 5.5"), "S5.5");
     assert_eq!(compact_model("Opus 5.5"), "O5.5");
     assert_eq!(compact_model("Haiku 5.5"), "H5.5");
@@ -1112,6 +1113,7 @@ fn compact_model_table_test() {
     // Gemini: Flash or Pro
     assert_eq!(compact_model("Gemini 3.8 Flash"), "Flash");
     assert_eq!(compact_model("Gemini 3.8 Pro"), "Pro");
+    assert_eq!(compact_model("Gemini 4 Argon"), "Argon");
 
     // Codex: Codex
     assert_eq!(compact_model("GPT-5 Codex"), "Codex");

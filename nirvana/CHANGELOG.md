@@ -3,6 +3,28 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.65.0: phone photos say what they are, labels come from the model, and a gate runner that cleans its temp
+
+- **Changed:** a phone upload's path is followed by a short note built by the server: an image's pixel size and
+  bytes and "in a Nirvana pane, herdr look ... reads it and answers in text"; the same idea for HEIC, PDF and video.
+  A zero-byte upload is refused; `.partial` leftovers older than an hour are swept. Model labels and provider marks
+  come from the model id whatever CLI runs it (`claude-opus-5-5-high` through agy reads Opus 5.5, Argon reads
+  Argon). The installer cannot leave a half install: a failed font download no longer stops it, the plugin folder
+  is replaced by a rename or an overlay that reports stale files, a failed binary copy puts the old binary back.
+  `nirvana/controls.py` saves the bytes it sabotages, repairs a killed run at the next start, and allows one run
+  per worktree. New `nirvana/gate.py` runs the scoped gates in a private TEMP made with `mkdtemp`, inside a job
+  object, and removes it. New `nirvana/clean_temp.py` (dry run by default) removes leaked test folders from
+  `%TEMP%` and never follows a link. The preset tests' `scratch()` helper cleans up after itself.
+- **Because:** the owner, 2026-11-09: "Do a project lceanup / code review and ifx any bugs." and "improve multi modal
+  usage". The review found Claude seats run through agy labelled Gemini, an install that a failed download left
+  half done, and photos reaching agents as a bare path.
+- **Measured:** 35,326 `herdr-*` and `nirvana-*` folders in `%TEMP%` (20.8 MB), 10,595 from one day; the dry run
+  finds 23,954 removable. The preset tests left 52 folders a run, now 0. 458 scoped tests and 141 Python tests
+  pass, clippy clean, 3366 of 3366 controls find their text. `clean_temp.py --apply` has not been run on the real
+  folder.
+- **If you remove this:** an order on Opus through agy shows as Gemini, a killed controls run can leave a product
+  file sabotaged with nothing to repair it, and every test run adds thousands of folders to `%TEMP%`.
+
 ## alpha 0.64.0: less text injected per session, an idle compact that says why, and the memory area's bugs
 
 - **Changed:** the first board notice of a session is capped to each section's head with the command that reads the

@@ -56,9 +56,22 @@ def install_binary(built: Path, target: Path, prefix: str) -> Path:
             old.unlink()          # an old build still running (a supervisor, a server) stays locked; skip it
         except OSError:
             pass
+    aside = None
     if target.exists():
-        target.rename(bin_dir / f"{prefix}.old-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}{target.suffix}")
-    shutil.copy2(built, target)
+        aside = bin_dir / f"{prefix}.old-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}{target.suffix}"
+        target.rename(aside)
+    try:
+        shutil.copy2(built, target)
+    except BaseException:
+        # Plan 40 review B4: a full disk or a scanner holding the new file left no herdr.exe at all, and the
+        # Explorer verb and the plugin hooks named a missing file until the next install. The old one goes back.
+        if aside is not None:
+            try:
+                target.unlink()
+            except OSError:
+                pass
+            os.replace(aside, target)
+        raise
     return target
 
 
@@ -99,8 +112,17 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     ver = version()
     root = home()
-    plugin = windows_shell.install_plugin(root)
-    print(f"installed the Nirvana Claude plugin at {plugin}")
+    # Review N5: a plugin folder that could not be renamed is overlaid, and a file in it a running Nirvana Claude
+    # holds keeps its old bytes. The rest of the install goes on, and the exit says the folder is mixed.
+    stale: list = []
+    try:
+        plugin = windows_shell.install_plugin(root)
+        print(f"installed the Nirvana Claude plugin at {plugin}")
+    except windows_shell.StaleFiles as err:
+        stale = err.paths
+        print(f"the Nirvana Claude plugin is installed with {len(stale)} old files a running program holds:")
+        for path in stale:
+            print(f"  stale {path}")
     target = install(built, root, ver, built_open=built_open)
     print(f"installed Nirvana-Herdr alpha {ver} at {target}")
     if os.name == "nt" and not ns.no_shell:
@@ -113,6 +135,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Windows Terminal profile: {report['fragment']}; JetBrains Mono: "
               f"{'installed' if isinstance(report['font'], dict) else report['font']}")
     print("a running Nirvana-Herdr shows a reload badge within 5 s; press it twice to restart onto this build")
+    if stale:
+        print(f"install: {len(stale)} plugin files are stale. Close every Nirvana Claude and run the install again")
+        return 1
     return 0
 
 

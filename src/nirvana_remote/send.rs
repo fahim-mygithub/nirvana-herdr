@@ -124,7 +124,7 @@ pub fn folder_of(agent: &serde_json::Value) -> Result<PathBuf, String> {
 }
 
 /// A link, a junction, or anything that is not a plain folder.
-fn plain_dir(path: &Path) -> bool {
+pub(crate) fn plain_dir(path: &Path) -> bool {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return false;
     };
@@ -199,6 +199,12 @@ pub fn save(
     };
     drop(file);
     match written {
+        // Review B5: iOS hands Safari a 0-byte placeholder for a photo still coming down from iCloud; kept, the agent
+        // was told to look at an empty image.
+        Ok(0) => {
+            let _ = std::fs::remove_file(&partial);
+            Err((400, "the file is empty".to_string()))
+        }
         Ok(size) => match std::fs::rename(&partial, &path) {
             Ok(()) => Ok((path, size)),
             Err(err) => {
@@ -232,6 +238,11 @@ fn typed(c: char) -> bool {
 /// The message as typed into the agent: the text with its controls dropped (`typed`), then each file's full path,
 /// after a space, in quotes when it has one (a space's folder may: "3D-Printer Flow"). Not on a line of its own: in a
 /// pane that did not ask for bracketed paste, that newline would be an Enter, and send the text before its files.
+///
+/// Plan 40, "phone photos tell the agent what they are": after an image's, a PDF's or a video's path comes one short
+/// note in parentheses (`note_for`), naming the command that reads it without pulling the bytes into the agent's own
+/// context. The path stays first, so an agent that just reads the file still can. The note is built from the
+/// server's own file name and the bytes on disk, never from the phone's text.
 pub fn message(text: &str, files: &[PathBuf]) -> String {
     let mut parts: Vec<String> = Vec::new();
     let text: String = text.chars().filter(|&c| typed(c)).collect();
@@ -240,17 +251,185 @@ pub fn message(text: &str, files: &[PathBuf]) -> String {
         parts.push(text.to_string());
     }
     parts.extend(files.iter().map(|file| {
-        let path: String = file
-            .display()
-            .to_string()
-            .chars()
-            .filter(|&c| typed(c) && c != '\n')
-            .collect();
-        if path.contains(char::is_whitespace) {
-            format!("\"{path}\"")
-        } else {
-            path
+        let path = shown_path(file);
+        match note_for(file, &path) {
+            Some(note) => format!("{path} ({note})"),
+            None => path,
         }
     }));
     parts.join(" ")
+}
+
+/// A path as typed: controls dropped, in double quotes when it holds whitespace.
+fn shown_path(file: &Path) -> String {
+    let path: String = file
+        .display()
+        .to_string()
+        .chars()
+        .filter(|&c| typed(c) && c != '\n')
+        .collect();
+    if path.contains(char::is_whitespace) {
+        format!("\"{path}\"")
+    } else {
+        path
+    }
+}
+
+/// What a file is, by the extension the server gave it (`name_for`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Media {
+    Image,
+    /// HEIC and HEIF: Claude's `Read` cannot show them; `herdr look` converts them.
+    Heic,
+    Pdf,
+    Video,
+}
+
+fn media_of(file: &Path) -> Option<Media> {
+    let ext = file.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" => Some(Media::Image),
+        "heic" | "heif" => Some(Media::Heic),
+        "pdf" => Some(Media::Pdf),
+        "mp4" | "mov" => Some(Media::Video),
+        _ => None,
+    }
+}
+
+/// The note after a media file's path, or `None` for any other file. `path` is the path as typed (quoted when it
+/// holds a space), so the command in the note can be pasted as it is.
+fn note_for(file: &Path, path: &str) -> Option<String> {
+    let media = media_of(file)?;
+    // Only a file that is there: the bytes are the server's own reading, not a claim.
+    let meta = std::fs::metadata(file)
+        .ok()
+        .filter(std::fs::Metadata::is_file)?;
+    let size = Some(human_bytes(meta.len()));
+    let quoted = if path.starts_with('"') {
+        path.to_string()
+    } else {
+        format!("\"{path}\"")
+    };
+    // Review N7: the note goes to every agent kind and the path stays first, so one that reads the file itself still
+    // can; the command is named for where it runs, since a pane outside Nirvana may have no `herdr` on PATH.
+    let look = format!("in a Nirvana pane, herdr look {quoted} --ask \"<your question>\"");
+    let mut facts: Vec<String> = Vec::new();
+    let note = match media {
+        Media::Image => {
+            facts.push("image".into());
+            if let Some((width, height)) = image_size(file) {
+                facts.push(format!("{width}x{height} px"));
+            }
+            facts.extend(size);
+            format!("{}; {look} reads it and answers in text", facts.join(", "))
+        }
+        Media::Heic => {
+            facts.push("HEIC image".into());
+            facts.extend(size);
+            format!(
+                "{}; {look} converts it, reads it and answers in text",
+                facts.join(", ")
+            )
+        }
+        Media::Pdf => {
+            facts.push("PDF".into());
+            facts.extend(size);
+            format!("{}; {look} reads it and answers in text", facts.join(", "))
+        }
+        Media::Video => {
+            facts.push("video".into());
+            facts.extend(size);
+            format!(
+                "{}; in a Nirvana pane, herdr media probe {quoted} gives its length, size and streams",
+                facts.join(", ")
+            )
+        }
+    };
+    Some(note)
+}
+
+/// "512 bytes", "41 KB", "3.1 MB": the size a person reads.
+fn human_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    if bytes < KB {
+        format!("{bytes} bytes")
+    } else if bytes < MB {
+        format!("{} KB", bytes.div_ceil(KB))
+    } else {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    }
+}
+
+/// How much of an image's start is read for its size. A JPEG's frame header sits after its EXIF block, which one
+/// APP1 segment holds, at most 64 KiB by its own length field; twice that leaves room for an APP2 colour profile.
+const HEADER_MOST: u64 = 128 * 1024;
+
+/// An image's width and height from its header, when the header can be read cheaply: PNG, GIF, JPEG and WebP.
+pub fn image_size(file: &Path) -> Option<(u32, u32)> {
+    use std::io::Read;
+    let mut head = Vec::new();
+    std::fs::File::open(file)
+        .ok()?
+        .take(HEADER_MOST)
+        .read_to_end(&mut head)
+        .ok()?;
+    header_size(&head)
+}
+
+/// The size a header names; `None` for a header this does not read or a cut one.
+pub fn header_size(head: &[u8]) -> Option<(u32, u32)> {
+    let be16 = |at: usize| -> Option<u32> {
+        Some(u32::from(u16::from_be_bytes(
+            head.get(at..at + 2)?.try_into().ok()?,
+        )))
+    };
+    let le16 = |at: usize| -> Option<u32> {
+        Some(u32::from(u16::from_le_bytes(
+            head.get(at..at + 2)?.try_into().ok()?,
+        )))
+    };
+    let be32 = |at: usize| -> Option<u32> {
+        Some(u32::from_be_bytes(head.get(at..at + 4)?.try_into().ok()?))
+    };
+    let le24 = |at: usize| -> Option<u32> {
+        let b = head.get(at..at + 3)?;
+        Some(u32::from(b[0]) | u32::from(b[1]) << 8 | u32::from(b[2]) << 16)
+    };
+    if head.starts_with(b"\x89PNG\r\n\x1a\n") && head.get(12..16) == Some(&b"IHDR"[..]) {
+        return Some((be32(16)?, be32(20)?));
+    }
+    if head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a") {
+        return Some((le16(6)?, le16(8)?));
+    }
+    if head.starts_with(b"RIFF") && head.get(8..12) == Some(&b"WEBP"[..]) {
+        return match head.get(12..16)? {
+            b"VP8 " => Some((le16(26)? & 0x3FFF, le16(28)? & 0x3FFF)),
+            b"VP8L" => {
+                let bits = u32::from_le_bytes(head.get(21..25)?.try_into().ok()?);
+                Some(((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1))
+            }
+            b"VP8X" => Some((le24(24)? + 1, le24(27)? + 1)),
+            _ => None,
+        };
+    }
+    if head.starts_with(&[0xFF, 0xD8]) {
+        let mut at = 2;
+        while at + 4 <= head.len() {
+            if head[at] != 0xFF {
+                return None;
+            }
+            let marker = head[at + 1];
+            if marker == 0xFF {
+                at += 1;
+                continue;
+            }
+            // SOF0 to SOF15 carry the frame's size; DHT (C4), JPG (C8) and DAC (CC) share the range and do not.
+            if (0xC0..=0xCF).contains(&marker) && ![0xC4, 0xC8, 0xCC].contains(&marker) {
+                return Some((be16(at + 7)?, be16(at + 5)?));
+            }
+            at += 2 + usize::try_from(be16(at + 2)?).ok()?;
+        }
+    }
+    None
 }

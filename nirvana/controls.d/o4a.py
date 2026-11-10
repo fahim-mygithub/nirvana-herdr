@@ -164,10 +164,10 @@ CONTROLS = (
             "                return winreg.QueryValueEx(key, name)[0]", "                return None",
             "nirvana.test_windows_shell.RealRegistryTest."
             "test_verb_and_toast_id_round_trip_and_the_old_verb_is_deleted", "python"),
-    Control("o4a_py_plugin_keeps_stale", "nirvana/windows_shell.py",
-            "    if dst.exists():\n        shutil.rmtree(dst)\n    shutil.copytree(src, dst)\n",
-            "    shutil.copytree(src, dst, dirs_exist_ok=True)\n",
-            "nirvana.test_windows_shell.FilesTest.test_the_plugin_is_copied_whole_and_a_removed_file_goes", "python"),
+    Control("o4a_py_plugin_keeps_stale", 'nirvana/windows_shell.py',
+            '        shutil.copytree(src, new, copy_function=_copy_file)\n',
+            '        shutil.copytree(dst if dst.exists() else src, new, copy_function=_copy_file)\n        shutil.copytree(src, new, copy_function=_copy_file, dirs_exist_ok=True)\n',
+            'nirvana.test_windows_shell.FilesTest.test_the_plugin_is_copied_whole_and_a_removed_file_goes', 'python'),
     Control("o4a_py_themes_rewritten", "nirvana/windows_shell.py",
             "        shutil.copyfile(src / name, dst / name)\n", "        (dst / name).write_bytes(b\"{}\")\n",
             "nirvana.test_windows_shell.FilesTest."

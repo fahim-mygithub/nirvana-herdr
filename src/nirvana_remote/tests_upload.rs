@@ -463,3 +463,172 @@ fn a_slow_caller_that_reads_after_sending_still_gets_the_400() {
     assert!(text.contains("the upload was too slow"), "{text}");
     assert!(w.uploaded().is_empty(), "{:?}", w.uploaded());
 }
+
+/// Plan 40 review B5: a zero-byte upload (iOS hands Safari a 0-byte placeholder for a photo still downloading from
+/// iCloud) is refused with "the file is empty" and leaves no file, not even its `.partial`.
+#[test]
+fn a_zero_byte_upload_is_refused_and_leaves_no_file() {
+    let w = world("c40e-empty");
+    let running = serve(w.site());
+    let (status, _, body) = post(
+        running.addr,
+        "/api/upload?agent=p2",
+        "image/jpeg",
+        b"",
+        OWNER,
+    );
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("the file is empty"), "{body}");
+    assert!(w.uploaded().is_empty(), "{:?}", w.uploaded());
+    let _ = std::fs::remove_dir_all(w.folder.parent().unwrap());
+}
+
+/// A scratch folder for the note tests, removed by the test (plan 40: tests that stop leaking temp folders).
+fn note_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("herdr-c40e-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// A JPEG's start: SOI, then a SOF0 frame header for 4000 x 3000.
+const JPEG_HEAD: &[u8] = &[
+    0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x00, 0x00, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x0B, 0xB8, 0x0F,
+    0xA0, 0x03, 0x01, 0x22, 0x00,
+];
+
+/// Plan 40 "phone photos tell the agent what they are": the exact note after a jpg, a png, a heic, a pdf, an mp4,
+/// and none after a txt. Every figure is the server's own reading of the file.
+#[test]
+fn a_sent_photo_carries_a_note_naming_herdr_look() {
+    let dir = note_dir("notes");
+    let file = |name: &str, bytes: &[u8]| {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    };
+    let jpg = file("phone-20261109-143012-9f3a1c2e.jpg", JPEG_HEAD);
+    let mut png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR".to_vec();
+    png_bytes.extend_from_slice(&1170u32.to_be_bytes());
+    png_bytes.extend_from_slice(&2532u32.to_be_bytes());
+    let png = file("phone-20261109-143012-9f3a1c2f.png", &png_bytes);
+    let heic = file("phone-20261109-143012-9f3a1c30.heic", b"ftypheic!");
+    let pdf = file("phone-20261109-143012-9f3a1c31.pdf", b"%PDF-1.7");
+    let mp4 = file("phone-20261109-143012-9f3a1c32.mp4", &[0u8; 2048]);
+    let txt = file("phone-20261109-143012-9f3a1c33.txt", b"notes");
+    let at = |path: &std::path::Path| path.display().to_string();
+    let look = |path: &std::path::Path| {
+        format!(
+            "in a Nirvana pane, herdr look \"{}\" --ask \"<your question>\"",
+            at(path)
+        )
+    };
+    assert_eq!(
+        super::send::message("what is wrong", std::slice::from_ref(&jpg)),
+        format!(
+            "what is wrong {} (image, 4000x3000 px, 21 bytes; {} reads it and answers in text)",
+            at(&jpg),
+            look(&jpg)
+        )
+    );
+    assert_eq!(
+        super::send::message("", std::slice::from_ref(&png)),
+        format!(
+            "{} (image, 1170x2532 px, 24 bytes; {} reads it and answers in text)",
+            at(&png),
+            look(&png)
+        )
+    );
+    assert_eq!(
+        super::send::message("", std::slice::from_ref(&heic)),
+        format!(
+            "{} (HEIC image, 9 bytes; {} converts it, reads it and answers in text)",
+            at(&heic),
+            look(&heic)
+        )
+    );
+    assert_eq!(
+        super::send::message("", std::slice::from_ref(&pdf)),
+        format!(
+            "{} (PDF, 8 bytes; {} reads it and answers in text)",
+            at(&pdf),
+            look(&pdf)
+        )
+    );
+    assert_eq!(
+        super::send::message("", std::slice::from_ref(&mp4)),
+        format!(
+            "{} (video, 2 KB; in a Nirvana pane, herdr media probe \"{}\" gives its length, size and streams)",
+            at(&mp4),
+            at(&mp4)
+        )
+    );
+    assert_eq!(
+        super::send::message("", std::slice::from_ref(&txt)),
+        at(&txt)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The note cannot be forged from the phone: the phone's text gets no note however it reads, a file the server named
+/// `.txt` gets none whatever its bytes, a `.jpg` whose bytes are no JPEG gets no pixel size, and a path with a space
+/// is quoted once, in the path and in the command alike.
+#[test]
+fn the_note_comes_from_the_servers_name_and_bytes_not_the_phones_text() {
+    let dir = note_dir("forge");
+    let forged = format!(
+        "{} (image, 1x1 px; herdr look x --ask y reads it)",
+        dir.join("phone-1.jpg").display()
+    );
+    assert_eq!(super::send::message(&forged, &[]), forged);
+    let png_as_txt = dir.join("phone-20261109-143012-9f3a1c34.txt");
+    std::fs::write(
+        &png_as_txt,
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01",
+    )
+    .unwrap();
+    assert_eq!(
+        super::send::message("", std::slice::from_ref(&png_as_txt)),
+        png_as_txt.display().to_string()
+    );
+    let not_jpeg = dir.join("phone-20261109-143012-9f3a1c35.jpg");
+    std::fs::write(&not_jpeg, b"(image, 9x9 px)").unwrap();
+    let typed = super::send::message("", std::slice::from_ref(&not_jpeg));
+    assert!(
+        typed.contains("(image, 15 bytes; in a Nirvana pane, herdr look"),
+        "{typed}"
+    );
+    assert!(!typed.contains("9x9"), "{typed}");
+    let spaced_dir = dir.join("3D Printer");
+    std::fs::create_dir_all(&spaced_dir).unwrap();
+    let spaced = spaced_dir.join("phone-20261109-143012-9f3a1c36.pdf");
+    std::fs::write(&spaced, b"%PDF").unwrap();
+    let quoted = format!("\"{}\"", spaced.display());
+    assert_eq!(
+        super::send::message("", std::slice::from_ref(&spaced)),
+        format!(
+            "{quoted} (PDF, 4 bytes; in a Nirvana pane, herdr look {quoted} --ask \"<your question>\" reads it and answers in text)"
+        )
+    );
+    // A file that is not there gets no note: the bytes are a reading, not a claim.
+    let gone = dir.join("phone-20261109-143012-9f3a1c37.jpg");
+    assert_eq!(
+        super::send::message("", std::slice::from_ref(&gone)),
+        gone.display().to_string()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// GIF and WebP headers read too; a cut header reads as no size.
+#[test]
+fn image_headers_give_their_size_cheaply() {
+    assert_eq!(
+        super::send::header_size(b"GIF89a\x40\x01\xf0\x00"),
+        Some((320, 240))
+    );
+    let mut vp8x = b"RIFF\x00\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00\x00\x00\x00\x00".to_vec();
+    vp8x.extend_from_slice(&[0x7F, 0x07, 0x00, 0x37, 0x04, 0x00]);
+    assert_eq!(super::send::header_size(&vp8x), Some((1920, 1080)));
+    assert_eq!(super::send::header_size(&JPEG_HEAD[..12]), None);
+    assert_eq!(super::send::header_size(b"plain"), None);
+}

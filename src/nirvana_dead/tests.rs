@@ -769,3 +769,86 @@ fn the_studio_gui_pane_is_kept_by_the_owners_later_key() {
         Verdict::Keep("the owner typed in it after its worker or job ended".into())
     );
 }
+
+/// Plan 40 review D1: the sweep removes an upload's `.partial` older than an hour from each pane's space, and only
+/// that: a fresh one, a finished upload, and a `.partial` of a name the server never gives all stay.
+#[test]
+fn the_sweep_removes_old_upload_partials_and_never_a_finished_upload() {
+    let (home, root) = (Temp::new("partials-home"), Temp::new("partials"));
+    let uploads = root.0.join(".nirvana").join("uploads");
+    std::fs::create_dir_all(&uploads).unwrap();
+    let now = std::time::SystemTime::now();
+    let hours_ago = |hours: u64| now - std::time::Duration::from_secs(hours * 3600);
+    let make = |name: &str, at: std::time::SystemTime| {
+        let path = uploads.join(name);
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_modified(at).unwrap();
+        path
+    };
+    let dead = make("phone-20261109-010101-0a1b2c3d.jpg.partial", hours_ago(2));
+    let fresh = make("phone-20261109-010102-0a1b2c3e.jpg.partial", now);
+    let finished = make("phone-20261109-010103-0a1b2c3f.jpg", hours_ago(500));
+    let foreign = make("notes.txt.partial", hours_ago(500));
+    let herdr = FakeHerdr::new(vec![
+        agent_pane("wP:p1", "wP:t1"),
+        pane("wP:p2", "wP:t1", None, &root.0),
+    ]);
+    let unix = now.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let dry = herdr.pass(
+        &home.0,
+        &Pass {
+            dry_run: true,
+            ..Pass::at(unix)
+        },
+    );
+    assert!(dead.exists(), "a dry run removes nothing");
+    assert_eq!(
+        dry,
+        vec![format!(
+            "would remove {}: an upload never finished",
+            dead.display()
+        )]
+    );
+    let lines = herdr.sweep(&home.0, unix);
+    assert_eq!(
+        lines,
+        vec![format!(
+            "removed {}: an upload never finished",
+            dead.display()
+        )]
+    );
+    assert!(!dead.exists());
+    assert!(fresh.exists() && finished.exists() && foreign.exists());
+}
+
+/// Review N6: a project whose `.nirvana` is a junction to another folder is not swept through it; the partial in the
+/// junction's target stays.
+#[cfg(windows)]
+#[test]
+fn the_sweep_does_not_follow_a_junction_at_the_dot_folder() {
+    let (root, outside) = (Temp::new("partials-linked"), Temp::new("partials-outside"));
+    let uploads = outside.0.join("uploads");
+    std::fs::create_dir_all(&uploads).unwrap();
+    let held = uploads.join("phone-20261109-010101-0a1b2c3d.jpg.partial");
+    let file = std::fs::File::create(&held).unwrap();
+    file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(5 * 3600))
+        .unwrap();
+    drop(file);
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(root.0.join(".nirvana"))
+        .arg(&outside.0)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "mklink /J: {made:?}");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert_eq!(
+        sweep_partials(std::slice::from_ref(&root.0), now, false),
+        Vec::<String>::new()
+    );
+    assert!(held.exists(), "the sweep went through the junction");
+    let _ = std::fs::remove_dir(root.0.join(".nirvana"));
+}

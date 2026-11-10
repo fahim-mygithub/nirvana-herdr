@@ -168,10 +168,10 @@ CONTROLS = (
             "        let checked = decide(&logins, owner.as_deref())\n",
             T_REFUSED, "rust"),
     # The scripts are served
-    Control("p39d_scripts_served", PICK,
-            '            ("/cards.js", true) => Response::new(\n',
-            '            ("/cards.jsx", true) => Response::new(\n',
-            T_PAGE, "rust"),
+    Control("p39d_scripts_served", 'src/nirvana_remote/routes.rs',
+            '        "/newspace.js",\n',
+            '        "/newspace.jsx",\n',
+            'nirvana_remote::tests_cards::the_page_has_the_cards_and_the_new_space_sheet', 'rust'),
     # §2.6 usage: the foot's hidden pools stay hidden
     Control("p39d_usage_hidden", CARDS,
             "        .filter(|row| !usage::FOOT_HIDDEN.contains(&row.pool.as_str()))\n",

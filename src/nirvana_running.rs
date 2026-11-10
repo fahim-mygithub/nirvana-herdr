@@ -276,10 +276,7 @@ fn start_read(path: &Path) {
         let activity = crate::nirvana_spaces::read_tail(&file).map(|tail| activity(&tail));
         let mut entries = entries().lock().unwrap_or_else(|e| e.into_inner());
         let entry = entries.entry(file).or_default();
-        entry.reading = false;
-        entry.read_at = Some(Instant::now());
-        if activity.is_some() && entry.activity != activity {
-            entry.activity = activity;
+        if settle(entry, activity) {
             CHANGED.store(true, Ordering::Release);
         }
     });
@@ -292,6 +289,19 @@ fn start_read(path: &Path) {
             entry.reading = false;
         }
     }
+}
+
+/// A finished read into its entry; whether what the panel shows changed. A read that failed (`None`: the transcript
+/// moved by a rotation, deleted, locked) clears the activity (plan 40 review B7): kept, the panel printed "working"
+/// with the name of a tool call that ended hours ago for as long as herdr said the agent worked.
+fn settle(entry: &mut Entry, read: Option<Activity>) -> bool {
+    entry.reading = false;
+    entry.read_at = Some(Instant::now());
+    if entry.activity == read {
+        return false;
+    }
+    entry.activity = read;
+    true
 }
 
 /// The transcript's activity as last read; a read starts when it is older than `REREAD`. Under test no
@@ -338,6 +348,23 @@ pub fn elapsed(seconds: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review B7: a read that fails after one that worked leaves no tool name behind.
+    #[test]
+    fn running_drops_the_tool_when_the_transcript_cannot_be_read() {
+        let mut entry = Entry::default();
+        let working = Activity {
+            asked: Some("fix it".into()),
+            ..Activity::default()
+        };
+        assert!(settle(&mut entry, Some(working.clone())));
+        assert_eq!(entry.activity.as_ref(), Some(&working));
+        assert!(!settle(&mut entry, Some(working)));
+        assert!(settle(&mut entry, None), "a failed read is a change");
+        assert_eq!(entry.activity, None);
+        assert!(!entry.reading);
+        assert!(entry.read_at.is_some());
+    }
 
     fn rows(text: &str) -> Vec<String> {
         text.lines().map(str::to_owned).collect()

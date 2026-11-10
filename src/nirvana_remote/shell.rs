@@ -21,13 +21,7 @@ pub const BUILD_HEADER: &str = "Nirvana-Build";
 const BUILD_MARK: &str = "NIRVANA_BUILD";
 const SHELL_MARK: &str = "['NIRVANA_SHELL']";
 
-/// The P39d screens' scripts, which `pick.rs` serves from its own match.
-const PICK_SCRIPTS: &[(&str, &[u8])] = &[
-    ("/newspace.js", include_bytes!("page/newspace.js")),
-    ("/cards.js", include_bytes!("page/cards.js")),
-];
-
-/// Every file the shell is made of, as written in the binary: the page's assets, the P39d scripts, and the
+/// Every file the shell is made of, as written in the binary: the page's assets (the P39d scripts among them), and the
 /// home-screen app's files. Not `/sw.js` (a worker never caches its own script) and nothing under `/api/` (agent
 /// data is never kept on the phone).
 pub fn files() -> Vec<(&'static str, &'static [u8])> {
@@ -35,7 +29,6 @@ pub fn files() -> Vec<(&'static str, &'static [u8])> {
         .iter()
         .map(|(path, _, body)| (*path, body.as_bytes()))
         .collect();
-    all.extend_from_slice(PICK_SCRIPTS);
     all.extend(
         alerts::FILES
             .iter()

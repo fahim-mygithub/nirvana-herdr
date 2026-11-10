@@ -392,10 +392,10 @@ CONTROLS = (
             '    parts.join("\\n")\n',
             T_PATHS, "rust"),
     # S2: a path with a space is quoted
-    Control("p39b_path_quoted", SEND,
-            "        if path.contains(char::is_whitespace) {\n",
-            "        if false {\n",
-            T_CONTROLS, "rust"),
+    Control("p39b_path_quoted", 'src/nirvana_remote/send.rs',
+            '    if path.contains(char::is_whitespace) {\n',
+            '    if false {\n',
+            'nirvana_remote::tests_live::phone_text_reaches_agent_prompt_without_controls', 'rust'),
     # S3a: a change between the snapshot and the subscription is sent
     Control("p39b_feed_snapshot_after_subscribe", SPACES,
             "                    if !self.send(Some(again.to_string())) {\n",

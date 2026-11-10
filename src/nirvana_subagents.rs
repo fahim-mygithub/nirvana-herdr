@@ -115,49 +115,33 @@ pub fn claude_project_dir(claude_dir: &Path, folder: &Path) -> PathBuf {
 
 /// Spells model names as the strip spells models (e.g. `Sonnet 5.5`, `Opus 5.5`, `Haiku 5.5`,
 /// `Gemini 3.8 Flash`, `Gemini 4 Argon`). A Claude subagent with no model in its transcript reads `inherit`.
+///
+/// A Claude model reads as Claude whatever `provider` says (plan 40 review B1): the g-opus and g-sonnet seats run
+/// `claude-opus-5-5-{effort}` through agy, and the Gemini arm printed "Gemini claude-opus-5-5-high".
 pub fn format_model(model: Option<&str>, provider: SubagentProvider) -> String {
+    let model = model.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(label) = model.and_then(crate::nirvana_spaces::claude_label) {
+        return match label.strip_prefix("Claude ") {
+            Some(stripped) => stripped.to_string(),
+            None => label,
+        };
+    }
     match provider {
         SubagentProvider::Claude => {
-            let Some(m) = model.map(str::trim).filter(|s| !s.is_empty()) else {
+            let Some(m) = model else {
                 return "inherit".to_string();
             };
             if m.eq_ignore_ascii_case("inherit") {
                 return "inherit".to_string();
             }
-            if let Some(label) = crate::nirvana_spaces::claude_label(m) {
-                if let Some(stripped) = label.strip_prefix("Claude ") {
-                    stripped.to_string()
-                } else {
-                    label
-                }
-            } else if m.starts_with("claude-") {
-                m.strip_prefix("claude-").unwrap_or(m).to_string()
-            } else {
-                match m.to_ascii_lowercase().as_str() {
-                    "sonnet" => "Sonnet".to_string(),
-                    "opus" => "Opus".to_string(),
-                    "haiku" => "Haiku".to_string(),
-                    other => other.to_string(),
-                }
-            }
+            m.strip_prefix("claude-").unwrap_or(m).to_string()
         }
-        SubagentProvider::Gemini => {
-            let Some(m) = model.map(str::trim).filter(|s| !s.is_empty()) else {
-                return "Gemini".to_string();
-            };
-            let lower = m.to_ascii_lowercase();
-            if lower.contains("3.8") || lower.contains("3-8") || lower.contains("flash") {
-                "Gemini 3.8 Flash".to_string()
-            } else if lower.contains("argon") || lower.contains("4") {
-                "Gemini 4 Argon".to_string()
-            } else if lower.starts_with("gemini") {
-                m.to_string()
-            } else {
-                format!("Gemini {m}")
-            }
-        }
+        SubagentProvider::Gemini => match model {
+            None => "Gemini".to_string(),
+            Some(m) => gemini_label(m),
+        },
         SubagentProvider::Local => {
-            let Some(m) = model.map(str::trim).filter(|s| !s.is_empty()) else {
+            let Some(m) = model else {
                 return "Local".to_string();
             };
             if m.starts_with("Local ") {
@@ -167,6 +151,55 @@ pub fn format_model(model: Option<&str>, provider: SubagentProvider) -> String {
             }
         }
     }
+}
+
+/// A Gemini id as people read it, by its own parts: "gemini-3.8-flash-high" -> "Gemini 3.8 Flash",
+/// "gemini-3-pro-20260414" -> "Gemini 3 Pro" (an eight-digit date dropped). Review M3: the old arm knew two models and
+/// read any id holding the character `4` as "Gemini 4 Argon". A label already ("Gemini 3.8 Flash (High)") loses only
+/// its parenthetical.
+fn gemini_label(model: &str) -> String {
+    let bare = crate::nirvana_spaces::bare_model(model);
+    if !bare.to_ascii_lowercase().starts_with("gemini") {
+        return format!("Gemini {bare}");
+    }
+    if bare.contains(char::is_whitespace) {
+        return bare.to_string();
+    }
+    let mut words = vec!["Gemini".to_string()];
+    for part in bare.split('-').skip(1).filter(|part| !part.is_empty()) {
+        let numeric = part.bytes().all(|b| b.is_ascii_digit() || b == b'.');
+        if numeric && part.len() == 8 {
+            continue;
+        }
+        if numeric {
+            words.push(part.to_string());
+        } else {
+            let mut chars = part.chars();
+            words.push(match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+                None => String::new(),
+            });
+        }
+    }
+    words.join(" ")
+}
+
+/// Which provider a row reads as: the model's, whatever CLI runs it (review B1). agy with a Claude id is Claude; agy
+/// with anything else is Gemini; every other CLI is Claude, as before. The CLI still tells the usage pool apart.
+pub fn provider_of(cli: &str, model: Option<&str>) -> SubagentProvider {
+    if model.and_then(crate::nirvana_spaces::claude_label).is_some() {
+        SubagentProvider::Claude
+    } else if cli == "agy" {
+        SubagentProvider::Gemini
+    } else {
+        SubagentProvider::Claude
+    }
+}
+
+/// A seated order's provider and model label (review B1).
+pub fn seated_label(seated: &crate::nirvana_run::Seated) -> (SubagentProvider, String) {
+    let provider = provider_of(&seated.cli, Some(&seated.model));
+    (provider, format_model(Some(&seated.model), provider))
 }
 
 /// Drops the version number from a formatted model string when displayed in narrow width.
@@ -846,7 +879,8 @@ pub fn find_agy_processes_under(
         if let Some(cmdline) = crate::platform::process_command_line(pid) {
             if is_agy_cmdline(&cmdline) {
                 let model_name = parse_cmdline_model(&cmdline);
-                let model = format_model(model_name.as_deref(), SubagentProvider::Gemini);
+                let provider = provider_of("agy", model_name.as_deref());
+                let model = format_model(model_name.as_deref(), provider);
                 let description = crate::platform::process_cwd(pid)
                     .and_then(|cwd| cwd.file_name().and_then(|n| n.to_str()).map(String::from))
                     .unwrap_or_default();
@@ -860,7 +894,7 @@ pub fn find_agy_processes_under(
                     parent_id: None,
                     name: "agy".into(),
                     description,
-                    provider: SubagentProvider::Gemini,
+                    provider,
                     model,
                     state: SubagentState::Running,
                     elapsed_secs,
@@ -923,7 +957,9 @@ pub fn read_agy_jobs(home: &Path, pane_id: &str, now_secs: u64) -> Vec<Subagent>
             SubagentState::Running
         };
 
-        let model = format_model(argv_model(&job.argv).as_deref(), SubagentProvider::Gemini);
+        let job_model = argv_model(&job.argv);
+        let provider = provider_of("agy", job_model.as_deref());
+        let model = format_model(job_model.as_deref(), provider);
         let elapsed_secs = ended_at.unwrap_or(now_secs).saturating_sub(job.started);
 
         subagents.push(Subagent {
@@ -931,7 +967,7 @@ pub fn read_agy_jobs(home: &Path, pane_id: &str, now_secs: u64) -> Vec<Subagent>
             parent_id: None,
             name: job.name,
             description: job.argv.join(" "),
-            provider: SubagentProvider::Gemini,
+            provider,
             model,
             state,
             elapsed_secs,
@@ -1107,13 +1143,7 @@ fn seat_orders_and_panes(
                 SubagentState::Failed
             };
 
-            let provider = if order.seated.cli == "agy" {
-                SubagentProvider::Gemini
-            } else {
-                SubagentProvider::Claude
-            };
-
-            let model = format_model(Some(&order.seated.model), provider);
+            let (provider, model) = seated_label(&order.seated);
 
             let stream_path = entry
                 .path()
@@ -1222,45 +1252,28 @@ pub fn set_claude_dir_for_test(dir: Option<PathBuf>) {
     *guard = dir;
 }
 
+/// This binary run as a child with `args`; its stdout when it exits 0 within `timeout`.
 fn herdr_self(args: &[&str], timeout: Duration) -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     let mut command = std::process::Command::new(exe);
+    command.args(args);
+    stdout_within(command, timeout)
+}
+
+/// A child's stdout when it exits 0 within `timeout`, read while it runs (review B8): read only after the exit, a
+/// child that wrote more than the pipe holds (64 KiB on Windows) blocked on the write until the timeout killed it.
+/// `nirvana_dead::output_within` drains both pipes on threads.
+fn stdout_within(mut command: std::process::Command, timeout: Duration) -> Option<String> {
     command
-        .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     crate::platform::configure_background_command(&mut command);
-    let mut child = command.spawn().ok()?;
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if status.success() {
-                    let mut stdout = Vec::new();
-                    if let Some(mut out) = child.stdout.take() {
-                        let _ = std::io::Read::read_to_end(&mut out, &mut stdout);
-                    }
-                    return Some(String::from_utf8_lossy(&stdout).into_owned());
-                } else {
-                    return None;
-                }
-            }
-            Ok(None) => {
-                if started.elapsed() > timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    }
+    let output = crate::nirvana_dead::output_within(command, timeout).ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Returns the CLI arguments for querying pane process information.
@@ -2274,6 +2287,107 @@ mod tests {
         assert_eq!(short_model("Gemini 3.8 Flash"), "Gemini Flash");
         assert_eq!(short_model("Gemini 4 Argon"), "Gemini Argon");
         assert_eq!(short_model("inherit"), "inherit");
+    }
+
+    /// Plan 40 review B1 and M3, the "Model labels" table: (cli, id) -> provider, row label, chip, narrow label.
+    #[test]
+    fn labels_come_from_the_model_id_whatever_cli_runs_it() {
+        use crate::nirvana_spaces::compact_model;
+        let rows: &[(&str, &str, SubagentProvider, &str, &str, &str)] = &[
+            ("agy", "claude-opus-5-5-high", SubagentProvider::Claude, "Opus 5.5", "O5.5", "Opus"),
+            ("agy", "claude-sonnet-5-5-medium", SubagentProvider::Claude, "Sonnet 5.5", "S5.5", "Sonnet"),
+            ("claude", "claude-fable-5-2", SubagentProvider::Claude, "Fable 5.2", "F5.2", "Fable"),
+            ("claude", "claude-opus-5-5", SubagentProvider::Claude, "Opus 5.5", "O5.5", "Opus"),
+            ("claude", "claude-haiku-5-5", SubagentProvider::Claude, "Haiku 5.5", "H5.5", "Haiku"),
+            ("agy", "gemini-3.8-flash-low", SubagentProvider::Gemini, "Gemini 3.8 Flash", "Flash", "Gemini Flash"),
+            ("agy", "gemini-4-argon-high", SubagentProvider::Gemini, "Gemini 4 Argon", "Argon", "Gemini Argon"),
+            ("agy", "gemini-3-pro-20260414", SubagentProvider::Gemini, "Gemini 3 Pro", "Pro", "Gemini Pro"),
+            ("agy", "Gemini 3.8 Flash (High)", SubagentProvider::Gemini, "Gemini 3.8 Flash", "Flash", "Gemini Flash"),
+        ];
+        for (cli, id, provider, label, chip, narrow) in rows {
+            let got = provider_of(cli, Some(id));
+            assert_eq!(got, *provider, "provider of {cli} {id}");
+            let row = format_model(Some(id), got);
+            assert_eq!(row, *label, "row of {cli} {id}");
+            assert_eq!(compact_model(&row), *chip, "chip of {cli} {id}");
+            assert_eq!(short_model(&row), *narrow, "narrow of {cli} {id}");
+        }
+        assert_eq!(compact_model("Claude Fable 5.2"), "F5.2");
+        // The old Gemini arm, given a Claude id by the agy job and process readers.
+        assert_eq!(
+            format_model(Some("claude-opus-5-5-high"), SubagentProvider::Gemini),
+            "Opus 5.5"
+        );
+        assert_eq!(format_model(None, SubagentProvider::Gemini), "Gemini");
+    }
+
+    /// Review B1: a row built from a seated order with cli agy and the g-opus seat's substituted id.
+    #[test]
+    fn a_seated_claude_order_through_agy_reads_as_claude() {
+        let seated = crate::nirvana_run::Seated {
+            order: "o1".to_string(),
+            seat: "g-opus".to_string(),
+            cli: "agy".to_string(),
+            model: "claude-opus-5-5-high".to_string(),
+            effort: crate::nirvana_seat::Effort::High,
+            pool: "antigravity".to_string(),
+            class: "c".to_string(),
+            chain: None,
+            size: crate::nirvana_seat::SizeName::Medium,
+            mode: crate::nirvana_seat::Mode::Balanced,
+            needs: Vec::new(),
+            not_family: Vec::new(),
+            reason: "r".to_string(),
+            override_reason: None,
+            order_file: "f".to_string(),
+            cwd: "cwd".to_string(),
+            worktree: None,
+            branch: None,
+            parent: None,
+            why: None,
+            rule_pick: None,
+            bar_dropped: None,
+            step_down: None,
+            use_basis: None,
+            expected: std::collections::BTreeMap::new(),
+            jev_pick: None,
+            send_ok: None,
+        };
+        assert_eq!(
+            seated_label(&seated),
+            (SubagentProvider::Claude, "Opus 5.5".to_string())
+        );
+        let gemini = crate::nirvana_run::Seated {
+            model: "gemini-3.8-flash-medium".to_string(),
+            ..seated
+        };
+        assert_eq!(
+            seated_label(&gemini),
+            (SubagentProvider::Gemini, "Gemini 3.8 Flash".to_string())
+        );
+    }
+
+    /// Review B8: a child that prints more than a pipe holds still answers. Before the fix the child blocked on its
+    /// write once the 64 KiB pipe was full and was killed at the timeout.
+    #[test]
+    fn a_child_answer_larger_than_a_pipe_is_read_whole() {
+        let dir = std::env::temp_dir().join(format!("herdr-c40e-pipe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("big.txt");
+        std::fs::write(&file, "x".repeat(200 * 1024)).unwrap();
+        let mut command = if cfg!(windows) {
+            let mut command = std::process::Command::new("cmd");
+            command.arg("/C").arg("type").arg(&file);
+            command
+        } else {
+            let mut command = std::process::Command::new("cat");
+            command.arg(&file);
+            command
+        };
+        command.current_dir(&dir);
+        let out = stdout_within(command, Duration::from_secs(10));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(out.map(|out| out.len()), Some(200 * 1024));
     }
 
     #[test]
