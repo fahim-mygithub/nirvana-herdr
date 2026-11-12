@@ -18,8 +18,9 @@
 //!   1280 px wide, at most 10 fps, and mono 48 kbps AAC audio, sizing the video bitrate from duration with a
 //!   safety margin and retrying once at a lower bitrate if pass 1 is still over the limit. Never overwrites
 //!   the input file.
-//! - `herdr media prompt <file> --ask "<question>" [--seat argon|flash]`: prints the single-line worker
-//!   prompt with the full absolute path, the `view_file` instruction, and what to return.
+//! - `herdr media prompt <file> --ask "<question>" [--seat carbon|argon|flash]`: prints the single-line worker
+//!   prompt with the full absolute path, the `view_file` instruction, and what to return. Plan 70: carbon is the
+//!   default, since it took argon's seat; it gets argon's role line, a prior (P2 measured video on argon only).
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -52,13 +53,18 @@ pub const MAX_VIDEO_KBPS: u64 = 4_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MediaSeat {
+    Carbon,
     Argon,
     Flash,
 }
 
+/// The seat `herdr media prompt` addresses without `--seat`. Plan 70: carbon, since it took argon's seat.
+pub const DEFAULT_SEAT: MediaSeat = MediaSeat::Carbon;
+
 impl MediaSeat {
     pub fn word(self) -> &'static str {
         match self {
+            Self::Carbon => "carbon",
             Self::Argon => "argon",
             Self::Flash => "flash",
         }
@@ -66,6 +72,7 @@ impl MediaSeat {
 
     pub fn parse(text: &str) -> Option<Self> {
         match text.trim() {
+            "carbon" => Some(Self::Carbon),
             "argon" => Some(Self::Argon),
             "flash" => Some(Self::Flash),
             _ => None,
@@ -417,7 +424,7 @@ pub fn shrink_argv(input: &Path, output: &Path, video_kbps: u64) -> Result<Vec<S
     ])
 }
 
-/// Builds the one-line prompt for an `agy` worker on `argon` or `flash` following probe P2's lesson:
+/// Builds the one-line prompt for an `agy` worker on `carbon`, `argon` or `flash` following probe P2's lesson:
 /// names the full absolute path, instructs the worker to open it with `view_file` (without `StartLine` or
 /// `EndLine`), and asks for timestamps, what happens on screen, what the video shows that a transcript
 /// would lose, and findings for `ask`.
@@ -428,7 +435,7 @@ pub fn prompt_line(path: &Path, ask: &str, seat: MediaSeat) -> Result<String, St
     }
     let abs = absolute_media_path(path);
     let role_detail = match seat {
-        MediaSeat::Argon => {
+        MediaSeat::Carbon | MediaSeat::Argon => {
             "watch the recording directly and cross-check relevant source files if needed."
         }
         MediaSeat::Flash => "extract a complete timestamped transcript and visual event timeline.",
@@ -770,7 +777,7 @@ fn doctor_cli(args: &[String]) -> std::io::Result<()> {
 
 const USAGE: &str = "usage: herdr media probe <file> [--json]
        herdr media shrink <file> [--out <path>] [--max-mb 95] [--max-px 1024] [--json]
-       herdr media prompt <file> --ask \"<question>\" [--seat argon|flash]
+       herdr media prompt <file> --ask \"<question>\" [--seat carbon|argon|flash]
        herdr media doctor";
 
 fn usage_exit() -> ! {
@@ -1083,7 +1090,7 @@ fn shrink_cli(args: &[String]) -> std::io::Result<()> {
 fn prompt_cli(args: &[String]) -> std::io::Result<()> {
     let mut file: Option<PathBuf> = None;
     let mut ask: Option<String> = None;
-    let mut seat = MediaSeat::Argon;
+    let mut seat = DEFAULT_SEAT;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         let mut value = || iter.next().cloned().unwrap_or_else(|| usage_exit());
@@ -1092,7 +1099,9 @@ fn prompt_cli(args: &[String]) -> std::io::Result<()> {
             "--seat" => {
                 let raw = value();
                 seat = MediaSeat::parse(&raw).unwrap_or_else(|| {
-                    eprintln!("herdr media prompt: --seat must be argon or flash (got {raw:?})");
+                    eprintln!(
+                        "herdr media prompt: --seat must be carbon, argon or flash (got {raw:?})"
+                    );
                     std::process::exit(2);
                 });
             }
@@ -1264,7 +1273,7 @@ mod tests {
         let line = prompt_line(
             rel,
             "What UI glitch happens\nwhen the sidebar closes?",
-            MediaSeat::Argon,
+            MediaSeat::Carbon,
         )
         .expect("prompt line succeeds");
         assert!(!line.contains('\n') && !line.contains('\r'));
@@ -1274,7 +1283,16 @@ mod tests {
         assert!(line.contains("timestamps"));
         assert!(line.contains("what happens on screen"));
         assert!(line.contains("transcript"));
-        assert!(line.contains("Seat role (argon)"));
+        assert!(line.contains("Seat role (carbon)"));
+        assert!(line.contains("watch the recording directly"));
+        // Plan 70: argon still reads as a word and gets the same role line.
+        assert_eq!(MediaSeat::parse("argon"), Some(MediaSeat::Argon));
+        assert_eq!(MediaSeat::parse("carbon"), Some(MediaSeat::Carbon));
+        assert_eq!(
+            DEFAULT_SEAT,
+            MediaSeat::Carbon,
+            "no --seat addresses carbon"
+        );
         assert!(line.contains("What UI glitch happens when the sidebar closes?"));
 
         let flash_line =
@@ -1481,7 +1499,9 @@ mod tests {
             !line("pdf: ").contains("haiku"),
             "haiku does not take a PDF: {text}"
         );
-        assert!(line("video: ").contains("argon (agy)"), "{text}");
+        // Plan 70: argon is off in the shipped table, carbon took its place.
+        assert!(line("video: ").contains("carbon (agy)"), "{text}");
+        assert!(!line("video: ").contains("argon"), "{text}");
         assert!(!line("video: ").contains("claude"), "{text}");
         assert_eq!(
             line("claude: "),

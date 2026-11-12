@@ -1,6 +1,6 @@
 ---
 name: media
-description: "Route video, audio, and >400k-token files to Gemini seats (argon or flash) on Antigravity (agy). Use whenever a task involves screen recordings, animations, UI reproduction videos, voice-overs, audio recordings, or huge files that would burn the Claude Max pool."
+description: "Route video, audio, and >400k-token files to Gemini seats (carbon or flash) on Antigravity (agy). Use whenever a task involves screen recordings, animations, UI reproduction videos, voice-overs, audio recordings, or huge files that would burn the Claude Max pool."
 ---
 
 # Media and Huge-Read Seating (`media.video`, `media.audio`, `read.huge`)
@@ -9,7 +9,7 @@ description: "Route video, audio, and >400k-token files to Gemini seats (argon o
 from a cheap seat, and the picture never enters your context. This skill is for video, audio and huge reads.
 `herdr media doctor` lists which tools (ffmpeg, ffprobe, pdftoppm) and which seats this machine has for each kind.
 
-As the Nirvana Claude orchestrator, **never read a video, an audio file, or a huge (>400k token) file into your own context**. Claude cannot ingest video or audio at all, and reading huge inputs on Claude burns the `>150k` context tier that consumes 74% of the Max weekly pool. Always delegate media and huge reads to an Antigravity (`agy`) worker seated on `argon` or `flash`.
+As the Nirvana Claude orchestrator, **never read a video, an audio file, or a huge (>400k token) file into your own context**. Claude cannot ingest video or audio at all, and reading huge inputs on Claude burns the `>150k` context tier that consumes 74% of the Max weekly pool. Always delegate media and huge reads to an Antigravity (`agy`) worker seated on `carbon` or `flash`.
 
 `herdr` below is the fork's binary, `"${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe"`. A plain `herdr` on this machine's
 PATH is upstream herdr, which has no `media` or `seat` command (measured by O4b, 2026-10-18).
@@ -44,31 +44,31 @@ Choose the class that matches the work:
   ```bash
   herdr seat pick --class media.video --json
   ```
-  Seats `argon` (`medium`) first, falling back to `flash` (`low`). For visual UI work (`build.frontend` or `judge.visual`) that involves motion or a screen recording, pass `--needs video` so `herdr seat pick` routes to `argon`.
-  - Use **`argon`** when the worker should watch the video *and* cross-check the repository's source files to diagnose a bug or verify a fix. A text transcript alone throws away spatial and temporal visual evidence.
+  Seats `carbon` (`medium`) first, falling back to `flash` (`low`). Carbon took `argon`'s seat in plan 70 at the same cost; argon is off. For visual UI work (`build.frontend` or `judge.visual`) that involves motion or a screen recording, pass `--needs video` so `herdr seat pick` routes to `carbon`.
+  - Use **`carbon`** when the worker should watch the video *and* cross-check the repository's source files to diagnose a bug or verify a fix. A text transcript alone throws away spatial and temporal visual evidence.
   - Use **`flash`** (`low`) when you only need a fast timestamped transcript and event extraction.
 
 - **Audio recordings and voice notes (`media.audio`):**
   ```bash
   herdr seat pick --class media.audio --json
   ```
-  Seats `flash` (`low`) first, then `argon` (`low`).
+  Seats `flash` (`low`) first, then `carbon` (`low`).
 
 - **Huge text/log/bundle reads over 400k tokens (`read.huge`):**
   ```bash
   herdr seat pick --class read.huge --json
   ```
-  Seats `flash` (`medium`) first, then `argon` (`medium`) using their `context_1m` capability.
+  Seats `flash` (`medium`) first, then `carbon` (`medium`) using their `context_1m` capability.
   - **One exception to the "never resume" rule:** for a read-only follow-up question on a `read.huge` session, resume the same `agy` conversation with `agy --conversation <id>`. Starting a fresh session re-reads the entire >400k-token input, whereas cached input on Gemini costs 95% less.
 
 ## 3. Build the worker prompt (`herdr media prompt`)
 
-Probe P2 proved that `flash` and `argon` read MP4 and WebM files reliably **only when the prompt names the file's full absolute path and explicitly instructs the worker to use the `view_file` tool** (omitting `StartLine` and `EndLine`). With a bare filename, `flash` tried to run `dir`, plan mode refused it, and the worker exited with an empty answer and `status: SUCCESS`.
+Probe P2 proved that `flash` and `argon` read MP4 and WebM files reliably **only when the prompt names the file's full absolute path and explicitly instructs the worker to use the `view_file` tool** (omitting `StartLine` and `EndLine`). Carbon was not in P2; it gets the same prompt, a prior. With a bare filename, `flash` tried to run `dir`, plan mode refused it, and the worker exited with an empty answer and `status: SUCCESS`.
 
 Generate the single-line worker prompt with:
 
 ```bash
-herdr media prompt <path/to/file-or-shrunk.mp4> --ask "<your question>" --seat argon
+herdr media prompt <path/to/file-or-shrunk.mp4> --ask "<your question>" --seat carbon
 ```
 
 This line instructs the `agy` worker to:
@@ -77,7 +77,7 @@ This line instructs the `agy` worker to:
    - **Timestamps (`MM:SS`)** for each key event or transition.
    - **Transcript and screen timeline**: what happens on screen and any spoken audio verbatim.
    - **Visual-only evidence**: what the video shows spatially/temporally (layout shifts, flicker, cursor/focus state, timing) that a text transcript alone would lose.
-   - **Findings** answering the specific question (and, on `argon`, the relevant source file/line diagnosis).
+   - **Findings** answering the specific question (and, on `carbon`, the relevant source file/line diagnosis).
 
 ## 4. Gate rule: an empty answer is always a failure
 

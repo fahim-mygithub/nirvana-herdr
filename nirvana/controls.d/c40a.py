@@ -39,7 +39,9 @@ CONTROLS = (
     Control("c40a_v12_historical", SEAT,
             '    // upgrades.\n    include_str!("nirvana_seats_v12.toml"),\n',
             '    // upgrades.\n',
-            T_UPGRADE, "rust"),
+            # Plan 70: v13 is now the last historical default, so the c40a test no longer names v12; the lrs upgrade
+            # test still asserts v12 is historical.
+            "lrs_an_installed_34a_or_35c_default_upgrades_to_r2", "rust"),
     # Fail closed: a window with no reading skips the seat.
     Control("c40a_fable_unread_skips", SEAT,
             "        if let Some(why) = window\n            .used\n            .is_none()\n",

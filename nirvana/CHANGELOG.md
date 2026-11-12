@@ -3,6 +3,36 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.69.0: Gemini 4 Carbon takes Argon's seat
+
+- **Changed:** the seat table has a `carbon` seat. It runs `gemini-4-carbon-{effort}` on agy at low, medium and high,
+  in the `gemini` pool, with Argon's capabilities and Argon's two price rows. Every class that lists Argon lists Carbon
+  just before it, at Argon's score and effort. Argon stays in the table but is off, with the measurement beside it.
+  `herdr media prompt` addresses Carbon when no `--seat` is given. The chip and the subagent rows read "Carbon". The
+  media, Jev, usage and role texts name Carbon where they named Argon as the seat to use. The 0.68.0 table is kept as
+  `nirvana_seats_v13.toml`, so an installed default upgrades.
+- **Because:** the owner, 2026-11-10: "A new gemini model Carbon is out. Can you include that model for the seating.
+  Check the cost and if its the same it might be used to replace Argon." The rule written before the run: Carbon
+  costs the same if at each effort its quota per order is within 1.25 times Argon's, or its tokens times price when
+  the quota cannot be read, and its answer is at least as right.
+- **Measured:** 2026-11-11 from 03:47Z, four orders one at a time on this PC's agy. Each read a 42-line copy of
+  `nirvana/version.py` and answered one question about it. All four answers were right. agy's free `/usage` was read
+  before and after each order. It had no Argon group, and both models moved the "Gemini Models" buckets, so Carbon's
+  pool is `gemini`. Argon low used 0.0162% of the week and 0.0647% of the 5 h window. It took 14,048 tokens in, 332
+  out, 9,179 cache reads and 16.1 s, $0.0323 at list price. Carbon low used 0.0167% and 0.0667%. It took 14,052 in,
+  432 out, 9,183 cache reads and 20.3 s, $0.0333. That is 1.03 times Argon. At medium another agy run on the account
+  moved the buckets between readings, and one reading went up, so the quota delta could not be read. By tokens times
+  price Argon medium cost $0.0365 for 547 out and 201 thinking in 15.7 s. Carbon medium cost $0.0401 for 765 out and
+  327 thinking in 26.3 s. That is 1.10 times Argon, or 1.07 if thinking is already in the output count. Carbon is the
+  same cost by the rule, so it replaced Argon. It is slower: 1.26 times at low and 1.68 times at medium. High was not
+  run; its cells are medium times 1.6, a prior. Carbon's capabilities are Argon's, a prior: Google's posts name no
+  context window and no input types. The four orders took about 0.07% of the week by their tokens. The week fell
+  from 79.4% left to 78.3% left over the run, the rest from the other agy run. One new test and 20 controls, each
+  red alone. 13 tests retargeted from Argon to Carbon, and 2 controls retargeted. The 70 existing controls on the
+  retargeted tests stay red. Scoped tests 506 of 507, the one failure a subagents test that fails on master too.
+- **If you remove this:** the router keeps seating Argon. Carbon, which costs the same per order here, is never
+  picked, and an order that names `gemini-4-carbon` shows "Gemini" on its chip.
+
 ## alpha 0.68.0: the phone works a picker the PC opened
 
 - **Changed:** when an agent that is not working shows a picker (Claude Code's `/resume`, `/model`, any screen whose
