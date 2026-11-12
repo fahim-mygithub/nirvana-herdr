@@ -464,6 +464,8 @@ pub enum GeminiLine {
     Argon,
     /// Plan 70: Gemini 4 Carbon, the seat that took Argon's place.
     Carbon,
+    /// Plan 71: Gemini 4 Hydrogen, the seat that took Flash 3.8's place.
+    Hydrogen,
     Other,
 }
 
@@ -511,13 +513,15 @@ pub fn model_family(model: &str) -> Family {
             .map(|word| word.to_string());
         return Family::Claude(initial.unwrap_or('C'), version);
     }
-    if has("gemini") || has("flash") || has("argon") || has("carbon") {
+    if has("gemini") || has("flash") || has("argon") || has("carbon") || has("hydrogen") {
         let line = if has("flash") {
             GeminiLine::Flash
         } else if has("argon") {
             GeminiLine::Argon
         } else if has("carbon") {
             GeminiLine::Carbon
+        } else if has("hydrogen") {
+            GeminiLine::Hydrogen
         } else if has("pro") {
             GeminiLine::Pro
         } else {
@@ -536,7 +540,7 @@ pub fn model_family(model: &str) -> Family {
 
 /// The short model representation (plan 26 S1), from `model_family`:
 /// - Claude: family initial and version, `S5.5`, `O5.5`, `H5.5`, `F5.2`.
-/// - Gemini: `Flash`, `Pro`, `Argon`, `Carbon`, else `Gemini`.
+/// - Gemini: `Flash`, `Pro`, `Argon`, `Carbon`, `Hydrogen`, else `Gemini`.
 /// - Codex: `Codex`. Antigravity with no model: `Agy`, whole, not a cut "Antigr".
 /// - A local model: its name, cut to 6 cells.
 pub fn compact_model(model: &str) -> String {
@@ -547,6 +551,7 @@ pub fn compact_model(model: &str) -> String {
         Family::Gemini(GeminiLine::Pro) => "Pro".to_string(),
         Family::Gemini(GeminiLine::Argon) => "Argon".to_string(),
         Family::Gemini(GeminiLine::Carbon) => "Carbon".to_string(),
+        Family::Gemini(GeminiLine::Hydrogen) => "Hydrogen".to_string(),
         Family::Gemini(GeminiLine::Other) => "Gemini".to_string(),
         Family::Codex => "Codex".to_string(),
         Family::Antigravity => "Agy".to_string(),
@@ -1004,6 +1009,13 @@ mod tests {
                 "Gemini 4 Carbon (Medium)",
                 "Carbon",
             ),
+            // Plan 71: Hydrogen read "Gemini" before its line was added.
+            ("gemini-4-hydrogen-low", "gemini-4-hydrogen-low", "Hydrogen"),
+            (
+                "Gemini 4 Hydrogen (XHigh)",
+                "Gemini 4 Hydrogen (XHigh)",
+                "Hydrogen",
+            ),
             ("gemini-3-pro-20260414", "gemini-3-pro-20260414", "Pro"),
         ];
         for (id, label, chip) in rows {
@@ -1017,6 +1029,8 @@ mod tests {
         assert_eq!(compact_model("Gemini 3.8 Pro"), "Pro");
         // Plan 70: a bare "Carbon" names the Gemini line, as a bare "Argon" does.
         assert_eq!(model_family("Carbon"), Family::Gemini(GeminiLine::Carbon));
+        // Plan 71: and a bare "Hydrogen".
+        assert_eq!(model_family("Hydrogen"), Family::Gemini(GeminiLine::Hydrogen));
         assert_eq!(compact_model("GPT-5 Codex"), "Codex");
         assert_eq!(claude_label("claude-fable-5-2").as_deref(), Some("Claude Fable 5.2"));
         assert_eq!(claude_label("claude-opus-5-5-max").as_deref(), Some("Claude Opus 5.5"));

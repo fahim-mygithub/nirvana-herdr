@@ -1674,8 +1674,9 @@ fn p34_a_teacher_is_denied_the_writing_tools_and_only_a_claude_seat_teaches() {
         "why = \"plan 34 §2.5: learn a technique from a source and give it a verdict as a card\"\nseats = [\n  \
          { seat = \"sonnet\", score = 82 },\n  { seat = \"opus\", score = 86 },\n]",
         "why = \"plan 34 §2.5: learn a technique from a source and give it a verdict as a card\"\nseats = [\n  \
-         { seat = \"flash\", score = 82 },\n]",
+         { seat = \"hydrogen\", score = 82 },\n]",
     );
+    // Plan 71: hydrogen, the agy seat that took flash's place (flash is off, so it would fail as off, not as agy).
     assert_ne!(only_agy, nirvana_seat::DEFAULT);
     std::fs::write(&seats, only_agy).unwrap();
     let live = nirvana_worker::take_live(&project, "r1", "teach-reel-1")

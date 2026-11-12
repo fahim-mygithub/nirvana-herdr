@@ -321,6 +321,34 @@ use = [
   { effort = "high", windows = { "5h" = 0.011525, week = 0.002885 }, at = "2026-11-11", basis = "prior: medium x 1.6" },
 ]
 
+# Plan 71: Gemini 4 Hydrogen, the owner 2026-11-12: "Gemini 4 Hydrogen potentially replacing the flash 3.8 model",
+# "it supposidly costs the same as 3.8", and "Hydrogen can do media level work replace flash". `agy models` (agy
+# 1.5.7) lists gemini-4-hydrogen-low|medium|high|xhigh. Its pool is `gemini`: agy's /usage has only the "Gemini Models"
+# group for Gemini. The capabilities are Flash's: the owner's word for media; context and input types are unmeasured,
+# a prior. The prices are Flash's: the owner's word, unverified.
+[[seat]]
+id = "hydrogen"
+cli = "agy"
+model = "gemini-4-hydrogen-{effort}"
+family = "google"
+pool = "gemini"
+efforts = ["low", "medium", "high", "xhigh"]
+capabilities = ["code", "tools", "image", "pdf", "web", "browser", "image_gen", "video", "audio", "context_1m"]
+enabled = true
+prices = [
+  { from = "2026-11-12", input = 0.75, output = 3.75, cache_read = 0.075, cache_write = 0.75, basis = "Flash 3.8's row: the owner 2026-11-12 'it supposidly costs the same as 3.8', unverified" },
+]
+# Ten orders one at a time (plan 71, 2026-11-12): read a 42-line file and answer one question, Flash 3.8 and Hydrogen
+# alternating. The quota could not be read (other agy runs moved the buckets; two readings went negative), so each cell
+# is Flash's cell times Hydrogen's cost per order over Flash's by tokens at the same price: low 0.74 (n 2 each), medium
+# 0.71 (n 2 each), high 0.57 (n 1 each). Hydrogen read ~10.6k of ~26k input from cache; Flash read none.
+use = [
+  { effort = "low", windows = { "5h" = 0.0001157, week = 5.783e-05 }, at = "2026-11-12", basis = "derived: flash low's cell x0.74, plan 71 tokens at the same price (n 2 each); carries flash's fit x8.97" },
+  { effort = "medium", windows = { "5h" = 0.0003224, week = 0.0001612 }, at = "2026-11-12", basis = "derived: flash medium's cell x0.71, plan 71 tokens at the same price (n 2 each); carries flash's fit x2.73" },
+  { effort = "high", windows = { "5h" = 0.0001535, week = 7.675e-05 }, at = "2026-11-12", basis = "derived: flash high's cell x0.57, plan 71 tokens at the same price (n 1 each)" },
+  { effort = "xhigh", windows = { "5h" = 0.0002456, week = 0.0001228 }, at = "2026-11-12", basis = "prior: high x 1.6" },
+]
+
 [[seat]]
 id = "flash"
 cli = "agy"
@@ -329,7 +357,11 @@ family = "google"
 pool = "gemini"
 efforts = ["low", "medium", "high"]
 capabilities = ["code", "tools", "image", "pdf", "web", "browser", "image_gen", "video", "audio", "context_1m"]
-enabled = true
+# Off since plan 71, 2026-11-12: Hydrogen took its seat at the same cost or less. Ten orders, the same question on the
+# same file, all answers right; by tokens at Flash's price Hydrogen cost 0.74x at low, 0.71x at medium, 0.57x at high
+# (0.78x to 1.11x if its cache reads were full price). Turn it back on here to give the router both; every class still
+# lists it.
+enabled = false
 prices = [
   { from = "2026-10-17", input = 0.75, output = 3.75, cache_read = 0.075, cache_write = 0.75, basis = "aggregators, medium confidence (plan 12 §2); cache read at a tenth of input, unverified" },
 ]
@@ -377,6 +409,8 @@ use = [
 # own `effort` is its departure. `weight` scales the expected use against P4's order (a prior).
 # Plan 70: carbon stands just before argon in every class that lists argon, at argon's score and effort, a prior
 # (decision 0012). With argon off, carbon is the Gemini pro seat the rule picks.
+# Plan 71: hydrogen stands just before flash in every class that lists flash, at flash's score and effort, a prior
+# (decision 0012). With flash off, hydrogen is the Gemini fast seat the rule picks.
 # `only_with` takes the seat only when the order needs all of those. A class lists its seats in §5.4's
 # order, and that order breaks the last tie.
 
@@ -396,6 +430,7 @@ seats = [
   { seat = "carbon", score = 87 },
   { seat = "argon", score = 87 },
   { seat = "sonnet", score = 86 },
+  { seat = "hydrogen", score = 74 },
   { seat = "flash", score = 74 },
   { seat = "g-opus", score = 95 },
 ]
@@ -416,6 +451,7 @@ seats = [
   { seat = "carbon", score = 86 },
   { seat = "argon", score = 86 },
   { seat = "sonnet", score = 85 },
+  { seat = "hydrogen", score = 68 },
   { seat = "flash", score = 68 },
   { seat = "g-opus", score = 95 },
 ]
@@ -435,6 +471,7 @@ seats = [
   { seat = "sonnet", score = 88 },
   { seat = "carbon", score = 84 },
   { seat = "argon", score = 84 },
+  { seat = "hydrogen", score = 80 },
   { seat = "flash", score = 80 },
   { seat = "haiku", score = 70 },
   { seat = "g-sonnet", score = 88 },
@@ -456,6 +493,7 @@ seats = [
   { seat = "sonnet", score = 86 },
   { seat = "carbon", score = 86 },
   { seat = "argon", score = 86 },
+  { seat = "hydrogen", score = 72 },
   { seat = "flash", score = 72 },
   { seat = "g-opus", score = 95 },
 ]
@@ -476,6 +514,7 @@ seats = [
   { seat = "carbon", score = 86 },
   { seat = "argon", score = 86 },
   { seat = "sonnet", score = 84 },
+  { seat = "hydrogen", score = 74 },
   { seat = "flash", score = 74 },
   { seat = "g-opus", score = 95 },
 ]
@@ -496,6 +535,7 @@ seats = [
   { seat = "carbon", score = 85, effort = "high" },
   { seat = "argon", score = 85, effort = "high" },
   { seat = "sonnet", score = 84 },
+  { seat = "hydrogen", score = 72 },
   { seat = "flash", score = 72 },
   { seat = "g-opus", score = 93 },
 ]
@@ -513,6 +553,7 @@ why = "plan 19 §4: terminal operations"
 seats = [
   { seat = "sonnet", score = 88 },
   { seat = "opus", score = 90 },
+  { seat = "hydrogen", score = 78 },
   { seat = "flash", score = 78 },
   { seat = "haiku", score = 72 },
   { seat = "g-sonnet", score = 88 },
@@ -534,6 +575,7 @@ seats = [
   { seat = "carbon", score = 90 },
   { seat = "argon", score = 90 },
   { seat = "sonnet", score = 89 },
+  { seat = "hydrogen", score = 76 },
   { seat = "flash", score = 76 },
   { seat = "g-opus", score = 94 },
 ]
@@ -553,6 +595,7 @@ seats = [
   { seat = "carbon", score = 85 },
   { seat = "argon", score = 85 },
   { seat = "sonnet", score = 85 },
+  { seat = "hydrogen", score = 74 },
   { seat = "flash", score = 74 },
 ]
 
@@ -569,6 +612,7 @@ why = "plan 19 §4: research and document reading"
 seats = [
   { seat = "sonnet", score = 85 },
   { seat = "opus", score = 88 },
+  { seat = "hydrogen", score = 78 },
   { seat = "flash", score = 78 },
   { seat = "carbon", score = 80 },
   { seat = "argon", score = 80 },
@@ -586,6 +630,7 @@ weight = 0.5
 bars = { efficient = 68, balanced = 80, sota = 100 }
 why = "plan 35: agy searches with search_web and reads pages with bladebro when granted, else shell fetches; agy seats list browser since live check 35.1 (one order, so not rescored)"
 seats = [
+  { seat = "hydrogen", score = 84 },
   { seat = "flash", score = 84 },
   { seat = "carbon", score = 84 },
   { seat = "argon", score = 84 },
@@ -606,6 +651,7 @@ weight = 6.0
 bars = { efficient = 70, balanced = 80, sota = 100 }
 why = "plan 19 §4: huge context over 400k tokens"
 seats = [
+  { seat = "hydrogen", score = 85 },
   { seat = "flash", score = 85 },
   { seat = "carbon", score = 83 },
   { seat = "argon", score = 83 },
@@ -626,6 +672,7 @@ seats = [
   { seat = "argon", score = 86 },
   { seat = "sonnet", score = 82 },
   { seat = "opus", score = 84 },
+  { seat = "hydrogen", score = 76 },
   { seat = "flash", score = 76 },
   { seat = "g-sonnet", score = 82 },
 ]
@@ -644,6 +691,7 @@ why = "plan 19 §4: video processing on Gemini"
 seats = [
   { seat = "carbon", score = 90 },
   { seat = "argon", score = 90 },
+  { seat = "hydrogen", score = 82 },
   { seat = "flash", score = 82 },
 ]
 
@@ -659,6 +707,7 @@ weight = 1.0
 bars = { efficient = 70, balanced = 82, sota = 100 }
 why = "plan 19 §4: audio processing on Gemini"
 seats = [
+  { seat = "hydrogen", score = 86 },
   { seat = "flash", score = 86 },
   { seat = "carbon", score = 85 },
   { seat = "argon", score = 85 },
@@ -693,6 +742,7 @@ weight = 1.0
 bars = { efficient = 60, balanced = 79, sota = 100 }
 why = "plan 19 §4: mechanical sweeps"
 seats = [
+  { seat = "hydrogen", score = 80 },
   { seat = "flash", score = 80 },
   { seat = "haiku", score = 78 },
   { seat = "sonnet", score = 80 },
@@ -710,6 +760,7 @@ bars = { efficient = 60, balanced = 70, sota = 100 }
 why = "plan 19 §4: memory maintenance"
 seats = [
   { seat = "haiku", score = 80 },
+  { seat = "hydrogen", score = 78 },
   { seat = "flash", score = 78 },
   { seat = "sonnet", score = 82 },
 ]
@@ -726,6 +777,7 @@ bars = { efficient = 60, balanced = 70, sota = 100 }
 why = "plan 19 §4: script chores"
 seats = [
   { seat = "haiku", score = 80 },
+  { seat = "hydrogen", score = 78 },
   { seat = "flash", score = 78 },
   { seat = "sonnet", score = 82 },
 ]
@@ -742,6 +794,7 @@ bars = { efficient = 60, balanced = 70, sota = 100 }
 why = "plan 19 §4: github chores"
 seats = [
   { seat = "haiku", score = 80 },
+  { seat = "hydrogen", score = 78 },
   { seat = "flash", score = 78 },
   { seat = "sonnet", score = 82 },
 ]
@@ -761,6 +814,7 @@ weight = 0.3
 bars = { efficient = 60, balanced = 70, sota = 100 }
 why = "plan 33 §3.3: a cheap review of a gated order's lessons"
 seats = [
+  { seat = "hydrogen", score = 80 },
   { seat = "flash", score = 80 },
   { seat = "sonnet", score = 78 },
 ]

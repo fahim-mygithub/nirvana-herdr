@@ -249,7 +249,8 @@ fn p33_a_review_is_queued_after_a_pass_and_its_new_op_keeps_a_lesson() {
         ruling
             .next
             .iter()
-            .any(|line| line.starts_with("b1-lr seated on flash low")),
+            // Plan 71: hydrogen took flash's seat.
+            .any(|line| line.starts_with("b1-lr seated on hydrogen low")),
         "{:?}",
         ruling.next
     );
@@ -406,7 +407,11 @@ fn p33_the_review_seats_flash_first_then_sonnet_low_at_efficient() {
         ..nirvana_seat::World::default()
     };
     let first = pick(&table, &world, "x-lr").expect("pick");
-    assert_eq!((first.seat.as_str(), first.effort.word()), ("flash", "low"));
+    // Plan 71: hydrogen took flash's seat; the name keeps flash for the controls that name this test.
+    assert_eq!(
+        (first.seat.as_str(), first.effort.word()),
+        ("hydrogen", "low")
+    );
     let mut no_agy = world.clone();
     no_agy.clis.insert("agy".into(), "signed out".into());
     let second = pick(&table, &no_agy, "x-lr").expect("pick");

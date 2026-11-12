@@ -45,16 +45,18 @@ CONTROLS = (
     Control("p70_class_effort", TABLE, '  { seat = "carbon", score = 85, effort = "high" },',
             '  { seat = "carbon", score = 85 },', T_CARBON, "rust"),
     # The upgrade path: the 0.68.0 default is historical
-    Control("p70_v13_not_historical", SEAT, '    include_str!("nirvana_seats_v13.toml"),\n];', "];",
+    # Plan 71 put v14 after v13, so v13's line alone is taken out.
+    Control("p70_v13_not_historical", SEAT, '    include_str!("nirvana_seats_v13.toml"),\n', "",
             T_UPGRADE, "rust"),
-    Control("p70_v13_not_upgraded", SEAT, '    include_str!("nirvana_seats_v13.toml"),\n];', "];",
+    Control("p70_v13_not_upgraded", SEAT, '    include_str!("nirvana_seats_v13.toml"),\n', "",
             T_UPGRADE_LRS, "rust"),
     # Labels: the chip and the subagent row read "Carbon"
     Control("p70_chip_line", SPACES, '        } else if has("carbon") {\n            GeminiLine::Carbon\n', "",
             T_LABEL, "rust"),
     Control("p70_chip_word", SPACES, '        Family::Gemini(GeminiLine::Carbon) => "Carbon".to_string(),',
             '        Family::Gemini(GeminiLine::Carbon) => "Gemini".to_string(),', T_LABEL, "rust"),
-    Control("p70_chip_bare", SPACES, ' || has("argon") || has("carbon") {', ' || has("argon") {', T_LABEL, "rust"),
+    Control("p70_chip_bare", SPACES, ' || has("argon") || has("carbon") || has("hydrogen") {',
+            ' || has("argon") || has("hydrogen") {', T_LABEL, "rust"),
     Control("p70_row_chip", SPACES, '        Family::Gemini(GeminiLine::Carbon) => "Carbon".to_string(),',
             '        Family::Gemini(GeminiLine::Carbon) => "Gemini".to_string(),', T_ROWS, "rust"),
     # Media: carbon is a word, the default, and its own role name; the doctor names it for video

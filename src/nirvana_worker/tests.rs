@@ -806,7 +806,7 @@ fn worker_supervisor_uses_project_mode_when_order_names_none() {
     std::fs::write(&order_file, "# Test Order\n").unwrap();
 
     let request = SeatRequest {
-        seat: "flash".into(),
+        seat: "hydrogen".into(), // Plan 71: hydrogen took flash's seat.
         order_file,
         order: "test-order".into(),
         run: "r1".into(),

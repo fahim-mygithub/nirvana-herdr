@@ -2973,6 +2973,8 @@ fn p37_gate_fail_with(
     }
 }
 
+/// Plan 71: the parent is on hydrogen, the seat that took flash's place (flash is off, and an off seat steps up to
+/// nothing).
 /// L5: "Step up one seat". reel-motion-gemini's redo went back to the flash-low seat that invented its sources; a
 /// missing video now sends the redo to the next stronger seat of research.web, carbon, as herdr's own step (no run
 /// override spent), and its brief trusts nothing from the first try.
@@ -2980,14 +2982,14 @@ fn p37_gate_fail_with(
 fn p37_a_send_back_for_invented_videos_steps_up_one_seat_and_trusts_nothing() {
     let (seat, reason, brief, overrides) = p37_send_back(
         "p37-step-up",
-        "flash",
+        "hydrogen",
         vec![format!("{NO_SUCH_VIDEO}{P37_FAKE}")],
     );
     assert_eq!(seat, "carbon");
     assert!(
         reason
             .as_deref()
-            .is_some_and(|why| why.starts_with("step up from flash to carbon")),
+            .is_some_and(|why| why.starts_with("step up from hydrogen to carbon")),
         "{reason:?}"
     );
     assert_eq!(overrides, 0);
@@ -3026,7 +3028,12 @@ fn p37_invented() -> Vec<Axis> {
 /// and seats nothing more.
 #[test]
 fn p37_a_gate_by_hand_of_a_sent_back_order_gives_its_child() {
-    let sent = p37_gate_fail("p37-again-sent", "flash", p37_invented(), BTreeMap::new());
+    let sent = p37_gate_fail(
+        "p37-again-sent",
+        "hydrogen",
+        p37_invented(),
+        BTreeMap::new(),
+    );
     assert_eq!(sent.ruling.verdict, "sent_back");
     let again = sent.again.expect("the stored verdict");
     assert_eq!((again.verdict.as_str(), again.exit()), ("sent_back", 1));
@@ -3059,7 +3066,7 @@ fn p37_invented_sources_with_no_seat_above_ask() {
 #[test]
 fn p37_invented_sources_whose_step_is_refused_ask() {
     let clis = BTreeMap::from([("agy".to_owned(), "agy is signed out".to_owned())]);
-    let sent = p37_gate_fail("p37-step-refused", "flash", p37_invented(), clis);
+    let sent = p37_gate_fail("p37-step-refused", "hydrogen", p37_invented(), clis);
     assert_eq!(sent.ruling.verdict, "asked", "{:?}", sent.ruling);
     assert!(sent.child.is_none());
     assert!(
@@ -4057,7 +4064,7 @@ fn gsrc_a_send_back_keeps_the_parents_effort() {
 fn gsrc_a_stepped_up_redo_keeps_the_parents_effort() {
     let axes = vec![Axis::new("sources", Mark::Fail, "the sources")
         .with(vec![format!("{NO_SUCH_VIDEO}{P37_FAKE}")])];
-    let (_, child) = gsrc_send_back("gsrc-step", "research.web", "flash", Effort::High, axes);
+    let (_, child) = gsrc_send_back("gsrc-step", "research.web", "hydrogen", Effort::High, axes);
     assert_eq!(child.seat, "carbon", "{}", child.reason);
     assert_eq!(child.effort, Effort::High, "{}", child.reason);
 }

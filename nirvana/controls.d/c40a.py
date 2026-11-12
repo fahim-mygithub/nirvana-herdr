@@ -239,8 +239,9 @@ CONTROLS = (
             T_PLAN19, "rust"),
     # Part 2 item 5: the two scores the record contradicts.
     Control("c40a_flash_load_bearing_score", TOML,
-            '  { seat = "sonnet", score = 85 },\n  { seat = "flash", score = 68 },\n',
-            '  { seat = "sonnet", score = 85 },\n  { seat = "flash", score = 74 },\n',
+            # Plan 71: hydrogen's row now stands between sonnet's and flash's.
+            '  { seat = "hydrogen", score = 68 },\n  { seat = "flash", score = 68 },\n',
+            '  { seat = "hydrogen", score = 68 },\n  { seat = "flash", score = 74 },\n',
             T_RECORD, "rust"),
     Control("c40a_sonnet_adversary_score", TOML,
             '  { seat = "sonnet", score = 89 },\n',

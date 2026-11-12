@@ -68,6 +68,9 @@ pub const HISTORICAL_DEFAULTS: &[&str] = &[
     // Plan 70: the default before Gemini 4 Carbon took Argon's seat (d5834ff5), copied before the edit so an
     // installed copy upgrades.
     include_str!("nirvana_seats_v13.toml"),
+    // Plan 71: the default before Gemini 4 Hydrogen took Flash 3.8's seat (20b42c2c), copied before the edit so an
+    // installed copy upgrades.
+    include_str!("nirvana_seats_v14.toml"),
 ];
 pub const DIR: &str = "nirvana";
 pub const SEATS_FILE: &str = "seats.toml";
@@ -5049,7 +5052,8 @@ mod tests {
         let table = parse(&read_or_create(&path)).expect("parses");
         assert!(table.problems().is_empty(), "{:?}", table.problems());
         // Plan 12 §4: seven seats in the first version; plan 40a turned Fable 5.2 on; plan 70 put Carbon in Argon's
-        // place and turned Argon off; gpt-oss and local stay off.
+        // place and turned Argon off; plan 71 put Hydrogen in Flash's place and turned Flash off; gpt-oss and local
+        // stay off.
         let on: Vec<&str> = table
             .seats
             .iter()
@@ -5058,7 +5062,7 @@ mod tests {
             .collect();
         assert_eq!(
             on,
-            ["opus", "sonnet", "haiku", "fable", "g-opus", "g-sonnet", "carbon", "flash"]
+            ["opus", "sonnet", "haiku", "fable", "g-opus", "g-sonnet", "carbon", "hydrogen"]
         );
         let off: Vec<&str> = table
             .seats
@@ -5066,7 +5070,7 @@ mod tests {
             .filter(|s| !s.enabled)
             .map(|s| s.id.as_str())
             .collect();
-        assert_eq!(off, ["argon", "gpt-oss", "local"]);
+        assert_eq!(off, ["argon", "flash", "gpt-oss", "local"]);
         // Plan 40a: Fable 5.2's seat, as the Claude docs gave it on 2026-11-09.
         let fable = table.seat("fable").unwrap();
         assert_eq!(fable.model, "claude-fable-5-2");
@@ -5305,8 +5309,8 @@ mod tests {
             .map(|s| s.id.as_str())
             .collect();
         google_enabled.sort();
-        // Plan 70: Carbon took Argon's place.
-        assert_eq!(google_enabled, ["carbon", "flash"]);
+        // Plan 70: Carbon took Argon's place. Plan 71: Hydrogen took Flash's.
+        assert_eq!(google_enabled, ["carbon", "hydrogen"]);
     }
 
     #[test]
@@ -5614,13 +5618,14 @@ mod tests {
         let mut world = world();
         set(&mut world, "gemini", "5h", 0.96);
         let got = chosen(&table, &world, &request("research.web"));
-        // Plan 70: carbon is in flash's pool, so the one floor skips both, with the same why.
+        // Plan 70: carbon is in hydrogen's pool (plan 71: hydrogen took flash's place), so the one floor skips both,
+        // with the same why.
         assert!(
-            !["carbon", "flash"].contains(&got.seat.as_str()),
+            !["carbon", "hydrogen"].contains(&got.seat.as_str()),
             "{}",
             got.seat
         );
-        for seat in ["flash", "carbon"] {
+        for seat in ["hydrogen", "carbon"] {
             assert_eq!(
                 why(&got.runners_up, seat),
                 "gemini 5h 96% used: at or under the floor 5%"
@@ -5629,12 +5634,16 @@ mod tests {
         // 90% used and 6% booked by an order in flight leaves 4%.
         let mut world = self::world();
         set(&mut world, "gemini", "5h", 0.90);
-        world
-            .leases
-            .push(lease("o-1", "flash", "gemini", &[("5h", 0.06)], NOW + 600));
+        world.leases.push(lease(
+            "o-1",
+            "hydrogen",
+            "gemini",
+            &[("5h", 0.06)],
+            NOW + 600,
+        ));
         let got = chosen(&table, &world, &request("research.web"));
         assert_eq!(
-            why(&got.runners_up, "flash"),
+            why(&got.runners_up, "hydrogen"),
             "gemini 5h 90% used and 6% booked: at or under the floor 5%"
         );
     }
@@ -5712,15 +5721,15 @@ mod tests {
     fn pressure_is_the_worst_window_and_a_weeks_share_is_not_a_5h_windows() {
         let table = table();
         let mut world = world();
-        // Gemini's and Argon's weeks 90% used: neither has spare, and flash's binding window is the week. Anthropic's
-        // seats are left out: since the review round's refit (flash low x8.97) sonnet wins this world, and the test is
-        // flash's pressure, not who wins.
+        // Gemini's and Argon's weeks 90% used: neither has spare, and hydrogen's binding window is the week (plan 71:
+        // it took flash's place). Anthropic's seats are left out: since the review round's refit (flash low x8.97)
+        // sonnet wins this world, and the test is hydrogen's pressure, not who wins.
         set(&mut world, "gemini", "week", 0.90);
         set(&mut world, "argon", "week", 0.90);
         let mut req = request("research.web");
         req.not_family = vec!["anthropic".into()];
         let got = chosen(&table, &world, &req);
-        assert_eq!(got.seat, "flash");
+        assert_eq!(got.seat, "hydrogen");
         let term =
             |w: &WindowState| w.expected / w.headroom.unwrap() * w.pace.unwrap() * w.reset_factor;
         let five = got.windows.iter().find(|w| w.window == "5h").unwrap();
@@ -5831,16 +5840,16 @@ mod tests {
         for seat in table
             .seats
             .iter_mut()
-            .filter(|s| s.id == "flash" || s.id == "carbon")
+            .filter(|s| s.id == "hydrogen" || s.id == "carbon")
         {
             for cell in &mut seat.uses {
                 cell.windows.clear();
             }
         }
-        // Both 84, both no expected use: flash heads research.web's row (§5.4), though carbon is earlier in
-        // the table (plan 70: carbon took argon's place).
+        // Both 84, both no expected use: hydrogen heads research.web's row (§5.4), though carbon is earlier
+        // in the table (plan 70: carbon took argon's place; plan 71: hydrogen took flash's).
         let got = chosen(&table, &world(), &request("research.web"));
-        assert_eq!(got.seat, "flash");
+        assert_eq!(got.seat, "hydrogen");
         assert_eq!(
             why(&got.runners_up, "carbon"),
             "same pressure and score, later in the class's order"
@@ -5854,13 +5863,13 @@ mod tests {
         class
             .seats
             .iter_mut()
-            .find(|e| e.seat == "flash")
+            .find(|e| e.seat == "hydrogen")
             .unwrap()
             .score = 83.0;
         let got = chosen(&table, &world(), &request("research.web"));
         assert_eq!(got.seat, "carbon");
         assert_eq!(
-            why(&got.runners_up, "flash"),
+            why(&got.runners_up, "hydrogen"),
             "same pressure, scores 83.0 against 84.0"
         );
     }
@@ -6103,7 +6112,7 @@ mod tests {
         };
         assert_eq!(
             effort("build.bounded", Mode::Balanced),
-            ("flash".into(), Effort::Medium)
+            ("hydrogen".into(), Effort::Medium)
         );
         assert_eq!(
             effort("build.bounded", Mode::Sota),
@@ -6111,11 +6120,11 @@ mod tests {
         );
         assert_eq!(
             effort("fix.debug", Mode::Balanced),
-            ("flash".into(), Effort::Medium)
+            ("hydrogen".into(), Effort::Medium)
         );
         assert_eq!(
             effort("plan", Mode::Balanced),
-            ("flash".into(), Effort::High)
+            ("hydrogen".into(), Effort::High)
         );
         // Plan 40a: Fable 97 heads plan at SOTA while its week was read fresh (this world's 0%).
         assert_eq!(effort("plan", Mode::Sota), ("fable".into(), Effort::High));
@@ -6139,7 +6148,7 @@ mod tests {
         table
             .seats
             .iter_mut()
-            .find(|s| s.id == "flash")
+            .find(|s| s.id == "hydrogen")
             .unwrap()
             .efforts
             .push(Effort::Max);
@@ -6151,7 +6160,7 @@ mod tests {
             .efforts
             .push(Effort::Max);
         let got = chosen(&table, &self::world(), &request("plan"));
-        assert_eq!((got.seat.as_str(), got.effort), ("flash", Effort::High));
+        assert_eq!((got.seat.as_str(), got.effort), ("hydrogen", Effort::High));
         assert_eq!(got.effort_note.as_deref(), Some("capped at high"));
         // An explicit override can still choose max.
         let mut over_max = request("plan");
@@ -6239,7 +6248,7 @@ mod tests {
             Ok(got) => got,
             Err(_) => panic!("no seat"),
         };
-        assert_eq!((got.seat.as_str(), got.effort), ("flash", Effort::Low));
+        assert_eq!((got.seat.as_str(), got.effort), ("hydrogen", Effort::Low));
         assert!(!got.step_down);
         assert!(!got.reason.contains("step down"), "{}", got.reason);
     }
@@ -6401,7 +6410,7 @@ mod tests {
             existing_booking(&leases, "o-9", Some("carbon"), NOW + 5)
                 .unwrap()
                 .unwrap_err(),
-            "override carbon refused: o-9 is already booked on flash medium (the rule's pick); \
+            "override carbon refused: o-9 is already booked on hydrogen medium (the rule's pick); \
              release it first (herdr seat release o-9)"
         );
         assert!(existing_booking(&leases, "o-404", Some("carbon"), NOW).is_none());
@@ -7118,14 +7127,14 @@ mod tests {
             assert_eq!(loser.effort, Some(Effort::Medium));
         }
 
-        // at 1.2: argon or flash wins plan
+        // at 1.2: argon or hydrogen wins plan
         let mut world_12 = world();
         set(&mut world_12, "max", "5h", 0.41);
         set(&mut world_12, "max", "week", 1.20 * el_week);
         let pick_12 = chosen(&table, &world_12, &req_plan);
         assert!(
-            pick_12.seat == "argon" || pick_12.seat == "flash",
-            "at climb 1.2, expected argon or flash to win plan, got {}",
+            pick_12.seat == "argon" || pick_12.seat == "hydrogen",
+            "at climb 1.2, expected argon or hydrogen to win plan, got {}",
             pick_12.seat
         );
     }
@@ -7139,7 +7148,7 @@ mod tests {
         }
 
         // World with non-floored pools:
-        // Gemini (flash's and carbon's pool) and Argon at 94% (so left = 6% > floor 5%).
+        // Gemini (hydrogen's and carbon's pool) and Argon at 94% (so left = 6% > floor 5%).
         // Max: week at 94%, 5h at 75% (so left = 25% > reserve 20% + expected use).
         // Plan 40a: Fable's own week stays at 0% here. Its fail-closed reserve is the one usage rule SOTA keeps per
         // seat (`scoped_skip`), tested on its own below.
@@ -7184,17 +7193,18 @@ mod tests {
         assert_eq!(pick_res.seat, "carbon");
         assert!(why(&pick_res.runners_up, "opus").contains("under the orchestrator's reserve"));
 
-        // 2. Floor skip on carbon: plan 70 put carbon in flash's pool, so gemini's floor skips both.
+        // 2. Floor skip on carbon: plan 70 put carbon in flash's pool, plan 71 hydrogen in flash's place, so gemini's
+        // floor skips both.
         let mut world_floor = world_reserve;
         set(&mut world_floor, "gemini", "week", 0.96); // left = 4% <= 5% floor
         let pick_floor = chosen(&table, &world_floor, &req_plan);
         assert!(
-            !["carbon", "flash"].contains(&pick_floor.seat.as_str()),
+            !["carbon", "hydrogen"].contains(&pick_floor.seat.as_str()),
             "{}",
             pick_floor.seat
         );
         assert!(why(&pick_floor.runners_up, "carbon").contains("floor"));
-        assert!(why(&pick_floor.runners_up, "flash").contains("floor"));
+        assert!(why(&pick_floor.runners_up, "hydrogen").contains("floor"));
 
         // 3. Filter 6 (headroom) is bypassed in SOTA:
         let mut world_f6 = world_zero.clone();
@@ -7210,7 +7220,7 @@ mod tests {
 
     #[test]
     fn l8_g_opus_wins_plan_only_when_all_non_fallback_seats_are_skipped() {
-        // Plan 70: carbon shares flash's pool, so no floor skips it alone; it is turned off here instead.
+        // Plan 70: carbon shares hydrogen's pool, so no floor skips it alone; it is turned off here instead.
         let mut table = table();
         table
             .seats
@@ -7225,17 +7235,17 @@ mod tests {
         // Skip opus, carbon, sonnet (argon is off in the shipped table):
         set(&mut world_test, "max", "5h", 0.85); // skips opus and sonnet by reserve
         let pick_flash = chosen(&table, &world_test, &req_plan);
-        assert_eq!(pick_flash.seat, "flash");
-        assert!(why(&pick_flash.runners_up, "g-opus").contains("fallback seat; flash is not"));
+        assert_eq!(pick_flash.seat, "hydrogen");
+        assert!(why(&pick_flash.runners_up, "g-opus").contains("fallback seat; hydrogen is not"));
 
-        // Now also skip flash:
-        set(&mut world_test, "gemini", "5h", 0.96); // skips flash by floor
+        // Now also skip hydrogen (plan 71: it took flash's place):
+        set(&mut world_test, "gemini", "5h", 0.96); // skips hydrogen by floor
         let pick_g_opus = chosen(&table, &world_test, &req_plan);
         assert_eq!(pick_g_opus.seat, "g-opus");
         assert!(pick_g_opus.reason.contains("; fallback:"));
         assert!(pick_g_opus.reason.contains("opus"));
         assert!(pick_g_opus.reason.contains("sonnet"));
-        assert!(pick_g_opus.reason.contains("flash"));
+        assert!(pick_g_opus.reason.contains("hydrogen"));
     }
 
     #[test]
@@ -7716,13 +7726,13 @@ mod tests {
     }
 
     /// Plan 37 §1.3: the next stronger seat of the class, by the class's score and then the seat's output price:
-    /// research.web scores flash and carbon 84 each, and carbon's price is the higher; carbon has none above it. Plan 70:
-    /// carbon took argon's place, argon is off.
+    /// research.web scores hydrogen and carbon 84 each, and carbon's price is the higher; carbon has none above it.
+    /// Plan 70: carbon took argon's place, argon is off. Plan 71: hydrogen took flash's place, flash is off.
     #[test]
     fn p37_step_up_takes_the_next_stronger_seat_of_the_class() {
         let table = parse(DEFAULT).expect("default table");
         assert_eq!(
-            step_up(&table, "research.web", "flash", NOW).as_deref(),
+            step_up(&table, "research.web", "hydrogen", NOW).as_deref(),
             Some("carbon")
         );
         assert_eq!(step_up(&table, "research.web", "carbon", NOW), None);
@@ -7748,7 +7758,7 @@ mod tests {
             .collect();
         assert_eq!(
             agy.iter().map(|seat| seat.id.as_str()).collect::<Vec<_>>(),
-            ["g-opus", "g-sonnet", "carbon", "flash"]
+            ["g-opus", "g-sonnet", "carbon", "hydrogen"]
         );
         for seat in &agy {
             assert!(
@@ -7790,7 +7800,7 @@ mod tests {
             Some("claude")
         );
         assert_eq!(
-            why(&got.runners_up, "flash"),
+            why(&got.runners_up, "hydrogen"),
             "bambu-studio-beta drives a desktop window"
         );
         // The seat skill says `--needs browser` is the way to a browser on agy, and no longer only `bladebro`.
@@ -7856,7 +7866,7 @@ mod tests {
         }
         assert_eq!(
             HISTORICAL_DEFAULTS.last().copied(),
-            Some(include_str!("nirvana_seats_v13.toml"))
+            Some(include_str!("nirvana_seats_v14.toml"))
         );
         assert!(!differs_from_default(DEFAULT));
         assert!(!differs_from_default(&replace_mode_line(
@@ -8051,10 +8061,11 @@ mod tests {
             Some("fable")
         );
         assert_eq!(step_up(&table, "plan", "fable", now), None);
-        // Today's research.web (no Fable): a sent-back opus order steps up to flash, 84 over 82, the cheaper of the two.
+        // Today's research.web (no Fable): a sent-back opus order steps up to hydrogen, 84 over 82, the cheaper
+        // of the two (plan 71: hydrogen took flash's place).
         assert_eq!(
             step_up(&table, "research.web", "opus", now).as_deref(),
-            Some("flash")
+            Some("hydrogen")
         );
         let mut redo = request("plan");
         redo.override_seat = Some(("fable".into(), "step up".into()));
@@ -8263,6 +8274,11 @@ mod tests {
         req.not_family = vec!["anthropic".into()];
         let got = pick(&table, &world(), &req);
         assert!(!got.as_ref().is_ok_and(|p| p.seat == "flash"), "{got:?}");
+        // Plan 71: hydrogen took flash's row at flash's score, a prior, so it stays under the bar too and is not
+        // picked.
+        let (hydrogen, bars) = score("build.load_bearing", "hydrogen");
+        assert!(hydrogen < bars.at(Mode::Efficient), "hydrogen {hydrogen}");
+        assert!(!got.as_ref().is_ok_and(|p| p.seat == "hydrogen"), "{got:?}");
     }
 
     /// Review a, N4: an owner's table that turns sonnet and opus off seats Nirvana Claude on the first claude seat still
@@ -8471,12 +8487,115 @@ mod tests {
         video.needs = vec!["video".into()];
         assert_eq!(chosen(&table, &world(), &video).seat, "carbon");
         assert_eq!(
-            step_up(&table, "research.web", "flash", NOW).as_deref(),
+            step_up(&table, "research.web", "hydrogen", NOW).as_deref(),
             Some("carbon")
         );
         // An override of argon is refused: it is off.
         let mut over = request("build.bounded");
         over.override_seat = Some(("argon".into(), "x".into()));
+        assert!(pick(&table, &world(), &over).is_err());
+    }
+
+    // ---- plan 71 ----
+
+    /// Plan 71: Gemini 4 Hydrogen takes Flash 3.8's seat. The owner, 2026-11-12: "it supposidly costs the same as 3.8"
+    /// and "Hydrogen can do media level work replace flash". Ten orders, all right; by tokens at Flash's price Hydrogen
+    /// cost 0.74x at low, 0.71x at medium, 0.57x at high (the quota could not be read). Hydrogen is on in gemini's pool
+    /// with Flash's price row and capabilities; Flash stays in the table, off.
+    #[test]
+    fn p71_hydrogen_takes_flashs_seat_at_the_same_cost() {
+        let table = table();
+        let hydrogen = table.seat("hydrogen").expect("a hydrogen seat");
+        assert!(hydrogen.enabled);
+        assert_eq!(
+            (
+                hydrogen.cli.as_str(),
+                hydrogen.model.as_str(),
+                hydrogen.family.as_str(),
+                hydrogen.pool.as_str()
+            ),
+            ("agy", "gemini-4-hydrogen-{effort}", "google", "gemini")
+        );
+        // agy lists xhigh for Hydrogen (agy 1.5.7); the rule still never picks above high on its own.
+        assert_eq!(
+            hydrogen.efforts,
+            [Effort::Low, Effort::Medium, Effort::High, Effort::Xhigh]
+        );
+        let flash = table.seat("flash").expect("flash stays in the table");
+        assert!(!flash.enabled, "flash is off since plan 71");
+        // The owner's word: Hydrogen does media work, so it takes Flash's capabilities, video and audio with them.
+        assert_eq!(hydrogen.capabilities, flash.capabilities);
+        assert!(hydrogen.capabilities.iter().any(|c| c == "video"));
+        assert!(hydrogen.capabilities.iter().any(|c| c == "audio"));
+        let day = date("2026-11-12").unwrap();
+        let (h, f) = (
+            hydrogen.price_at(day).unwrap(),
+            flash.price_at(day).unwrap(),
+        );
+        assert_eq!(
+            (h.input, h.output, h.cache_read, h.cache_write),
+            (f.input, f.output, f.cache_read, f.cache_write)
+        );
+        assert!(h.basis.contains("unverified"), "{}", h.basis);
+        // Each cell is Flash's cell times the measured ratio at that effort, so it keeps Flash's fit to real orders.
+        let cell = |seat: &Seat, effort: Effort| {
+            seat.uses
+                .iter()
+                .find(|u| u.effort == effort)
+                .unwrap()
+                .windows
+                .clone()
+        };
+        for (effort, ratio) in [
+            (Effort::Low, 0.74),
+            (Effort::Medium, 0.71),
+            (Effort::High, 0.57),
+        ] {
+            let (h, f) = (cell(hydrogen, effort), cell(flash, effort));
+            for window in ["5h", "week"] {
+                assert!(
+                    (h[window] / (f[window] * ratio) - 1.0).abs() < 0.01,
+                    "{effort:?} {window}: {} against {} x {ratio}",
+                    h[window],
+                    f[window]
+                );
+            }
+        }
+        let xhigh = cell(hydrogen, Effort::Xhigh);
+        assert!(close(
+            xhigh["week"],
+            cell(hydrogen, Effort::High)["week"] * 1.6
+        ));
+        // Every class that lists flash lists hydrogen just before it, at flash's score and effort.
+        let mut classes = 0;
+        for class in &table.classes {
+            let Some(at) = class.seats.iter().position(|e| e.seat == "flash") else {
+                assert!(
+                    class.seats.iter().all(|e| e.seat != "hydrogen"),
+                    "{}",
+                    class.id
+                );
+                continue;
+            };
+            classes += 1;
+            let (h, f) = (&class.seats[at - 1], &class.seats[at]);
+            assert_eq!(h.seat, "hydrogen", "{}", class.id);
+            assert_eq!(
+                (h.score, h.effort, &h.only_with),
+                (f.score, f.effort, &f.only_with),
+                "{}",
+                class.id
+            );
+        }
+        assert_eq!(classes, 20);
+        // The rule takes hydrogen where it took flash: audio, and the huge read.
+        for class in ["media.audio", "read.huge"] {
+            let got = chosen(&table, &world(), &request(class));
+            assert_eq!(got.seat, "hydrogen", "{class}");
+        }
+        // An override of flash is refused: it is off.
+        let mut over = request("build.bounded");
+        over.override_seat = Some(("flash".into(), "x".into()));
         assert!(pick(&table, &world(), &over).is_err());
     }
 }

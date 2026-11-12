@@ -6,10 +6,10 @@
 //! The owner, 2026-10-30, verbatim: "Pay particular atention to the self learning after each run." (L2) and "Sure"
 //! to a review after every gated order on a cheap seat with a daily cap (L3).
 //!
-//! - **A normal herdr order.** Seated by the seat rule at Efficient (agy Flash, then Sonnet low), booked, journaled
-//!   `seated` and started the way a send-back child is (`nirvana_gate::send_back`): herdr's one launcher,
-//!   `nirvana_worker::launch_worker`. Nothing here seats around the table. It never takes the reviewed order's
-//!   profile: its scope is the subject's journaled seating (review B1).
+//! - **A normal herdr order.** Seated by the seat rule at Efficient (agy Hydrogen since plan 71, then Sonnet low),
+//!   booked, journaled `seated` and started the way a send-back child is (`nirvana_gate::send_back`): herdr's one
+//!   launcher, `nirvana_worker::launch_worker`. Nothing here seats around the table. It never takes the reviewed
+//!   order's profile: its scope is the subject's journaled seating (review B1).
 //! - **No orchestrator turn** (review B2). `seat exec` gates a delivered review itself, since the gate is
 //!   deterministic, and neither wakes Nirvana Claude nor journals a question; its delivery is no queue line. `settle`
 //!   at `herdr run end` gates any review that delivered with no `seat exec` to gate it.

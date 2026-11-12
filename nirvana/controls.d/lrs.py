@@ -191,8 +191,11 @@ CONTROLS = (
             "agy seats list browser since live check 35.1",
             T_AGY, "rust"),
     Control("lrs_research_web_not_rescored", SEATS,
-            '(one order, so not rescored)"\nseats = [\n  { seat = "flash", score = 84 },\n',
-            '(one order, so not rescored)"\nseats = [\n  { seat = "flash", score = 86 },\n',
+            # Plan 71: hydrogen's row now heads research.web, just before flash's.
+            '(one order, so not rescored)"\nseats = [\n  { seat = "hydrogen", score = 84 },\n'
+            '  { seat = "flash", score = 84 },\n',
+            '(one order, so not rescored)"\nseats = [\n  { seat = "hydrogen", score = 84 },\n'
+            '  { seat = "flash", score = 86 },\n',
             T_AGY, "rust"),
     # R2: the seat skill names `--needs browser` as the way to a browser on agy
     Control("lrs_skill_browser_on_agy", SKILL,

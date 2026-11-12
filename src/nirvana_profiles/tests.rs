@@ -231,8 +231,12 @@ fn p33_the_profile_narrows_the_seats_and_its_effort_replaces_the_class_effort() 
     let table = nirvana_seat::table_for(&project.root).unwrap();
     let world = nirvana_seat::live_world(&table);
     let plain = nirvana_seat::pick(&table, &world, &Request::new("sweep.mechanical")).unwrap();
-    // Without a profile the class seats on flash at low: the rule has something to narrow.
-    assert_eq!((plain.seat.as_str(), plain.effort), ("flash", Effort::Low));
+    // Without a profile the class seats on hydrogen at low (plan 71: it took flash's place): the rule has something to
+    // narrow.
+    assert_eq!(
+        (plain.seat.as_str(), plain.effort),
+        ("hydrogen", Effort::Low)
+    );
     let with = |model: Option<&str>, family: Option<&str>, effort: Option<Effort>| {
         let mut request = Request::new("sweep.mechanical");
         request.profile = Some(nirvana_seat::Narrow {
@@ -255,8 +259,8 @@ fn p33_the_profile_narrows_the_seats_and_its_effort_replaces_the_class_effort() 
         sonnet
             .runners_up
             .iter()
-            .any(|loser| loser.seat == "flash"
-                && loser.why == "profile slicer asks for model claude-sonnet-5-5; this seat is gemini-3.8-flash-{effort}"),
+            .any(|loser| loser.seat == "hydrogen"
+                && loser.why == "profile slicer asks for model claude-sonnet-5-5; this seat is gemini-4-hydrogen-{effort}"),
         "{:?}",
         sonnet.runners_up
     );
@@ -264,8 +268,8 @@ fn p33_the_profile_narrows_the_seats_and_its_effort_replaces_the_class_effort() 
     assert_eq!(anthropic.family, "anthropic");
     // An agy model is named without its effort.
     assert_eq!(
-        with(Some("gemini-3.8-flash"), None, None).unwrap().seat,
-        "flash"
+        with(Some("gemini-4-hydrogen"), None, None).unwrap().seat,
+        "hydrogen"
     );
     // §2.2: "`effort` replaces the class effort" (sweep.mechanical's is low).
     let medium = with(Some("claude-sonnet-5-5"), None, Some(Effort::Medium)).unwrap();
@@ -522,7 +526,7 @@ fn p33_the_agy_worker_gets_the_body_quoted_at_the_top_of_its_order() {
     write_profile(&project, "sweeper", text);
     let profile = parsed(text);
     let seat = rule_seat(&project, "sweep.mechanical", &profile);
-    assert_eq!((seat.seat.as_str(), seat.cli.as_str()), ("flash", "agy"));
+    assert_eq!((seat.seat.as_str(), seat.cli.as_str()), ("hydrogen", "agy"));
     std::fs::write(
         project.root.join("order.md"),
         "# Sweep the docs\nowns: docs/*.md\n",
@@ -531,8 +535,12 @@ fn p33_the_agy_worker_gets_the_body_quoted_at_the_top_of_its_order() {
     let _live = nirvana_worker::take_live(&project, "r1", "a1")
         .unwrap()
         .unwrap();
-    nirvana_worker::seat_order_with(&project, &request(&project, "a1", "flash"), Some("sweeper"))
-        .unwrap();
+    nirvana_worker::seat_order_with(
+        &project,
+        &request(&project, "a1", "hydrogen"),
+        Some("sweeper"),
+    )
+    .unwrap();
     let seated = seated_of(&project, "a1");
     let brief = std::fs::read_to_string(&seated.order_file).unwrap();
     let sha = sha256_hex(text.as_bytes());
@@ -891,10 +899,11 @@ fn p33_an_override_onto_a_seat_the_profile_refuses_is_refused() {
         request.override_seat = Some((seat.into(), "the owner asked".into()));
         nirvana_seat::pick(&table, &world, &request)
     };
-    let refused = over("flash").expect_err("the profile refuses flash");
+    // Plan 71: hydrogen, the seat that took flash's place (an override of flash is refused as off first).
+    let refused = over("hydrogen").expect_err("the profile refuses hydrogen");
     assert_eq!(
         refused.reason,
-        "with profile slicer: override flash refused: profile slicer asks for model claude-sonnet-5-5; this seat is gemini-3.8-flash-{effort}"
+        "with profile slicer: override hydrogen refused: profile slicer asks for model claude-sonnet-5-5; this seat is gemini-4-hydrogen-{effort}"
     );
     assert_eq!(over("sonnet").expect("sonnet").seat, "sonnet");
 }

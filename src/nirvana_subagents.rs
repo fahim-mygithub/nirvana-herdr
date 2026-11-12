@@ -2302,6 +2302,7 @@ mod tests {
             ("agy", "gemini-3.8-flash-low", SubagentProvider::Gemini, "Gemini 3.8 Flash", "Flash", "Gemini Flash"),
             ("agy", "gemini-4-argon-high", SubagentProvider::Gemini, "Gemini 4 Argon", "Argon", "Gemini Argon"),
             ("agy", "gemini-4-carbon-high", SubagentProvider::Gemini, "Gemini 4 Carbon", "Carbon", "Gemini Carbon"),
+            ("agy", "gemini-4-hydrogen-xhigh", SubagentProvider::Gemini, "Gemini 4 Hydrogen", "Hydrogen", "Gemini Hydrogen"),
             ("agy", "gemini-3-pro-20260414", SubagentProvider::Gemini, "Gemini 3 Pro", "Pro", "Gemini Pro"),
             ("agy", "Gemini 3.8 Flash (High)", SubagentProvider::Gemini, "Gemini 3.8 Flash", "Flash", "Gemini Flash"),
         ];

@@ -3,6 +3,37 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.71.0: Gemini 4 Hydrogen takes Flash 3.8's seat
+
+- **Changed:** the seat table has a `hydrogen` seat. It runs `gemini-4-hydrogen-{effort}` on agy at low, medium, high
+  and xhigh, in the `gemini` pool, with Flash 3.8's capabilities (video, audio and the 1M context with them) and
+  Flash's price row. Every class that lists Flash lists Hydrogen just before it, at Flash's score and effort. Flash
+  stays in the table but is off, with the measurement beside it. `herdr media prompt --seat hydrogen` gives Hydrogen
+  Flash's role line (a timestamped transcript and event timeline); carbon stays the default. The chip and the subagent
+  rows read "Hydrogen". The role, media, Jev and usage texts name Hydrogen where they named Flash as the seat to use.
+  The 0.70.0 table is kept as `nirvana_seats_v14.toml`, so an installed default upgrades.
+- **Because:** the owner, 2026-11-12: "Check for another new seat. Gemini 4 Hydrogen potentially replacing the flash
+  3.8 model", "Sounds good it supposidly costs the same as 3.8", and "Hydrogen can do media level work replace flash".
+  The rule written before the run, Carbon's: Hydrogen costs the same if at each effort its quota per order is within
+  1.25 times Flash's, or its tokens times price when the quota cannot be read, and its answer is right.
+- **Measured:** 2026-11-12, ten orders one at a time on this PC's agy 1.5.7, Flash and Hydrogen alternating. Each read
+  a 42-line copy of `nirvana/version.py` and answered one two-part question; all ten answers were right. agy's free
+  `/usage` was read before and after each order, but three agy runs that were not this probe's moved the "Gemini
+  Models" buckets and two readings went up, so the quota per order could not be read. By tokens at Flash's price
+  (Hydrogen's price is the owner's word, unverified): low $0.0195 for Flash and $0.0144 for Hydrogen (0.74, n 2 each),
+  medium $0.0223 and $0.0159 (0.71, n 2 each), high $0.0354 and $0.0203 (0.57, n 1 each). Hydrogen read about 10.6k of
+  its 26k input from cache and Flash none; with Hydrogen's cache reads at full price it is still 1.11, 1.03 and 0.78.
+  Hydrogen was as fast or faster: 6.6 s against 6.1 s at low, 9.5 s against 10.8 s at medium, 11.6 s against 22.1 s at
+  high. Hydrogen's cells are Flash's times those ratios, so they keep Flash's fit to real orders (x8.97 low, x2.73
+  medium); xhigh is high times 1.6, a prior. Video, audio and the 1M context were not run on Hydrogen: they are the
+  owner's word. The scores are Flash's, a prior, so Hydrogen stays under build.load_bearing's Efficient bar as Flash
+  did. An order seated on Flash before the upgrade that comes back with invented sources has no seat to step up from
+  (an off seat steps up to nothing), so the gate asks the owner. One new test, 24 p71 controls and 5 older controls
+  retargeted to the moved lines, each red alone; the tests that named Flash as the
+  rule's pick name Hydrogen.
+- **If you remove this:** the router keeps seating Flash 3.8. Hydrogen, which costs the same or less per order here,
+  is never picked, and an order that names `gemini-4-hydrogen` shows "Gemini" on its chip.
+
 ## alpha 0.70.0: an agent waiting on background work says so, and a ghost is never shown running
 
 - **Changed:** when a Claude's turn has ended and it waits on background work (a Bash or PowerShell command run in the
