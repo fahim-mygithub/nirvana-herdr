@@ -171,9 +171,11 @@ CONTROLS = (
             _seat("gemini-3.8-flash-{effort}", "gemini", AGY_BIG),
             _seat("gemini-3.8-flash-{effort}", "gemini", AGY_BIG.replace(' "browser",', "")),
             T_AGY, "rust"),
+    # Plan 70: argon is off and the test lists only enabled agy seats, so the control moved to carbon, which took its
+    # place.
     Control("lrs_argon_browser", SEATS,
-            _seat("gemini-4-argon-{effort}", "argon", AGY_BIG),
-            _seat("gemini-4-argon-{effort}", "argon", AGY_BIG.replace(' "browser",', "")),
+            _seat("gemini-4-carbon-{effort}", "gemini", AGY_BIG),
+            _seat("gemini-4-carbon-{effort}", "gemini", AGY_BIG.replace(' "browser",', "")),
             T_AGY, "rust"),
     Control("lrs_g_opus_browser", SEATS,
             _seat("claude-opus-5-5-{effort}", "google3p", AGY_SMALL),

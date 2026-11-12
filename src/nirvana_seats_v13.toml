@@ -1,0 +1,739 @@
+# herdr's seat table: the seats, the classes and the rule's numbers that `herdr seat pick` reads.
+# Plan 12 §4 and §5 (nirvana/plans/2026-10-17-12-nirvana-claude-orchestrator.md). herdr wrote this file
+# because it was missing; from now on it is yours, like JEV.md. A bad edit is refused with its reason,
+# never overwritten: delete the file to get herdr's default back.
+#
+# Every number is tagged. "measured" came from a probe named beside it, "derived" is a measured token
+# count priced by the schedule, "prior" is a guess written down so it can be argued with (decision 0012:
+# the table is a prior, and the owner's own runs become the truth).
+
+version = 1
+# Efficient, Balanced or SOTA (decision 0018's three stops) when `--mode` is not given.
+mode = "balanced"
+# Blend each seat's score with its record in record.jsonl (decision 0029's formula). Off in the first
+# version: priors stay static and every finished order is logged for offline tuning (plan 12 §4).
+use_record = false
+
+[constants]
+# A pool window at or under this share left skips its seats. Old Nirvana's ASK_BUDGET_FLOOR (measured
+# there, nirvanad/api.py).
+floor = 0.05
+# The orchestrator runs on max: a max seat that would leave less than this of the 5 h window is skipped.
+# A hypothesis (plan 12 §3).
+reserve = 0.15
+reserve_pool = "max"
+reserve_window = "5h"
+# pace = clamp((used + ease) / (elapsed + ease), min, max), the foot's formula and numbers
+# (nirvana_usage.rs). Hypotheses (Argon's review, §4.2).
+pace_ease = 0.10
+pace_min = 0.5
+pace_max = 2.0
+# Plan 14 §2.2: the share of an order inside `spare = max(0, 1 - projected - booked)` is weighted by this so
+# projected-unused quota is spent before non-spare quota, while cheaper seats still win inside the spare.
+# A hypothesis (plan 14 §2.2).
+spare_weight = 0.05
+# Quota about to be lost is cheap: a window with more than reset_left left and under reset_within_min
+# minutes to its reset is discounted by up to reset_discount, scaled by the share of the order that fits
+# before the reset. Hypotheses (Argon's review, §4.3).
+reset_left = 0.30
+reset_within_min = 60
+reset_discount = 0.5
+# NoSeat says "defer" when the earliest reset is this near. Old Nirvana's MAX_DEFER_S (1800 s), a hypothesis.
+defer_min = 30
+# Overrides the orchestrator may make per run without the owner (plan 12 §5.3 step 4).
+overrides_per_run = 3
+# Decision 0029: multiplier = min(1, ((passes + shrink * prior) / (orders + shrink)) / prior).
+record_prior = 0.80
+record_shrink = 5.0
+# Plan 19 §6.2: Balanced mode climb thresholds. Hypotheses (plan 19 §6.2).
+climb_start = 0.70
+climb_full = 1.00
+# Plan 25 §2: Nirvana Claude starts a fresh session after a run ends only when its context is above this: twice
+# the first turn measured in plan 25 §1 (60.7k), a hypothesis.
+fresh_above = 120000
+# Plan 33 §3.3: lesson reviews a project may queue per UTC day; 0 turns them off. A hypothesis.
+lesson_reviews_per_day = 20
+# Plan 40a: a seat with its own window (Fable's `week.fable`) is skipped when the order would leave less than this of
+# it. A hypothesis: past its week a headless Fable run bills usage credits without asking (code.claude.com
+# model-config), so the last tenth is kept as a margin for the rule's own estimate being low.
+fable_reserve = 0.10
+# Plan 40a: SOTA seats Nirvana Claude on Fable only while the Fable week has at least this left. A hypothesis: the
+# orchestrator is the largest single spender, so it leaves the last quarter of the Fable week to seated orders.
+fable_orchestrator_left = 0.25
+# Plan 40a: CLAUDE_CODE_SUBAGENT_MODEL for Nirvana Claude, so a subagent that names no model never inherits the
+# orchestrator's Fable or Opus. A worker-* agent file's own `model` still wins (Claude Code's order: the call's model,
+# the agent file's, this variable, then the main conversation's).
+subagent_default = "sonnet"
+# Plan 40a: `--autocompact <tokens>` for Nirvana Claude; 0 passes no flag. Measured 2026-11-09 from this machine's
+# transcripts: 55 automatic compactions since 2026-10-23, the context before them 201k at least, 249k median, 429k at
+# most. Claude Code already compacts far below the 967K the docs give, so a 400K cap changed nothing and is off. The
+# knob stays for a cap under 200K. fresh_above starts a fresh session between runs; this would compact inside one.
+autocompact_tokens = 0
+
+# Plan 40a (review M5): Nirvana Claude's own seat by mode, a seat and an effort each. The seat must be on and offer the
+# effort, else the nearest effort it offers below. `balanced` is the cool climb, `balanced_hot` the climb at t >= 0.5,
+# `unread` Balanced with its readings missing or stale. A seat with its own window (Fable) is taken only when every
+# window it spends was read fresh and its own week keeps `fable_orchestrator_left`; else `sota_fallback`, with why.
+[orchestrator]
+efficient = { seat = "sonnet", effort = "medium" }
+balanced = { seat = "opus", effort = "medium" }
+balanced_hot = { seat = "sonnet", effort = "medium" }
+sota = { seat = "fable", effort = "high" }
+sota_fallback = { seat = "opus", effort = "high" }
+unread = { seat = "opus", effort = "medium" }
+
+# An order's size scales its expected use and its lease. `use` is a multiple of probe P4's order (one
+# `slugify` function and its tests, about 45k tokens read and 1.3k written), against `medium = 5`.
+# small and large are measured from the record (the review round, `python nirvana/seat_fit.py`, section 2): the median
+# across seat-and-effort groups of what an order of that size spent against a medium one, small 0.59 of medium (6
+# groups, n 115), large 0.83 (4 groups, n 27). Large under medium is the record's word, not a slip: the orchestrator's
+# size labels do not separate large from medium orders yet. The old priors were 1 and 20.
+# `minutes` is how long an order runs, for the reset discount; `lease_minutes` how long a booking holds
+# when its runner never releases it. Priors, kept: seat_fit.py section 3 prints the record's p90 at 16, 35 and 108
+# minutes, inside each `lease_minutes`.
+[size.small]
+use = 3.0
+minutes = 15
+lease_minutes = 60
+
+[size.medium]
+use = 5.0
+minutes = 45
+lease_minutes = 180
+
+[size.large]
+use = 4.1
+minutes = 120
+lease_minutes = 480
+
+# A pool is one quota several seats spend (plan 12 §3). `windows` are the windows every seat of the pool
+# spends; `per_usd` turns an order's list-price cost into a share of each window (plan 12 §4: "One factor
+# per pool turns that into a fraction of the pool's windows").
+
+[[pool]]
+id = "max"
+windows = ["5h", "week"]
+per_usd = { "5h" = 0.0073, week = 0.00078, "week.fable" = 0.005 }
+basis = "derived: week of 2026-10-16, $796 at list price for 62%, the week. 5h measured once, 2026-11-09: every Claude response on this machine from the window's start at 19:49Z to 23:48Z summed to $78.40 at list price while /usage read 57%, so 0.0073 ($137 a window, not the $25 prior); whole percents, other devices not counted; the usage audit's finding 4 (5 h ratios 6.5 times the week's, n 72) disagreed the same way. week.fable measured once, 2026-11-09: about $10 of Fable 5.2 at list price moved the Fable week 0% to 5%, so 0.005 (coarse: whole percents, one day), three times the 0.00156 the doc's 50% sentence gave. The Fable line is a share of Fable's own allowance (nirvana_usage.rs, N5)"
+
+[[pool]]
+id = "gemini"
+windows = ["5h", "week"]
+per_usd = { "5h" = 0.0021, week = 0.00107 }
+basis = "derived: plan 19 §2, six Flash high builds moved week 0% to 4.08% for $38.30 (0.00107); 5h at twice, a hypothesis (0.0021)"
+
+[[pool]]
+id = "google3p"
+windows = ["5h", "week"]
+per_usd = { "5h" = 0.31, week = 0.166 }
+basis = "measured: plan 19 §2, G·Claude Sonnet high fix round took week 4% to 58% for $3.25 (0.166); 5h 0% to 100% (0.31, a floor)"
+
+[[pool]]
+id = "argon"
+windows = ["week"]
+per_usd = { week = 0.48 }
+basis = "derived: P4 argon low spent 1.01% of the week for $0.017 and argon medium 1.01% for $0.026; the mean"
+
+# No windows to read: the rule ranks it with the unread pools, below known headroom, never as free. The local
+# seat is off in this version anyway.
+[[pool]]
+id = "local"
+windows = []
+per_usd = {}
+basis = "free: the local GPU"
+
+# A seat is a CLI, a model and an effort, in one pool, with capabilities (plan 12 §4). `model` names the
+# effort as {effort} where the CLI takes it in the model id (agy).
+# `prices` are USD per million tokens, each from its date. `use` is the expected share of each window for
+# P4's order at each effort, on the date `at`; a later price scales it.
+
+[[seat]]
+id = "opus"
+cli = "claude"
+model = "claude-opus-5-5"
+family = "anthropic"
+pool = "max"
+efforts = ["low", "medium", "high", "xhigh"]
+capabilities = ["code", "tools", "image", "pdf", "browser"]
+enabled = true
+prices = [
+  { from = "2026-10-17", input = 4.0, output = 20.0, cache_read = 0.20, cache_write = 5.0, basis = "claude-api skill price table, cached 2026-10-06; cache write at 1.25x input" },
+]
+use = [
+  { effort = "low", windows = { "5h" = 0.001598, week = 0.0001707 }, at = "2026-10-17", basis = "prior: medium x 0.6, fit x10.58 (medium's) (nirvana/seat_cells.py)" },
+  { effort = "medium", windows = { "5h" = 0.002663, week = 0.0002846 }, at = "2026-10-17", basis = "derived: P4's 43,807 cache reads and 1,286 out at opus's 2026-10-17 prices, $0.0345, fit x10.58 (seat_fit.py, n 8), times per_usd (nirvana/seat_cells.py)" },
+  { effort = "high", windows = { "5h" = 0.002859, week = 0.0003055 }, at = "2026-10-17", basis = "prior: medium x 1.6, fit x7.1 (seat_fit.py, n 9) (nirvana/seat_cells.py)" },
+  { effort = "xhigh", windows = { "5h" = 0.006658, week = 0.0007114 }, at = "2026-10-17", basis = "prior: medium x 2.5, fit x10.58 (medium's) (nirvana/seat_cells.py)" },
+]
+
+[[seat]]
+id = "sonnet"
+cli = "claude"
+model = "claude-sonnet-5-5"
+family = "anthropic"
+pool = "max"
+efforts = ["low", "medium", "high"]
+capabilities = ["code", "tools", "image", "pdf", "browser"]
+enabled = true
+prices = [
+  { from = "2026-10-17", input = 2.0, output = 10.0, cache_read = 0.20, cache_write = 2.5, basis = "claude-api skill price table, cached 2026-10-06; cache write at 1.25x input" },
+  { from = "2026-11-09", input = 2.0, output = 10.0, cache_read = 0.10, cache_write = 2.5, basis = "Claude docs pricing, read 2026-11-09: cache read 0.10, not the 0.20 the old table had (review M4)" },
+]
+use = [
+  { effort = "low", windows = { "5h" = 0.0005143, week = 5.495e-05 }, at = "2026-11-09", basis = "prior: medium x 0.6, fit x6.81 (medium's) (nirvana/seat_cells.py)" },
+  { effort = "medium", windows = { "5h" = 0.0008571, week = 9.158e-05 }, at = "2026-11-09", basis = "derived: P4's 43,807 cache reads and 1,286 out at sonnet's 2026-11-09 prices, $0.0172, fit x6.81 (seat_fit.py, n 66), times per_usd (nirvana/seat_cells.py)" },
+  { effort = "high", windows = { "5h" = 0.001371, week = 0.0001465 }, at = "2026-11-09", basis = "prior: medium x 1.6, fit x6.81 (medium's) (nirvana/seat_cells.py)" },
+]
+
+[[seat]]
+id = "haiku"
+cli = "claude"
+model = "claude-haiku-5-5"
+family = "anthropic"
+pool = "max"
+efforts = ["low", "medium"]
+capabilities = ["code", "tools", "image"]
+enabled = true
+prices = [
+  { from = "2026-10-17", input = 0.10, output = 0.50, cache_read = 0.01, cache_write = 0.125, basis = "claude-api skill price table, cached 2026-10-06, up to 100K tokens; cache read at a tenth of input, unverified" },
+]
+use = [
+  { effort = "low", windows = { "5h" = 3.225e-05, week = 3.445e-06 }, at = "2026-10-17", basis = "prior: medium x 0.6, fit x6.81 (medium's) (nirvana/seat_cells.py)" },
+  { effort = "medium", windows = { "5h" = 5.374e-05, week = 5.742e-06 }, at = "2026-10-17", basis = "derived: P4's 43,807 cache reads and 1,286 out at haiku's 2026-10-17 prices, $0.0011, fit x6.81 (sonnet medium's, a prior: haiku has n 1 in the record), times per_usd (nirvana/seat_cells.py)" },
+]
+
+[[seat]]
+id = "fable"
+cli = "claude"
+model = "claude-fable-5-2"
+family = "anthropic"
+pool = "max"
+# Fable spends the all-models week with an allowance of half of it (P6): its own window too.
+extra_windows = ["week.fable"]
+efforts = ["low", "medium", "high", "xhigh"]
+# Opus's: the same claude CLI, so bladebro's browser too.
+capabilities = ["code", "tools", "image", "pdf", "browser"]
+# Plan 40a: on since Fable 5.2 (the owner, 2026-11-09). It fails closed: a headless `claude -p` past the Fable week
+# bills usage credits without asking (code.claude.com model-config), so herdr skips it unless every window it spends
+# was read fresh and its own week keeps `fable_reserve` after the order, in every mode and under --override.
+enabled = true
+prices = [
+  { from = "2026-10-17", input = 10.0, output = 50.0, cache_read = 0.25, cache_write = 12.5, basis = "claude-api skill price table, cached 2026-10-06" },
+  { from = "2026-11-09", input = 8.0, output = 40.0, cache_read = 0.20, cache_write = 10.0, basis = "Claude docs pricing for Fable 5.2, read 2026-11-09; cache write is the 5-minute one" },
+]
+use = [
+  { effort = "low", windows = { "5h" = 0.00279, week = 0.0002981, "week.fable" = 0.001911 }, at = "2026-11-09", basis = "prior: medium x 0.6, fit x10.58 (medium's) (nirvana/seat_cells.py)" },
+  { effort = "medium", windows = { "5h" = 0.00465, week = 0.0004968, "week.fable" = 0.003185 }, at = "2026-11-09", basis = "derived: P4's 43,807 cache reads and 1,286 out at fable's 2026-11-09 prices, $0.0602, fit x10.58 (opus medium's, a prior: no Fable order in the record), times per_usd (nirvana/seat_cells.py)" },
+  { effort = "high", windows = { "5h" = 0.004992, week = 0.0005334, "week.fable" = 0.003419 }, at = "2026-11-09", basis = "prior: medium x 1.6, fit x7.1 (opus high's, a prior: no Fable order in the record) (nirvana/seat_cells.py)" },
+  { effort = "xhigh", windows = { "5h" = 0.01162, week = 0.001242, "week.fable" = 0.007962 }, at = "2026-11-09", basis = "prior: medium x 2.5, fit x10.58 (medium's) (nirvana/seat_cells.py)" },
+]
+
+# Plan 35 R2: every agy seat lists `browser`. herdr grants a browser order bladebro on either CLI (plan 35c), and
+# live check 35.1 (2026-11-01) saw agy drive it headless and the gate pass. One order is not a score: research.web
+# keeps its numbers until more orders are measured.
+[[seat]]
+id = "g-opus"
+cli = "agy"
+model = "claude-opus-5-5-{effort}"
+family = "anthropic"
+pool = "google3p"
+efforts = ["low", "medium", "high"]
+capabilities = ["code", "tools", "image", "pdf", "web", "browser"]
+enabled = true
+fallback = true
+prices = [
+  { from = "2026-10-17", input = 4.0, output = 20.0, cache_read = 0.20, cache_write = 5.0, basis = "Anthropic's list price; agy's own rate unpublished (agy: quota is consumed proportionally to the cost of the tokens)" },
+]
+use = [
+  { effort = "low", windows = { "5h" = 0.006624, week = 0.003536 }, at = "2026-10-20", basis = "prior: plan 19 §2, scaled by 0.207 (5h) and 0.221 (week) from 2026-10-17 cell" },
+  { effort = "medium", windows = { "5h" = 0.010971, week = 0.0058565 }, at = "2026-10-20", basis = "prior: plan 19 §2, scaled by 0.207 (5h) and 0.221 (week) from 2026-10-17 cell" },
+  { effort = "high", windows = { "5h" = 0.017595, week = 0.009282 }, at = "2026-10-20", basis = "prior: plan 19 §2, scaled by 0.207 (5h) and 0.221 (week) from 2026-10-17 cell" },
+]
+
+[[seat]]
+id = "g-sonnet"
+cli = "agy"
+model = "claude-sonnet-5-5-{effort}"
+family = "anthropic"
+pool = "google3p"
+efforts = ["low", "medium", "high"]
+capabilities = ["code", "tools", "image", "pdf", "web", "browser"]
+enabled = true
+fallback = true
+prices = [
+  { from = "2026-10-17", input = 2.0, output = 10.0, cache_read = 0.20, cache_write = 2.5, basis = "Anthropic's list price; agy's own rate unpublished" },
+  { from = "2026-11-09", input = 2.0, output = 10.0, cache_read = 0.10, cache_write = 2.5, basis = "Anthropic's list price, read 2026-11-09 (sonnet's cache read 0.10); agy's own rate unpublished. The cells stay: they are google3p shares measured in plan 19, not priced" },
+]
+use = [
+  { effort = "low", windows = { "5h" = 0.0041193, week = 0.00221 }, at = "2026-10-20", basis = "prior: plan 19 §2, scaled by 0.207 (5h) and 0.221 (week) from 2026-10-17 cell" },
+  { effort = "medium", windows = { "5h" = 0.0068517, week = 0.0036686 }, at = "2026-10-20", basis = "measured: plan 19 §2, scaled by 0.207 (5h) and 0.221 (week) from P4 g-sonnet medium" },
+  { effort = "high", windows = { "5h" = 0.010971, week = 0.0058786 }, at = "2026-10-20", basis = "prior: plan 19 §2, scaled by 0.207 (5h) and 0.221 (week) from 2026-10-17 cell" },
+]
+
+[[seat]]
+id = "argon"
+cli = "agy"
+model = "gemini-4-argon-{effort}"
+family = "google"
+pool = "argon"
+efforts = ["low", "medium", "high"]
+capabilities = ["code", "tools", "image", "pdf", "web", "browser", "image_gen", "video", "audio", "context_1m"]
+enabled = true
+# Argon's price doubles on 2026-11-30 (Google blog); cached input 95% off.
+prices = [
+  { from = "2026-10-17", input = 2.0, output = 10.0, cache_read = 0.10, cache_write = 2.0, basis = "Google blog: $2 / $10 until 2026-11-30, cached input 95% off" },
+  { from = "2026-11-30", input = 4.0, output = 20.0, cache_read = 0.20, cache_write = 4.0, basis = "Google blog: $4 / $20 from 2026-11-30" },
+]
+use = [
+  { effort = "low", windows = { week = 0.0101 }, at = "2026-10-17", basis = "measured: P4 argon low, one order alone" },
+  { effort = "medium", windows = { week = 0.0101 }, at = "2026-10-17", basis = "measured: P4 argon medium, one order alone" },
+  { effort = "high", windows = { week = 0.0162 }, at = "2026-10-17", basis = "prior: medium x 1.6" },
+]
+
+[[seat]]
+id = "flash"
+cli = "agy"
+model = "gemini-3.8-flash-{effort}"
+family = "google"
+pool = "gemini"
+efforts = ["low", "medium", "high"]
+capabilities = ["code", "tools", "image", "pdf", "web", "browser", "image_gen", "video", "audio", "context_1m"]
+enabled = true
+prices = [
+  { from = "2026-10-17", input = 0.75, output = 3.75, cache_read = 0.075, cache_write = 0.75, basis = "aggregators, medium confidence (plan 12 §2); cache read at a tenth of input, unverified" },
+]
+use = [
+  { effort = "low", windows = { "5h" = 0.0001563, week = 7.815e-05 }, at = "2026-10-20", basis = "derived: plan 19 §2, scaled by 0.0396 from P4 tokens, fit x8.97 (seat_fit.py, n 12)" },
+  { effort = "medium", windows = { "5h" = 0.0004541, week = 0.000227 }, at = "2026-10-20", basis = "derived: plan 19 §2, scaled by 0.0396 from P4 tokens, fit x2.73 (seat_fit.py, n 17)" },
+  { effort = "high", windows = { "5h" = 0.00026928, week = 0.00013464 }, at = "2026-10-20", basis = "measured: plan 19 §2, scaled by 0.0396 from P4 flash high" },
+]
+
+[[seat]]
+id = "gpt-oss"
+cli = "agy"
+model = "gpt-oss-120b-medium"
+family = "openai"
+pool = "google3p"
+efforts = ["medium"]
+capabilities = ["code", "tools"]
+# Not in the first version (plan 12 §4); no class names it.
+enabled = false
+prices = []
+use = [
+  { effort = "medium", windows = { "5h" = 0.01, week = 0.005 }, at = "2026-10-17", basis = "prior: unmeasured" },
+]
+
+[[seat]]
+id = "local"
+cli = "claude"
+model = "qwen3.6:35b-a3b"
+family = "qwen"
+pool = "local"
+efforts = ["medium"]
+capabilities = ["code", "tools"]
+# Not in the first version: chore.* only, off unless switched on (plan 12 §4, decision 0013).
+enabled = false
+prices = []
+use = [
+  { effort = "medium", windows = {}, at = "2026-10-17", basis = "free: the local GPU" },
+]
+
+# The classes the orchestrator names (plan 12 §5.2), each in one of the nine chains of §5.4 that the
+# record is kept by; the class stays a label in the journal. A seat a class does not list is excluded.
+# `score` is the seat's prior for the class, 0 to 100. `bars` are the score a seat must reach at each
+# mode (decision 0018; default 70/80/100 bounded, 85/90/100 load-bearing): the bar drops to the best seat
+# left, never under the Efficient bar. `effort` follows the class and its blast radius (§5.5); a seat's
+# own `effort` is its departure. `weight` scales the expected use against P4's order (a prior).
+# `only_with` takes the seat only when the order needs all of those. A class lists its seats in §5.4's
+# order, and that order breaks the last tie.
+
+[[class]]
+id = "plan"
+chain = "plan"
+blast = "load_bearing"
+effort = "high"
+efficient_effort = "medium"
+sota_effort = "high"
+weight = 2.0
+bars = { efficient = 70, balanced = 90, sota = 100 }
+why = "plan 19 §4: strongest at agentic coding; plan 40a: fable 97, a prior (decision 0012), the prompting guide's hard-coding seat"
+seats = [
+  { seat = "opus", score = 95 },
+  { seat = "fable", score = 97 },
+  { seat = "argon", score = 87 },
+  { seat = "sonnet", score = 86 },
+  { seat = "flash", score = 74 },
+  { seat = "g-opus", score = 95 },
+]
+
+[[class]]
+id = "build.load_bearing"
+chain = "build.load_bearing"
+blast = "load_bearing"
+effort = "high"
+efficient_effort = "medium"
+sota_effort = "high"
+weight = 3.0
+bars = { efficient = 70, balanced = 90, sota = 100 }
+why = "plan 19 §4: quality first; plan 40a: fable 97, a prior (decision 0012), the prompting guide's hard-coding seat; the review round: flash 74 to 68, under the Efficient bar, because the record has it at 9 passes of 28 with 15 send-backs, $5.47 a pass against sonnet's $1.44 (usage audit finding 7, section B)"
+seats = [
+  { seat = "opus", score = 95 },
+  { seat = "fable", score = 97 },
+  { seat = "argon", score = 86 },
+  { seat = "sonnet", score = 85 },
+  { seat = "flash", score = 68 },
+  { seat = "g-opus", score = 95 },
+]
+
+[[class]]
+id = "build.bounded"
+chain = "build.bounded"
+blast = "bounded"
+effort = "medium"
+efficient_effort = "low"
+sota_effort = "high"
+weight = 1.0
+bars = { efficient = 70, balanced = 85, sota = 100 }
+why = "plan 19 §4: bounded build tasks"
+seats = [
+  { seat = "opus", score = 92 },
+  { seat = "sonnet", score = 88 },
+  { seat = "argon", score = 84 },
+  { seat = "flash", score = 80 },
+  { seat = "haiku", score = 70 },
+  { seat = "g-sonnet", score = 88 },
+]
+
+[[class]]
+id = "build.frontend"
+chain = "build.visual"
+blast = "bounded"
+effort = "high"
+efficient_effort = "medium"
+sota_effort = "high"
+weight = 2.0
+bars = { efficient = 70, balanced = 90, sota = 100 }
+why = "plan 19 §4: visual work goes to Opus; argon now competes at 86; plan 40a: fable 96, a prior (decision 0012), the prompting guide's hard-coding seat"
+seats = [
+  { seat = "opus", score = 95 },
+  { seat = "fable", score = 96 },
+  { seat = "sonnet", score = 86 },
+  { seat = "argon", score = 86 },
+  { seat = "flash", score = 72 },
+  { seat = "g-opus", score = 95 },
+]
+
+[[class]]
+id = "judge.visual"
+chain = "build.visual"
+blast = "bounded"
+effort = "high"
+efficient_effort = "medium"
+sota_effort = "high"
+weight = 1.0
+bars = { efficient = 70, balanced = 90, sota = 100 }
+why = "plan 19 §4: visual verification goes to Opus; argon now competes at 86; plan 40a: fable 96, a prior (decision 0012), the prompting guide's hard-coding seat"
+seats = [
+  { seat = "opus", score = 95 },
+  { seat = "fable", score = 96 },
+  { seat = "argon", score = 86 },
+  { seat = "sonnet", score = 84 },
+  { seat = "flash", score = 74 },
+  { seat = "g-opus", score = 95 },
+]
+
+[[class]]
+id = "fix.debug"
+chain = "fix.debug"
+blast = "bounded"
+effort = "medium"
+efficient_effort = "medium"
+sota_effort = "high"
+weight = 2.0
+bars = { efficient = 70, balanced = 88, sota = 100 }
+why = "plan 19 §4: argon at medium under-reasons on a root cause, so it runs high; plan 40a: fable 95, a prior (decision 0012), the prompting guide's hard-coding seat"
+seats = [
+  { seat = "opus", score = 93 },
+  { seat = "fable", score = 95 },
+  { seat = "argon", score = 85, effort = "high" },
+  { seat = "sonnet", score = 84 },
+  { seat = "flash", score = 72 },
+  { seat = "g-opus", score = 93 },
+]
+
+[[class]]
+id = "ops.terminal"
+chain = "build.bounded"
+blast = "bounded"
+effort = "medium"
+efficient_effort = "low"
+sota_effort = "medium"
+weight = 1.0
+bars = { efficient = 70, balanced = 85, sota = 100 }
+why = "plan 19 §4: terminal operations"
+seats = [
+  { seat = "sonnet", score = 88 },
+  { seat = "opus", score = 90 },
+  { seat = "flash", score = 78 },
+  { seat = "haiku", score = 72 },
+  { seat = "g-sonnet", score = 88 },
+]
+
+[[class]]
+id = "review.adversary"
+chain = "review"
+blast = "bounded"
+effort = "high"
+efficient_effort = "medium"
+sota_effort = "high"
+weight = 1.5
+bars = { efficient = 74, balanced = 88, sota = 100 }
+why = "plan 19 §4: adversary review across families; plan 40a: fable 96, a prior (decision 0012), the prompting guide's hard-coding seat; the review round: sonnet 86 to 89, over the Balanced bar, because the record has it at 17 passes of 17, $0.21 a pass (usage audit finding 7, section B)"
+seats = [
+  { seat = "opus", score = 94 },
+  { seat = "fable", score = 96 },
+  { seat = "argon", score = 90 },
+  { seat = "sonnet", score = 89 },
+  { seat = "flash", score = 76 },
+  { seat = "g-opus", score = 94 },
+]
+
+[[class]]
+id = "acceptance.author"
+chain = "review"
+blast = "bounded"
+effort = "medium"
+efficient_effort = "low"
+sota_effort = "high"
+weight = 1.0
+bars = { efficient = 70, balanced = 84, sota = 100 }
+why = "plan 19 §4: held-out check author"
+seats = [
+  { seat = "opus", score = 90 },
+  { seat = "argon", score = 85 },
+  { seat = "sonnet", score = 85 },
+  { seat = "flash", score = 74 },
+]
+
+[[class]]
+id = "research.read"
+chain = "research"
+blast = "bounded"
+effort = "medium"
+efficient_effort = "low"
+sota_effort = "medium"
+weight = 0.5
+bars = { efficient = 68, balanced = 80, sota = 100 }
+why = "plan 19 §4: research and document reading"
+seats = [
+  { seat = "sonnet", score = 85 },
+  { seat = "opus", score = 88 },
+  { seat = "flash", score = 78 },
+  { seat = "argon", score = 80 },
+  { seat = "haiku", score = 70 },
+]
+
+[[class]]
+id = "research.web"
+chain = "research"
+blast = "bounded"
+effort = "low"
+efficient_effort = "low"
+sota_effort = "medium"
+weight = 0.5
+bars = { efficient = 68, balanced = 80, sota = 100 }
+why = "plan 35: agy searches with search_web and reads pages with bladebro when granted, else shell fetches; agy seats list browser since live check 35.1 (one order, so not rescored)"
+seats = [
+  { seat = "flash", score = 84 },
+  { seat = "argon", score = 84 },
+  { seat = "sonnet", score = 80 },
+  { seat = "opus", score = 82 },
+  { seat = "g-sonnet", score = 80 },
+]
+
+[[class]]
+id = "read.huge"
+chain = "research"
+blast = "bounded"
+effort = "medium"
+efficient_effort = "low"
+sota_effort = "high"
+needs = ["context_1m"]
+weight = 6.0
+bars = { efficient = 70, balanced = 80, sota = 100 }
+why = "plan 19 §4: huge context over 400k tokens"
+seats = [
+  { seat = "flash", score = 85 },
+  { seat = "argon", score = 83 },
+]
+
+[[class]]
+id = "write.docs"
+chain = "research"
+blast = "bounded"
+effort = "low"
+efficient_effort = "low"
+sota_effort = "medium"
+weight = 0.8
+bars = { efficient = 70, balanced = 82, sota = 100 }
+why = "plan 19 §4: docs drafting and editing"
+seats = [
+  { seat = "argon", score = 86 },
+  { seat = "sonnet", score = 82 },
+  { seat = "opus", score = 84 },
+  { seat = "flash", score = 76 },
+  { seat = "g-sonnet", score = 82 },
+]
+
+[[class]]
+id = "media.video"
+chain = "media"
+blast = "bounded"
+effort = "medium"
+efficient_effort = "low"
+sota_effort = "high"
+needs = ["video"]
+weight = 2.0
+bars = { efficient = 70, balanced = 85, sota = 100 }
+why = "plan 19 §4: video processing on Gemini"
+seats = [
+  { seat = "argon", score = 90 },
+  { seat = "flash", score = 82 },
+]
+
+[[class]]
+id = "media.audio"
+chain = "media"
+blast = "bounded"
+effort = "low"
+efficient_effort = "low"
+sota_effort = "medium"
+needs = ["audio"]
+weight = 1.0
+bars = { efficient = 70, balanced = 82, sota = 100 }
+why = "plan 19 §4: audio processing on Gemini"
+seats = [
+  { seat = "flash", score = 86 },
+  { seat = "argon", score = 85 },
+]
+
+# Plan 40c: `herdr look` reads one image or PDF on a cheap claude seat and returns text. The same text as
+# `nirvana_look::CLASS_TOML`, which is appended in memory to an owner's table that lacks the class.
+[[class]]
+id = "look.image"
+chain = "media"
+blast = "bounded"
+effort = "low"
+efficient_effort = "low"
+sota_effort = "low"
+needs = ["image"]
+weight = 0.2
+bars = { efficient = 70, balanced = 80, sota = 100 }
+why = "plan 40c: herdr look, one question about one image or PDF; weight 0.2 is a prior (10.4k tokens measured against P4's 45k); claude seats only: agy has no tool filter and the picture is untrusted (plan 34a: no agy seat teaches)"
+seats = [
+  { seat = "haiku", score = 84 },
+  { seat = "sonnet", score = 86 },
+]
+
+[[class]]
+id = "sweep.mechanical"
+chain = "chore"
+blast = "bounded"
+effort = "low"
+efficient_effort = "low"
+sota_effort = "medium"
+weight = 1.0
+bars = { efficient = 60, balanced = 79, sota = 100 }
+why = "plan 19 §4: mechanical sweeps"
+seats = [
+  { seat = "flash", score = 80 },
+  { seat = "haiku", score = 78 },
+  { seat = "sonnet", score = 80 },
+]
+
+[[class]]
+id = "chore.memory"
+chain = "chore"
+blast = "bounded"
+effort = "low"
+efficient_effort = "low"
+sota_effort = "medium"
+weight = 0.3
+bars = { efficient = 60, balanced = 70, sota = 100 }
+why = "plan 19 §4: memory maintenance"
+seats = [
+  { seat = "haiku", score = 80 },
+  { seat = "flash", score = 78 },
+  { seat = "sonnet", score = 82 },
+]
+
+[[class]]
+id = "chore.script"
+chain = "chore"
+blast = "bounded"
+effort = "low"
+efficient_effort = "low"
+sota_effort = "medium"
+weight = 0.3
+bars = { efficient = 60, balanced = 70, sota = 100 }
+why = "plan 19 §4: script chores"
+seats = [
+  { seat = "haiku", score = 80 },
+  { seat = "flash", score = 78 },
+  { seat = "sonnet", score = 82 },
+]
+
+[[class]]
+id = "chore.github"
+chain = "chore"
+blast = "bounded"
+effort = "low"
+efficient_effort = "low"
+sota_effort = "medium"
+weight = 0.3
+bars = { efficient = 60, balanced = 70, sota = 100 }
+why = "plan 19 §4: github chores"
+seats = [
+  { seat = "haiku", score = 80 },
+  { seat = "flash", score = 78 },
+  { seat = "sonnet", score = 82 },
+]
+
+# Plan 33 §3.3 (ledger L3, the owner's "Sure" to a review after every gated order on a cheap seat with a daily
+# cap): one review of each gated order's lessons, after `herdr gate run`. herdr seats it at Efficient, so the
+# rule's own order holds: agy Flash, then Sonnet at low. Scores are priors; the chain is chore's so the record
+# keeps the nine chains of §5.4. The daily cap is [constants] `lesson_reviews_per_day`.
+[[class]]
+id = "lesson-review"
+chain = "chore"
+blast = "bounded"
+effort = "low"
+efficient_effort = "low"
+sota_effort = "low"
+weight = 0.3
+bars = { efficient = 60, balanced = 70, sota = 100 }
+why = "plan 33 §3.3: a cheap review of a gated order's lessons"
+seats = [
+  { seat = "flash", score = 80 },
+  { seat = "sonnet", score = 78 },
+]
+
+# Plan 34 §2.5 (ledger L1, "gets taught new techniques"): `herdr profile teach` reads a source as data and gives each
+# technique a verdict against the project's own measurements, the owner's motion-skills method. Seated with the
+# profile applied, so its model, family and needs narrow these. Scores are priors, research.web's; chain research.
+# P34a review B2: claude seats only. A teacher reads an untrusted page, and agy has no tool filter
+# (`--dangerously-skip-permissions`), so no agy seat teaches; `herdr profile teach` refuses any other CLI too.
+[[class]]
+id = "profile-teach"
+chain = "research"
+blast = "bounded"
+effort = "medium"
+efficient_effort = "low"
+sota_effort = "high"
+weight = 0.5
+bars = { efficient = 68, balanced = 80, sota = 100 }
+why = "plan 34 §2.5: learn a technique from a source and give it a verdict as a card"
+seats = [
+  { seat = "sonnet", score = 82 },
+  { seat = "opus", score = 86 },
+]

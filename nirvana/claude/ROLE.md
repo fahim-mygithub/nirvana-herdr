@@ -56,7 +56,7 @@ chore, can go to a `worker-*` subagent instead of a pane worker; the agent's nam
   30 lines outside an order (§12 R2, enforced by the `guard-edit` and `check-edit` hooks). Everything else goes to a worker.
 - A question is answered, never built. A triage that fell back to a build turned a code-tour question into a
   7.72M-token build.
-- Never read a large file or a video into its own context. Ask Jev, or seat flash or argon.
+- Never read a large file or a video into its own context. Ask Jev, or seat flash or carbon.
 - Ask about an image over 300 KB with `herdr look "<path>" --ask "<your question>"`, or read the small copy that
   `herdr media shrink "<path>"` makes; the `guard-read` hook refuses the full image. An image read here is re-sent
   with every later turn of the session: one session on the parent project carried 118 MiB of them.

@@ -2974,7 +2974,7 @@ fn p37_gate_fail_with(
 }
 
 /// L5: "Step up one seat". reel-motion-gemini's redo went back to the flash-low seat that invented its sources; a
-/// missing video now sends the redo to the next stronger seat of research.web, argon, as herdr's own step (no run
+/// missing video now sends the redo to the next stronger seat of research.web, carbon, as herdr's own step (no run
 /// override spent), and its brief trusts nothing from the first try.
 #[test]
 fn p37_a_send_back_for_invented_videos_steps_up_one_seat_and_trusts_nothing() {
@@ -2983,11 +2983,11 @@ fn p37_a_send_back_for_invented_videos_steps_up_one_seat_and_trusts_nothing() {
         "flash",
         vec![format!("{NO_SUCH_VIDEO}{P37_FAKE}")],
     );
-    assert_eq!(seat, "argon");
+    assert_eq!(seat, "carbon");
     assert!(
         reason
             .as_deref()
-            .is_some_and(|why| why.starts_with("step up from flash to argon")),
+            .is_some_and(|why| why.starts_with("step up from flash to carbon")),
         "{reason:?}"
     );
     assert_eq!(overrides, 0);
@@ -3031,23 +3031,23 @@ fn p37_a_gate_by_hand_of_a_sent_back_order_gives_its_child() {
     let again = sent.again.expect("the stored verdict");
     assert_eq!((again.verdict.as_str(), again.exit()), ("sent_back", 1));
     assert!(
-        again.next[0].starts_with("res-s1 seated on argon"),
+        again.next[0].starts_with("res-s1 seated on carbon"),
         "{:?}",
         again.next
     );
 }
 
-/// Review S1: invented sources on the strongest seat of the class (argon has none above it) are not redone on the
+/// Review S1: invented sources on the strongest seat of the class (carbon has none above it) are not redone on the
 /// rule's pick, the cheap seat that invented reel-motion-gemini's: the owner is asked, and a gate by hand gives
 /// the same question.
 #[test]
 fn p37_invented_sources_with_no_seat_above_ask() {
-    let sent = p37_gate_fail("p37-no-above", "argon", p37_invented(), BTreeMap::new());
+    let sent = p37_gate_fail("p37-no-above", "carbon", p37_invented(), BTreeMap::new());
     assert_eq!(sent.ruling.verdict, "asked", "{:?}", sent.ruling);
     assert!(sent.child.is_none());
     let question = &sent.ruling.next[0];
     assert!(
-        question.contains("no seat of research.web stands above argon"),
+        question.contains("no seat of research.web stands above carbon"),
         "{question}"
     );
     let again = sent.again.expect("the stored verdict");
@@ -3063,7 +3063,7 @@ fn p37_invented_sources_whose_step_is_refused_ask() {
     assert_eq!(sent.ruling.verdict, "asked", "{:?}", sent.ruling);
     assert!(sent.child.is_none());
     assert!(
-        sent.ruling.next[0].contains("the seat above it, argon, is refused"),
+        sent.ruling.next[0].contains("the seat above it, carbon, is refused"),
         "{:?}",
         sent.ruling.next
     );
@@ -4058,7 +4058,7 @@ fn gsrc_a_stepped_up_redo_keeps_the_parents_effort() {
     let axes = vec![Axis::new("sources", Mark::Fail, "the sources")
         .with(vec![format!("{NO_SUCH_VIDEO}{P37_FAKE}")])];
     let (_, child) = gsrc_send_back("gsrc-step", "research.web", "flash", Effort::High, axes);
-    assert_eq!(child.seat, "argon", "{}", child.reason);
+    assert_eq!(child.seat, "carbon", "{}", child.reason);
     assert_eq!(child.effort, Effort::High, "{}", child.reason);
 }
 

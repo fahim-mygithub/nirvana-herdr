@@ -21,7 +21,7 @@ every extra turn re-reads your whole context, so a read you skip is a read you n
   `herdr jev files "<glob>" --ask "<question>"`.
 - Output over 200 lines: `<command> 2>&1 | herdr jev text --ask "<question>" --choice "a,b,c"`. Read shorter
   output yourself.
-- A video, audio or an input over 400k tokens is not Jev's: seat it on argon or flash (the `media` skill).
+- A video, audio or an input over 400k tokens is not Jev's: seat it on carbon or flash (the `media` skill).
 
 ## Handoffs
 

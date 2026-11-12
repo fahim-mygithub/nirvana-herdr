@@ -278,7 +278,11 @@ family = "google"
 pool = "argon"
 efforts = ["low", "medium", "high"]
 capabilities = ["code", "tools", "image", "pdf", "web", "browser", "image_gen", "video", "audio", "context_1m"]
-enabled = true
+# Off since plan 70, 2026-11-11: Carbon took its seat at the same cost. Measured one order per effort, the same
+# question on the same file: low 0.0162% of the Gemini week for Argon and 0.0167% for Carbon (1.03x), medium $0.0365
+# and $0.0401 at list price (1.10x; the quota reading was spoiled by another agy run). Both answers right. Turn it
+# back on here to give the router both; every class still lists it.
+enabled = false
 # Argon's price doubles on 2026-11-30 (Google blog); cached input 95% off.
 prices = [
   { from = "2026-10-17", input = 2.0, output = 10.0, cache_read = 0.10, cache_write = 2.0, basis = "Google blog: $2 / $10 until 2026-11-30, cached input 95% off" },
@@ -288,6 +292,33 @@ use = [
   { effort = "low", windows = { week = 0.0101 }, at = "2026-10-17", basis = "measured: P4 argon low, one order alone" },
   { effort = "medium", windows = { week = 0.0101 }, at = "2026-10-17", basis = "measured: P4 argon medium, one order alone" },
   { effort = "high", windows = { week = 0.0162 }, at = "2026-10-17", basis = "prior: medium x 1.6" },
+]
+
+# Plan 70: Gemini 4 Carbon, the owner 2026-11-10: "Check the cost and if its the same it might be used to replace
+# Argon." `agy models` lists gemini-4-carbon-low|medium|high. Its pool is `gemini`: on 2026-11-11 agy's /usage had
+# no Argon group, and both Carbon's and Argon's orders moved the "Gemini Models" buckets. The capabilities are
+# Argon's, a prior: Google's posts name no context window and no input types.
+[[seat]]
+id = "carbon"
+cli = "agy"
+model = "gemini-4-carbon-{effort}"
+family = "google"
+pool = "gemini"
+efforts = ["low", "medium", "high"]
+capabilities = ["code", "tools", "image", "pdf", "web", "browser", "image_gen", "video", "audio", "context_1m"]
+enabled = true
+prices = [
+  { from = "2026-10-28", input = 2.0, output = 10.0, cache_read = 0.10, cache_write = 2.0, basis = "blog.google introducing-gemini-4-carbon 2026-10-28 and 9to5google gemini-app-4-carbon 2026-11-10: $2 / $10 until 2026-11-30, cached input 95% off" },
+  { from = "2026-11-30", input = 4.0, output = 20.0, cache_read = 0.20, cache_write = 4.0, basis = "the same two sources: $4 / $20 from 2026-11-30" },
+]
+# One order per effort (plan 70): read a 42-line file and answer one question. Its tokens are about P4's argon
+# order's in size: 14k in, 9k cache read. Low moved the week 0.0167% and the 5 h 0.0667%, for $0.0333, so 0.0050
+# of the week and 0.0200 of the 5 h per dollar. Medium's reading was spoiled by another agy run, so its cells are
+# its $0.0401 at that rate.
+use = [
+  { effort = "low", windows = { "5h" = 0.005983, week = 0.001498 }, at = "2026-11-11", basis = "measured: plan 70 carbon low, one probe order alone (0.0667% 5h, 0.0167% week), fit x8.97 (flash's, seat_fit.py, n 12): a probe is not a real order" },
+  { effort = "medium", windows = { "5h" = 0.007203, week = 0.001803 }, at = "2026-11-11", basis = "derived: plan 70 carbon medium's $0.0401 at low's measured 0.0200 (5h) and 0.0050 (week) per dollar, fit x8.97 (flash's, seat_fit.py, n 12)" },
+  { effort = "high", windows = { "5h" = 0.011525, week = 0.002885 }, at = "2026-11-11", basis = "prior: medium x 1.6" },
 ]
 
 [[seat]]
@@ -344,6 +375,8 @@ use = [
 # mode (decision 0018; default 70/80/100 bounded, 85/90/100 load-bearing): the bar drops to the best seat
 # left, never under the Efficient bar. `effort` follows the class and its blast radius (§5.5); a seat's
 # own `effort` is its departure. `weight` scales the expected use against P4's order (a prior).
+# Plan 70: carbon stands just before argon in every class that lists argon, at argon's score and effort, a prior
+# (decision 0012). With argon off, carbon is the Gemini pro seat the rule picks.
 # `only_with` takes the seat only when the order needs all of those. A class lists its seats in §5.4's
 # order, and that order breaks the last tie.
 
@@ -360,6 +393,7 @@ why = "plan 19 §4: strongest at agentic coding; plan 40a: fable 97, a prior (de
 seats = [
   { seat = "opus", score = 95 },
   { seat = "fable", score = 97 },
+  { seat = "carbon", score = 87 },
   { seat = "argon", score = 87 },
   { seat = "sonnet", score = 86 },
   { seat = "flash", score = 74 },
@@ -379,6 +413,7 @@ why = "plan 19 §4: quality first; plan 40a: fable 97, a prior (decision 0012), 
 seats = [
   { seat = "opus", score = 95 },
   { seat = "fable", score = 97 },
+  { seat = "carbon", score = 86 },
   { seat = "argon", score = 86 },
   { seat = "sonnet", score = 85 },
   { seat = "flash", score = 68 },
@@ -398,6 +433,7 @@ why = "plan 19 §4: bounded build tasks"
 seats = [
   { seat = "opus", score = 92 },
   { seat = "sonnet", score = 88 },
+  { seat = "carbon", score = 84 },
   { seat = "argon", score = 84 },
   { seat = "flash", score = 80 },
   { seat = "haiku", score = 70 },
@@ -418,6 +454,7 @@ seats = [
   { seat = "opus", score = 95 },
   { seat = "fable", score = 96 },
   { seat = "sonnet", score = 86 },
+  { seat = "carbon", score = 86 },
   { seat = "argon", score = 86 },
   { seat = "flash", score = 72 },
   { seat = "g-opus", score = 95 },
@@ -436,6 +473,7 @@ why = "plan 19 §4: visual verification goes to Opus; argon now competes at 86; 
 seats = [
   { seat = "opus", score = 95 },
   { seat = "fable", score = 96 },
+  { seat = "carbon", score = 86 },
   { seat = "argon", score = 86 },
   { seat = "sonnet", score = 84 },
   { seat = "flash", score = 74 },
@@ -455,6 +493,7 @@ why = "plan 19 §4: argon at medium under-reasons on a root cause, so it runs hi
 seats = [
   { seat = "opus", score = 93 },
   { seat = "fable", score = 95 },
+  { seat = "carbon", score = 85, effort = "high" },
   { seat = "argon", score = 85, effort = "high" },
   { seat = "sonnet", score = 84 },
   { seat = "flash", score = 72 },
@@ -492,6 +531,7 @@ why = "plan 19 §4: adversary review across families; plan 40a: fable 96, a prio
 seats = [
   { seat = "opus", score = 94 },
   { seat = "fable", score = 96 },
+  { seat = "carbon", score = 90 },
   { seat = "argon", score = 90 },
   { seat = "sonnet", score = 89 },
   { seat = "flash", score = 76 },
@@ -510,6 +550,7 @@ bars = { efficient = 70, balanced = 84, sota = 100 }
 why = "plan 19 §4: held-out check author"
 seats = [
   { seat = "opus", score = 90 },
+  { seat = "carbon", score = 85 },
   { seat = "argon", score = 85 },
   { seat = "sonnet", score = 85 },
   { seat = "flash", score = 74 },
@@ -529,6 +570,7 @@ seats = [
   { seat = "sonnet", score = 85 },
   { seat = "opus", score = 88 },
   { seat = "flash", score = 78 },
+  { seat = "carbon", score = 80 },
   { seat = "argon", score = 80 },
   { seat = "haiku", score = 70 },
 ]
@@ -545,6 +587,7 @@ bars = { efficient = 68, balanced = 80, sota = 100 }
 why = "plan 35: agy searches with search_web and reads pages with bladebro when granted, else shell fetches; agy seats list browser since live check 35.1 (one order, so not rescored)"
 seats = [
   { seat = "flash", score = 84 },
+  { seat = "carbon", score = 84 },
   { seat = "argon", score = 84 },
   { seat = "sonnet", score = 80 },
   { seat = "opus", score = 82 },
@@ -564,6 +607,7 @@ bars = { efficient = 70, balanced = 80, sota = 100 }
 why = "plan 19 §4: huge context over 400k tokens"
 seats = [
   { seat = "flash", score = 85 },
+  { seat = "carbon", score = 83 },
   { seat = "argon", score = 83 },
 ]
 
@@ -578,6 +622,7 @@ weight = 0.8
 bars = { efficient = 70, balanced = 82, sota = 100 }
 why = "plan 19 §4: docs drafting and editing"
 seats = [
+  { seat = "carbon", score = 86 },
   { seat = "argon", score = 86 },
   { seat = "sonnet", score = 82 },
   { seat = "opus", score = 84 },
@@ -597,6 +642,7 @@ weight = 2.0
 bars = { efficient = 70, balanced = 85, sota = 100 }
 why = "plan 19 §4: video processing on Gemini"
 seats = [
+  { seat = "carbon", score = 90 },
   { seat = "argon", score = 90 },
   { seat = "flash", score = 82 },
 ]
@@ -614,6 +660,7 @@ bars = { efficient = 70, balanced = 82, sota = 100 }
 why = "plan 19 §4: audio processing on Gemini"
 seats = [
   { seat = "flash", score = 86 },
+  { seat = "carbon", score = 85 },
   { seat = "argon", score = 85 },
 ]
 

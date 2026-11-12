@@ -2301,6 +2301,7 @@ mod tests {
             ("claude", "claude-haiku-5-5", SubagentProvider::Claude, "Haiku 5.5", "H5.5", "Haiku"),
             ("agy", "gemini-3.8-flash-low", SubagentProvider::Gemini, "Gemini 3.8 Flash", "Flash", "Gemini Flash"),
             ("agy", "gemini-4-argon-high", SubagentProvider::Gemini, "Gemini 4 Argon", "Argon", "Gemini Argon"),
+            ("agy", "gemini-4-carbon-high", SubagentProvider::Gemini, "Gemini 4 Carbon", "Carbon", "Gemini Carbon"),
             ("agy", "gemini-3-pro-20260414", SubagentProvider::Gemini, "Gemini 3 Pro", "Pro", "Gemini Pro"),
             ("agy", "Gemini 3.8 Flash (High)", SubagentProvider::Gemini, "Gemini 3.8 Flash", "Flash", "Gemini Flash"),
         ];
