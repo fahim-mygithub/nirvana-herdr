@@ -6772,9 +6772,9 @@ mod tests {
         let got = chosen(&table, &world, &video);
         assert_eq!((got.seat.as_str(), got.effort), ("carbon", Effort::Medium));
         let week = got.windows.iter().find(|w| w.window == "week").unwrap();
-        // carbon medium's 0.0201% x 2 (price) x 2 (weight) x 5 (medium).
+        // carbon medium's 0.1803% x 2 (price) x 2 (weight) x 5 (medium).
         assert!(
-            close(week.expected, 0.000201 * 2.0 * 2.0 * 5.0),
+            close(week.expected, 0.001803 * 2.0 * 2.0 * 5.0),
             "{:?}",
             got.windows
         );
@@ -8435,10 +8435,12 @@ mod tests {
                     || c.basis.contains("same two sources")
             );
         }
-        // Low's cells are the measured order's quota; each cell names its basis.
+        // Low's cells are the measured probe's quota scaled to a real order by flash's fit x8.97, the gemini
+        // pool's only fit: unscaled, carbon would read a ninth of its cost beside the fitted seats.
         let cell = |effort: Effort| carbon.uses.iter().find(|u| u.effort == effort).unwrap();
-        assert!(close(cell(Effort::Low).windows["week"], 0.000167));
-        assert!(close(cell(Effort::Low).windows["5h"], 0.000667));
+        assert!(close(cell(Effort::Low).windows["week"], 0.000167 * 8.97));
+        assert!(close(cell(Effort::Low).windows["5h"], 0.000667 * 8.97));
+        assert!(cell(Effort::Low).basis.contains("fit x8.97"));
         assert!(cell(Effort::Low).basis.starts_with("measured: plan 70"));
         assert!(cell(Effort::Medium).basis.starts_with("derived: plan 70"));
         assert!(cell(Effort::High).basis.starts_with("prior:"));

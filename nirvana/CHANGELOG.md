@@ -30,6 +30,10 @@ which the fork never edits.
   from 79.4% left to 78.3% left over the run, the rest from the other agy run. One new test and 20 controls, each
   red alone. 13 tests retargeted from Argon to Carbon, and 2 controls retargeted. The 70 existing controls on the
   retargeted tests stay red. Scoped tests 506 of 507, the one failure a subagents test that fails on master too.
+- **Scaled at merge:** the probe order is far smaller than a real one. Every other fitted seat carries a fit of 6.8 to
+  10.6 times its probe, so Carbon's cells carry Flash's fit, 8.97 times, the Gemini pool's only one. Unscaled, Carbon
+  read about a ninth of its real cost beside the fitted seats and the router would have picked it too often. The fit
+  is a prior until `seat_fit.py` has five Carbon orders.
 - **If you remove this:** the router keeps seating Argon. Carbon, which costs the same per order here, is never
   picked, and an order that names `gemini-4-carbon` shows "Gemini" on its chip.
 

@@ -316,9 +316,9 @@ prices = [
 # of the week and 0.0200 of the 5 h per dollar. Medium's reading was spoiled by another agy run, so its cells are
 # its $0.0401 at that rate.
 use = [
-  { effort = "low", windows = { "5h" = 0.000667, week = 0.000167 }, at = "2026-11-11", basis = "measured: plan 70 carbon low, one order alone" },
-  { effort = "medium", windows = { "5h" = 0.000803, week = 0.000201 }, at = "2026-11-11", basis = "derived: plan 70 carbon medium's $0.0401 at low's measured 0.0200 (5h) and 0.0050 (week) per dollar" },
-  { effort = "high", windows = { "5h" = 0.001284, week = 0.000321 }, at = "2026-11-11", basis = "prior: medium x 1.6" },
+  { effort = "low", windows = { "5h" = 0.005983, week = 0.001498 }, at = "2026-11-11", basis = "measured: plan 70 carbon low, one probe order alone (0.0667% 5h, 0.0167% week), fit x8.97 (flash's, seat_fit.py, n 12): a probe is not a real order" },
+  { effort = "medium", windows = { "5h" = 0.007203, week = 0.001803 }, at = "2026-11-11", basis = "derived: plan 70 carbon medium's $0.0401 at low's measured 0.0200 (5h) and 0.0050 (week) per dollar, fit x8.97 (flash's, seat_fit.py, n 12)" },
+  { effort = "high", windows = { "5h" = 0.011525, week = 0.002885 }, at = "2026-11-11", basis = "prior: medium x 1.6" },
 ]
 
 [[seat]]

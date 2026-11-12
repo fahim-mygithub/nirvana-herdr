@@ -36,8 +36,8 @@ CONTROLS = (
             '{ from = "2026-11-30", input = 2.0, output = 20.0, cache_read = 0.20, cache_write = 4.0, basis = "the same',
             T_CARBON, "rust"),
     # The measured cell and its basis
-    Control("p70_cell_low", TABLE, 'windows = { "5h" = 0.000667, week = 0.000167 }',
-            'windows = { "5h" = 0.000667, week = 0.000334 }', T_CARBON, "rust"),
+    Control("p70_cell_low", TABLE, 'windows = { "5h" = 0.005983, week = 0.001498 }',
+            'windows = { "5h" = 0.005983, week = 0.000167 }', T_CARBON, "rust"),
     Control("p70_cell_basis", TABLE, 'basis = "measured: plan 70 carbon low', 'basis = "prior: plan 70 carbon low',
             T_CARBON, "rust"),
     # The classes: carbon just before argon, at argon's score and effort
