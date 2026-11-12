@@ -380,7 +380,7 @@ impl App {
         }
         let pane = self.pane_metadata(ws_idx, pane_id)?;
         let mut tokens = pane.tokens;
-        // Nirvana fork, alpha 0.69.0: the background-wait reading (src/nirvana_bgwait.rs), so the phone, which reads
+        // Nirvana fork, alpha 0.70.0: the background-wait reading (src/nirvana_bgwait.rs), so the phone, which reads
         // `agent.list`, words it as the sidebar does. Display-only: `agent_status` is still herdr's own.
         if let Some(bg) = self
             .terminal_runtimes

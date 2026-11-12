@@ -24,7 +24,7 @@
     return Math.max(1, Math.round(bytes / 1024)) + ' KB';
   }
 
-  // Alpha 0.69.0: `bg` is an agent whose turn ended and that waits on background work; its chip says waiting or quiet
+  // Alpha 0.70.0: `bg` is an agent whose turn ended and that waits on background work; its chip says waiting or quiet
   // (the PC's reading, src/nirvana_bgwait.rs), with no pulse: nothing of the agent's own is at work.
   function chip(status, bg) {
     const word = LABEL[status] ? status : 'idle';
@@ -73,7 +73,7 @@
       const working = h('div', { class: 'msg at-work', hidden: true },
         h('span', { class: 'dots' }, h('span'), h('span'), h('span')),
         h('span', { class: 'shim', text: 'working' }));
-      // Alpha 0.69.0: what the agent waits on, in place of the working dots, while its turn is over.
+      // Alpha 0.70.0: what the agent waits on, in place of the working dots, while its turn is over.
       const waiting = h('div', { class: 'msg at-bg bg-line', hidden: true });
       el.append(h('div', { class: 'scroll thread' }, h('div', { class: 'thread-in' }, list, working, waiting, liveBox)));
 

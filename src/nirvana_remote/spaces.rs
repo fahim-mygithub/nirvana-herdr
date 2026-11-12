@@ -26,7 +26,7 @@ const SETTLE_MOST: Duration = Duration::from_secs(1);
 /// Before each subscription after the first the feed waits this, doubling to `RETRY_MOST` (`Feed::watch`).
 const RETRY_FIRST: Duration = Duration::from_millis(500);
 const RETRY_MOST: Duration = Duration::from_secs(10);
-/// Alpha 0.69.0: a background-wait reading changes with no herdr event (`crate::nirvana_bgwait`: running turns quiet,
+/// Alpha 0.70.0: a background-wait reading changes with no herdr event (`crate::nirvana_bgwait`: running turns quiet,
 /// a task is lost, the server's worker finishes its first read a moment after the event that asked for it). So the
 /// feed builds the list once more this long after each event, longer than the reader's `REFRESH`, and every
 /// `BACKGROUND_EVERY` while any agent shows a reading. Neither runs while nothing waits.
@@ -70,7 +70,7 @@ pub fn background(agent: &Value) -> Option<crate::nirvana_bgwait::View> {
         .and_then(crate::nirvana_bgwait::View::from_token)
 }
 
-/// `agent_row` at `now`. Alpha 0.69.0: an agent whose turn ended and that waits on background work reads `bg`, with
+/// `agent_row` at `now`. Alpha 0.70.0: an agent whose turn ended and that waits on background work reads `bg`, with
 /// its reading in words under `bg` (`{"state": "waiting" | "quiet" | "lost", "line"}`), not `working`; one whose tasks
 /// are all lost reads herdr's state, except that a Working from the screen reads idle. A blocked agent is the owner's
 /// to answer and keeps `needs`. Display only: the routes that act on an agent read herdr's `agent_status`.
@@ -178,7 +178,7 @@ pub fn subscriptions(panes: &BTreeSet<String>) -> Value {
     Value::Array(list)
 }
 
-/// How long the feed waits for an event before it builds the list anyway (alpha 0.69.0): `FOLLOW_UP` after an event,
+/// How long the feed waits for an event before it builds the list anyway (alpha 0.70.0): `FOLLOW_UP` after an event,
 /// so a reading the event's own build asked for shows; `BACKGROUND_EVERY` while a reading shows; else only on events.
 pub fn next_build(after_event: bool, background: bool) -> Option<Duration> {
     if after_event {
@@ -312,7 +312,7 @@ impl Feed {
             };
             // The stream ends when this subscription is left, however it is left.
             let _ends = Stop(stop);
-            // Alpha 0.69.0: when the next list is built with no event (`next_build`).
+            // Alpha 0.70.0: when the next list is built with no event (`next_build`).
             let mut timed;
             match snapshot(self.herdr.as_ref()) {
                 Ok(again) => {

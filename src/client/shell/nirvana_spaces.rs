@@ -44,7 +44,7 @@ pub(super) struct SpaceAgent {
     pub(super) status: crate::api::schema::AgentStatus,
     pub(super) focused: bool,
     pub(super) is_folded: bool,
-    /// Alpha 0.69.0: the agent's turn ended and it waits on background work (`crate::nirvana_bgwait`); its state word
+    /// Alpha 0.70.0: the agent's turn ended and it waits on background work (`crate::nirvana_bgwait`); its state word
     /// says so in place of herdr's, and `status` is the shown one (`shown_status`), so a background wait never spins.
     pub(super) bg: Option<crate::nirvana_bgwait::Shown>,
 }
@@ -215,7 +215,7 @@ pub(super) fn space_agents(
     fold_space_agents(raw)
 }
 
-/// Alpha 0.69.0: the agent's background-wait reading, from the server's token (`crate::nirvana_bgwait::TOKEN`).
+/// Alpha 0.70.0: the agent's background-wait reading, from the server's token (`crate::nirvana_bgwait::TOKEN`).
 pub(super) fn background(agent: &ClientShellAgent) -> Option<crate::nirvana_bgwait::View> {
     crate::nirvana_bgwait::from_tokens(
         agent
@@ -231,7 +231,7 @@ pub(super) fn shown_agent_status(agent: &ClientShellAgent) -> crate::api::schema
 }
 
 /// The state a space shows: herdr's for the space, except Working when every agent of the space herdr reads as
-/// working waits on background work instead (alpha 0.69.0). herdr ranks the space by its agents, so its Working came
+/// working waits on background work instead (alpha 0.70.0). herdr ranks the space by its agents, so its Working came
 /// from those agents; the next status down among the space's agents takes its place.
 pub(super) fn shown_space_status(
     snapshot: &ClientShellSnapshot,
@@ -550,7 +550,7 @@ pub(super) fn space_working(
 ) -> bool {
     use crate::api::schema::AgentStatus;
     let busy = |status: AgentStatus| matches!(status, AgentStatus::Working | AgentStatus::Blocked);
-    // Alpha 0.69.0: an agent waiting on background work is not at work, so it does not sparkle its space.
+    // Alpha 0.70.0: an agent waiting on background work is not at work, so it does not sparkle its space.
     let status = shown_space_status(snapshot, &workspace.workspace_id, status);
     if busy(status) || workers.iter().any(|worker| worker.working) {
         return true;

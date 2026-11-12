@@ -95,7 +95,7 @@ pub fn summary(herdr: &dyn Herdr) -> Result<Summary, String> {
             .iter()
             .filter(|agent| match agent["agent_status"].as_str() {
                 Some("blocked") => true,
-                // Alpha 0.69.0: waiting on background work is not at work (`spaces::agent_row_at`).
+                // Alpha 0.70.0: waiting on background work is not at work (`spaces::agent_row_at`).
                 Some("working") => super::spaces::background(agent).is_none(),
                 _ => false,
             })

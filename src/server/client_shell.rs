@@ -38,7 +38,7 @@ fn nirvana_agent_model(
     )
 }
 
-/// Nirvana fork, alpha 0.69.0: the background-wait reading of the Claude in this pane, read off the server's loop
+/// Nirvana fork, alpha 0.70.0: the background-wait reading of the Claude in this pane, read off the server's loop
 /// (`nirvana_bgwait::cached`), as the token value the sidebar draws.
 fn nirvana_bgwait_token(
     app: &app::App,
@@ -249,7 +249,7 @@ pub(super) fn snapshot_with_completions(
             ) {
                 tokens.extend(model.tokens());
             }
-            // Nirvana fork, alpha 0.69.0: waiting on background work (src/nirvana_bgwait.rs).
+            // Nirvana fork, alpha 0.70.0: waiting on background work (src/nirvana_bgwait.rs).
             if let Some(bg) = nirvana_bgwait_token(
                 app,
                 &pane_id,

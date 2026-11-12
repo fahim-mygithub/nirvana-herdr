@@ -1,4 +1,4 @@
-# Alpha 0.69.0: a Claude waiting on its background work says so, never a spinner, and never "running" for a task that is
+# Alpha 0.70.0: a Claude waiting on its background work says so, never a spinner, and never "running" for a task that is
 # idle or a ghost. The owner, 2026-11-10: "I can foresee an issue where we easily show that a bg task is working but
 # it's actually idling or ghosting". Controls starting with p69_. One sabotage per assertion, each on a product line;
 # the test named must print FAIL with it in place. `Control` is provided by controls.py.

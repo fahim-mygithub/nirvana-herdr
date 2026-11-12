@@ -17,7 +17,7 @@ pub(super) struct AgentRow {
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
     pub(super) subagents: Vec<crate::nirvana_subagents::Subagent>,
     pub(super) subagents_overflow: usize,
-    /// Alpha 0.69.0: what the agent waits on, in words, on its own line under the agent (`crate::nirvana_bgwait`). The
+    /// Alpha 0.70.0: what the agent waits on, in words, on its own line under the agent (`crate::nirvana_bgwait`). The
     /// default rows do not show the state text, so the reading has a line of its own.
     pub(super) bg_line: Option<String>,
 }
@@ -576,7 +576,7 @@ pub(super) fn agent_row(
         .cloned()
         .collect::<HashMap<_, _>>();
     let tokens = agent.tokens.iter().cloned().collect::<HashMap<_, _>>();
-    // Alpha 0.69.0: a Claude whose turn ended and that waits on background work says so in words, and its icon is not
+    // Alpha 0.70.0: a Claude whose turn ended and that waits on background work says so in words, and its icon is not
     // a working one (`crate::nirvana_bgwait`).
     let bg = super::nirvana_spaces::background(agent);
     let status = crate::nirvana_bgwait::shown_status(agent.agent_status, bg.as_ref());

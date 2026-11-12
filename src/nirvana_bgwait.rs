@@ -1,4 +1,4 @@
-//! Nirvana fork, alpha 0.69.0: a Claude whose turn has ended and that waits on its background work says so in words,
+//! Nirvana fork, alpha 0.70.0: a Claude whose turn has ended and that waits on its background work says so in words,
 //! not with a working spinner. The owner, 2026-11-10: "One of the agent is working on some sort background testing
 //! that needs to deliver then alerts the agent I'd like ui to tell me that instead of [spinning] one. Ensure we are
 //! testing accurately for this feature I can foresee an issue where we easily show that a bg task is working but it's
@@ -31,9 +31,9 @@
 //!
 //! **Where it shows.** The herdr server reads it off its loop (`cached`, one worker thread, as `nirvana_spaces`'s
 //! model; the worker also reads again unasked, `poll_due`) and hands it on as the agent token `TOKEN`: in the
-//! window's snapshot (`server/client_shell.rs`) and in `agent.list` (`app/agents.rs`), which the phone reads. The sidebar row, the agents panel and the phone draw it
-//! (`shown_status`, `View::sentence`); herdr's own agent state is not changed, so `agent wait`, alerts' sources and
-//! everything else upstream still see what herdr detected.
+//! window's snapshot (`server/client_shell.rs`) and in `agent.list` (`app/agents.rs`), which the phone reads. The
+//! sidebar row, the agents panel and the phone draw it (`shown_status`, `View::sentence`); herdr's own agent state is
+//! not changed, so `agent wait`, alerts' sources and everything else upstream still see what herdr detected.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -493,8 +493,8 @@ pub fn squash(text: &str) -> String {
 /// command with `cd ..` first, `cd <dir> && ...`, single and double quotes, a backslash path, accented letters, a
 /// backtick and redirects all read running, each by its command inside the wrapper's `eval '...'` (two wrapper prefixes
 /// were seen; the command is never rewritten). Not matched by "a shell started near the launch": Claude starts its
-/// statusline as `bash.exe -c "powershell.exe ... statusline.ps1"` and git processes under itself on its own, one in the
-/// same second as three launches, so a dead task would have read running.
+/// statusline as `bash.exe -c "powershell.exe ... statusline.ps1"` and git processes under itself on its own, one in
+/// the same second as three launches, so a dead task would have read running.
 pub fn is_task_process(task: &OpenTask, command_line: &str) -> bool {
     if command_line.contains(&format!("{}.output", task.id)) {
         return true;

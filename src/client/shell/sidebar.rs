@@ -360,7 +360,7 @@ pub(crate) fn render_sidebar(
         let Some(workspace) = snapshot.workspaces.get(entry.index) else {
             continue;
         };
-        // Alpha 0.69.0: a space whose working agents all wait on background work does not read working.
+        // Alpha 0.70.0: a space whose working agents all wait on background work does not read working.
         let status = super::nirvana_spaces::shown_space_status(
             snapshot,
             &workspace.workspace_id,

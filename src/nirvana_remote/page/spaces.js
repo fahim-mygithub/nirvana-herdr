@@ -11,7 +11,7 @@
   const SPARKLE = ['✧', '✦', '✶', '✷', '✸', '✷', '✶', '✦'];
   const LABEL = { working: 'working', needs: 'needs you', done: 'done', idle: 'idle', bg: 'waiting' };
 
-  // Alpha 0.69.0: `bg` is an agent whose turn ended and that waits on background work; its chip says waiting or quiet
+  // Alpha 0.70.0: `bg` is an agent whose turn ended and that waits on background work; its chip says waiting or quiet
   // (the PC's reading, src/nirvana_bgwait.rs), with no pulse: nothing of the agent's own is at work.
   function chip(status, bg) {
     const word = LABEL[status] ? status : 'idle';
@@ -69,7 +69,7 @@
             onclick: () => nv.go('chat', 'r', { agent: agent.id, name: agent.name, space: space.name }),
           }, h('span', { class: 'agent-text' },
             h('span', { class: 'agent-name', text: agent.name }),
-            // Alpha 0.69.0: the background-wait reading in words takes the task's place while it shows.
+            // Alpha 0.70.0: the background-wait reading in words takes the task's place while it shows.
             h('span', { class: 'agent-line' + (agent.bg ? ' bg-line' : ''), text: (agent.bg && agent.bg.line) || agent.line || '' })),
           chip(agent.status, agent.bg)));
           if (agents.length) quiet.delete(space.id);

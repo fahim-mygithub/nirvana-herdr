@@ -1,4 +1,4 @@
-//! Alpha 0.69.0: the background-wait reader. The transcript lines are cut-down copies of the shapes Claude Code
+//! Alpha 0.70.0: the background-wait reader. The transcript lines are cut-down copies of the shapes Claude Code
 //! 2.1.322 wrote in the owner's transcripts (2026-11-10, `WorkOutAppRefactor/b4c82fab...jsonl` and the orchestrator's
 //! session), with the paths scrubbed and every field the reader does not look at dropped.
 

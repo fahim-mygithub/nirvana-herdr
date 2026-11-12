@@ -519,7 +519,7 @@ fn the_agents_panel_lists_the_selected_space_only() {
     assert!(text.contains("no agents in this space"));
 }
 
-/// Alpha 0.69.0 (src/nirvana_bgwait.rs): a Claude herdr reads as working whose transcript says its turn ended and that
+/// Alpha 0.70.0 (src/nirvana_bgwait.rs): a Claude herdr reads as working whose transcript says its turn ended and that
 /// waits on one live background task, as the server's token carries it.
 fn claude_waiting_on_background() -> ClientShellAgent {
     let now = crate::nirvana_bgwait::now_secs();
