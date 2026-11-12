@@ -41,6 +41,12 @@ T_PHONE = _T + "the_phone_row_says_waiting_not_working"
 T_SUMMARY = _T + "the_pc_list_does_not_count_a_background_wait_as_at_work"
 T_FEED = _T + "the_feed_builds_again_after_an_event_and_while_a_reading_shows"
 T_PAGE = _T + "the_page_words_a_background_wait"
+# Fix round 2026-11-11 (the review's findings 1-3 and a ghost Agent)
+T_SHAPES = _T + "each_notification_shape_leaves_the_turn_as_measured"
+T_WAKE = _T + "a_new_turn_after_a_notification_reads_as_working"
+T_POLL = _T + "the_worker_reads_again_when_the_transcript_grows_or_a_shown_reading_ages"
+T_AGENT_GHOST = _T + "a_background_agent_with_no_transcript_past_the_grace_is_lost"
+T_MEASURED = _T + "measured_command_lines_match_their_tasks"
 _C = "client::shell::tests::nirvana_space_agents::"
 T_ROW = _C + "a_claude_waiting_on_background_work_says_so_and_does_not_spin"
 T_PANEL = _C + "the_agents_panel_words_the_background_wait"
@@ -137,8 +143,8 @@ CONTROLS = (
             ".filter(|c| !matches!(c, '\\'' | '\"' | '\\\\'))",
             ".filter(|_| true)", T_MATCH, "rust"),
     Control("p69_agent_transcript_ignored", BG,
-            "                last_output = last_output.max((evidence.stat)(&path).and_then(wrote));",
-            "                let _ = &path;", T_AGENT_FILE, "rust"),
+            "                    Some(stat) => last_output = wrote(stat).max(last_output),",
+            "                    Some(_) => {}", T_AGENT_FILE, "rust"),
     # The pane's reading: none while the turn goes on, a ghost dropped after an hour, the words, the token
     Control("p69_read_while_turn_runs", BG,
             "    if !ledger.turn_ended || ledger.open.is_empty() {",
@@ -199,4 +205,48 @@ CONTROLS = (
     Control("p69_chat_keeps_old_reading", CHAT_JS,
             "        agent: (data) => { agent = Object.assign(agent, { bg: null }, data); drawHead(); },",
             "        agent: (data) => { agent = Object.assign(agent, data); drawHead(); },", T_PAGE, "rust"),
+    # Fix round 2026-11-11. A dequeue and a queued_command attachment start the turn, an enqueue alone does not, a
+    # remove closes what it carries; the tail sees growth; the worker reads again on growth and while a reading shows;
+    # an Agent with no transcript past the grace is lost; measured command lines match and no plain shell is a task.
+    Control("p69_dequeue_keeps_ended", BG,
+            'Some("dequeue") => self.turn_ended = false,',
+            'Some("dequeue") => {}', T_SHAPES, "rust"),
+    Control("p69_dequeue_keeps_reading", BG,
+            'Some("dequeue") => self.turn_ended = false,',
+            'Some("dequeue") => {}', T_WAKE, "rust"),
+    Control("p69_attachment_keeps_ended", BG,
+            "                // A queued input handed to the model as an attachment is part of a turn at work.\n"
+            "                self.turn_ended = false;\n",
+            "", T_SHAPES, "rust"),
+    Control("p69_enqueue_starts_turn", BG,
+            'Some("enqueue" | "remove") => {\n                    if let Some(content)',
+            'Some("enqueue" | "remove") => {\n                    self.turn_ended = false;\n'
+            '                    if let Some(content)', T_SHAPES, "rust"),
+    Control("p69_remove_ignored", BG,
+            'Some("enqueue" | "remove") => {',
+            'Some("enqueue") => {', T_SHAPES, "rust"),
+    Control("p69_growth_never_seen", BG,
+            "std::fs::metadata(&self.path).is_ok_and(|meta| meta.len() != self.len_seen)",
+            "std::fs::metadata(&self.path).is_err()", T_WAKE, "rust"),
+    Control("p69_len_seen_unset", BG,
+            "        self.len_seen = len;\n",
+            "", T_WAKE, "rust"),
+    Control("p69_poll_ignores_growth", BG,
+            "    grew || (shown && since_read >= REFRESH)",
+            "    let _ = grew;\n    shown && since_read >= REFRESH", T_POLL, "rust"),
+    Control("p69_poll_never_refreshes", BG,
+            "    grew || (shown && since_read >= REFRESH)",
+            "    let _ = (shown, since_read);\n    grew", T_POLL, "rust"),
+    Control("p69_agent_no_file_runs", BG,
+            "                        return reading(State::Lost, last_output, Some(Why::OutputGone));\n",
+            "", T_AGENT_GHOST, "rust"),
+    Control("p69_agent_no_grace", BG,
+            "None if evidence.now.saturating_sub(task.launched_at) > AGENT_FILE_GRACE_S => {",
+            "None if evidence.now >= task.launched_at => {", T_AGENT_GHOST, "rust"),
+    Control("p69_measured_quotes_kept", BG,
+            ".filter(|c| !matches!(c, '\\'' | '\"' | '\\\\'))",
+            ".filter(|_| true)", T_MEASURED, "rust"),
+    Control("p69_any_shell_is_task", BG,
+            '    if command_line.contains(&format!("{}.output", task.id)) {',
+            '    if command_line.contains("bash.exe") {', T_MEASURED, "rust"),
 )

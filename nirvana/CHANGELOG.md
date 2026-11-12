@@ -32,7 +32,22 @@ which the fork never edits.
   task's process. "Exit and stop tasks" left both sleeps running after Claude exited. After Claude came back with
   `--continue` there was no reading at all; lost by a restart is covered by tests only. 32 tests and 47 controls,
   each red alone; 4 older controls moved to the lines this rewrote. The 3 minute, 1 hour, 4 s and 15 s figures are
-  guesses. Not run on the owner's own panes or on the phone itself.
+  guesses. Not run on the owner's own panes or on the phone itself. Review fix round, 2026-11-11, scratch session
+  again: during a background Agent's wait herdr read working and Claude's title spun as in a turn, so neither tells a
+  wait from a turn; the hand-back then started a turn with herdr still working, and the old build handed out the
+  reading 0.8 s into that turn (07:18:00 against the turn's line at 07:17:59.2). A killed task's reading on the old
+  build still said running 5 s after its notification, because nothing asked in between. The worker now looks at
+  each transcript every 250 ms and reads it again when it grew, and checks a shown reading every 3 s unasked; a
+  dequeue and a `queued_command` attachment start the turn. On the new build the reading came 0.5 s after the turn
+  ended, stayed through the wait, and was gone within 0.36 s of the hand-back's dequeue; the killed task's reading
+  was gone at the first ask. From the owner's transcripts of the last 14 days: 1,084 enqueues, 601 dequeues, 460
+  removes; a waking notification's dequeue came about 5 ms after its enqueue, and enqueues followed by a remove
+  started no turn, so an enqueue alone still does not. Nine background shell commands read running by their command
+  (two pipes, two multi-line commands with `cd ..` first, `cd <dir> &&`, quotes, a redirect, a backslash path with
+  accents, a backtick); matching any shell started near
+  the launch was rejected, because Claude's statusline `bash.exe` started in the same second as three launches. A
+  background Agent with no transcript 30 s after its launch reads lost (82 of 82 launches in the owner's
+  transcripts had one). 37 tests and 60 controls, each red alone. The 250 ms and 30 s figures are guesses.
 - **If you remove this:** a Claude waiting on its tests shows as done or as a spinner with no word of what it waits
   on, and a task whose process died shows nothing different from one still running.
 

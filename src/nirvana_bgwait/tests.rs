@@ -948,3 +948,231 @@ fn the_page_words_a_background_wait() {
     assert!(chat.contains("agent = Object.assign(agent, { bg: null }, data.agent || {});"));
     assert!(css.contains(".chip.bg .chip-dot"));
 }
+
+// ---- fix round, 2026-11-11: the turn after a notification, the worker's own reads, ghosts ------------------------
+
+fn queue_op(operation: &str, content: Option<String>, secs: u64) -> String {
+    let mut entry = json!({"type": "queue-operation", "operation": operation, "timestamp": at(secs), "sessionId": "sess"});
+    if let Some(content) = content {
+        entry["content"] = Value::String(content);
+    }
+    line(entry)
+}
+
+/// Two shell tasks open and the turn ended: the review's starting point.
+fn two_open_and_ended() -> Vec<String> {
+    vec![
+        bash_launch("toolu_1", "sleep 90", S0),
+        bash_result("toolu_1", "b24g7efc5", S0 + 1),
+        bash_launch("toolu_2", "sleep 95", S0 + 1),
+        bash_result("toolu_2", "b2second1", S0 + 2),
+        end_turn(S0 + 3),
+    ]
+}
+
+/// The shapes measured 2026-11-11 on the owner's transcripts of the last 14 days and on the scratch session: after an
+/// ended turn a notification that starts a turn is enqueued, dequeued about 5 ms later, then written as a user line.
+#[test]
+fn each_notification_shape_leaves_the_turn_as_measured() {
+    let with = |extra: &[String]| {
+        let mut lines = two_open_and_ended();
+        lines.extend_from_slice(extra);
+        ledger(&lines)
+    };
+    assert!(with(&[]).turn_ended);
+    // An enqueue alone starts nothing: enqueues followed by removes and no turn were seen.
+    let l = with(&[enqueue("b24g7efc5", Some("completed"), S0 + 50)]);
+    assert!(l.turn_ended, "an enqueue alone is not a turn");
+    assert_eq!(ids(&l), ["b2second1"]);
+    // The dequeue is the next turn taking its input.
+    let l = with(&[
+        enqueue("b24g7efc5", Some("completed"), S0 + 50),
+        queue_op("dequeue", None, S0 + 50),
+    ]);
+    assert!(!l.turn_ended, "a dequeue starts the turn");
+    // A Monitor's event (no status) wakes the turn the same way, and keeps its task open.
+    let l = with(&[
+        enqueue("b2second1", None, S0 + 50),
+        queue_op("dequeue", None, S0 + 50),
+    ]);
+    assert!(!l.turn_ended);
+    assert_eq!(ids(&l), ["b24g7efc5", "b2second1"]);
+    // The turn's user line.
+    let l = with(&[prompt(
+        &notification("b24g7efc5", Some("completed")),
+        S0 + 50,
+    )]);
+    assert!(!l.turn_ended);
+    // A queued input handed over inside a turn.
+    let l = with(&[queued_attachment("b24g7efc5", S0 + 50)]);
+    assert!(
+        !l.turn_ended,
+        "a queued_command attachment is a turn at work"
+    );
+    assert_eq!(ids(&l), ["b2second1"]);
+    // A background Agent's hand-back, measured on the scratch session: a plain user line.
+    let l = with(&[prompt(
+        "Another Claude session sent a message: <agent-message from=\"a05e94895727387c8\"> [Subagent hand-back] done",
+        S0 + 50,
+    )]);
+    assert!(!l.turn_ended);
+    // A remove carries the notification it took out: the task closes, and nothing starts.
+    let l = with(&[queue_op(
+        "remove",
+        Some(notification("b24g7efc5", Some("completed"))),
+        S0 + 50,
+    )]);
+    assert!(l.turn_ended);
+    assert_eq!(ids(&l), ["b2second1"]);
+}
+
+fn live_shell(task: &OpenTask, pid: u32) -> Proc {
+    Proc {
+        pid,
+        command_line: format!(
+            r#""C:\Program Files\Git\bin\bash.exe" -c "source /c/x/snapshot.sh 2>/dev/null || true && eval '{}' < /dev/null && pwd -P >| /c/x/claude-1-cwd""#,
+            task.command.as_deref().unwrap_or("")
+        ),
+    }
+}
+
+/// The review's case: a notification for one of two open tasks wakes a turn while herdr reads working. The tail sees
+/// the dequeue, so the reading goes and the row shows working.
+#[test]
+fn a_new_turn_after_a_notification_reads_as_working() {
+    use std::io::Write as _;
+    let dir = std::env::temp_dir().join(format!("herdr-bgwait-wake-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("sess.jsonl");
+    std::fs::write(&path, two_open_and_ended().join("\n") + "\n").unwrap();
+    let mut tail = Tail::new(path.clone());
+    tail.catch_up();
+    assert!(!tail.grew(), "nothing was added since the read");
+    let shells: Vec<Proc> = tail
+        .ledger
+        .open()
+        .iter()
+        .enumerate()
+        .map(|(i, task)| live_shell(task, 10 + i as u32))
+        .collect();
+    let stat = |_: &Path| {
+        Some(Stat {
+            len: 1,
+            modified: S0 + 49,
+        })
+    };
+    let reading_now = |tail: &Tail| {
+        view(
+            &tail.ledger,
+            &Evidence {
+                now: S0 + 51,
+                claude_started: Some(S0 - 600),
+                processes: Some(&shells),
+                session_dir: None,
+                stat: &stat,
+            },
+        )
+    };
+    let before = reading_now(&tail);
+    assert!(
+        before.is_some(),
+        "two live tasks, the turn ended: a reading"
+    );
+    assert_eq!(
+        shown_status(AgentStatus::Working, before.as_ref()),
+        AgentStatus::Idle
+    );
+    let mut more = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    writeln!(more, "{}", enqueue("b2second1", None, S0 + 50)).unwrap();
+    writeln!(more, "{}", queue_op("dequeue", None, S0 + 50)).unwrap();
+    drop(more);
+    assert!(
+        tail.grew(),
+        "the worker sees the file grow without reading it"
+    );
+    tail.catch_up();
+    assert!(!tail.grew());
+    let after = reading_now(&tail);
+    assert_eq!(after, None, "a turn at work has no reading");
+    assert_eq!(
+        shown_status(AgentStatus::Working, after.as_ref()),
+        AgentStatus::Working
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_worker_reads_again_when_the_transcript_grows_or_a_shown_reading_ages() {
+    let young = REFRESH / 2;
+    assert!(
+        poll_due(false, young, true),
+        "a grown transcript is read again"
+    );
+    assert!(poll_due(true, young, true));
+    assert!(
+        poll_due(true, REFRESH, false),
+        "a shown reading is checked again"
+    );
+    assert!(!poll_due(true, young, false));
+    assert!(
+        !poll_due(false, REFRESH * 10, false),
+        "nothing shown and nothing new: no read"
+    );
+    assert!(POLL < REFRESH);
+}
+
+#[test]
+fn a_background_agent_with_no_transcript_past_the_grace_is_lost() {
+    let task = OpenTask {
+        id: "a071754251fec83ec".into(),
+        kind: Kind::Agent,
+        label: "explore".into(),
+        command: None,
+        output: None,
+        launched_at: S0,
+        last_event_at: None,
+    };
+    let none = files(&[]);
+    let r = read(&task, S0 + 5, Some(S0 - 600), Some(&[]), &none);
+    assert_eq!(
+        r.state,
+        State::Running,
+        "inside the grace it may not be written yet"
+    );
+    let r = read(
+        &task,
+        S0 + AGENT_FILE_GRACE_S + 1,
+        Some(S0 - 600),
+        Some(&[]),
+        &none,
+    );
+    assert_eq!((r.state, r.why), (State::Lost, Some(Why::OutputGone)));
+}
+
+/// Command lines read live 2026-11-11 under the scratch session's claude.exe (paths scrubbed), each against the command
+/// the tool was given: a three-line command, single and double quotes, the second wrapper prefix with a backtick.
+#[test]
+fn measured_command_lines_match_their_tasks() {
+    let task = |command: &str| OpenTask {
+        command: Some(command.into()),
+        ..open_shell()
+    };
+    let three_lines = task("cd ..\necho \"start $(date +%s)\"\nsleep 70; echo done-two");
+    let three_lines_line = "\"C:\\Program Files\\Git\\bin\\bash.exe\" -c \"source /c/Users/USER/.claude/shell-snapshots/snapshot-bash-1.sh 2>/dev/null || true && export TEMP='C:\\Users\\USER\\AppData\\Local\\Temp' && eval 'cd ..\necho \\\"start $(date +%s)\\\"\nsleep 70; echo done-two' < /dev/null && pwd -P >| /c/Users/USER/AppData/Local/Temp/claude-af4e-cwd\"";
+    assert!(is_task_process(&three_lines, three_lines_line));
+    let quotes = task("sleep 60 && echo 'it is \"done\" now'");
+    let quotes_line = r#""C:\Program Files\Git\bin\bash.exe" -c "source /c/x.sh 2>/dev/null || true && eval 'sleep 60 && echo '\"'\"'it is \"done\" now'\"'\"'' < /dev/null && pwd -P >| /c/x/claude-faf3-cwd""#;
+    assert!(is_task_process(&quotes, quotes_line));
+    let backtick = task("x=`echo hi`; sleep 48; echo $x");
+    let backtick_line = r#""C:\Program Files\Git\bin\bash.exe" -c "{ case \"${BASH_VERSINFO-}\" in '2'|'3') \builtin printf '%s\n' 'x' ;; esac; } && eval 'x=`echo hi`; sleep 48; echo $x' < /dev/null && pwd -P >| /c/x/claude-2-cwd""#;
+    assert!(is_task_process(&backtick, backtick_line));
+    // Claude's own statusline shell, started under it in the same second as three launches, is no task's.
+    let statusline = r#""C:\Program Files\Git\bin\bash.exe" -c "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/Users/USER/.claude/statusline.ps1""#;
+    for t in [&three_lines, &quotes, &backtick] {
+        assert!(!is_task_process(t, statusline));
+    }
+    assert!(!is_task_process(&quotes, three_lines_line));
+}

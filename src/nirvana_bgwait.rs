@@ -30,8 +30,8 @@
 //! - running: alive, with output (or its start) within `QUIET_AFTER_S`.
 //!
 //! **Where it shows.** The herdr server reads it off its loop (`cached`, one worker thread, as `nirvana_spaces`'s
-//! model) and hands it on as the agent token `TOKEN`: in the window's snapshot (`server/client_shell.rs`) and in
-//! `agent.list` (`app/agents.rs`), which the phone reads. The sidebar row, the agents panel and the phone draw it
+//! model; the worker also reads again unasked, `poll_due`) and hands it on as the agent token `TOKEN`: in the
+//! window's snapshot (`server/client_shell.rs`) and in `agent.list` (`app/agents.rs`), which the phone reads. The sidebar row, the agents panel and the phone draw it
 //! (`shown_status`, `View::sentence`); herdr's own agent state is not changed, so `agent wait`, alerts' sources and
 //! everything else upstream still see what herdr detected.
 
@@ -76,6 +76,12 @@ const PENDING_MOST: usize = 256;
 const OPEN_MOST: usize = 64;
 /// A command is matched to a process by this many of its first characters, quotes and backslashes taken out.
 const COMMAND_MATCH: usize = 120;
+/// A background Agent whose own transcript is still missing this long after its launch is not running. A guess: the
+/// file is written when the subagent starts, so a few seconds would do; 30 s leaves room for a slow disk.
+pub const AGENT_FILE_GRACE_S: u64 = 30;
+/// How often the worker looks, unasked, at the transcripts it reads (one file length each; `poll_due`). A guess at a
+/// cost nobody notices: the reading under a new turn lasts at most this long plus one read.
+pub const POLL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -201,15 +207,28 @@ impl Ledger {
         match entry["type"].as_str() {
             Some("assistant") => self.assistant(&entry),
             Some("user") => self.user(&entry, at),
-            Some("queue-operation") if entry["operation"] == "enqueue" => {
-                if let Some(content) = entry["content"].as_str() {
-                    self.notifications(content, at);
+            // Fix round, measured 2026-11-11 on the owner's transcripts of the last 14 days (1,084 enqueues, 601
+            // dequeues, 460 removes): a notification that wakes an ended turn is enqueued, dequeued about 5 ms later
+            // and written as the turn's user line about 10 ms after that. A dequeue is a queued input becoming the next
+            // turn's, so the turn runs from there, before its user line is written. An enqueue alone starts nothing:
+            // after an ended turn, enqueues followed by removes and no turn were seen, so reading an enqueue as a turn
+            // would hide a real wait until the next turn ended. A remove carries the notification it took out; it is
+            // read as the enqueue is, so a task whose enqueue fell before the first read still closes.
+            Some("queue-operation") => match entry["operation"].as_str() {
+                Some("enqueue" | "remove") => {
+                    if let Some(content) = entry["content"].as_str() {
+                        self.notifications(content, at);
+                    }
                 }
-            }
+                Some("dequeue") => self.turn_ended = false,
+                _ => {}
+            },
             Some("attachment") if entry["attachment"]["type"] == "queued_command" => {
                 if let Some(prompt) = entry["attachment"]["prompt"].as_str() {
                     self.notifications(prompt, at);
                 }
+                // A queued input handed to the model as an attachment is part of a turn at work.
+                self.turn_ended = false;
             }
             Some("system") if entry["subtype"] == "turn_duration" => self.turn_ended = true,
             _ => {}
@@ -469,6 +488,13 @@ pub fn squash(text: &str) -> String {
 }
 
 /// Whether `command_line` is `task`'s process: it names the task's output file, or carries its command.
+///
+/// Fix round, measured live 2026-11-11 (Claude Code on Haiku in a scratch herdr session): a piped loop, a three-line
+/// command with `cd ..` first, `cd <dir> && ...`, single and double quotes, a backslash path, accented letters, a
+/// backtick and redirects all read running, each by its command inside the wrapper's `eval '...'` (two wrapper prefixes
+/// were seen; the command is never rewritten). Not matched by "a shell started near the launch": Claude starts its
+/// statusline as `bash.exe -c "powershell.exe ... statusline.ps1"` and git processes under itself on its own, one in the
+/// same second as three launches, so a dead task would have read running.
 pub fn is_task_process(task: &OpenTask, command_line: &str) -> bool {
     if command_line.contains(&format!("{}.output", task.id)) {
         return true;
@@ -526,7 +552,16 @@ pub fn classify(task: &OpenTask, evidence: &Evidence) -> Reading {
                 let path = dir
                     .join("subagents")
                     .join(format!("agent-{}.jsonl", task.id));
-                last_output = last_output.max((evidence.stat)(&path).and_then(wrote));
+                match (evidence.stat)(&path) {
+                    Some(stat) => last_output = wrote(stat).max(last_output),
+                    // Fix round: every background Agent launched in the owner's transcripts of the last 10 days had
+                    // its transcript there (82 of 82, 2026-11-11). One with none past the grace never started or
+                    // was removed: it is not running.
+                    None if evidence.now.saturating_sub(task.launched_at) > AGENT_FILE_GRACE_S => {
+                        return reading(State::Lost, last_output, Some(Why::OutputGone));
+                    }
+                    None => {}
+                }
             }
             Some(last_output.unwrap_or(0).max(task.launched_at))
         }
@@ -706,6 +741,11 @@ pub fn from_tokens<'a>(mut tokens: impl Iterator<Item = (&'a str, &'a str)>) -> 
 /// a Working from the screen (`background_agents_working`, `background_mcp_task_working` in
 /// `detect/manifests/claude.toml`, or anything else) is not a turn at work: it reads Idle. Blocked is the owner's to
 /// answer and stays.
+///
+/// Fix round: herdr's Working is not split by where it came from, and the screen cannot split it either: measured
+/// 2026-11-11, Claude's title spins (`osc_title_working`) through a background Agent wait with no turn running, as it
+/// does in a turn. So the transcript decides, and what keeps a turn from hiding is how fresh the reading is: the worker
+/// reads a transcript again within `POLL` of it growing (`poll_due`), and a dequeue starts the turn (`Ledger::feed`).
 pub fn shown_status(status: AgentStatus, view: Option<&View>) -> AgentStatus {
     match (status, view) {
         (AgentStatus::Working, Some(_)) => AgentStatus::Idle,
@@ -729,6 +769,8 @@ pub fn now_secs() -> u64 {
 pub struct Tail {
     path: PathBuf,
     offset: u64,
+    /// The file's length at the last read, partial line and all (`grew`).
+    len_seen: u64,
     pub ledger: Ledger,
 }
 
@@ -744,6 +786,11 @@ impl Tail {
         &self.path
     }
 
+    /// Whether the file's length differs from the last read's: one metadata call, no read.
+    pub fn grew(&self) -> bool {
+        std::fs::metadata(&self.path).is_ok_and(|meta| meta.len() != self.len_seen)
+    }
+
     /// Reads what was added since the last read: whole lines only, so a line being written is read next time. A file
     /// that shrank, or grew by more than `FIRST_READ_MOST`, is read again from its last `FIRST_READ_MOST`.
     pub fn catch_up(&mut self) {
@@ -754,6 +801,7 @@ impl Tail {
         let Ok(len) = file.metadata().map(|m| m.len()) else {
             return;
         };
+        self.len_seen = len;
         if len < self.offset || len - self.offset > FIRST_READ_MOST {
             self.offset = 0;
             self.ledger = Ledger::default();
@@ -823,40 +871,134 @@ fn stat(path: &Path) -> Option<Stat> {
     })
 }
 
-/// The reading of the Claude under this pane shell, as a token value. Runs on the worker thread only.
-fn probe(
-    shell_pid: u32,
-    cwd: Option<&str>,
-    tails: &mut HashMap<u32, (Tail, Instant)>,
-) -> Option<String> {
+/// A transcript the worker reads, and what it needs to read it again unasked (`poll`).
+struct Watched {
+    tail: Tail,
+    used: Instant,
+    claude_pid: u32,
+    waker: crate::nirvana_spaces::Waker,
+}
+
+/// What `tail` says now, checked against the evidence of the Claude `claude_pid`, as a token value.
+fn reading(tail: &mut Tail, claude_pid: u32) -> Option<String> {
+    tail.catch_up();
+    if !tail.ledger.turn_ended || tail.ledger.open().is_empty() {
+        return None;
+    }
+    let processes = processes_under(claude_pid);
+    let session_dir = tail.path().with_extension("");
+    let evidence = Evidence {
+        now: now_secs(),
+        claude_started: crate::nirvana_subagents::process_creation_secs(claude_pid),
+        processes: processes.as_deref(),
+        session_dir: Some(&session_dir),
+        stat: &stat,
+    };
+    view(&tail.ledger, &evidence).map(|view| view.token())
+}
+
+/// The pane's Claude and its transcript, found now.
+fn locate(shell_pid: u32, cwd: Option<&str>) -> Option<(u32, PathBuf)> {
     let job = crate::detect::foreground_job(shell_pid)?;
     let (agent, _, pid) = crate::detect::identify_agent_process_in_job(&job)?;
     if agent != crate::detect::Agent::Claude {
         return None;
     }
     let config = crate::nirvana::claude_config_dir()?;
-    let path = crate::nirvana_spaces::claude_transcript(&config, pid, cwd)?;
-    let (tail, used) = tails
-        .entry(shell_pid)
-        .or_insert_with(|| (Tail::new(path.clone()), Instant::now()));
-    *used = Instant::now();
-    if tail.path() != path {
-        *tail = Tail::new(path.clone());
-    }
-    tail.catch_up();
-    if !tail.ledger.turn_ended || tail.ledger.open().is_empty() {
+    Some((
+        pid,
+        crate::nirvana_spaces::claude_transcript(&config, pid, cwd)?,
+    ))
+}
+
+/// The reading of the Claude under this pane shell, as a token value. Runs on the worker thread only. A pane with no
+/// Claude is no longer watched, so `poll` never reads a transcript for a Claude that left.
+fn probe(
+    shell_pid: u32,
+    cwd: Option<&str>,
+    waker: &crate::nirvana_spaces::Waker,
+    watched: &mut HashMap<u32, Watched>,
+) -> Option<String> {
+    let Some((pid, path)) = locate(shell_pid, cwd) else {
+        watched.remove(&shell_pid);
         return None;
-    }
-    let processes = processes_under(pid);
-    let session_dir = path.with_extension("");
-    let evidence = Evidence {
-        now: now_secs(),
-        claude_started: crate::nirvana_subagents::process_creation_secs(pid),
-        processes: processes.as_deref(),
-        session_dir: Some(&session_dir),
-        stat: &stat,
     };
-    view(&tail.ledger, &evidence).map(|view| view.token())
+    let entry = watched.entry(shell_pid).or_insert_with(|| Watched {
+        tail: Tail::new(path.clone()),
+        used: Instant::now(),
+        claude_pid: pid,
+        waker: waker.clone(),
+    });
+    entry.used = Instant::now();
+    entry.claude_pid = pid;
+    entry.waker = waker.clone();
+    if entry.tail.path() != path {
+        entry.tail = Tail::new(path);
+    }
+    reading(&mut entry.tail, pid)
+}
+
+/// Whether the worker reads a watched transcript again without being asked. The review of 2026-11-11 found readings
+/// made only when the window or the phone asked: a reading kept while its turn had already started again, and one kept
+/// "running" long after its task went quiet or died. Measured live the same day: a background Agent's hand-back
+/// started a turn that herdr read as working, as it had read the wait before it, so nothing asked, and a reading 2 s
+/// old was still handed out with the turn under way. Now a transcript that grew is read again within `POLL` (a new
+/// turn writes its first line within about 15 ms of the queue taking its input), and a shown reading is checked
+/// against its processes and files every `REFRESH`.
+pub fn poll_due(shown: bool, since_read: Duration, grew: bool) -> bool {
+    grew || (shown && since_read >= REFRESH)
+}
+
+/// Stores a reading for `shell_pid` and wakes the server's loop when what it shows changed. `read_for` is herdr's state
+/// when the read was asked; a read nobody asked (`poll`) keeps the one the last ask set.
+fn publish(
+    shell_pid: u32,
+    token: Option<String>,
+    read_for: Option<AgentStatus>,
+    waker: &crate::nirvana_spaces::Waker,
+) {
+    let changed = {
+        let mut cache = cache().lock().unwrap_or_else(|e| e.into_inner());
+        let Some(entry) = cache.get_mut(&shell_pid) else {
+            return;
+        };
+        let changed = entry.token != token || read_for.is_some_and(|s| entry.read_for != Some(s));
+        entry.token = token;
+        if let Some(status) = read_for {
+            entry.read_for = Some(status);
+            entry.pending = false;
+        }
+        entry.checked = Some(Instant::now());
+        changed
+    };
+    if changed {
+        waker.dirty.request_generic();
+        waker.notify.notify_one();
+    }
+}
+
+/// Reads again each watched transcript `poll_due` names. A pane whose read is already queued is left to that read.
+fn poll(watched: &mut HashMap<u32, Watched>) {
+    for (shell_pid, entry) in watched.iter_mut() {
+        let shown = {
+            let cache = cache().lock().unwrap_or_else(|e| e.into_inner());
+            match cache.get(shell_pid) {
+                Some(cached) if !cached.pending => Some((
+                    cached.token.is_some(),
+                    cached.checked.map_or(Duration::MAX, |at| at.elapsed()),
+                )),
+                _ => None,
+            }
+        };
+        let Some((shown, since_read)) = shown else {
+            continue;
+        };
+        if !poll_due(shown, since_read, entry.tail.grew()) {
+            continue;
+        }
+        let token = reading(&mut entry.tail, entry.claude_pid);
+        publish(*shell_pid, token, None, &entry.waker);
+    }
 }
 
 struct Entry {
@@ -878,7 +1020,8 @@ struct Request {
 /// Whether a reading made while herdr read the pane as `read_for` may be shown now that it reads `now`. The live
 /// probe of 2026-11-10 (12:36:19) caught the cache handing out a "running" reading for 8 s after the task's
 /// notification had started a new turn and herdr read working: the reading was older than the turn. A reading
-/// made under another state is not shown; the read it waits for is asked at once.
+/// made under another state is not shown; the read it waits for is asked at once. A turn that starts while herdr
+/// already reads working (a background Agent's wait) changes no state; `poll_due` covers that one.
 pub fn usable(read_for: Option<AgentStatus>, now: AgentStatus) -> bool {
     read_for == Some(now)
 }
@@ -894,26 +1037,31 @@ fn worker() -> Option<&'static mpsc::Sender<Request>> {
         .get_or_init(|| {
             let (sender, receiver) = mpsc::channel::<Request>();
             crate::thread_spawn::spawn_named("nirvana-bgwait", move || {
-                let mut tails: HashMap<u32, (Tail, Instant)> = HashMap::new();
-                for request in receiver {
-                    tails.retain(|_, (_, used)| used.elapsed() < FORGET);
-                    let token = probe(request.shell_pid, request.cwd.as_deref(), &mut tails);
-                    let changed = {
-                        let mut cache = cache().lock().unwrap_or_else(|e| e.into_inner());
-                        let Some(entry) = cache.get_mut(&request.shell_pid) else {
-                            continue;
-                        };
-                        let changed =
-                            entry.token != token || entry.read_for != Some(request.status);
-                        entry.token = token;
-                        entry.read_for = Some(request.status);
-                        entry.checked = Some(Instant::now());
-                        entry.pending = false;
-                        changed
-                    };
-                    if changed {
-                        request.waker.dirty.request_generic();
-                        request.waker.notify.notify_one();
+                let mut watched: HashMap<u32, Watched> = HashMap::new();
+                let mut polled = Instant::now();
+                loop {
+                    match receiver.recv_timeout(POLL) {
+                        Ok(request) => {
+                            watched.retain(|_, entry| entry.used.elapsed() < FORGET);
+                            let token = probe(
+                                request.shell_pid,
+                                request.cwd.as_deref(),
+                                &request.waker,
+                                &mut watched,
+                            );
+                            publish(
+                                request.shell_pid,
+                                token,
+                                Some(request.status),
+                                &request.waker,
+                            );
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
+                    if polled.elapsed() >= POLL {
+                        polled = Instant::now();
+                        poll(&mut watched);
                     }
                 }
             })
