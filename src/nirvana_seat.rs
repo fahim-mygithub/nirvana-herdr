@@ -7868,6 +7868,8 @@ mod tests {
             HISTORICAL_DEFAULTS.last().copied(),
             Some(include_str!("nirvana_seats_v14.toml"))
         );
+        // Plan 71: v14 went after v13, which stays historical (control p70_v13_not_historical).
+        assert!(HISTORICAL_DEFAULTS.contains(&include_str!("nirvana_seats_v13.toml")));
         assert!(!differs_from_default(DEFAULT));
         assert!(!differs_from_default(&replace_mode_line(
             DEFAULT,
