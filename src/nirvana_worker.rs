@@ -2811,12 +2811,25 @@ pub fn type_prompt(pane: &str, text: &str) -> Result<(), String> {
     })
 }
 
-fn pane_env(project: &Project) -> Vec<String> {
-    let mut env = vec![format!(
-        "{}={}",
-        nirvana_run::PROJECT_ENV,
-        project.root.display()
+/// The variables a supervisor needs from its shell: the project (a worker's cwd is its worktree, whose git top level
+/// is not the project) and herdr's home when the caller has one. A new pane gets them with `--env`; a reused pane's
+/// launch line sets them (`exec_line`).
+fn launch_env(project: &Project) -> Vec<(String, String)> {
+    let mut env = vec![(
+        nirvana_run::PROJECT_ENV.to_owned(),
+        project.root.display().to_string(),
     )];
+    if let Ok(home) = std::env::var(crate::nirvana::HOME_ENV) {
+        env.push((crate::nirvana::HOME_ENV.to_owned(), home));
+    }
+    env
+}
+
+fn pane_env(project: &Project) -> Vec<String> {
+    let mut env: Vec<String> = launch_env(project)
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
     // `herdr` in the pane's shell is this build: the pane's command is then the same in every shell.
     if let Some(dir) = std::env::current_exe()
         .ok()
@@ -2826,10 +2839,221 @@ fn pane_env(project: &Project) -> Vec<String> {
         let sep = if cfg!(windows) { ';' } else { ':' };
         env.push(format!("PATH={}{sep}{path}", dir.display()));
     }
-    if let Ok(home) = std::env::var(crate::nirvana::HOME_ENV) {
-        env.push(format!("{}={home}", crate::nirvana::HOME_ENV));
-    }
     env
+}
+
+/// `PATH` with `dir` first, once. `seat exec` sets it on itself, so the worker's own `herdr` calls reach this build
+/// in any pane. 0.71.1: a pane herdr restored after a server restart had the machine `PATH`, where `herdr` was the
+/// stock 0.9.5 that knows no `seat`.
+pub(crate) fn path_with_dir_first(
+    dir: &Path,
+    path: Option<std::ffi::OsString>,
+) -> std::ffi::OsString {
+    let rest: Vec<PathBuf> = path
+        .as_deref()
+        .map(|path| std::env::split_paths(path).collect())
+        .unwrap_or_default();
+    if rest.first().is_some_and(|first| first == dir) {
+        return path.unwrap_or_default();
+    }
+    let all =
+        std::iter::once(dir.to_path_buf()).chain(rest.into_iter().filter(|entry| entry != dir));
+    std::env::join_paths(all).unwrap_or_else(|_| path.unwrap_or_default())
+}
+
+/// The shell in a worker's pane, which decides how `open_pane`'s launch line is quoted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaneShell {
+    PowerShell,
+    Cmd,
+    Posix,
+}
+
+impl PaneShell {
+    /// From a process name as `pane process-info` gives it; `None` for a program that is no shell this line knows.
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        let name = name
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(name)
+            .to_lowercase();
+        let name = name.trim_start_matches('-');
+        match name.strip_suffix(".exe").unwrap_or(name) {
+            "pwsh" | "powershell" => Some(Self::PowerShell),
+            "cmd" => Some(Self::Cmd),
+            "bash" | "zsh" | "sh" | "dash" | "ksh" | "fish" => Some(Self::Posix),
+            _ => None,
+        }
+    }
+
+    /// herdr's default pane shell on this platform, for a pane whose shell could not be read. A wrong guess only
+    /// fails the launch, which `confirm_pane_start` then catches.
+    fn platform_default() -> Self {
+        if cfg!(windows) {
+            Self::PowerShell
+        } else {
+            Self::Posix
+        }
+    }
+}
+
+/// A PowerShell single-quoted string. PowerShell also ends a single-quoted string at the typographic quotes
+/// U+2018 to U+201B, so each of those is doubled as `'` is.
+fn ps_quote(value: &str) -> String {
+    let mut out = String::from("'");
+    for ch in value.chars() {
+        if matches!(ch, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
+            out.push(ch);
+        }
+        out.push(ch);
+    }
+    out.push('\'');
+    out
+}
+
+fn posix_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// cmd has no escape inside double quotes, and a Windows path cannot hold `"`. A `%NAME%` in a path would still
+/// expand: cmd panes are not herdr's default, and a launch that goes wrong falls back to a detached start.
+fn cmd_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', ""))
+}
+
+/// The line `open_pane` types into a worker's pane: into the order's folder, the order's variables set, then this
+/// build's `herdr` by its full path. 0.71.1, the owner's project on 2026-11-13: panes restored after the herdr server
+/// restarted at 01:37 ran a shell with the machine `PATH`, so a bare `herdr seat exec` reached the stock herdr 0.9.5
+/// and printed `unknown command: seat` in five reused panes; the orders sat seated with no supervisor for up to 37
+/// minutes until Nirvana Claude typed the full path by hand.
+pub(crate) fn exec_line(
+    shell: PaneShell,
+    exe: &Path,
+    cwd: &str,
+    env: &[(String, String)],
+    order: &str,
+    run: &str,
+    pane: &str,
+) -> String {
+    let exe = exe.display().to_string();
+    match shell {
+        PaneShell::PowerShell => {
+            let mut line = format!("Set-Location -LiteralPath {}", ps_quote(cwd));
+            for (key, value) in env {
+                line.push_str(&format!("; $env:{key} = {}", ps_quote(value)));
+            }
+            line.push_str(&format!(
+                "; & {} seat exec {} --run {} --pane {}",
+                ps_quote(&exe),
+                ps_quote(order),
+                ps_quote(run),
+                ps_quote(pane)
+            ));
+            line
+        }
+        PaneShell::Cmd => {
+            let mut line = format!("cd /d {}", cmd_quote(cwd));
+            for (key, value) in env {
+                line.push_str(&format!(" && set {}", cmd_quote(&format!("{key}={value}"))));
+            }
+            line.push_str(&format!(
+                " && {} seat exec {} --run {} --pane {}",
+                cmd_quote(&exe),
+                cmd_quote(order),
+                cmd_quote(run),
+                cmd_quote(pane)
+            ));
+            line
+        }
+        PaneShell::Posix => {
+            let mut line = format!("cd {} &&", posix_quote(cwd));
+            for (key, value) in env {
+                line.push_str(&format!(" {key}={}", posix_quote(value)));
+            }
+            line.push_str(&format!(
+                " {} seat exec {} --run {} --pane {}",
+                posix_quote(&exe),
+                posix_quote(order),
+                posix_quote(run),
+                posix_quote(pane)
+            ));
+            line
+        }
+    }
+}
+
+/// The shell running in `pane`, from its foreground processes.
+fn pane_shell(pane: &str) -> Option<PaneShell> {
+    let process = herdr_json(&["pane", "process-info", "--pane", pane]).ok()?;
+    [
+        "/result/process_info/foreground_processes",
+        "/process_info/foreground_processes",
+    ]
+    .iter()
+    .find_map(|pointer| process.pointer(pointer))
+    .and_then(Value::as_array)?
+    .iter()
+    .filter_map(|process| process.get("name").and_then(Value::as_str))
+    .find_map(PaneShell::from_name)
+}
+
+/// The pane's last line with text, cut to 160 characters: what the shell said to the launch line.
+fn pane_last_line(pane: &str) -> Option<String> {
+    let text = herdr_text(&["pane", "read", pane, "--source", "recent-unwrapped"])?;
+    let line = text
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    Some(line.chars().take(160).collect())
+}
+
+/// How long `open_pane` waits for the supervisor it typed into a pane to take the order's lock. `seat exec` takes
+/// the lock as its first act.
+const PANE_START_LIMIT: Duration = Duration::from_secs(10);
+
+/// After `pane run`: the pane's supervisor took the order's lock within `limit`, or the order starts detached and the
+/// answer says the pane launch failed and why. 0.71.1: `open_pane` used to return `pane <id>` whatever the pane did
+/// with the line, and five orders sat seated with no supervisor.
+pub(crate) fn confirm_pane_start(
+    pane: &str,
+    typed: Result<(), String>,
+    started: impl Fn() -> bool,
+    last_line: impl FnOnce() -> Option<String>,
+    detached: impl FnOnce() -> Result<String, String>,
+    limit: Duration,
+    poll: Duration,
+) -> Result<String, String> {
+    let why = match typed {
+        Ok(()) => {
+            let begun = Instant::now();
+            loop {
+                if started() {
+                    return Ok(format!("pane {pane}"));
+                }
+                if begun.elapsed() >= limit {
+                    break;
+                }
+                std::thread::sleep(poll);
+            }
+            match last_line() {
+                Some(line) => format!(
+                    "no worker took the order within {} s; the pane's last line reads: {line}",
+                    limit.as_secs()
+                ),
+                None => format!("no worker took the order within {} s", limit.as_secs()),
+            }
+        }
+        Err(why) => format!("the launch line could not be typed: {why}"),
+    };
+    match detached() {
+        Ok(how) => Ok(format!(
+            "the launch in pane {pane} failed: {why}. Started it detached instead: {how}"
+        )),
+        Err(err) => Err(format!(
+            "the launch in pane {pane} failed: {why}. The detached start failed too: {err}"
+        )),
+    }
 }
 
 /// Opens the worker's pane in the run's tab (a new tab for the run's first worker) and starts `seat exec` in it.
@@ -2913,13 +3137,29 @@ fn open_pane(project: &Project, run: &str, seated: &Seated) -> Result<String, St
         std::thread::sleep(Duration::from_millis(200));
     }
     std::thread::sleep(Duration::from_millis(300));
-    herdr_ok(&[
-        "pane",
-        "run",
+    // 0.71.1: the full path of this build, the order's folder and its variables, in the pane's own shell; a reused
+    // pane got none of the `--env` above, and one restored after a server restart found the stock herdr on `PATH`.
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("herdr"));
+    let shell = pane_shell(&pane).unwrap_or_else(PaneShell::platform_default);
+    let line = exec_line(
+        shell,
+        &exe,
+        &seated.cwd,
+        &launch_env(project),
+        &seated.order,
+        run,
         &pane,
-        &format!("herdr seat exec {} --run {run} --pane {pane}", seated.order),
-    ])?;
-    Ok(format!("pane {pane}"))
+    );
+    let typed = herdr_ok(&["pane", "run", &pane, &line]);
+    confirm_pane_start(
+        &pane,
+        typed,
+        || live(project, run, &seated.order),
+        || pane_last_line(&pane),
+        || spawn_detached(project, run, seated),
+        PANE_START_LIMIT,
+        Duration::from_millis(200),
+    )
 }
 
 /// The panes of the tab `neighbour` is in, measured, with which of them a finished worker of this run left idle.
@@ -3108,6 +3348,14 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             };
             if !valid_id(&order) || !valid_id(&run) {
                 usage_exit();
+            }
+            // 0.71.1: the worker's `herdr` is this build whatever `PATH` its pane's shell had (`path_with_dir_first`).
+            // Set before any thread starts.
+            if let Some(dir) = std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(Path::to_path_buf))
+            {
+                std::env::set_var("PATH", path_with_dir_first(&dir, std::env::var_os("PATH")));
             }
             let project = Project::from_env();
             let mut out = std::io::stdout();
@@ -3550,6 +3798,31 @@ fn git_in(root: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Makes an order's worktree on a new branch at the project's `HEAD`, and records that commit beside the worktree
+/// (`nirvana_gate::start_file`) so the gate can tell the owner's commits the worktree began with from the worker's.
+/// 0.71.1: am1-assetmap's worktree began at the owner's commit 7dbefa0 on main, the integration branch lacked it, and
+/// the gate counted its 35 files as the order's.
+pub(crate) fn add_worktree(root: &Path, path: &Path, branch: &str) -> Result<(), String> {
+    let start = git_in(root, &["rev-parse", "--verify", "HEAD^{commit}"])
+        .map(|sha| sha.trim().to_owned())
+        .map_err(|why| format!("git rev-parse HEAD: {why}"))?;
+    git_in(
+        root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            &path.display().to_string(),
+            &start,
+        ],
+    )
+    .map_err(|why| format!("git worktree add: {why}"))?;
+    let record = crate::nirvana_gate::start_file(path);
+    std::fs::write(&record, format!("{start}\n"))
+        .map_err(|err| format!("{}: {err}", record.display()))
+}
+
 /// `herdr seat run`: book, copy the order, open the worktree, journal `seated`, start the worker. The tests' entry;
 /// the CLI passes its `--profile` to `seat_order_with`.
 // Plan 40 review D4: compiled for the tests only, as `write_order_config` is.
@@ -3720,18 +3993,7 @@ pub fn seat_order_with(
         let path = project.worktrees_dir().join(&request.order);
         let branch = format!("nirvana/{}", request.order);
         if !path.exists() {
-            git_in(
-                &project.root,
-                &[
-                    "worktree",
-                    "add",
-                    "-b",
-                    &branch,
-                    &path.display().to_string(),
-                    "HEAD",
-                ],
-            )
-            .map_err(|why| (2, format!("git worktree add: {why}")))?;
+            add_worktree(&project.root, &path, &branch).map_err(|why| (2, why))?;
         }
         (path.clone(), Some(path.display().to_string()), Some(branch))
     } else if booked.class == crate::nirvana_knowledge::TEACH_CLASS {
@@ -4121,6 +4383,8 @@ fn remove_worktree(root: &Path, worktree: &Path) -> Result<(), String> {
         let removed = git_in(root, &["worktree", "remove", "--force", &path]);
         if removed.is_ok() || !worktree.exists() {
             let _ = git_in(root, &["worktree", "prune"]);
+            // Its start record goes with it: a later worktree of the same name records its own.
+            let _ = std::fs::remove_file(crate::nirvana_gate::start_file(worktree));
             return Ok(());
         }
         let unregistered = git_in(root, &["worktree", "list", "--porcelain"])
@@ -4133,6 +4397,7 @@ fn remove_worktree(root: &Path, worktree: &Path) -> Result<(), String> {
             .unwrap_or(false);
         if unregistered && std::fs::remove_dir_all(worktree).is_ok() {
             let _ = git_in(root, &["worktree", "prune"]);
+            let _ = std::fs::remove_file(crate::nirvana_gate::start_file(worktree));
             return Ok(());
         }
         if started.elapsed() > Duration::from_secs(5) {

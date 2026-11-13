@@ -28,7 +28,8 @@
 //! The order file's gate lines, each at the start of a line, anywhere in the order, any number of times:
 //!
 //! ```text
-//! owns: src/calc.py tests/**/*.py      paths from the repository root; `*` within a name, `**` across folders
+//! owns: src/calc.py tests/**/*.py      paths from the repository root; `*` within a name, `**` across folders,
+//!                                      a trailing `/` the whole folder
 //! test: python -m pytest -q -rA tests  one command, run without a shell, in the worker's folder
 //! check: test_mul test_add             names that must appear in the test output
 //! serves: 8770                         ops orders: ports the worker's pane must listen on
@@ -40,6 +41,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -289,7 +291,9 @@ pub fn spec(text: &str) -> Spec {
     spec
 }
 
-/// `*` and `?` within one path segment, `**` across any number of segments, `/` the only separator.
+/// `*` and `?` within one path segment, `**` across any number of segments, `/` the only separator. A pattern ending
+/// in `/` names a folder and matches everything under it, as `<folder>/**` does. 0.71.1: c0-skeleton-s1's `owns:
+/// Config/` and `owns: Source/InkAether/` matched nothing, and the order was sent back for 309 files it owned.
 pub fn glob_match(pattern: &str, path: &str) -> bool {
     fn segments(p: &[&str], s: &[&str]) -> bool {
         match (p.first(), s.first()) {
@@ -312,7 +316,10 @@ pub fn glob_match(pattern: &str, path: &str) -> bool {
     }
     let pattern = pattern.trim_start_matches("./");
     let path = path.trim_start_matches("./");
-    let p: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
+    let mut p: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
+    if pattern.ends_with('/') && !p.is_empty() {
+        p.push("**");
+    }
     let s: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     segments(&p, &s)
 }
@@ -2706,6 +2713,90 @@ pub fn changed_files(cwd: &Path, base: &str) -> Result<Vec<String>, String> {
     )
 }
 
+/// Where `nirvana_worker::add_worktree` records the commit a worktree began at: beside the worktree, never in it.
+pub fn start_file(worktree: &Path) -> PathBuf {
+    let name = worktree
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    worktree.with_file_name(format!("{name}.start"))
+}
+
+fn changed_between(cwd: &Path, from: &str, to: &str) -> Result<HashSet<String>, String> {
+    Ok(
+        git(cwd, &["diff", "--name-only", "--no-renames", from, to])?
+            .lines()
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+/// Of `changed` (against `base`, after the rebase onto it), the paths that came with the commit `start` the worktree
+/// began at and that the worker left as they were. 0.71.1: am1-assetmap's worktree began at the owner's commit
+/// 7dbefa0 on main, a minute after it; the integration branch lacked it, so the rebase carried it as a copy and the
+/// owned axis sent the order back for its 35 files.
+///
+/// A changed path is the owner's only when both hold, so no edit of the worker's is ever dropped:
+/// - HEAD has it exactly as `start` had it: the worker's net change to it is nothing.
+/// - `base` has not changed it since `fork`, where `start` and `base` meet: the branch's version is not a revert of
+///   another order's merged work.
+///
+/// HEAD differs from `base` there, so `start` differs from `fork`: the change came with the worktree. `start` is
+/// herdr's record, written when the worktree was made, and must name a commit.
+pub fn begun_with(
+    cwd: &Path,
+    base: &str,
+    start: &str,
+    changed: &[String],
+) -> Result<Vec<String>, String> {
+    let start = git(
+        cwd,
+        &["rev-parse", "--verify", &format!("{start}^{{commit}}")],
+    )?
+    .trim()
+    .to_owned();
+    let fork = git(cwd, &["merge-base", &start, base])?.trim().to_owned();
+    let integrated = changed_between(cwd, &fork, base)?;
+    let worker = changed_between(cwd, &start, "HEAD")?;
+    Ok(changed
+        .iter()
+        .filter(|path| !worker.contains(*path) && !integrated.contains(*path))
+        .cloned()
+        .collect())
+}
+
+/// `changed` without the paths `begun_with` gives, and a note saying how many were left out. With no start record
+/// (a worktree made before 0.71.1) or a git error, every path is kept, as before.
+fn without_begun_with(
+    cwd: &Path,
+    base: &str,
+    changed: Vec<String>,
+) -> (Vec<String>, Option<String>) {
+    let Some(start) = std::fs::read_to_string(start_file(cwd))
+        .ok()
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
+    else {
+        return (changed, None);
+    };
+    match begun_with(cwd, base, &start, &changed) {
+        Ok(theirs) if !theirs.is_empty() => {
+            let note = format!(
+                "{} file(s) the worktree began with at {} and the worker left alone are not counted",
+                theirs.len(),
+                short_sha(&start)
+            );
+            let kept = changed
+                .into_iter()
+                .filter(|path| !theirs.contains(path))
+                .collect();
+            (kept, Some(note))
+        }
+        _ => (changed, None),
+    }
+}
+
 /// Merges the gated head into the integration branch with no checkout: the order's branch is rebased onto the
 /// branch's tip, so the merge's tree is the head's tree. `update-ref` takes the old value, so a branch that moved
 /// since the gate is refused, not overwritten. The served checkout is never touched (memory
@@ -2895,6 +2986,11 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
         // Only an order with no branch comes here: a branch gives a base or returns above.
         _ => order_changes(subject),
     };
+    // 0.71.1: a worktree's paths that came with the owner's commits it began at are not the order's.
+    let changed = changed.map(|(changed, note)| match (&base, worktree) {
+        (Some(base), true) => without_begun_with(subject.cwd, base, changed),
+        _ => (changed, note.map(str::to_owned)),
+    });
     axes.push(match changed {
         Ok((changed, note)) => {
             let mut owned = owned_axis(subject.class, &changed, &subject.spec.owns);

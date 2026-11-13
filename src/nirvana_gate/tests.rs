@@ -4503,3 +4503,128 @@ fn c40b_a_media_order_cites_the_local_file_it_opened() {
     let axis = sources_axis("media.video", None, Some(&report), &stream).expect("an axis");
     assert_eq!(axis.mark, Mark::Pass, "{axis:?}");
 }
+
+// ---- 0.71.1: a folder owned by its trailing slash; the owner's commits a worktree began with ----
+
+#[test]
+fn p72_an_owns_line_ending_in_a_slash_owns_the_whole_folder() {
+    assert!(glob_match("Config/", "Config/DefaultEngine.ini"));
+    assert!(glob_match(
+        "Source/InkAether/",
+        "Source/InkAether/Private/Deep/A.cpp"
+    ));
+    assert!(!glob_match("Config/", "ConfigX/a.ini"));
+    assert!(!glob_match("Config/", "Other/Config/a.ini"));
+    // A bare slash owns nothing, as an empty line does.
+    assert!(!glob_match("/", "a.txt"));
+    // A Windows separator is read as `/` first.
+    let read = spec("owns: Config\\ Source/InkAether/\n");
+    let changed = vec![
+        "Config/DefaultEngine.ini".to_owned(),
+        "Source/InkAether/Private/A.cpp".to_owned(),
+    ];
+    let axis = owned_axis("build.bounded", &changed, &read.owns);
+    assert_eq!(axis.mark, Mark::Pass, "{axis:?}");
+}
+
+/// As the owner's project on 2026-11-13: the integration branch starts at `base`, then the owner commits on main,
+/// then the order's worktree is made from main through herdr's own `add_worktree`, which records where it began.
+fn begun_after_an_owner_commit(name: &str, order: &str) -> (PathBuf, PathBuf) {
+    let root = repo(name);
+    ensure_integration(&root, "r1").expect("integration");
+    std::fs::create_dir_all(root.join("Docs").join("Handoff")).expect("docs");
+    std::fs::write(
+        root.join("Docs").join("Handoff").join("TABLE.md"),
+        "the table\n",
+    )
+    .expect("doc");
+    std::fs::write(root.join("README.md"), "calc, with the handoff\n").expect("readme");
+    sh(&root, &["add", "Docs/Handoff/TABLE.md", "README.md"]);
+    sh(&root, &["commit", "-q", "-m", "Handoff (owner)"]);
+    let path = root.join(".nirvana").join("worktrees").join(order);
+    crate::nirvana_worker::add_worktree(&root, &path, &format!("nirvana/{order}"))
+        .expect("worktree");
+    nirvana_run::ensure_dir(&path.join(".nirvana")).expect("dir");
+    std::fs::create_dir_all(path.join(".nirvana").join("orders")).expect("orders");
+    std::fs::write(
+        path.join(".nirvana")
+            .join("orders")
+            .join(format!("{order}.md")),
+        "the order\n",
+    )
+    .expect("copy");
+    (root, path)
+}
+
+#[test]
+fn p72_the_owners_commits_a_worktree_began_with_are_not_the_orders() {
+    let (_root, cwd) = begun_after_an_owner_commit("p72-begun", "am1");
+    work(&cwd);
+    let spec = spec_with(&["calc.py", "test_*.py"], "git ls-files", &["test_mul"]);
+    let det = run_det(&_root, &cwd, "am1", &spec, Some(&done()));
+    let owned = axis(&det, "owned");
+    assert_eq!(owned.mark, Mark::Pass, "{det:#?}");
+    assert!(
+        owned.why.contains("2 file(s) the worktree began with"),
+        "{}",
+        owned.why
+    );
+}
+
+#[test]
+fn p72_without_the_start_record_the_owners_files_still_count() {
+    // A worktree made before 0.71.1 has no record: the gate counts as it did, which is the sent-back am1.
+    let (root, cwd) = begun_after_an_owner_commit("p72-norecord", "am1");
+    std::fs::remove_file(start_file(&cwd)).expect("record");
+    work(&cwd);
+    let spec = spec_with(&["calc.py", "test_*.py"], "git ls-files", &["test_mul"]);
+    let det = run_det(&root, &cwd, "am1", &spec, Some(&done()));
+    let owned = axis(&det, "owned");
+    assert_eq!(owned.mark, Mark::Fail, "{det:#?}");
+    assert!(
+        owned.lines.iter().any(|f| f == "Docs/Handoff/TABLE.md"),
+        "{owned:?}"
+    );
+}
+
+#[test]
+fn p72_a_worker_edit_to_a_file_the_worktree_began_with_still_counts() {
+    let (root, cwd) = begun_after_an_owner_commit("p72-sneak", "am1");
+    work(&cwd);
+    std::fs::write(
+        cwd.join("README.md"),
+        "calc, with the handoff, and the worker's line\n",
+    )
+    .expect("edit");
+    let spec = spec_with(&["calc.py", "test_*.py"], "git ls-files", &["test_mul"]);
+    let det = run_det(&root, &cwd, "am1", &spec, Some(&done()));
+    let owned = axis(&det, "owned");
+    assert_eq!(owned.mark, Mark::Fail, "{det:#?}");
+    assert_eq!(owned.lines, vec!["README.md".to_owned()], "{owned:?}");
+}
+
+#[test]
+fn p72_a_branch_that_undoes_merged_work_keeps_the_file_as_the_orders() {
+    // The integration branch changed README.md (another order's merged work) and the owner's main changed it too:
+    // a branch that lands main's version over it is not passed as the owner's.
+    let root = repo("p72-revert");
+    ensure_integration(&root, "r1").expect("integration");
+    sh(&root, &["checkout", "-q", "nirvana-integrate/r1"]);
+    std::fs::write(root.join("README.md"), "calc, as another order merged it\n").expect("merged");
+    sh(&root, &["commit", "-q", "-am", "another order"]);
+    sh(&root, &["checkout", "-q", "main"]);
+    std::fs::write(root.join("README.md"), "calc, as the owner wrote it\n").expect("owner");
+    sh(&root, &["commit", "-q", "-am", "owner"]);
+    let start = rev(&root, "HEAD").expect("start");
+    let base = rev(&root, "refs/heads/nirvana-integrate/r1").expect("base");
+    let path = root.join(".nirvana").join("worktrees").join("o1");
+    crate::nirvana_worker::add_worktree(&root, &path, "nirvana/o1").expect("worktree");
+    let changed = vec!["README.md".to_owned()];
+    assert_eq!(begun_with(&path, &base, &start, &changed), Ok(Vec::new()));
+    // And without the integration branch's change the same file is the owner's.
+    let fork = sh(&root, &["merge-base", &start, &base]).trim().to_owned();
+    assert_eq!(
+        begun_with(&path, &fork, &start, &changed),
+        Ok(vec!["README.md".to_owned()])
+    );
+}

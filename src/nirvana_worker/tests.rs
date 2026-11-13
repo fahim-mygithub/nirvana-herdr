@@ -3118,3 +3118,226 @@ fn c40b_a_tool_call_is_open_from_its_call_to_its_answer() {
     stream.feed(r#"{"event":"step_update","step_update":{"step_index":3,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{"parameters":{}}}}"#);
     assert!(!stream.tool_open());
 }
+
+// ---- 0.71.1: the launch in a reused pane ----
+
+fn launch_env_for(root: &str) -> Vec<(String, String)> {
+    vec![("NIRVANA_PROJECT".to_owned(), root.to_owned())]
+}
+
+#[test]
+fn p72_the_launch_line_names_this_build_by_its_full_path_in_the_panes_own_shell() {
+    let exe = Path::new(r"C:\Users\o'neil\Nirvana Herdr\herdr.exe");
+    let env = launch_env_for(r"C:\Megajam - Ink & Aether");
+    let line = exec_line(
+        PaneShell::PowerShell,
+        exe,
+        r"C:\Megajam - Ink & Aether\.nirvana\worktrees\n0",
+        &env,
+        "n0-relay-lr",
+        "ia1",
+        "wP:p1D",
+    );
+    assert_eq!(
+        line,
+        r"Set-Location -LiteralPath 'C:\Megajam - Ink & Aether\.nirvana\worktrees\n0'; $env:NIRVANA_PROJECT = 'C:\Megajam - Ink & Aether'; & 'C:\Users\o''neil\Nirvana Herdr\herdr.exe' seat exec 'n0-relay-lr' --run 'ia1' --pane 'wP:p1D'"
+    );
+    // PowerShell ends a single-quoted string at a typographic quote too.
+    assert_eq!(ps_quote("a\u{2019}b'c"), "'a\u{2019}\u{2019}b''c'");
+    let cmd = exec_line(PaneShell::Cmd, exe, r"C:\w", &env, "o1", "r1", "p1");
+    assert_eq!(
+        cmd,
+        r#"cd /d "C:\w" && set "NIRVANA_PROJECT=C:\Megajam - Ink & Aether" && "C:\Users\o'neil\Nirvana Herdr\herdr.exe" seat exec "o1" --run "r1" --pane "p1""#
+    );
+    let posix = exec_line(
+        PaneShell::Posix,
+        Path::new("/opt/o'neil/herdr"),
+        "/w",
+        &launch_env_for("/p"),
+        "o1",
+        "r1",
+        "p1",
+    );
+    assert_eq!(
+        posix,
+        r"cd '/w' && NIRVANA_PROJECT='/p' '/opt/o'\''neil/herdr' seat exec 'o1' --run 'r1' --pane 'p1'"
+    );
+}
+
+#[test]
+fn p72_a_panes_shell_is_read_from_its_process_name() {
+    assert_eq!(
+        PaneShell::from_name("pwsh.exe"),
+        Some(PaneShell::PowerShell)
+    );
+    assert_eq!(
+        PaneShell::from_name(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+        Some(PaneShell::PowerShell)
+    );
+    assert_eq!(PaneShell::from_name("CMD.EXE"), Some(PaneShell::Cmd));
+    assert_eq!(PaneShell::from_name("-bash"), Some(PaneShell::Posix));
+    assert_eq!(PaneShell::from_name("/usr/bin/zsh"), Some(PaneShell::Posix));
+    assert_eq!(PaneShell::from_name("herdr.exe"), None);
+    assert_eq!(PaneShell::from_name("nu"), None);
+}
+
+/// The PowerShell line, run by Windows PowerShell: the folder, the variable and the arguments reach the program,
+/// through a path with a single quote and spaces in it.
+#[cfg(windows)]
+#[test]
+fn p72_powershell_runs_the_launch_line_as_written() {
+    let dir = temp_dir("p72-ps").join("it's a dir");
+    let work = dir.join("work tree");
+    std::fs::create_dir_all(&work).expect("dirs");
+    let fake = dir.join("fake herdr.cmd");
+    std::fs::write(
+        &fake,
+        "@echo off\r\necho %CD%^|%NIRVANA_PROJECT%^|%*> \"%~dp0out.txt\"\r\n",
+    )
+    .expect("fake");
+    let line = exec_line(
+        PaneShell::PowerShell,
+        &fake,
+        &work.display().to_string(),
+        &launch_env_for(r"C:\it's the project"),
+        "o1-x",
+        "r1",
+        "w1:p2",
+    );
+    let out = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &line,
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("powershell");
+    assert!(out.status.success(), "{out:?}");
+    let seen = std::fs::read_to_string(dir.join("out.txt")).expect("the fake ran");
+    assert_eq!(
+        seen.trim(),
+        format!(
+            r"{}|C:\it's the project|seat exec o1-x --run r1 --pane w1:p2",
+            work.display()
+        )
+    );
+}
+
+#[test]
+fn p72_a_pane_launch_counts_only_when_the_supervisor_takes_the_order() {
+    use std::cell::Cell;
+    let fast = Duration::from_millis(1);
+    let limit = Duration::from_millis(30);
+    // The supervisor took the lock: the pane is the answer and nothing starts detached.
+    let detached = Cell::new(0);
+    let seen = Cell::new(0);
+    let answer = confirm_pane_start(
+        "w1:p2",
+        Ok(()),
+        || {
+            seen.set(seen.get() + 1);
+            seen.get() >= 3
+        },
+        || None,
+        || {
+            detached.set(detached.get() + 1);
+            Ok("detached pid 1".into())
+        },
+        Duration::from_secs(5),
+        fast,
+    );
+    assert_eq!(answer, Ok("pane w1:p2".to_owned()));
+    assert_eq!(detached.get(), 0);
+    // The stock herdr answered the line: the order starts detached and the answer says why and where.
+    let answer = confirm_pane_start(
+        "w1:p2",
+        Ok(()),
+        || false,
+        || Some("unknown command: seat".into()),
+        || Ok(r"detached pid 7, view in C:\p\streams\o1.log".into()),
+        limit,
+        fast,
+    )
+    .expect("detached");
+    assert!(
+        answer.contains("the launch in pane w1:p2 failed"),
+        "{answer}"
+    );
+    assert!(answer.contains("unknown command: seat"), "{answer}");
+    assert!(answer.contains(r"view in C:\p\streams\o1.log"), "{answer}");
+    // `pane run` itself refused: no wait, straight to detached.
+    let begun = Instant::now();
+    let answer = confirm_pane_start(
+        "w1:p2",
+        Err("herdr pane run: no such pane".into()),
+        || false,
+        || None,
+        || Ok("detached pid 8".into()),
+        Duration::from_secs(5),
+        fast,
+    )
+    .expect("detached");
+    assert!(begun.elapsed() < Duration::from_secs(2));
+    assert!(answer.contains("no such pane"), "{answer}");
+    // Both failed: the caller gets an error naming both.
+    let answer = confirm_pane_start(
+        "w1:p2",
+        Ok(()),
+        || false,
+        || None,
+        || Err("spawn: access denied".into()),
+        limit,
+        fast,
+    );
+    let why = answer.expect_err("both failed");
+    assert!(
+        why.contains("failed") && why.contains("access denied"),
+        "{why}"
+    );
+}
+
+#[test]
+fn p72_seat_exec_puts_its_own_folder_first_on_path_once() {
+    let dir = Path::new(if cfg!(windows) { r"C:\build" } else { "/build" });
+    let other = if cfg!(windows) { r"C:\stock" } else { "/stock" };
+    let path = std::env::join_paths([Path::new(other), dir]).expect("join");
+    let got = path_with_dir_first(dir, Some(path));
+    let parts: Vec<PathBuf> = std::env::split_paths(&got).collect();
+    assert_eq!(parts, vec![dir.to_path_buf(), PathBuf::from(other)]);
+    // Already first: unchanged.
+    assert_eq!(path_with_dir_first(dir, Some(got.clone())), got);
+    // No PATH at all.
+    let alone: Vec<PathBuf> = std::env::split_paths(&path_with_dir_first(dir, None)).collect();
+    assert_eq!(alone, vec![dir.to_path_buf()]);
+}
+
+#[test]
+fn p72_a_new_worktree_records_the_commit_it_began_at_beside_itself() {
+    let root = temp_dir("p72-start");
+    let git = |args: &[&str]| git_in(&root, args).unwrap_or_else(|why| panic!("{why}"));
+    git(&["-c", "init.defaultBranch=main", "init", "-q"]);
+    git(&["config", "user.name", "T"]);
+    git(&["config", "user.email", "t@t"]);
+    std::fs::write(root.join("a.txt"), "a\n").expect("a");
+    git(&["add", "a.txt"]);
+    git(&["commit", "-q", "-m", "base"]);
+    let head = git(&["rev-parse", "HEAD"]).trim().to_owned();
+    let path = root.join(".nirvana").join("worktrees").join("o1");
+    add_worktree(&root, &path, "nirvana/o1").expect("worktree");
+    assert!(path.join("a.txt").exists());
+    let record = crate::nirvana_gate::start_file(&path);
+    assert_eq!(
+        record,
+        root.join(".nirvana").join("worktrees").join("o1.start")
+    );
+    assert_eq!(
+        std::fs::read_to_string(&record).expect("record").trim(),
+        head
+    );
+    // Removing the worktree takes its record.
+    remove_worktree(&root, &path).expect("remove");
+    assert!(!record.exists());
+}

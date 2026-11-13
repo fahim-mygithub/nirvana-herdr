@@ -3,6 +3,39 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.71.1: workers start in reused panes, `owns: dir/` owns the folder, owner commits stay the owner's
+
+- **Changed:** three gate and launch fixes.
+  - A worker launched into a pane now types this build's full path, not a bare `herdr`. The line also moves into the
+    order's folder and sets `NIRVANA_PROJECT` and herdr's home, quoted for the pane's shell. The shell is read from
+    the pane: PowerShell, cmd, or a POSIX shell. herdr then waits up to 10 s for the worker to take the order. If it
+    does not, the order starts detached, and the launch answer says the pane launch failed, the pane's last line,
+    and where the log is. `seat exec` also puts its own folder first on `PATH`, so a worker's `herdr` calls reach
+    this build. Every launch goes this way: a first order, a send-back, a reseat, a `-lr` lesson review and a tick
+    restart.
+  - An `owns:` path ending in `/` owns everything under that folder, as `dir/**` does. A bare `/` owns nothing.
+  - A new worktree records the commit it began at, in `.nirvana/worktrees/<order>.start`. At the gate, a changed
+    file is left out of the owned count only when two things hold. The worker's branch has it exactly as that commit
+    had it. The integration branch has not changed it since the two met. The owned axis says how many it left out.
+    A worktree made before this version has no record and is counted as before.
+- **Because:** the owner, 2026-11-13: "Can you check the Megajam project especially lately the runs have not been
+  showing up on herder. Check for bugs as well." and "Go ahead".
+- **Measured:** 2026-11-13 on the owner's project, run `ia1`, read only. The herdr server restarted at 01:37. The
+  panes it restored had the machine `PATH`, where `herdr` is the stock 0.9.5. The scrollback of the reused panes for
+  n0-relay-lr, n1-netclient, gh1-pages-b, dl1-megascans-candle and its `-s1` and `-lr` shows `unknown command: seat`.
+  The launch still answered `pane <id>`. In the run's journal, gh1-pages-b's worker started 36.7 minutes after it was
+  seated, and n0-relay-lr, dl1-megascans-candle-s1 and dl1-megascans-candle-lr never started. In a scratch herdr
+  session with the stock herdr first on `PATH`, the old line printed `unknown command: seat`. The new line, in the
+  same pwsh pane, ran this build in a folder with `'` and `&` in its name and printed `no order o1 in run r1`.
+  c0-skeleton-s1 was sent back for 309 files under folder lines such as `owns: Config/`. am1-assetmap was
+  sent back for 35 files from the owner's commit 7dbefa0 on main at 01:20. Its worktree began at 7dbefa0 at 01:21. The
+  integration branch was cut before it, so the rebase carried a copy, 383e65a. Replaying the new rule on that history
+  leaves out exactly 7dbefa0's 35 files and keeps the worker's 15. 11 new tests. 24 p72 controls, each red alone. The
+  worker, gate, dead-panes and run suites pass.
+- **If you remove this:** a pane restored after a server restart runs the stock herdr. The order then sits seated
+  with no worker and nothing says so. An order that owns `Config/` is sent back for every file in it. An order whose
+  worktree began after an owner commit on main is sent back for the owner's files.
+
 ## alpha 0.71.0: Gemini 4 Hydrogen takes Flash 3.8's seat
 
 - **Changed:** the seat table has a `hydrogen` seat. It runs `gemini-4-hydrogen-{effort}` on agy at low, medium, high

@@ -17,7 +17,7 @@ Each at the start of a line, anywhere in the order file. The gate reads them fro
 so a send-back keeps them.
 
 ```text
-owns: src/calc.py tests/test_calc.py     every file the worker may change; `*` within a name, `**` across folders
+owns: src/calc.py tests/test_calc.py     every file the worker may change; `*` within a name, `**` across folders, `dir/` the whole folder
 test: python -m pytest -q -rA tests      one command, no shell, run in the worker's folder
 check: test_mul test_mul_negative        names the test output must print; pytest needs -rA to print passing names
 serves: 8770                             ops.terminal orders only: the port the worker's own pane must listen on
