@@ -16,6 +16,7 @@ T_SLASH = "nirvana_gate::tests::p72_an_owns_line_ending_in_a_slash_owns_the_whol
 T_BEGUN = "nirvana_gate::tests::p72_the_owners_commits_a_worktree_began_with_are_not_the_orders"
 T_SNEAK = "nirvana_gate::tests::p72_a_worker_edit_to_a_file_the_worktree_began_with_still_counts"
 T_REVERT = "nirvana_gate::tests::p72_a_branch_that_undoes_merged_work_keeps_the_file_as_the_orders"
+T_FORGED = "nirvana_gate::tests::p72_a_forged_start_record_passes_nothing"
 
 CONTROLS = (
     # The launch line: this build by its full path, in the order's folder, with the order's variables, quoted
@@ -88,4 +89,8 @@ CONTROLS = (
     Control("p72_merged_work_undone", GATE,
             ".filter(|path| !worker.contains(*path) && !integrated.contains(*path))",
             ".filter(|path| !worker.contains(*path) && (integrated.is_empty() || true))", T_REVERT, "rust"),
+    # Review finding 1: a start record only a `nirvana/` branch holds is the worker's own, not where it began.
+    Control("p72_forged_start_trusted", GATE,
+            '.any(|name| !name.is_empty() && !name.starts_with("refs/heads/nirvana/"))',
+            '.any(|name| !name.is_empty())', T_FORGED, "rust"),
 )

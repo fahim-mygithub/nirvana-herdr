@@ -17,7 +17,10 @@ which the fork never edits.
   - A new worktree records the commit it began at, in `.nirvana/worktrees/<order>.start`. At the gate, a changed
     file is left out of the owned count only when two things hold. The worker's branch has it exactly as that commit
     had it. The integration branch has not changed it since the two met. The owned axis says how many it left out.
-    A worktree made before this version has no record and is counted as before.
+    A worktree made before this version has no record and is counted as before. The record counts only when a
+    branch outside `nirvana/` holds its commit. The review found that a worker can write the file beside its
+    worktree, and its own HEAD there would have passed every file. A worker's own commit is only on its order's
+    branch, so a forged record leaves nothing out.
 - **Because:** the owner, 2026-11-13: "Can you check the Megajam project especially lately the runs have not been
   showing up on herder. Check for bugs as well." and "Go ahead".
 - **Measured:** 2026-11-13 on the owner's project, run `ia1`, read only. The herdr server restarted at 01:37. The
@@ -30,7 +33,7 @@ which the fork never edits.
   c0-skeleton-s1 was sent back for 309 files under folder lines such as `owns: Config/`. am1-assetmap was
   sent back for 35 files from the owner's commit 7dbefa0 on main at 01:20. Its worktree began at 7dbefa0 at 01:21. The
   integration branch was cut before it, so the rebase carried a copy, 383e65a. Replaying the new rule on that history
-  leaves out exactly 7dbefa0's 35 files and keeps the worker's 15. 11 new tests. 24 p72 controls, each red alone. The
+  leaves out exactly 7dbefa0's 35 files and keeps the worker's 15. 12 new tests. 25 p72 controls, each red alone. The
   worker, gate, dead-panes and run suites pass.
 - **If you remove this:** a pane restored after a server restart runs the stock herdr. The order then sits seated
   with no worker and nothing says so. An order that owns `Config/` is sent back for every file in it. An order whose

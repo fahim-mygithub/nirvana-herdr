@@ -4604,6 +4604,23 @@ fn p72_a_worker_edit_to_a_file_the_worktree_began_with_still_counts() {
 }
 
 #[test]
+fn p72_a_forged_start_record_passes_nothing() {
+    // Review of 0.71.1, finding 1: the worker commits an unowned edit and writes its own HEAD as the start record.
+    let (root, cwd) = begun_after_an_owner_commit("p72-forged", "am1");
+    work(&cwd);
+    std::fs::write(cwd.join("secret.txt"), "not the order's\n").expect("unowned");
+    sh(&cwd, &["add", "calc.py", "test_mul.py", "secret.txt"]);
+    sh(&cwd, &["commit", "-q", "-m", "worker"]);
+    let head = sh(&cwd, &["rev-parse", "HEAD"]).trim().to_owned();
+    std::fs::write(start_file(&cwd), format!("{head}\n")).expect("forge");
+    let spec = spec_with(&["calc.py", "test_*.py"], "git ls-files", &["test_mul"]);
+    let det = run_det(&root, &cwd, "am1", &spec, Some(&done()));
+    let owned = axis(&det, "owned");
+    assert_eq!(owned.mark, Mark::Fail, "{det:#?}");
+    assert!(owned.lines.iter().any(|f| f == "secret.txt"), "{owned:?}");
+}
+
+#[test]
 fn p72_a_branch_that_undoes_merged_work_keeps_the_file_as_the_orders() {
     // The integration branch changed README.md (another order's merged work) and the owner's main changed it too:
     // a branch that lands main's version over it is not passed as the owner's.

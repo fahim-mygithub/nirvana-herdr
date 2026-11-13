@@ -2756,6 +2756,27 @@ pub fn begun_with(
     )?
     .trim()
     .to_owned();
+    // Review of 0.71.1, finding 1: the record sits beside the worktree, where a worker's shell can write it. A worker
+    // that commits an unowned edit and writes its own HEAD there would empty `worker` below and pass every path. The
+    // commit a worktree began at is on the branch it was made from (the owner's main); a worker's own commit is only
+    // on its order's branch. So the record counts only when a branch outside `nirvana/` holds it; else nothing is
+    // left out and the gate counts as before 0.71.1.
+    let holders = git(
+        cwd,
+        &[
+            "for-each-ref",
+            "--contains",
+            &start,
+            "--format=%(refname)",
+            "refs/heads/",
+        ],
+    )?;
+    if !holders
+        .lines()
+        .any(|name| !name.is_empty() && !name.starts_with("refs/heads/nirvana/"))
+    {
+        return Ok(Vec::new());
+    }
     let fork = git(cwd, &["merge-base", &start, base])?.trim().to_owned();
     let integrated = changed_between(cwd, &fork, base)?;
     let worker = changed_between(cwd, &start, "HEAD")?;
