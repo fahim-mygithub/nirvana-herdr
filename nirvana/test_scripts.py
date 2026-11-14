@@ -88,7 +88,7 @@ class InstallTest(unittest.TestCase):
                     mock.patch.object(install.windows_shell, "install_plugin", mock.Mock(side_effect=stale)), \
                     mock.patch.object(install.agy_plugin, "install",
                                       mock.Mock(return_value=(tmp / "home" / "nirvana" / "agy",
-                                                              {"agy_install": {"ok": None, "why": "test"}}))), \
+                                                              {"agy_install": {"ok": None, "why": "test"}}))),                     mock.patch.object(install, "agy_report", mock.Mock()), \
                     mock.patch("builtins.print") as printed:
                 code = install.main(["--no-build", "--no-shell"])
             text = "\n".join(str(c.args[0]) for c in printed.call_args_list)
