@@ -31,6 +31,22 @@ pub(crate) struct SubagentRunGroup<'a> {
     pub(crate) run_id: &'a str,
     pub(crate) live: Vec<&'a crate::nirvana_subagents::Subagent>,
     pub(crate) finished: Vec<&'a crate::nirvana_subagents::Subagent>,
+    /// The run's ended orders not drawn, past `RUN_FINISHED_SHOWN`. The panel draws "+N more" for them under the run.
+    pub(crate) finished_cut: usize,
+}
+
+/// A run's ended orders past this many leave only the `RUN_FINISHED_CUT_TO` most recent and a "+N more" line. The
+/// owner, 2026-11-14: "The agent lists on the left is not populating". Run `ia1` kept 43 ended orders beside its one
+/// live order, as context (plan 2026-11-09 finished rows, rule 2), so the orchestrator's row took 47 lines and the
+/// panel drew none of it. The numbers are the spaces view's `WORKERS_SHOWN` and `WORKERS_CUT_TO`: all up to 4, past
+/// that 3 and "+N more", so a "+1 more" never takes the line the one row would have used. Live orders are never cut.
+pub(crate) const RUN_FINISHED_SHOWN: usize = 4;
+pub(crate) const RUN_FINISHED_CUT_TO: usize = 3;
+
+/// The lines one run group takes in the agents panel: its header, two per live order, one per ended order drawn, and
+/// the "+N more" line when ended orders were cut.
+pub(crate) fn run_group_lines(group: &SubagentRunGroup) -> usize {
+    1 + group.live.len() * 2 + group.finished.len() + usize::from(group.finished_cut > 0)
 }
 
 pub(crate) fn is_live_subagent(state: crate::nirvana_subagents::SubagentState) -> bool {
@@ -74,6 +90,7 @@ pub(crate) fn group_subagents_by_run<'a>(
                 run_id,
                 live,
                 finished,
+                finished_cut: 0,
             });
         }
     }
@@ -104,6 +121,15 @@ pub(crate) fn group_subagents_by_run<'a>(
         )
     });
 
+    // Cut after the sort, so a run's place still reads all its orders. `finished` is newest first, so the most recent
+    // ended orders stay.
+    for group in &mut result {
+        if group.finished.len() > RUN_FINISHED_SHOWN {
+            group.finished_cut = group.finished.len() - RUN_FINISHED_CUT_TO;
+            group.finished.truncate(RUN_FINISHED_CUT_TO);
+        }
+    }
+
     result
 }
 
@@ -131,14 +157,13 @@ pub(crate) fn group_sort_and_cap_subagents<'a>(
     max_lines: usize,
 ) -> CappedRunGroups<'a> {
     let sorted_groups = group_subagents_by_run(subagents);
+    // The orders a run already cut count as cut here too: past the cap, groups carry no "+N more" of their own and the
+    // one line at the end counts them all.
     let total_workers: usize = sorted_groups
         .iter()
-        .map(|g| g.live.len() + g.finished.len())
+        .map(|g| g.live.len() + g.finished.len() + g.finished_cut)
         .sum();
-    let total_lines: usize = sorted_groups
-        .iter()
-        .map(|g| 1 + g.live.len() * 2 + g.finished.len())
-        .sum();
+    let total_lines: usize = sorted_groups.iter().map(run_group_lines).sum();
 
     if total_lines <= max_lines {
         return CappedRunGroups {
@@ -174,6 +199,7 @@ pub(crate) fn group_sort_and_cap_subagents<'a>(
                     run_id: group.run_id,
                     live: group_live,
                     finished: Vec::new(),
+                    finished_cut: 0,
                 });
             }
         }
@@ -211,6 +237,7 @@ pub(crate) fn group_sort_and_cap_subagents<'a>(
                     run_id: group.run_id,
                     live: Vec::new(),
                     finished: group_fin,
+                    finished_cut: 0,
                 });
             }
         }
@@ -237,10 +264,11 @@ pub(super) fn agent_row_lines(row: &AgentRow, width: u16) -> usize {
         .sum();
     let overflow_line =
         usize::from(row.subagents_overflow > 0) + usize::from(row.bg_line.is_some());
-    // Seat-order workers under their run headers: a header, two lines per live worker, one per finished one.
+    // Seat-order workers under their run headers: a header, two lines per live worker, one per finished one drawn, and
+    // a run's "+N more" line.
     let run_lines: usize = group_subagents_by_run(&row.subagents)
         .iter()
-        .map(|g| 1 + g.live.len() * 2 + g.finished.len())
+        .map(run_group_lines)
         .sum();
     base + sub_lines + overflow_line + run_lines
 }
@@ -404,6 +432,10 @@ pub(super) fn render_agent_panel_header(
     true
 }
 
+/// The fewest lines a row is drawn in when it does not fit whole. Two is the default agent layout's own lines: the
+/// state, space and tab line, then the agent's name. One line would show a space and a tab with no agent name.
+const CLIPPED_ROW_MIN_LINES: u16 = 2;
+
 pub(super) fn render_agent_list<T>(
     buffer: &mut Buffer,
     area: Rect,
@@ -465,9 +497,17 @@ pub(super) fn render_agent_list<T>(
     let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
     let mut y = body.y;
     for (index, row) in rows.iter().enumerate().skip(*agent_scroll) {
-        let height = row_heights[index].min(body.height);
-        if y.saturating_add(height) > body.bottom() {
-            break;
+        let mut height = row_heights[index].min(body.height);
+        let room = body.bottom().saturating_sub(y);
+        if height > room {
+            // The owner, 2026-11-14: an orchestrator row taller than the space left under the row above it was not
+            // drawn at all, so the agent seemed missing. A row that does not fit is drawn cut to the space left,
+            // when that holds at least `CLIPPED_ROW_MIN_LINES`; the scrollbar shows the rest is below. The scroll
+            // metrics count only rows that fit whole, so scrolling and the thumb read as before.
+            if room < CLIPPED_ROW_MIN_LINES {
+                break;
+            }
+            height = room;
         }
         let rect = Rect::new(body.x, y, content_width, height);
         render_row(buffer, rect, row, hits);
@@ -1026,6 +1066,22 @@ fn render_grouped_subagents(
                 .render(Rect::new(rect.x, *current_y, rect.width, 1), buffer);
             *current_y += 1;
         }
+
+        // 4. The run's ended orders past `RUN_FINISHED_SHOWN`, as one line.
+        if group.finished_cut > 0 && *current_y < rect.bottom() {
+            let more_spans = vec![
+                ratatui::text::Span::raw("    "),
+                ratatui::text::Span::styled(
+                    format!("+{} more", group.finished_cut),
+                    Style::default()
+                        .fg(palette.overlay0)
+                        .add_modifier(Modifier::DIM),
+                ),
+            ];
+            Paragraph::new(Line::from(more_spans))
+                .render(Rect::new(rect.x, *current_y, rect.width, 1), buffer);
+            *current_y += 1;
+        }
     }
 
     if capped.cut_count > 0 && *current_y < rect.bottom() {
@@ -1059,5 +1115,171 @@ fn sidebar_status_text(status: crate::api::schema::AgentStatus) -> &'static str 
         AgentStatus::Done => "done",
         AgentStatus::Working => "working",
         AgentStatus::Idle | AgentStatus::Unknown => "idle",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The owner, 2026-11-14, with a screenshot of 0.73.0: "The agent lists on the left is not populating despite
+    //! what the main herder is telling me". The panel showed the stale agy pane only; the orchestrator's row, with run
+    //! `ia1`'s one live order and its 43 ended ones, was not drawn.
+    use super::*;
+    use crate::api::schema::AgentStatus;
+    use crate::nirvana_subagents::{
+        set_view_for_test, set_worker_panes_for_test, Subagent, SubagentProvider, SubagentState,
+        SubagentsView,
+    };
+
+    const WIDTH: u16 = 32;
+
+    fn agent(pane_id: &str, name: &str, status: AgentStatus) -> crate::protocol::ClientShellAgent {
+        crate::protocol::ClientShellAgent {
+            pane_id: pane_id.into(),
+            workspace_id: "ws_1".into(),
+            tab_id: "tab_1".into(),
+            name: Some(name.into()),
+            display_agent: Some(name.into()),
+            agent: Some("claude".into()),
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_status: status,
+            state_change_seq: 1,
+            state_labels: Vec::new(),
+            tokens: Vec::new(),
+            focused: false,
+            agent_session: None,
+        }
+    }
+
+    fn order(name: &str, state: SubagentState, at: u64) -> Subagent {
+        Subagent {
+            id: name.into(),
+            parent_id: None,
+            name: name.into(),
+            description: String::new(),
+            provider: SubagentProvider::Claude,
+            model: "Claude Sonnet 5.5".into(),
+            state,
+            elapsed_secs: 90,
+            tokens: None,
+            ended_at: (state != SubagentState::Running).then_some(at),
+            depth: 0,
+            target_pane_id: None,
+            run_id: Some("ia1".into()),
+            run_event_time: Some(at),
+            waiting: false,
+        }
+    }
+
+    /// The screenshot's shape: the stale agy pane first, then the orchestrator, whose run holds one live order, last,
+    /// and 43 ended ones (the owner's real run read 44 rows).
+    fn screenshot_shape() -> ClientShellSnapshot {
+        let mut runs = Vec::new();
+        for n in 0..43u64 {
+            let state = match n % 3 {
+                0 => SubagentState::Done,
+                1 => SubagentState::Stopped,
+                _ => SubagentState::Blocked,
+            };
+            runs.push(order(&format!("ended-{n:02}"), state, 1000 + n));
+        }
+        runs.push(order("l05-beats2", SubagentState::Running, 2000));
+        let mut views = HashMap::new();
+        views.insert(
+            "p1".to_string(),
+            SubagentsView {
+                subagents: runs,
+                total_count: 44,
+                overflow: 0,
+            },
+        );
+        set_view_for_test(Some(views));
+        set_worker_panes_for_test(Some(Default::default()));
+
+        let mut snap = super::super::tests::snapshot();
+        snap.panes.clear();
+        for id in ["p6S", "p1"] {
+            snap.panes.push(crate::protocol::ClientShellPane {
+                pane_id: id.into(),
+                workspace_id: "ws_1".into(),
+                tab_id: "tab_1".into(),
+                label: None,
+                cwd: None,
+                foreground_cwd: None,
+                focused: false,
+                right_click_passthrough: false,
+            });
+        }
+        snap.agents = vec![
+            agent("p6S", "agy-stale", AgentStatus::Idle),
+            agent("p1", "orch-claude", AgentStatus::Working),
+        ];
+        snap
+    }
+
+    /// Draws the agents panel with a body of `body` lines (the panel's header takes 3) and returns its text lines.
+    fn draw(snap: &ClientShellSnapshot, body: u16) -> (Vec<String>, ShellHitMap) {
+        let config = ClientShellConfig::from_config(&crate::config::Config::default());
+        let area = Rect::new(0, 0, WIDTH, body + 3);
+        let mut buffer = Buffer::empty(area);
+        let mut scroll = 0;
+        let mut hits = ShellHitMap::default();
+        render_agent_panel(&mut buffer, area, snap, &config, &mut scroll, &mut hits);
+        let lines = (0..area.height)
+            .map(|y| {
+                (0..WIDTH)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        (lines, hits)
+    }
+
+    #[test]
+    fn the_orchestrator_row_and_its_live_order_show_beside_a_short_row() {
+        let snap = screenshot_shape();
+        let (lines, _) = draw(&snap, 18);
+        let text = lines.join("\n");
+        set_view_for_test(None);
+        set_worker_panes_for_test(None);
+        assert!(text.contains("agy-stale"), "{text}");
+        assert!(text.contains("orch-claude"), "{text}");
+        assert!(text.contains("Run ia1"), "{text}");
+        assert!(text.contains("l05-beats2"), "{text}");
+        // The three most recent ended orders, then one line for the other 40.
+        for name in ["ended-42", "ended-41", "ended-40"] {
+            assert!(text.contains(name), "{name}\n{text}");
+        }
+        assert!(!text.contains("ended-39"), "{text}");
+        assert!(lines.iter().any(|l| l == "    +40 more"), "{text}");
+    }
+
+    #[test]
+    fn a_runs_ended_orders_are_cut_in_the_rows_height() {
+        let snap = screenshot_shape();
+        let config = ClientShellConfig::from_config(&crate::config::Config::default());
+        let row = agent_row(&snap, "p1", &config, None).expect("orchestrator row");
+        set_view_for_test(None);
+        set_worker_panes_for_test(None);
+        // Two agent lines, the run header, two for the live order, three ended orders and "+40 more".
+        assert_eq!(agent_row_lines(&row, WIDTH), 2 + 1 + 2 + 3 + 1);
+    }
+
+    #[test]
+    fn a_row_that_does_not_fit_whole_is_drawn_cut_with_its_live_order_first() {
+        let snap = screenshot_shape();
+        // The agy row takes 2 lines; the orchestrator's 9 do not fit in the 6 left, so it is drawn cut.
+        let (lines, hits) = draw(&snap, 8);
+        let text = lines.join("\n");
+        set_view_for_test(None);
+        set_worker_panes_for_test(None);
+        assert!(text.contains("orch-claude"), "{text}");
+        assert!(text.contains("l05-beats2"), "{text}");
+        // Past the panel's cap, the one "+N more" counts the run's own cut orders too: 43 ended, none drawn.
+        assert!(text.contains("+43 more"), "{text}");
+        assert!(hits.agent_max_scroll > 0, "the scrollbar shows the rest is below");
     }
 }

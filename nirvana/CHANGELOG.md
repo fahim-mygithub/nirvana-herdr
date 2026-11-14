@@ -3,6 +3,27 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.73.1: the agents panel draws an orchestrator with a long run
+
+- **Changed:** in the agents panel, a run keeps all its live orders. Past 4 ended orders it shows the 3 most recent
+  and one "+N more" line, as the spaces view does with its workers. The row's height counts the same lines. A row
+  that does not fit whole under the row above it is now drawn cut to the space left, when 2 lines or more are left.
+  Before, the panel stopped there and drew nothing more. The scrollbar shows the rest, and scrolling is unchanged.
+  When the panel's own cap applies, its one "+N more" line also counts the ended orders the run cut.
+- **Because:** the owner, 2026-11-14, with a screenshot of 0.73.0: "The agent lists on the left is not populating
+  despite what the main herder is telling me". The statusline named l05-beats2 as running. The panel showed only the
+  stale agy pane `wY:p6S`. Run `ia1` held one live order and 43 ended ones, kept as context because the run is live
+  (finished rows plan, 2026-11-09, rule 2). The orchestrator's row counted 47 lines. The panel clamped it to its
+  body, found it did not fit under the agy row, and stopped. The plan said "the panel's cap already bounds the
+  lines", but that cap bounded only the lines drawn inside the row, not the row's height in the list.
+- **Measured:** `client::shell::agent_sidebar::tests` build the screenshot's shape: the agy row first, then the
+  orchestrator with one live order and 43 ended ones. At a body of 18 lines the panel draws the orchestrator, run
+  `ia1`, l05-beats2, the 3 newest ended orders and "+40 more". The row counts 9 lines, not 47. At a body of 8 lines
+  the row is drawn cut, with l05-beats2 and "+43 more", and the scrollbar is on. Each control in `p76_panel.py`
+  turns its test red. Not run in a live window.
+- **If you remove this:** an orchestrator whose run has many ended orders vanishes from the agents panel whenever
+  any agent is listed above it.
+
 ## alpha 0.73.1: finished orders leave the agents panel while their run goes on
 
 - **Changed:** each order's row in the agents panel now leaves by its own rule, also while its run has a live order.
