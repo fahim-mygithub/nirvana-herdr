@@ -83,6 +83,11 @@ asked for. In `-p` it stayed `false` through every Stop, so the probe's hook ask
 `GATE-SEEN` lines, then agy ended the turn by its own limit. A gate on agy must count its own asks and not trust that
 field. The interactive mode, which the orchestrator pane uses, was not probed.
 
+A second run started agy in another folder and passed the hooks folder with `--add-dir`. All four hooks loaded from
+there: `MANGO`, `R-77`, `write_file` denied, `GATE-SEEN`. The gate kept its own count in a marker file, and agy
+stopped after 2 Stops with one `GATE-SEEN`. So the plugin can reach agy with no write under `~/.gemini` and no file in
+the project, the same way plan 35 gives agy workers their tools.
+
 ## 5. The design
 
 ### 5.1 One hook adapter in herdr
@@ -107,7 +112,7 @@ here too.
 
 ### 5.2 An agy plugin built from `nirvana/claude`
 
-`install.py` writes `nirvana/agy/`: `plugin.json`, a root `hooks.json` in agy's named-hook format, `skills/`, `agents/`,
+`install.py` writes `nirvana/agy/.agents/`: a `hooks.json` in agy's named-hook format, `skills/`, `agents/`,
 `ROLE.md` as a rule, and bladebro as a plugin MCP server. `agy plugin validate --strict` gates the build. How it reaches
 agy is R1.
 
@@ -144,9 +149,11 @@ P41b and P41c can run in parallel: disjoint files. P41d needs both.
 
 ## 7. Owner rulings
 
-- **R1, where the agy plugin lives.** (a) `install.py` runs `agy plugin install` from a local folder. That writes into
-  agy's config under `~/.gemini`, so the owner approves it once. (b) A `.agents/` folder in each project. That touches
-  no `~/.gemini`, but puts Nirvana files into every project. Recommended: (a).
+- **R1, where the agy plugin lives.** (a) A `.agents/` folder in the install, passed with `--add-dir` at launch. It
+  touches no `~/.gemini` and no project, and §4.2 proved hooks load that way. Skills, agents and MCP from that folder
+  are still to prove in P41a. (b) `install.py` runs `agy plugin install` from a local folder, which writes into agy's
+  config under `~/.gemini`. (c) A `.agents/` folder in each project. Recommended: (a), with (b) only if P41a finds a
+  part that loads from a plugin alone.
 - **R2, the thresholds.** Recommended: offer at 90% of the 5h window or 95% of the week. Force at 98% of either.
 - **R3, the agy orchestrator seat.** Recommended: Carbon high. The owner already names it for checking work: "validate it with AGY
   Carbon high".
