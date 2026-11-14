@@ -1,11 +1,13 @@
 """Plan 41 P41c: the agy orchestrator's copy of the Nirvana plugin, built from `nirvana/claude/` at every install.
 
-    python nirvana/agy_plugin.py --home <dir>               # build <dir>/nirvana/agy/.agents and print the report
+    python nirvana/agy_plugin.py --home <dir>               # build <dir>/nirvana/agy/nirvana, validate, print
     python nirvana/agy_plugin.py --home <dir> --no-bladebro # the same with no mcp_config.json
 
-Owner ruling R1 (plan 41 §7, 2026-11-14): the plugin is a `.agents/` folder inside the install, handed to agy with
-`--add-dir <home>/nirvana/agy` at launch. Nothing goes under `~/.gemini` and nothing into a project. Plan 41 §4.2
-measured that hooks load from an add-dir folder that way; plan 35's probe 2 measured the same for `mcp_config.json`.
+Owner ruling R1, changed to (b) on 2026-11-14 (plan 41 §7): P41a found that interactive `agy -i` loads no hooks from
+an `--add-dir` folder. So the built folder is a native agy plugin (`plugin.json` at its root) and `install.py` passes
+it to `agy plugin install <folder>`, which copies it into agy's config under `~/.gemini`. The owner approved that
+write for this installer step only, and this module never writes there itself. The CLI's `main` builds and validates
+the folder; it does not install it into agy.
 
 Built, never hand-kept: every part comes from the Claude plugin's own files, so the two cannot drift. A Claude file
 this module cannot read the way it expects (a hook command that is not the installed herdr, a tool name with no agy
@@ -13,6 +15,8 @@ row, a skill over agy's size limit) fails the build instead of shipping a half t
 
 What goes where (agy 1.5.9's built-in docs, read out of agy.exe on 2026-11-14):
 
+- `plugin.json`: `{"name": "nirvana", "version": <nirvana/VERSION>}`, the marker that makes the folder a native
+  plugin. agy does no extension staging for a native plugin, so every part below sits at the plugin root.
 - `hooks.json`: agy's named-hook format. Each top-level key is a hook name holding events; SessionStart,
   PreInvocation and Stop are flat lists of handlers, PreToolUse and PostToolUse are groups of `matcher` + `hooks`.
   A handler is `{"type": "command", "command": <string>, "timeout": <s>}`, run by `cmd /c` on Windows with the folder
@@ -33,6 +37,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -41,9 +46,16 @@ import windows_shell  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "nirvana" / "claude"
 
-# The folder `--add-dir` names, under the install; agy reads `.agents/` inside it.
+# The built plugin is `<home>/nirvana/agy/<NAME>`. The manifest `name` and the folder's own name are the same word
+# because agy keys an installed plugin on its install directory name (its plugins guide: "`dir` is the identifier
+# that matters ... It can differ from `name` in `plugin.json`"). With both fixed, each install replaces the last one
+# instead of adding a second plugin. While R1 was (a) the folder was `.agents`, the name agy reads inside an add-dir.
 AGY_DIR = Path("nirvana") / "agy"
-DOT = ".agents"
+NAME = "nirvana"
+MANIFEST = "plugin.json"
+# A limit for one `agy plugin` call. The baseline test run did two validates in under a second, so two minutes
+# means agy has hung.
+AGY_TIMEOUT_S = 120
 
 # The flag P41b's adapter takes on every hook command. Spelling fixed by the plan 41 brief; feat/p41-hooks owns it.
 HOST_FLAG = ["--host", "agy"]
@@ -219,14 +231,31 @@ def bladebro(home: Path) -> dict:
     return {"mcpServers": {"bladebro": {"command": command_, "args": args, "env": env}}}
 
 
-def build(out: Path, home: Path, src: Path | None = None, with_bladebro: bool | None = None) -> dict:
-    """Writes the `.agents` tree into `out` (which must not exist) and returns the report: the hook rows, the files
-    written and what was skipped. `with_bladebro` None asks PATH."""
+def plugin_version() -> str:
+    """The fork's version, so `agy plugin list` shows which build the installed plugin came from."""
+    return (ROOT / "nirvana" / "VERSION").read_text(encoding="utf-8").strip()
+
+
+def manifest(version: str) -> dict:
+    """agy's native-plugin marker. A name and a version is the smallest manifest `--strict` passes: without the
+    version it warns that the marketplace cannot list it (measured 2026-11-14, agy 1.5.9). There is no timestamp or
+    path in it, so a rebuild of the same version writes the same bytes."""
+    return {"name": NAME, "version": version}
+
+
+def build(out: Path, home: Path, src: Path | None = None, with_bladebro: bool | None = None,
+          version: str | None = None) -> dict:
+    """Writes the plugin tree into `out` (which must not exist) and returns the report: the hook rows, the files
+    written and what was skipped. `with_bladebro` None asks PATH; `version` None reads `nirvana/VERSION`."""
     src = SRC if src is None else Path(src)
     out, home = Path(out), Path(home)
     if with_bladebro is None:
         with_bladebro = shutil.which("bladebro") is not None
     report: dict = {"hooks": [], "skills": [], "rules": [], "agents": [], "mcp": [], "skipped": []}
+
+    # agy's plugins guide: a native plugin is "any directory containing `plugin.json`" and "**must** place
+    # `hooks.json` directly at the plugin root"; skills/, rules/, agents/ and mcp_config.json sit beside it.
+    write(out / MANIFEST, json.dumps(manifest(plugin_version() if version is None else version)) + "\n")
 
     claude = json.loads((src / "hooks" / "hooks.json").read_bytes())
     agy_hooks, report["hooks"], skipped = hooks(claude, home)
@@ -288,22 +317,23 @@ def build(out: Path, home: Path, src: Path | None = None, with_bladebro: bool | 
     return report
 
 
-def validate(dot: Path, agy: str | None = None) -> dict:
-    """`agy plugin validate --strict --json` on a scratch copy of `dot`. The validator takes only a plugin (on a bare
-    `.agents` it says "no plugin.json found"), so the copy gets the smallest manifest strict mode passes: a name and
-    a version (without the version it warns that the marketplace cannot list it). Measured 2026-11-14 on agy 1.5.9:
-    it reports a rule with no valid trigger, a skill named unlike its folder, an unknown hook event and bad agent
-    YAML. Returns `{"ok": None, ...}` when agy is not on PATH: not validated, said so, never passed."""
-    import tempfile
+def agy_run(agy: str, args: list[str]) -> subprocess.CompletedProcess:
+    """One `agy` call with its output read back. Stdin is an empty pipe, not NUL: on Windows NUL reads as a terminal
+    (memory windows-nul-isatty-true), so a prompt reading it would hang the install. NO_COLOR keeps colour codes out
+    of the output we parse; agy's changelog fixed colour in piped output for these commands twice."""
+    return subprocess.run([agy, *args], input="", capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=AGY_TIMEOUT_S, env={**os.environ, "NO_COLOR": "1"})
+
+
+def validate(plugin: Path, agy: str | None = None) -> dict:
+    """`agy plugin validate <plugin> --strict --json` on the built folder itself, so the folder that is installed is
+    the one that was validated. Measured 2026-11-14 on agy 1.5.9: it reports a rule with no valid trigger, a skill
+    named unlike its folder, an unknown hook event and bad agent YAML. Returns `{"ok": None, ...}` when agy is not on
+    PATH: the folder was not validated, the report says so, and it never counts as a pass."""
     agy = agy or shutil.which("agy")
     if agy is None:
         return {"ok": None, "why": "agy is not on PATH, so the folder was not validated", "findings": []}
-    with tempfile.TemporaryDirectory(prefix="nirvana-agy-validate-") as tmp:
-        plugin = Path(tmp) / "nirvana"
-        shutil.copytree(dot, plugin)
-        write(plugin / "plugin.json", json.dumps({"name": "nirvana", "version": "0.0.0"}) + "\n")
-        done = subprocess.run([agy, "plugin", "validate", str(plugin), "--strict", "--json"], capture_output=True,
-                              text=True, encoding="utf-8", errors="replace", timeout=120)
+    done = agy_run(agy, ["plugin", "validate", str(plugin), "--strict", "--json"])
     try:
         parsed = json.loads(done.stdout)
     except ValueError:
@@ -315,25 +345,96 @@ def validate(dot: Path, agy: str | None = None) -> dict:
             "findings": findings, "components": parsed.get("components", {})}
 
 
+# agy 1.5.9's install summary, read out of agy.exe: `Installed plugin %q from %s` (or `... from %q, replacing the %q
+# plugin that was already installed`), then `Installed to %s`, plus ` (replaced existing installation)` when it
+# overwrote an earlier copy. `%q` is Go's quoting, so the name is in double quotes.
+_INSTALLED_NAME = re.compile(r'Installed plugin "((?:[^"\\]|\\.)*)"')
+_INSTALLED_TO = re.compile(r"^[ \t]*Installed to (.+?)([ \t]+\(replaced existing installation\))?[ \t]*$", re.M)
+
+
+def temp_root() -> Path:
+    return Path(tempfile.gettempdir())
+
+
+def _under(path, root) -> bool:
+    try:
+        Path(path).resolve().relative_to(Path(root).resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def agy_install(plugin: Path, agy: str | None = None) -> dict:
+    """`agy plugin install <plugin>`. agy copies the folder into its config and swaps it in whole; if the install
+    fails it keeps its previous copy (its 1.5.x changelog). Returns `ok` True with the name and folder agy printed,
+    False with agy's own error, or None when agy is not on PATH. `argv` is the command line, for the report.
+
+    A real agy is never handed a plugin from under the temp folder. P41c found `test_scripts.py` running
+    `install.main` into a temp home with agy on PATH. Before R1 (b) that ran only the validator; now it would put a
+    `nirvana` plugin into the owner's `~/.gemini`, enabled in every agy session, with hooks naming a herdr.exe that
+    is deleted with the folder. The test case is a temp plugin with an agy outside temp; a fake agy in temp passes."""
+    agy = agy or shutil.which("agy")
+    if agy is None:
+        return {"ok": None, "why": "agy is not on PATH, so the plugin was not installed into agy", "argv": None}
+    if _under(plugin, temp_root()) and not _under(agy, temp_root()):
+        return {"ok": None, "why": f"the plugin is under the temp folder and agy ({agy}) is not; a test or a check, "
+                                   "so it was not installed into agy", "argv": None}
+    argv = [agy, "plugin", "install", str(plugin)]
+    try:
+        done = agy_run(agy, argv[1:])
+    except (OSError, subprocess.TimeoutExpired) as err:
+        return {"ok": False, "why": f"agy plugin install did not finish: {err}", "argv": argv}
+    out = "\n".join(s.strip() for s in (done.stdout, done.stderr) if s.strip())
+    if done.returncode != 0:
+        # agy prints `Error: <reason>` and exits 1, seen 2026-11-14: "Error: install target must be a directory".
+        return {"ok": False, "why": f"agy plugin install exit {done.returncode}: {out[-600:] or 'no output'}",
+                "argv": argv, "output": out}
+    name = _INSTALLED_NAME.search(out)
+    folder = _INSTALLED_TO.search(out)
+    return {"ok": True, "why": f"exit {done.returncode}", "argv": argv, "output": out,
+            "name": name.group(1) if name else None, "folder": folder.group(1) if folder else None,
+            "replaced": bool(folder and folder.group(2))}
+
+
+class AgyInstallError(RuntimeError):
+    """The plugin was built and validated and is in the install folder, but `agy plugin install` failed, so agy
+    keeps the copy it had. Carries the report so the caller can still print it."""
+
+    def __init__(self, why: str, dst: Path, report: dict):
+        super().__init__(why)
+        self.dst, self.report = dst, report
+
+
 def install(home: Path, src: Path | None = None, with_bladebro: bool | None = None,
-            check=validate) -> tuple[Path, dict]:
-    """Builds beside `<home>/nirvana/agy`, validates the build (plan 41 §5.2: `agy plugin validate --strict` gates
-    it), and only then swaps it in with the Claude plugin's own replace, so a running agy that holds a file keeps
-    whole old or whole new files. A failed validation raises `BuildError` and the installed folder stays as it was.
-    Raises `windows_shell.StaleFiles` after the rest is down."""
+            check=validate, register=agy_install) -> tuple[Path, dict]:
+    """Builds beside `<home>/nirvana/agy` and validates the build (plan 41 §5.2: `agy plugin validate --strict` gates
+    it). Then it swaps the build in with the Claude plugin's own replace and passes `<home>/nirvana/agy/nirvana` to
+    `agy plugin install` (R1 (b)). A failed validation raises `BuildError` before anything moves, so both the folder
+    and agy's copy stay as they were. A failed agy install raises `AgyInstallError` after the swap. With agy not on
+    PATH nothing is validated or installed into agy, and the report says so. If the swap left files a running
+    program holds, `windows_shell.StaleFiles` comes up and agy is not asked: the folder it would copy is mixed."""
     home = Path(home)
     dst = home / AGY_DIR
     stage = dst.with_name(f"{dst.name}.build-{os.getpid()}")
     windows_shell._remove_quietly(stage)
     try:
-        report = build(stage / DOT, home, src, with_bladebro)
-        report["validate"] = check(stage / DOT)
+        report = build(stage / NAME, home, src, with_bladebro)
+        report["validate"] = check(stage / NAME)
         if report["validate"]["ok"] is False:
             raise BuildError(f"agy plugin validate --strict failed ({report['validate']['why']}): "
                              f"{report['validate']['findings']}")
         windows_shell._replace_tree(stage, dst)
     finally:
         windows_shell._remove_quietly(stage)
+    # agy copies from the installed folder, not the stage: the stage is deleted by now, and this way agy is given
+    # the same source path at every install.
+    if report["validate"]["ok"] is None:
+        report["agy_install"] = {"ok": None, "why": "agy is not on PATH, so the plugin was not installed into agy",
+                                 "argv": None}
+    else:
+        report["agy_install"] = register(dst / NAME)
+    if report["agy_install"]["ok"] is False:
+        raise AgyInstallError(report["agy_install"]["why"], dst, report)
     return dst, report
 
 
@@ -342,7 +443,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--home", required=True, help="the install root; the folder lands at <home>/nirvana/agy")
     ap.add_argument("--no-bladebro", action="store_true")
     ns = ap.parse_args(argv)
-    dst, report = install(Path(ns.home), with_bladebro=False if ns.no_bladebro else None)
+    # Build and validate only. Installing into agy's config is install.py's step, and the approval covers that step.
+    skipped = {"ok": None, "why": "agy_plugin's own CLI does not install into agy; install.py does", "argv": None}
+    dst, report = install(Path(ns.home), with_bladebro=False if ns.no_bladebro else None,
+                          register=lambda plugin: skipped)
     print(json.dumps({"dir": str(dst), **report}, indent=2))
     return 0
 

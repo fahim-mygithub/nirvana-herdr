@@ -17,10 +17,13 @@ so a reload never starts a Nirvana Claude whose plugin is older than its herdr. 
 writes the mark, the themes, the Windows Terminal profile, JetBrains Mono when missing, the toast's app id and the
 Explorer verb "Open Nirvana", and removes Nirvana-C's "Open Nirvana - CC".
 
-Plan 41 P41c: the agy orchestrator's folder `<root>/nirvana/agy/.agents` is built from the same `nirvana/claude/`
-right after it (`agy_plugin.py`), for the same reason, and handed to agy with `--add-dir` (owner ruling R1). A build
-that `agy plugin validate --strict` fails leaves the installed folder as it was; the rest of the install goes on and
-the exit is non-zero.
+Plan 41 P41c: the agy orchestrator's plugin `<root>/nirvana/agy/nirvana` is built from the same `nirvana/claude/`
+right after the Claude plugin (`agy_plugin.py`), for the same reason. It is validated with
+`agy plugin validate --strict` and then installed with `agy plugin install <root>/nirvana/agy/nirvana`, which copies
+it into agy's config under `~/.gemini` (owner ruling R1, changed to (b)). A build that fails validation leaves the
+folder and agy's copy as they were. A failed agy install leaves agy's previous copy in place. In both cases the rest
+of the install goes on and the exit is 1. With agy not on PATH, both steps are skipped, a line says so, and the exit
+code does not change.
 """
 from __future__ import annotations
 
@@ -97,6 +100,24 @@ def install(built: Path, root: Path, ver: str, built_open: Path | None = None) -
     return target
 
 
+def agy_report(agy_dir: Path, report: dict) -> None:
+    """What `agy_plugin.install` did. The agy line names the command run, the plugin agy named and the folder it
+    copied to, so the live check at merge can find the copy without guessing agy's layout."""
+    checked = report["validate"]
+    print(f"built the agy orchestrator plugin at {agy_dir / agy_plugin.NAME}: skills {len(report['skills'])}, "
+          f"rules {len(report['rules'])}, agents {len(report['agents'])}, mcp {report['mcp'] or 'none'}; "
+          f"{'validated' if checked['ok'] else checked['why']}")
+    for line in report["skipped"]:
+        print(f"  skipped {line}")
+    done = report.get("agy_install") or {}
+    if done.get("ok"):
+        print(f"agy plugin install: installed plugin {done.get('name') or '(name not printed)'} to "
+              f"{done.get('folder') or '(folder not printed)'}"
+              f"{' (replaced the earlier copy)' if done.get('replaced') else ''}")
+    elif done.get("ok") is None:
+        print(f"agy plugin install: skipped, {done.get('why', 'not run')}")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="install")
     ap.add_argument("--no-build", action="store_true")
@@ -132,20 +153,20 @@ def main(argv: list[str] | None = None) -> int:
     agy_failed = None
     try:
         agy_dir, report = agy_plugin.install(root)
-        checked = report["validate"]
-        print(f"installed the agy orchestrator folder at {agy_dir / agy_plugin.DOT}: skills {len(report['skills'])}, "
-              f"rules {len(report['rules'])}, agents {len(report['agents'])}, mcp {report['mcp'] or 'none'}; "
-              f"{'validated' if checked['ok'] else checked['why']}")
-        for line in report["skipped"]:
-            print(f"  skipped {line}")
+        agy_report(agy_dir, report)
     except windows_shell.StaleFiles as err:
         stale += err.paths
-        print(f"the agy orchestrator folder is installed with {len(err.paths)} old files a running program holds:")
+        print(f"the agy orchestrator folder is installed with {len(err.paths)} old files a running program holds; "
+              "agy plugin install was not run:")
         for path in err.paths:
             print(f"  stale {path}")
     except agy_plugin.BuildError as err:
         agy_failed = err
         print(f"the agy orchestrator folder was not installed; the one there stays: {err}")
+    except agy_plugin.AgyInstallError as err:
+        agy_failed = err
+        agy_report(err.dst, err.report)
+        print(f"agy plugin install failed; agy keeps the copy it had: {err}")
     target = install(built, root, ver, built_open=built_open)
     print(f"installed Nirvana-Herdr alpha {ver} at {target}")
     if os.name == "nt" and not ns.no_shell:
@@ -162,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"install: {len(stale)} plugin files are stale. Close every Nirvana Claude and run the install again")
         return 1
     if agy_failed is not None:
-        print("install: the agy orchestrator folder failed its build or validation; see above")
+        print("install: the agy orchestrator plugin failed its build, validation or agy plugin install; see above")
         return 1
     return 0
 
