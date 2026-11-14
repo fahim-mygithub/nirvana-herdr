@@ -128,7 +128,14 @@ pub enum AppEvent {
         seq: Option<u64>,
         argv: Vec<String>,
     },
-    /// A pane held by a self-reported agent is back at its idle shell.
+    /// Nirvana fork, alpha 0.72.0: the pane's program reported its status (OSC 7501), or `None` cleared it.
+    /// `observed_at` is when the pane reader saw it.
+    ProgramStatusReported {
+        pane_id: PaneId,
+        status: Option<crate::terminal::program_status::ProgramStatus>,
+        observed_at: std::time::Instant,
+    },
+    /// A pane held by a self-reported agent, or by a program status report, is back at its idle shell.
     ReportedAgentShellReturned {
         pane_id: PaneId,
         observed_at: std::time::Instant,

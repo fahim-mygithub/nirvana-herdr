@@ -2230,6 +2230,28 @@ fn publish_reported_cwd(
     }
 }
 
+/// Nirvana fork, alpha 0.72.0: hands an OSC 7501 report to the app. The reader thread never blocks on the app, and a
+/// report is never dropped: a full queue sends it from a task instead. The time it was seen lets the app drop one
+/// that arrives after a newer one.
+fn publish_program_status(
+    pane_id: PaneId,
+    status: Option<crate::terminal::program_status::ProgramStatus>,
+    events: &mpsc::Sender<AppEvent>,
+    rt: &tokio::runtime::Handle,
+) {
+    let event = AppEvent::ProgramStatusReported {
+        pane_id,
+        status,
+        observed_at: std::time::Instant::now(),
+    };
+    if let Err(mpsc::error::TrySendError::Full(event)) = events.try_send(event) {
+        let events = events.clone();
+        rt.spawn(async move {
+            let _ = events.send(event).await;
+        });
+    }
+}
+
 impl PaneRuntime {
     pub fn shutdown(mut self) {
         if let Some(handle) = self.detect_handle.take() {
@@ -2611,6 +2633,9 @@ impl PaneRuntime {
                 if let Some(cwd) = result.reported_cwd.clone() {
                     publish_reported_cwd(pane_id, cwd, &reported_cwd, &read_events);
                 }
+                if let Some(status) = result.program_status.clone() {
+                    publish_program_status(pane_id, status, &read_events, &delay_rt);
+                }
                 for content in result.clipboard_writes {
                     if let Err(err) = read_events.try_send(AppEvent::ClipboardWrite { content }) {
                         warn!(
@@ -2817,6 +2842,9 @@ impl PaneRuntime {
                 }
                 if let Some(cwd) = result.reported_cwd.clone() {
                     publish_reported_cwd(pane_id, cwd, &reported_cwd, &events);
+                }
+                if let Some(status) = result.program_status.clone() {
+                    publish_program_status(pane_id, status, &events, &rt);
                 }
                 for content in result.clipboard_writes {
                     if let Err(err) = events.try_send(AppEvent::ClipboardWrite { content }) {
@@ -3319,6 +3347,11 @@ impl PaneRuntime {
     pub fn set_self_reported_agent_active(&self, active: bool) {
         self.self_reported_agent_active
             .store(active, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn self_reported_agent_active_for_test(&self) -> bool {
+        self.self_reported_agent_active.load(Ordering::Acquire)
     }
 
     pub fn set_full_lifecycle_authority_active(&self, active: bool) {

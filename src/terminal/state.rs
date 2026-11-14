@@ -168,6 +168,12 @@ pub struct TerminalState {
     /// Nirvana fork, plan 27 §2 rules 3 and 7: the pane's unbroken idle stretch, and whether `/compact` went in it
     /// (`app/nirvana_idle_compact.rs`).
     pub idle_stretch: crate::nirvana_idle_compact::IdleStretch,
+    /// Nirvana fork, alpha 0.72.0: the OSC 7501 root record the pane's program reported
+    /// (`crate::terminal::program_status`). While set, its state wins over hooks and detection.
+    pub program_status: Option<crate::terminal::program_status::ProgramStatus>,
+    /// When the pane reader saw the latest report or clear. A report sent late through a full event queue must not
+    /// replace a newer one, and the shell-return clear must not remove a report made after the shell was seen.
+    program_status_at: Option<Instant>,
 }
 
 impl TerminalState {
@@ -210,7 +216,87 @@ impl TerminalState {
             restore_error: None,
             nirvana_relaunch: None,
             idle_stretch: crate::nirvana_idle_compact::IdleStretch::default(),
+            program_status: None,
+            program_status_at: None,
         }
+    }
+
+    /// A report or clear (`None`) from the pane reader, seen at `observed_at`. An older one than the last is dropped.
+    pub fn set_program_status(
+        &mut self,
+        status: Option<crate::terminal::program_status::ProgramStatus>,
+        observed_at: Instant,
+    ) -> Option<TerminalStateMutation> {
+        if self.program_status_at.is_some_and(|at| at > observed_at) {
+            return None;
+        }
+        self.program_status_at = Some(observed_at);
+        self.replace_program_status(status)
+    }
+
+    /// A `working`, `blocked` or `idle` record is in place, so the pane's shell coming back must end it.
+    pub fn program_status_ends_with_shell(&self) -> bool {
+        self.program_status
+            .as_ref()
+            .is_some_and(|status| status.state.ends_with_its_program())
+    }
+
+    /// The pane's shell was idle at `observed_at`: the program that reported is gone. Ends a record that lasts only as
+    /// long as its program and was reported before then, and a self-reported agent, as one state change.
+    pub fn report_shell_returned(&mut self, observed_at: Instant) -> Option<TerminalStateMutation> {
+        let program_ended = self.program_status_ends_with_shell()
+            && self.program_status_at.is_none_or(|at| at <= observed_at);
+        if !program_ended {
+            return self.clear_self_reported_agent(observed_at);
+        }
+        let now = Instant::now();
+        let previous_agent_label = self.effective_agent_label().map(str::to_string);
+        let previous_known_agent = self.effective_known_agent();
+        let previous_state = self.state;
+        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
+        // `self.state` still holds the reported state, so a self-reported agent's clear below records the change from
+        // it and covers both.
+        self.program_status = None;
+        if let Some(mutation) = self.clear_self_reported_agent(observed_at) {
+            return Some(mutation);
+        }
+        Some(TerminalStateMutation {
+            effective_state_change: self.recompute_effective_state(
+                previous_agent_label,
+                previous_known_agent,
+                previous_state,
+                previous_presentation,
+                now,
+            ),
+            session_ref_changed: false,
+            agent_released: false,
+        })
+    }
+
+    fn replace_program_status(
+        &mut self,
+        status: Option<crate::terminal::program_status::ProgramStatus>,
+    ) -> Option<TerminalStateMutation> {
+        if self.program_status == status {
+            return None;
+        }
+        let now = Instant::now();
+        let previous_agent_label = self.effective_agent_label().map(str::to_string);
+        let previous_known_agent = self.effective_known_agent();
+        let previous_state = self.state;
+        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
+        self.program_status = status;
+        Some(TerminalStateMutation {
+            effective_state_change: self.recompute_effective_state(
+                previous_agent_label,
+                previous_known_agent,
+                previous_state,
+                previous_presentation,
+                now,
+            ),
+            session_ref_changed: false,
+            agent_released: false,
+        })
     }
 
     pub fn set_detected_agent_process_at(
@@ -2352,6 +2438,8 @@ impl TerminalState {
         self.recent_agent_process_exit = None;
         self.agent_process_acquisition_pending = false;
         self.pending_agent_resume_plan = None;
+        self.program_status = None;
+        self.program_status_at = None;
         self.clear_agent_name();
     }
 
@@ -2418,7 +2506,10 @@ impl TerminalState {
         previous_presentation: EffectivePresentation,
         now: Instant,
     ) -> Option<EffectiveStateChange> {
-        let state = if self.visible_blocker_overrides_hook() {
+        // Nirvana fork, alpha 0.72.0: a program's own report wins over hooks and detection (OSC 7501).
+        let state = if let Some(status) = &self.program_status {
+            status.state.agent_state()
+        } else if self.visible_blocker_overrides_hook() {
             AgentState::Blocked
         } else {
             self.hook_authority
@@ -2490,6 +2581,24 @@ mod tests {
             agent: agent_label.into(),
             session_ref,
         });
+    }
+
+    #[test]
+    fn a_respawned_pane_drops_its_program_status() {
+        let mut terminal = test_terminal();
+        terminal.set_program_status(
+            Some(crate::terminal::program_status::ProgramStatus {
+                state: crate::terminal::program_status::ProgramState::Done,
+                kind: None,
+                app: None,
+                msg: Some("o1".into()),
+            }),
+            Instant::now(),
+        );
+        assert_eq!(terminal.state, AgentState::Idle);
+        terminal.clear_agent_runtime_identity_after_respawn();
+        assert_eq!(terminal.program_status, None);
+        assert_eq!(terminal.state, AgentState::Unknown);
     }
 
     #[test]

@@ -3359,7 +3359,15 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             }
             let project = Project::from_env();
             let mut out = std::io::stdout();
-            let code = exec(&project, &run, &order, pane.as_deref(), &mut out)?;
+            // Alpha 0.72.0: the pane's status row says what this order does (`pane_status`), from its own report.
+            let status = pane_status::PaneStatus::new(pane.as_deref());
+            status.begin(&mut out, &order, std::env::current_dir().ok().as_deref());
+            let code = exec(&project, &run, &order, pane.as_deref(), &mut out);
+            let phase = replay(&project.journal(&run).read().0)
+                .order(&order)
+                .map(|known| known.phase);
+            status.end(&mut out, &order, phase);
+            let code = code?;
             out.flush()?;
             std::process::exit(code);
         }
@@ -4472,6 +4480,7 @@ pub fn cleanup(
 }
 
 pub(crate) mod job;
+mod pane_status;
 mod place;
 mod view;
 

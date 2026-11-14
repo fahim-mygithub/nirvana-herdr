@@ -493,7 +493,11 @@ impl App {
                     runtime.set_full_lifecycle_authority_active(
                         terminal.full_lifecycle_hook_authority_active(),
                     );
-                    runtime.set_self_reported_agent_active(terminal.self_reported_agent_active());
+                    // Nirvana fork, alpha 0.72.0: a live program status report is ended by the same shell-return probe.
+                    runtime.set_self_reported_agent_active(
+                        terminal.self_reported_agent_active()
+                            || terminal.program_status_ends_with_shell(),
+                    );
                 }
             }
         }
@@ -1672,6 +1676,55 @@ mod tests {
             .is_err(),
             "status request should not reset detection runtimes"
         );
+    }
+
+    #[tokio::test]
+    async fn a_live_program_status_turns_on_the_shell_return_probe() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("program-status")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminal_runtimes.insert(
+            terminal_id.clone(),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+        );
+        let report = |state| AppEvent::ProgramStatusReported {
+            pane_id,
+            status: Some(crate::terminal::program_status::ProgramStatus {
+                state,
+                kind: None,
+                app: None,
+                msg: Some("o1".into()),
+            }),
+            observed_at: Instant::now(),
+        };
+        let probe = |app: &App| {
+            app.terminal_runtimes
+                .get(&terminal_id)
+                .unwrap()
+                .self_reported_agent_active_for_test()
+        };
+
+        app.handle_internal_event(report(
+            crate::terminal::program_status::ProgramState::Working,
+        ));
+        assert!(
+            probe(&app),
+            "a working report must be ended by the shell coming back"
+        );
+        // done outlives its program, so nothing needs to watch for the shell.
+        app.handle_internal_event(report(crate::terminal::program_status::ProgramState::Done));
+        assert!(!probe(&app));
     }
 
     #[tokio::test]

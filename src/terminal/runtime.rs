@@ -253,6 +253,11 @@ impl TerminalRuntime {
         self.0.set_self_reported_agent_active(active);
     }
 
+    #[cfg(test)]
+    pub(crate) fn self_reported_agent_active_for_test(&self) -> bool {
+        self.0.self_reported_agent_active_for_test()
+    }
+
     pub fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
         self.0.resize(rows, cols, cell_width_px, cell_height_px);
     }

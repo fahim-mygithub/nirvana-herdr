@@ -1536,7 +1536,17 @@ impl AppState {
                 observed_at,
             } => self
                 .update_terminal_state(pane_id, |terminal| {
-                    terminal.clear_self_reported_agent(observed_at)
+                    terminal.report_shell_returned(observed_at)
+                })
+                .into_iter()
+                .collect(),
+            AppEvent::ProgramStatusReported {
+                pane_id,
+                status,
+                observed_at,
+            } => self
+                .update_terminal_state(pane_id, |terminal| {
+                    terminal.set_program_status(status, observed_at)
                 })
                 .into_iter()
                 .collect(),
@@ -3770,6 +3780,101 @@ mod tests {
             state.terminals[&terminal_id].reported_resume().is_none(),
             "a late report must not revive an exited agent"
         );
+    }
+
+    fn program_status(
+        state: crate::terminal::program_status::ProgramState,
+        msg: &str,
+    ) -> Option<crate::terminal::program_status::ProgramStatus> {
+        Some(crate::terminal::program_status::ProgramStatus {
+            state,
+            kind: None,
+            app: Some("nirvana".into()),
+            msg: Some(msg.into()),
+        })
+    }
+
+    #[test]
+    fn a_program_status_report_wins_over_detection_and_ends_with_the_shell() {
+        use crate::terminal::program_status::ProgramState;
+        let mut state = app_with_workspaces(&["one"]);
+        let (pane_id, terminal_id) = first_pane_terminal(&state);
+        // The incident: a headless worker under a detected Claude reads idle.
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        let seen = std::time::Instant::now();
+        let before = seen
+            .checked_sub(std::time::Duration::from_millis(5))
+            .unwrap();
+
+        state.handle_app_event(AppEvent::ProgramStatusReported {
+            pane_id,
+            status: program_status(ProgramState::Working, "o1"),
+            observed_at: seen,
+        });
+        let terminal = &state.terminals[&terminal_id];
+        assert_eq!(terminal.state, AgentState::Working);
+        // The `agent` field keeps its meaning: a report names no agent.
+        assert_eq!(terminal.effective_agent_label(), Some("claude"));
+
+        // A report seen before the current one arrives late: dropped.
+        state.handle_app_event(AppEvent::ProgramStatusReported {
+            pane_id,
+            status: program_status(ProgramState::Idle, "o0"),
+            observed_at: before,
+        });
+        assert_eq!(state.terminals[&terminal_id].state, AgentState::Working);
+
+        // A shell seen idle before the report does not end it; one seen after does.
+        state.handle_app_event(AppEvent::ReportedAgentShellReturned {
+            pane_id,
+            observed_at: before,
+        });
+        assert_eq!(state.terminals[&terminal_id].state, AgentState::Working);
+        state.handle_app_event(AppEvent::ReportedAgentShellReturned {
+            pane_id,
+            observed_at: std::time::Instant::now(),
+        });
+        let terminal = &state.terminals[&terminal_id];
+        assert_eq!(terminal.program_status, None);
+        assert_eq!(terminal.state, AgentState::Idle);
+    }
+
+    #[test]
+    fn a_done_report_survives_the_shell_and_a_clear_ends_it() {
+        use crate::terminal::program_status::ProgramState;
+        let mut state = app_with_workspaces(&["one"]);
+        let (pane_id, terminal_id) = first_pane_terminal(&state);
+        state.handle_app_event(AppEvent::ProgramStatusReported {
+            pane_id,
+            status: program_status(ProgramState::Done, "o1"),
+            observed_at: std::time::Instant::now(),
+        });
+        assert!(!state.terminals[&terminal_id].program_status_ends_with_shell());
+        state.handle_app_event(AppEvent::ReportedAgentShellReturned {
+            pane_id,
+            observed_at: std::time::Instant::now(),
+        });
+        let terminal = &state.terminals[&terminal_id];
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(
+            terminal
+                .program_status
+                .as_ref()
+                .and_then(|status| status.msg.as_deref()),
+            Some("o1")
+        );
+        state.handle_app_event(AppEvent::ProgramStatusReported {
+            pane_id,
+            status: None,
+            observed_at: std::time::Instant::now(),
+        });
+        let terminal = &state.terminals[&terminal_id];
+        assert_eq!(terminal.program_status, None);
+        assert_eq!(terminal.state, AgentState::Unknown);
     }
 
     #[test]

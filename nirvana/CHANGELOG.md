@@ -3,6 +3,41 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.72.0: a program reports its own status to its pane, and worker panes say what they run
+
+- **Changed:** herdr reads the program status protocol, OSC 7501, spec revision 0.4, in a smaller form than upstream
+  PR #5172. A program in a pane can say it is idle, working, blocked, done or failed, with a message. herdr keeps the
+  latest report for the pane. While it is in place it wins over hooks and screen detection, in `pane list`,
+  `agent list` and the sidebar. herdr answers the spec's support query. A new shell prompt, the pane's shell coming
+  back, a full reset or a clear ends a working, blocked or idle report. A done or error report stays until it is
+  replaced, cleared or reset. `pane list` and `agent list` show the report as two tokens: `program_status` and
+  `program_status_msg`. The `agent` field is unchanged, so the dead-pane sweep reads what it read before.
+  - `herdr seat exec` in a pane reports its order: working with the order id while it runs. When it ends: blocked
+    when the order asks, done when it delivered, error when it failed or was stopped, idle when it waits for a
+    window to reset. It also writes OSC 7 with its folder, so the pane's cwd is the new order's. A detached
+    `seat exec` writes neither, since its output is a log file.
+  - Left out of #5172: child records and ids, the record priority list, the vendored libghostty parser and its patch,
+    the `program_status` array in the API schema, OSC 9;4 mapping, API events for report-only changes, docs.
+- **Because:** the owner, 2026-11-14: "Sure lets add the top 3". This was the item "Status reporting in herdr: port
+  #5172's idea in a smaller form. It fixes the stale idle states at the source." On 2026-11-13 `herdr agent list`
+  showed live worker panes as idle, with the folder of the order that last used the pane.
+- **Measured:** 2026-11-14 on a scratch herdr session `osc7501` with this build, not the owner's. A report written by
+  a Python program in a PowerShell pane came through Windows ConPTY: `pane list` read `working` with the tokens
+  `program_status: working` and `program_status_msg: order-one`. After the program exited it read `unknown` with no
+  tokens. A `done` report stayed after its program exited. The stale folder had its own cause. herdr takes a Windows
+  pane's folder from its last PowerShell prompt. The launch line runs `Set-Location` and `seat exec` on one line, so
+  no prompt shows the new folder while the order runs. The control line, `Set-Location order2; Start-Sleep 12`, read
+  the old folder while it ran and `order2` only after the prompt came back. The same line with `seat exec` read
+  `order3` while it ran. A probe program in a pane did not see the reply to the support query. It did not see the
+  reply to `CSI c` either, so the probe cannot tell where a reply is lost. The unit test shows herdr writes the reply
+  ahead of the device attributes reply. 15 new tests. Each of the 29 controls in `p74_status.py` turns its test red.
+  No control covers the pane reader's hand-off to the app or the two `seat exec` lines that write the reports. The
+  live session ran the hand-off, and the `seat exec` start for an order that does not exist, which wrote its folder
+  and cleared the report. No real worker order was run, to spend no model usage, so a live working, done or error
+  from `seat exec` is not measured.
+- **If you remove this:** a headless worker's pane reads idle while it works, and a reused pane shows the folder of
+  the order before.
+
 ## alpha 0.72.0: lessons go stale and to the archive by time, and a review that waited goes on a short quiet
 
 - **Changed:** two parts from Hermes, added to the lesson reviews.

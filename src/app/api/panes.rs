@@ -4548,6 +4548,40 @@ mod tests {
     }
 
     #[test]
+    fn pane_get_carries_the_program_status_and_its_message_as_tokens() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        app.handle_internal_event(crate::events::AppEvent::ProgramStatusReported {
+            pane_id: internal_pane_id,
+            status: Some(crate::terminal::program_status::ProgramStatus {
+                state: crate::terminal::program_status::ProgramState::Working,
+                kind: None,
+                app: Some("nirvana".into()),
+                msg: Some("c6-candle-noise".into()),
+            }),
+            observed_at: std::time::Instant::now(),
+        });
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "get".into(),
+            method: crate::api::schema::Method::PaneGet(PaneTarget {
+                pane_id: pane_id.clone(),
+            }),
+        });
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("expected pane info");
+        };
+        assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Working);
+        assert_eq!(
+            pane.tokens,
+            std::collections::HashMap::from([
+                ("program_status".into(), "working".into()),
+                ("program_status_msg".into(), "c6-candle-noise".into()),
+            ])
+        );
+    }
+
+    #[test]
     fn pane_tokens_are_independent_from_presentation_guards() {
         let (mut app, pane_id) = app_with_test_workspace();
         let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();

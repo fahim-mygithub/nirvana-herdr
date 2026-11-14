@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use tracing::info;
 
 use crate::layout::PaneId;
+use crate::terminal::program_status::{self, ProgramStatus};
 
 use super::terminal::GhosttyPaneCore;
 
@@ -371,6 +372,16 @@ impl OscStreamCollector {
     const MAX_BODY_BYTES: usize = 4096;
 
     fn observe(&mut self, bytes: &[u8], mut receive: impl FnMut(&[u8])) {
+        self.observe_with_reset(bytes, |body| {
+            if let Some(body) = body {
+                receive(body);
+            }
+        });
+    }
+
+    /// As `observe`, and also hands `None` for a full reset (`ESC c`), in stream order. Nirvana fork, alpha 0.72.0:
+    /// OSC 7501 says a full reset removes every program status record.
+    fn observe_with_reset(&mut self, bytes: &[u8], mut receive: impl FnMut(Option<&[u8]>)) {
         let mut cursor = 0;
         while cursor < bytes.len() {
             if matches!(
@@ -398,6 +409,10 @@ impl OscStreamCollector {
                     0x1b => self.state = OscStreamState::Escape,
                     byte if is_ignored_string_intro(byte) => {
                         self.state = OscStreamState::IgnoringString;
+                    }
+                    b'c' => {
+                        receive(None);
+                        self.state = OscStreamState::Ground;
                     }
                     _ => self.state = OscStreamState::Ground,
                 },
@@ -471,8 +486,8 @@ impl OscStreamCollector {
         }
     }
 
-    fn finish(&mut self, receive: &mut impl FnMut(&[u8])) {
-        receive(&self.body);
+    fn finish(&mut self, receive: &mut impl FnMut(Option<&[u8]>)) {
+        receive(Some(&self.body));
         self.body.clear();
         self.state = OscStreamState::Ground;
     }
@@ -496,22 +511,69 @@ pub(super) struct AgentOscStateTracker {
     latest_title: Option<String>,
     terminal_title: Option<String>,
     latest_progress: Option<String>,
+    /// Nirvana fork, alpha 0.72.0: the OSC 7501 root record (`crate::terminal::program_status`). Unlike the title
+    /// and progress it is not dropped on an agent change: it belongs to the terminal, and the spec's own events end it.
+    program_status: Option<ProgramStatus>,
+    program_status_changed: bool,
+    program_status_queries: usize,
 }
 
 impl AgentOscStateTracker {
     pub(super) fn observe(&mut self, bytes: &[u8]) -> bool {
-        let (collector, latest_title, terminal_title, latest_progress) = (
+        let (
+            collector,
+            latest_title,
+            terminal_title,
+            latest_progress,
+            program_status,
+            program_status_changed,
+            program_status_queries,
+        ) = (
             &mut self.collector,
             &mut self.latest_title,
             &mut self.terminal_title,
             &mut self.latest_progress,
+            &mut self.program_status,
+            &mut self.program_status_changed,
+            &mut self.program_status_queries,
         );
         let mut terminal_title_changed = false;
-        collector.observe(bytes, |body| {
+        collector.observe_with_reset(bytes, |body| {
+            let Some(body) = body else {
+                // A full reset removes every record.
+                replace_program_status(program_status, program_status_changed, None);
+                return;
+            };
             let Some((command, payload)) = parse_agent_osc_body(body) else {
                 return;
             };
             match command {
+                program_status::OSC_COMMAND => {
+                    if payload == b"?" {
+                        *program_status_queries += 1;
+                        return;
+                    }
+                    match program_status::parse_report(payload) {
+                        Some(program_status::Report::Set(status)) => replace_program_status(
+                            program_status,
+                            program_status_changed,
+                            Some(status),
+                        ),
+                        Some(program_status::Report::Clear) => {
+                            replace_program_status(program_status, program_status_changed, None)
+                        }
+                        None => {}
+                    }
+                }
+                // OSC 133 A, a new shell prompt, ends what lasts only as long as its program.
+                b"133" if payload.first() == Some(&b'A') => {
+                    if program_status
+                        .as_ref()
+                        .is_some_and(|status| status.state.ends_with_its_program())
+                    {
+                        replace_program_status(program_status, program_status_changed, None);
+                    }
+                }
                 b"0" | b"2" => {
                     let title = sanitize_agent_osc_string(payload, AGENT_OSC_MAX_CHARS);
                     let title = (!title.is_empty()).then_some(title);
@@ -531,6 +593,16 @@ impl AgentOscStateTracker {
 
     pub(super) fn terminal_title(&self) -> Option<&str> {
         self.terminal_title.as_deref()
+    }
+
+    /// The root record after the bytes seen since the last call, when it changed. `Some(None)` is a cleared record.
+    pub(super) fn take_program_status_change(&mut self) -> Option<Option<ProgramStatus>> {
+        std::mem::take(&mut self.program_status_changed).then(|| self.program_status.clone())
+    }
+
+    /// How many `OSC 7501 ; ?` queries came since the last call. Each gets one reply.
+    pub(super) fn take_program_status_queries(&mut self) -> usize {
+        std::mem::take(&mut self.program_status_queries)
     }
 
     #[cfg(unix)]
@@ -558,6 +630,17 @@ impl AgentOscStateTracker {
     pub(super) fn clear_retained(&mut self) {
         self.latest_title = None;
         self.latest_progress = None;
+    }
+}
+
+fn replace_program_status(
+    slot: &mut Option<ProgramStatus>,
+    changed: &mut bool,
+    status: Option<ProgramStatus>,
+) {
+    if *slot != status {
+        *slot = status;
+        *changed = true;
     }
 }
 
@@ -1150,6 +1233,64 @@ mod tests {
         t.observe(b"\x1b]0;first\x07\x1b]9;4;3;\x07\x1b]2;second\x07");
         assert_eq!(t.latest_title(), "second");
         assert_eq!(t.latest_progress(), "4;3;");
+    }
+
+    fn program_state(
+        tracker: &mut AgentOscStateTracker,
+        bytes: &[u8],
+    ) -> Option<Option<&'static str>> {
+        tracker.observe(bytes);
+        tracker
+            .take_program_status_change()
+            .map(|status| status.map(|status| status.state.word()))
+    }
+
+    #[test]
+    fn program_status_report_is_kept_and_cleared_by_the_specs_events() {
+        let mut tracker = AgentOscStateTracker::default();
+        // A report split across two reads, then the same report again: one change.
+        assert_eq!(program_state(&mut tracker, b"\x1b]7501;state=work"), None);
+        assert_eq!(
+            program_state(&mut tracker, b"ing:msg=b3JkZXI\x1b\\"),
+            Some(Some("working"))
+        );
+        assert_eq!(
+            program_state(&mut tracker, b"\x1b]7501;state=working:msg=b3JkZXI\x07"),
+            None
+        );
+        // A new shell prompt (OSC 133 A) ends working.
+        assert_eq!(program_state(&mut tracker, b"\x1b]133;A\x07"), Some(None));
+        // done survives a prompt; a full reset (ESC c) ends it.
+        assert_eq!(
+            program_state(&mut tracker, b"\x1b]7501;state=done\x1b\\"),
+            Some(Some("done"))
+        );
+        assert_eq!(program_state(&mut tracker, b"\x1b]133;A\x07"), None);
+        assert_eq!(program_state(&mut tracker, b"\x1bc"), Some(None));
+        // state=clear ends it; a report the parser ignores changes nothing.
+        assert_eq!(
+            program_state(&mut tracker, b"\x1b]7501;state=blocked\x1b\\"),
+            Some(Some("blocked"))
+        );
+        assert_eq!(
+            program_state(&mut tracker, b"\x1b]7501;state=paused\x1b\\"),
+            None
+        );
+        assert_eq!(
+            program_state(&mut tracker, b"\x1b]7501;state=clear\x1b\\"),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn program_status_query_is_counted_and_not_a_report() {
+        let mut tracker = AgentOscStateTracker::default();
+        assert_eq!(
+            program_state(&mut tracker, b"\x1b]7501;?\x1b\\\x1b]7501;?\x07"),
+            None
+        );
+        assert_eq!(tracker.take_program_status_queries(), 2);
+        assert_eq!(tracker.take_program_status_queries(), 0);
     }
 
     #[test]

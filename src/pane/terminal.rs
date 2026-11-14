@@ -170,6 +170,8 @@ pub(crate) struct ProcessBytesResult {
     pub clipboard_writes: Vec<Vec<u8>>,
     pub reported_cwd: Option<std::path::PathBuf>,
     pub terminal_responses: Vec<Bytes>,
+    /// Nirvana fork, alpha 0.72.0: the OSC 7501 root record when these bytes changed it; `Some(None)` cleared it.
+    pub program_status: Option<Option<crate::terminal::program_status::ProgramStatus>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1368,6 +1370,7 @@ impl GhosttyPaneTerminal {
                 clipboard_writes: Vec::new(),
                 reported_cwd: None,
                 terminal_responses: Vec::new(),
+                program_status: None,
             };
         };
 
@@ -1397,6 +1400,8 @@ impl GhosttyPaneTerminal {
             );
         }
         let terminal_title_changed = core.agent_osc_state.observe(bytes);
+        let program_status = core.agent_osc_state.take_program_status_change();
+        let program_status_queries = core.agent_osc_state.take_program_status_queries();
 
         core.kitty_keyboard.observe(bytes);
         let mut terminal_responses = Vec::new();
@@ -1477,6 +1482,17 @@ impl GhosttyPaneTerminal {
         if synchronized_output {
             crate::render_prof::event("pty.synchronized_output_suppressed");
         }
+        // OSC 7501 feature detection. The reply goes first: a program sends `CSI c` right after its query and reads a
+        // device-attributes reply that arrives first as "unsupported", so it must not trail the native replies.
+        if program_status_queries > 0 {
+            terminal_responses.splice(
+                0..0,
+                std::iter::repeat_n(
+                    Bytes::from_static(crate::terminal::program_status::SUPPORT_REPLY),
+                    program_status_queries,
+                ),
+            );
+        }
         ProcessBytesResult {
             request_render,
             render_delay,
@@ -1485,6 +1501,7 @@ impl GhosttyPaneTerminal {
             clipboard_writes,
             reported_cwd,
             terminal_responses,
+            program_status,
         }
     }
 
@@ -6545,6 +6562,32 @@ mod tests {
         let result = pane.process_pty_bytes(pane_id, 0, b"\x1b_25a1;s\x1b\\", &tx);
 
         assert!(result.terminal_responses.is_empty());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn process_pty_bytes_answers_the_program_status_query_first_and_returns_the_report() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        // The spec's detection: the query, then primary device attributes. Our reply must come before the DA reply.
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]7501;?\x1b\\\x1b[c", &tx);
+        assert_eq!(
+            result.terminal_responses.first(),
+            Some(&Bytes::from_static(b"\x1b]7501;?\x1b\\"))
+        );
+        assert_eq!(result.program_status, None);
+
+        let result = pane.process_pty_bytes(
+            pane_id,
+            0,
+            b"\x1b]7501;state=working:msg=b3JkZXI\x1b\\",
+            &tx,
+        );
+        let status = result.program_status.flatten().expect("a report");
+        assert_eq!(status.msg.as_deref(), Some("order"));
         assert!(rx.try_recv().is_err());
     }
 
