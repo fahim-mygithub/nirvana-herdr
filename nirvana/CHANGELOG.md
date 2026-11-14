@@ -3,6 +3,20 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.71.3: a PowerShell pane keeps its output when resized
+
+- **Changed:** took upstream herdr's fix for ConPTY resizes, PR #5381, commit a97964c7, unchanged. A Windows pane's
+  terminal now resizes the way ConPTY does. It keeps ConPTY's live buffer, follows its cursor, and leaves older
+  scrollback where it was. Only Windows ConPTY panes use it.
+- **Because:** the owner, 2026-11-14: "Sure lets add the top 3". This was the second item: "The Windows resize fix,
+  taken from #5381." The PR says widening a PowerShell pane put herdr's cursor one row below ConPTY's, so the prompt
+  wrote over earlier output and left a stale prompt behind.
+- **Measured:** the commit applied to master 0.71.2 with no conflicts. Its test
+  `windows_conpty_resize_preserves_live_buffer_and_scrollback` passes, and so do all 401 `pane::` tests. Control
+  `p73_conpty_policy_off` turns the policy off and turns the test red. The PR's five Zig tests in the vendored terminal
+  were not run here. The control does not cover the line in `PaneRuntime` that turns the policy on for each new pane.
+- **If you remove this:** resizing a PowerShell pane can write a prompt over the output above it again.
+
 ## alpha 0.71.2: a finished worker's pane closes beside a live one
 
 - **Changed:** the dead-pane sweep kept every pane in a tab where herdr saw an agent in any pane. Now a pane is kept
