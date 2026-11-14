@@ -23,6 +23,7 @@ T_LIVE = _D + "order_live_reads_the_supervisor_not_the_phase"
 T_LABELS = _D + "labels_name_a_worker_or_a_job"
 T_ROWS_DEAD = "nirvana_subagents::tests::a_worker_with_no_supervisor_stops_counting"
 T_ROWS_PHASES = "nirvana_subagents::tests::read_seat_orders_phases_and_ended_runs"
+T_ROWS_GRACE = "nirvana_subagents::tests::an_ended_run_leaves_the_panel_after_the_grace"
 T_STATUS = "nirvana_claude::tests::the_statusline_names_an_order_with_no_supervisor_stopped"
 # Review round (dead-review.md)
 T_REAP = "app::nirvana_dead_panes::tests::a_hung_sweep_is_killed_logged_and_frees_the_next_pass"
@@ -38,6 +39,11 @@ T_KEY = _D + "an_unreadable_key_record_keeps_the_pane"
 T_EMPTY = _D + "an_empty_process_list_keeps_the_pane"
 
 CONTROLS = (
+    # 0.73.1: an ended order of a live run leaves by its own rule, not with the run.
+    Control("dead_context_rows_leave", SUBAGENTS,
+            "            if !order_shown {\n",
+            "            if false && !order_shown {\n",
+            T_ROWS_GRACE, "rust"),
     # The close rule (`decide`) and the sweep
     Control("dead_grace", DEAD,
             "    if now < since.saturating_add(grace) {\n",

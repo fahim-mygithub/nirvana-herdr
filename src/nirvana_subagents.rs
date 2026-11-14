@@ -1071,10 +1071,16 @@ fn seat_orders_and_panes(
         // live, a pending deferral, an open question, a dead supervisor's order for the sweep's hour, else
         // `ROWS_GRACE_S` after its last event); a shown run keeps its ended orders beside the shown one as context. The
         // owner's screenshot held finished groups (`bs-2-09`, `quadxlslice`, `quad-split`, `print-audit`) for days.
-        let run_shown = run_state.orders.iter().zip(&lives).any(|(order, live)| {
-            let answered = crate::nirvana_dead::answered(&run_state.orders, order);
-            crate::nirvana_dead::order_shown(order, *live, answered, now_secs)
-        });
+        let shown: Vec<bool> = run_state
+            .orders
+            .iter()
+            .zip(&lives)
+            .map(|(order, live)| {
+                let answered = crate::nirvana_dead::answered(&run_state.orders, order);
+                crate::nirvana_dead::order_shown(order, *live, answered, now_secs)
+            })
+            .collect();
+        let run_shown = shown.iter().any(|shown| *shown);
         // Review S2: a pane is a worker's while its order's worker holds it, and only then; the set is rebuilt on
         // every read, so a kept pane the owner reuses after its order is done shows as an ordinary pane again.
         for (order, live) in run_state.orders.iter().zip(&lives) {
@@ -1091,7 +1097,7 @@ fn seat_orders_and_panes(
             }
         }
 
-        for (order, is_live) in run_state.orders.into_iter().zip(lives) {
+        for ((order, is_live), order_shown) in run_state.orders.into_iter().zip(lives).zip(shown) {
             if matches!(
                 order.phase,
                 crate::nirvana_run::Phase::Merged
@@ -1108,6 +1114,13 @@ fn seat_orders_and_panes(
 
             // No stream is read for a hidden run.
             if !run_shown {
+                continue;
+            }
+            // 0.73.1: each order leaves by its own rule (`nirvana_dead::order_shown`), also while its run has a live
+            // order. A shown run used to keep every ended order beside the live one as context; on 2026-11-14 the
+            // owner's run `ia1`, live for two days, listed 43 stopped, blocked and failed orders under its one live
+            // worker, and the agents panel's row grew too tall to draw. The statusline already used this rule.
+            if !order_shown {
                 continue;
             }
 
@@ -2752,8 +2765,10 @@ mod tests {
         // Assert all phases. o-seated was seated at 1002 and no supervisor took it: past the seat grace it stopped.
         assert_eq!(find_state("o-seated"), Some(SubagentState::Stopped));
         assert_eq!(find_state("o-running"), Some(SubagentState::Running));
-        // An asked worker has ended; its order waits on the owner, as a blocked delivery does.
-        assert_eq!(find_state("o-asked"), Some(SubagentState::Blocked));
+        // An asked worker has ended. Here o-deferred, seated after it with no parent, answers its question
+        // (`nirvana_dead::answered`), so since 0.73.1 its row leaves by its own rule. An open question shows as Blocked:
+        // `a_worker_with_no_supervisor_stops_counting`.
+        assert_eq!(find_state("o-asked"), None);
         assert_eq!(find_state("o-deferred"), Some(SubagentState::Running));
         // Within the seat grace a Seated order whose supervisor has not started yet is live.
         let early = read_seat_orders(&temp, "orch-1", 1030);
@@ -2761,20 +2776,30 @@ mod tests {
             early.iter().find(|s| s.name == "o-seated").map(|s| s.state),
             Some(SubagentState::Running)
         );
-        assert_eq!(find_state("o-del-done"), Some(SubagentState::Done));
-        assert_eq!(find_state("o-del-blocked"), Some(SubagentState::Blocked));
-        assert_eq!(find_state("o-del-failed"), Some(SubagentState::Failed));
-        assert_eq!(find_state("o-interrupted"), Some(SubagentState::Stopped));
-        assert_eq!(find_state("o-failed"), Some(SubagentState::Failed));
+        // 0.73.1: an ended order leaves `ROWS_GRACE_S` after its last event, live run or not, so the ended phases are
+        // read inside the grace; at 2000 they are gone.
+        let early_state = |name: &str| -> Option<SubagentState> {
+            early.iter().find(|s| s.name == name).map(|s| s.state)
+        };
+        assert_eq!(early_state("o-del-done"), Some(SubagentState::Done));
+        assert_eq!(early_state("o-del-blocked"), Some(SubagentState::Blocked));
+        assert_eq!(early_state("o-del-failed"), Some(SubagentState::Failed));
+        assert_eq!(early_state("o-interrupted"), Some(SubagentState::Stopped));
+        assert_eq!(early_state("o-failed"), Some(SubagentState::Failed));
+        assert_eq!(find_state("o-del-done"), None);
+        assert_eq!(find_state("o-failed"), None);
         // Reseated is skipped!
-        assert_eq!(find_state("o-reseated"), None);
+        assert_eq!(early_state("o-reseated"), None);
         // Plan 38 review S4: Asked and Deferred orders are live but wait; Seated and Running ones work.
         let waiting = |name: &str| -> Option<bool> {
             subs.iter().find(|s| s.name == name).map(|s| s.waiting)
         };
         assert_eq!(waiting("o-seated"), Some(false));
         assert_eq!(waiting("o-running"), Some(false));
-        assert_eq!(waiting("o-asked"), Some(false));
+        assert_eq!(
+            early.iter().find(|s| s.name == "o-asked").map(|s| s.waiting),
+            Some(false)
+        );
         assert_eq!(waiting("o-deferred"), Some(true));
 
         // Now test Ended run: finished rows are hidden!
@@ -2853,10 +2878,16 @@ mod tests {
         for now in [1_100, 1_300, 5_000, 900_000] {
             let rows = read_seat_orders(&temp, "wP:p1", now);
             let row = |name: &str| rows.iter().find(|s| s.name == name).cloned().unwrap();
-            let died = row("quad-xl-slice4");
-            assert_eq!(died.state, SubagentState::Stopped, "at {now}");
-            assert_eq!(died.ended_at, Some(1003));
-            assert_eq!(died.elapsed_secs, 1);
+            // 0.73.1: the dead supervisor's order leaves after its own hour, `STOPPED_GRACE_S` from 1003, even while
+            // the run stays shown for the open question.
+            if now < 1003 + crate::nirvana_dead::STOPPED_GRACE_S {
+                let died = row("quad-xl-slice4");
+                assert_eq!(died.state, SubagentState::Stopped, "at {now}");
+                assert_eq!(died.ended_at, Some(1003));
+                assert_eq!(died.elapsed_secs, 1);
+            } else {
+                assert!(rows.iter().all(|s| s.name != "quad-xl-slice4"), "at {now}");
+            }
             let asked = row("quad-xl-slice2");
             assert_eq!(asked.state, SubagentState::Blocked, "at {now}");
             assert_eq!(asked.elapsed_secs, 2);
@@ -2961,30 +2992,18 @@ mod tests {
                 row("quad-v5", "quad-v5-size-colour"),
             ]
         );
-        // At the grace it is gone; the live run keeps its ended order as context.
-        assert_eq!(
-            names(1004 + grace),
-            vec![
-                row("quad-v5", "quad-v5-old"),
-                row("quad-v5", "quad-v5-size-colour"),
-            ]
-        );
-        // A live order keeps its run however long it runs, its ended order with it.
-        assert_eq!(
-            names(1_000_000),
-            vec![
-                row("quad-v5", "quad-v5-old"),
-                row("quad-v5", "quad-v5-size-colour"),
-            ]
-        );
+        // At the grace it is gone, and so is the live run's ended order: each order leaves by its own rule (0.73.1).
+        assert_eq!(names(1004 + grace), vec![row("quad-v5", "quad-v5-size-colour")]);
+        // A live order keeps its run however long it runs; an ended order of that run does not stay with it.
+        assert_eq!(names(1_000_000), vec![row("quad-v5", "quad-v5-size-colour")]);
         // The live order's supervisor dies with no word in the journal (a server restart): its run stays the sweep's
         // `STOPPED_GRACE_S` after that order's last event (1006), as long as its pane may stay open (review N2).
         drop(lock);
         let stopped = crate::nirvana_dead::STOPPED_GRACE_S;
         assert_eq!(
             names(1006 + stopped - 1).len(),
-            2,
-            "the run whose dead order's last event is 1006 stays its hour"
+            1,
+            "the dead order whose last event is 1006 stays its hour"
         );
         assert!(
             names(1006 + stopped).is_empty(),

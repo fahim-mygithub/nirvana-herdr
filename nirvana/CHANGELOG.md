@@ -3,6 +3,23 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.73.1: finished orders leave the agents panel while their run goes on
+
+- **Changed:** each order's row in the agents panel now leaves by its own rule, also while its run has a live order.
+  A finished order goes 5 minutes after its end. A worker that died goes after its hour. An open question stays until
+  a later order answers it. Before, a run with any live order kept every order it ever had beside it. The statusline
+  already used the per-order rule.
+- **Because:** the owner, 2026-11-14, with a screenshot of run `ia1`: "why does all the stopped and blocked and failed
+  still exist?" Earlier the same day: "The agent lists on the left is not populating despite what the main herder is
+  telling me".
+- **Measured:** 2026-11-14, read only, the panel's own row code on the owner's Megajam project returned 44 rows for run
+  `ia1`: l05-beats2 running and 43 stopped, blocked or failed orders, some days old. That row was too tall for the
+  panel to draw. The test `an_ended_run_leaves_the_panel_after_the_grace` now expects an ended order of a live run to
+  leave at the grace, and control `dead_context_rows_leave` turns it red. Two older tests read finished states past
+  the grace and now read them inside it. `nirvana_subagents` passes with one thread apart from the known flaky
+  `cached_shell_pid` test. `client::shell` and `nirvana_dead` pass.
+- **If you remove this:** a long run lists every order it ever ran, and its agents panel row grows past the screen.
+
 ## alpha 0.73.0: a program reports its own status to its pane, and worker panes say what they run
 
 - **Changed:** herdr reads the program status protocol, OSC 7501, spec revision 0.4, in a smaller form than upstream
