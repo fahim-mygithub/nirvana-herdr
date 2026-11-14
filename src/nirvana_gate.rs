@@ -3807,7 +3807,7 @@ fn gate_subject(
         {
             // Plan 33 §3.1: any project, remote or none; §3.2: the order's own copy names its profile.
             let profile = order_profile(seated, &spec);
-            let verdict = crate::nirvana_lessons::verify_and_write(
+            let (verdict, ledger_note) = crate::nirvana_lessons::verify_and_write_noted(
                 &project.root,
                 lesson,
                 true,
@@ -3828,7 +3828,10 @@ fn gate_subject(
                     Axis::new(
                         "lesson",
                         Mark::Pass,
-                        format!("written to {}", path.display()),
+                        match &ledger_note {
+                            Some(note) => format!("written to {}; {note}", path.display()),
+                            None => format!("written to {}", path.display()),
+                        },
                     )
                 }
                 crate::nirvana_lessons::Verdict::Refused(why) => {
