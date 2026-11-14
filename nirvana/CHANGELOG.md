@@ -3,7 +3,7 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
-## alpha 0.73.1: the agents panel draws an orchestrator with a long run
+## alpha 0.73.2: the agents panel draws an orchestrator with a long run
 
 - **Changed:** in the agents panel, a run keeps all its live orders. Past 4 ended orders it shows the 3 most recent
   and one "+N more" line, as the spaces view does with its workers. The row's height counts the same lines. A row
