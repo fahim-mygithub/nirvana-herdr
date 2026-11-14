@@ -24,9 +24,26 @@ pub(super) struct PaneStatus {
 impl PaneStatus {
     /// On only for a pane launch (`--pane`) whose stdout is the pane's terminal.
     pub(super) fn new(pane: Option<&str>) -> Self {
+        let in_pane = std::env::var(crate::integration::HERDR_PANE_ID_ENV_VAR).ok();
         Self {
-            on: pane.is_some() && std::io::stdout().is_terminal(),
+            on: on_for(pane, in_pane.as_deref(), std::io::stdout().is_terminal()),
         }
+    }
+
+    /// Writes `working` and the folder, runs the order, then writes how it ended, also when `exec` failed: an error
+    /// return must not leave the pane reading working.
+    pub(super) fn around(
+        &self,
+        out: &mut dyn Write,
+        order: &str,
+        cwd: Option<&Path>,
+        exec: impl FnOnce(&mut dyn Write) -> std::io::Result<i32>,
+        phase: impl FnOnce() -> Option<Phase>,
+    ) -> std::io::Result<i32> {
+        self.begin(out, order, cwd);
+        let code = exec(out);
+        self.end(out, order, phase());
+        code
     }
 
     pub(super) fn begin(&self, out: &mut dyn Write, order: &str, cwd: Option<&Path>) {
@@ -42,6 +59,13 @@ impl PaneStatus {
             let _ = out.flush();
         }
     }
+}
+
+/// Review fix round: a terminal on stdout is not proof it is the pane's. herdr gives each pane's shell its public id
+/// in `HERDR_PANE_ID` (`pane.rs`, `PaneLaunchIdentity::Managed`), the same id `--pane` names. A `seat exec --pane w1:p2`
+/// typed in another pane, or in a terminal outside herdr, has another id or none, so it writes nothing.
+fn on_for(pane: Option<&str>, in_pane: Option<&str>, stdout_is_terminal: bool) -> bool {
+    stdout_is_terminal && pane.is_some_and(|pane| in_pane == Some(pane))
 }
 
 /// OSC 7 with the order's folder, then `working` with the order id.
@@ -112,6 +136,24 @@ mod tests {
     }
 
     #[test]
+    fn a_wake_reads_detection_not_a_report_in_the_orchestrator_pane() {
+        // `pane get` for an orchestrator pane where a `cat` wrote a done report over a working Claude.
+        let info = serde_json::json!({"result": {"pane": {
+            "agent_status": "done",
+            "tokens": {"program_status": "done", "detected_status": "working"},
+        }}});
+        assert_eq!(
+            crate::nirvana_worker::pane_decision_status(&info).as_deref(),
+            Some("working")
+        );
+        let plain = serde_json::json!({"pane": {"agent_status": "idle", "tokens": {}}});
+        assert_eq!(
+            crate::nirvana_worker::pane_decision_status(&plain).as_deref(),
+            Some("idle")
+        );
+    }
+
+    #[test]
     fn seat_exec_reports_working_with_the_order_and_its_folder() {
         let bytes = begin_bytes("c6-candle-noise", Some(Path::new(r"C:\p\my proj\.nirvana")));
         assert!(
@@ -158,6 +200,49 @@ mod tests {
         };
         assert_eq!(asked.kind.as_deref(), Some("question"));
         assert_eq!(asked.msg.as_deref(), Some("o"));
+    }
+
+    #[test]
+    fn seat_exec_writes_only_to_the_pane_it_names() {
+        assert!(on_for(Some("w1:p2"), Some("w1:p2"), true));
+        assert!(!on_for(Some("w1:p2"), Some("w1:p3"), true), "another pane's terminal");
+        assert!(!on_for(Some("w1:p2"), None, true), "a terminal outside herdr");
+        assert!(!on_for(Some("w1:p2"), Some("w1:p2"), false), "stdout is a log");
+        assert!(!on_for(None, Some("w1:p2"), true), "no --pane");
+    }
+
+    #[test]
+    fn seat_exec_reports_around_the_order_and_after_an_error() {
+        let on = PaneStatus { on: true };
+        let mut out = Vec::new();
+        let code = on.around(
+            &mut out,
+            "o1",
+            None,
+            |out| {
+                out.write_all(b"<worker>")?;
+                Ok(3)
+            },
+            || Some(Phase::Delivered),
+        );
+        assert_eq!(code.unwrap(), 3);
+        let text = String::from_utf8(out).unwrap();
+        let worker = text.find("<worker>").unwrap();
+        assert_eq!(state_of(&text[..worker]), Some(ProgramState::Working));
+        assert_eq!(state_of(&text[worker..]), Some(ProgramState::Done));
+
+        let mut out = Vec::new();
+        let code = on.around(
+            &mut out,
+            "o1",
+            None,
+            |_| Err(std::io::Error::other("journal")),
+            || Some(Phase::Failed),
+        );
+        assert!(code.is_err());
+        let text = String::from_utf8(out).unwrap();
+        let last = text.rfind("\x1b]7501;").unwrap();
+        assert_eq!(state_of(&text[last..]), Some(ProgramState::Error));
     }
 
     #[test]

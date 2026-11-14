@@ -1048,6 +1048,25 @@ fn a_message_is_typed_through_agent_prompt() {
     assert_eq!(w.herdr.calls("agent.prompt").len(), 1);
 }
 
+/// Review fix round, alpha 0.72.0: a program status report in the pane says done, detection says working. The send
+/// rides on what detection reads, so nothing is typed into the busy Claude.
+#[test]
+fn a_forged_done_report_does_not_type_into_a_working_agent() {
+    let w = world("forged");
+    for agent in w.herdr.agents.lock().unwrap().iter_mut() {
+        if agent["pane_id"] == "p1" {
+            agent["agent_status"] = json!("done");
+            agent["tokens"]["program_status"] = json!("done");
+            agent["tokens"]["detected_status"] = json!("working");
+        }
+    }
+    let running = serve(w.site());
+    let (status, answer) = send_json(running.addr, json!({"agent": "p1", "text": "also this"}));
+    assert_eq!(status, 409, "{answer}");
+    assert_eq!(answer["choose"], true);
+    assert!(w.herdr.calls("agent.prompt").is_empty());
+}
+
 #[test]
 fn a_working_agent_asks_queue_or_send_now() {
     let w = world("choose");

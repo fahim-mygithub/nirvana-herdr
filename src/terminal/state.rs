@@ -234,6 +234,30 @@ impl TerminalState {
         self.replace_program_status(status)
     }
 
+    /// The state from hooks and screen detection alone, with no program status report.
+    fn detected_state(&self) -> AgentState {
+        if self.visible_blocker_overrides_hook() {
+            AgentState::Blocked
+        } else {
+            self.hook_authority
+                .as_ref()
+                .filter(|authority| self.hook_authority_is_effective(authority))
+                .map(|authority| authority.state)
+                .unwrap_or(self.fallback_state)
+        }
+    }
+
+    /// Review fix round: the state that code which acts on the pane reads. A report is display only: any output in
+    /// the pane can write one, a `cat` of a file or a model's text. So a decision, such as typing into the pane,
+    /// reads hooks and detection. With no report in place this is `state`.
+    pub fn decision_state(&self) -> AgentState {
+        if self.program_status.is_some() {
+            self.detected_state()
+        } else {
+            self.state
+        }
+    }
+
     /// A `working`, `blocked` or `idle` record is in place, so the pane's shell coming back must end it.
     pub fn program_status_ends_with_shell(&self) -> bool {
         self.program_status
@@ -2507,24 +2531,20 @@ impl TerminalState {
         now: Instant,
     ) -> Option<EffectiveStateChange> {
         // Nirvana fork, alpha 0.72.0: a program's own report wins over hooks and detection (OSC 7501).
-        let state = if let Some(status) = &self.program_status {
-            status.state.agent_state()
-        } else if self.visible_blocker_overrides_hook() {
-            AgentState::Blocked
-        } else {
-            self.hook_authority
-                .as_ref()
-                .filter(|authority| self.hook_authority_is_effective(authority))
-                .map(|authority| authority.state)
-                .unwrap_or(self.fallback_state)
-        };
+        let detected = self.detected_state();
+        let state = self
+            .program_status
+            .as_ref()
+            .map_or(detected, |status| status.state.agent_state());
         let agent_label = self.effective_agent_label().map(str::to_string);
         let known_agent = self.effective_known_agent();
 
         let presentation = self.effective_presentation_for_state_at(state, now);
         self.clear_expiry_pending_for_hidden_metadata();
         // Nirvana fork, plan 27: every effective state passes here, so this is where an idle stretch starts and ends.
-        self.idle_stretch = self.idle_stretch.after(state, now);
+        // Review fix round: the stretch follows the detected state, not a report. It decides when `/compact` is typed
+        // into the pane, and any pane output can forge a report.
+        self.idle_stretch = self.idle_stretch.after(detected, now);
 
         if previous_agent_label == agent_label
             && previous_state == state
@@ -2599,6 +2619,29 @@ mod tests {
         terminal.clear_agent_runtime_identity_after_respawn();
         assert_eq!(terminal.program_status, None);
         assert_eq!(terminal.state, AgentState::Unknown);
+    }
+
+    #[test]
+    fn a_forged_report_moves_the_display_and_not_the_decision_state() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_program_status(
+            Some(crate::terminal::program_status::ProgramStatus {
+                state: crate::terminal::program_status::ProgramState::Done,
+                kind: None,
+                app: Some("nirvana".into()),
+                msg: Some("o1".into()),
+            }),
+            Instant::now(),
+        );
+        assert_eq!(terminal.state, AgentState::Idle, "display trusts the report");
+        assert_eq!(terminal.decision_state(), AgentState::Working);
+        assert!(
+            terminal.idle_stretch.since.is_none(),
+            "no idle stretch, so no /compact into a working Claude"
+        );
+        terminal.set_program_status(None, Instant::now());
+        assert_eq!(terminal.decision_state(), AgentState::Working);
     }
 
     #[test]

@@ -2230,25 +2230,69 @@ fn publish_reported_cwd(
     }
 }
 
-/// Nirvana fork, alpha 0.72.0: hands an OSC 7501 report to the app. The reader thread never blocks on the app, and a
-/// report is never dropped: a full queue sends it from a task instead. The time it was seen lets the app drop one
-/// that arrives after a newer one.
-fn publish_program_status(
-    pane_id: PaneId,
-    status: Option<crate::terminal::program_status::ProgramStatus>,
-    events: &mpsc::Sender<AppEvent>,
-    rt: &tokio::runtime::Handle,
-) {
-    let event = AppEvent::ProgramStatusReported {
-        pane_id,
-        status,
-        observed_at: std::time::Instant::now(),
-    };
-    if let Err(mpsc::error::TrySendError::Full(event)) = events.try_send(event) {
+/// Nirvana fork, alpha 0.72.0: hands OSC 7501 reports to the app, one pane's at a time. The reader thread never
+/// blocks on the app, and the app always gets the latest record. A full queue parks the report in `pending` and starts
+/// one task that sends it. Reports made while that task is live replace the parked one, latest wins, and never go
+/// around it, so they reach the app in the order the reader saw them. Review fix round: the first version spawned a
+/// task per report while the app was stalled, with no bound.
+#[derive(Default)]
+pub(crate) struct ProgramStatusOutbox {
+    slot: Mutex<OutboxSlot>,
+}
+
+#[derive(Default)]
+struct OutboxSlot {
+    pending: Option<AppEvent>,
+    task_live: bool,
+}
+
+impl ProgramStatusOutbox {
+    /// Sends the report now, or parks it. True when this call started the one sending task.
+    pub(crate) fn publish(
+        self: &Arc<Self>,
+        pane_id: PaneId,
+        status: Option<crate::terminal::program_status::ProgramStatus>,
+        events: &mpsc::Sender<AppEvent>,
+        rt: &tokio::runtime::Handle,
+    ) -> bool {
+        let event = AppEvent::ProgramStatusReported {
+            pane_id,
+            status,
+            observed_at: std::time::Instant::now(),
+        };
+        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.task_live {
+            slot.pending = Some(event);
+            return false;
+        }
+        let Err(mpsc::error::TrySendError::Full(event)) = events.try_send(event) else {
+            return false;
+        };
+        slot.pending = Some(event);
+        slot.task_live = true;
+        drop(slot);
+        let outbox = self.clone();
         let events = events.clone();
         rt.spawn(async move {
-            let _ = events.send(event).await;
+            loop {
+                let next = {
+                    let mut slot = outbox.slot.lock().unwrap_or_else(|e| e.into_inner());
+                    let next = slot.pending.take();
+                    // Cleared under the same lock the reader checks, so a report parked after this sees no task and
+                    // takes the queue itself.
+                    slot.task_live = next.is_some();
+                    next
+                };
+                let Some(event) = next else { break };
+                if events.send(event).await.is_err() {
+                    let mut slot = outbox.slot.lock().unwrap_or_else(|e| e.into_inner());
+                    slot.pending = None;
+                    slot.task_live = false;
+                    break;
+                }
+            }
         });
+        true
     }
 }
 
@@ -2600,6 +2644,7 @@ impl PaneRuntime {
             let compression_wake = compression.notifier();
             let rt = tokio::runtime::Handle::current();
             let delay_rt = rt.clone();
+            let program_status_outbox = Arc::new(ProgramStatusOutbox::default());
             let on_read = Box::new(move |bytes: &[u8]| {
                 let _content_write_guard = match content_write_lock.lock() {
                     Ok(guard) => guard,
@@ -2634,7 +2679,7 @@ impl PaneRuntime {
                     publish_reported_cwd(pane_id, cwd, &reported_cwd, &read_events);
                 }
                 if let Some(status) = result.program_status.clone() {
-                    publish_program_status(pane_id, status, &read_events, &delay_rt);
+                    program_status_outbox.publish(pane_id, status, &read_events, &delay_rt);
                 }
                 for content in result.clipboard_writes {
                     if let Err(err) = read_events.try_send(AppEvent::ClipboardWrite { content }) {
@@ -2808,6 +2853,7 @@ impl PaneRuntime {
             let reported_cwd = reported_cwd.clone();
             let compression_wake = compression.notifier();
             let rt = tokio::runtime::Handle::current();
+            let program_status_outbox = Arc::new(ProgramStatusOutbox::default());
             let on_read = Box::new(move |bytes: &[u8]| {
                 let _content_write_guard = match content_write_lock.lock() {
                     Ok(guard) => guard,
@@ -2844,7 +2890,7 @@ impl PaneRuntime {
                     publish_reported_cwd(pane_id, cwd, &reported_cwd, &events);
                 }
                 if let Some(status) = result.program_status.clone() {
-                    publish_program_status(pane_id, status, &events, &rt);
+                    program_status_outbox.publish(pane_id, status, &events, &rt);
                 }
                 for content in result.clipboard_writes {
                     if let Err(err) = events.try_send(AppEvent::ClipboardWrite { content }) {
@@ -4130,6 +4176,46 @@ impl PaneRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn program_status_outbox_starts_one_task_and_delivers_the_latest_in_order() {
+        use crate::terminal::program_status::{ProgramState, ProgramStatus};
+        let (tx, mut rx) = mpsc::channel(1);
+        let pane_id = PaneId::from_raw(7);
+        let outbox = Arc::new(ProgramStatusOutbox::default());
+        let rt = tokio::runtime::Handle::current();
+        let report = |msg: &str| {
+            Some(ProgramStatus {
+                state: ProgramState::Working,
+                kind: None,
+                app: Some("nirvana".into()),
+                msg: Some(msg.into()),
+            })
+        };
+        // The first fills the queue; the app is stalled, so the rest park behind one task. One thread: the task runs
+        // only once the test awaits, so every report is parked before it does.
+        assert!(!outbox.publish(pane_id, report("r0"), &tx, &rt));
+        let started = (1..100)
+            .filter(|n| outbox.publish(pane_id, report(&format!("r{n}")), &tx, &rt))
+            .count();
+        assert_eq!(started, 1, "one sending task, however many reports");
+        let msg = |event: AppEvent| match event {
+            AppEvent::ProgramStatusReported {
+                status, observed_at, ..
+            } => (status.and_then(|status| status.msg), observed_at),
+            _ => panic!("not a report"),
+        };
+        let (first, first_at) = msg(rx.recv().await.unwrap());
+        assert_eq!(first.as_deref(), Some("r0"));
+        let (last, last_at) = msg(rx.recv().await.unwrap());
+        assert_eq!(last.as_deref(), Some("r99"), "latest wins");
+        assert!(last_at >= first_at);
+        // The task ends once nothing waits, and the next report goes straight to the queue.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(rx.try_recv().is_err());
+        assert!(!outbox.publish(pane_id, report("r100"), &tx, &rt));
+        assert_eq!(msg(rx.recv().await.unwrap()).0.as_deref(), Some("r100"));
+    }
     use std::ffi::OsStr;
 
     #[tokio::test]

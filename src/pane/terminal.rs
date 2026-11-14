@@ -174,6 +174,9 @@ pub(crate) struct ProcessBytesResult {
     pub program_status: Option<Option<crate::terminal::program_status::ProgramStatus>>,
 }
 
+/// The most OSC 7501 query replies one read of pane output gets. A program asks once at its start.
+const MAX_PROGRAM_STATUS_REPLIES: usize = 4;
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct TerminalReadSnapshot {
     pub text: String,
@@ -1489,7 +1492,9 @@ impl GhosttyPaneTerminal {
                 0..0,
                 std::iter::repeat_n(
                     Bytes::from_static(crate::terminal::program_status::SUPPORT_REPLY),
-                    program_status_queries,
+                    // Review fix round: a reply goes back as input to the pane's program, asked or not. A `cat` of a
+                    // file full of queries would type that many replies, so one read answers a few at most.
+                    program_status_queries.min(MAX_PROGRAM_STATUS_REPLIES),
                 ),
             );
         }
@@ -6580,6 +6585,16 @@ mod tests {
         );
         assert_eq!(result.program_status, None);
 
+        // A flood of queries in one read gets a few replies, not one each.
+        let flood = b"\x1b]7501;?\x07".repeat(50);
+        let result = pane.process_pty_bytes(pane_id, 0, &flood, &tx);
+        let replies = result
+            .terminal_responses
+            .iter()
+            .filter(|reply| reply.as_ref() == crate::terminal::program_status::SUPPORT_REPLY)
+            .count();
+        assert_eq!(replies, MAX_PROGRAM_STATUS_REPLIES);
+
         let result = pane.process_pty_bytes(
             pane_id,
             0,
@@ -6589,6 +6604,41 @@ mod tests {
         let status = result.program_status.flatten().expect("a report");
         assert_eq!(status.msg.as_deref(), Some("order"));
         assert!(rx.try_recv().is_err());
+    }
+
+    /// Review fix round, the exact scenario: `seat exec o1` is cut by Ctrl-C, the shell comes back and the app ends
+    /// the record, and a re-run of the same order writes the same report. The pane must read working again.
+    #[test]
+    fn a_rerun_of_the_same_order_reads_working_after_the_app_cleared_it() {
+        use crate::detect::AgentState;
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+        let mut state = crate::terminal::TerminalState::new(
+            crate::terminal::TerminalId::alloc(),
+            "/tmp".into(),
+        );
+        let report = b"\x1b]7501;state=working:app=nirvana:msg=bzE\x1b\\";
+        let feed = |state: &mut crate::terminal::TerminalState| {
+            if let Some(status) = pane.process_pty_bytes(pane_id, 0, report, &tx).program_status {
+                state.set_program_status(status, std::time::Instant::now());
+            }
+        };
+
+        feed(&mut state);
+        assert_eq!(state.state, AgentState::Working);
+        // Ctrl-C: no clear is written. The app's shell-return probe ends the record; the pane's tracker never sees it.
+        state.report_shell_returned(std::time::Instant::now());
+        assert_eq!(state.program_status, None);
+        assert_ne!(state.state, AgentState::Working);
+
+        feed(&mut state);
+        assert_eq!(state.state, AgentState::Working);
+        assert_eq!(
+            state.program_status.and_then(|status| status.msg).as_deref(),
+            Some("o1")
+        );
     }
 
     #[test]

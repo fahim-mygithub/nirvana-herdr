@@ -426,10 +426,11 @@ impl Site {
         let mut stopped = None;
         // Alpha 0.68.0: a message typed into an open picker is its search and an Enter, which picks whatever matched
         // (the owner's "1" into `/resume`, 2026-11-10). So nothing is typed, and the page is sent the picker's keys.
-        if !matches!(
-            found.agent["agent_status"].as_str().unwrap_or(""),
-            "working" | "blocked"
-        ) {
+        // Review fix round, alpha 0.72.0: what to type rides on the status hooks and detection read, not a program
+        // status report any pane output can write (`program_status::decision_status`).
+        let acting_status =
+            crate::terminal::program_status::decision_status(&found.agent).unwrap_or("");
+        if !matches!(acting_status, "working" | "blocked") {
             match self.prompt_now(&found) {
                 Ok((now, Some(_))) => {
                     return Response::json(
@@ -441,7 +442,7 @@ impl Site {
                 Err(refused) => return refused,
             }
         }
-        match found.agent["agent_status"].as_str().unwrap_or("") {
+        match acting_status {
             "blocked" => {
                 return error(
                     409,

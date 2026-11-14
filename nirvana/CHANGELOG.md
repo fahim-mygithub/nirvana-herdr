@@ -15,7 +15,24 @@ which the fork never edits.
   - `herdr seat exec` in a pane reports its order: working with the order id while it runs. When it ends: blocked
     when the order asks, done when it delivered, error when it failed or was stopped, idle when it waits for a
     window to reset. It also writes OSC 7 with its folder, so the pane's cwd is the new order's. A detached
-    `seat exec` writes neither, since its output is a log file.
+    `seat exec` writes neither, since its output is a log file. It writes only when the pane's own `HERDR_PANE_ID`
+    names the pane `--pane` names, so a `seat exec` typed in another terminal writes nothing. The end is written
+    also when the order fails with an error.
+  - A report is display only. Any output in a pane can write one: a `cat` of a file, or a model's text. So code that
+    acts on a pane reads what hooks and detection read. While a report is in place, `pane list` and `agent list`
+    carry that as the token `detected_status`. A wake reads it before it types into the orchestrator's Claude. The
+    phone reads it before it types a message or presses Esc. The idle stretch that times `/compact` and the fresh
+    start's check read it too. The sidebar, `agent_status` and the phone's rows still show the report. No decision
+    trusts a report, not even one with `app=nirvana`: no decision path read a worker pane's report, and herdr cannot
+    tell who wrote the bytes.
+  - Fix round, from the review. The pane's tracker hands on every report, also one equal to the last. The app ends a
+    record on its own when the shell comes back, and the tracker cannot see that: a re-run of a cut order wrote the
+    same `working` report, nothing reached the app, and the pane read idle while the worker ran. A stalled app no
+    longer gets one task per report: each pane parks the latest report and has one sending task at most, so reports
+    still arrive in the order they were seen. One read of pane output gets four query replies at most.
+  - Known limits. An unterminated OSC string swallows the output after it, as herdr's collector did before. A full
+    reset, `ESC c`, ends every record, as the spec says, so a program that resets the screen must report again. A
+    query reply goes back to the pane's program whether it asked or not; the cap bounds how many.
   - Left out of #5172: child records and ids, the record priority list, the vendored libghostty parser and its patch,
     the `program_status` array in the API schema, OSC 9;4 mapping, API events for report-only changes, docs.
 - **Because:** the owner, 2026-11-14: "Sure lets add the top 3". This was the item "Status reporting in herdr: port
@@ -30,11 +47,14 @@ which the fork never edits.
   the old folder while it ran and `order2` only after the prompt came back. The same line with `seat exec` read
   `order3` while it ran. A probe program in a pane did not see the reply to the support query. It did not see the
   reply to `CSI c` either, so the probe cannot tell where a reply is lost. The unit test shows herdr writes the reply
-  ahead of the device attributes reply. 15 new tests. Each of the 29 controls in `p74_status.py` turns its test red.
-  No control covers the pane reader's hand-off to the app or the two `seat exec` lines that write the reports. The
-  live session ran the hand-off, and the `seat exec` start for an order that does not exist, which wrote its folder
-  and cleared the report. No real worker order was run, to spend no model usage, so a live working, done or error
-  from `seat exec` is not measured.
+  ahead of the device attributes reply. Each control in `p74_status.py` turns its test red. The fix round's
+  controls cover the re-run, each decision path's read of `detected_status`, the one sending task, the pane id check,
+  the two `seat exec` writes and the end after an error. No control covers the reader thread's call into the
+  outbox, the phone's Esc check in `prompt.rs`, or the idle compact and fresh start reads of the decision state.
+  The live session ran the hand-off, and the `seat exec` start for an order that does not exist, which wrote its
+  folder and cleared the report. That run was before the pane id check, and the fix round ran no live session. No
+  real worker order was run, to spend no model usage, so a live working, done or error from `seat exec` is not
+  measured.
 - **If you remove this:** a headless worker's pane reads idle while it works, and a reused pane shows the folder of
   the order before.
 

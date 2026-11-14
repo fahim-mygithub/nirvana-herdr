@@ -119,7 +119,8 @@ impl App {
         fresh.checks += 1;
         let compact_in_flight = terminal.idle_stretch.pending.is_some();
         let compact_sent = terminal.idle_stretch.sent;
-        let state = terminal.state;
+        // Review fix round, alpha 0.72.0: what detection reads, not a program status report (`decision_state`).
+        let state = terminal.decision_state();
         let panes = self.claude_panes();
         let Some(pane) = panes.iter().find(|pane| pane.terminal_id == terminal_id) else {
             return false;

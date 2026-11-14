@@ -86,14 +86,40 @@ pub const MSG_TOKEN: &str = "program_status_msg";
 pub fn with_tokens(
     mut tokens: std::collections::HashMap<String, String>,
     status: Option<&ProgramStatus>,
+    detected: crate::api::schema::AgentStatus,
 ) -> std::collections::HashMap<String, String> {
     if let Some(status) = status {
         tokens.insert(TOKEN.to_owned(), status.state.word().to_owned());
         if let Some(msg) = &status.msg {
             tokens.insert(MSG_TOKEN.to_owned(), msg.clone());
         }
+        tokens.insert(DETECTED_TOKEN.to_owned(), status_word(detected).to_owned());
     }
     tokens
+}
+
+/// Review fix round: while a report is in place, `agent_status` shows it, and this token holds what hooks and
+/// detection read. Code that acts on a pane reads this token first (`decision_status`), since any output in the pane
+/// can write a report. Only present with a report, so a pane with none has the tokens it had before.
+pub const DETECTED_TOKEN: &str = "detected_status";
+
+fn status_word(status: crate::api::schema::AgentStatus) -> &'static str {
+    use crate::api::schema::AgentStatus;
+    match status {
+        AgentStatus::Idle => "idle",
+        AgentStatus::Working => "working",
+        AgentStatus::Blocked => "blocked",
+        AgentStatus::Done => "done",
+        AgentStatus::Unknown => "unknown",
+    }
+}
+
+/// The status to act on for a pane or agent JSON from `pane get` or `agent list`: `tokens.detected_status` when a
+/// program status report is in place, else `agent_status`.
+pub fn decision_status(pane: &serde_json::Value) -> Option<&str> {
+    pane.pointer(&format!("/tokens/{DETECTED_TOKEN}"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| pane["agent_status"].as_str())
 }
 
 /// Parses the payload after `7501;`. `None` is a report the spec says to ignore or discard: nothing is applied.
@@ -225,6 +251,26 @@ fn decode_text(value: &[u8], max_encoded: usize, max_decoded: usize) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decision_status_reads_detection_under_a_report() {
+        use crate::api::schema::AgentStatus;
+        let report = ProgramStatus {
+            state: ProgramState::Done,
+            kind: None,
+            app: None,
+            msg: None,
+        };
+        let tokens = with_tokens(Default::default(), Some(&report), AgentStatus::Working);
+        assert_eq!(tokens.get(DETECTED_TOKEN).map(String::as_str), Some("working"));
+        let pane = serde_json::json!({"agent_status": "done", "tokens": tokens});
+        assert_eq!(decision_status(&pane), Some("working"));
+        // No report: no token, and `agent_status` is what to act on.
+        let tokens = with_tokens(Default::default(), None, AgentStatus::Working);
+        assert!(tokens.is_empty());
+        let pane = serde_json::json!({"agent_status": "idle", "tokens": tokens});
+        assert_eq!(decision_status(&pane), Some("idle"));
+    }
 
     fn set(payload: &str) -> ProgramStatus {
         match parse_report(payload.as_bytes()) {

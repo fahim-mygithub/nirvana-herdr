@@ -633,12 +633,16 @@ impl AgentOscStateTracker {
     }
 }
 
+/// Review fix round: a report is always a change, even one equal to the record kept here. The app ends a record on its
+/// own when the pane's shell comes back (`TerminalState::report_shell_returned`), and this tracker cannot see that. A
+/// deduped re-run of the same `seat exec` order sent nothing, and the pane read idle while the worker ran. A clear is
+/// deduped only when nothing is kept here: the app holds no record this tracker did not send.
 fn replace_program_status(
     slot: &mut Option<ProgramStatus>,
     changed: &mut bool,
     status: Option<ProgramStatus>,
 ) {
-    if *slot != status {
+    if status.is_some() || slot.is_some() {
         *slot = status;
         *changed = true;
     }
@@ -1248,7 +1252,8 @@ mod tests {
     #[test]
     fn program_status_report_is_kept_and_cleared_by_the_specs_events() {
         let mut tracker = AgentOscStateTracker::default();
-        // A report split across two reads, then the same report again: one change.
+        // A report split across two reads, then the same report again: each is handed on, since the app may have
+        // ended its copy when the shell came back.
         assert_eq!(program_state(&mut tracker, b"\x1b]7501;state=work"), None);
         assert_eq!(
             program_state(&mut tracker, b"ing:msg=b3JkZXI\x1b\\"),
@@ -1256,8 +1261,10 @@ mod tests {
         );
         assert_eq!(
             program_state(&mut tracker, b"\x1b]7501;state=working:msg=b3JkZXI\x07"),
-            None
+            Some(Some("working"))
         );
+        // Bytes with no report change nothing.
+        assert_eq!(program_state(&mut tracker, b"plain output\r\n"), None);
         // A new shell prompt (OSC 133 A) ends working.
         assert_eq!(program_state(&mut tracker, b"\x1b]133;A\x07"), Some(None));
         // done survives a prompt; a full reset (ESC c) ends it.
@@ -1279,6 +1286,11 @@ mod tests {
         assert_eq!(
             program_state(&mut tracker, b"\x1b]7501;state=clear\x1b\\"),
             Some(None)
+        );
+        // A clear with nothing kept is no change.
+        assert_eq!(
+            program_state(&mut tracker, b"\x1b]7501;state=clear\x1b\\"),
+            None
         );
     }
 

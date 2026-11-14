@@ -408,7 +408,9 @@ impl Site {
     ) -> Result<(Value, Option<Shown>), Response> {
         let mut row = spaces::agent_row(&found.agent);
         row["space"] = json!(found.space);
-        let status = found.agent["agent_status"].as_str().unwrap_or("");
+        // Review fix round, alpha 0.72.0: keys are pressed on this, so it is the status detection reads
+        // (`program_status::decision_status`), not a program status report.
+        let status = crate::terminal::program_status::decision_status(&found.agent).unwrap_or("");
         if status == "working" {
             return Ok((json!({"blocked": false, "agent": row}), None));
         }
@@ -500,7 +502,7 @@ impl Site {
                 if key != "esc" {
                     return error(409, "only Esc goes to an agent with no prompt");
                 }
-                if found.agent["agent_status"].as_str() != Some("working") {
+                if crate::terminal::program_status::decision_status(&found.agent) != Some("working") {
                     return Response::json(
                         409,
                         &json!({"error": "the agent is not working: nothing to stop", "prompt": now}),

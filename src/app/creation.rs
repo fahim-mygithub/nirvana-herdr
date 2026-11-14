@@ -361,6 +361,7 @@ impl App {
             tokens: crate::terminal::program_status::with_tokens(
                 terminal.metadata_tokens.values(),
                 terminal.program_status.as_ref(),
+                pane_agent_status(terminal.decision_state(), pane.seen),
             ),
             agent_session: terminal_agent_session_info(terminal),
             scroll: None,

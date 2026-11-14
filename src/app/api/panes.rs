@@ -4577,6 +4577,8 @@ mod tests {
             std::collections::HashMap::from([
                 ("program_status".into(), "working".into()),
                 ("program_status_msg".into(), "c6-candle-noise".into()),
+                // What detection reads under the report, for code that acts on the pane.
+                ("detected_status".into(), "unknown".into()),
             ])
         );
     }

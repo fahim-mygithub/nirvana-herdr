@@ -2749,9 +2749,7 @@ pub(crate) fn find_str<'a>(value: &'a Value, pointers: &[&str]) -> Option<&'a st
 /// The orchestrator's pane as a wake sees it.
 pub fn pane_view(pane: &str) -> nirvana_run::PaneView {
     let (info, program) = pane_get(pane);
-    let status = info.as_ref().and_then(|value| {
-        find_str(value, &["/result/pane/agent_status", "/pane/agent_status"]).map(str::to_owned)
-    });
+    let status = info.as_ref().and_then(pane_decision_status);
     let prompt = herdr_text(&[
         "pane", "read", pane, "--source", "visible", "--format", "ansi",
     ])
@@ -2767,6 +2765,14 @@ pub fn pane_view(pane: &str) -> nirvana_run::PaneView {
 /// `pane get`'s answer and what runs in the pane; a pane herdr no longer has is `Gone` (fix wake-pane).
 fn pane_get(pane: &str) -> (Option<Value>, nirvana_run::PaneProgram) {
     pane_get_with(pane, herdr_json_coded)
+}
+
+/// The status a wake acts on, from `pane get`'s answer. Review fix round, alpha 0.72.0: a wake types into the
+/// orchestrator's Claude when it reads idle, so it reads what hooks and detection see, not a program status report
+/// any output in the pane can write (`program_status::decision_status`).
+pub(crate) fn pane_decision_status(info: &Value) -> Option<String> {
+    let pane = info.pointer("/result/pane").or_else(|| info.pointer("/pane"))?;
+    crate::terminal::program_status::decision_status(pane).map(str::to_owned)
 }
 
 /// `pane_get` with herdr's calls passed in, so a test needs no herdr.
@@ -3361,13 +3367,17 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             let mut out = std::io::stdout();
             // Alpha 0.72.0: the pane's status row says what this order does (`pane_status`), from its own report.
             let status = pane_status::PaneStatus::new(pane.as_deref());
-            status.begin(&mut out, &order, std::env::current_dir().ok().as_deref());
-            let code = exec(&project, &run, &order, pane.as_deref(), &mut out);
-            let phase = replay(&project.journal(&run).read().0)
-                .order(&order)
-                .map(|known| known.phase);
-            status.end(&mut out, &order, phase);
-            let code = code?;
+            let code = status.around(
+                &mut out,
+                &order,
+                std::env::current_dir().ok().as_deref(),
+                |out| exec(&project, &run, &order, pane.as_deref(), out),
+                || {
+                    replay(&project.journal(&run).read().0)
+                        .order(&order)
+                        .map(|known| known.phase)
+                },
+            )?;
             out.flush()?;
             std::process::exit(code);
         }

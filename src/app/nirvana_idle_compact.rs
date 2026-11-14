@@ -191,7 +191,8 @@ impl App {
         // Review S2: stamped first, pane or not, so a check that finds nothing waits RECHECK.
         terminal.idle_stretch.checked_at = Some(now);
         let stretch = terminal.idle_stretch.clone();
-        let state = terminal.state;
+        // Review fix round, alpha 0.72.0: what detection reads, not a program status report (`decision_state`).
+        let state = terminal.decision_state();
         let agent = terminal.effective_known_agent();
         let panes = self.claude_panes();
         let Some(pane) = panes.iter().find(|pane| pane.terminal_id == terminal_id) else {
