@@ -132,7 +132,8 @@ pub fn claude_tool(agy: &str) -> Option<&'static str> {
     Some(match agy {
         "write_file" | "write_to_file" => "Write",
         "edit_file" | "replace_file_content" | "multi_replace_file_content" | "sed_file" => "Edit",
-        "notebook_edit" => "NotebookEdit",
+        // `notebook_edit` is in agy's tool list, `edit_notebook` a step type in its binary (P41c's read).
+        "notebook_edit" | "edit_notebook" => "NotebookEdit",
         "read_file" | "view_file" => "Read",
         "invoke_subagent" | "define_subagent" | "run_workflow" => "Agent",
         "run_command" => "Bash",

@@ -103,6 +103,7 @@ fn agy_tool_names_map_to_the_claude_tools_the_guards_match() {
     }
     assert_eq!(claude_tool("write_to_file"), Some("Write"));
     assert_eq!(claude_tool("notebook_edit"), Some("NotebookEdit"));
+    assert_eq!(claude_tool("edit_notebook"), Some("NotebookEdit"));
     assert_eq!(claude_tool("run_workflow"), Some("Agent"));
     assert_eq!(claude_tool("send_message"), None);
     assert_eq!(claude_tool("browser_subagent"), None);
