@@ -112,9 +112,16 @@ here too.
 
 ### 5.2 An agy plugin built from `nirvana/claude`
 
-`install.py` writes `nirvana/agy/.agents/`: a `hooks.json` in agy's named-hook format, `skills/`, `agents/`,
-`ROLE.md` as a rule, and bladebro as a plugin MCP server. `agy plugin validate --strict` gates the build. How it reaches
-agy is R1.
+As built in P41c. `install.py` builds `<home>/nirvana/agy/nirvana`, a native agy plugin: `plugin.json` (name `nirvana`,
+the Nirvana version), a root `hooks.json` in agy's named-hook format, `skills/`, `agents/` and `mcp_config.json` with
+bladebro. `agy plugin validate --strict` gates it, then `agy plugin install` installs it into agy's config (R1 (b)).
+
+The installed plugin reaches every agy session on the machine, so it is scoped twice:
+
+- the role is the `nirvana` agent's body, not an always-on rule, so only `agy --agent nirvana` gets it. A scratch run
+  with `--agent nirvana` named itself "Nirvana's orchestrator on the agy seat"; one without said "Antigravity";
+- every hook does nothing unless `NIRVANA_ORCHESTRATOR=1` (`nirvana_hookhost::outside_orchestrator`), and seated
+  workers have that variable removed (`nirvana_worker::ENV_REMOVED`).
 
 ### 5.3 The handoff
 
