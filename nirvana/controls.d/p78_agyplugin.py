@@ -13,14 +13,14 @@ T_UNKNOWN = _T + "AgyHooksTest.test_a_claude_tool_with_no_agy_row_fails_the_buil
 T_NOT_HERDR = _T + "AgyHooksTest.test_a_hook_that_is_not_the_installed_herdr_fails_the_build"
 T_SKILLS = _T + "AgyFilesTest.test_skills_are_copied_with_the_installed_herdr_in_place_of_the_plugin_root"
 T_SKILL_NAME = _T + "AgyFilesTest.test_a_skill_named_unlike_its_folder_fails_the_build"
-T_RULE = _T + "AgyFilesTest.test_the_role_is_an_always_on_rule_holding_role_md"
+T_ROLE = _T + "AgyFilesTest.test_the_role_is_the_nirvana_agents_body_and_no_rule_ships"
 T_AGENT = _T + "AgyFilesTest.test_only_the_orchestrator_agent_maps_as_agys_main_agent_with_a_body"
 T_BLADE = _T + "AgyFilesTest.test_bladebro_is_decision_0043s_recipe_with_the_orchestrators_own_home"
 T_NO_BLADE = _T + "AgyFilesTest.test_no_bladebro_on_path_writes_no_mcp_config_and_says_so"
 T_KEEP = _T + "AgyInstallTest.test_a_failed_validation_keeps_the_installed_folder_and_leaves_no_build"
 T_REPLACE = _T + "AgyInstallTest.test_a_passed_validation_replaces_the_folder_whole"
 T_MAIN = _T + "AgyInstallTest.test_install_main_builds_the_agy_folder_and_a_failed_one_exits_non_zero"
-T_VALIDATE = _T + "AgyValidateTest.test_agys_strict_validator_passes_the_build_and_fails_a_broken_rule"
+T_VALIDATE = _T + "AgyValidateTest.test_agys_strict_validator_passes_the_build_and_fails_a_broken_skill"
 T_NATIVE = _T + "AgyFilesTest.test_the_build_is_a_native_agy_plugin_named_nirvana_with_hooks_at_its_root"
 T_SAME = _T + "AgyFilesTest.test_a_rebuild_writes_the_same_bytes"
 _I = _T + "AgyPluginInstallTest."
@@ -80,18 +80,27 @@ CONTROLS = (
             '        if fields.get("name") != skill.name or not fields.get("description"):\n',
             "        if False:\n",
             T_SKILL_NAME, "python"),
-    # ROLE.md is an always-on rule.
-    Control("p78_agy_rule_trigger", PLUGIN,
-            'RULE_TRIGGER = "always_on"', 'RULE_TRIGGER = "model_decision"',
-            T_RULE, "python"),
+    # ROLE.md is the nirvana agent's body, not an always-on rule that reaches every agy session.
+    Control("p78_agy_role_in_agent", PLUGIN,
+            "if body.strip() else MAIN_BODY) + role\n", "if body.strip() else MAIN_BODY)\n",
+            T_ROLE, "python"),
+    # ROLE.md's H1 is demoted (measured: a body opening with an H1 sent no model call).
+    Control("p78_agy_role_h1_demoted", PLUGIN,
+            "            line = \"#\" + line\n", "            pass\n",
+            T_ROLE, "python"),
+    # The intro line opens the body, so it never starts with ROLE.md's heading.
+    Control("p78_agy_role_intro_first", PLUGIN,
+            'MAIN_BODY = ("You are Nirvana\'s orchestrator on the agy seat. Your role follows.',
+            'MAIN_BODY = ("Your role follows.',
+            T_ROLE, "python"),
     # The orchestrator agent is agy's main agent.
     Control("p78_agy_main_agent", PLUGIN,
             '"mainAgent: true", "subagent: false"', '"mainAgent: false", "subagent: true"',
             T_AGENT, "python"),
-    # An empty Claude body gets the agy body (measured: an empty one does not take).
+    # An empty Claude body gets the agy intro line first (measured: an empty body does not take, an H1 opening sends
+    # no model call). Sabotaged, the body opens with ROLE.md's demoted heading.
     Control("p78_agy_main_body", PLUGIN,
-            "        body = herdr_text(body, home) if body.strip() else MAIN_BODY.format(rule=RULE)\n",
-            "        body = herdr_text(body, home)\n",
+            '" if body.strip() else MAIN_BODY)', '" if True else MAIN_BODY)',
             T_AGENT, "python"),
     # The Claude workers stay out and are listed as skipped.
     Control("p78_agy_workers_skipped", PLUGIN,

@@ -105,7 +105,7 @@ def agy_report(agy_dir: Path, report: dict) -> None:
     copied to, so the live check at merge can find the copy without guessing agy's layout."""
     checked = report["validate"]
     print(f"built the agy orchestrator plugin at {agy_dir / agy_plugin.NAME}: skills {len(report['skills'])}, "
-          f"rules {len(report['rules'])}, agents {len(report['agents'])}, mcp {report['mcp'] or 'none'}; "
+          f"agents {len(report['agents'])} (the role is the nirvana agent's body), mcp {report['mcp'] or 'none'}; "
           f"{'validated' if checked['ok'] else checked['why']}")
     for line in report["skipped"]:
         print(f"  skipped {line}")

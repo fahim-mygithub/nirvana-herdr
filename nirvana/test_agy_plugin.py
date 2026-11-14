@@ -218,7 +218,7 @@ class AgyFilesTest(AgyBuilt):
         self.assertEqual(manifest, {"name": "nirvana", "version": version})
         # agy: a native plugin "must place `hooks.json` directly at the plugin root".
         self.assertTrue((self.dot / "hooks.json").is_file())
-        for part in ("skills", "rules", "agents"):
+        for part in ("skills", "agents"):
             self.assertTrue((self.dot / part).is_dir(), part)
         self.assertTrue((self.dot / "mcp_config.json").is_file())
 
@@ -255,12 +255,20 @@ class AgyFilesTest(AgyBuilt):
         with self.assertRaises(agy_plugin.BuildError):
             agy_plugin.build(self.tmp / "o4" / ".agents", self.home, src, with_bladebro=False)
 
-    def test_the_role_is_an_always_on_rule_holding_role_md(self):
-        rule = (self.dot / "rules" / "nirvana-role.md").read_text(encoding="utf-8")
-        head = "---\ntrigger: always_on\n---\n\n"
-        self.assertTrue(rule.startswith(head), rule[:80])
-        self.assertEqual(rule[len(head):], (SRC / "ROLE.md").read_text(encoding="utf-8"))
-        self.assertEqual(sorted(p.name for p in (self.dot / "rules").iterdir()), ["nirvana-role.md"])
+    def test_the_role_is_the_nirvana_agents_body_and_no_rule_ships(self):
+        # Scope ruling 2026-11-14: the plugin is installed for every agy session, so the role may reach only
+        # `--agent nirvana`. No rules/ at all: any rule would load beyond that agent.
+        self.assertFalse((self.dot / "rules").exists())
+        _, body = agy_plugin.frontmatter((self.dot / "agents" / "nirvana.md").read_text(encoding="utf-8"))
+        role = (SRC / "ROLE.md").read_text(encoding="utf-8")
+        self.assertTrue(role.startswith("# "), "ROLE.md opens with an H1; this test needs one to demote")
+        exe = (self.home / "bin" / "herdr.exe").as_posix()
+        want = role.replace('"${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe"', f'"{exe}"')
+        want = "\n".join("#" + line if line.startswith("# ") else line for line in want.split("\n"))
+        self.assertTrue(body.endswith(want), body[-200:])
+        # No H1 anywhere in the body: measured, a body opening with one sent no model call.
+        self.assertEqual([line for line in body.split("\n") if line.startswith("# ")], [])
+        self.assertIn("orchestrator", body.split("\n", 1)[0])
 
     def test_only_the_orchestrator_agent_maps_as_agys_main_agent_with_a_body(self):
         self.assertEqual(sorted(p.name for p in (self.dot / "agents").iterdir()), ["nirvana.md"])
@@ -443,16 +451,16 @@ class AgyPluginInstallTest(unittest.TestCase):
 
 @unittest.skipIf(shutil.which("agy") is None, "agy is not on PATH: the folder is not validated here")
 class AgyValidateTest(unittest.TestCase):
-    def test_agys_strict_validator_passes_the_build_and_fails_a_broken_rule(self):
+    def test_agys_strict_validator_passes_the_build_and_fails_a_broken_skill(self):
         with tempfile.TemporaryDirectory() as tmp:
             dot = Path(tmp) / "nirvana"
             agy_plugin.build(dot, Path(tmp) / "home", with_bladebro=True)
             good = agy_plugin.validate(dot)
             self.assertIs(good["ok"], True, good)
-            self.assertEqual(good["components"], {"agents": 1, "hooks": 5, "mcpServers": 1, "rules": 1,
+            self.assertEqual(good["components"], {"agents": 1, "hooks": 5, "mcpServers": 1, "rules": 0,
                                                   "sidecars": 0, "skills": 8})
-            rule = dot / "rules" / "nirvana-role.md"
-            rule.write_bytes(rule.read_bytes().replace(b"trigger: always_on", b"trigger: bogus", 1))
+            skill = dot / "skills" / "gate" / "SKILL.md"
+            skill.write_bytes(skill.read_bytes().replace(b"name: gate\n", b"name: gatex\n", 1))
             bad = agy_plugin.validate(dot)
             self.assertIs(bad["ok"], False, bad)
 

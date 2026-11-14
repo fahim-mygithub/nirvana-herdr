@@ -23,7 +23,9 @@ What goes where (agy 1.5.9's built-in docs, read out of agy.exe on 2026-11-14):
   holding `hooks.json` as its cwd. Each command is the installed herdr with the Claude hook's args and `--host agy`
   (P41b's adapter; until it lands herdr refuses the flag and the hook fails, which agy logs and moves past).
 - `skills/<name>/SKILL.md`: the same format as Claude's; agy drops one whose frontmatter `name` is not its folder.
-- `rules/nirvana-role.md`: `ROLE.md` under `trigger: always_on`, the only trigger agy loads unconditionally. 24 KB cap.
+- No `rules/`. `ROLE.md` is the body of `agents/nirvana.md`, so only a session started with `--agent nirvana` gets it.
+  The plugin is installed into agy's config, where a rule would reach every agy session on the machine, the seated
+  agy workers and the owner's own agy included (P41c scope ruling, 2026-11-14).
 - `agents/<name>.md`: the orchestrator agent only, as agy's main agent; see `AGENTS` for why the workers stay out.
 - `mcp_config.json`: bladebro, decision 0043's recipe as `src/nirvana_bladebro.rs::definition` writes it for agy
   workers, with the orchestrator's own `BLADE_HOME`. Written only when bladebro is on PATH (0043 item 6).
@@ -103,18 +105,19 @@ AGENTS = {"nirvana": "main"}
 # An agy agent with no `tools` gets a small read-only set (agy's import guide), so the orchestrator names its tools:
 # the guide's full set, plus the subagent tool so it can still hand a short read to an agy subagent.
 MAIN_TOOLS = ["read_file", "edit_file", "write_file", "run_command", "manage_task", "search_web", "invoke_subagent"]
-# Claude's `nirvana.md` has no body (the role comes from `ROLE.md`). Measured 2026-11-14, P41c live check: with that
-# empty body `agy --agent nirvana` listed agy's default tools (swarm, run_workflow, define_subagent, ...), so the
-# agent did not take; with a one-line body the same launch listed exactly `MAIN_TOOLS` and answered from the body.
-# So an empty body gets this one; the role itself stays the always-on rule. No H1: agy's 1.1.6 note calls Markdown
-# agents "H1-delimited", and the one run whose body opened with `# Nirvana` sent no model call in 180 s (0 tokens).
-MAIN_BODY = ("You are Nirvana's orchestrator on the agy seat. Your role, your commands and how you seat, watch and "
-             "gate work are in the always-on rule `{rule}` and the skills beside it.\n")
+# Claude's `nirvana.md` has no body (in Claude the role comes from `ROLE.md`). Measured 2026-11-14 in the first P41c
+# live check: with an empty body, `agy --agent nirvana` listed agy's default tools (swarm, run_workflow,
+# define_subagent, ...), so the agent did not take. With a one-line body, the same launch listed exactly `MAIN_TOOLS`
+# and answered from the body. So the agy body is that line, then `ROLE.md`. The body may not open with an H1: agy's
+# 1.1.6 note calls Markdown agents "H1-delimited", and the one run whose body opened with `# Nirvana` sent no model
+# call in 180 s (0 tokens). `demote_h1` also turns ROLE.md's own H1s into H2s.
+MAIN_BODY = ("You are Nirvana's orchestrator on the agy seat. Your role follows. It was written for the Claude seat; "
+             "on agy it is the same role, with agy's own tool names.\n\n")
 
 ROLE = "ROLE.md"
-RULE = "nirvana-role.md"
-RULE_TRIGGER = "always_on"
-RULE_CAP = 24 * 1024      # agy: "Each rule file is capped at 24 KB"
+# agy states no limit for an agent body. This is the 24 KB it gives a rule, so the role is no bigger here than it
+# could have been as a rule.
+BODY_CAP = 24 * 1024
 SKILL_CAP = 24 * 1024     # the plan 41 brief: SKILL.md body limit 24 KB
 
 # The orchestrator's bladebro home: outside `nirvana/agy`, which every install replaces whole, and never `~/.blade`
@@ -202,6 +205,18 @@ def frontmatter(text: str) -> tuple[dict, str]:
     return fields, text[m.end():]
 
 
+def demote_h1(text: str) -> str:
+    """Every `# ` heading outside a code fence becomes `## `, so no H1 can split or end the agent's prompt."""
+    out, fenced = [], False
+    for line in text.split("\n"):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        elif not fenced and line.startswith("# "):
+            line = "#" + line
+        out.append(line)
+    return "\n".join(out)
+
+
 def herdr_text(text: str, home: Path) -> str:
     """The Claude plugin's `"${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe"` as the installed path: agy has no such
     variable, and a `herdr` on PATH may be upstream herdr."""
@@ -251,10 +266,10 @@ def build(out: Path, home: Path, src: Path | None = None, with_bladebro: bool | 
     out, home = Path(out), Path(home)
     if with_bladebro is None:
         with_bladebro = shutil.which("bladebro") is not None
-    report: dict = {"hooks": [], "skills": [], "rules": [], "agents": [], "mcp": [], "skipped": []}
+    report: dict = {"hooks": [], "skills": [], "agents": [], "mcp": [], "skipped": []}
 
     # agy's plugins guide: a native plugin is "any directory containing `plugin.json`" and "**must** place
-    # `hooks.json` directly at the plugin root"; skills/, rules/, agents/ and mcp_config.json sit beside it.
+    # `hooks.json` directly at the plugin root"; skills/, agents/ and mcp_config.json sit beside it.
     write(out / MANIFEST, json.dumps(manifest(plugin_version() if version is None else version)) + "\n")
 
     claude = json.loads((src / "hooks" / "hooks.json").read_bytes())
@@ -280,13 +295,7 @@ def build(out: Path, home: Path, src: Path | None = None, with_bladebro: bool | 
                 shutil.copyfile(path, out / rel)
         report["skills"].append(skill.name)
 
-    role = herdr_text((src / ROLE).read_text(encoding="utf-8"), home)
-    rule = f"---\ntrigger: {RULE_TRIGGER}\n---\n\n{role}"
-    if len(rule.encode("utf-8")) > RULE_CAP:
-        raise BuildError(f"{src / ROLE}: {len(rule.encode('utf-8'))} bytes as a rule, over agy's {RULE_CAP}; "
-                         "agy would cut it")
-    write(out / "rules" / RULE, rule)
-    report["rules"].append(RULE)
+    role = demote_h1(herdr_text((src / ROLE).read_text(encoding="utf-8"), home))
 
     for agent in sorted((src / "agents").glob("*.md")):
         fields, body = frontmatter(agent.read_text(encoding="utf-8"))
@@ -298,7 +307,9 @@ def build(out: Path, home: Path, src: Path | None = None, with_bladebro: bool | 
         head = [f"name: {name}", f"description: {json.dumps(fields.get('description', ''))}",
                 "mainAgent: true", "subagent: false", f"tools: [{', '.join(MAIN_TOOLS)}]"]
         # `model`, `effort` and `color` are Claude's: the agy seat's model is the launch's `--model` (R3).
-        body = herdr_text(body, home) if body.strip() else MAIN_BODY.format(rule=RULE)
+        body = (demote_h1(herdr_text(body, home)).rstrip("\n") + "\n\n" if body.strip() else MAIN_BODY) + role
+        if len(body.encode("utf-8")) > BODY_CAP:
+            raise BuildError(f"{agent} with {src / ROLE}: {len(body.encode('utf-8'))} bytes of body, over {BODY_CAP}")
         text = "---\n" + "\n".join(head) + "\n---\n" + body
         write(out / "agents" / agent.name, text)
         report["agents"].append(name)
