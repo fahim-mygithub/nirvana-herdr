@@ -16,6 +16,11 @@ Plan 12 O4a: the Nirvana Claude plugin (`nirvana/claude/` to `<root>/nirvana/cla
 so a reload never starts a Nirvana Claude whose plugin is older than its herdr. Then, on Windows, `windows_shell.py`
 writes the mark, the themes, the Windows Terminal profile, JetBrains Mono when missing, the toast's app id and the
 Explorer verb "Open Nirvana", and removes Nirvana-C's "Open Nirvana - CC".
+
+Plan 41 P41c: the agy orchestrator's folder `<root>/nirvana/agy/.agents` is built from the same `nirvana/claude/`
+right after it (`agy_plugin.py`), for the same reason, and handed to agy with `--add-dir` (owner ruling R1). A build
+that `agy plugin validate --strict` fails leaves the installed folder as it was; the rest of the install goes on and
+the exit is non-zero.
 """
 from __future__ import annotations
 
@@ -28,6 +33,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import agy_plugin  # noqa: E402
 import windows_shell  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -123,6 +129,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"the Nirvana Claude plugin is installed with {len(stale)} old files a running program holds:")
         for path in stale:
             print(f"  stale {path}")
+    agy_failed = None
+    try:
+        agy_dir, report = agy_plugin.install(root)
+        checked = report["validate"]
+        print(f"installed the agy orchestrator folder at {agy_dir / agy_plugin.DOT}: skills {len(report['skills'])}, "
+              f"rules {len(report['rules'])}, agents {len(report['agents'])}, mcp {report['mcp'] or 'none'}; "
+              f"{'validated' if checked['ok'] else checked['why']}")
+        for line in report["skipped"]:
+            print(f"  skipped {line}")
+    except windows_shell.StaleFiles as err:
+        stale += err.paths
+        print(f"the agy orchestrator folder is installed with {len(err.paths)} old files a running program holds:")
+        for path in err.paths:
+            print(f"  stale {path}")
+    except agy_plugin.BuildError as err:
+        agy_failed = err
+        print(f"the agy orchestrator folder was not installed; the one there stays: {err}")
     target = install(built, root, ver, built_open=built_open)
     print(f"installed Nirvana-Herdr alpha {ver} at {target}")
     if os.name == "nt" and not ns.no_shell:
@@ -137,6 +160,9 @@ def main(argv: list[str] | None = None) -> int:
     print("a running Nirvana-Herdr shows a reload badge within 5 s; press it twice to restart onto this build")
     if stale:
         print(f"install: {len(stale)} plugin files are stale. Close every Nirvana Claude and run the install again")
+        return 1
+    if agy_failed is not None:
+        print("install: the agy orchestrator folder failed its build or validation; see above")
         return 1
     return 0
 
