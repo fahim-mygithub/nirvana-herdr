@@ -3,6 +3,32 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.72.0: lessons go stale and to the archive by time, and a review that waited goes on a short quiet
+
+- **Changed:** two parts from Hermes, added to the lesson reviews.
+  - A lesson's last use is now recorded. A use is a brief that offers it, or herdr writing it. A lesson unused for
+    14 days shows as stale in `herdr lessons list`. At 30 days the idle tick archives it. Its file goes to
+    `.archive/` and nothing is deleted. A pinned lesson is never stale, archived or retired. New commands:
+    `herdr lessons pin <slug>`, `unpin <slug>`, `undo <op-id|slug>`, `sweep [--dry-run]` and `archived`. A lesson
+    from before this version has no use on record. The first sweep starts its clock, so none is archived on day one.
+  - The gate's own write of a worker's lesson is now a ledger op, `write`, with the text before and after. So are pin,
+    unpin and archive. Before, a worker's newer text over an older lesson was not in the ledger, and the older text was
+    lost. `undo` takes back one op, by its id or the newest op on a lesson.
+  - The idle review already had Hermes's one slot per space, its newest snapshot and its settle. Its max age is new.
+    When orders have waited 6 h for a review, 10 min of quiet is enough instead of 30. The lease rule, the spare
+    usage, the week, the caps and the use of the pool by anyone all still hold.
+- **Because:** the owner, 2026-11-14: "Sure lets add the top 3", for "Hermes's idle queue and lesson lifecycle, added
+  to the lesson reviews." Plan `nirvana/plans/2026-11-14-lesson-lifecycle.md`.
+- **Measured:** on stand-ins only. No owner project was read. 7 new tests: 5 in `nirvana_lessons::life`, 2 in
+  `nirvana_idle_review`. The lessons suite passes 26, the idle review 23, the gate 108, the review 18 with the hunk
+  below, the Learning square 27. 20 p73 controls, each run alone, each turn its test red. Two review tests counted
+  ledger rows from op-1. The gate's writes now come first, so they need the hunk the package report gives. The 14, 30,
+  6 h and 10 min are hypotheses. No lesson on this machine has a recorded use yet, so how many go stale is unknown
+  until 14 days after this ships.
+- **If you remove this:** a lesson no order is offered stays in the index for ever. A lesson the owner wants kept has
+  no way to say so. A worker's newer lesson text replaces the older one with no way back. A busy day with no 30 min
+  gap never reviews its orders.
+
 ## alpha 0.71.3: a PowerShell pane keeps its output when resized
 
 - **Changed:** took upstream herdr's fix for ConPTY resizes, PR #5381, commit a97964c7, unchanged. A Windows pane's

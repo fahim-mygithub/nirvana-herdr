@@ -26,6 +26,11 @@
 //!   `herdr lessons rollback` undoes. Its run ends when it is gated, and the Learning square shows what it did.
 //! - **Caps**: `PER_SPACE_PER_DAY` per project and UTC day, `PER_WINDOW` across the machine per 5 h window of the pool
 //!   it runs on, and `lesson_reviews_per_day` still holds (it is a lesson review). Off with `herdr lessons idle off`.
+//! - **Plan 73, Hermes's idle queue** (`agent/review_idle_queue.py`; nirvana/plans/2026-11-14-lesson-lifecycle.md).
+//!   Its one slot per space is `SpaceState.last`, its newest snapshot is the orders gated since `last.through` read at
+//!   queue time, and its settle is `IDLE_AFTER_S`: all here before it. What it adds is the max age. Orders that waited
+//!   `MAX_WAIT_S` need only `FORCE_QUIET_S` of quiet, and every other rule still holds. The tick also runs the lessons'
+//!   stale and archive sweep (`nirvana_lessons::life::sweep`), which reads files and spends no seat.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -89,6 +94,15 @@ pub const STRANDED_S: u64 = 15 * 60;
 /// Review round N9: a tick child still running after this is killed; the next one starts on time.
 #[cfg_attr(test, allow(dead_code))]
 pub const TICK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Plan 73 L2, Hermes's max age. Orders gated this long ago and not yet reviewed need only `FORCE_QUIET_S` of quiet, not
+/// `IDLE_AFTER_S`. Hermes forces at 30 min over a 15 s settle, about 120 settles; its numbers are not copied. Here the
+/// settle is 30 min and a review also waits for a 5 h window that resets within `RESETS_WITHIN_S` with half of it
+/// spare, so 6 h is more than one whole 5 h window gone by with orders waiting. A hypothesis.
+pub const MAX_WAIT_S: u64 = 6 * 3_600;
+/// Plan 73 L2: the quiet a forced review still needs, two ticks with no owner key and no order write. A forced review
+/// skips only the long settle: the lease rule ("never while any order runs anywhere"), the spare, the week, the caps
+/// and the use of the pool by anyone all hold, since they are the owner's spend. A hypothesis.
+pub const FORCE_QUIET_S: u64 = 10 * 60;
 /// Two readings of one pool's window whose resets are this close are the same window.
 const SAME_WINDOW_S: u64 = 900;
 /// The 5 h samples kept per pool for the S5 check: three idle spans, so a baseline of `IDLE_AFTER_S` ago survives a
@@ -136,6 +150,9 @@ pub struct Facts {
     /// Orders gated in this project since its last idle review; `None` until the tick counts them, which it does only
     /// when every other fact allows a review (review round N2: the count replays journals).
     pub new_orders: Option<usize>,
+    /// Plan 73: when the oldest of those orders was gated; counted with them. Once it is `MAX_WAIT_S` old, the quiet
+    /// needed is `FORCE_QUIET_S`.
+    pub pending_since: Option<u64>,
     /// Why `lesson_reviews_per_day` refuses a review now.
     pub review_cap: Option<String>,
     pub used_today: u32,
@@ -156,8 +173,16 @@ fn minutes(seconds: u64) -> String {
 
 /// The rule. Each refusal is said, so the Learning square can say why no review ran. The order count comes last: the
 /// tick counts orders only when `ready` passes (review round N2).
+///
+/// Plan 73: once the orders waited `MAX_WAIT_S`, the quiet is `FORCE_QUIET_S`, and a refusal names the rule that holds
+/// the review then, not the long quiet it no longer needs.
 pub fn decide(facts: &Facts) -> Decision {
-    if let Err(why) = ready(facts) {
+    let quiet = if waited_out(facts) {
+        FORCE_QUIET_S
+    } else {
+        IDLE_AFTER_S
+    };
+    if let Err(why) = ready_within(facts, quiet) {
         return Decision::Skip(why);
     }
     match facts.new_orders {
@@ -166,8 +191,21 @@ pub fn decide(facts: &Facts) -> Decision {
     }
 }
 
+/// Plan 73: the oldest order waiting for a review was gated `MAX_WAIT_S` ago or more.
+pub fn waited_out(facts: &Facts) -> bool {
+    facts
+        .pending_since
+        .is_some_and(|at| facts.now.saturating_sub(at) >= MAX_WAIT_S)
+}
+
 /// Every fact but the order count, cheapest first.
 pub fn ready(facts: &Facts) -> Result<(), String> {
+    ready_within(facts, IDLE_AFTER_S)
+}
+
+/// `ready` with `quiet` as the time since the owner's last key and the last order write. Plan 73: `FORCE_QUIET_S` for
+/// orders that waited `MAX_WAIT_S`; the use of a pool is still read over `IDLE_AFTER_S` (`usage_moved`).
+pub fn ready_within(facts: &Facts, quiet: u64) -> Result<(), String> {
     let skip = |why: String| Err(why);
     if !facts.on {
         return skip("idle review is off (herdr lessons idle on)".into());
@@ -180,21 +218,21 @@ pub fn ready(facts: &Facts) -> Result<(), String> {
     }
     match &facts.owner_key {
         Err(why) => return skip(format!("the owner's last key cannot be read: {why}")),
-        Ok(Some(at)) if facts.now.saturating_sub(*at) < IDLE_AFTER_S => {
+        Ok(Some(at)) if facts.now.saturating_sub(*at) < quiet => {
             return skip(format!(
                 "the owner typed {} ago; idle after {}",
                 minutes(facts.now.saturating_sub(*at)),
-                minutes(IDLE_AFTER_S)
+                minutes(quiet)
             ))
         }
         Ok(_) => {}
     }
     if let Some((at, project)) = &facts.activity {
-        if facts.now.saturating_sub(*at) < IDLE_AFTER_S {
+        if facts.now.saturating_sub(*at) < quiet {
             return skip(format!(
                 "an order wrote in {project} {} ago; idle after {}",
                 minutes(facts.now.saturating_sub(*at)),
-                minutes(IDLE_AFTER_S)
+                minutes(quiet)
             ));
         }
     }
@@ -1043,6 +1081,18 @@ pub fn tick_with(
         if let Some(line) = settle(&Project::at(root), world, doubt.is_none()) {
             lines.push(line);
         }
+        // Plan 73 L3: stale and archive by time. Files only, no seat, so it runs whatever the idle facts say; a line
+        // only when it archived or failed, so a quiet tick says nothing new.
+        let swept = nirvana_lessons::life::sweep(root, now, false);
+        if !swept.archived.is_empty() || !swept.failed.is_empty() {
+            lines.push(format!(
+                "{}: {}",
+                root.display(),
+                nirvana_lessons::life::sweep_report(&swept, false)
+                    .trim_end()
+                    .replace('\n', " ")
+            ));
+        }
     }
     // S5: this tick's readings join the history before it is read.
     let mut doubt = doubt;
@@ -1100,6 +1150,7 @@ pub fn tick_with(
             usage_moved: moved.clone(),
             backoff_until: state.backoff_until,
             new_orders: None,
+            pending_since: None,
             review_cap: review::cap_refusal(root, cap, now),
             used_today: used_today(&state, now),
             used_window: picked.as_ref().map_or(0, |(_, spare)| {
@@ -1110,14 +1161,25 @@ pub fn tick_with(
                 .map(|(_, spare)| spare.clone())
                 .map_err(Clone::clone),
         };
-        // N2: the journals are replayed only when every cheaper fact allows a review.
-        let gated = if ready(&facts).is_ok() {
+        // N2: the journals are replayed only when every cheaper fact allows a review. Plan 73: or would with the short
+        // quiet of a forced review. That adds at most the four ticks of a quiet spell that fall between `FORCE_QUIET_S`
+        // and `IDLE_AFTER_S`, and only while the rest of `ready` holds.
+        let full = ready(&facts).is_ok();
+        let gated = if full || ready_within(&facts, FORCE_QUIET_S).is_ok() {
             gated_since(&project, since)
         } else {
             Vec::new()
         };
         facts.new_orders = Some(gated.len());
+        facts.pending_since = gated.iter().map(|r| r.at).min();
         let decision = decide(&facts);
+        let waited = (!full)
+            .then(|| {
+                facts
+                    .pending_since
+                    .map(|at| minutes(now.saturating_sub(at)))
+            })
+            .flatten();
         let said = match (&decision, &picked) {
             (Decision::Run, Ok((pick, spare))) => {
                 queued = true;
@@ -1168,7 +1230,13 @@ pub fn tick_with(
                         since,
                         now,
                     ) {
-                        Ok(line) => format!("queued: {line}"),
+                        Ok(line) => match &waited {
+                            Some(waited) => format!(
+                                "queued after orders waited {waited}, on {} of quiet: {line}",
+                                minutes(FORCE_QUIET_S)
+                            ),
+                            None => format!("queued: {line}"),
+                        },
                         Err(why) => {
                             // S3: the try stays counted; its orders are read again after the back-off.
                             let _ = change_space(root, |state| {

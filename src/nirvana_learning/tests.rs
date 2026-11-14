@@ -39,6 +39,8 @@ fn entry(
         seen: Vec::new(),
         profile: profile.map(str::to_owned),
         origin,
+        used_at: None,
+        pinned: false,
     }
 }
 

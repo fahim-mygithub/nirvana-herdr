@@ -39,6 +39,9 @@ use std::path::{Path, PathBuf};
 
 use crate::nirvana_run::{self, Project};
 
+/// Plan 73: stale and archive by time, pin, undo and the archive listing (nirvana/plans/2026-11-14-lesson-lifecycle.md).
+pub mod life;
+
 /// The folder in `.nirvana/`; tracked with the project (O3's `.gitignore` leaves it out on purpose).
 pub const DIR: &str = "lessons";
 pub const INDEX: &str = "index.json";
@@ -144,6 +147,18 @@ pub struct Entry {
     /// Plan 33 §3.5. An entry written before it reads as `worker`, which it was.
     #[serde(default)]
     pub origin: Origin,
+    /// Plan 73 L3: the last time a brief offered it, or herdr wrote it. A use is a lesson delivered into an order's
+    /// prompt (`count_offered_at`); `life` reads it for stale and archive. An entry written before plan 73 has none
+    /// until the first sweep sets it (`life::sweep`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_at: Option<u64>,
+    /// Plan 73 L3: `herdr lessons pin`. A pinned lesson is never stale, archived or retired.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,11 +417,13 @@ pub fn verify_and_write(
     };
     // Order LEARN: the class the next order of this kind is routed with, not the worker's own words for it.
     let (lesson, topic) = routed(root, run, order, lesson);
-    let written = (|| {
+    // Plan 73 L3: the gate's own write is a ledger op too (`write`), with the file and entry before and after, so
+    // `herdr lessons undo` takes back a worker's lesson or the newer text it put over an older one. Before, only review,
+    // merge, retire and reclass ops were in the ledger, and an overwrite lost the older text.
+    let slug = slug(&lesson.name);
+    let slugs = [slug.clone()];
+    let written = ledgered(root, "write", order, run, at, &slugs, |index, _| {
         let io = |err: std::io::Error| format!("could not write it: {err}");
-        let _lock = lock(root).map_err(io)?;
-        let mut index = read_index(root);
-        let slug = slug(&lesson.name);
         // Plan 33 review S3: a worker's lesson never overwrites one a review or a merge made, nor one of another class
         // or profile; a merge's rollback would then refuse, and the umbrella would be lost silently.
         if let Some(entry) = index.lessons.get(&slug) {
@@ -426,9 +443,9 @@ pub fn verify_and_write(
                 ));
             }
         }
-        let path = write_locked(
+        write_locked(
             root,
-            &mut index,
+            index,
             &slug,
             &lesson,
             &Source {
@@ -440,11 +457,10 @@ pub fn verify_and_write(
             meta,
         )
         .map_err(io)?;
-        write_index(root, &index).map_err(io)?;
-        Ok::<_, String>(path)
-    })();
+        Ok(slug.clone())
+    });
     match written {
-        Ok(path) => Verdict::Written(path),
+        Ok((slug, _)) => Verdict::Written(lesson_path(root, &slug)),
         Err(why) => Verdict::Refused(why),
     }
 }
@@ -690,10 +706,17 @@ fn write_locked(
     );
     std::fs::write(&path, body)?;
     noted(root, &path);
-    let (counters, seen) = index
+    let (counters, seen, used_at, pinned) = index
         .lessons
         .get(slug)
-        .map(|entry| (entry.counters.clone(), entry.seen.clone()))
+        .map(|entry| {
+            (
+                entry.counters.clone(),
+                entry.seen.clone(),
+                entry.used_at,
+                entry.pinned,
+            )
+        })
         .unwrap_or_default();
     index.lessons.insert(
         slug.to_owned(),
@@ -708,6 +731,9 @@ fn write_locked(
             seen,
             profile: meta.profile.map(str::to_owned),
             origin: meta.origin,
+            // Plan 73 L3: a lesson just written is as fresh as one just offered; its clock to stale starts here.
+            used_at: Some(used_at.map_or(source.at, |was| was.max(source.at))),
+            pinned,
         },
     );
     Ok(path)
@@ -1176,17 +1202,25 @@ pub fn rollback(root: &Path, id: &str, at: u64) -> Result<String, String> {
         }
         noted(root, &path);
         match &before.entry {
-            // Review round N6: a reclass changed only the class; the offers and opens since are kept.
-            Some(entry) if row.op == "reclass" => {
+            // Review round N6: a reclass changed only the class; the offers and opens since are kept. Plan 73: so does
+            // a pin or an unpin, which changed only `pinned`.
+            Some(entry) if matches!(row.op.as_str(), "reclass" | "pin" | "unpin") => {
                 let mut entry = entry.clone();
                 if let Some(now) = index.lessons.get(&before.slug) {
                     entry.counters = now.counters.clone();
                     entry.seen = now.seen.clone();
+                    entry.used_at = now.used_at;
                 }
                 index.lessons.insert(before.slug.clone(), entry);
             }
             Some(entry) => {
-                index.lessons.insert(before.slug.clone(), entry.clone());
+                let mut entry = entry.clone();
+                // Plan 73: a lesson taken back from the archive is the owner's use of it. With its old `used_at` the
+                // next sweep would archive it again.
+                if matches!(row.op.as_str(), "archive" | "retire") {
+                    entry.used_at = Some(at);
+                }
+                index.lessons.insert(before.slug.clone(), entry);
             }
             None => {
                 index.lessons.remove(&before.slug);
@@ -1401,6 +1435,9 @@ pub fn retire(root: &Path, slug: &str, by: &str, run: &str, at: u64) -> Result<S
         let Some(entry) = index.lessons.get(slug).cloned() else {
             return Err(format!("no lesson {slug} to retire"));
         };
+        if entry.pinned {
+            return Err(format!("{slug} is pinned: herdr lessons unpin {slug} first"));
+        }
         if !retirable(&entry.counters) {
             return Err(format!(
                 "{slug} is offered {} · passed after opened {}: only a lesson offered {DECAY_AFTER} times or more \
@@ -1408,18 +1445,24 @@ pub fn retire(root: &Path, slug: &str, by: &str, run: &str, at: u64) -> Result<S
                 entry.counters.offered, entry.counters.passed_after_opened
             ));
         }
-        let archive = dir(root).join(ARCHIVE);
-        std::fs::create_dir_all(&archive).map_err(|err| err.to_string())?;
-        let copy = archive.join(format!("{id}-{slug}.md"));
-        let from = lesson_path(root, slug);
-        std::fs::copy(&from, &copy).map_err(|err| format!("archive {slug}: {err}"))?;
-        noted(root, &copy);
-        index.lessons.remove(slug);
-        std::fs::remove_file(&from).map_err(|err| format!("remove {slug}: {err}"))?;
-        noted(root, &from);
-        Ok(slug.to_owned())
+        to_archive(root, index, slug, id)
     })
     .map(|(_, id)| id)
+}
+
+/// The lesson's file copied to `.archive/<id>-<slug>.md`, then out of `lessons/` and the index; the caller is inside
+/// `ledgered`, which puts the file back when a step fails. Retire's move, shared with plan 73's `life::archive`.
+fn to_archive(root: &Path, index: &mut Index, slug: &str, id: &str) -> Result<String, String> {
+    let archive = dir(root).join(ARCHIVE);
+    std::fs::create_dir_all(&archive).map_err(|err| err.to_string())?;
+    let copy = archive.join(format!("{id}-{slug}.md"));
+    let from = lesson_path(root, slug);
+    std::fs::copy(&from, &copy).map_err(|err| format!("archive {slug}: {err}"))?;
+    noted(root, &copy);
+    index.lessons.remove(slug);
+    std::fs::remove_file(&from).map_err(|err| format!("remove {slug}: {err}"))?;
+    noted(root, &from);
+    Ok(slug.to_owned())
 }
 
 /// One brief line per live lesson an order of `class` and `profile` is offered (`fits`): the path from the
@@ -1589,6 +1632,12 @@ pub fn offer_uncounted(root: &Path, cwd: &Path, class: &str, profile: Option<&st
 
 /// Counts one `offered` for each lesson an `Offer` named, once the order it went into is seated (plan 40 T5).
 pub fn count_offered(root: &Path, offer: &Offer) {
+    count_offered_at(root, offer, nirvana_run::now());
+}
+
+/// `count_offered` at `at`. Plan 73 L3: an offer is the lesson's use, so it moves `used_at`, the clock `life` reads.
+/// `seat run` calls `count_offered`, so the use is recorded with no change outside this file.
+pub fn count_offered_at(root: &Path, offer: &Offer, at: u64) {
     if offer.slugs.is_empty() {
         return;
     }
@@ -1599,6 +1648,7 @@ pub fn count_offered(root: &Path, offer: &Offer) {
     for slug in &offer.slugs {
         if let Some(entry) = index.lessons.get_mut(slug) {
             entry.counters.offered += 1;
+            entry.used_at = Some(entry.used_at.map_or(at, |was| was.max(at)));
         }
     }
     let _ = write_index(root, &index);
@@ -1944,6 +1994,10 @@ const USAGE: &str = "usage: herdr lessons for --class <class> [--profile <p>] [-
        herdr lessons import [--run <run>] [--dry-run]  keep the lessons of gated-pass orders, through the gate's checks
        herdr lessons merge [--class <class>] [--run <run>]  queue an umbrella review of a class over 8 live lessons
        herdr lessons rollback <op-id>               undo one review or merge op from ledger.jsonl
+       herdr lessons undo <op-id|slug>              undo one op, or the newest op on that lesson
+       herdr lessons pin <slug> | unpin <slug>      a pinned lesson is never stale, archived or retired
+       herdr lessons sweep [--dry-run]              mark lessons unused 14 days stale and archive them at 30
+       herdr lessons archived                       the archived lessons, each with the op that undoes it
        herdr lessons reclass [--dry-run] [--edited] give each lesson whose class the router never names its order's class
                                                     (--edited: also lessons changed since herdr wrote them)
        herdr lessons idle [status|on|off|tick]      the memory review in idle time on spare usage (order LEARN)";
@@ -2006,9 +2060,10 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             if index.lessons.is_empty() {
                 println!("no lesson in {}", dir(&root).display());
             }
+            let now = nirvana_run::now();
             for (slug, entry) in &index.lessons {
                 println!(
-                    "{slug} · {} · offered {} · opened {} · passed after opened {}{}",
+                    "{slug} · {} · offered {} · opened {} · passed after opened {}{}{}",
                     entry.class,
                     entry.counters.offered,
                     entry.counters.opened,
@@ -2017,7 +2072,10 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
                         ""
                     } else {
                         " · decayed"
-                    }
+                    },
+                    life::word(entry, now)
+                        .map(|w| format!(" · {w}"))
+                        .unwrap_or_default()
                 );
             }
             Ok(())
@@ -2073,6 +2131,18 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
                 }
                 Err(why) => {
                     eprintln!("herdr lessons reclass: {why}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some(verb @ ("undo" | "pin" | "unpin" | "sweep" | "archived")) => {
+            match life::cli(&root, verb, &args[1..], nirvana_run::now()) {
+                Ok(text) => {
+                    print!("{text}");
+                    Ok(())
+                }
+                Err(why) => {
+                    eprintln!("herdr lessons {verb}: {why}");
                     std::process::exit(1);
                 }
             }
@@ -2342,6 +2412,8 @@ mod tests {
                 seen: Vec::new(),
                 profile: None,
                 origin: Origin::Worker,
+                used_at: None,
+                pinned: false,
             },
         );
         assert!(lines_for(&index, "build.bounded", None).is_empty());
@@ -2371,6 +2443,8 @@ mod tests {
                     seen: Vec::new(),
                     profile: None,
                     origin: Origin::Worker,
+                    used_at: None,
+                    pinned: false,
                 },
             );
         }
@@ -2441,6 +2515,8 @@ mod tests {
             seen: Vec::new(),
             profile: None,
             origin: Origin::Worker,
+            used_at: None,
+            pinned: false,
         };
         for n in 0..18u32 {
             index.lessons.insert(format!("old-{n:02}"), entry(n, 1 + n));
@@ -2620,6 +2696,8 @@ mod tests {
             seen: Vec::new(),
             profile: None,
             origin,
+            used_at: None,
+            pinned: false,
         };
         index
             .lessons
@@ -2852,6 +2930,8 @@ mod tests {
         let root = temp("merge-fail");
         let parts = vec![kept_lesson(&root, "Tip one"), kept_lesson(&root, "Tip two")];
         let index_before = read_index(&root);
+        // Plan 73: the gate's two writes are ledger rows now; the failed merge adds none.
+        let ledger_before = ledger(&root);
         // The umbrella's path is a folder: its write fails.
         std::fs::create_dir_all(dir(&root).join("tips.md")).expect("folder");
         let why = merge(
@@ -2870,7 +2950,7 @@ mod tests {
             assert!(lesson_path(&root, part).is_file(), "{part} is kept");
         }
         assert_eq!(read_index(&root), index_before);
-        assert!(ledger(&root).is_empty());
+        assert_eq!(ledger(&root), ledger_before);
         std::fs::remove_dir(dir(&root).join("tips.md")).expect("folder");
         // A ledger holding op-5 and a damaged line: the next op is op-6.
         std::fs::write(
@@ -2917,6 +2997,8 @@ mod tests {
         let root = temp("merge-midway");
         let parts = vec![kept_lesson(&root, "Tip one"), kept_lesson(&root, "Tip two")];
         let index_before = read_index(&root);
+        // Plan 73: the gate's two writes are ledger rows now; the failed merge adds none.
+        let ledger_before = ledger(&root);
         let first = body(&root, &parts[0]);
         let held = std::fs::OpenOptions::new()
             .read(true)
@@ -2940,7 +3022,7 @@ mod tests {
         assert_eq!(body(&root, &parts[0]), first, "the removed part is back");
         assert!(!lesson_path(&root, "tips").exists(), "the umbrella is out");
         assert_eq!(read_index(&root), index_before);
-        assert!(ledger(&root).is_empty());
+        assert_eq!(ledger(&root), ledger_before);
     }
 
     /// Review S6: a ledger row naming a slug `slug()` could not make is refused before any file is written.

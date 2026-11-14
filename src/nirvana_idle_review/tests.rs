@@ -183,6 +183,7 @@ fn facts(now: u64) -> Facts {
         usage_moved: Ok(None),
         backoff_until: None,
         new_orders: Some(3),
+        pending_since: Some(now - 2 * 3_600),
         review_cap: None,
         used_today: 0,
         used_window: 0,
@@ -1427,4 +1428,123 @@ fn c40a_a_damaged_idle_review_file_is_a_doubt_never_on() {
         lines.iter().any(|line| line.contains("queued:")),
         "{lines:?}"
     );
+}
+
+// ---- plan 73: Hermes's max age, and the lessons' sweep in the tick ----
+
+#[test]
+fn p73_orders_that_waited_the_max_age_need_only_the_short_quiet() {
+    let now = 10_000_000;
+    // The owner typed 15 minutes ago: under the long settle, over the short one.
+    let mut typed = facts(now);
+    typed.owner_key = Ok(Some(now - 15 * 60));
+    skipped(decide(&typed), "the owner typed");
+    let mut waited = typed.clone();
+    waited.pending_since = Some(now - MAX_WAIT_S);
+    assert_eq!(
+        decide(&waited),
+        Decision::Run,
+        "orders waited {MAX_WAIT_S} s"
+    );
+    let mut short = waited.clone();
+    short.pending_since = Some(now - MAX_WAIT_S + 60);
+    skipped(decide(&short), "the owner typed");
+    // An order write 15 minutes ago is the same quiet.
+    let mut wrote = waited.clone();
+    wrote.owner_key = Ok(None);
+    wrote.activity = Some((now - 15 * 60, "C:/p".into()));
+    assert_eq!(decide(&wrote), Decision::Run);
+    // Inside the short quiet, still no review.
+    let mut fresh = waited.clone();
+    fresh.owner_key = Ok(Some(now - FORCE_QUIET_S + 60));
+    skipped(decide(&fresh), "the owner typed");
+    // The owner's spend and the lease rule are never forced.
+    let mut busy = waited.clone();
+    busy.busy = Some("o1 holds a lease".into());
+    skipped(decide(&busy), "an order runs");
+    let mut no_spare = waited.clone();
+    no_spare.spare = Ok(Spare {
+        spare: Some(0.2),
+        ..no_spare.spare.clone().unwrap()
+    });
+    skipped(decide(&no_spare), "projected unused");
+    let mut capped = waited.clone();
+    capped.used_today = PER_SPACE_PER_DAY;
+    skipped(decide(&capped), "the cap");
+    let mut moved = waited;
+    moved.usage_moved = Ok(Some(("max".into(), 0.05)));
+    skipped(decide(&moved), "someone is using it");
+}
+
+#[test]
+fn p73_a_tick_forces_a_review_whose_orders_waited_and_sweeps_lessons() {
+    let _home = quiet("p73-tick");
+    let world = world(3_600, 10);
+    let root = temp("p73-tick");
+    gated(
+        &root,
+        "r1",
+        "b1",
+        "build.bounded",
+        "nozzle diameter read from the inventory list",
+        "pass",
+        world.now - MAX_WAIT_S - 600,
+    );
+    seed_samples(&world);
+    // A lesson unused 30 days, and one pinned.
+    let lessons_dir = lessons::dir(&root);
+    std::fs::create_dir_all(&lessons_dir).expect("lessons");
+    let mut index = lessons::Index::default();
+    for (slug, pinned) in [("gone-quiet", false), ("kept-pinned", true)] {
+        std::fs::write(
+            lessons_dir.join(format!("{slug}.md")),
+            format!("1. {slug}\n"),
+        )
+        .expect("file");
+        index.lessons.insert(
+            slug.into(),
+            lessons::Entry {
+                name: slug.into(),
+                class: "build.bounded".into(),
+                description: slug.into(),
+                order: "o".into(),
+                run: "r".into(),
+                written_at: 0,
+                counters: lessons::Counters::default(),
+                seen: Vec::new(),
+                profile: None,
+                origin: Origin::Worker,
+                used_at: Some(world.now - lessons::life::ARCHIVE_AFTER_S),
+                pinned,
+            },
+        );
+    }
+    std::fs::write(
+        lessons_dir.join(lessons::INDEX),
+        serde_json::to_string_pretty(&index).unwrap(),
+    )
+    .expect("index");
+    let dir = nirvana_seat::dir();
+    std::fs::create_dir_all(dir.join("keys")).expect("keys");
+    std::fs::write(
+        dir.join("keys").join("wP_p1"),
+        (world.now - 15 * 60).to_string(),
+    )
+    .expect("key");
+    let lines = tick_with(std::slice::from_ref(&root), &table(), &world, None);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("queued after orders waited")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("archived gone-quiet")),
+        "{lines:?}"
+    );
+    let index = lessons::read_index(&root);
+    assert!(!index.lessons.contains_key("gone-quiet"));
+    assert!(index.lessons.contains_key("kept-pinned"));
 }
