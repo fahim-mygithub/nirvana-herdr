@@ -1,6 +1,6 @@
 # Plan 41: the orchestrator seat moves to agy when Claude runs low
 
-Status: PROPOSED 2026-11-14. Probe done. No code yet. Owner rulings R1-R4 open.
+Status: RULED 2026-11-14. Probe done. R1-R4 ruled, see §7. Building P41a-P41c.
 
 ## 1. The ask
 
@@ -148,6 +148,17 @@ steps. Lessons used in briefs need no change.
 P41b and P41c can run in parallel: disjoint files. P41d needs both.
 
 ## 7. Owner rulings
+
+Ruled 2026-11-14. The owner: "Tr1 makes senscses r2 make sence give it a bigger buffer like 95 r3 makes sence. and r4
+makes sesncse".
+
+- R1: (a), the install's `.agents/` folder passed with `--add-dir`.
+- R2: offer at 90% of the 5h window or 90% of the week; force at 95% of either. Read as: the force level moves from
+  98% to 95% for a bigger buffer, and the offer moves below it. Confirm at P41d if the owner meant otherwise.
+- R3: Carbon high.
+- R4: Gemini CLI dropped.
+
+The proposals as written before the ruling:
 
 - **R1, where the agy plugin lives.** (a) A `.agents/` folder in the install, passed with `--add-dir` at launch. It
   touches no `~/.gemini` and no project, and §4.2 proved hooks load that way. Skills, agents and MCP from that folder
