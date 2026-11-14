@@ -512,8 +512,12 @@ fn p33_each_lesson_op_refusal_says_why() {
     );
     let body = nirvana_lessons::body(&root, &slug).expect("body");
     assert!(body.ends_with("1. read TOTAL last\n"), "{body}");
-    // Only the applied op is in the ledger.
-    assert_eq!(nirvana_lessons::ledger(&root).len(), 1);
+    // Only the applied op is in the ledger, after the gate's own write of the lesson (plan 73).
+    let ops: Vec<String> = nirvana_lessons::ledger(&root)
+        .into_iter()
+        .map(|row| row.op)
+        .collect();
+    assert_eq!(ops, ["write", "patch"]);
 }
 
 /// Review S1 and S2: an op keeps a lesson only for the reviewed order's class and profile, and only on a quote of at
@@ -989,7 +993,7 @@ fn p33_a_crowded_class_is_merged_archived_ledgered_and_rolled_back() {
             .exists());
         assert!(nirvana_lessons::dir(&root)
             .join(nirvana_lessons::ARCHIVE)
-            .join(format!("op-1-{part}.md"))
+            .join(format!("op-10-{part}.md"))
             .is_file());
     }
     let axes = gated_axes(&root, "r1", "lm-build-bounded-1");
@@ -1003,7 +1007,11 @@ fn p33_a_crowded_class_is_merged_archived_ledgered_and_rolled_back() {
             .any(|w| w.contains("not-given is not one of the lessons")),
         "{whys:?}"
     );
-    let ledger = nirvana_lessons::ledger(&root);
+    // Plan 73: the gate's nine writes of the parts are op-1 to op-9; the merge is op-10.
+    let ledger: Vec<_> = nirvana_lessons::ledger(&root)
+        .into_iter()
+        .filter(|row| row.op != "write")
+        .collect();
     assert_eq!(ledger.len(), 1);
     assert_eq!(ledger[0].op, "merge");
     assert!(ledger[0].before.iter().filter(|s| s.file.is_some()).count() == 3);
@@ -1012,15 +1020,15 @@ fn p33_a_crowded_class_is_merged_archived_ledgered_and_rolled_back() {
         .iter()
         .any(|s| s.slug == "studio-tips" && s.file.is_some()));
     // Rollback restores the parts with their counters and takes the umbrella out.
-    let said = nirvana_lessons::rollback(&root, "op-1", 20).expect("rollback");
-    assert!(said.starts_with("op-2: rolled back op-1 (merge"), "{said}");
+    let said = nirvana_lessons::rollback(&root, "op-10", 20).expect("rollback");
+    assert!(said.starts_with("op-11: rolled back op-10 (merge"), "{said}");
     let index = nirvana_lessons::read_index(&root);
     assert!(!index.lessons.contains_key("studio-tips"));
     assert_eq!(index.lessons[&slugs[2]].counters.offered, 2);
     assert!(nirvana_lessons::dir(&root)
         .join(format!("{}.md", slugs[0]))
         .is_file());
-    assert!(nirvana_lessons::rollback(&root, "op-1", 21)
+    assert!(nirvana_lessons::rollback(&root, "op-10", 21)
         .expect_err("twice")
         .contains("rolled back already"));
     assert!(
