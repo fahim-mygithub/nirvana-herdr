@@ -152,7 +152,11 @@ P41b and P41c can run in parallel: disjoint files. P41d needs both.
 Ruled 2026-11-14. The owner: "Tr1 makes senscses r2 make sence give it a bigger buffer like 95 r3 makes sence. and r4
 makes sesncse".
 
-- R1: (a), the install's `.agents/` folder passed with `--add-dir`.
+- R1: (a), the install's `.agents/` folder passed with `--add-dir`. CHANGED the same day to (b): P41a found that
+  interactive `agy -i` loads no hooks from an `--add-dir` folder (run 3: none fired, `/hooks` listed none of ours),
+  while a workspace `.agents/` loaded and fired (run 4). The owner, asked (b) or (c): "Go with recomended even tho its
+  called gemini the actual agent is agy". So `install.py` installs the folder with `agy plugin install`, which writes
+  into agy's config under `~/.gemini`.
 - R2: offer at 90% of the 5h window or 90% of the week; force at 95% of either. Read as: the force level moves from
   98% to 95% for a bigger buffer, and the offer moves below it. Confirm at P41d if the owner meant otherwise.
 - R3: Carbon high.
