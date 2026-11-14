@@ -107,6 +107,8 @@ fn a_worker_is_never_started_through_a_shell() {
     }
     assert!(argv(&spec("codex", "m", None)).is_err());
     assert!(ENV_REMOVED.contains(&"CLAUDECODE"));
+    // Plan 41 P41c: a worker never carries the orchestrator's mark.
+    assert!(ENV_REMOVED.contains(&"NIRVANA_ORCHESTRATOR"));
 }
 
 // ---- the Work Report ----

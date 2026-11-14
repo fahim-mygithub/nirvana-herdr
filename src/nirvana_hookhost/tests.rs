@@ -335,3 +335,20 @@ fn the_owners_words_in_an_agy_transcript_never_pass_a_check() {
     );
     assert!(checked.is_err(), "send-ok refuses on an agy transcript: {checked:?}");
 }
+
+/// Plan 41 P41c: the installed agy plugin reaches every agy session; only the orchestrator's does any work.
+#[test]
+fn an_agy_hook_outside_the_orchestrator_does_nothing() {
+    assert!(outside_orchestrator(Host::Agy, None));
+    assert!(outside_orchestrator(Host::Agy, Some("0")));
+    assert!(!outside_orchestrator(Host::Agy, Some("1")));
+    assert!(!outside_orchestrator(Host::Claude, None));
+    let dir = Scratch::new("outside");
+    let pre = json!({"hookEventName": "PreToolUse", "conversationId": "c1", "lastUserInput": "go",
+        "toolCall": {"name": "write_file", "args": {"Path": "a.txt"}}});
+    let hin = read_for(Host::Agy, "guard-edit", &pre.to_string(), None, &dir.0, 100);
+    assert_eq!(hin.skipped_text().trim(), r#"{"decision":"allow"}"#);
+    let stop = json!({"hookEventName": "Stop", "conversationId": "c1", "lastUserInput": "go"});
+    let hin = read_for(Host::Agy, "stop", &stop.to_string(), None, &dir.0, 100);
+    assert_eq!(hin.skipped_text().trim(), "{}");
+}

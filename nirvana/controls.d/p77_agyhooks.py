@@ -21,6 +21,9 @@ T_GATE = _H + "the_gates_own_output_becomes_one_continue_then_its_notice"
 T_PROMPT = _H + "a_prompt_notice_runs_once_per_prompt_and_per_verb"
 T_OTHER = _H + "post_invocation_and_unknown_events_run_nothing"
 T_OWNER = _H + "the_owners_words_in_an_agy_transcript_never_pass_a_check"
+T_OUTSIDE = _H + "an_agy_hook_outside_the_orchestrator_does_nothing"
+WORKER = "src/nirvana_worker.rs"
+T_WORKER_ENV = "nirvana_worker::tests::a_worker_is_never_started_through_a_shell"
 
 CONTROLS = (
     # The flag
@@ -115,4 +118,13 @@ CONTROLS = (
             "at: String::new(), transcript: String::new(), check: String::new() });\n    }\n"
             "    let Some(found) = crate::nirvana_fresh::owner_quote_at(text, quote) else {\n",
             T_OWNER, "rust"),
+    # P41c scope: the installed agy plugin reaches every agy session; only the orchestrator's works.
+    Control("p77_outside_orchestrator_works", HOST,
+            "    host == Host::Agy && marker != Some(\"1\")\n",
+            "    host == Host::Agy && marker == Some(\"never\")\n",
+            T_OUTSIDE, "rust"),
+    Control("p77_worker_keeps_marker", WORKER,
+            "    crate::nirvana_launch::ORCHESTRATOR_ENV,\n    \"CODEX_THREAD_ID\",\n",
+            "    \"NIRVANA_ORCHESTRATOR_KEPT\",\n    \"CODEX_THREAD_ID\",\n",
+            T_WORKER_ENV, "rust"),
 )

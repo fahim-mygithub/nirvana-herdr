@@ -218,7 +218,10 @@ pub const CLAUDE_ENV: [(&str, &str); 1] = [("CLAUDE_CODE_DISABLE_BACKGROUND_TASK
 /// of the orchestrator's Claude (the same list herdr's `pane.rs` removes from a new pane). Nor Nirvana Claude's
 /// `CLAUDE_CODE_SUBAGENT_MODEL` (plan 40a review a, N1): its launch settings put it in the orchestrator's env, and a
 /// worker's `herdr seat run` would pass it on, so a seated worker's own subagents keep Claude Code's default.
-pub const ENV_REMOVED: [&str; 7] = [
+pub const ENV_REMOVED: [&str; 8] = [
+    // Plan 41 P41c: a worker seated from the orchestrator's shell inherited `NIRVANA_ORCHESTRATOR=1`; with Nirvana's
+    // agy plugin installed for every agy session, an agy worker carrying it would run the orchestrator's gate.
+    crate::nirvana_launch::ORCHESTRATOR_ENV,
     "CODEX_THREAD_ID",
     "OMPCODE",
     "CLAUDECODE",

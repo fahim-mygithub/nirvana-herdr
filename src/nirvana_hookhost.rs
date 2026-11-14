@@ -489,6 +489,15 @@ pub fn read_stdin_for(verb: &str) -> HookIn {
         &state_dir(),
         crate::nirvana_run::now(),
     );
+    if outside_orchestrator(
+        hin.host,
+        std::env::var(crate::nirvana_launch::ORCHESTRATOR_ENV)
+            .ok()
+            .as_deref(),
+    ) {
+        hin.answer_skipped();
+        std::process::exit(0);
+    }
     if hin.host == Host::Agy {
         if let Some(cwd) = hin
             .hook
@@ -500,6 +509,15 @@ pub fn read_stdin_for(verb: &str) -> HookIn {
         }
     }
     hin
+}
+
+/// Plan 41 P41c: `agy plugin install` puts Nirvana's plugin in agy's config, and agy turns an installed plugin on for
+/// every session on the machine: the owner's own agy and herdr's seated agy workers would run the gate and the
+/// guards too. Only the orchestrator's launch sets `NIRVANA_ORCHESTRATOR=1`, and seated workers have it removed
+/// (`nirvana_worker::ENV_REMOVED`), so an agy hook without it answers as a skipped hook and does no work. Claude is
+/// untouched: its plugin loads only on Nirvana Claude.
+pub fn outside_orchestrator(host: Host, marker: Option<&str>) -> bool {
+    host == Host::Agy && marker != Some("1")
 }
 
 /// One hook's input from `input`. On Claude `hook` is the input as it stands (or `null`, as the verbs read a bad
@@ -571,6 +589,20 @@ impl HookIn {
             count_ask(&self.state_dir, &self.raw, now);
         }
         format!("{value}\n")
+    }
+
+    /// What a skipped hook prints: `allow` on a PreToolUse, `{}` otherwise, never a block or a continue.
+    pub fn skipped_text(&self) -> String {
+        let (value, _) = agy_output(self.event, "", 0);
+        format!("{value}\n")
+    }
+
+    /// Prints `skipped_text`; nothing is counted.
+    pub fn answer_skipped(&self) {
+        use std::io::Write;
+        let mut stdout = std::io::stdout();
+        let _ = stdout.write_all(self.skipped_text().as_bytes());
+        let _ = stdout.flush();
     }
 
     /// Prints `answer_text`. Every verb's last word.
