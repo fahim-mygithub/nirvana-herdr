@@ -1,0 +1,15 @@
+{
+ "artifactDirectoryPath": "C:/Users/owner/.gemini/antigravity-cli/brain/eeb6f04f-ce65-4339-a3e5-7a7c061cd0b0",
+ "conversationId": "eeb6f04f-ce65-4339-a3e5-7a7c061cd0b0",
+ "cwd": "C:\\nirvana\\agy",
+ "hookEventName": "PreInvocation",
+ "initialNumSteps": 12,
+ "invocationNum": 0,
+ "lastUserInput": "Now start one subagent with your subagent tool and ask it to report how many lines notes.txt has. Tell me its answer.",
+ "modelName": "gemini-4-carbon-medium",
+ "transcriptPath": "C:/Users/owner/.gemini/antigravity-cli/brain/eeb6f04f-ce65-4339-a3e5-7a7c061cd0b0/.system_generated/logs/transcript_full.jsonl",
+ "workspacePaths": [
+  "C:/nirvana/agy",
+  "C:/work/proj"
+ ]
+}

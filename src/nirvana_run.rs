@@ -2446,6 +2446,18 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
     if args.first().map(String::as_str) == Some("sweep") {
         return crate::nirvana_dead::cli(&args[1..]);
     }
+    // Plan 41 §5.1: `run notice --host agy` is agy's `PreInvocation` hook. It reads agy's input, which moves the
+    // process into the session's folder before `Project::from_env` looks (agy runs a hook in its hooks folder), runs
+    // once per prompt, and answers in agy's shape. Claude's `run notice` reads no stdin and is unchanged.
+    let agy = (args.first().map(String::as_str) == Some("notice")
+        && crate::nirvana_hookhost::host_in(args) == crate::nirvana_hookhost::Host::Agy)
+        .then(|| crate::nirvana_hookhost::read_stdin_for("run notice"));
+    if let Some(hin) = &agy {
+        if hin.skip {
+            hin.answer("");
+            return Ok(());
+        }
+    }
     let project = Project::from_env();
     let rest = args.get(1..).unwrap_or(&[]);
     match args.first().map(String::as_str) {
@@ -2457,7 +2469,15 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             println!("{verdict}");
             Ok(())
         }
-        Some("notice") => notice_cli(&project, rest),
+        Some("notice") => {
+            let rest = crate::nirvana_hookhost::without_host(rest);
+            let out = notice_cli(&project, &rest)?;
+            match &agy {
+                Some(hin) => hin.answer(&out),
+                None => print!("{out}"),
+            }
+            Ok(())
+        }
         Some("check") => {
             let run = run_arg(&project, rest.first());
             let (_, _, _, state) = load(&project, &run);
@@ -2947,7 +2967,9 @@ fn log_cli(project: &Project, args: &[String]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn notice_cli(project: &Project, args: &[String]) -> std::io::Result<()> {
+/// The notice's text, each line ending in a newline; empty when nothing waits.
+fn notice_cli(project: &Project, args: &[String]) -> std::io::Result<String> {
+    let mut out = String::new();
     let runs = match args.first() {
         Some(run) => vec![run_arg(project, Some(run))],
         None => project.runs(),
@@ -2972,13 +2994,13 @@ fn notice_cli(project: &Project, args: &[String]) -> std::io::Result<()> {
         // Plan 31 review W: the notice delivered the queue, or nothing waits; either way the retry is over.
         clear_retry(crate::nirvana::home().as_deref(), project, &run);
         if !written.is_empty() {
-            println!("herdr run {run}:");
+            out.push_str(&format!("herdr run {run}:\n"));
             for line in lines {
-                println!("- {line}");
+                out.push_str(&format!("- {line}\n"));
             }
         }
     }
-    Ok(())
+    Ok(out)
 }
 
 /// Plan 31 §2.3: the `wake_queued` event a queued wake writes, or `None` when the journal's last lines already hold the

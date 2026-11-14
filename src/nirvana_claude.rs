@@ -20,6 +20,7 @@
 //! Every hook stays quiet and fast when it has nothing to say, and never fails the turn: a problem prints nothing.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -27,6 +28,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::nirvana_hookhost::HookIn;
 use crate::nirvana_run::{self, Phase, Project, RunState};
 use crate::nirvana_seat::{self, Effort, Leases, Table, Tokens};
 use crate::nirvana_usage::{self, Figure, Freshness, Provider, Reading, Source};
@@ -516,11 +518,22 @@ pub fn write_board_line(home: &Path, root: &Path) -> std::io::Result<PathBuf> {
     })
 }
 
+/// Plan 41 §5.1: a hook verb's input, Claude Code's or agy's (`--host agy`) turned into Claude Code's.
+fn hook_in(verb: &str) -> HookIn {
+    crate::nirvana_hookhost::read_stdin_for(verb)
+}
+
 fn digest_cli() -> std::io::Result<()> {
-    let hook = read_stdin();
+    let hin = hook_in("digest");
+    if hin.skip {
+        hin.answer("");
+        return Ok(());
+    }
+    let hook = &hin.hook;
+    let mut out = String::new();
     let now = now();
     let home = home_dir();
-    let project = project_at(hook_cwd(&hook).as_deref());
+    let project = project_at(hook_cwd(hook).as_deref());
     let memory = home.join(nirvana_seat::DIR).join(MEMORY_FILE);
     if let Some(project) = &project {
         let _ = write_board_line(&home, &project.root);
@@ -560,7 +573,13 @@ fn digest_cli() -> std::io::Result<()> {
             .unwrap_or_default(),
         memory: memory.display().to_string(),
     };
-    if let Some(session_id) = hook.get("session_id").and_then(Value::as_str) {
+    // Plan 41 §5.1: the session seat record is a Claude model's seat (plan 20 §3.3), and `record_session_seat` reads
+    // any other model as opus. An agy session records none, so `guard-spawn` and the seat notice read no seat for it.
+    if let Some(session_id) = hook
+        .get("session_id")
+        .and_then(Value::as_str)
+        .filter(|_| !hin.is_agy())
+    {
         let model = hook
             .get("model")
             .and_then(Value::as_str)
@@ -573,19 +592,23 @@ fn digest_cli() -> std::io::Result<()> {
             crate::nirvana_launch::orchestrator_launch_seat_for(&home, folder);
         let _ = record_session_seat(&home, session_id, model, &launch_effort);
     }
-    println!("{}", digest_text(&digest));
+    let _ = writeln!(out, "{}", digest_text(&digest));
     // Plan 33 §2.5: the project's profiles, outside `DIGEST_MAX_CHARS`: a description cut short is one Nirvana Claude
     // cannot pick by. At most `DIGEST_PROFILES` lines and a count.
     if let Some(project) = &project {
         let lines = crate::nirvana_profiles::digest_lines(&project.root);
         if !lines.is_empty() {
-            println!("{}", lines.join("\n"));
+            let _ = writeln!(out, "{}", lines.join("\n"));
         }
     }
-    // Plan 25 §2: after a `/clear` herdr typed, the fresh session starts from the handoff note.
-    if let Some(note) = crate::nirvana_fresh::session_start_hook(&hook, project.as_ref()) {
-        println!("\n{note}");
+    // Plan 25 §2: after a `/clear` herdr typed, the fresh session starts from the handoff note. Plan 41 §5.1: not on
+    // agy, where herdr types no `/clear` and the fresh start's owner-typing checks are not proven.
+    if !hin.is_agy() {
+        if let Some(note) = crate::nirvana_fresh::session_start_hook(hook, project.as_ref()) {
+            let _ = writeln!(out, "\n{note}");
+        }
     }
+    hin.answer(&out);
     Ok(())
 }
 
@@ -1105,11 +1128,17 @@ fn claude_config_dir() -> Option<PathBuf> {
 }
 
 fn guard_cli() -> std::io::Result<()> {
-    let hook = read_stdin();
+    let hin = hook_in("guard-spawn");
+    if hin.skip {
+        hin.answer("");
+        return Ok(());
+    }
+    let hook = &hin.hook;
+    let mut out = String::new();
     let spawn = Spawn::from_input(hook.get("tool_input").unwrap_or(&Value::Null));
     let plugin_root = std::env::var_os("CLAUDE_PLUGIN_ROOT").map(PathBuf::from);
     let mut dirs = Vec::new();
-    if let Some(cwd) = hook_cwd(&hook) {
+    if let Some(cwd) = hook_cwd(hook) {
         dirs.push(cwd.join(".claude").join("agents"));
     }
     if let Some(config) = claude_config_dir() {
@@ -1127,7 +1156,8 @@ fn guard_cli() -> std::io::Result<()> {
         .and_then(|session| read_session_seat(&home_dir(), session))
         .map(|record| format!("{} {}", record.seat, record.effort));
     if let Verdict::Deny(reason) = guard(&spawn, def.as_ref(), &table, &reserve) {
-        println!(
+        let _ = writeln!(
+            out,
             "{}",
             json!({"hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -1136,6 +1166,7 @@ fn guard_cli() -> std::io::Result<()> {
             }})
         );
     }
+    hin.answer(&out);
     Ok(())
 }
 
@@ -1439,16 +1470,24 @@ pub fn stop_output(
 }
 
 fn stop_cli() -> std::io::Result<()> {
-    let hook = read_stdin();
-    if hook.get("agent_id").is_some_and(|a| !a.is_null()) {
+    let hin = hook_in("stop");
+    let hook = &hin.hook;
+    if hin.skip || hook.get("agent_id").is_some_and(|a| !a.is_null()) {
+        hin.answer("");
         return Ok(());
     }
-    let Some(project) = project_at(hook_cwd(&hook).as_deref()) else {
+    let Some(project) = project_at(hook_cwd(hook).as_deref()) else {
+        hin.answer("");
         return Ok(());
     };
     // Plan 25 §2: a run this pane ended since the session's last clear, and a context above `fresh_above`, record a
-    // pending fresh start for herdr's server to type.
-    crate::nirvana_fresh::stop_hook(&hook, &project);
+    // pending fresh start for herdr's server to type. Plan 41 §5.1: not on agy. The fresh start is sent only while no
+    // owner prompt follows the run's end (`nirvana_fresh::owner_prompt_since`), and an agy transcript has no line
+    // that check reads as the owner's, so it would always pass: a check on the owner's words is not proven on agy,
+    // and it must refuse.
+    if !hin.is_agy() {
+        crate::nirvana_fresh::stop_hook(hook, &project);
+    }
     let dead_ends: Vec<(String, String, u64)> = run_steps(&project, now())
         .into_iter()
         .filter_map(|(run, step, seq)| step.err().map(|why| (run, why, seq)))
@@ -1478,9 +1517,7 @@ fn stop_cli() -> std::io::Result<()> {
         }
         let _ = nirvana_seat::write_atomic(&path, serde_json::to_string(&all)?.as_bytes());
     }
-    if let Some(out) = out {
-        println!("{out}");
-    }
+    hin.answer(&out.map(|out| format!("{out}\n")).unwrap_or_default());
     Ok(())
 }
 
@@ -1669,6 +1706,11 @@ pub fn settings_files(cwd: &Path, config: Option<&Path>) -> Vec<PathBuf> {
 /// Whether the folder's own settings already run herdr's `tail` command on `event` (Preload's switches,
 /// `nirvana_jev_install`), so the plugin's copy of the same hook stays quiet and the session hears it once.
 pub fn folder_runs(input: &str, event: &str, tail: &str) -> bool {
+    // Plan 41 §5.1: a folder's Claude settings run no hook in an agy session, so under `--host agy` the plugin's
+    // hook is the only one and always runs.
+    if crate::nirvana_hookhost::host() == crate::nirvana_hookhost::Host::Agy {
+        return false;
+    }
     folder_runs_with(input, event, tail, claude_config_dir().as_deref())
 }
 
@@ -1896,7 +1938,11 @@ pub fn log_usage_from(hook: &Value, is_orchestrator: bool) -> std::io::Result<Op
 }
 
 fn log_usage_cli() -> std::io::Result<()> {
-    log_usage_from(&read_stdin(), is_orchestrator_env())?;
+    let hin = hook_in("log-usage");
+    if !hin.skip {
+        log_usage_from(&hin.hook, is_orchestrator_env())?;
+    }
+    hin.answer("");
     Ok(())
 }
 
@@ -2626,22 +2672,34 @@ pub fn prompt_baseline_from(hook: &Value, is_orchestrator: bool) -> std::io::Res
 }
 
 fn prompt_baseline_cli() -> std::io::Result<()> {
-    prompt_baseline_from(&read_stdin(), is_orchestrator_env())
+    let hin = hook_in("prompt-baseline");
+    if !hin.skip {
+        prompt_baseline_from(&hin.hook, is_orchestrator_env())?;
+    }
+    hin.answer("");
+    Ok(())
 }
 
 fn guard_edit_cli() -> std::io::Result<()> {
-    let hook = read_stdin();
-    let cwd = hook_cwd(&hook).or_else(|| std::env::current_dir().ok());
+    let hin = hook_in("guard-edit");
+    if hin.skip {
+        hin.answer("");
+        return Ok(());
+    }
+    let hook = &hin.hook;
+    let mut out = String::new();
+    let cwd = hook_cwd(hook).or_else(|| std::env::current_dir().ok());
     let project = project_at(cwd.as_deref());
     if let Some(decision) = guard_edit_decision(
-        &hook,
+        hook,
         project.as_ref().map(|p| p.root.as_path()),
         cwd.as_deref(),
         EditLimit::default(),
         is_orchestrator_env(),
     ) {
-        println!("{decision}");
+        let _ = writeln!(out, "{decision}");
     }
+    hin.answer(&out);
     Ok(())
 }
 
@@ -2691,9 +2749,15 @@ pub fn check_edit_from(hook: &Value, is_orchestrator: bool) -> std::io::Result<O
 }
 
 fn check_edit_cli() -> std::io::Result<()> {
-    if let Some(decision) = check_edit_from(&read_stdin(), is_orchestrator_env())? {
-        println!("{decision}");
+    let hin = hook_in("check-edit");
+    let mut out = String::new();
+    if !hin.skip {
+        if let Some(decision) = check_edit_from(&hin.hook, is_orchestrator_env())? {
+            let _ = writeln!(out, "{decision}");
+        }
     }
+    // On agy the block is lost: agy ignores a PostToolUse answer (P41a run 8, `nirvana_hookhost`).
+    hin.answer(&out);
     Ok(())
 }
 
@@ -2753,11 +2817,16 @@ pub fn guard_read_decision(hook: &Value, cwd: Option<&Path>, is_orchestrator: bo
 }
 
 fn guard_read_cli() -> std::io::Result<()> {
-    let hook = read_stdin();
-    let cwd = hook_cwd(&hook).or_else(|| std::env::current_dir().ok());
-    if let Some(decision) = guard_read_decision(&hook, cwd.as_deref(), is_orchestrator_env()) {
-        println!("{decision}");
+    let hin = hook_in("guard-read");
+    let mut out = String::new();
+    if !hin.skip {
+        let cwd = hook_cwd(&hin.hook).or_else(|| std::env::current_dir().ok());
+        if let Some(decision) = guard_read_decision(&hin.hook, cwd.as_deref(), is_orchestrator_env())
+        {
+            let _ = writeln!(out, "{decision}");
+        }
     }
+    hin.answer(&out);
     Ok(())
 }
 

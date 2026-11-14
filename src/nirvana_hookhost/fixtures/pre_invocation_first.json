@@ -1,0 +1,15 @@
+{
+ "artifactDirectoryPath": "C:/Users/owner/.gemini/antigravity-cli/brain/eeb6f04f-ce65-4339-a3e5-7a7c061cd0b0",
+ "conversationId": "eeb6f04f-ce65-4339-a3e5-7a7c061cd0b0",
+ "cwd": "C:\\nirvana\\agy",
+ "hookEventName": "PreInvocation",
+ "initialNumSteps": 1,
+ "invocationNum": 0,
+ "lastUserInput": "Use your file-reading tool to read notes.txt and tell me its first line. Then use your edit/replace tool (not a full-file write) to change APPLE to PEAR in notes.txt. Then create b.txt containing 'hi'",
+ "modelName": "gemini-4-carbon-medium",
+ "transcriptPath": "C:/Users/owner/.gemini/antigravity-cli/brain/eeb6f04f-ce65-4339-a3e5-7a7c061cd0b0/.system_generated/logs/transcript_full.jsonl",
+ "workspacePaths": [
+  "C:/nirvana/agy",
+  "C:/work/proj"
+ ]
+}

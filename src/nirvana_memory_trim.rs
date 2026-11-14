@@ -1147,6 +1147,16 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         fail(USAGE);
     };
     if verb == "record-session" {
+        // Plan 41 §5.1: under `--host agy` no record is written. The record names the transcript `--send-ok` checks
+        // the owner's words in (`nirvana_gui_tools::verify_send_ok`) and the session `Open Nirvana` resumes with
+        // `claude --resume <id>`. An agy conversation id there would hand Claude an id it cannot resume, and a check
+        // on the owner's words is not proven on agy, so it must refuse, never pass: the Claude record it leaves is
+        // still the owner's own Claude prompts. Learning from agy transcripts is P41e's.
+        if crate::nirvana_hookhost::host_in(args) == crate::nirvana_hookhost::Host::Agy {
+            let hin = crate::nirvana_hookhost::read_stdin_for("record-session");
+            hin.answer("");
+            return Ok(());
+        }
         return crate::nirvana_session_record::cli();
     }
     // `--force` only means something to `restore`; it is taken out wherever it stands so it is never the folder.

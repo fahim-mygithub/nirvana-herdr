@@ -1,0 +1,23 @@
+{
+ "artifactDirectoryPath": "C:/Users/owner/.gemini/antigravity-cli/brain/40a4dd27-af0e-4753-a519-5bd1cfa02d55",
+ "conversationId": "40a4dd27-af0e-4753-a519-5bd1cfa02d55",
+ "cwd": "C:\\work\\proj",
+ "error": "",
+ "hookEventName": "PostToolUse",
+ "lastUserInput": "Call these tools one at a time, exactly as named, then reply NAMES-DONE: 1) multi_replace_file_content on notes.txt changing 'second' to 'two' and 'third' to 'three' in one call; 2) sed_file on notes.",
+ "modelName": "gemini-4-carbon-medium",
+ "stepIdx": 8,
+ "toolCall": {
+  "args": {
+   "CommandLine": "Get-ChildItem",
+   "WaitMsBeforeAsync": 5000,
+   "toolSummary": "Directory listing of workspace"
+  },
+  "id": "call_1367126055301581735",
+  "name": "run_command"
+ },
+ "transcriptPath": "C:/Users/owner/.gemini/antigravity-cli/brain/40a4dd27-af0e-4753-a519-5bd1cfa02d55/.system_generated/logs/transcript_full.jsonl",
+ "workspacePaths": [
+  "C:/work/proj"
+ ]
+}

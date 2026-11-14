@@ -21,7 +21,7 @@
 //! needs only a shell.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -732,16 +732,24 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
     }
     match words.first().map(String::as_str) {
         Some("notice") => {
-            let mut input = String::new();
-            let _ = std::io::stdin().read_to_string(&mut input);
+            // Plan 41 §5.1: Claude Code's input, or agy's under `--host agy` (once per prompt, its `PreInvocation`
+            // firing before every model call), and the answer in the host's own shape.
+            let hin = crate::nirvana_hookhost::read_stdin_for("board notice");
+            let input = hin.hook.to_string();
             // Plan 12 O4b: the Nirvana Claude plugin runs this hook with `--plugin`. A folder whose own settings run
             // it as well gets the notice once, from its own hook; two copies raced to print the same notice.
-            if words.iter().any(|word| word == "--plugin")
-                && crate::nirvana_claude::folder_runs(&input, "UserPromptSubmit", NOTICE_COMMAND)
+            if hin.skip
+                || (words.iter().any(|word| word == "--plugin")
+                    && crate::nirvana_claude::folder_runs(
+                        &input,
+                        "UserPromptSubmit",
+                        NOTICE_COMMAND,
+                    ))
             {
+                hin.answer("");
                 return Ok(());
             }
-            run_notice(&input);
+            hin.answer(&run_notice(&input));
             Ok(())
         }
         Some("read") => {
@@ -827,7 +835,9 @@ pub(crate) fn check_seat_notice(session: &str, root: Option<&Path>) -> Option<St
 
 /// The hook: prints what changed for this session, then remembers what it saw. Never fails the prompt: any
 /// problem prints nothing.
-fn run_notice(input: &str) {
+/// The notice's text, each line ending in a newline; empty when there is none.
+fn run_notice(input: &str) -> String {
+    let mut out = String::new();
     let hook: Value = serde_json::from_str(input).unwrap_or(Value::Null);
     let session = hook
         .get("session_id")
@@ -841,16 +851,16 @@ fn run_notice(input: &str) {
     let root = cwd.as_deref().and_then(root);
     if !session.is_empty() {
         if let Some(line) = check_seat_notice(session, root.as_deref()) {
-            println!("{line}");
+            out.push_str(&format!("{line}\n"));
         }
     }
     let Some(root) = root else {
-        return;
+        return out;
     };
     let board = read(&root).unwrap_or_default();
     let seen = seen(session);
     if let Some(text) = notice(&board, seen.as_ref(), &exe()) {
-        println!("{text}");
+        out.push_str(&format!("{text}\n"));
     }
     remember(session, &board);
     // Plan 40 D1: one file per session, never removed. A new session is the time to sweep, once.
@@ -859,6 +869,7 @@ fn run_notice(input: &str) {
             prune_dir(&dir, 0, PRUNE_AFTER, SystemTime::now());
         }
     }
+    out
 }
 
 // ---- pruning the files that only grow (plan 40 D1) ---------------------------------------------------

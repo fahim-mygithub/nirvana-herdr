@@ -1,0 +1,17 @@
+{
+ "artifactDirectoryPath": "C:/Users/owner/.gemini/antigravity-cli/brain/52b57117-55ae-4559-bd15-6e80143c512d",
+ "continuationActive": false,
+ "conversationId": "52b57117-55ae-4559-bd15-6e80143c512d",
+ "cwd": "C:\\work\\proj",
+ "error": "",
+ "executionNum": 1,
+ "fullyIdle": true,
+ "hookEventName": "Stop",
+ "lastUserInput": "Read notes.txt with your file tool and tell me its first line. Then reply DONE-ONE.",
+ "modelName": "gemini-4-carbon-medium",
+ "terminationReason": "NO_TOOL_CALL",
+ "transcriptPath": "C:/Users/owner/.gemini/antigravity-cli/brain/52b57117-55ae-4559-bd15-6e80143c512d/.system_generated/logs/transcript_full.jsonl",
+ "workspacePaths": [
+  "C:/work/proj"
+ ]
+}
