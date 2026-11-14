@@ -1,7 +1,6 @@
 """Plan 41 P41c: the agy orchestrator's copy of the Nirvana plugin, built from `nirvana/claude/` at every install.
 
-    python nirvana/agy_plugin.py --home <dir>               # build <dir>/nirvana/agy/nirvana, validate, print
-    python nirvana/agy_plugin.py --home <dir> --no-bladebro # the same with no mcp_config.json
+    python nirvana/agy_plugin.py --home <dir>    # build <dir>/nirvana/agy/nirvana, validate, print
 
 Owner ruling R1, changed to (b) on 2026-11-14 (plan 41 §7): P41a found that interactive `agy -i` loads no hooks from
 an `--add-dir` folder. So the built folder is a native agy plugin (`plugin.json` at its root) and `install.py` passes
@@ -27,8 +26,16 @@ What goes where (agy 1.5.9's built-in docs, read out of agy.exe on 2026-11-14):
   The plugin is installed into agy's config, where a rule would reach every agy session on the machine, the seated
   agy workers and the owner's own agy included (P41c scope ruling, 2026-11-14).
 - `agents/<name>.md`: the orchestrator agent only, as agy's main agent; see `AGENTS` for why the workers stay out.
-- `mcp_config.json`: bladebro, decision 0043's recipe as `src/nirvana_bladebro.rs::definition` writes it for agy
-  workers, with the orchestrator's own `BLADE_HOME`. Written only when bladebro is on PATH (0043 item 6).
+- No `mcp_config.json`. A plugin's MCP servers load in every session agy loads the plugin for, which is every agy
+  session on the machine, so bladebro here would have shared one `BLADE_HOME` between the owner's agy, the seated
+  agy workers and the orchestrator, against decision 0043 (the Sonnet review of P41c; `NIRVANA_ORCHESTRATOR` gates
+  the hooks only). agy 1.5.9 has no per-launch MCP flag (`agy --help` and `agy mcp add --help`, 2026-11-14: `mcp
+  add` writes the user config). What does scope to one launch is `--add-dir <folder>`: that folder's
+  `.agents/mcp_config.json` loads for that session (plan 35 probe 2), which is how `src/nirvana_agy_tools.rs` gives
+  each seated agy worker its servers. So P41d attaches bladebro at the orchestrator's launch with
+  `--add-dir <home>/nirvana/agy-tools`, whose `.agents/mcp_config.json` holds `nirvana_bladebro::definition` with
+  the orchestrator's own `BLADE_HOME`. Unmeasured: whether interactive `agy -i` loads an add-dir's MCP file
+  (P41a found it loads no hooks from one); P41d must probe that first.
 """
 from __future__ import annotations
 
@@ -87,14 +94,22 @@ GROUPED = {"PreToolUse", "PostToolUse"}   # agy events that take `matcher` group
 # `invoke_subagent` is in the tool list agy gave the nirvana agent but was never called. The IDE names and
 # `edit_notebook` are read off the binary only: P41a confirms them in the interactive mode, and a name agy never
 # sends only costs a regex branch that never matches.
+#
+# Every name here is one herdr's hook adapter maps (`src/nirvana_hookhost.rs` AGY_TOOLS), and every name the adapter
+# maps is here: both are tested against `nirvana/agy_tool_names.json`. The Sonnet review found `sed_file`,
+# `notebook_edit`, `define_subagent` and `run_workflow` mapped by the adapter and missing here, so agy would never
+# have called guard-edit, check-edit or guard-spawn for them. A Claude edit matcher takes every file writer: the
+# Claude guards treat Edit, Write and MultiEdit alike.
+FILE_WRITERS = ["write_file", "edit_file", "replace_file_content", "multi_replace_file_content", "sed_file",
+                "write_to_file"]
 TOOLS = {
-    "Edit": ["write_file", "edit_file", "replace_file_content", "multi_replace_file_content", "write_to_file"],
-    "Write": ["write_file", "edit_file", "replace_file_content", "multi_replace_file_content", "write_to_file"],
-    "MultiEdit": ["write_file", "edit_file", "replace_file_content", "multi_replace_file_content", "write_to_file"],
-    "NotebookEdit": ["edit_notebook"],     # a step type in the binary; no CLI tool file names it
+    "Edit": FILE_WRITERS,
+    "Write": FILE_WRITERS,
+    "MultiEdit": FILE_WRITERS,
+    "NotebookEdit": ["notebook_edit", "edit_notebook"],   # agy's tool list, and a step type in the binary
     "Read": ["read_file", "view_file"],
     "Bash": ["run_command"],
-    "Agent": ["invoke_subagent"],          # P41a: `define_subagent` and `manage_subagents` exist too
+    "Agent": ["invoke_subagent", "define_subagent", "run_workflow"],
 }
 
 # Claude agent -> what agy gets. Only the orchestrator maps. Each worker file fixes a Claude model and effort and
@@ -120,10 +135,9 @@ ROLE = "ROLE.md"
 BODY_CAP = 24 * 1024
 SKILL_CAP = 24 * 1024     # the plan 41 brief: SKILL.md body limit 24 KB
 
-# The orchestrator's bladebro home: outside `nirvana/agy`, which every install replaces whole, and never `~/.blade`
-# or the owner's Chrome profile (0043). One home for the one orchestrator session, reused, so nothing leaks per run.
-BLADE_HOME = Path("nirvana") / "blade-orchestrator"
-BLADE_IDLE_TIMEOUT_S = 60   # src/nirvana_bladebro.rs IDLE_TIMEOUT_S
+# Said in every build's report: why the plugin has no bladebro (see the module docstring).
+MCP_SKIPPED = ("mcp bladebro: not in the plugin, which every agy session loads (decision 0043: one home per "
+               "session); P41d attaches it at the orchestrator's launch with --add-dir")
 
 
 class BuildError(ValueError):
@@ -229,23 +243,6 @@ def write(path: Path, text: str) -> None:
     path.write_bytes(text.encode("utf-8"))
 
 
-def bladebro(home: Path) -> dict:
-    """`src/nirvana_bladebro.rs::definition` in agy's `mcp_config.json` shape (`nirvana_agy_tools::translate`
-    passes command, args and env). No `cwd`: the orchestrator has no one project folder, and bladebro needs none."""
-    blade = (Path(home) / BLADE_HOME).as_posix()
-    env = {
-        "BLADE_HOME": blade,
-        "BLADE_CHROME_FLAGS": "--headless=new",
-        "BLADE_LANE": "agent",
-        "BLADE_IDLE_TIMEOUT": str(BLADE_IDLE_TIMEOUT_S),
-        "BLADE_NO_UPDATE_CHECK": "1",
-        "BLADE_NO_WARMING": "1",
-        "BLADE_PLAIN": "1",
-    }
-    command_, args = ("cmd", ["/c", "bladebro", "mcp"]) if os.name == "nt" else ("bladebro", ["mcp"])
-    return {"mcpServers": {"bladebro": {"command": command_, "args": args, "env": env}}}
-
-
 def plugin_version() -> str:
     """The fork's version, so `agy plugin list` shows which build the installed plugin came from."""
     return (ROOT / "nirvana" / "VERSION").read_text(encoding="utf-8").strip()
@@ -258,18 +255,15 @@ def manifest(version: str) -> dict:
     return {"name": NAME, "version": version}
 
 
-def build(out: Path, home: Path, src: Path | None = None, with_bladebro: bool | None = None,
-          version: str | None = None) -> dict:
+def build(out: Path, home: Path, src: Path | None = None, version: str | None = None) -> dict:
     """Writes the plugin tree into `out` (which must not exist) and returns the report: the hook rows, the files
-    written and what was skipped. `with_bladebro` None asks PATH; `version` None reads `nirvana/VERSION`."""
+    written and what was skipped. `version` None reads `nirvana/VERSION`."""
     src = SRC if src is None else Path(src)
     out, home = Path(out), Path(home)
-    if with_bladebro is None:
-        with_bladebro = shutil.which("bladebro") is not None
-    report: dict = {"hooks": [], "skills": [], "agents": [], "mcp": [], "skipped": []}
+    report: dict = {"hooks": [], "skills": [], "agents": [], "skipped": []}
 
     # agy's plugins guide: a native plugin is "any directory containing `plugin.json`" and "**must** place
-    # `hooks.json` directly at the plugin root"; skills/, agents/ and mcp_config.json sit beside it.
+    # `hooks.json` directly at the plugin root"; skills/ and agents/ sit beside it.
     write(out / MANIFEST, json.dumps(manifest(plugin_version() if version is None else version)) + "\n")
 
     claude = json.loads((src / "hooks" / "hooks.json").read_bytes())
@@ -320,11 +314,7 @@ def build(out: Path, home: Path, src: Path | None = None, with_bladebro: bool | 
     for extra in ("settings.json",):
         if (src / extra).exists():
             report["skipped"].append(f"{extra}: Claude Code settings (statusline, theme); agy takes its own")
-    if with_bladebro:
-        write(out / "mcp_config.json", json.dumps(bladebro(home), indent=2) + "\n")
-        report["mcp"].append("bladebro")
-    else:
-        report["skipped"].append("mcp bladebro: not on PATH, so no mcp_config.json (0043 item 6)")
+    report["skipped"].append(MCP_SKIPPED)
     return report
 
 
@@ -340,11 +330,16 @@ def validate(plugin: Path, agy: str | None = None) -> dict:
     """`agy plugin validate <plugin> --strict --json` on the built folder itself, so the folder that is installed is
     the one that was validated. Measured 2026-11-14 on agy 1.5.9: it reports a rule with no valid trigger, a skill
     named unlike its folder, an unknown hook event and bad agent YAML. Returns `{"ok": None, ...}` when agy is not on
-    PATH: the folder was not validated, the report says so, and it never counts as a pass."""
+    PATH: the folder was not validated, the report says so, and it never counts as a pass. An agy that cannot be
+    run or hangs past `AGY_TIMEOUT_S` is a failed validation, never an exception: the Sonnet review found one
+    raised through `install.main` and stopped the herdr.exe install after it."""
     agy = agy or shutil.which("agy")
     if agy is None:
         return {"ok": None, "why": "agy is not on PATH, so the folder was not validated", "findings": []}
-    done = agy_run(agy, ["plugin", "validate", str(plugin), "--strict", "--json"])
+    try:
+        done = agy_run(agy, ["plugin", "validate", str(plugin), "--strict", "--json"])
+    except (OSError, subprocess.SubprocessError) as err:
+        return {"ok": False, "why": f"agy plugin validate did not finish: {err}", "findings": []}
     try:
         parsed = json.loads(done.stdout)
     except ValueError:
@@ -416,8 +411,7 @@ class AgyInstallError(RuntimeError):
         self.dst, self.report = dst, report
 
 
-def install(home: Path, src: Path | None = None, with_bladebro: bool | None = None,
-            check=validate, register=agy_install) -> tuple[Path, dict]:
+def install(home: Path, src: Path | None = None, check=validate, register=agy_install) -> tuple[Path, dict]:
     """Builds beside `<home>/nirvana/agy` and validates the build (plan 41 §5.2: `agy plugin validate --strict` gates
     it). Then it swaps the build in with the Claude plugin's own replace and passes `<home>/nirvana/agy/nirvana` to
     `agy plugin install` (R1 (b)). A failed validation raises `BuildError` before anything moves, so both the folder
@@ -429,7 +423,7 @@ def install(home: Path, src: Path | None = None, with_bladebro: bool | None = No
     stage = dst.with_name(f"{dst.name}.build-{os.getpid()}")
     windows_shell._remove_quietly(stage)
     try:
-        report = build(stage / NAME, home, src, with_bladebro)
+        report = build(stage / NAME, home, src)
         report["validate"] = check(stage / NAME)
         if report["validate"]["ok"] is False:
             raise BuildError(f"agy plugin validate --strict failed ({report['validate']['why']}): "
@@ -452,12 +446,10 @@ def install(home: Path, src: Path | None = None, with_bladebro: bool | None = No
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="agy_plugin")
     ap.add_argument("--home", required=True, help="the install root; the folder lands at <home>/nirvana/agy")
-    ap.add_argument("--no-bladebro", action="store_true")
     ns = ap.parse_args(argv)
     # Build and validate only. Installing into agy's config is install.py's step, and the approval covers that step.
     skipped = {"ok": None, "why": "agy_plugin's own CLI does not install into agy; install.py does", "argv": None}
-    dst, report = install(Path(ns.home), with_bladebro=False if ns.no_bladebro else None,
-                          register=lambda plugin: skipped)
+    dst, report = install(Path(ns.home), register=lambda plugin: skipped)
     print(json.dumps({"dir": str(dst), **report}, indent=2))
     return 0
 

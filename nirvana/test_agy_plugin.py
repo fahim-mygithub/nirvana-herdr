@@ -67,8 +67,8 @@ sys.exit(9)
 
 
 class FakeAgy:
-    """PATH holding only a fake `agy` (`with_agy=True`) or nothing, for the length of a `with`. The real agy, and
-    bladebro, cannot be found while it holds."""
+    """PATH holding only a fake `agy` (`with_agy=True`) or nothing, for the length of a `with`. The real agy cannot
+    be found while it holds."""
 
     def __init__(self, tmp: Path, mode: str = "", with_agy: bool = True):
         self.bin = tmp / "fake-bin"
@@ -130,7 +130,7 @@ class AgyBuilt(unittest.TestCase):
         self.tmp = Path(self._tmp.name)
         self.home = self.tmp / "home"
         self.dot = self.tmp / "out" / ".agents"
-        self.report = agy_plugin.build(self.dot, self.home, with_bladebro=True)
+        self.report = agy_plugin.build(self.dot, self.home)
         self.hooks = json.loads((self.dot / "hooks.json").read_bytes())
         self.exe = str(self.home / "bin" / "herdr.exe")
 
@@ -186,12 +186,29 @@ class AgyHooksTest(AgyBuilt):
         self.assertIn("write_file", groups[("PreToolUse", "guard-edit")])
         self.assertIn("edit_file", groups[("PreToolUse", "guard-edit")])
         self.assertIn("read_file", groups[("PreToolUse", "guard-read")])
-        self.assertEqual(groups[("PreToolUse", "guard-spawn")], ["invoke_subagent"])
+        self.assertEqual(groups[("PreToolUse", "guard-spawn")],
+                         ["invoke_subagent", "define_subagent", "run_workflow"])
+        self.assertIn("sed_file", groups[("PreToolUse", "guard-edit")])
+        self.assertIn("notebook_edit", groups[("PostToolUse", "check-edit")])
         self.assertIn("run_command", groups[("PostToolUse", "check-edit")])
         self.assertIn("edit_file", groups[("PostToolUse", "check-edit")])
         for names in groups.values():
             for claude in ("Edit", "Write", "MultiEdit", "NotebookEdit", "Read", "Bash", "Agent"):
                 self.assertNotIn(claude, names)
+
+    def test_the_matchers_cover_the_hook_adapters_tool_table(self):
+        """Sonnet review item 6: `nirvana/agy_tool_names.json` is the hook adapter's table (its Rust test
+        `the_tool_table_is_the_shared_fixture` holds AGY_TOOLS to it). Every name it maps for a Claude tool is in
+        that tool's matcher row, and the plugin matches no name the adapter would not map."""
+        shared = json.loads((Path(__file__).resolve().parent / "agy_tool_names.json").read_bytes())
+        shared = {tool: names for tool, names in shared.items() if not tool.startswith("_")}
+        for tool, names in shared.items():
+            missing = [name for name in names if name not in agy_plugin.TOOLS[tool]]
+            self.assertEqual(missing, [], tool)
+        mapped = {name for names in shared.values() for name in names}
+        matched = {name for names in agy_plugin.TOOLS.values() for name in names}
+        self.assertEqual(sorted(matched - mapped), [], "matched by the plugin, unmapped by the adapter")
+        self.assertEqual(sorted(mapped - matched), [], "mapped by the adapter, never matched by the plugin")
 
     def test_a_claude_tool_with_no_agy_row_fails_the_build(self):
         src = copy_src(self.tmp)
@@ -199,7 +216,7 @@ class AgyHooksTest(AgyBuilt):
         hooks["hooks"]["PreToolUse"][0]["matcher"] = "Agent|Glob"
         (src / "hooks" / "hooks.json").write_bytes(json.dumps(hooks).encode("utf-8"))
         with self.assertRaises(agy_plugin.BuildError):
-            agy_plugin.build(self.tmp / "o2" / ".agents", self.home, src, with_bladebro=False)
+            agy_plugin.build(self.tmp / "o2" / ".agents", self.home, src)
 
     def test_a_hook_that_is_not_the_installed_herdr_fails_the_build(self):
         src = copy_src(self.tmp)
@@ -207,7 +224,7 @@ class AgyHooksTest(AgyBuilt):
         hooks["hooks"]["Stop"][0]["hooks"][0]["command"] = "herdr"
         (src / "hooks" / "hooks.json").write_bytes(json.dumps(hooks).encode("utf-8"))
         with self.assertRaises(agy_plugin.BuildError):
-            agy_plugin.build(self.tmp / "o3" / ".agents", self.home, src, with_bladebro=False)
+            agy_plugin.build(self.tmp / "o3" / ".agents", self.home, src)
 
 
 class AgyFilesTest(AgyBuilt):
@@ -220,11 +237,11 @@ class AgyFilesTest(AgyBuilt):
         self.assertTrue((self.dot / "hooks.json").is_file())
         for part in ("skills", "agents"):
             self.assertTrue((self.dot / part).is_dir(), part)
-        self.assertTrue((self.dot / "mcp_config.json").is_file())
+        self.assertFalse((self.dot / "mcp_config.json").exists())
 
     def test_a_rebuild_writes_the_same_bytes(self):
         again = self.tmp / "again" / ".agents"
-        agy_plugin.build(again, self.home, with_bladebro=True)
+        agy_plugin.build(again, self.home)
 
         def tree(root: Path) -> dict:
             return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
@@ -253,7 +270,7 @@ class AgyFilesTest(AgyBuilt):
         skill = src / "skills" / "gate" / "SKILL.md"
         skill.write_bytes(skill.read_bytes().replace(b"name: gate\n", b"name: gatex\n", 1))
         with self.assertRaises(agy_plugin.BuildError):
-            agy_plugin.build(self.tmp / "o4" / ".agents", self.home, src, with_bladebro=False)
+            agy_plugin.build(self.tmp / "o4" / ".agents", self.home, src)
 
     def test_the_role_is_the_nirvana_agents_body_and_no_rule_ships(self):
         # Scope ruling 2026-11-14: the plugin is installed for every agy session, so the role may reach only
@@ -289,22 +306,24 @@ class AgyFilesTest(AgyBuilt):
         for worker in workers:
             self.assertTrue(any(s.startswith(f"agent {worker}:") for s in self.report["skipped"]), worker)
 
-    def test_bladebro_is_decision_0043s_recipe_with_the_orchestrators_own_home(self):
-        config = json.loads((self.dot / "mcp_config.json").read_bytes())
-        self.assertEqual(list(config), ["mcpServers"])
-        server = config["mcpServers"]["bladebro"]
-        self.assertEqual((server["command"], server["args"]), ("cmd", ["/c", "bladebro", "mcp"]))
-        self.assertEqual(server["env"], {
-            "BLADE_HOME": (self.home / "nirvana" / "blade-orchestrator").as_posix(),
-            "BLADE_CHROME_FLAGS": "--headless=new", "BLADE_LANE": "agent", "BLADE_IDLE_TIMEOUT": "60",
-            "BLADE_NO_UPDATE_CHECK": "1", "BLADE_NO_WARMING": "1", "BLADE_PLAIN": "1"})
-        self.assertEqual(set(server), {"command", "args", "env"})
-
-    def test_no_bladebro_on_path_writes_no_mcp_config_and_says_so(self):
-        report = agy_plugin.build(self.tmp / "o5" / ".agents", self.home, with_bladebro=False)
-        self.assertFalse((self.tmp / "o5" / ".agents" / "mcp_config.json").exists())
-        self.assertEqual(report["mcp"], [])
-        self.assertTrue(any(s.startswith("mcp bladebro") for s in report["skipped"]), report)
+    def test_the_plugin_ships_no_mcp_server_even_with_bladebro_on_path(self):
+        """Sonnet review item 3: a plugin MCP server loads in every agy session, so bladebro would share one
+        BLADE_HOME across the owner's agy and the seated workers (decision 0043). P41d attaches it per launch."""
+        fake = self.tmp / "bladebro-bin"
+        fake.mkdir()
+        (fake / ("bladebro.cmd" if os.name == "nt" else "bladebro")).write_bytes(b"@echo off\r\n")
+        if os.name != "nt":
+            (fake / "bladebro").chmod(0o755)
+        with mock.patch.dict(os.environ, {"PATH": str(fake)}):
+            self.assertIsNotNone(shutil.which("bladebro"))
+            report = agy_plugin.build(self.tmp / "o5" / "nirvana", self.home)
+        files = sorted(p.relative_to(self.tmp / "o5" / "nirvana").as_posix()
+                       for p in (self.tmp / "o5" / "nirvana").rglob("*") if p.is_file())
+        self.assertFalse([f for f in files if "mcp" in f.lower()], files)
+        self.assertFalse((self.dot / "mcp_config.json").exists())
+        said = [s for s in report["skipped"] if s.startswith("mcp bladebro")]
+        self.assertEqual(len(said), 1, report)
+        self.assertIn("--add-dir", said[0])
 
 
 class AgyInstallTest(unittest.TestCase):
@@ -316,7 +335,7 @@ class AgyInstallTest(unittest.TestCase):
             old.write_bytes(b"old")
             bad = mock.Mock(return_value={"ok": False, "why": "exit 1", "findings": [{"severity": "error"}]})
             with FakeAgy(home / "t", with_agy=False), self.assertRaises(agy_plugin.BuildError):
-                agy_plugin.install(home, with_bladebro=False, check=bad)
+                agy_plugin.install(home, check=bad)
             self.assertEqual(old.read_bytes(), b"old")
             self.assertEqual(sorted(p.name for p in (home / "nirvana").iterdir()), ["agy"])
 
@@ -330,7 +349,7 @@ class AgyInstallTest(unittest.TestCase):
             good = mock.Mock(return_value={"ok": True, "why": "exit 0", "findings": []})
             put = mock.Mock(return_value={"ok": True, "why": "exit 0", "argv": []})
             with FakeAgy(Path(tmp), with_agy=False):
-                dst, report = agy_plugin.install(home, with_bladebro=False, check=good, register=put)
+                dst, report = agy_plugin.install(home, check=good, register=put)
             self.assertEqual(dst, home / "nirvana" / "agy")
             self.assertFalse(gone.exists())
             self.assertEqual(sorted(p.name for p in dst.iterdir()), ["nirvana"])
@@ -377,7 +396,7 @@ class AgyPluginInstallTest(unittest.TestCase):
 
     def test_install_runs_after_validate_passes_on_the_installed_folder(self):
         with FakeAgy(self.tmp) as agy:
-            dst, report = agy_plugin.install(self.home, with_bladebro=False)
+            dst, report = agy_plugin.install(self.home)
         calls = agy.calls()
         self.assertEqual([c["argv"] for c in calls],
                          [["plugin", "validate", calls[0]["argv"][2], "--strict", "--json"],
@@ -395,7 +414,7 @@ class AgyPluginInstallTest(unittest.TestCase):
     def test_agy_calls_read_an_empty_pipe_with_no_colour(self):
         # Windows NUL reads as a terminal, so a prompt would wait on it; colour codes would break the summary parse.
         with FakeAgy(self.tmp) as agy:
-            agy_plugin.install(self.home, with_bladebro=False)
+            agy_plugin.install(self.home)
         for call in agy.calls():
             self.assertIs(call["stdin_tty"], False, call)
             self.assertEqual(call["stdin"], "", call)
@@ -403,7 +422,7 @@ class AgyPluginInstallTest(unittest.TestCase):
 
     def test_a_failed_validation_never_calls_agy_plugin_install(self):
         with FakeAgy(self.tmp, mode="validate-fails") as agy, self.assertRaises(agy_plugin.BuildError) as err:
-            agy_plugin.install(self.home, with_bladebro=False)
+            agy_plugin.install(self.home)
         self.assertEqual([c["argv"][:2] for c in agy.calls()], [["plugin", "validate"]])
         self.assertIn("canned finding", str(err.exception))
         self.assertFalse(Path(self.plugin).exists())
@@ -411,7 +430,7 @@ class AgyPluginInstallTest(unittest.TestCase):
     def test_agy_missing_validates_and_installs_nothing_and_says_so(self):
         put = mock.Mock(return_value={"ok": True, "why": "exit 0", "argv": []})
         with FakeAgy(self.tmp, with_agy=False):
-            dst, report = agy_plugin.install(self.home, with_bladebro=False, register=put)
+            dst, report = agy_plugin.install(self.home, register=put)
         put.assert_not_called()
         self.assertIsNone(report["validate"]["ok"])
         self.assertIsNone(report["agy_install"]["ok"])
@@ -421,7 +440,7 @@ class AgyPluginInstallTest(unittest.TestCase):
     def test_a_real_agy_is_never_handed_a_plugin_from_the_temp_folder(self):
         # The home stands in for the temp folder; the fake agy sits outside it, as the real agy does.
         with FakeAgy(self.tmp) as agy, mock.patch.object(agy_plugin, "temp_root", lambda: self.home):
-            dst, report = agy_plugin.install(self.home, with_bladebro=False)
+            dst, report = agy_plugin.install(self.home)
         self.assertEqual([c["argv"][:2] for c in agy.calls()], [["plugin", "validate"]])
         self.assertIsNone(report["agy_install"]["ok"])
         self.assertIn("temp folder", report["agy_install"]["why"])
@@ -449,15 +468,46 @@ class AgyPluginInstallTest(unittest.TestCase):
         self.assertIn("Error: canned install failure", text)
 
 
+class AgyStepNeverStopsTheInstallTest(unittest.TestCase):
+    """Sonnet review item 2: every failure in the agy step leaves the rest of install.py to run."""
+
+    def test_a_validate_that_cannot_run_is_a_failed_validation(self):
+        for raised in (subprocess.TimeoutExpired(["agy"], 120), FileNotFoundError("agy.exe gone"),
+                       PermissionError("denied")):
+            with mock.patch.object(agy_plugin, "agy_run", mock.Mock(side_effect=raised)):
+                try:
+                    got = agy_plugin.validate(Path("plugin"), agy="agy")
+                except Exception as err:  # noqa: BLE001
+                    self.fail(f"validate raised {err!r}")
+            self.assertIs(got["ok"], False, raised)
+            self.assertIn("did not finish", got["why"])
+
+    def test_any_failure_in_the_agy_step_still_installs_the_binary_and_exits_1(self):
+        for raised in (FileNotFoundError("hooks.json"), json.JSONDecodeError("bad", "x", 0),
+                       PermissionError("held"), subprocess.TimeoutExpired(["agy"], 120)):
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                home = tmp / "home"
+                with FakeAgy(tmp, with_agy=False), \
+                        mock.patch.object(install.agy_plugin, "install", mock.Mock(side_effect=raised)):
+                    try:
+                        code, text, put = run_install_main(tmp, home)
+                    except Exception as err:  # noqa: BLE001
+                        self.fail(f"install.main raised {err!r}, so herdr.exe was not installed")
+                put.assert_called_once()     # herdr.exe still installs
+                self.assertEqual(code, 1, text)
+                self.assertIn(f"the agy orchestrator plugin step failed ({type(raised).__name__}", text)
+
+
 @unittest.skipIf(shutil.which("agy") is None, "agy is not on PATH: the folder is not validated here")
 class AgyValidateTest(unittest.TestCase):
     def test_agys_strict_validator_passes_the_build_and_fails_a_broken_skill(self):
         with tempfile.TemporaryDirectory() as tmp:
             dot = Path(tmp) / "nirvana"
-            agy_plugin.build(dot, Path(tmp) / "home", with_bladebro=True)
+            agy_plugin.build(dot, Path(tmp) / "home")
             good = agy_plugin.validate(dot)
             self.assertIs(good["ok"], True, good)
-            self.assertEqual(good["components"], {"agents": 1, "hooks": 5, "mcpServers": 1, "rules": 0,
+            self.assertEqual(good["components"], {"agents": 1, "hooks": 5, "mcpServers": 0, "rules": 0,
                                                   "sidecars": 0, "skills": 8})
             skill = dot / "skills" / "gate" / "SKILL.md"
             skill.write_bytes(skill.read_bytes().replace(b"name: gate\n", b"name: gatex\n", 1))

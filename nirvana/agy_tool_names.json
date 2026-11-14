@@ -1,0 +1,29 @@
+{
+  "_why": "Plan 41: the agy hook tool names herdr's hook adapter maps (src/nirvana_hookhost.rs AGY_TOOLS) and the agy plugin's hook matchers must cover (nirvana/agy_plugin.py TOOLS). Both are tested against this file, so neither can gain or lose a name alone (Sonnet review of P41b/P41c, 2026-11-14).",
+  "Write": [
+    "write_file",
+    "write_to_file"
+  ],
+  "Edit": [
+    "edit_file",
+    "replace_file_content",
+    "multi_replace_file_content",
+    "sed_file"
+  ],
+  "NotebookEdit": [
+    "notebook_edit",
+    "edit_notebook"
+  ],
+  "Read": [
+    "read_file",
+    "view_file"
+  ],
+  "Agent": [
+    "invoke_subagent",
+    "define_subagent",
+    "run_workflow"
+  ],
+  "Bash": [
+    "run_command"
+  ]
+}

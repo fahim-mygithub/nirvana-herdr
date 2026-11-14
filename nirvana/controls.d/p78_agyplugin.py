@@ -15,8 +15,11 @@ T_SKILLS = _T + "AgyFilesTest.test_skills_are_copied_with_the_installed_herdr_in
 T_SKILL_NAME = _T + "AgyFilesTest.test_a_skill_named_unlike_its_folder_fails_the_build"
 T_ROLE = _T + "AgyFilesTest.test_the_role_is_the_nirvana_agents_body_and_no_rule_ships"
 T_AGENT = _T + "AgyFilesTest.test_only_the_orchestrator_agent_maps_as_agys_main_agent_with_a_body"
-T_BLADE = _T + "AgyFilesTest.test_bladebro_is_decision_0043s_recipe_with_the_orchestrators_own_home"
-T_NO_BLADE = _T + "AgyFilesTest.test_no_bladebro_on_path_writes_no_mcp_config_and_says_so"
+T_NO_MCP = _T + "AgyFilesTest.test_the_plugin_ships_no_mcp_server_even_with_bladebro_on_path"
+T_COVER = _T + "AgyHooksTest.test_the_matchers_cover_the_hook_adapters_tool_table"
+_S = _T + "AgyStepNeverStopsTheInstallTest."
+T_VALIDATE_RUN = _S + "test_a_validate_that_cannot_run_is_a_failed_validation"
+T_ANY = _S + "test_any_failure_in_the_agy_step_still_installs_the_binary_and_exits_1"
 T_KEEP = _T + "AgyInstallTest.test_a_failed_validation_keeps_the_installed_folder_and_leaves_no_build"
 T_REPLACE = _T + "AgyInstallTest.test_a_passed_validation_replaces_the_folder_whole"
 T_MAIN = _T + "AgyInstallTest.test_install_main_builds_the_agy_folder_and_a_failed_one_exits_non_zero"
@@ -106,18 +109,29 @@ CONTROLS = (
     Control("p78_agy_workers_skipped", PLUGIN,
             '        if AGENTS.get(name) != "main":\n', "        if False:\n",
             T_AGENT, "python"),
-    # bladebro's home is the orchestrator's own, outside the folder every install replaces.
-    Control("p78_agy_blade_home", PLUGIN,
-            'BLADE_HOME = Path("nirvana") / "blade-orchestrator"', 'BLADE_HOME = Path("nirvana") / "agy" / "blade"',
-            T_BLADE, "python"),
-    # bladebro keeps decision 0043's headless flag.
-    Control("p78_agy_blade_headless", PLUGIN,
-            '"BLADE_CHROME_FLAGS": "--headless=new",', '"BLADE_CHROME_FLAGS": "",',
-            T_BLADE, "python"),
-    # No bladebro on PATH writes no MCP config.
-    Control("p78_agy_no_bladebro", PLUGIN,
-            "    if with_bladebro:\n", "    if True:\n",
-            T_NO_BLADE, "python"),
+    # Sonnet review item 3: no MCP server in the plugin, which every agy session loads (decision 0043). The
+    # sabotage writes the file back in place of the line that says why.
+    Control("p78_agy_no_mcp_in_plugin", PLUGIN,
+            '    report["skipped"].append(MCP_SKIPPED)\n', '    write(out / "mcp_config.json", "{}\\n")\n',
+            T_NO_MCP, "python"),
+    # Sonnet review item 6: the matchers cover every name the hook adapter maps (nirvana/agy_tool_names.json).
+    Control("p78_agy_matcher_sed_file", PLUGIN,
+            '"multi_replace_file_content", "sed_file",\n', '"multi_replace_file_content",\n',
+            T_COVER, "python"),
+    Control("p78_agy_matcher_agent_tools", PLUGIN,
+            '    "Agent": ["invoke_subagent", "define_subagent", "run_workflow"],\n', '    "Agent": ["invoke_subagent"],\n',
+            T_COVER, "python"),
+    # Sonnet review item 2: an agy that cannot run or hangs is a failed validation, not an exception.
+    Control("p78_agy_validate_never_raises", PLUGIN,
+            "    except (OSError, subprocess.SubprocessError) as err:\n"
+            '        return {"ok": False, "why": f"agy plugin validate did not finish: {err}", "findings": []}\n',
+            "    except ZeroDivisionError as err:\n"
+            '        return {"ok": False, "why": f"agy plugin validate did not finish: {err}", "findings": []}\n',
+            T_VALIDATE_RUN, "python"),
+    # Sonnet review item 2: any failure in the agy step leaves herdr.exe to install, and exits 1.
+    Control("p78_install_any_agy_failure", INSTALL,
+            "    except Exception as err:  # noqa: BLE001\n", "    except ZeroDivisionError as err:  # noqa: BLE001\n",
+            T_ANY, "python"),
     # A failed validation leaves the installed folder as it was.
     Control("p78_agy_validate_gates", PLUGIN,
             '        if report["validate"]["ok"] is False:\n', "        if False:\n",

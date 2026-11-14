@@ -22,8 +22,9 @@ right after the Claude plugin (`agy_plugin.py`), for the same reason. It is vali
 `agy plugin validate --strict` and then installed with `agy plugin install <root>/nirvana/agy/nirvana`, which copies
 it into agy's config under `~/.gemini` (owner ruling R1, changed to (b)). A build that fails validation leaves the
 folder and agy's copy as they were. A failed agy install leaves agy's previous copy in place. In both cases the rest
-of the install goes on and the exit is 1. With agy not on PATH, both steps are skipped, a line says so, and the exit
-code does not change.
+of the install goes on and the exit is 1, and so it is for any other failure in the agy step: the agy plugin is
+never a reason to leave herdr.exe uninstalled. With agy not on PATH, both steps are skipped, a line says so, and
+the exit code does not change.
 """
 from __future__ import annotations
 
@@ -105,7 +106,7 @@ def agy_report(agy_dir: Path, report: dict) -> None:
     copied to, so the live check at merge can find the copy without guessing agy's layout."""
     checked = report["validate"]
     print(f"built the agy orchestrator plugin at {agy_dir / agy_plugin.NAME}: skills {len(report['skills'])}, "
-          f"agents {len(report['agents'])} (the role is the nirvana agent's body), mcp {report['mcp'] or 'none'}; "
+          f"agents {len(report['agents'])} (the role is the nirvana agent's body); "
           f"{'validated' if checked['ok'] else checked['why']}")
     for line in report["skipped"]:
         print(f"  skipped {line}")
@@ -167,6 +168,12 @@ def main(argv: list[str] | None = None) -> int:
         agy_failed = err
         agy_report(err.dst, err.report)
         print(f"agy plugin install failed; agy keeps the copy it had: {err}")
+    except Exception as err:  # noqa: BLE001
+        # The Sonnet review of P41c: a missing or unreadable Claude plugin file, bad JSON, or an agy that could not
+        # be run raised out of here and the binary below was never installed. Anything in the agy step is that
+        # step's failure only.
+        agy_failed = err
+        print(f"the agy orchestrator plugin step failed ({type(err).__name__}: {err}); the rest installs")
     target = install(built, root, ver, built_open=built_open)
     print(f"installed Nirvana-Herdr alpha {ver} at {target}")
     if os.name == "nt" and not ns.no_shell:
