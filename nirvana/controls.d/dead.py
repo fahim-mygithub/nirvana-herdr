@@ -13,6 +13,7 @@ T_RUNS = _D + "a_pane_whose_worker_still_runs_is_never_closed"
 T_PROGRAM = _D + "a_pane_running_a_program_is_never_closed"
 T_TYPED = _D + "a_pane_the_owner_typed_in_after_its_worker_ended_is_kept"
 T_AGENT_TAB = _D + "the_spaces_agent_tab_and_an_agent_pane_are_never_closed"
+T_WORKER_AGENT = _D + "a_live_workers_agent_keeps_only_its_own_pane"
 T_LAST = _D + "a_run_tabs_panes_all_close_but_a_spaces_last_pane_stays"
 T_JOBS = _D + "an_ended_jobs_pane_closes_and_a_running_ones_stays"
 T_NO_RECORD = _D + "a_labelled_pane_no_record_names_is_kept"
@@ -54,8 +55,12 @@ CONTROLS = (
             "Ok(Some(key)) if *key >= ended_at => {",
             "Ok(Some(key)) if *key >= u64::MAX => {",
             T_TYPED, "rust"),
+    # 0.71.2: a worker's own agent keeps only its own pane, not the finished shells beside it.
+    Control("dead_worker_agent_keeps_tab", DEAD,
+            '        .filter(|pane| parse_label(str_at(pane, &["/label"]).unwrap_or("")).is_none())\n',
+            "", T_WORKER_AGENT, "rust"),
     Control("dead_agent_tab", DEAD,
-            "            tab_has_agent: agent_tabs.contains(&tab),\n",
+            '            tab_has_agent: agent_tabs.contains(&tab) || str_at(pane, &["/agent"]).is_some(),\n',
             "            tab_has_agent: false,\n",
             T_AGENT_TAB, "rust"),
     Control("dead_space_last_pane", DEAD,

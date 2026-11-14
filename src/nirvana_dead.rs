@@ -172,8 +172,8 @@ pub enum Ended {
 pub struct PaneFacts {
     pub pane: String,
     pub owner: Option<Owner>,
-    /// A pane of its tab, itself included, is one herdr sees an agent in (`pane list`'s `agent`): the space's own
-    /// agent tab, or a pane a Claude runs in.
+    /// herdr sees an agent (`pane list`'s `agent`) in the pane itself, or in a pane of its tab that is not a worker's
+    /// or a job's: the space's own agent tab, or a Claude the owner opened. Another worker's agent does not count.
     pub tab_has_agent: bool,
     /// The pane is the only pane of its space's only tab: closing it would close the space.
     pub last_of_space: bool,
@@ -414,9 +414,14 @@ pub fn sweep(
         *tabs_in_space.entry(space.to_owned()).or_default() += 1;
         space_of_tab.insert(tab_id.to_owned(), space.to_owned());
     }
+    // 0.71.2: only an agent in a pane that is not a worker's or a job's keeps its whole tab: the space's own agent tab,
+    // or a Claude the owner opened. A worker's own agent keeps only its own pane (`has_agent` below). On 2026-11-13 the
+    // run tab of `ia1` held 8 worker panes; the two live workers' Claude and agy kept the six finished shells beside
+    // them, and with a run that keeps seating orders the tab never emptied.
     let agent_tabs: HashSet<String> = panes
         .iter()
         .filter(|pane| str_at(pane, &["/agent"]).is_some())
+        .filter(|pane| parse_label(str_at(pane, &["/label"]).unwrap_or("")).is_none())
         .map(tab_of)
         .collect();
     // Review S2: a tab on screen keeps every pane in it. Scroll and mouse never reach `note_owner_key`, so a pane the
@@ -454,7 +459,7 @@ pub fn sweep(
         let space = space_of_tab.get(&tab).cloned().unwrap_or_default();
         let facts = PaneFacts {
             pane: id.to_owned(),
-            tab_has_agent: agent_tabs.contains(&tab),
+            tab_has_agent: agent_tabs.contains(&tab) || str_at(pane, &["/agent"]).is_some(),
             last_of_space: panes_in_tab.get(&tab).copied().unwrap_or(0) <= 1
                 && tabs_in_space.get(&space).copied().unwrap_or(0) <= 1,
             watched: watched.contains(&tab),

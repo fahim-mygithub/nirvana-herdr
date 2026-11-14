@@ -3,6 +3,23 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.71.2: a finished worker's pane closes beside a live one
+
+- **Changed:** the dead-pane sweep kept every pane in a tab where herdr saw an agent in any pane. Now a pane is kept
+  for an agent only when the agent is in that pane itself, or in a pane of its tab that is not a worker's or a job's.
+  The space's own agent tab and a Claude the owner opened in an unlabelled pane still keep their tab. A worker pane
+  that still runs Claude or agy is still kept, by its own agent and by the shells-only check.
+- **Because:** the owner, 2026-11-13: "There is alot of stopped or failed jobs that dont seem to be released from
+  herder."
+- **Measured:** 2026-11-13 on the owner's `nirvana` session, read only. `herdr run sweep --dry-run` kept all 8 panes of
+  the `run ia1` tab with "its tab holds an agent". Two held live workers, l08-build and l09-proto-v2b. Five belonged
+  to orders the journal had ended: four `-lr` reviews gated pass, c6-candle-noise delivered, l09-proto-v2 stopped.
+  The eighth, i1-gemini-refs, stopped about 14 h earlier, still runs `agy.exe --conversation`, and stays kept by the
+  shells-only check. A run that keeps seating orders into its tab never empties it, so the finished shells stayed.
+  New test `a_live_workers_agent_keeps_only_its_own_pane`; 30 `nirvana_dead` tests pass. Controls
+  `dead_worker_agent_keeps_tab` (new) and `dead_agent_tab` (retargeted) each turn their test red.
+- **If you remove this:** a run tab with one live worker keeps every finished pane in it until the run ends.
+
 ## alpha 0.71.1: workers start in reused panes, `owns: dir/` owns the folder, owner commits stay the owner's
 
 - **Changed:** three gate and launch fixes.

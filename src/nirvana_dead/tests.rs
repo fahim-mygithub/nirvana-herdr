@@ -294,6 +294,22 @@ fn the_spaces_agent_tab_and_an_agent_pane_are_never_closed() {
 }
 
 #[test]
+fn a_live_workers_agent_keeps_only_its_own_pane() {
+    // 0.71.2: the run tab of `ia1` kept six finished shells for hours because two live workers in it ran Claude and agy.
+    let (home, root) = (Temp::new("home"), Temp::new("proj"));
+    project_with(&root.0, "r", &[("done", "wP:pA"), ("busy", "wP:pB")], &[]);
+    let mut busy = pane("wP:pB", "wP:t9", Some(&worker("busy")), &root.0);
+    busy["agent"] = json!("claude");
+    let herdr = FakeHerdr::new(vec![
+        agent_pane("wP:p1", "wP:t1"),
+        pane("wP:pA", "wP:t9", Some(&worker("done")), &root.0),
+        busy,
+    ]);
+    herdr.sweep(&home.0, LATER);
+    assert_eq!(herdr.closed(), vec!["wP:pA".to_owned()]);
+}
+
+#[test]
 fn a_run_tabs_panes_all_close_but_a_spaces_last_pane_stays() {
     let (home, root) = (Temp::new("home"), Temp::new("proj"));
     project_with(&root.0, "r", &[("one", "wP:pA"), ("two", "wP:pB")], &[]);
