@@ -170,7 +170,7 @@ pub(crate) struct ProcessBytesResult {
     pub clipboard_writes: Vec<Vec<u8>>,
     pub reported_cwd: Option<std::path::PathBuf>,
     pub terminal_responses: Vec<Bytes>,
-    /// Nirvana fork, alpha 0.72.0: the OSC 7501 root record when these bytes changed it; `Some(None)` cleared it.
+    /// Nirvana fork, alpha 0.73.0: the OSC 7501 root record when these bytes changed it; `Some(None)` cleared it.
     pub program_status: Option<Option<crate::terminal::program_status::ProgramStatus>>,
 }
 

@@ -1,4 +1,4 @@
-//! Nirvana fork, alpha 0.72.0: `herdr seat exec` reports its order's status to its own pane, with the program status
+//! Nirvana fork, alpha 0.73.0: `herdr seat exec` reports its order's status to its own pane, with the program status
 //! protocol (OSC 7501, `crate::terminal::program_status`). The workers it runs, Claude Code and agy, report nothing,
 //! and a headless worker draws no screen herdr's detector reads. Measured 2026-11-13 in the owner's session: live
 //! worker panes read "idle" in `herdr agent list`, with the folder of the order that used the pane before.

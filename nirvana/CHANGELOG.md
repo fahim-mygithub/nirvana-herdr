@@ -3,7 +3,7 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
-## alpha 0.72.0: a program reports its own status to its pane, and worker panes say what they run
+## alpha 0.73.0: a program reports its own status to its pane, and worker panes say what they run
 
 - **Changed:** herdr reads the program status protocol, OSC 7501, spec revision 0.4, in a smaller form than upstream
   PR #5172. A program in a pane can say it is idle, working, blocked, done or failed, with a message. herdr keeps the

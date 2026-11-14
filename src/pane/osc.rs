@@ -379,7 +379,7 @@ impl OscStreamCollector {
         });
     }
 
-    /// As `observe`, and also hands `None` for a full reset (`ESC c`), in stream order. Nirvana fork, alpha 0.72.0:
+    /// As `observe`, and also hands `None` for a full reset (`ESC c`), in stream order. Nirvana fork, alpha 0.73.0:
     /// OSC 7501 says a full reset removes every program status record.
     fn observe_with_reset(&mut self, bytes: &[u8], mut receive: impl FnMut(Option<&[u8]>)) {
         let mut cursor = 0;
@@ -511,7 +511,7 @@ pub(super) struct AgentOscStateTracker {
     latest_title: Option<String>,
     terminal_title: Option<String>,
     latest_progress: Option<String>,
-    /// Nirvana fork, alpha 0.72.0: the OSC 7501 root record (`crate::terminal::program_status`). Unlike the title
+    /// Nirvana fork, alpha 0.73.0: the OSC 7501 root record (`crate::terminal::program_status`). Unlike the title
     /// and progress it is not dropped on an agent change: it belongs to the terminal, and the spec's own events end it.
     program_status: Option<ProgramStatus>,
     program_status_changed: bool,

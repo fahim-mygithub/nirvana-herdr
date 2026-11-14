@@ -2230,7 +2230,7 @@ fn publish_reported_cwd(
     }
 }
 
-/// Nirvana fork, alpha 0.72.0: hands OSC 7501 reports to the app, one pane's at a time. The reader thread never
+/// Nirvana fork, alpha 0.73.0: hands OSC 7501 reports to the app, one pane's at a time. The reader thread never
 /// blocks on the app, and the app always gets the latest record. A full queue parks the report in `pending` and starts
 /// one task that sends it. Reports made while that task is live replace the parked one, latest wins, and never go
 /// around it, so they reach the app in the order the reader saw them. Review fix round: the first version spawned a

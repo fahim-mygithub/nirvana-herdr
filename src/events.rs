@@ -128,7 +128,7 @@ pub enum AppEvent {
         seq: Option<u64>,
         argv: Vec<String>,
     },
-    /// Nirvana fork, alpha 0.72.0: the pane's program reported its status (OSC 7501), or `None` cleared it.
+    /// Nirvana fork, alpha 0.73.0: the pane's program reported its status (OSC 7501), or `None` cleared it.
     /// `observed_at` is when the pane reader saw it.
     ProgramStatusReported {
         pane_id: PaneId,

@@ -426,7 +426,7 @@ impl Site {
         let mut stopped = None;
         // Alpha 0.68.0: a message typed into an open picker is its search and an Enter, which picks whatever matched
         // (the owner's "1" into `/resume`, 2026-11-10). So nothing is typed, and the page is sent the picker's keys.
-        // Review fix round, alpha 0.72.0: what to type rides on the status hooks and detection read, not a program
+        // Review fix round, alpha 0.73.0: what to type rides on the status hooks and detection read, not a program
         // status report any pane output can write (`program_status::decision_status`).
         let acting_status =
             crate::terminal::program_status::decision_status(&found.agent).unwrap_or("");

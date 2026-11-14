@@ -1048,7 +1048,7 @@ fn a_message_is_typed_through_agent_prompt() {
     assert_eq!(w.herdr.calls("agent.prompt").len(), 1);
 }
 
-/// Review fix round, alpha 0.72.0: a program status report in the pane says done, detection says working. The send
+/// Review fix round, alpha 0.73.0: a program status report in the pane says done, detection says working. The send
 /// rides on what detection reads, so nothing is typed into the busy Claude.
 #[test]
 fn a_forged_done_report_does_not_type_into_a_working_agent() {

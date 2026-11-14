@@ -493,7 +493,7 @@ impl App {
                     runtime.set_full_lifecycle_authority_active(
                         terminal.full_lifecycle_hook_authority_active(),
                     );
-                    // Nirvana fork, alpha 0.72.0: a live program status report is ended by the same shell-return probe.
+                    // Nirvana fork, alpha 0.73.0: a live program status report is ended by the same shell-return probe.
                     runtime.set_self_reported_agent_active(
                         terminal.self_reported_agent_active()
                             || terminal.program_status_ends_with_shell(),

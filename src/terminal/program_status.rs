@@ -1,4 +1,4 @@
-//! Nirvana fork, alpha 0.72.0: the program status protocol, OSC 7501, spec revision 0.4
+//! Nirvana fork, alpha 0.73.0: the program status protocol, OSC 7501, spec revision 0.4
 //! (https://www.superlogical.com/rex/docs/build/program-status), in a smaller form than upstream PR #5172.
 //!
 //! A program in a pane says what it is doing: idle, working, blocked, done or error. While a report is in place its

@@ -168,7 +168,7 @@ pub struct TerminalState {
     /// Nirvana fork, plan 27 §2 rules 3 and 7: the pane's unbroken idle stretch, and whether `/compact` went in it
     /// (`app/nirvana_idle_compact.rs`).
     pub idle_stretch: crate::nirvana_idle_compact::IdleStretch,
-    /// Nirvana fork, alpha 0.72.0: the OSC 7501 root record the pane's program reported
+    /// Nirvana fork, alpha 0.73.0: the OSC 7501 root record the pane's program reported
     /// (`crate::terminal::program_status`). While set, its state wins over hooks and detection.
     pub program_status: Option<crate::terminal::program_status::ProgramStatus>,
     /// When the pane reader saw the latest report or clear. A report sent late through a full event queue must not
@@ -2530,7 +2530,7 @@ impl TerminalState {
         previous_presentation: EffectivePresentation,
         now: Instant,
     ) -> Option<EffectiveStateChange> {
-        // Nirvana fork, alpha 0.72.0: a program's own report wins over hooks and detection (OSC 7501).
+        // Nirvana fork, alpha 0.73.0: a program's own report wins over hooks and detection (OSC 7501).
         let detected = self.detected_state();
         let state = self
             .program_status

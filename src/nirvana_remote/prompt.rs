@@ -408,7 +408,7 @@ impl Site {
     ) -> Result<(Value, Option<Shown>), Response> {
         let mut row = spaces::agent_row(&found.agent);
         row["space"] = json!(found.space);
-        // Review fix round, alpha 0.72.0: keys are pressed on this, so it is the status detection reads
+        // Review fix round, alpha 0.73.0: keys are pressed on this, so it is the status detection reads
         // (`program_status::decision_status`), not a program status report.
         let status = crate::terminal::program_status::decision_status(&found.agent).unwrap_or("");
         if status == "working" {

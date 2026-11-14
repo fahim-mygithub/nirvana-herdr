@@ -2767,7 +2767,7 @@ fn pane_get(pane: &str) -> (Option<Value>, nirvana_run::PaneProgram) {
     pane_get_with(pane, herdr_json_coded)
 }
 
-/// The status a wake acts on, from `pane get`'s answer. Review fix round, alpha 0.72.0: a wake types into the
+/// The status a wake acts on, from `pane get`'s answer. Review fix round, alpha 0.73.0: a wake types into the
 /// orchestrator's Claude when it reads idle, so it reads what hooks and detection see, not a program status report
 /// any output in the pane can write (`program_status::decision_status`).
 pub(crate) fn pane_decision_status(info: &Value) -> Option<String> {
