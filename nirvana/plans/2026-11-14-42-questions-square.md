@@ -1,6 +1,6 @@
 # Plan 42: a Questions square for what the agents need from the owner
 
-Status: PROPOSED 2026-11-14. Measured on run `ia1`. No code yet. Owner rulings Q1-Q4 open.
+Status: APPROVED 2026-11-14. Measured on run `ia1`. No code yet. Owner ruled Q1-Q4 as recommended (§7).
 
 ## 1. The ask
 
@@ -122,6 +122,9 @@ last opened the panel. A new item can also send a phone alert, which is Q3.
 P42a goes first. P42b and P42c can then run in parallel, since their files don't overlap.
 
 ## 7. Owner rulings
+
+Ruled 2026-11-14. The owner: "These sound good", to all four recommendations. So: the name is "Questions";
+the nudge is on; phone alerts go out for worker questions and blocking items; there is no accept-all key.
 
 - **Q1, the name.** "Questions", or "Asks", or "To you". Recommended: "Questions".
 - **Q2, the nudge.** When the orchestrator asks in prose without filing an item, should its next prompt remind it?
