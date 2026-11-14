@@ -179,7 +179,7 @@ pub fn pin(root: &Path, slug_in: &str, on: bool, at: u64) -> Result<String, Stri
 /// The op `undo` takes: `target` itself when it is an op id, else the newest op on that lesson that is not a rollback
 /// and not rolled back.
 pub fn undo_target(root: &Path, target: &str) -> Result<String, String> {
-    if target.starts_with("op-") {
+    if is_op_id(target) {
         return Ok(target.to_owned());
     }
     if slug(target) != target {
@@ -202,6 +202,14 @@ pub fn undo_target(root: &Path, target: &str) -> Result<String, String> {
         })
         .map(|row| row.id.clone())
         .ok_or_else(|| format!("no op on {target} to undo"))
+}
+
+/// An op id as `next_id` makes it, `op-` and digits. Plan 73 review 5: a bare `op-` prefix took a slug such as
+/// `op-amp-wiring` for an op id, so its undo failed with "no op".
+fn is_op_id(target: &str) -> bool {
+    target
+        .strip_prefix("op-")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// `herdr lessons undo <op-id|slug>`: `rollback` of `undo_target`.
@@ -336,10 +344,11 @@ pub fn cli(root: &Path, verb: &str, args: &[String], now: u64) -> Result<String,
 #[cfg(test)]
 mod tests {
     use super::super::{
-        body, count_offered_at, retire, verify_and_write, Counters, Index, Meta, Offer, Origin,
-        Verdict, INDEX,
+        body, count_offered_at, merge, retire, verify_and_write, verify_and_write_noted, Counters,
+        Index, Meta, Offer, Origin, Verdict, INDEX, LEDGER,
     };
     use super::*;
+    use std::collections::BTreeMap;
 
     const DAY: u64 = 86_400;
     const T0: u64 = 1_000 * DAY;
@@ -493,11 +502,13 @@ mod tests {
         let back = entry(&root, "keep-me").unwrap();
         assert!(!back.pinned);
         assert_eq!(back.counters.offered, 9);
-        // An unpin starts the clock again.
+        // An unpin starts the clock again. The unpin comes 40 days after the undo above, since an undo is a use too
+        // (review 1): unpinned at `late`, the clock would read `late` with or without the restart.
         pin(&root, "keep-me", true, late).expect("pin again");
-        pin(&root, "keep-me", false, late).expect("unpin");
-        assert_eq!(entry(&root, "keep-me").unwrap().used_at, Some(late));
-        assert!(sweep(&root, late + DAY, false).archived.is_empty());
+        let unpinned = late + 40 * DAY;
+        pin(&root, "keep-me", false, unpinned).expect("unpin");
+        assert_eq!(entry(&root, "keep-me").unwrap().used_at, Some(unpinned));
+        assert!(sweep(&root, unpinned + DAY, false).archived.is_empty());
         let ops: Vec<String> = ledger(&root).into_iter().map(|r| r.op).collect();
         assert!(
             ops.contains(&"pin".to_owned()) && ops.contains(&"unpin".to_owned()),
@@ -594,6 +605,153 @@ mod tests {
             undo(&root, "read-the-total", T0 + 4).is_err(),
             "nothing left to undo"
         );
+    }
+
+    /// The gate's write of `steps` as "Read the total", by order `order` at `at`.
+    fn gate_write(root: &Path, steps: &str, order: &str, at: u64) -> (Verdict, Option<String>) {
+        let quote = "TOTAL 12 passed, 0 failed";
+        let lesson = serde_json::json!({"name":"Read the total","class":"build.bounded","steps":steps,"evidence":quote});
+        verify_and_write_noted(
+            root,
+            &lesson,
+            true,
+            &stream(quote),
+            order,
+            "r1",
+            at,
+            Meta::default(),
+        )
+    }
+
+    /// Review 1: a rollback restores the entry from before the op, and that `used_at` can be weeks old. The rollback
+    /// keeps the newest use, so the next sweep does not archive what was just taken back.
+    #[test]
+    fn p73_a_rollback_keeps_the_newest_use_so_the_sweep_keeps_it() {
+        let root = temp("rb-use");
+        plant(&root, "tip-one", Some(T0), 0);
+        plant(&root, "tip-two", Some(T0), 0);
+        let parts = vec!["tip-one".to_owned(), "tip-two".to_owned()];
+        let (_, id) = merge(
+            &root,
+            &parts,
+            "Tips",
+            "1. both",
+            &BTreeMap::new(),
+            "o",
+            "r",
+            T0 + 29 * DAY,
+        )
+        .expect("merge");
+        undo(&root, &id, T0 + 31 * DAY).expect("undo the merge");
+        for part in &parts {
+            assert_eq!(
+                entry(&root, part).unwrap().used_at,
+                Some(T0 + 31 * DAY),
+                "{part}"
+            );
+        }
+        let swept = sweep(&root, T0 + 31 * DAY + 600, false);
+        assert!(swept.archived.is_empty(), "merge parts kept: {swept:?}");
+        // A write over a lesson last used 20 days before it, undone a day later.
+        plant(&root, "read-the-total", Some(T0 - 20 * DAY), 0);
+        assert!(matches!(
+            gate_write(&root, "1. read TOTAL", "o1", T0).0,
+            Verdict::Written(_)
+        ));
+        undo(&root, "read-the-total", T0 + DAY).expect("undo the write");
+        assert_eq!(
+            entry(&root, "read-the-total").unwrap().used_at,
+            Some(T0 + DAY)
+        );
+        let swept = sweep(&root, T0 + 11 * DAY, false);
+        assert!(
+            swept.archived.is_empty(),
+            "the older lesson kept: {swept:?}"
+        );
+    }
+
+    /// Review 2: a merge archives its parts, so a pinned part is refused, as retire refuses it, and nothing moves.
+    #[test]
+    fn p73_a_merge_naming_a_pinned_lesson_is_refused() {
+        let root = temp("merge-pin");
+        plant(&root, "tips", Some(T0), 0);
+        plant(&root, "tip-two", Some(T0), 0);
+        pin(&root, "tips", true, T0).expect("pin");
+        let rows_before = ledger(&root).len();
+        let index_before = read_index(&root);
+        let why = merge(
+            &root,
+            &["tips".to_owned(), "tip-two".to_owned()],
+            "Tips",
+            "1. both",
+            &BTreeMap::new(),
+            "o",
+            "r",
+            T0 + DAY,
+        )
+        .expect_err("a pinned part");
+        assert!(why.contains("tips is pinned"), "{why}");
+        assert_eq!(read_index(&root), index_before);
+        assert_eq!(ledger(&root).len(), rows_before);
+        assert!(body(&root, "tips").is_some() && body(&root, "tip-two").is_some());
+    }
+
+    /// Review 3: a pin changes the entry, not the file. Rolling back the write under it would remove a pinned lesson.
+    #[test]
+    fn p73_a_rollback_under_a_later_pin_is_refused() {
+        let root = temp("rb-pin");
+        assert!(matches!(
+            gate_write(&root, "1. read TOTAL", "o1", T0).0,
+            Verdict::Written(_)
+        ));
+        let write = ledger(&root)[0].id.clone();
+        let pinned = pin(&root, "read-the-total", true, T0 + 1).expect("pin");
+        let why = rollback(&root, &write, T0 + 2).expect_err("pinned since");
+        assert!(why.contains("pinned or unpinned since"), "{why}");
+        let kept = entry(&root, "read-the-total").expect("kept");
+        assert!(kept.pinned);
+        // Undo the pin first, and the write rolls back.
+        rollback(&root, &pinned, T0 + 3).expect("undo the pin");
+        rollback(&root, &write, T0 + 4).expect("then the write");
+        assert!(entry(&root, "read-the-total").is_none());
+    }
+
+    /// Review 4: an unwritable ledger keeps a lesson that passed the gate, with a note for the gate's axis.
+    #[test]
+    fn p73_an_unwritable_ledger_keeps_the_gates_lesson_with_a_note() {
+        let root = temp("ledger-locked");
+        // A folder where the ledger file goes: an append to it fails, as an antivirus or git lock makes it fail.
+        std::fs::create_dir_all(dir(&root).join(LEDGER)).expect("folder");
+        let (verdict, note) = gate_write(&root, "1. read TOTAL", "o1", T0);
+        assert!(matches!(verdict, Verdict::Written(_)), "{verdict:?}");
+        assert!(
+            note.as_deref()
+                .is_some_and(|n| n.starts_with("not in the ledger")),
+            "{note:?}"
+        );
+        assert!(body(&root, "read-the-total").is_some(), "the file is kept");
+        assert!(
+            entry(&root, "read-the-total").is_some(),
+            "the entry is kept"
+        );
+        // A review's op still refuses on the same ledger, as before.
+        assert!(pin(&root, "read-the-total", true, T0 + 1).is_err());
+        assert!(!entry(&root, "read-the-total").unwrap().pinned);
+    }
+
+    /// Review 5: a slug that starts with `op-` is a slug, not an op id.
+    #[test]
+    fn p73_undo_takes_a_slug_that_starts_with_op() {
+        let root = temp("op-slug");
+        plant(&root, "op-amp-wiring", Some(T0), 0);
+        let id = pin(&root, "op-amp-wiring", true, T0).expect("pin");
+        assert_eq!(
+            undo_target(&root, "op-amp-wiring").as_deref(),
+            Ok(id.as_str())
+        );
+        assert_eq!(undo_target(&root, "op-12").as_deref(), Ok("op-12"));
+        undo(&root, "op-amp-wiring", T0 + 1).expect("undo by slug");
+        assert!(!entry(&root, "op-amp-wiring").unwrap().pinned);
     }
 
     #[test]

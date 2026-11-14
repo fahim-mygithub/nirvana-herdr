@@ -411,9 +411,32 @@ pub fn verify_and_write(
     at: u64,
     meta: Meta,
 ) -> Verdict {
+    let (verdict, note) =
+        verify_and_write_noted(root, lesson, passed, stream, order, run, at, meta);
+    // Plan 73 review 4: until the gate puts the note on its lesson axis (`verify_and_write_noted`), it goes to the
+    // gate command's stderr, so a lesson kept without its ledger row is never silent.
+    if let Some(note) = note {
+        eprintln!("herdr lessons: {order}'s lesson is kept but {note}");
+    }
+    verdict
+}
+
+/// `verify_and_write`, and a note for the gate's lesson axis when the lesson was kept but its `write` op could not be
+/// appended to the ledger (plan 73 review 4).
+#[allow(clippy::too_many_arguments)]
+pub fn verify_and_write_noted(
+    root: &Path,
+    lesson: &Value,
+    passed: bool,
+    stream: &str,
+    order: &str,
+    run: &str,
+    at: u64,
+    meta: Meta,
+) -> (Verdict, Option<String>) {
     let lesson = match check(lesson, passed, stream) {
         Ok(lesson) => lesson,
-        Err(why) => return Verdict::Refused(why),
+        Err(why) => return (Verdict::Refused(why), None),
     };
     // Order LEARN: the class the next order of this kind is routed with, not the worker's own words for it.
     let (lesson, topic) = routed(root, run, order, lesson);
@@ -422,7 +445,7 @@ pub fn verify_and_write(
     // merge, retire and reclass ops were in the ledger, and an overwrite lost the older text.
     let slug = slug(&lesson.name);
     let slugs = [slug.clone()];
-    let written = ledgered(root, "write", order, run, at, &slugs, |index, _| {
+    let written = ledgered_or_kept(root, "write", order, run, at, &slugs, true, |index, _| {
         let io = |err: std::io::Error| format!("could not write it: {err}");
         // Plan 33 review S3: a worker's lesson never overwrites one a review or a merge made, nor one of another class
         // or profile; a merge's rollback would then refuse, and the umbrella would be lost silently.
@@ -460,8 +483,8 @@ pub fn verify_and_write(
         Ok(slug.clone())
     });
     match written {
-        Ok((slug, _)) => Verdict::Written(lesson_path(root, &slug)),
-        Err(why) => Verdict::Refused(why),
+        Ok((slug, _, note)) => (Verdict::Written(lesson_path(root, &slug)), note),
+        Err(why) => (Verdict::Refused(why), None),
     }
 }
 
@@ -871,6 +894,24 @@ fn ledgered(
     slugs: &[String],
     change: impl FnOnce(&mut Index, &str) -> Result<String, String>,
 ) -> Result<(String, String), String> {
+    ledgered_or_kept(root, op, by, run, at, slugs, false, change).map(|(made, id, _)| (made, id))
+}
+
+/// `ledgered`; with `keep_unledgered`, a ledger that cannot be appended to keeps the change and returns why as the
+/// third value instead of putting it back. Plan 73 review 4: only the gate's own write takes this. Before plan 73 the
+/// gate's write had no ledger row, so an unwritable `ledger.jsonl` (an antivirus or git lock) never refused a lesson
+/// that passed the gate; refusing it now would lose a lesson for a log line.
+#[allow(clippy::too_many_arguments)]
+fn ledgered_or_kept(
+    root: &Path,
+    op: &str,
+    by: &str,
+    run: &str,
+    at: u64,
+    slugs: &[String],
+    keep_unledgered: bool,
+    change: impl FnOnce(&mut Index, &str) -> Result<String, String>,
+) -> Result<(String, String, Option<String>), String> {
     let _lock = lock(root).map_err(|err| err.to_string())?;
     let was = read_index(root);
     let mut index = was.clone();
@@ -924,9 +965,12 @@ fn ledgered(
         of: None,
     };
     if let Err(err) = append_ledger(root, &row) {
+        if keep_unledgered {
+            return Ok((made, id, Some(format!("not in the ledger: {err}"))));
+        }
         return Err(undo(format!("the ledger: {err}"), true, &before));
     }
-    Ok((made, id))
+    Ok((made, id, None))
 }
 
 /// A review's `new` op: the lesson must not exist yet, since a lesson already kept is patched after it is read
@@ -1071,6 +1115,13 @@ pub fn merge(
             let Some(entry) = index.lessons.get(part).cloned() else {
                 return Err(format!("no lesson {part} to merge"));
             };
+            // Plan 73 review 2: a merge archives its parts, and an umbrella named as a part is written over it with a
+            // fresh entry, so a pinned part would lose its pin either way. Refused as retire refuses it.
+            if entry.pinned {
+                return Err(format!(
+                    "{part} is pinned: herdr lessons unpin {part} first"
+                ));
+            }
             if let Some(sha) = shas.get(part) {
                 if body_sha(root, part).as_deref() != Some(sha.as_str()) {
                     return Err(format!("{part} changed since the merge was queued"));
@@ -1187,6 +1238,15 @@ pub fn rollback(root: &Path, id: &str, at: u64) -> Result<String, String> {
                 after.slug
             ));
         }
+        // Plan 73 review 3: a pin or an unpin changes the entry, not the file. Without this, rolling back a `write`
+        // or a `new` after a later pin would silently unpin the lesson, or remove a pinned one.
+        let pinned = |entry: Option<&Entry>| entry.is_some_and(|entry| entry.pinned);
+        if pinned(index.lessons.get(&after.slug)) != pinned(after.entry.as_ref()) {
+            return Err(format!(
+                "{} was pinned or unpinned since {id}: undo that op first",
+                after.slug
+            ));
+        }
     }
     let now: Vec<Snap> = row
         .after
@@ -1201,6 +1261,7 @@ pub fn rollback(root: &Path, id: &str, at: u64) -> Result<String, String> {
             None => {}
         }
         noted(root, &path);
+        let current_use = index.lessons.get(&before.slug).and_then(|now| now.used_at);
         match &before.entry {
             // Review round N6: a reclass changed only the class; the offers and opens since are kept. Plan 73: so does
             // a pin or an unpin, which changed only `pinned`.
@@ -1209,17 +1270,13 @@ pub fn rollback(root: &Path, id: &str, at: u64) -> Result<String, String> {
                 if let Some(now) = index.lessons.get(&before.slug) {
                     entry.counters = now.counters.clone();
                     entry.seen = now.seen.clone();
-                    entry.used_at = now.used_at;
                 }
+                entry.used_at = rolled_back_use(entry.used_at, current_use, at);
                 index.lessons.insert(before.slug.clone(), entry);
             }
             Some(entry) => {
                 let mut entry = entry.clone();
-                // Plan 73: a lesson taken back from the archive is the owner's use of it. With its old `used_at` the
-                // next sweep would archive it again.
-                if matches!(row.op.as_str(), "archive" | "retire") {
-                    entry.used_at = Some(at);
-                }
+                entry.used_at = rolled_back_use(entry.used_at, current_use, at);
                 index.lessons.insert(before.slug.clone(), entry);
             }
             None => {
@@ -1253,6 +1310,15 @@ pub fn rollback(root: &Path, id: &str, at: u64) -> Result<String, String> {
             .collect::<Vec<_>>()
             .join(", ")
     ))
+}
+
+/// Plan 73 review 1: the `used_at` a lesson gets back from any rollback, the newest of the one it had before the op,
+/// the one it has now, and the rollback's own time. The restored stamp dates from before the op: a merge's part last
+/// offered 29 days ago, or an older lesson a write replaced. Restored alone, the next sweep, minutes later, would
+/// archive what the owner just took back. The current stamp holds offers since the op. The rollback itself is the
+/// owner's hand on the lesson, a use as an undone archive always was. A max never moves a clock back.
+fn rolled_back_use(restored: Option<u64>, current: Option<u64>, at: u64) -> Option<u64> {
+    Some(restored.into_iter().chain(current).fold(at, u64::max))
 }
 
 // ---- order LEARN: the router's class, and retiring a lesson that never helps ----

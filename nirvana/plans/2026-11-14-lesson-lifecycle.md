@@ -43,6 +43,19 @@ Builder: "Opus - lesson lifecycle". Branch `feat/lesson-lifecycle` off master b1
 `stale` is a lesson's `used_at` older than 14 days and not pinned. It shows in `herdr lessons list` and in `sweep`. The
 Learning square draws in `src/client/`, which this package does not own. A stored mark would need clearing on every offer, a second index write on the seat path.
 
+## Fix round after the Sonnet review
+
+| # | Finding | Fix | Test |
+|---|---|---|---|
+| 1 | A rollback gave back the `used_at` from before the op, weeks old after a merge or a write; the next sweep archived again | any rollback keeps the newest of the restored use, the current use and its own time (`rolled_back_use`) | `p73_a_rollback_keeps_the_newest_use_so_the_sweep_keeps_it` |
+| 2 | A merge archived a pinned part, or wrote an umbrella over it | a merge naming a pinned lesson is refused | `p73_a_merge_naming_a_pinned_lesson_is_refused` |
+| 3 | Rolling back a `write` or `new` after a pin unpinned or removed the lesson | refused when `pinned` differs from the op's `after` | `p73_a_rollback_under_a_later_pin_is_refused` |
+| 4 | An unwritable ledger refused a lesson that passed the gate | the gate's write keeps the lesson; the failure is a note (`verify_and_write_noted`), on stderr until the gate takes the hunk | `p73_an_unwritable_ledger_keeps_the_gates_lesson_with_a_note` |
+| 5 | `undo` took any `op-` name for an op id | an op id is `op-` and digits | `p73_undo_takes_a_slug_that_starts_with_op` |
+
+Left as reported, in the CHANGELOG limits: the sweep's dating is not a ledger op, and the archive move shares retire's
+crash window.
+
 ## Out of scope, reported
 
 - A project left for 30 days loses every unpinned lesson to the archive on its first tick back. The archive keeps them

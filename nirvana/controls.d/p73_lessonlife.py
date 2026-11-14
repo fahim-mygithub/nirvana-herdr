@@ -12,6 +12,12 @@ T_USE = 'p73_an_offer_is_a_use_and_an_undated_lesson_is_dated_not_archived'
 T_WRITE = 'p73_a_workers_write_is_a_ledger_op_that_undo_takes_back'
 T_FORCE = 'p73_orders_that_waited_the_max_age_need_only_the_short_quiet'
 T_TICK = 'p73_a_tick_forces_a_review_whose_orders_waited_and_sweeps_lessons'
+# The fix round after the Sonnet review, one test per finding.
+T_RB_USE = 'p73_a_rollback_keeps_the_newest_use_so_the_sweep_keeps_it'
+T_MERGE_PIN = 'p73_a_merge_naming_a_pinned_lesson_is_refused'
+T_RB_PIN = 'p73_a_rollback_under_a_later_pin_is_refused'
+T_LEDGER_KEPT = 'p73_an_unwritable_ledger_keeps_the_gates_lesson_with_a_note'
+T_OP_SLUG = 'p73_undo_takes_a_slug_that_starts_with_op'
 
 CONTROLS = (
     # Unused 14 days is stale
@@ -26,7 +32,9 @@ CONTROLS = (
             '    let _ = &copy;\n', T_LIFE, 'rust'),
     # An undone archive is a use, so the next sweep keeps it
     Control('p73_undo_archive_is_use', LESSONS,
-            'if matches!(row.op.as_str(), "archive" | "retire") {', 'if false {', T_LIFE, 'rust'),
+            '            Some(entry) => {\n                let mut entry = entry.clone();\n'
+            '                entry.used_at = rolled_back_use(entry.used_at, current_use, at);\n',
+            '            Some(entry) => {\n                let mut entry = entry.clone();\n', T_LIFE, 'rust'),
     # The archive listing leaves out an op that was undone
     Control('p73_archived_skips_undone', LIFE,
             '            || rows\n                .iter()\n                .any(|r| r.of.as_deref() == Some(row.id.as_str()))\n',
@@ -55,8 +63,8 @@ CONTROLS = (
             '                    entry.used_at = Some(now);\n', '', T_USE, 'rust'),
     # The gate's worker write is a ledger op of its own
     Control('p73_write_ledgered', LESSONS,
-            'let written = ledgered(root, "write", order, run, at, &slugs, |index, _| {',
-            'let written = ledgered(root, "new", order, run, at, &slugs, |index, _| {', T_WRITE, 'rust'),
+            'let written = ledgered_or_kept(root, "write", order, run, at, &slugs, true, |index, _| {',
+            'let written = ledgered_or_kept(root, "new", order, run, at, &slugs, true, |index, _| {', T_WRITE, 'rust'),
     # A write is a use
     Control('p73_write_is_use', LESSONS,
             'used_at: Some(used_at.map_or(source.at, |was| was.max(source.at))),', 'used_at,', T_WRITE, 'rust'),
@@ -87,4 +95,24 @@ CONTROLS = (
     Control('p73_tick_sweeps', IDLE,
             'let swept = nirvana_lessons::life::sweep(root, now, false);',
             'let swept = nirvana_lessons::life::Swept::default();', T_TICK, 'rust'),
+    # Review 1: a rollback keeps the newest of the restored use, the current use and its own time
+    Control('p73_rollback_keeps_newest_use', LESSONS,
+            '    Some(restored.into_iter().chain(current).fold(at, u64::max))\n', '    restored\n',
+            T_RB_USE, 'rust'),
+    # Review 2: a merge naming a pinned lesson is refused
+    Control('p73_merge_refuses_pinned', LESSONS,
+            '            if entry.pinned {\n                return Err(format!(\n                    "{part} is pinned',
+            '            if false {\n                return Err(format!(\n                    "{part} is pinned',
+            T_MERGE_PIN, 'rust'),
+    # Review 3: a rollback is refused when the lesson was pinned or unpinned since the op
+    Control('p73_rollback_refuses_pin_since', LESSONS,
+            'if pinned(index.lessons.get(&after.slug)) != pinned(after.entry.as_ref()) {', 'if false {',
+            T_RB_PIN, 'rust'),
+    # Review 4: the gate's write is kept when the ledger cannot be appended to
+    Control('p73_gate_write_kept_unledgered', LESSONS,
+            'ledgered_or_kept(root, "write", order, run, at, &slugs, true, |index, _| {',
+            'ledgered_or_kept(root, "write", order, run, at, &slugs, false, |index, _| {', T_LEDGER_KEPT, 'rust'),
+    # Review 5: an op id is op- and digits; any other op- name is a slug
+    Control('p73_op_id_is_digits', LIFE,
+            '    if is_op_id(target) {\n', '    if target.starts_with("op-") {\n', T_OP_SLUG, 'rust'),
 )

@@ -17,11 +17,25 @@ which the fork never edits.
   - The idle review already had Hermes's one slot per space, its newest snapshot and its settle. Its max age is new.
     When orders have waited 6 h for a review, 10 min of quiet is enough instead of 30. The lease rule, the spare
     usage, the week, the caps and the use of the pool by anyone all still hold.
+  - The review's fix round. Any rollback keeps a lesson's newest use: the one from before the op, the one it has now,
+    or the rollback's own time. Before, an undone merge or write gave back a use weeks old, and the next sweep
+    archived the lesson again within minutes. A merge that names a pinned lesson is refused, as retire refuses it. A
+    rollback is refused when the lesson was pinned or unpinned since the op, so an undo never unpins or removes a
+    pinned lesson in silence. When `ledger.jsonl` cannot be written, the gate still keeps a lesson that passed. The
+    failure goes to the gate command's stderr. `verify_and_write_noted` gives it to the gate's lesson axis once the
+    gate takes the hunk in the package report. `undo` reads a target as an op id only when it is `op-` and digits, so
+    a lesson named `op-amp-wiring` is undone by its slug.
 - **Because:** the owner, 2026-11-14: "Sure lets add the top 3", for "Hermes's idle queue and lesson lifecycle, added
-  to the lesson reviews." Plan `nirvana/plans/2026-11-14-lesson-lifecycle.md`.
-- **Measured:** on stand-ins only. No owner project was read. 7 new tests: 5 in `nirvana_lessons::life`, 2 in
-  `nirvana_idle_review`. The lessons suite passes 26, the idle review 23, the gate 108, the review 18 with the hunk
-  below, the Learning square 27. 20 p73 controls, each run alone, each turn its test red. Two review tests counted
+  to the lesson reviews." Plan `nirvana/plans/2026-11-14-lesson-lifecycle.md`. The fix round: a Sonnet review of the
+  package found the five faults above.
+- **Limits:** a ledger that stays unwritable keeps every gate lesson out of the ledger, and `undo` cannot take those
+  back. The ledger only grows; nothing trims it yet. A sweep's dating of an undated lesson is an index write, not a
+  ledger op. The archive move is shared with `retire`, and so is its crash window. A crash after the file leaves
+  `lessons/` but before the index and the ledger are written leaves the copy in `.archive/`, the entry in the index
+  and no op to undo it.
+- **Measured:** on stand-ins only. No owner project was read. 12 new tests: 10 in `nirvana_lessons::life`, 2 in
+  `nirvana_idle_review`. The lessons suite passes 31, the idle review 23, the gate 108, the review 18 with the hunk
+  below, the Learning square 27. 25 p73 controls, each run alone, each turn its test red. Two review tests counted
   ledger rows from op-1. The gate's writes now come first, so they need the hunk the package report gives. The 14, 30,
   6 h and 10 min are hypotheses. No lesson on this machine has a recorded use yet, so how many go stale is unknown
   until 14 days after this ships.
