@@ -1680,6 +1680,70 @@ fn the_page_has_the_spaces_and_chat_screens_and_no_inline_script() {
     assert!(css.contains(":where(.nv) button"));
 }
 
+/// The owner, 2026-11-14: agent formatting "is not rendered" on the phone. md.js draws an agent bubble's markdown as
+/// nodes; this checks it is served as a script under the page's CSP, loaded between app.js and chat.js, that chat.js
+/// draws agent bubbles (and only those) with it, and that it parses no markup. What it draws is
+/// nirvana/test_phonemd.py's, in node.
+#[test]
+fn the_markdown_script_is_served_under_the_csp_and_draws_agent_bubbles_only() {
+    let w = world("page-md");
+    let running = serve(w.site());
+    let (status, head, md) = get(running.addr, "/md.js", OWNER);
+    assert_eq!(status, 200);
+    assert!(
+        head.contains("Content-Type: text/javascript; charset=utf-8"),
+        "{head}"
+    );
+    assert!(
+        head.contains(&format!("Content-Security-Policy: {}", routes::CSP)),
+        "{head}"
+    );
+    assert!(md.contains("window.Nirvana.md = (text) => render(text, window.Nirvana.h)"));
+    for markup in [
+        ".innerHTML",
+        ".outerHTML",
+        "insertAdjacentHTML",
+        "DOMParser",
+        "document.write",
+        "eval(",
+    ] {
+        assert!(!md.contains(markup), "md.js parses markup with {markup}");
+    }
+    assert!(!md.contains("style="), "md.js: the CSP has no inline style");
+    // Links only for http(s): the one pattern a link's href must match.
+    assert!(md.contains(r#"const URL = /^https?:\/\/[^\s<>"]+$/i;"#));
+    assert!(md.contains("rel: 'noopener noreferrer', target: '_blank'"));
+    let (_, _, index) = get(running.addr, "/", OWNER);
+    let at = |script: &str| index.find(&format!(r#"<script src="{script}"></script>"#));
+    let (app, mdjs, chat) = (at("/app.js"), at("/md.js"), at("/chat.js"));
+    assert!(
+        app.is_some() && mdjs.is_some() && chat.is_some(),
+        "{index}"
+    );
+    assert!(
+        app < mdjs && mdjs < chat,
+        "md.js loads after app.js and before chat.js"
+    );
+    let (_, _, chat) = get(running.addr, "/chat.js", OWNER);
+    assert!(chat.contains(
+        "if (m.kind === 'agent') return h('div', { class: 'msg bubble-agent md' }, ...nv.md(m.text || ''));"
+    ));
+    assert!(chat.contains(
+        "if (m.kind === 'user') return h('div', { class: 'msg bubble-user', text: m.text });"
+    ));
+    assert_eq!(chat.matches("nv.md(").count(), 1, "the agent bubble only");
+    // The offline shell keeps it, so a page from the phone's cache still draws markdown.
+    assert!(super::shell::paths().contains(&"/md.js"));
+    let (_, _, css) = get(running.addr, "/app.css", OWNER);
+    for rule in [
+        "white-space: pre; overflow-wrap: normal; overflow-x: auto;",
+        ".md .md-scroll { min-width: 0; max-width: 100%; overflow-x: auto;",
+        ".md strong { font-weight: 700;",
+    ] {
+        assert!(css.contains(rule), "{rule}");
+    }
+}
+
 // --- Review round (record p39b, "Review round") ------------------------------------------------------------------
 
 /// The folder's "Open Nirvana here" session record, naming `w.path`; its home.

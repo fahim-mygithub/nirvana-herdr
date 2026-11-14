@@ -58,6 +58,13 @@ pub const ASSETS: &[(&str, &str, &str)] = &[
         "text/javascript; charset=utf-8",
         include_str!("page/chat.js"),
     ),
+    // The agent's markdown as DOM nodes, for chat.js's agent bubbles (the owner, 2026-11-14: the formatting "is not
+    // rendered"). A row here also puts it in the offline shell and its build tag (shell.rs).
+    (
+        "/md.js",
+        "text/javascript; charset=utf-8",
+        include_str!("page/md.js"),
+    ),
     // P39c: screen 4, the prompt sheet and the Esc button.
     (
         "/prompt.js",
