@@ -893,8 +893,13 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         }
         // Plan 25 §2: the owner's fresh start.
         Some("fresh") if args.len() <= 2 => crate::nirvana_fresh::cli(&args[1..]),
-        // Plan 12 O4b: the plugin's hooks and statusline.
-        Some(name) if args.len() == 1 && crate::nirvana_claude::SUBCOMMANDS.contains(&name) => {
+        // Plan 12 O4b: the plugin's hooks and statusline. Plan 41 §5.1: agy's hooks.json calls the same verbs with a
+        // trailing `--host agy`, which `nirvana_hookhost::host` reads from the process's own command line; the verb
+        // still takes no other argument.
+        Some(name)
+            if crate::nirvana_hookhost::without_host(args).len() == 1
+                && crate::nirvana_claude::SUBCOMMANDS.contains(&name) =>
+        {
             crate::nirvana_claude::cli(name).expect("a listed subcommand")
         }
         _ => {
