@@ -26,6 +26,8 @@
 <!-- The shell, then one file per screen; each screen calls Nirvana.screen(name, {...}). The shell starts on
      DOMContentLoaded, after every screen has registered. No inline script: the page's CSP allows 'self' only. -->
 <script src="/app.js"></script>
+<!-- md.js after app.js (it hangs nv.md on window.Nirvana) and before chat.js, which draws agent bubbles with it. -->
+<script src="/md.js"></script>
 <script src="/pcs.js"></script>
 <script src="/spaces.js"></script>
 <script src="/prompt.js"></script>

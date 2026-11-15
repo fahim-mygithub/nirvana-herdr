@@ -3,6 +3,22 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.76.0: the phone page draws the agents' markdown
+
+- **Changed:** a new `src/nirvana_remote/page/md.js` draws each agent bubble on the phone page as markdown:
+  paragraphs, headings, bold and italic, inline and fenced code, nested lists, quotes, rules, pipe tables and links.
+  It builds DOM nodes only, through `nv.h`, and never sets `innerHTML`. Only http and https links become links.
+  Nesting stops at 12 levels. Anything else stays the text it was. The owner's own bubbles stay plain text. Tables
+  and code scroll inside their own box.
+- **Because:** the owner, 2026-11-14: "text formatting is not rendered... maybe ignored in Nirvana phone app". An
+  agent bubble was its raw text in a pre-wrap box, so Claude Code's markdown showed as stars, hashes and pipes.
+- **Measured:** 14 node tests in `nirvana/test_phonemd.py` pass, and one Rust test checks the page serves `md.js`.
+  The 28 controls in `p79_phonemd.py` pass. A 4,000-character message draws in about 0.18 ms. The page grows by
+  18.7 KB. `nirvana_remote` passes with one thread. With parallel threads two of its tests fail, also at master
+  3ff4a4ff: `a_failed_upload_logs_one_line_with_its_size_bytes_time_and_why` and
+  `the_chat_view_pushes_new_bubbles_as_the_transcript_grows`. Both pass alone. Not yet seen on an iPhone.
+- **If you remove this:** the phone page shows agent replies as raw markdown source.
+
 ## alpha 0.75.0: the install builds and installs a native agy plugin
 
 - **Changed:** `install.py` builds a native agy plugin at `<home>/nirvana/agy/nirvana`. It holds `plugin.json`,

@@ -197,6 +197,39 @@ a:hover { color: #86CBD2; }
 .messages { display: flex; flex-direction: column; gap: 12px; }
 .bubble-user { align-self: flex-end; max-width: 82%; background: rgba(95, 179, 188, 0.16); border: 1px solid rgba(95, 179, 188, 0.28); border-radius: 18px 18px 6px 18px; padding: 10px 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .bubble-agent { max-width: 92%; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* An agent bubble's markdown (md.js; the owner, 2026-11-14: Claude Code's "spacing and bolding" did not show). Blocks
+   stand apart as in Claude Code; a code block or a table wider than the column scrolls inside its own box, so the
+   page never scrolls sideways. min-width: 0 lets the bubble, a flex item, be narrower than a wide table in it. */
+.bubble-agent.md { display: flex; flex-direction: column; gap: 10px; min-width: 0; line-height: 1.5; }
+.md .md-p { margin: 0; }
+.md strong { font-weight: 700; color: #FFFFFF; }
+.md em { font-style: italic; }
+.md .md-h { font-weight: 700; line-height: 1.3; color: #FFFFFF; margin-top: 4px; }
+.md .md-h1 { font-size: 19px; }
+.md .md-h2 { font-size: 17px; }
+.md .md-h3 { font-size: 15.5px; }
+.md .md-h4 { font-size: 15px; color: var(--soft); }
+.md .md-code-span { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 0.86em; background: var(--hover); border: 1px solid var(--line); border-radius: 5px; padding: 0 4px; color: #D4F0F2; }
+.md .md-code { display: flex; flex-direction: column; min-width: 0; background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.md .md-lang { font-size: 11px; color: var(--faint); padding: 6px 12px 0; }
+.md .md-pre { margin: 0; padding: 8px 12px 10px; font-size: 12.5px; line-height: 1.5; color: var(--soft); white-space: pre; overflow-wrap: normal; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.md .md-list { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 4px; }
+.md .md-li { padding-left: 2px; }
+.md .md-li > * + * { margin-top: 4px; }
+.md .md-li::marker { color: var(--muted); }
+.md .md-quote { margin: 0; padding: 2px 0 2px 12px; border-left: 3px solid var(--teal-deep); color: var(--soft); display: flex; flex-direction: column; gap: 8px; }
+.md .md-rule { width: 100%; height: 1px; margin: 4px 0; border: 0; background: var(--line); }
+.md .md-link { color: var(--teal); text-decoration: underline; text-underline-offset: 2px; }
+/* A table at phone width: up to 640 px wide, its cells wrapping inside that (a word never splits: overflow-wrap
+   anywhere would shrink a column to one letter), the box scrolling sideways past the column. */
+.md .md-scroll { min-width: 0; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; border: 1px solid var(--line); border-radius: 10px; }
+.md .md-table { border-collapse: collapse; width: max-content; min-width: 100%; max-width: 640px; font-size: 13.5px; line-height: 1.4; }
+.md .md-cell { padding: 7px 10px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); overflow-wrap: normal; word-break: normal; }
+.md .md-cell + .md-cell { border-left: 1px solid var(--line); }
+.md th.md-cell { font-weight: 600; color: #FFFFFF; background: var(--card); white-space: nowrap; }
+.md tbody tr:last-child .md-cell { border-bottom: 0; }
+.md .md-al-r { text-align: right; }
+.md .md-al-c { text-align: center; }
 .bubble-file { align-self: flex-end; display: flex; align-items: center; gap: 10px; background: var(--hover); border-radius: 14px; padding: 8px 12px 8px 8px; max-width: 82%; }
 .file-icon { width: 40px; height: 40px; border-radius: 8px; background: #2A3A3D; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .file-text { display: flex; flex-direction: column; min-width: 0; }

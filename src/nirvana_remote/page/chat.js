@@ -128,7 +128,9 @@
 
       function bubble(m) {
         if (m.kind === 'user') return h('div', { class: 'msg bubble-user', text: m.text });
-        if (m.kind === 'agent') return h('div', { class: 'msg bubble-agent', text: m.text });
+        // An agent's text is markdown (Claude Code's bold, lists, tables, code), drawn as nodes by md.js; nothing in it
+        // becomes markup. The owner's own messages stay the text they typed.
+        if (m.kind === 'agent') return h('div', { class: 'msg bubble-agent md' }, ...nv.md(m.text || ''));
         if (m.kind === 'file') {
           return h('div', { class: 'msg bubble-file' }, h('span', { class: 'file-icon' }, nv.icon('image', 20, '#86CBD2', 1.8)),
             h('span', { class: 'file-text' }, h('span', { class: 'file-name', text: m.text }),
