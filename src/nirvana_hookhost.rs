@@ -11,7 +11,8 @@
 //! - **Events.** `SessionStart`, `PreInvocation`, `PreToolUse`, `PostToolUse`, `PostInvocation`, `Stop`. No
 //!   `UserPromptSubmit` and no `SubagentStop`. `PreInvocation` fires before every model call: 5 times for the first
 //!   of two prompts in run 1. `invocationNum` restarts at 0 for each new prompt, and also when a subagent's message
-//!   wakes the parent (run 1, twice), so it does not mark a prompt; `lastUserInput` does (`first_for_prompt`).
+//!   wakes the parent (run 1, twice); `initialNumSteps` only grows. A turn is named by both (`turn_start`, and
+//!   the state section's comment), so the owner typing the same prompt twice is two turns (`first_for_turn`).
 //! - **Tool names a hook sees** differ from the names in agy's own tool list: the hook saw `read_file`, `edit_file`,
 //!   `write_file`, `run_command`, `invoke_subagent`, `send_message`, where `--output-format stream-json`'s `init`
 //!   lists `view_file`, `replace_file_content`, `multi_replace_file_content`, `write_to_file`. Asked by name for
@@ -39,7 +40,7 @@ use serde_json::{json, Value};
 pub const HOST_FLAG: &str = "--host";
 pub const AGY: &str = "agy";
 
-/// The Stop blocks agy is given per owner prompt. One, as Claude Code allows: Claude sets `stop_hook_active` on the
+/// The Stop blocks agy is given per turn (`turn_key`). One, as Claude Code allows: Claude sets `stop_hook_active` on the
 /// Stop that follows a block, and the gate (`nirvana_claude::stop_output`) then gives a notice, not a block. agy's
 /// `continuationActive` never turned true (P41a), and a gate that trusted it asked 10 times in one `-p` turn (§4.2).
 pub const AGY_STOP_ASKS_PER_PROMPT: u32 = 1;
@@ -49,6 +50,9 @@ const STATE_KEEP_S: u64 = 7 * 24 * 60 * 60;
 /// `<home>/nirvana/<file>`, beside the gate's `stop-raised.json`.
 pub const ASKS_FILE: &str = "agy-stop-asks.json";
 pub const PROMPTS_FILE: &str = "agy-prompts.json";
+pub const CONVERSATIONS_FILE: &str = "agy-conversations.json";
+/// Held while a hook reads and writes the three files above (`lock_state`).
+pub const LOCK_FILE: &str = "agy-state.lock";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Host {
@@ -128,17 +132,34 @@ pub fn agy_event(name: &str) -> Option<Event> {
 /// agy's tool list a hook may yet see (a later agy, another model): an edit tool unmapped would pass the edit guard
 /// unseen, so every file-writing name in the list is here. `browser_subagent` is not an `Agent`: on Claude a browser
 /// lookup is not a spawn the guard books.
+///
+/// A table, not a `match`, so a test can hold it against `nirvana/agy_tool_names.json`, the file `agy_plugin.py`'s
+/// hook matchers are tested against too: the Sonnet review of P41b/P41c found the plugin's matchers missing
+/// `sed_file`, `notebook_edit`, `define_subagent` and `run_workflow`, so agy would never have called the guard for a
+/// tool this table maps (`the_tool_table_is_the_shared_fixture`).
+pub const AGY_TOOLS: &[(&str, &str)] = &[
+    ("write_file", "Write"),
+    ("write_to_file", "Write"),
+    ("edit_file", "Edit"),
+    ("replace_file_content", "Edit"),
+    ("multi_replace_file_content", "Edit"),
+    ("sed_file", "Edit"),
+    // `notebook_edit` is in agy's tool list, `edit_notebook` a step type in its binary (P41c's read).
+    ("notebook_edit", "NotebookEdit"),
+    ("edit_notebook", "NotebookEdit"),
+    ("read_file", "Read"),
+    ("view_file", "Read"),
+    ("invoke_subagent", "Agent"),
+    ("define_subagent", "Agent"),
+    ("run_workflow", "Agent"),
+    ("run_command", "Bash"),
+];
+
 pub fn claude_tool(agy: &str) -> Option<&'static str> {
-    Some(match agy {
-        "write_file" | "write_to_file" => "Write",
-        "edit_file" | "replace_file_content" | "multi_replace_file_content" | "sed_file" => "Edit",
-        // `notebook_edit` is in agy's tool list, `edit_notebook` a step type in its binary (P41c's read).
-        "notebook_edit" | "edit_notebook" => "NotebookEdit",
-        "read_file" | "view_file" => "Read",
-        "invoke_subagent" | "define_subagent" | "run_workflow" => "Agent",
-        "run_command" => "Bash",
-        _ => return None,
-    })
+    AGY_TOOLS
+        .iter()
+        .find(|(name, _)| *name == agy)
+        .map(|(_, tool)| *tool)
 }
 
 /// The Claude tools each tool verb is called for: the matchers of `nirvana/claude/hooks/hooks.json`. agy's
@@ -219,8 +240,19 @@ pub fn tool_input(tool: &str, args: &Value) -> Value {
 
 /// A subagent's hook: P41a's one subagent had an empty `lastUserInput` on every event, and the parent's was never
 /// empty (an agy session fires `SessionStart` at its first prompt, with that prompt). Hypothesis on one subagent.
-pub fn is_subagent(raw: &Value) -> bool {
-    text(raw, "lastUserInput").is_none_or(|input| input.trim().is_empty())
+///
+/// `main_session` is true when this conversation's `SessionStart` came with the owner's prompt
+/// (`Conversation::main`). Then an empty `lastUserInput` does not make it a subagent: the Sonnet review found that an
+/// orchestrator Stop with an empty input would have skipped the Stop gate. An `agent_id` (or `agentId`) in the
+/// payload is a subagent whatever else is true; no agy 1.5.9 payload carried one, so that arm is for a later agy.
+pub fn is_subagent(raw: &Value, main_session: bool) -> bool {
+    if ["agent_id", "agentId"]
+        .iter()
+        .any(|key| text(raw, key).is_some_and(|id| !id.is_empty()))
+    {
+        return true;
+    }
+    !main_session && text(raw, "lastUserInput").is_none_or(|input| input.trim().is_empty())
 }
 
 fn same_folder(a: &str, b: &str) -> bool {
@@ -265,9 +297,9 @@ pub fn session_cwd(raw: &Value, hooks_home: Option<&Path>) -> Option<PathBuf> {
 }
 
 /// agy's hook input as the Claude Code input the verbs read. `stop_hook_active` is the gate's own count, never
-/// `continuationActive`. A subagent's hook carries an `agent_id`, as Claude's does, so every verb that skips a
-/// subagent skips it here too.
-pub fn to_claude(raw: &Value, cwd: Option<&Path>, stop_hook_active: bool) -> Value {
+/// `continuationActive`. A subagent's hook (`subagent`, from `is_subagent`) carries an `agent_id`, as Claude's does,
+/// so every verb that skips a subagent skips it here too.
+pub fn to_claude(raw: &Value, cwd: Option<&Path>, stop_hook_active: bool, subagent: bool) -> Value {
     let event = text(raw, "hookEventName").and_then(agy_event);
     let mut hook = json!({
         "host": AGY,
@@ -277,7 +309,7 @@ pub fn to_claude(raw: &Value, cwd: Option<&Path>, stop_hook_active: bool) -> Val
         "hook_event_name": event.map(Event::claude_name),
         "model": text(raw, "modelName"),
     });
-    if is_subagent(raw) {
+    if subagent {
         hook["agent_id"] = json!(format!("agy:{}", text(raw, "conversationId").unwrap_or("")));
     }
     match event {
@@ -337,7 +369,7 @@ fn block_reason(out: &str) -> Option<String> {
 }
 
 /// agy's answer for a verb's Claude output on `event`, and whether it asks agy to continue (a Stop block, which
-/// `count_ask` records). `asks` is how many continues this prompt has had: at `AGY_STOP_ASKS_PER_PROMPT` a block is
+/// `count_ask` records). `asks` is how many continues this turn has had: at `AGY_STOP_ASKS_PER_PROMPT` a block is
 /// dropped whatever the verb said, so no verb can loop agy. A Stop's `systemMessage` (the gate's notice to the owner)
 /// has no agy form and is dropped: agy shows a Stop hook's output to no one.
 pub fn agy_output(event: Option<Event>, out: &str, asks: u32) -> (Value, bool) {
@@ -369,7 +401,30 @@ pub fn agy_output(event: Option<Event>, out: &str, asks: u32) -> (Value, bool) {
     }
 }
 
-// ---- the state: one prompt's notices, one prompt's asks ----
+// ---- the state: one turn's notices, one turn's asks ----
+//
+// A turn is what Claude Code calls one: an owner prompt, the model calls it takes, and the Stop that ends it. The
+// first build keyed a turn on `lastUserInput` alone, so an owner who typed "yes" twice in one conversation got no
+// second notice, no second `prompt-baseline`, and the second turn's Stop read asks=1: the dead-end gate was spent
+// silently (the Sonnet review of P41b, 2026-11-14). What the P41a payloads give instead (every `PreInvocation` of runs
+// 1, 4 and 6, `events_*.jsonl` in that session's scratchpad):
+//
+// - `invocationNum` counts the model calls of one execution and restarts at 0 for each new owner prompt. It does not
+//   restart on a Stop hook's continue (run 1: 7 then 8; run 4: 1 then 2), so a continue stays in its turn and the cap
+//   holds.
+// - `initialNumSteps` is the conversation's step count when that call began. It only grows (run 1: 1, 4, 6, 8, 10,
+//   then 12 for the second prompt), so two prompts of the same text get two different numbers.
+//
+// So a turn starts at a `PreInvocation` with `invocationNum` 0, and is named by its `initialNumSteps`
+// (`Conversation::turn`). Every verb of that `PreInvocation` records the same name, so the verbs need not agree on
+// who records it. A Stop carries neither field and reads the name its turn's `PreInvocation` left. The turn key
+// (`turn_key`) is that name and the prompt's hash, so a conversation whose `PreInvocation` never reached a hook still
+// keys on the prompt, as before.
+//
+// What this costs: `invocationNum` also restarts at 0 when a subagent's message wakes the parent (run 1, twice, with
+// the same `lastUserInput`). That wake is a turn here: the notices and `prompt-baseline` run again and the gate may
+// ask once more. Claude Code starts a turn for a background agent's message too; whether it fires `UserPromptSubmit`
+// for one is not measured here. Telling the two apart would need the transcript's step at `initialNumSteps - 1`.
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct Mark {
@@ -377,6 +432,34 @@ struct Mark {
     #[serde(default)]
     asks: u32,
     at: u64,
+}
+
+/// What the hooks know of one agy conversation, in `CONVERSATIONS_FILE`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct Conversation {
+    /// The `initialNumSteps` of the turn's first `PreInvocation`; empty before one was seen.
+    #[serde(default)]
+    turn: String,
+    /// Its `SessionStart` came with the owner's prompt, so it is a main session, never a subagent (`is_subagent`).
+    #[serde(default)]
+    main: bool,
+    at: u64,
+}
+
+trait Aged {
+    fn at(&self) -> u64;
+}
+
+impl Aged for Mark {
+    fn at(&self) -> u64 {
+        self.at
+    }
+}
+
+impl Aged for Conversation {
+    fn at(&self) -> u64 {
+        self.at
+    }
 }
 
 /// A short, stable name for a conversation's prompt: the state files hold no prompt text.
@@ -390,37 +473,75 @@ fn conversation(raw: &Value) -> String {
     text(raw, "conversationId").unwrap_or_default().to_owned()
 }
 
-fn load(path: &Path) -> BTreeMap<String, Mark> {
+fn load<T: serde::de::DeserializeOwned>(path: &Path) -> BTreeMap<String, T> {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default()
 }
 
-fn save(path: &Path, mut marks: BTreeMap<String, Mark>, now: u64) {
-    marks.retain(|_, mark| now.saturating_sub(mark.at) < STATE_KEEP_S);
+fn save<T: Serialize + Aged>(path: &Path, mut marks: BTreeMap<String, T>, now: u64) {
+    marks.retain(|_, mark| now.saturating_sub(mark.at()) < STATE_KEEP_S);
     if let Ok(text) = serde_json::to_string(&marks) {
         let _ = crate::nirvana_seat::write_atomic(path, text.as_bytes());
     }
 }
 
-/// True the first time `verb` sees this prompt of this conversation, and records it. agy fires `PreInvocation`
+/// The `initialNumSteps` of a `PreInvocation` that starts a turn (`invocationNum` 0), as the turn's name.
+pub fn turn_start(raw: &Value) -> Option<String> {
+    (text(raw, "hookEventName") == Some("PreInvocation")
+        && raw.get("invocationNum").and_then(Value::as_u64) == Some(0))
+    .then(|| raw.get("initialNumSteps").and_then(Value::as_u64))
+    .flatten()
+    .map(|steps| steps.to_string())
+}
+
+/// Records what this hook says of its conversation (a turn's start, a main session's start) and returns what is
+/// known: the turn key and whether it is a main session.
+fn note_conversation(state_dir: &Path, raw: &Value, now: u64) -> (String, bool) {
+    let path = state_dir.join(CONVERSATIONS_FILE);
+    let mut known: BTreeMap<String, Conversation> = load(&path);
+    let entry = known.entry(conversation(raw)).or_default();
+    let mut changed = false;
+    if let Some(start) = turn_start(raw) {
+        if entry.turn != start {
+            entry.turn = start;
+            changed = true;
+        }
+    }
+    let with_prompt = text(raw, "lastUserInput").is_some_and(|input| !input.trim().is_empty());
+    if text(raw, "hookEventName") == Some("SessionStart") && with_prompt && !entry.main {
+        entry.main = true;
+        changed = true;
+    }
+    let (turn, main) = (turn_key(&entry.turn, raw), entry.main);
+    if changed {
+        entry.at = now;
+        save(&path, known, now);
+    }
+    (turn, main)
+}
+
+/// The key a turn's notices and asks are kept under: its `PreInvocation`'s name and the prompt's hash.
+fn turn_key(turn: &str, raw: &Value) -> String {
+    format!("{turn}|{}", prompt_key(raw))
+}
+
+/// True the first time `verb` sees this turn of this conversation, and records it. agy fires `PreInvocation`
 /// before every model call (P41a: 5 for one prompt), where Claude fires `UserPromptSubmit` once; a notice repeated
 /// per call would cost a turn's context each time, and `prompt-baseline` would reset the edit budget mid-turn.
-/// Each verb keeps its own mark, since each is its own hook process. The one thing missed: the owner typing the same
-/// prompt twice in one conversation gets no second notice.
-pub fn first_for_prompt(state_dir: &Path, verb: &str, raw: &Value, now: u64) -> bool {
+/// Each verb keeps its own mark, since each is its own hook process.
+pub fn first_for_turn(state_dir: &Path, verb: &str, raw: &Value, turn: &str, now: u64) -> bool {
     let path = state_dir.join(PROMPTS_FILE);
-    let mut marks = load(&path);
+    let mut marks: BTreeMap<String, Mark> = load(&path);
     let key = format!("{verb}|{}", conversation(raw));
-    let prompt = prompt_key(raw);
-    if marks.get(&key).is_some_and(|mark| mark.prompt == prompt) {
+    if marks.get(&key).is_some_and(|mark| mark.prompt == turn) {
         return false;
     }
     marks.insert(
         key,
         Mark {
-            prompt,
+            prompt: turn.to_owned(),
             asks: 0,
             at: now,
         },
@@ -429,28 +550,60 @@ pub fn first_for_prompt(state_dir: &Path, verb: &str, raw: &Value, now: u64) -> 
     true
 }
 
-/// The continues agy has been asked for in this prompt of this conversation. A new prompt starts at 0, as Claude's
+/// The continues agy has been asked for in this turn of this conversation. A new turn starts at 0, as Claude's
 /// `stop_hook_active` is false on the first Stop after an owner prompt.
-pub fn stop_asks(state_dir: &Path, raw: &Value) -> u32 {
-    load(&state_dir.join(ASKS_FILE))
+pub fn stop_asks(state_dir: &Path, raw: &Value, turn: &str) -> u32 {
+    load::<Mark>(&state_dir.join(ASKS_FILE))
         .get(&conversation(raw))
-        .filter(|mark| mark.prompt == prompt_key(raw))
+        .filter(|mark| mark.prompt == turn)
         .map_or(0, |mark| mark.asks)
 }
 
-/// Records one more continue for this prompt.
-pub fn count_ask(state_dir: &Path, raw: &Value, now: u64) {
+/// Records one more continue for this turn.
+pub fn count_ask(state_dir: &Path, raw: &Value, turn: &str, now: u64) {
+    let _lock = lock_state(state_dir);
     let path = state_dir.join(ASKS_FILE);
-    let mut marks = load(&path);
-    let prompt = prompt_key(raw);
+    let mut marks: BTreeMap<String, Mark> = load(&path);
     let mark = marks.entry(conversation(raw)).or_default();
-    if mark.prompt != prompt {
+    if mark.prompt != turn {
         *mark = Mark::default();
-        mark.prompt = prompt;
+        mark.prompt = turn.to_owned();
     }
     mark.asks += 1;
     mark.at = now;
     save(&path, marks, now);
+}
+
+/// How long a hook waits for another hook's hold on the state. agy runs every verb of one event at once (P41c's
+/// `hooks.json` lists three on `PreInvocation`), each a read-modify-write of the same files, and the last rename
+/// would win: a lost prompt mark repeats a notice, a lost ask mark lets the gate ask twice. A hold lasts one small
+/// read and write, so 2 s is long; past it the hook goes on unlocked rather than stall agy's model call.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Holds the OS's lock on `LOCK_FILE` while it lives (`File::try_lock`, as `nirvana_seat`'s lease lock: the OS lets
+/// go when the handle closes, a dead hook included, so nothing goes stale). `None` inside when the wait ran out.
+struct StateLock(#[allow(dead_code)] Option<std::fs::File>);
+
+fn lock_state(state_dir: &Path) -> StateLock {
+    let _ = std::fs::create_dir_all(state_dir);
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(state_dir.join(LOCK_FILE))
+    else {
+        return StateLock(None);
+    };
+    let deadline = std::time::Instant::now() + LOCK_WAIT;
+    loop {
+        if file.try_lock().is_ok() {
+            return StateLock(Some(file));
+        }
+        if std::time::Instant::now() >= deadline {
+            return StateLock(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
 }
 
 // ---- one hook, both hosts ----
@@ -465,6 +618,8 @@ pub struct HookIn {
     pub skip: bool,
     raw: Value,
     asks: u32,
+    /// `turn_key` of this hook's turn, empty on Claude and outside the orchestrator.
+    turn: String,
     state_dir: PathBuf,
 }
 
@@ -481,23 +636,38 @@ pub fn read_stdin_for(verb: &str) -> HookIn {
     use std::io::Read;
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
-    let hin = read_for(
+    read_or_exit(
         host(),
         verb,
         &input,
         hooks_home().as_deref(),
         &state_dir(),
         crate::nirvana_run::now(),
-    );
-    if outside_orchestrator(
-        hin.host,
         std::env::var(crate::nirvana_launch::ORCHESTRATOR_ENV)
             .ok()
             .as_deref(),
-    ) {
-        hin.answer_skipped();
+    )
+}
+
+/// `read_stdin_for` with its inputs passed in, so a test can run it in a child process
+/// (`an_agy_hook_outside_the_orchestrator_exits_before_any_state`). Outside the orchestrator it prints the skipped
+/// answer and ends the process before `read_for`, so the owner's own agy never reads or writes the hook state (the
+/// Sonnet review: the first build wrote `agy-prompts.json` on every prompt of every agy session, then skipped). The
+/// exit, not `skip`, is the guard: several verbs (`record-session`, `log-usage`) do their work without reading `skip`.
+pub fn read_or_exit(
+    host: Host,
+    verb: &str,
+    input: &str,
+    hooks_home: Option<&Path>,
+    state_dir: &Path,
+    now: u64,
+    marker: Option<&str>,
+) -> HookIn {
+    if outside_orchestrator(host, marker) {
+        unread(host, input).answer_skipped();
         std::process::exit(0);
     }
+    let hin = read_for(host, verb, input, hooks_home, state_dir, now);
     if hin.host == Host::Agy {
         if let Some(cwd) = hin
             .hook
@@ -520,6 +690,21 @@ pub fn outside_orchestrator(host: Host, marker: Option<&str>) -> bool {
     host == Host::Agy && marker != Some("1")
 }
 
+/// A hook read for its event alone, skipped, with no state touched: what a hook outside the orchestrator answers.
+pub fn unread(host: Host, input: &str) -> HookIn {
+    let raw: Value = serde_json::from_str(input).unwrap_or(Value::Null);
+    HookIn {
+        host,
+        event: text(&raw, "hookEventName").and_then(agy_event),
+        hook: Value::Null,
+        skip: true,
+        raw: Value::Null,
+        asks: 0,
+        turn: String::new(),
+        state_dir: PathBuf::new(),
+    }
+}
+
 /// One hook's input from `input`. On Claude `hook` is the input as it stands (or `null`, as the verbs read a bad
 /// one) and nothing is skipped. Pure but for the agy state files under `state_dir`.
 pub fn read_for(
@@ -539,24 +724,28 @@ pub fn read_for(
             skip: false,
             raw: Value::Null,
             asks: 0,
+            turn: String::new(),
             state_dir: state_dir.to_path_buf(),
         };
     }
     let raw = parsed;
     let event = text(&raw, "hookEventName").and_then(agy_event);
-    let subagent = is_subagent(&raw);
+    // One hold for the conversation record, the prompt mark and the ask count: the verbs of one event run at once.
+    let lock = lock_state(state_dir);
+    let (turn, main_session) = note_conversation(state_dir, &raw, now);
+    let subagent = is_subagent(&raw, main_session);
     let asks = if event == Some(Event::Stop) {
-        stop_asks(state_dir, &raw)
+        stop_asks(state_dir, &raw, &turn)
     } else {
         0
     };
     let cwd = session_cwd(&raw, hooks_home);
-    let hook = to_claude(&raw, cwd.as_deref(), asks > 0);
+    let hook = to_claude(&raw, cwd.as_deref(), asks > 0, subagent);
     let skip = match event {
         // Claude fires no SessionStart, UserPromptSubmit or Stop for a subagent (it fires SubagentStop, which has
         // no agy event, plan 41 §5.1).
         Some(Event::SessionStart | Event::Stop) => subagent,
-        Some(Event::UserPromptSubmit) => subagent || !first_for_prompt(state_dir, verb, &raw, now),
+        Some(Event::UserPromptSubmit) => subagent || !first_for_turn(state_dir, verb, &raw, &turn, now),
         Some(Event::PreToolUse | Event::PostToolUse) => verb_tools(verb).is_some_and(|tools| {
             !hook
                 .get("tool_name")
@@ -565,6 +754,7 @@ pub fn read_for(
         }),
         None => true,
     };
+    drop(lock);
     HookIn {
         host,
         event,
@@ -572,13 +762,14 @@ pub fn read_for(
         skip,
         raw,
         asks,
+        turn,
         state_dir: state_dir.to_path_buf(),
     }
 }
 
 impl HookIn {
     /// What to print for the verb's Claude output `out`: `out` itself on Claude, agy's JSON on agy. A Stop's continue
-    /// is counted here, so the next Stop of the prompt reads `stop_hook_active`.
+    /// is counted here, so the next Stop of the turn reads `stop_hook_active`.
     pub fn answer_text(&self, out: &str, now: u64) -> String {
         if self.host == Host::Claude {
             return out.to_owned();
@@ -586,7 +777,7 @@ impl HookIn {
         let out = if self.skip { "" } else { out };
         let (value, continues) = agy_output(self.event, out, self.asks);
         if continues {
-            count_ask(&self.state_dir, &self.raw, now);
+            count_ask(&self.state_dir, &self.raw, &self.turn, now);
         }
         format!("{value}\n")
     }

@@ -111,7 +111,8 @@ fn agy_tool_names_map_to_the_claude_tools_the_guards_match() {
 
 #[test]
 fn an_agy_tool_call_reads_as_claudes() {
-    let hook = to_claude(&fixture("pre_tool_edit_file"), Some(Path::new("C:/work/proj")), false);
+    let edit = fixture("pre_tool_edit_file");
+    let hook = to_claude(&edit, Some(Path::new("C:/work/proj")), false, is_subagent(&edit, false));
     assert_eq!(hook["hook_event_name"], "PreToolUse");
     assert_eq!(hook["session_id"], "eeb6f04f-ce65-4339-a3e5-7a7c061cd0b0");
     assert_eq!(hook["tool_name"], "Edit");
@@ -120,17 +121,17 @@ fn an_agy_tool_call_reads_as_claudes() {
     assert_eq!(hook["tool_input"]["new_string"], "PEAR");
     assert!(hook.get("agent_id").is_none(), "the parent's call is the orchestrator's");
 
-    let write = to_claude(&fixture("pre_tool_write_file"), None, false);
+    let write = to_claude(&fixture("pre_tool_write_file"), None, false, false);
     assert_eq!(write["tool_name"], "Write");
     assert_eq!(write["tool_input"]["content"], "hi");
-    let read = to_claude(&fixture("pre_tool_read_file"), None, false);
+    let read = to_claude(&fixture("pre_tool_read_file"), None, false, false);
     assert_eq!(read["tool_name"], "Read");
     assert_eq!(read["tool_input"]["file_path"], r"C:\work\proj\notes.txt");
-    let spawn = to_claude(&fixture("pre_tool_invoke_subagent"), None, false);
+    let spawn = to_claude(&fixture("pre_tool_invoke_subagent"), None, false, false);
     assert_eq!(spawn["tool_name"], "Agent");
     assert_eq!(spawn["tool_input"]["subagent_type"], "research");
     assert!(spawn["tool_input"]["prompt"].as_str().unwrap().contains("notes.txt"));
-    let bash = to_claude(&fixture("post_tool_run_command"), None, false);
+    let bash = to_claude(&fixture("post_tool_run_command"), None, false, false);
     assert_eq!(bash["tool_name"], "Bash");
     assert_eq!(bash["tool_input"]["command"], "Get-ChildItem");
 }
@@ -255,7 +256,7 @@ fn the_stop_gate_asks_agy_once_per_prompt_and_never_trusts_continuation_active()
     let second = agy("stop", &again, &state.0);
     assert_eq!(second.hook["stop_hook_active"], true);
     assert_eq!(answer(&second, BLOCK), json!({}), "the cap: no second continue for one prompt");
-    assert_eq!(stop_asks(&state.0, &again), AGY_STOP_ASKS_PER_PROMPT);
+    assert_eq!(stop_asks(&state.0, &again, &second.turn), AGY_STOP_ASKS_PER_PROMPT);
 
     // A new owner prompt starts the count again, as Claude's stop_hook_active is false after one.
     let mut next = fixture("stop_after_continue");
@@ -343,12 +344,159 @@ fn an_agy_hook_outside_the_orchestrator_does_nothing() {
     assert!(outside_orchestrator(Host::Agy, Some("0")));
     assert!(!outside_orchestrator(Host::Agy, Some("1")));
     assert!(!outside_orchestrator(Host::Claude, None));
-    let dir = Scratch::new("outside");
     let pre = json!({"hookEventName": "PreToolUse", "conversationId": "c1", "lastUserInput": "go",
         "toolCall": {"name": "write_file", "args": {"Path": "a.txt"}}});
-    let hin = read_for(Host::Agy, "guard-edit", &pre.to_string(), None, &dir.0, 100);
+    let hin = unread(Host::Agy, &pre.to_string());
+    assert!(hin.skip);
     assert_eq!(hin.skipped_text().trim(), r#"{"decision":"allow"}"#);
     let stop = json!({"hookEventName": "Stop", "conversationId": "c1", "lastUserInput": "go"});
-    let hin = read_for(Host::Agy, "stop", &stop.to_string(), None, &dir.0, 100);
-    assert_eq!(hin.skipped_text().trim(), "{}");
+    assert_eq!(unread(Host::Agy, &stop.to_string()).skipped_text().trim(), "{}");
+}
+
+const OUTSIDE_CHILD: &str = "NIRVANA_HOOKHOST_OUTSIDE_CHILD";
+const RETURNED: &str = "read_or_exit-returned";
+
+/// Not a test of its own: `an_agy_hook_outside_the_orchestrator_exits_before_any_state` runs it in a child process
+/// with `OUTSIDE_CHILD` naming a state folder. Without the variable it does nothing.
+#[test]
+fn outside_child() {
+    let Ok(dir) = std::env::var(OUTSIDE_CHILD) else {
+        return;
+    };
+    let pre = json!({"hookEventName": "PreToolUse", "conversationId": "c1", "lastUserInput": "go",
+        "toolCall": {"name": "write_file", "args": {"Path": "a.txt"}}});
+    let _ = read_or_exit(Host::Agy, "guard-edit", &pre.to_string(), None, Path::new(&dir), 100, None);
+    println!("{RETURNED}");
+}
+
+/// Plan 41 P41c, Sonnet review items 4 and 5: outside the orchestrator a hook prints its skipped answer and ends
+/// before it reads or writes any state; inside, it reads on. The owner's own agy runs every installed hook.
+#[test]
+fn an_agy_hook_outside_the_orchestrator_exits_before_any_state() {
+    let dir = Scratch::new("outside-child");
+    let out = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", "nirvana_hookhost::tests::outside_child", "--nocapture", "--test-threads=1"])
+        .env(OUTSIDE_CHILD, &dir.0)
+        .env_remove(crate::nirvana_launch::ORCHESTRATOR_ENV)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("child runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(stdout.contains(r#"{"decision":"allow"}"#), "the skipped answer is printed: {stdout}");
+    assert!(!stdout.contains(RETURNED), "the hook ended, so no verb ran: {stdout}");
+    let left: Vec<_> = std::fs::read_dir(&dir.0).unwrap().flatten().map(|e| e.file_name()).collect();
+    assert!(left.is_empty(), "no state was touched: {left:?}");
+
+    // With the orchestrator's marker the same hook reads on, and keeps its state.
+    let pre = json!({"hookEventName": "PreToolUse", "conversationId": "c1", "lastUserInput": "go",
+        "toolCall": {"name": "write_file", "args": {"Path": "a.txt"}}});
+    let hin = read_or_exit(Host::Agy, "guard-edit", &pre.to_string(), None, &dir.0, 100, Some("1"));
+    assert!(!hin.skip);
+    assert_eq!(hin.hook["tool_name"], "Write");
+    assert!(dir.0.join(LOCK_FILE).exists());
+}
+
+fn turn_call(prompt: &str, invocation: u64, steps: u64) -> Value {
+    let mut raw = fixture("pre_invocation_first");
+    raw["lastUserInput"] = json!(prompt);
+    raw["invocationNum"] = json!(invocation);
+    raw["initialNumSteps"] = json!(steps);
+    raw
+}
+
+fn turn_stop(prompt: &str) -> Value {
+    let mut raw = fixture("stop_first");
+    raw["lastUserInput"] = json!(prompt);
+    raw
+}
+
+/// Sonnet review item 1: the owner typing the same prompt twice in one conversation is two turns. Each gets its
+/// notice and its one continue; a Stop hook's continue stays in its turn (P41a: `invocationNum` 7 then 8, not 0).
+#[test]
+fn a_repeated_owner_prompt_is_a_new_turn_with_its_own_notice_and_ask() {
+    let state = Scratch::new("turns");
+    // Turn 1: "yes", two model calls, a Stop that continues, the continuation's call, the capped Stop.
+    assert!(!agy("board notice", &turn_call("yes", 0, 1), &state.0).skip);
+    assert!(agy("board notice", &turn_call("yes", 1, 3), &state.0).skip);
+    let first = agy("stop", &turn_stop("yes"), &state.0);
+    assert_eq!(answer(&first, BLOCK)["decision"], "continue");
+    assert!(agy("board notice", &turn_call("yes", 2, 5), &state.0).skip, "a continue is not a turn");
+    let capped = agy("stop", &turn_stop("yes"), &state.0);
+    assert_eq!(capped.hook["stop_hook_active"], true);
+    assert_eq!(answer(&capped, BLOCK), json!({}));
+    // Turn 2: the owner types "yes" again.
+    assert!(!agy("board notice", &turn_call("yes", 0, 7), &state.0).skip, "the second yes gets its notice");
+    assert!(!agy("prompt-baseline", &turn_call("yes", 0, 7), &state.0).skip);
+    let again = agy("stop", &turn_stop("yes"), &state.0);
+    assert_eq!(again.hook["stop_hook_active"], false, "the gate is not spent by the first yes");
+    assert_eq!(answer(&again, BLOCK)["decision"], "continue");
+    let text = std::fs::read_to_string(state.0.join(CONVERSATIONS_FILE)).unwrap();
+    assert!(!text.contains("yes"), "the state holds no prompt text: {text}");
+}
+
+/// Sonnet review item 8: an orchestrator Stop with an empty `lastUserInput` keeps the gate, once its
+/// `SessionStart` came with the owner's prompt. A subagent (no such start) is still skipped, and an `agent_id`
+/// skips whatever the record says.
+#[test]
+fn a_main_session_with_an_empty_input_keeps_the_gate() {
+    let state = Scratch::new("main");
+    assert!(!agy("digest", &fixture("session_start"), &state.0).skip);
+    let mut stop = fixture("stop_first");
+    stop["lastUserInput"] = json!("");
+    let hin = agy("stop", &stop, &state.0);
+    assert!(!hin.skip, "the orchestrator's own Stop runs the gate");
+    assert!(hin.hook.get("agent_id").is_none());
+    assert_eq!(answer(&hin, BLOCK)["decision"], "continue");
+    assert!(agy("stop", &fixture("subagent_stop"), &state.0).skip);
+    let mut tagged = fixture("stop_first");
+    tagged["agentId"] = json!("sub-1");
+    assert!(agy("stop", &tagged, &state.0).skip);
+}
+
+/// Sonnet review item 5: every verb of one `PreInvocation` runs at once and each writes the prompt marks. Under the
+/// state lock none of their marks is lost.
+#[test]
+fn the_verbs_of_one_event_lose_no_mark() {
+    let state = Scratch::new("lock");
+    let verbs: Vec<String> = (0..12).map(|i| format!("verb-{i}")).collect();
+    for round in 0..8u64 {
+        let raw = turn_call("go on", 0, 1 + round * 2);
+        std::thread::scope(|scope| {
+            for verb in &verbs {
+                let (raw, dir) = (&raw, &state.0);
+                scope.spawn(move || assert!(!agy(verb, raw, dir).skip, "{verb}"));
+            }
+        });
+        let marks: BTreeMap<String, Mark> = load(&state.0.join(PROMPTS_FILE));
+        let turn = turn_key(&(1 + round * 2).to_string(), &raw);
+        for verb in &verbs {
+            let key = format!("{verb}|{}", conversation(&raw));
+            assert_eq!(marks.get(&key).map(|m| m.prompt.as_str()), Some(turn.as_str()), "round {round}: {key}");
+        }
+    }
+}
+
+/// Sonnet review item 6: the adapter's tool table is `nirvana/agy_tool_names.json`, the file the agy plugin's
+/// matchers are tested against (`test_agy_plugin.py`), so neither side gains or loses a name alone.
+#[test]
+fn the_tool_table_is_the_shared_fixture() {
+    let shared: BTreeMap<String, Value> =
+        serde_json::from_str(include_str!("../../nirvana/agy_tool_names.json")).expect("fixture parses");
+    let mut want: Vec<(String, String)> = shared
+        .iter()
+        .filter(|(tool, _)| !tool.starts_with('_'))
+        .flat_map(|(tool, names)| {
+            names
+                .as_array()
+                .expect("a list of names")
+                .iter()
+                .map(move |name| (name.as_str().expect("a name").to_owned(), tool.clone()))
+        })
+        .collect();
+    want.sort();
+    let mut have: Vec<(String, String)> =
+        AGY_TOOLS.iter().map(|(name, tool)| ((*name).to_owned(), (*tool).to_owned())).collect();
+    have.sort();
+    assert_eq!(have, want);
 }
