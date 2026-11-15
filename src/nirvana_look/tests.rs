@@ -1214,3 +1214,21 @@ fn c40c_a_long_pdf_is_refused_with_the_poppler_fix_first() {
     assert_eq!(outcome.pages, Some(12));
     assert!(no_live_lease());
 }
+
+/// Plan 41 P41c, Sonnet review: a look's command drops the orchestrator's marker, so a look run on agy never runs
+/// the orchestrator's agy hooks.
+#[test]
+fn a_look_starts_without_the_orchestrators_marker() {
+    for cli in ["agy", "claude"] {
+        let command = launch_command(cli, &["-p".to_owned()], Path::new("."), cli);
+        let removed: Vec<String> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect();
+        for key in crate::nirvana_worker::ENV_REMOVED {
+            assert!(removed.iter().any(|k| k == key), "{cli}: {key} not removed: {removed:?}");
+        }
+        assert!(removed.iter().any(|k| k == crate::nirvana_launch::ORCHESTRATOR_ENV), "{cli}");
+    }
+}

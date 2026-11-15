@@ -218,7 +218,10 @@ pub const CLAUDE_ENV: [(&str, &str); 1] = [("CLAUDE_CODE_DISABLE_BACKGROUND_TASK
 /// of the orchestrator's Claude (the same list herdr's `pane.rs` removes from a new pane). Nor Nirvana Claude's
 /// `CLAUDE_CODE_SUBAGENT_MODEL` (plan 40a review a, N1): its launch settings put it in the orchestrator's env, and a
 /// worker's `herdr seat run` would pass it on, so a seated worker's own subagents keep Claude Code's default.
-pub const ENV_REMOVED: [&str; 7] = [
+pub const ENV_REMOVED: [&str; 8] = [
+    // Plan 41 P41c: a worker seated from the orchestrator's shell inherited `NIRVANA_ORCHESTRATOR=1`; with Nirvana's
+    // agy plugin installed for every agy session, an agy worker carrying it would run the orchestrator's gate.
+    crate::nirvana_launch::ORCHESTRATOR_ENV,
     "CODEX_THREAD_ID",
     "OMPCODE",
     "CLAUDECODE",
@@ -1327,24 +1330,11 @@ thread_local! {
     pub(crate) static TEST_ARGV: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Starts the worker in its job and reads its stream until it ends, stops, stalls or runs out.
-fn run_attempt(
-    journal: &Journal,
-    stream_path: &Path,
-    seated: &Seated,
-    attempt: u32,
-    argv: &[String],
-    stop: &Path,
-    pane: Option<&str>,
-    out: &mut dyn Write,
-) -> std::io::Result<(AttemptEnd, Stream)> {
-    #[cfg(test)]
-    let stand_in = TEST_COMMAND.with_borrow(Clone::clone);
-    #[cfg(test)]
-    TEST_ARGV.with_borrow_mut(|slot| *slot = Some(argv.to_vec()));
-    #[cfg(not(test))]
-    let stand_in: Option<Vec<String>> = None;
-    let spawned = stand_in.as_deref().unwrap_or(argv);
+/// The command one attempt starts: `spawned` (the argv, or a test's stand-in) in the order's folder, with
+/// `ENV_REMOVED` stripped. Its own function so a test reads the env of the command `run_attempt` really builds
+/// (`an_attempt_starts_without_the_orchestrators_marker`): the Sonnet review of P41b found the test checked only the
+/// list, and a spawn that stopped applying it would have let a seated agy worker run the orchestrator's hooks.
+pub(crate) fn attempt_command(spawned: &[String], seated: &Seated, argv: &[String]) -> std::process::Command {
     let mut command = std::process::Command::new(&spawned[0]);
     command
         .args(&spawned[1..])
@@ -1365,6 +1355,28 @@ fn run_attempt(
     for (key, value) in crate::nirvana_bladebro::worker_env(argv) {
         command.env(key, value);
     }
+    command
+}
+
+/// Starts the worker in its job and reads its stream until it ends, stops, stalls or runs out.
+fn run_attempt(
+    journal: &Journal,
+    stream_path: &Path,
+    seated: &Seated,
+    attempt: u32,
+    argv: &[String],
+    stop: &Path,
+    pane: Option<&str>,
+    out: &mut dyn Write,
+) -> std::io::Result<(AttemptEnd, Stream)> {
+    #[cfg(test)]
+    let stand_in = TEST_COMMAND.with_borrow(Clone::clone);
+    #[cfg(test)]
+    TEST_ARGV.with_borrow_mut(|slot| *slot = Some(argv.to_vec()));
+    #[cfg(not(test))]
+    let stand_in: Option<Vec<String>> = None;
+    let spawned = stand_in.as_deref().unwrap_or(argv);
+    let mut command = attempt_command(spawned, seated, argv);
     // Suspended until it is in the job, so nothing it starts escapes the job (`job::spawn`).
     let (job, mut child) = job::spawn(&mut command)?;
     journal.append(

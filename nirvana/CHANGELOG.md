@@ -3,6 +3,28 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.74.0: herdr's hooks run under agy, scoped to the orchestrator
+
+- **Changed:** every `herdr nirvana <verb>` hook command takes a trailing `--host agy`. herdr reads agy 1.5.9's hook
+  events and answers in agy's shape. A `block` becomes `decision: continue`. An agy hook outside the orchestrator,
+  where `NIRVANA_ORCHESTRATOR` is not `1`, exits before it reads or writes any state. Seated workers and looks drop
+  that variable, so their agy sessions do nothing in herdr's hooks. A turn is keyed by `invocationNum` 0 and
+  `initialNumSteps`, so a repeated prompt gets its own Stop ask. The Stop gate asks at most once per turn. Checks on
+  the owner's words refuse on agy. Hook state is written under a 2 s file lock. One tool table,
+  `nirvana/agy_tool_names.json`, maps agy's tool names to Claude Code's.
+- **Because:** the owner, 2026-11-14: "Is it possible for Nirvana to swap the Orchistrator seat during mid work as our
+  limits get constrained to Gemini." Plan 41 ledger L1: "swap the Orchistrator seat during mid work as our limits get
+  constrained". An orchestrator on agy needs the same gates as one on Claude. The dispatcher took exactly one
+  argument, so agy's hooks exited 2. agy's `continuationActive` stayed false through every Stop: the P41a probe's
+  hook asked 10 times in a row.
+- **Measured:** `nirvana_hookhost` 23, `nirvana_claude` 81, `nirvana_launch` 24, `nirvana_worker` 85 and
+  `nirvana_look` 27 tests pass. Each control in `p77_agyhooks.py` turns its test red. Not run in a live agy session.
+  Known gaps: a subagent that wakes the parent counts as a new turn. agy ignores `PostToolUse`, so on agy only the
+  per-call edit cap applies, not the cumulative budget. The agy launch does not set `NIRVANA_ORCHESTRATOR` yet; that
+  is P41d.
+- **If you remove this:** an orchestrator moved to agy runs with no completion gate and no edit cap, and
+  every agy session the plugin reaches writes into herdr's state.
+
 ## alpha 0.73.2: the agents panel draws an orchestrator with a long run
 
 - **Changed:** in the agents panel, a run keeps all its live orders. Past 4 ended orders it shows the 3 most recent

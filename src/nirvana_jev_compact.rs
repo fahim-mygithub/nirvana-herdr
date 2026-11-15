@@ -533,7 +533,18 @@ fn read_for_hook(transcript: &Path, lines: [u64; 3]) -> (Vec<String>, Option<u64
 /// nothing. Never fails the turn: every problem prints nothing. The CLI reads stdin first, since `--plugin` (plan 12
 /// O4b) looks at the input before this runs.
 pub fn hook_input(input: &str) {
-    let hook: Value = serde_json::from_str(input).unwrap_or(Value::Null);
+    // Plan 41 §5.1: under `--host agy` Jev is not asked. It judges a context from Claude's usage lines, and an agy
+    // transcript has none (P41a's `transcript_full.jsonl`: `input_tokens` on `PLANNER_RESPONSE` steps, no `usage`);
+    // its answer is a Stop `systemMessage`, which has no agy form. agy is answered `{}`.
+    if crate::nirvana_hookhost::host() == crate::nirvana_hookhost::Host::Agy {
+        println!("{{}}");
+        return;
+    }
+    hook_value(&serde_json::from_str(input).unwrap_or(Value::Null));
+}
+
+/// `hook_input` on Claude Code's input, parsed.
+fn hook_value(hook: &Value) {
     if hook.get("agent_id").is_some_and(|a| !a.is_null()) {
         return; // a subagent's context is not the one paid for turn after turn
     }

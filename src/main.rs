@@ -44,6 +44,7 @@ mod nirvana_fresh;
 mod nirvana_gate;
 pub mod nirvana_git;
 mod nirvana_gui_tools;
+mod nirvana_hookhost;
 mod nirvana_idle_compact;
 mod nirvana_idle_review;
 mod nirvana_jev;

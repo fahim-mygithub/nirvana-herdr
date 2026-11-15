@@ -1,0 +1,18 @@
+{
+ "artifactDirectoryPath": "C:/Users/owner/.gemini/antigravity-cli/brain/cb54f32e-a188-47e9-9ff5-a7d565783964",
+ "continuationActive": false,
+ "conversationId": "cb54f32e-a188-47e9-9ff5-a7d565783964",
+ "cwd": "C:\\nirvana\\agy",
+ "error": "",
+ "executionNum": 0,
+ "fullyIdle": true,
+ "hookEventName": "Stop",
+ "lastUserInput": "",
+ "modelName": "gemini-4-carbon-medium",
+ "terminationReason": "NO_TOOL_CALL",
+ "transcriptPath": "C:/Users/owner/.gemini/antigravity-cli/brain/cb54f32e-a188-47e9-9ff5-a7d565783964/.system_generated/logs/transcript_full.jsonl",
+ "workspacePaths": [
+  "C:/nirvana/agy",
+  "C:/work/proj"
+ ]
+}

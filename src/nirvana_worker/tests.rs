@@ -107,6 +107,34 @@ fn a_worker_is_never_started_through_a_shell() {
     }
     assert!(argv(&spec("codex", "m", None)).is_err());
     assert!(ENV_REMOVED.contains(&"CLAUDECODE"));
+    // Plan 41 P41c: a worker never carries the orchestrator's mark.
+    assert!(ENV_REMOVED.contains(&"NIRVANA_ORCHESTRATOR"));
+}
+
+/// The env names a command removes: `get_envs` lists an `env_remove` as the name with no value.
+fn removed_env(command: &std::process::Command) -> Vec<String> {
+    command
+        .get_envs()
+        .filter(|(_, value)| value.is_none())
+        .map(|(key, _)| key.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Plan 41 P41c, Sonnet review: the command an attempt starts drops the orchestrator's marker, for every CLI, so a
+/// seated agy worker never runs the orchestrator's agy hooks. `a_worker_is_never_started_through_a_shell` checks the
+/// list; this checks the spawn applies it.
+#[test]
+fn an_attempt_starts_without_the_orchestrators_marker() {
+    for cli in ["agy", "claude"] {
+        let mut seat = seated("o-marker");
+        seat.cli = cli.into();
+        let argv = vec![cli.to_owned(), "-p".to_owned()];
+        let removed = removed_env(&attempt_command(&argv, &seat, &argv));
+        for key in ENV_REMOVED {
+            assert!(removed.iter().any(|k| k == key), "{cli}: {key} not removed: {removed:?}");
+        }
+        assert!(removed.iter().any(|k| k == crate::nirvana_launch::ORCHESTRATOR_ENV), "{cli}");
+    }
 }
 
 // ---- the Work Report ----

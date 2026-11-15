@@ -944,11 +944,10 @@ pub(crate) fn drain(
     receive
 }
 
-/// Starts `program` in its job in `cwd` and waits up to `timeout`, then kills the whole job.
-pub fn launch(program: &[String], cwd: &Path, cli: &str, timeout: Duration) -> Result<End, String> {
-    let (first, rest) = program
-        .split_first()
-        .ok_or_else(|| "nothing to start".to_owned())?;
+/// The command `launch` starts. Its own function so a test reads its env
+/// (`a_look_starts_without_the_orchestrators_marker`): a look's agy run in the orchestrator's env would run the
+/// orchestrator's agy hooks (plan 41 P41c scope; the Sonnet review found only the list tested).
+pub(crate) fn launch_command(first: &str, rest: &[String], cwd: &Path, cli: &str) -> Command {
     let mut command = Command::new(first);
     command
         .args(rest)
@@ -965,6 +964,15 @@ pub fn launch(program: &[String], cwd: &Path, cli: &str, timeout: Duration) -> R
             command.env(key, value);
         }
     }
+    command
+}
+
+/// Starts `program` in its job in `cwd` and waits up to `timeout`, then kills the whole job.
+pub fn launch(program: &[String], cwd: &Path, cli: &str, timeout: Duration) -> Result<End, String> {
+    let (first, rest) = program
+        .split_first()
+        .ok_or_else(|| "nothing to start".to_owned())?;
+    let mut command = launch_command(first, rest, cwd, cli);
     crate::platform::configure_background_command(&mut command);
     let job = job::Job::new().map_err(|err| format!("no job object: {err}"))?;
     let mut child = command
