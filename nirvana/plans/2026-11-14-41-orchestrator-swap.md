@@ -113,8 +113,10 @@ here too.
 ### 5.2 An agy plugin built from `nirvana/claude`
 
 As built in P41c. `install.py` builds `<home>/nirvana/agy/nirvana`, a native agy plugin: `plugin.json` (name `nirvana`,
-the Nirvana version), a root `hooks.json` in agy's named-hook format, `skills/`, `agents/` and `mcp_config.json` with
-bladebro. `agy plugin validate --strict` gates it, then `agy plugin install` installs it into agy's config (R1 (b)).
+the Nirvana version), a root `hooks.json` in agy's named-hook format, `skills/` and `agents/`. It ships no MCP
+server: agy loads an installed plugin into every session, and bladebro there would share one home across the
+owner's agy and seated workers (decision 0043). P41d attaches bladebro at the orchestrator's launch through an
+`--add-dir` folder (0.75.0 review fix). `agy plugin validate --strict` gates it, then `agy plugin install` installs it into agy's config (R1 (b)).
 
 The installed plugin reaches every agy session on the machine, so it is scoped twice:
 
