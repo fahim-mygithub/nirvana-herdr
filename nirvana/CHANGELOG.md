@@ -3,6 +3,23 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.75.0: the install builds and installs a native agy plugin
+
+- **Changed:** `install.py` builds a native agy plugin at `<home>/nirvana/agy/nirvana`. It holds `plugin.json`,
+  `hooks.json`, the skills, and a `nirvana` agent whose body is ROLE.md. `agy plugin validate --strict` gates it, then
+  `agy plugin install` installs it. Any agy failure prints one line and the rest of the install goes on. The plugin
+  holds no MCP server. The hook matchers cover every name in `nirvana/agy_tool_names.json`.
+- **Because:** plan 41 ledger L2: "Can the full orchistrator seat get passed off?" R1 was first ruled as a folder
+  passed with `--add-dir`. P41a found that interactive `agy -i` loads no hooks from such a folder. The owner, asked
+  again: "Go with recomended even tho its called gemini the actual agent is agy". An installed plugin reaches every
+  agy session on the machine. So the role is the `nirvana` agent's body, read only with `--agent nirvana`, and the
+  hooks act only in the orchestrator, as 0.74.0 built. An MCP server in the plugin would put bladebro in every agy
+  session. P41d attaches it per launch with `--add-dir` instead.
+- **Measured:** 134 Python tests pass in `test_agy_plugin` and `test_scripts`. `test_windows_shell` passes. The 46
+  controls in `p78_agyplugin.py` all turn their tests red. The skill listings add about 2 KB to every agy session.
+  The agent body, about 10 KB, loads only with `--agent nirvana`. No test runs agy itself. Not run in a live install.
+- **If you remove this:** an orchestrator moved to agy has none of Nirvana's hooks, skills or role.
+
 ## alpha 0.74.0: herdr's hooks run under agy, scoped to the orchestrator
 
 - **Changed:** every `herdr nirvana <verb>` hook command takes a trailing `--host agy`. herdr reads agy 1.5.9's hook
