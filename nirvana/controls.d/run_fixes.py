@@ -124,8 +124,8 @@ CONTROLS = (
     Control(
         'p24_send_back_cap_exempt',
         'src/nirvana_seat.rs',
-        '        if !request.inherited_override && world.overrides_used',
-        '        if true && world.overrides_used',
+        '            && !request.inherited_override\n            && world.overrides_used',
+        '            && true\n            && world.overrides_used',
         'send_back_inherits_override_and_does_not_count_against_run_overrides',
         'rust',
     ),

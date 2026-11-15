@@ -3,6 +3,25 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.78.0: SOTA honours any override and drops the token rules
+
+- **Changed:** in SOTA the seat picker drops every rule that saves tokens or limits the orchestrator's routing. There
+  is no per-run override cap, though overrides are still counted. An override may take a seat outside the class's
+  list, past `only_with`, and past decision 0017's family exclusion. The orchestrator's 15% reserve, the floor's 5%
+  margin and the effort step-down are off for every pick. Facts still refuse: an unknown effort, no such seat, a seat
+  the owner turned off, a CLI not signed in, a missing capability, a claude-only order, the order's profile, a window
+  at 100%, and an order already booked. Fable's own-window checks stay, because past its week `claude -p` bills usage
+  credits, which is money, not subscription tokens. Outside SOTA the cap refusal now says SOTA lifts it.
+- **Because:** the owner, 2026-11-15: "Make a change to Nirvana if SOTA is running ignore any rules and allow full
+  overide. I am actively making the choie to burn through token If I leave it on SOTA." In run `ia1` the orchestrator
+  hit the override cap and twice tried to raise it by editing seats.toml.
+- **Measured:** hypothesis until a real SOTA run uses it. `nirvana_seat` passes 113 tests and `nirvana_jev_roles` 20.
+  The 15 `p81_sota` controls and the 6 retargeted seat controls each turn their test red. Two older tests that pinned
+  the reserve and floor in SOTA now pin the new rule. Safety gates outside the seat picker are unchanged.
+- **If you remove this:** SOTA refuses the fourth override in a run, refuses seats outside the class's list, and skips
+  max seats at the 15% reserve, so the owner's choice to spend still saves tokens. With the reserve lifted, workers
+  can now drain max's 5 h window to 0%, including the orchestrator's own share.
+
 ## alpha 0.77.0: a Questions record and `herdr ask`
 
 - **Changed:** `herdr ask add|answer|withdraw|list` keeps `<project>/.nirvana/questions.jsonl`, plan 42 P42a. It is an

@@ -1701,7 +1701,11 @@ fn seat_once(
 ) -> Result<Pick, NoSeat> {
     match evaluate(table, world, request, class, false) {
         Ok(pick) => Ok(pick),
-        Err(first) if first.priced && request.override_seat.is_none() => {
+        // Plan 81: SOTA never steps an effort down to fit a window. The owner, 2026-11-15: "I am actively making the
+        // choie to burn through token If I leave it on SOTA."
+        Err(first)
+            if first.priced && request.override_seat.is_none() && request.mode != Mode::Sota =>
+        {
             match evaluate(table, world, request, class, true) {
                 Ok(pick) => Ok(pick),
                 Err(_) => Err(first.no_seat),
@@ -1786,10 +1790,11 @@ fn evaluate(
         }
     }
 
-    // Filter 7: the orchestrator's reserve (§3).
+    // Filter 7: the orchestrator's reserve (§3). Plan 81: SOTA lifts it, for the rule and an override alike; a window
+    // the provider would refuse is still skipped by the floor's SOTA arm in `candidate`.
     for cand in candidates.iter_mut().filter(|cand| cand.skip.is_none()) {
         let seat = &table.seats[cand.index];
-        if seat.pool != constants.reserve_pool {
+        if request.mode == Mode::Sota || seat.pool != constants.reserve_pool {
             continue;
         }
         let Some(window) = cand
@@ -1872,10 +1877,15 @@ fn evaluate(
             None => override_target.trim(),
         };
         // Review a, N9: one condition, no longer nested under a clippy allow that only kept an old control's find text.
-        if !request.inherited_override && world.overrides_used >= constants.overrides_per_run {
+        // Plan 81: SOTA lifts the cap; the override is still counted and recorded by `book_pick`, so the owner sees it.
+        // The refusal names SOTA so the orchestrator can tell the owner how to lift it.
+        if request.mode != Mode::Sota
+            && !request.inherited_override
+            && world.overrides_used >= constants.overrides_per_run
+        {
             return Err(fail(
                 format!(
-                    "override {override_target} refused: {} of {} overrides already taken in this run; more is the owner's call",
+                    "override {override_target} refused: {} of {} overrides already taken in this run; more is the owner's call (SOTA mode lifts this cap)",
                     world.overrides_used, constants.overrides_per_run
                 ),
                 &candidates,
@@ -1934,7 +1944,13 @@ fn evaluate(
         out.override_reason = Some(reason.clone());
         out.inherited_override = request.inherited_override;
         out.rule_pick = rule_pick.clone();
-        let under = if under {
+        let under = if !candidates[index].in_class {
+            // Plan 81: only SOTA seats an override outside the class's list (`candidate`); it has no score there.
+            format!(
+                "; {override_target} is not in {}'s seats, taken because SOTA honours any override",
+                class.id
+            )
+        } else if under {
             format!(
                 "; {override_target} scores {score:.0}, under the bar {mode_bar:.0} at {}",
                 request.mode.word()
@@ -2208,11 +2224,31 @@ fn candidate(
         cand.skip = skip(SkipKind::Need, why.clone());
         return cand;
     }
-    let Some(entry) = entry else {
-        cand.skip = skip(SkipKind::Class, format!("{} does not take it", class.id));
-        return cand;
+    // Plan 81: in SOTA an override is honoured on any seat that can run the order. The class's list, its `only_with`
+    // and decision 0017's family exclusion are routing policy, so they do not refuse the seat the orchestrator named;
+    // the facts above (off, CLI, a capability, a claude-only order) and the profile below still do.
+    let sota_override = request.mode == Mode::Sota
+        && request.override_seat.as_ref().is_some_and(|(target, _)| {
+            target.split_once(':').map_or(target.trim(), |(id, _)| id.trim()) == seat.id
+        });
+    let unlisted;
+    let entry = match entry {
+        Some(entry) => entry,
+        None if sota_override => {
+            unlisted = ClassSeat {
+                seat: seat.id.clone(),
+                score: 0.0,
+                effort: None,
+                only_with: Vec::new(),
+            };
+            &unlisted
+        }
+        None => {
+            cand.skip = skip(SkipKind::Class, format!("{} does not take it", class.id));
+            return cand;
+        }
     };
-    if !entry.only_with.iter().all(|need| needs.contains(need)) {
+    if !sota_override && !entry.only_with.iter().all(|need| needs.contains(need)) {
         cand.skip = skip(
             SkipKind::Class,
             format!(
@@ -2223,7 +2259,7 @@ fn candidate(
         );
         return cand;
     };
-    if request.not_family.contains(&seat.family) {
+    if !sota_override && request.not_family.contains(&seat.family) {
         cand.skip = skip(
             SkipKind::Family,
             format!(
@@ -2301,17 +2337,40 @@ fn candidate(
         }
     }
     populate_windows(table, world, request, class, size, seat, &mut cand, effort);
-    // Filter 5: a window at or under the floor.
+    // Filter 5: a window at or under the floor. Plan 81: SOTA keeps only the fact under it, a window the provider has
+    // used up (100% read), where the run would be refused; the floor's margin and other orders' bookings do not skip.
+    // A seat with a window of its own (Fable) keeps the floor: its headless run past a window bills usage credits,
+    // which is money, not the subscription the owner chose to burn (plan 40a, `scoped_skip`).
+    let sota = request.mode == Mode::Sota && seat.extra_windows.is_empty();
     let floored: Vec<&WindowState> = cand
         .windows
         .iter()
         .filter(|window| {
-            window
-                .left
-                .is_some_and(|left| left <= constants.floor + EDGE)
+            if sota {
+                window.used.is_some_and(|used| used + EDGE >= 1.0)
+            } else {
+                window
+                    .left
+                    .is_some_and(|left| left <= constants.floor + EDGE)
+            }
         })
         .collect();
-    if let Some(window) = floored.first() {
+    if let Some(window) = floored.first().filter(|_| sota) {
+        cand.skip = Some(Skip {
+            kind: SkipKind::Floor,
+            why: format!(
+                "{} {} {} used: the provider refuses it until it resets (SOTA lifts the floor, not this)",
+                seat.pool,
+                window.window,
+                pct(window.used.unwrap_or(1.0))
+            ),
+            resets_at: floored
+                .iter()
+                .map(|window| window.resets_at)
+                .collect::<Option<Vec<u64>>>()
+                .and_then(|ats| ats.into_iter().max()),
+        });
+    } else if let Some(window) = floored.first() {
         // The seat is free only when every floored window has reset: the latest of them, and unknown when one
         // has no reset time. The first one's reset sent a NoSeat to defer 20 minutes for a 5 h window while
         // the week stayed floored for days (review S4).
@@ -2737,7 +2796,10 @@ fn build_pick(
         spare_phrase(&seat.pool, &won.windows, now)
             .unwrap_or_else(|| windows_phrase(&seat.pool, &won.windows))
     );
-    if seat.pool == constants.reserve_pool {
+    if seat.pool == constants.reserve_pool && request.mode == Mode::Sota {
+        // Plan 81: filter 7 does not run in SOTA, so the line says the reserve was lifted, not that it held.
+        reason.push_str(&format!(", reserve {} lifted (SOTA)", pct(constants.reserve)));
+    } else if seat.pool == constants.reserve_pool {
         // An unread reserve window leaves the reserve unknown: the seat ranked with the unread, and the line
         // says the reserve was not checked rather than that it held (review S2).
         let unread = won
@@ -6071,7 +6133,7 @@ mod tests {
         world.overrides_used = 3;
         assert_eq!(
             pick_err(&table, &world, &over),
-            "override argon refused: 3 of 3 overrides already taken in this run; more is the owner's call"
+            "override argon refused: 3 of 3 overrides already taken in this run; more is the owner's call (SOTA mode lifts this cap)"
         );
         // An override cannot dodge a filter: the class, a need, the reserve.
         over.override_seat = Some(("opus".into(), "trickier".into()));
@@ -6098,6 +6160,170 @@ mod tests {
 
     fn pick_err(table: &Table, world: &World, request: &Request) -> String {
         pick(table, world, request).unwrap_err().reason
+    }
+
+    fn sota_over(class: &str, target: &str) -> Request {
+        let mut over = request(class);
+        over.mode = Mode::Sota;
+        over.override_seat = Some((target.into(), "the owner burns tokens in SOTA".into()));
+        over
+    }
+
+    /// Plan 81, the owner 2026-11-15: "if SOTA is running ignore any rules and allow full overide". The per-run cap,
+    /// the class's list and `only_with`, decision 0017's family exclusion and the orchestrator's reserve do not refuse
+    /// an override in SOTA; the same overrides stay refused at Balanced.
+    #[test]
+    fn p81_sota_honours_any_override_policy_would_refuse() {
+        // Plan 14 table, as the "3 of 3" test above.
+        let table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
+        // The cap: the fourth override is taken, and the pick still carries what `book_pick` counts.
+        let mut capped = world();
+        capped.overrides_used = 3;
+        let got = pick(&table, &capped, &sota_over("build.bounded", "argon")).unwrap();
+        assert_eq!(got.seat, "argon");
+        assert!(got.override_reason.is_some() && !got.inherited_override);
+        // The class's list: opus is not in build.bounded.
+        let got = pick(&table, &world(), &sota_over("build.bounded", "opus")).unwrap();
+        assert_eq!(got.seat, "opus");
+        assert!(
+            got.reason
+                .contains("; opus is not in build.bounded's seats, taken because SOTA honours any override;"),
+            "{}",
+            got.reason
+        );
+        // `only_with`: build.frontend takes argon only for video.
+        assert_eq!(
+            pick(&table, &world(), &sota_over("build.frontend", "argon"))
+                .unwrap()
+                .seat,
+            "argon"
+        );
+        let mut balanced = sota_over("build.frontend", "argon");
+        balanced.mode = Mode::Balanced;
+        assert_eq!(
+            pick_err(&table, &world(), &balanced),
+            "override argon refused: build.frontend takes it only for video"
+        );
+        // Decision 0017's family exclusion.
+        let mut family = sota_over("build.bounded", "sonnet");
+        family.not_family = vec!["anthropic".into()];
+        assert_eq!(pick(&table, &world(), &family).unwrap().seat, "sonnet");
+        family.mode = Mode::Balanced;
+        assert_eq!(
+            pick_err(&table, &world(), &family),
+            "override sonnet refused: family anthropic excluded (another family reviews, decision 0017)"
+        );
+        // The orchestrator's reserve: 86% of max's 5 h used leaves 14% after the order.
+        let mut low = world();
+        agy_out(&mut low);
+        set(&mut low, "max", "5h", 0.86);
+        assert_eq!(
+            pick(&table, &low, &sota_over("build.bounded", "sonnet"))
+                .unwrap()
+                .seat,
+            "sonnet"
+        );
+    }
+
+    /// Plan 81: the rule's own pick in SOTA spends past the orchestrator's reserve and the floor, and says the reserve
+    /// was lifted; Balanced still skips the floored seat.
+    #[test]
+    fn p81_sota_rule_pick_spends_past_reserve_and_floor() {
+        let table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
+        let mut sota = request("build.bounded");
+        sota.mode = Mode::Sota;
+        let mut low = world();
+        agy_out(&mut low);
+        set(&mut low, "max", "5h", 0.86);
+        let got = pick(&table, &low, &sota).unwrap();
+        assert!(got.seat == "sonnet" || got.seat == "opus", "{}", got.seat);
+        assert!(
+            got.reason.contains(", reserve 15% lifted (SOTA)"),
+            "{}",
+            got.reason
+        );
+        // 96% used: under the 5% floor, not used up.
+        set(&mut low, "max", "5h", 0.96);
+        let got = pick(&table, &low, &sota).unwrap();
+        assert!(got.seat == "sonnet" || got.seat == "opus", "{}", got.seat);
+        let mut balanced = sota.clone();
+        balanced.mode = Mode::Balanced;
+        let floored = match pick(&table, &low, &balanced) {
+            Ok(got) => why(&got.runners_up, "sonnet").to_owned(),
+            Err(none) => none.reason,
+        };
+        assert!(floored.contains("at or under the floor 5%"), "{floored}");
+    }
+
+    /// Plan 81: what SOTA keeps, because it is a fact and not a rule: an effort that does not exist, a seat that does
+    /// not, a seat turned off in seats.toml, a CLI not signed in, a capability the seat lacks, a window used up.
+    #[test]
+    fn p81_sota_still_refuses_an_override_the_seat_cannot_run() {
+        let mut table = parse(HISTORICAL_DEFAULTS[2]).unwrap();
+        let w = world();
+        assert_eq!(
+            pick_err(&table, &w, &sota_over("build.bounded", "argon:bogus")),
+            "override argon:bogus refused: unknown effort bogus"
+        );
+        assert_eq!(
+            pick_err(&table, &w, &sota_over("build.bounded", "nobody")),
+            "override nobody refused: no such seat"
+        );
+        let mut video = sota_over("build.bounded", "g-sonnet");
+        video.needs = vec!["video".into()];
+        assert_eq!(
+            pick_err(&table, &w, &video),
+            "override g-sonnet refused: lacks video"
+        );
+        let mut out = world();
+        agy_out(&mut out);
+        assert_eq!(
+            pick_err(&table, &out, &sota_over("build.bounded", "argon")),
+            "override argon refused: agy not signed in"
+        );
+        // A window at 100%: the provider refuses the run.
+        set(&mut out, "max", "5h", 1.0);
+        let refused = pick_err(&table, &out, &sota_over("build.bounded", "sonnet"));
+        assert!(
+            refused.starts_with(
+                "override sonnet refused: max 5h 100% used: the provider refuses it until it resets"
+            ),
+            "{refused}"
+        );
+        for seat in table.seats.iter_mut().filter(|seat| seat.id == "argon") {
+            seat.enabled = false;
+        }
+        assert_eq!(
+            pick_err(&table, &w, &sota_over("build.bounded", "argon")),
+            "override argon refused: off in seats.toml"
+        );
+    }
+
+    /// Plan 81: SOTA never steps an effort down to fit a window. Fable alone, its week near its reserve: Balanced finds
+    /// a reading where only one effort step down seats it; SOTA at no reading does.
+    #[test]
+    fn p81_sota_never_steps_an_effort_down() {
+        let mut table = table();
+        for seat in table.seats.iter_mut() {
+            seat.enabled = seat.id == "fable";
+        }
+        let at = |mode: Mode, used: f32| {
+            let mut req = request("plan");
+            req.mode = mode;
+            pick(&table, &with_fable_week(Some(used)), &req)
+        };
+        let readings: Vec<f32> = (800..=950).map(|i| i as f32 / 1000.0).collect();
+        assert!(
+            readings
+                .iter()
+                .any(|used| at(Mode::Balanced, *used).is_ok_and(|got| got.step_down)),
+            "no reading steps Balanced down; the test's premise is gone"
+        );
+        for used in readings {
+            if let Ok(got) = at(Mode::Sota, used) {
+                assert!(!got.step_down, "SOTA stepped down at {used}: {}", got.reason);
+            }
+        }
     }
 
     #[test]
@@ -7183,28 +7409,27 @@ mod tests {
             );
         }
 
-        // Floor and reserve still skip:
-        // 1. Reserve skip on max 5h:
+        // Plan 81 (the owner, 2026-11-15: "if SOTA is running ignore any rules"): the orchestrator's reserve and the
+        // floor's margin no longer skip in SOTA; a window used up still does.
+        // 1. The reserve on max 5h is lifted: 85% used, Fable is still seated, and the line says so.
         let mut world_reserve = world();
-        set(&mut world_reserve, "max", "5h", 0.85); // left = 15% <= 20% reserve
+        set(&mut world_reserve, "max", "5h", 0.85); // left = 15%, under the reserve after the order
         let mut req_plan = request("plan");
         req_plan.mode = Mode::Sota;
         let pick_res = chosen(&table, &world_reserve, &req_plan);
-        assert_eq!(pick_res.seat, "carbon");
-        assert!(why(&pick_res.runners_up, "opus").contains("under the orchestrator's reserve"));
+        assert_eq!(pick_res.seat, "fable", "{}", pick_res.reason);
+        assert!(pick_res.reason.contains("reserve 15% lifted (SOTA)"), "{}", pick_res.reason);
 
-        // 2. Floor skip on carbon: plan 70 put carbon in flash's pool, plan 71 hydrogen in flash's place, so gemini's
-        // floor skips both.
+        // 2. Carbon and hydrogen share gemini's pool (plans 70, 71): at 96% (under the floor) they are not skipped; at
+        // 100% the provider refuses them and they are.
         let mut world_floor = world_reserve;
-        set(&mut world_floor, "gemini", "week", 0.96); // left = 4% <= 5% floor
+        set(&mut world_floor, "gemini", "week", 0.96);
         let pick_floor = chosen(&table, &world_floor, &req_plan);
-        assert!(
-            !["carbon", "hydrogen"].contains(&pick_floor.seat.as_str()),
-            "{}",
-            pick_floor.seat
-        );
-        assert!(why(&pick_floor.runners_up, "carbon").contains("floor"));
-        assert!(why(&pick_floor.runners_up, "hydrogen").contains("floor"));
+        assert!(!why(&pick_floor.runners_up, "carbon").contains("floor"));
+        set(&mut world_floor, "gemini", "week", 1.0);
+        let pick_floor = chosen(&table, &world_floor, &req_plan);
+        assert!(why(&pick_floor.runners_up, "carbon").contains("100% used"));
+        assert!(why(&pick_floor.runners_up, "hydrogen").contains("100% used"));
 
         // 3. Filter 6 (headroom) is bypassed in SOTA:
         let mut world_f6 = world_zero.clone();
@@ -7232,14 +7457,15 @@ mod tests {
         let mut req_plan = request("plan");
         req_plan.mode = Mode::Sota;
 
-        // Skip opus, carbon, sonnet (argon is off in the shipped table):
-        set(&mut world_test, "max", "5h", 0.85); // skips opus and sonnet by reserve
+        // Skip opus, carbon, sonnet (argon is off in the shipped table). Plan 81: SOTA lifts the reserve, so max's 5 h
+        // is used up instead; that skips Fable too.
+        set(&mut world_test, "max", "5h", 1.0);
         let pick_flash = chosen(&table, &world_test, &req_plan);
         assert_eq!(pick_flash.seat, "hydrogen");
         assert!(why(&pick_flash.runners_up, "g-opus").contains("fallback seat; hydrogen is not"));
 
         // Now also skip hydrogen (plan 71: it took flash's place):
-        set(&mut world_test, "gemini", "5h", 0.96); // skips hydrogen by floor
+        set(&mut world_test, "gemini", "5h", 1.0); // skips hydrogen: used up
         let pick_g_opus = chosen(&table, &world_test, &req_plan);
         assert_eq!(pick_g_opus.seat, "g-opus");
         assert!(pick_g_opus.reason.contains("; fallback:"));
