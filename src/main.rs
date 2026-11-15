@@ -63,6 +63,7 @@ mod nirvana_memory_trim;
 mod nirvana_preload;
 mod nirvana_preset;
 mod nirvana_profiles;
+mod nirvana_questions;
 mod nirvana_remote;
 mod nirvana_retro;
 mod nirvana_review;
@@ -616,6 +617,10 @@ fn main() -> io::Result<()> {
     // Nirvana fork, feature 9: Jev, the cheap judge, for every agent in a pane and for Claude Code's Stop hook.
     if args.get(1).map(String::as_str) == Some("jev") {
         return nirvana_jev::cli(&args[2..]);
+    }
+    // Nirvana fork, plan 42 P42a: the Questions record, what the agents need from the owner.
+    if args.get(1).map(String::as_str) == Some("ask") {
+        return nirvana_questions::cli(&args[2..]);
     }
     // Nirvana fork, plan 12 O1: every pool's usage windows, for the plugin, the statusline and the seat engine.
     if args.get(1).map(String::as_str) == Some("usage") {

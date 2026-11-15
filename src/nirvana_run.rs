@@ -825,7 +825,7 @@ fn queue_line(kind: &Kind) -> Option<String> {
 }
 
 /// A reviewer's or a lesson review's class: its question is about another order, and it answers none.
-fn reviews(class: &str) -> bool {
+pub(crate) fn reviews(class: &str) -> bool {
     class == crate::nirvana_review::CLASS || class == "review.adversary"
 }
 
