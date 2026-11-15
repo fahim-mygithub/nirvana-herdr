@@ -271,7 +271,17 @@ fn the_project_folder_ignores_runs_orders_and_worktrees_but_not_lessons() {
         .lines()
         .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
         .collect();
-    assert_eq!(rules, ["runs/", "orders/", "worktrees/"]);
+    assert_eq!(
+        rules,
+        [
+            "runs/",
+            "orders/",
+            "worktrees/",
+            "questions.jsonl",
+            "questions.lock",
+            "questions.cursor.json"
+        ]
+    );
     assert!(!rules.iter().any(|rule| rule.contains("lessons")));
     // The owner's edit is kept.
     std::fs::write(project.dir().join(".gitignore"), "mine\n").expect("edit");

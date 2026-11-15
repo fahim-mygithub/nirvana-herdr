@@ -20,8 +20,9 @@ CONTROLS = (
     Control("run_journal_unlocked", RUN,
             "let _lock = lock_journal(&dir)?;", "let _lock = ();",
             "appends_from_many_threads_lose_no_line", "rust"),
+    # Anchored on the list's last line; the 0.77.0 merge added the Questions files after worktrees/.
     Control("run_gitignore_lessons", RUN,
-            "runs/\\norders/\\nworktrees/\\n\";", "runs/\\norders/\\nworktrees/\\nlessons/\\n\";",
+            "questions.cursor.json\\n\";", "questions.cursor.json\\nlessons/\\n\";",
             "the_project_folder_ignores_runs_orders_and_worktrees_but_not_lessons", "rust"),
     Control("run_id_allows_semicolon", RUN,
             "matches!(c, '.' | '_' | '-')", "matches!(c, '.' | '_' | '-' | ';')",

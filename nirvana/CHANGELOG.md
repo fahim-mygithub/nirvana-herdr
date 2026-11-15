@@ -3,6 +3,29 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.77.0: a Questions record and `herdr ask`
+
+- **Changed:** `herdr ask add|answer|withdraw|list` keeps `<project>/.nirvana/questions.jsonl`, plan 42 P42a. It is an
+  append-only record of the questions put to the owner. The latest line for an id wins. The same text, or `--same`,
+  raises `asked_count` and makes no second item. A question asked again after its answer prints the answer. Workers'
+  `asked` events are mirrored on read, keyed by `run#seq`, and closed when the run shows them taken up.
+  `answered_by` keeps `owner`, `orchestrator` and `journal` apart. Only the window and the phone record `owner`; the
+  CLI cannot. The project's `.nirvana/.gitignore` now also lists `questions.jsonl`, `questions.lock` and
+  `questions.cursor.json`. herdr writes that file only when it is missing, so a project made before 0.77.0 keeps its
+  old one and shows the three files as untracked. No updater is built.
+- **Because:** plan 42 §3. In run ia1 about 15 questions were asked in more than one turn. A scope cut was asked in
+  10 turns over 14.2 hours and never answered. A merge the owner approved 4 times stayed listed as open. An answer
+  had no place to be recorded. Without the ignore rules a project showed the record, its lock and its cursor as
+  untracked.
+- **Measured:** `nirvana_questions` 17 tests pass, one of them new at this merge for the ignore rules. The
+  `nirvana_run` ignore test now lists all six rules. `nirvana_dead` passes. The 37 controls in `p80_questions.py`
+  passed on the branch; the 2 added here, `p80_gitignore_record` and `p80_gitignore_cursor`, pass. `run_gitignore_lessons`
+  in `o3.py` is re-anchored on the list's new last line and passes. On a copy of ia1's 4.6 MB journal, `ask list`
+  took 950 ms on the first read in a debug build and 40 ms after, with the cursor. That re-asking falls is a
+  hypothesis until the §3 count is re-run on the next run.
+- **If you remove this:** questions go back to living only in prose footers and Blocked rows. The orchestrator cannot
+  see that a question was already answered, and P42b to P42d have no record to draw or answer from.
+
 ## alpha 0.76.0: the phone page draws the agents' markdown
 
 - **Changed:** a new `src/nirvana_remote/page/md.js` draws each agent bubble on the phone page as markdown:

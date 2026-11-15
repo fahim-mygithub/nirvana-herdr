@@ -36,10 +36,14 @@ pub const V: u32 = 1;
 pub const DIR: &str = ".nirvana";
 /// Runs, orders and worktrees are machine state; `lessons/` is not ignored, because O5 tracks lessons in
 /// git per the owner's ruling of 2026-10-16 ("Checked lessions should go live automatically, keep it per
-/// github remote").
+/// github remote"). The Questions record and its lock and cursor (plan 42 P42a) are machine state too: without them
+/// here a project showed all three as untracked. `ensure_dir` writes this only into a folder that has no
+/// `.gitignore`, so a project made before 0.77.0 keeps its old file.
 pub const GITIGNORE: &str = "# Written by herdr (plan 12 O3). Runs, orders and worktrees are this machine's state.\n\
 # lessons/ is left out on purpose: verified lessons are tracked with the project (plan 12 §7.4.3).\n\
-runs/\norders/\nworktrees/\n";
+runs/\norders/\nworktrees/\n\
+# The Questions record, its lock and its read cursor (plan 42 P42a).\n\
+questions.jsonl\nquestions.lock\nquestions.cursor.json\n";
 pub const JOURNAL: &str = "journal.jsonl";
 const JOURNAL_LOCK: &str = "journal.lock";
 
@@ -825,7 +829,7 @@ fn queue_line(kind: &Kind) -> Option<String> {
 }
 
 /// A reviewer's or a lesson review's class: its question is about another order, and it answers none.
-fn reviews(class: &str) -> bool {
+pub(crate) fn reviews(class: &str) -> bool {
     class == crate::nirvana_review::CLASS || class == "review.adversary"
 }
 
