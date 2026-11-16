@@ -3,6 +3,21 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.78.1: the phone page fills the screen again after an app switch
+
+- **Changed:** the phone page reads the visual viewport again when it is shown, when it comes back from the page cache,
+  on a window resize, when focus leaves a box, and once more a frame later. A sheet is capped at the column's height
+  less the status bar, and it scrolls inside.
+- **Because:** the owner, 2026-11-16, with a screenshot: "switch to nirvana after I switch out on iOS causes this
+  bug". The column's bottom was set only on visual viewport events. A keyboard that went away while the page was in
+  the background sent none, so the column stayed keyboard-short. The prompt sheet sat in the top half and its title
+  ran under the clock.
+- **Measured:** a node driver on 0.78.0's `app.js` gives a 336px column bottom for all five ways back; this build gives
+  0px. The five `p82_resume` controls each turn their test red. `nirvana_remote` passes 184 with one thread. The sheet
+  cap has no test. Not yet seen on an iPhone.
+- **If you remove this:** after an app switch with the keyboard up, the page and every sheet stay keyboard-short until
+  the next keyboard event.
+
 ## alpha 0.78.0: SOTA honours any override and drops the token rules
 
 - **Changed:** in SOTA the seat picker drops every rule that saves tokens or limits the orchestrator's routing. There

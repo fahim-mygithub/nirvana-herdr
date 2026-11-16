@@ -36,6 +36,16 @@
     if (window.visualViewport) {
       window.visualViewport.addEventListener('resize', fit);
       window.visualViewport.addEventListener('scroll', fit);
+      // The owner, 2026-11-16: "switch to nirvana after I switch out on iOS causes this bug". Left with the keyboard
+      // up, the page came back with it gone but no visualViewport resize: --vv-bottom kept the keyboard's height, so
+      // the column was the top half of the screen and a sheet in it ran off the top, under the clock. Each way back
+      // (shown again, out of the cache, rotated, the box let go of the keyboard) reads the viewport now, and once more
+      // a frame later, as iOS may report the old size in the same task.
+      const again = () => { fit(); if (window.requestAnimationFrame) window.requestAnimationFrame(fit); };
+      document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') again(); });
+      window.addEventListener('pageshow', again);
+      window.addEventListener('resize', again);
+      document.addEventListener('focusout', again);
       fit();
     }
   }
