@@ -174,9 +174,14 @@
         const menu = data.menu;
         const lines = menu ? menu.lines.slice() : [];
         // The question is the heading; the lines above it (the command, the tool) go in the box.
-        const asks = menu && lines.length && /\?$/.test(lines[lines.length - 1]) ? lines.pop() : '';
+        // Not read as a menu: the screen's last question is the heading (the owner, 2026-11-16: "the choice dialog
+        // doesn't read well on the app"; a raw screen had only "<agent> needs you" above a wall of command text).
+        const asks = menu
+          ? (lines.length && /\?$/.test(lines[lines.length - 1]) ? lines.pop() : '')
+          : lastQuestion(data.screen);
         const title = asks || (a.name || 'The agent') + ' needs you';
         const shown = menu ? lines.join('\n') : data.screen;
+        const box = shown ? h('pre', { class: 'prompt-box mono' + (menu ? '' : ' screen-box'), text: shown }) : null;
         const keys = menu
           ? menu.options.map((o, i) => h('button', { class: 'press answer-option' + (i === 0 ? ' first' : ''), type: 'button',
             onclick: () => press(o.key, data.seen, note, true) }, h('span', { class: 'answer-key mono', text: o.key }), h('span', { text: o.label })))
@@ -184,18 +189,31 @@
             text: k === 'enter' ? 'Enter' : k === 'esc' ? 'Esc' : k, onclick: () => press(k, data.seen, note) })))];
         const el = h('div', { class: 'sheet-body prompt' },
           h('div', { class: 'prompt-head' }, h('span', { class: 'prompt-dot pulse-p' }), h('span', { class: 'prompt-title', text: title })),
-          shown ? h('pre', { class: 'prompt-box mono', text: shown }) : null,
+          box,
           h('span', { class: 'prompt-sub', text: menu
             ? 'In ' + (a.space || 'this space') + ', read off the PC’s prompt.'
-            : 'Not read as a menu: this is the PC’s screen, and each key goes to it as pressed.' }),
+            : 'Not read as a menu: the end of the PC’s screen is above, and each key goes to it as pressed.' }),
           h('div', { class: 'answer-list' }, ...keys),
           menu ? h('button', { class: 'press answer-option esc-option', type: 'button', onclick: () => press('esc', data.seen, note) },
             h('span', { class: 'answer-key mono', text: 'Esc' }), h('span', { text: 'Cancel the prompt' })) : null,
           note);
         el.close = close;
         body = el;
+        // A raw screen's options are at its end (the owner's screenshot, 2026-11-16: the box opened on the top of a
+        // long command, the choices below it out of sight): the box opens scrolled to its last line.
+        if (box && !menu) requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; });
         return el;
       });
+    }
+
+    // The last row of a raw screen that asks something ("Do you want to proceed?"), the `❯` and a box's side bars
+    // trimmed; '' when none does.
+    function lastQuestion(screen) {
+      const rows = (screen || '').split('\n')
+        .map((row) => row.replace(/^[\s│❯]+|[\s│]+$/g, ''))
+        .filter((row) => row && row.length <= 120);
+      for (let i = rows.length - 1; i >= 0; i--) if (/\?$/.test(rows[i])) return rows[i];
+      return '';
     }
 
     // Quiet (P39o review round, S1): a failed read leaves nothing stale, and must not have the chat drawn again when

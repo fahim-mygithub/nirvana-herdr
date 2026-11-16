@@ -298,14 +298,17 @@ a:hover { color: #86CBD2; }
 .esc-button { height: 44px; padding: 0 14px; flex-shrink: 0; border-radius: 22px; background: #2A2023; color: var(--red); font-size: 13px; font-weight: 500; }
 .answer-button { height: 44px; padding: 0 14px; flex-shrink: 0; border-radius: 22px; background: rgba(169, 149, 214, 0.16); color: #C2B3E3; font-size: 13px; font-weight: 600; }
 .esc-button[hidden], .answer-button[hidden] { display: none; }
-.sheet-body.prompt { gap: 14px; max-height: 80vh; max-height: 80dvh; overflow-y: auto; }
-.prompt-head { display: flex; align-items: center; gap: 10px; }
+/* The owner, 2026-11-16: "the choice dialog doesn't read well on the app". The body shrinks to the sheet (min-height 0
+   in the sheet's column) and scrolls inside; the question stays pinned at its top; the screen box is short and
+   scrolls in itself, so the choices under it stay on the screen. */
+.sheet-body.prompt { gap: 14px; flex: 1 1 auto; min-height: 0; max-height: 80vh; max-height: 80dvh; overflow-y: auto; }
+.prompt-head { display: flex; align-items: center; gap: 10px; position: sticky; top: 0; z-index: 1; background: var(--card); padding: 2px 0 4px; }
 .prompt-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--purple); flex-shrink: 0; }
 .prompt-title { font-size: 17px; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
-.prompt-box { margin: 0; background: var(--bg); border: 1px solid #2A2F34; border-radius: 12px; padding: 12px 14px; font-size: 13.5px; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; }
+.prompt-box { margin: 0; background: var(--bg); border: 1px solid #2A2F34; border-radius: 12px; padding: 10px 12px; font-size: 12.5px; line-height: 1.45; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 26vh; max-height: 26dvh; overflow-y: auto; flex-shrink: 0; }
 .prompt-sub { font-size: 13px; color: var(--muted); margin-top: -4px; }
 .answer-list { display: flex; flex-direction: column; gap: 8px; }
-.answer-option { display: flex; align-items: center; gap: 12px; min-height: 52px; padding: 0 14px; border-radius: 14px; background: var(--hover); font-weight: 500; width: 100%; box-sizing: border-box; overflow-wrap: anywhere; }
+.answer-option { display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 10px 14px; border-radius: 14px; background: var(--hover); font-size: 16px; font-weight: 500; line-height: 1.3; width: 100%; box-sizing: border-box; overflow-wrap: anywhere; }
 .answer-option.first { background: var(--teal); color: #0E1B1D; font-weight: 600; }
 .answer-key { color: var(--muted); flex-shrink: 0; }
 .answer-option.first .answer-key { color: inherit; opacity: 0.7; }

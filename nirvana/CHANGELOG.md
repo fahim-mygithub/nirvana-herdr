@@ -3,6 +3,19 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.78.2: the phone's choice sheet reads on an iPhone
+
+- **Changed:** in the phone's prompt sheet the heading stays pinned at the top, and the body shrinks to fit the sheet
+  and scrolls inside it. The screen box is capped at 26dvh, a little larger and looser, and opens scrolled to its last
+  line. The choices are 56px tall with 16px text that wraps. When no menu was read, the heading is the screen's last
+  line that ends in "?", such as "Do you want to proceed?", in place of "<agent> needs you".
+- **Because:** the owner, 2026-11-16: "Also the choice dialog doesn't read well on the app". Their screenshot showed a
+  tall box of wrapped command text that opened at its top, which pushed the options out of view.
+- **Measured:** 29 page tests pass. 7 of the 9 new ones fail on 0.78.1's files. The 10 new `p82_prompt_*` and
+  `p82_css_*` controls each turn their test red. Not yet seen on an iPhone.
+- **If you remove this:** the sheet opens on the top of the PC's screen, and the choices sit below a box of command
+  text.
+
 ## alpha 0.78.1: the phone page fills the screen again after an app switch
 
 - **Changed:** the phone page reads the visual viewport again when it is shown, when it comes back from the page cache,
