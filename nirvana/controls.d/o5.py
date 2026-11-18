@@ -9,8 +9,9 @@ SEAT = "src/nirvana_seat.rs"
 CONTROLS = (
     # §7.3 axis 1: rebase onto the run's integration tip.
     Control("gate_rebase_skipped", GATE,
-            "match rebase(subject.cwd, &integration_branch(subject.run)) {",
-            "match Ok::<(), Vec<String>>(()) {",
+            # Plan 43 fix round 2 (H1): plan 43 A1 sets herdr's files aside around the rebase, which is a `let` now.
+            "            let rebased = rebase(subject.cwd, &integration);\n",
+            "            let rebased: Result<(), RebaseFail> = Ok(());\n",
             "the_branch_is_rebased_onto_the_integration_tip_before_the_tests", "rust"),
     Control("gate_rebase_conflict_left_open", GATE,
             '            let _ = git(cwd, &["rebase", "--abort"]);\n', "",
@@ -24,7 +25,8 @@ CONTROLS = (
             '            "--untracked-files=all",\n            "--",\n            ".",\n',
             "a_new_file_no_owns_pattern_names_stays_out_of_the_commit_and_is_said", "rust"),
     Control("gate_commit_takes_unowned_new", GATE,
-            "} else if owns.is_empty() || owns.iter().any(|pattern| glob_match(pattern, &path)) {",
+            # Plan 43 fix round 2 (H1): `owns_match` (the case folded on Windows) since plan 43 A2.
+            "} else if owns.is_empty() || owns.iter().any(|pattern| owns_match(pattern, &path)) {",
             "} else if true {",
             "a_new_file_no_owns_pattern_names_stays_out_of_the_commit_and_is_said", "rust"),
     # Axis 2: tests, with the named check in the filtered output.
@@ -39,8 +41,9 @@ CONTROLS = (
             "    if run.timed_out {", "    if run.timed_out && false {",
             "a_failing_test_command_fails_and_checks_without_a_command_fail_too", "rust"),
     Control("gate_checks_without_command_pass", GATE,
-            "            if checks.is_empty() {\n                Mark::Note\n            } else {\n                Mark::Fail\n            },",
-            "            if checks.is_empty() {\n                Mark::Note\n            } else {\n                Mark::Note\n            },",
+            # Plan 43 fix round 2 (H1): plan 43 A1 split the two cases (a missing command is the brief's to fix).
+            "            \"tests\",\n            Mark::Fail,\n            \"the order names checks but no `test:` command to run them\",\n",
+            "            \"tests\",\n            Mark::Note,\n            \"the order names checks but no `test:` command to run them\",\n",
             "a_failing_test_command_fails_and_checks_without_a_command_fail_too", "rust"),
     # Axis 3: the Work Report.
     Control("gate_report_blocked_passes", GATE,
@@ -57,7 +60,8 @@ CONTROLS = (
             "a_missing_empty_or_blocked_report_fails_and_a_done_one_passes", "rust"),
     # Axis 4: only owned files.
     Control("gate_owned_unchecked", GATE,
-            ".filter(|path| !owns.iter().any(|pattern| glob_match(pattern, path)))", ".filter(|_| false)",
+            # Plan 43 fix round 2 (H1): `owns_match` since plan 43 A2.
+            ".filter(|path| !owns.iter().any(|pattern| owns_match(pattern, path)))", ".filter(|_| false)",
             "only_the_files_the_order_owns_may_change", "rust"),
     Control("gate_owned_counts_harness", GATE,
             "let changed: Vec<&String> = changed.iter().filter(|path| !harness_path(path)).collect();",
@@ -67,12 +71,13 @@ CONTROLS = (
             "    if owns.is_empty() {", "    if owns.is_empty() && false {",
             "only_the_files_the_order_owns_may_change", "rust"),
     Control("gate_glob_no_globstar", GATE,
-            '(Some(&"**"), _) => segments(&p[1..], s) || (!s.is_empty() && segments(p, &s[1..])),',
-            '(Some(&"**"), _) => segments(&p[1..], s),',
+            # Plan 43 fix round 2 (H1): plan 43 A2 added the `fold` argument; rustfmt broke the arm over lines.
+            "                segments(&p[1..], s, fold) || (!s.is_empty() && segments(p, &s[1..], fold))\n",
+            "                segments(&p[1..], s, fold)\n",
             "owned_patterns_match_names_and_folders", "rust"),
     Control("gate_glob_star_empty_only", GATE,
-            "(Some(b'*'), _) => segment(&p[1..], s) || (!s.is_empty() && segment(p, &s[1..])),",
-            "(Some(b'*'), _) => segment(&p[1..], s),",
+            "                segment(&p[1..], s, fold) || (!s.is_empty() && segment(p, &s[1..], fold))\n",
+            "                segment(&p[1..], s, fold)\n",
             "owned_patterns_match_names_and_folders", "rust"),
     Control("gate_spec_reads_indented", GATE,
             "        let line = line.trim_end();", "        let line = line.trim();",
@@ -158,7 +163,9 @@ CONTROLS = (
             "a_merge_moves_only_the_integration_branch_and_refuses_one_that_moved", "rust"),
     # The outcome words and the tally.
     Control("gate_tally_counts_reseat", GATE,
-            "            Some(Self::Reseated) => None,", "            Some(Self::Reseated) => Some(false),",
+            # Plan 43 fix round 2 (H1): plan 43 A1 joined the amend to the reseat's arm.
+            "            Some(Self::Reseated | Self::Amend) => None,",
+            "            Some(Self::Reseated) => Some(false),\n            Some(Self::Amend) => None,",
             "the_outcome_words_and_what_the_tally_counts", "rust"),
     Control("seat_tally_counts_subagents", SEAT,
             "        if chain == crate::nirvana_claude::SUBAGENT_CHAIN {", "        if false {",

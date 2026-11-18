@@ -491,12 +491,15 @@ pub fn owned_axes(
             .map(|holder| holder.order.clone())
     };
     let (mut held, mut narrow, mut fresh) = (Vec::new(), Vec::new(), Vec::new());
-    let mut fenced = Vec::new();
+    let (mut fenced, mut fenced_paths) = (Vec::new(), Vec::new());
     for path in outside {
         match holder_of(path) {
             Some(holder) => held.push(format!("{path} (owned by {holder})")),
             None if is_new(path) => match fenced_new(path) {
-                Some(why) => fenced.push(format!("{path} (new, and {why})")),
+                Some(why) => {
+                    fenced_paths.push(path.clone());
+                    fenced.push(format!("{path} (new, and {why})"))
+                }
                 None => fresh.push(path.clone()),
             },
             None => narrow.push(path.clone()),
@@ -538,6 +541,12 @@ pub fn owned_axes(
             "; {} of them new and fenced (they run by themselves, configure tooling or look like a secret), so never a note",
             fenced.len()
         ));
+        // Fix round 2 (H4, review (b)): a false positive looped through send-backs to the cap with no way out named.
+        why.push_str(&format!(
+            "; remove the fenced file(s), or, if the brief truly needs them, the orchestrator stops the child and runs \
+`herdr gate amend <order> {}`",
+            owns_flags(&fenced_paths).unwrap_or_default()
+        ));
     }
     let lines = capped(held.iter().chain(&fenced).chain(&narrow).cloned().collect());
     let mut axis = Axis::new("owned", Mark::Fail, why).with(lines).fault(
@@ -561,15 +570,22 @@ pub fn owned_axes(
 ///   `.git/hooks/`, `.husky/`, `.vscode/` (CI, agent settings, editor tasks and git attributes run or steer tools);
 /// - `nirvana/controls.d/`: the controls runner discovers and executes every file there;
 /// - `build.rs` (cargo runs it at every build) and `conftest.py` (pytest imports it from any folder it collects);
-/// - a git hook: a hook's name in a folder named for hooks (`githooks/pre-push`), or one of the names that are only
-///   ever hooks (`pre-commit`, `pre-push`, `commit-msg`, ...), or `lefthook.yml`;
+/// - config the order's own test reads where it runs: `pytest.ini`, `tox.ini`, `setup.cfg`, `pyproject.toml`,
+///   `Makefile`, `GNUmakefile`, `justfile`, `rust-toolchain(.toml)` (fix round 2);
+/// - a git hook: a hook's name in a folder named `hooks` or `githooks` (`githooks/pre-push`), or, as the whole file
+///   name with no extension, one of the names that are only ever hooks (`pre-commit`, `pre-push`, `commit-msg`,
+///   ...), or `lefthook.yml`;
 /// - a credential-looking name: `*.pem`, `*.key`, `*.pfx`, `*.p12`, `id_rsa*` (and `id_dsa*`, `id_ecdsa*`,
-///   `id_ed25519*`), and any path that holds `secret` or `credential`.
+///   `id_ed25519*`), and a file name, not a Markdown one, that holds `secret` or `credential`.
+/// `.gitkeep` is not fenced. A fenced file is the worker's fault, and the axis says both ways on: remove it, or the
+/// orchestrator, if the brief truly needs it, stops the child and runs `herdr gate amend <order> --owns <path>`.
 pub fn fenced_new(path: &str) -> Option<&'static str> {
     let lower = path.replace('\\', "/").to_ascii_lowercase();
     let parts: Vec<&str> = lower.split('/').filter(|part| !part.is_empty()).collect();
     let name = parts.last().copied().unwrap_or("");
-    if parts.iter().any(|part| part.starts_with('.')) {
+    // Fix round 2 (H4): `.gitkeep` only keeps an empty folder in git; nothing reads it.
+    let dotted = |part: &&str| part.starts_with('.') && !(*part == ".gitkeep" && *part == name);
+    if parts.iter().any(dotted) {
         return Some("dot-prefixed (CI, agent or tool settings, or git's own files)");
     }
     if lower.starts_with("nirvana/controls.d/") {
@@ -577,6 +593,23 @@ pub fn fenced_new(path: &str) -> Option<&'static str> {
     }
     if name == "build.rs" || name == "conftest.py" {
         return Some("a file the build or the test runner runs by itself");
+    }
+    // Fix round 2 (H4, review (b)): config the order's own `test:` reads by itself where it runs in the worktree:
+    // pytest's `pytest.ini`, `tox.ini`, `setup.cfg` and `pyproject.toml` (an `addopts` there loads a plugin), make's and
+    // just's recipes, and the toolchain cargo picks. Matched on the file name, the case folded.
+    const AUTO_READ: &[&str] = &[
+        "pytest.ini",
+        "tox.ini",
+        "setup.cfg",
+        "pyproject.toml",
+        "makefile",
+        "gnumakefile",
+        "justfile",
+        "rust-toolchain",
+        "rust-toolchain.toml",
+    ];
+    if AUTO_READ.contains(&name) {
+        return Some("config the test runner or the build reads by itself");
     }
     // Every git hook's name (githooks(5)); these alone are never anything else.
     const HOOKS: &[&str] = &[
@@ -623,10 +656,13 @@ pub fn fenced_new(path: &str) -> Option<&'static str> {
         "pre-receive",
         "post-receive",
     ];
+    // Fix round 2 (H4, review (b)): a hook's name counts as the whole file name with no extension, or as a file's stem
+    // inside a folder named `hooks` (or `githooks`, a common `core.hooksPath`); a folder merely holding "hook" in its
+    // name (`webhooks/`) and `Docs/pre-push.md` are no hooks.
     let stem = name.split('.').next().unwrap_or(name);
-    let in_hooks = parts.len() >= 2 && parts[parts.len() - 2].contains("hook");
+    let in_hooks = parts.len() >= 2 && matches!(parts[parts.len() - 2], "hooks" | "githooks");
     if (in_hooks && HOOKS.contains(&stem))
-        || ONLY_HOOKS.contains(&stem)
+        || (!name.contains('.') && ONLY_HOOKS.contains(&name))
         || matches!(name, "lefthook.yml" | "lefthook.yaml")
     {
         return Some("a git hook, which git runs by itself");
@@ -637,7 +673,10 @@ pub fn fenced_new(path: &str) -> Option<&'static str> {
     let ssh_key = ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"]
         .iter()
         .any(|key| name.starts_with(key));
-    if key_ext || ssh_key || lower.contains("secret") || lower.contains("credential") {
+    // Fix round 2 (H4): `secret` and `credential` in the file name only, and never a Markdown file's
+    // (`Docs/secretary.md`, `secrets/README.md` were fenced); p72's `secret.txt` stays fenced.
+    let secretive = !name.ends_with(".md") && (name.contains("secret") || name.contains("credential"));
+    if key_ext || ssh_key || secretive {
         return Some("a credential-looking name");
     }
     None
@@ -932,17 +971,35 @@ fn strip_ansi(text: &str) -> String {
 /// script the `-c` text sources names its file (`./bad.sh: line 1: ...`). A worker's script that itself runs `bash
 /// -c` or `pwsh -Command` on broken text still reads as the brief's: an open hole, rare, said in the fix round's
 /// report.
+///
+/// Fix round 2 (H2): that hole is closed by reading the command itself. Its own text is only ever the inline code of
+/// an interpreter run directly: `python -c`, `bash -c` / `sh -c`, `pwsh -Command` (and Windows PowerShell's
+/// positional command). A test whose program is a script, a test runner or anything else (`bash run.sh`, `pytest`,
+/// `cargo test`, `pwsh -File x.ps1`) has no text of the brief's to misparse, so a parse error anywhere in its output
+/// is the worker's (`inline_code`). And a pwsh `ParserError:` that names no file is still the worker's when a later
+/// line shows it came from a loaded file: `pwsh -Command "Import-Module ./bad.psm1; 'x'"` on a module holding
+/// `function f { (` printed (pwsh 7, 2026-11-18) `ParserError: An expression was expected after '('.` and then
+/// `Import-Module: The specified module './bad.psm1' was not loaded ...`; Windows PowerShell 5 printed the module's
+/// `At C:\...\bad.psm1:1 char:15`, wrapped across two lines, before the `Import-Module :` error's `At line:1`.
+/// Output a pipe of which was never read (`UNREAD_OUTPUT`) is not the whole story, so it is never the brief's.
 pub fn test_unparsed(test: &str, output: &str) -> Option<String> {
+    // Fix round 2 (H2): `run_command` reads both pipes whole, so the front is never cut; a pipe still held open after
+    // the test ended is dropped whole and marked with this line. A dropped stderr loses a `Traceback` header too.
+    if output.contains(UNREAD_OUTPUT) {
+        return None;
+    }
     let plain = strip_ansi(output);
     let lines: Vec<&str> = plain.lines().map(str::trim).collect();
-    let program = split_command(test).into_iter().next().unwrap_or_default();
+    let argv = split_command(test);
+    let program = argv.first().cloned().unwrap_or_default();
     let base = program
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or("")
         .to_ascii_lowercase();
     let base = base.strip_suffix(".exe").unwrap_or(&base);
-    if plain.contains("File \"<string>\"") {
+    let inline = inline_code(base, argv.get(1..).unwrap_or(&[]));
+    if inline && is_python(base) && plain.contains("File \"<string>\"") {
         for (at, line) in lines.iter().enumerate() {
             if !["SyntaxError", "IndentationError", "TabError"]
                 .iter()
@@ -973,14 +1030,33 @@ pub fn test_unparsed(test: &str, output: &str) -> Option<String> {
             }
         }
     }
-    if matches!(base, "pwsh" | "powershell") {
+    if inline && matches!(base, "pwsh" | "powershell") {
         let script = |text: &str| {
             let lower = text.to_ascii_lowercase();
             lower.contains(".ps1") || lower.contains(".psm1")
         };
+        // pwsh 7 echoes the failing source under the error (`Line |`, `   1 | <text>`, `     | ~~~`): the brief's own
+        // text, which may name a `.ps1` itself.
+        let echo = |line: &str| {
+            line.split_once('|').is_some_and(|(head, _)| {
+                let head = head.trim();
+                head.is_empty() || head == "Line" || head.chars().all(|c| c.is_ascii_digit())
+            })
+        };
+        // Fix round 2 (H2): a later line that shows a file was loaded: the module import's own error, a script's
+        // path, or Windows PowerShell's `At <path>:<line>` (its `At line:` is the command's own text).
+        let loaded = |line: &str| {
+            line.starts_with("Import-Module:")
+                || line.starts_with("Import-Module :")
+                || (line.starts_with("At ") && !line.starts_with("At line:"))
+                || (!echo(line) && script(line))
+        };
         for (at, line) in lines.iter().enumerate() {
             if let Some(rest) = line.strip_prefix("ParserError:") {
                 if script(rest) {
+                    continue;
+                }
+                if lines[at + 1..].iter().any(|line| loaded(line)) {
                     continue;
                 }
                 // pwsh 7 prints the message last, on a `|` line of its own.
@@ -1001,11 +1077,12 @@ pub fn test_unparsed(test: &str, output: &str) -> Option<String> {
             && lines
                 .iter()
                 .any(|line| line.contains("CategoryInfo") && line.contains("ParserError"))
+            && !lines.iter().any(|line| loaded(line))
         {
             return Some("ParserError".to_owned());
         }
     }
-    if matches!(base, "bash" | "sh") {
+    if inline && matches!(base, "bash" | "sh") {
         // Fix round F1: the shell's own `-c:` line opens with its name as run (`bash: -c:`, `/usr/bin/bash: -c:`); a
         // line that only holds `-c:` somewhere is another program's.
         let own = |line: &str| {
@@ -1033,6 +1110,64 @@ pub fn test_unparsed(test: &str, output: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The line `run_command` adds when a pipe was still open after the test ended and its text was dropped.
+pub const UNREAD_OUTPUT: &str =
+    "herdr gate: the output pipes were still open after the test ended; the rest was not read";
+
+/// A python launcher by its base name: `python`, `python3`, `python3.13`, `pythonw`, `py`.
+fn is_python(base: &str) -> bool {
+    base == "py" || base.starts_with("python")
+}
+
+/// Fix round 2 (H2): the test command is an interpreter run directly on inline code, the only text of the brief's
+/// that can fail to parse: `python [-I ...] -c`, `bash|sh [-e ...] -c` (a short-flag cluster holding `c`, as `-lc`,
+/// before the first operand), `pwsh -Command` (`-c`, `-com...`, `-EncodedCommand`) before any `-File`, and Windows
+/// PowerShell with no `-File` (its first operand is a command). `args` are the words after the program.
+fn inline_code(base: &str, args: &[String]) -> bool {
+    let lower: Vec<String> = args.iter().map(|arg| arg.to_ascii_lowercase()).collect();
+    let short_c = |arg: &str| {
+        arg.len() >= 2
+            && arg.starts_with('-')
+            && !arg.starts_with("--")
+            && arg[1..].chars().all(|c| c.is_ascii_alphabetic())
+            && arg[1..].contains('c')
+    };
+    if is_python(base) {
+        // Python's options before `-c`; `-m` or a script operand ends them.
+        for arg in &lower {
+            if arg == "-c" {
+                return true;
+            }
+            if arg == "-m" || !arg.starts_with('-') {
+                return false;
+            }
+        }
+        return false;
+    }
+    if matches!(base, "bash" | "sh") {
+        return lower
+            .iter()
+            .take_while(|arg| arg.starts_with('-'))
+            .any(|arg| short_c(arg));
+    }
+    if matches!(base, "pwsh" | "powershell") {
+        let command = |arg: &str| {
+            matches!(arg, "-c" | "-e" | "-ec" | "-encodedcommand")
+                || (arg.len() >= 4 && "-command".starts_with(arg))
+        };
+        let file = |arg: &str| arg.len() >= 2 && "-file".starts_with(arg);
+        let first_command = lower.iter().position(|arg| command(arg));
+        let first_file = lower.iter().position(|arg| file(arg));
+        return match (first_command, first_file) {
+            (Some(c), Some(f)) => c < f,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => base == "powershell",
+        };
+    }
+    false
 }
 
 /// Axis 5. `listened` is every port listened on inside the worker's pane's process tree.
@@ -2340,7 +2475,32 @@ fn shell_local_reads(cmd: &str) -> Vec<LocalRead> {
         });
     };
     let mut vars: Vec<(String, String)> = Vec::new();
-    for segment in &segs {
+    // Fix round 2 (H6 c, d): the words of each open `for NAME in <words>` loop, and the variables and folder outside
+    // each open `( ... )` subshell, put back when it closes.
+    let mut loops: Vec<(String, Vec<String>)> = Vec::new();
+    let mut scopes: Vec<(Vec<(String, String)>, Option<String>)> = Vec::new();
+    let mut closing = false;
+    for raw in &segs {
+        if std::mem::take(&mut closing) {
+            if let Some((outer_vars, outer_folder)) = scopes.pop() {
+                vars = outer_vars;
+                folder = outer_folder;
+            }
+        }
+        let mut owned = raw.trim().to_owned();
+        if let Some(inner) = owned.strip_prefix('(') {
+            scopes.push((vars.clone(), folder.clone()));
+            owned = inner.trim_start().to_owned();
+        }
+        if owned.ends_with(')') && owned.matches(')').count() > owned.matches('(').count() {
+            owned.pop();
+            closing = true;
+        }
+        let owned = match owned.split_once(char::is_whitespace) {
+            Some((head, rest)) if matches!(head, "do" | "then" | "else") => rest.trim().to_owned(),
+            _ => owned,
+        };
+        let segment = &owned;
         let words = split_command(segment);
         if let Some(to) = moves_to(&words) {
             let to = match &folder {
@@ -2355,24 +2515,80 @@ fn shell_local_reads(cmd: &str) -> Vec<LocalRead> {
             vars.push((name, value));
             continue;
         }
+        if words.first().map(String::as_str) == Some("for")
+            && words.len() > 3
+            && words[2] == "in"
+        {
+            loops.push((words[1].clone(), words[3..].to_vec()));
+            continue;
+        }
+        if words.first().map(String::as_str) == Some("done") {
+            loops.pop();
+            continue;
+        }
+        // Fix round 2 (H6 b): `git show <rev>:<path>` and `git cat-file -p <rev>:<path>` read `<path>` at `<rev>`.
+        if words.first().is_some_and(|word| word.eq_ignore_ascii_case("git"))
+            && words
+                .get(1)
+                .is_some_and(|sub| matches!(sub.as_str(), "show" | "cat-file"))
+        {
+            for word in &words[2..] {
+                let Some((rev, path)) = word.split_once(':') else {
+                    continue;
+                };
+                if rev.is_empty() || rev.contains(['/', '\\']) || path.is_empty() {
+                    continue;
+                }
+                if let Some(path) = path_word(path) {
+                    push(&mut reads, &folder, path, false);
+                }
+            }
+            continue;
+        }
         let reads_here = segment_reads_local(segment) || runs(segment, LOCAL_COUNTERS);
         if !reads_here || runs(segment, LOCAL_WRITERS) {
             continue;
         }
         let search = runs(segment, LOCAL_SEARCHERS);
         let expanded = expand_vars(segment, &vars);
-        let segment = &expanded;
+        // A loop's variable read as each of its words.
+        let mut variants = vec![expanded];
+        for (name, values) in &loops {
+            let marks = [format!("${name}"), format!("${{{name}}}")];
+            variants = variants
+                .into_iter()
+                .flat_map(|variant| {
+                    if marks.iter().any(|mark| variant.contains(mark.as_str())) {
+                        values
+                            .iter()
+                            .map(|value| {
+                                marks
+                                    .iter()
+                                    .fold(variant.clone(), |text, mark| text.replace(mark.as_str(), value))
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
+                        vec![variant]
+                    }
+                })
+                .collect();
+        }
+        for segment in &variants {
         let words = split_command(segment);
+        let patterns = pattern_words(&words);
         let mut named = Vec::new();
         // A script's quoted strings, read whole from the raw text: `r"C:\x\a.csv"` loses its quotes to the words.
         for part in quoted_parts(segment) {
+            if patterns.iter().any(|at| words[*at] == part) {
+                continue;
+            }
             if let Some(path) = path_word(part.trim()) {
                 named.push(path);
             }
         }
         for (at, word) in words.iter().enumerate() {
             let after_redirect = at > 0 && words[at - 1].ends_with('>');
-            if after_redirect || word.starts_with('>') || word.contains(">>") {
+            if after_redirect || word.starts_with('>') || word.contains(">>") || patterns.contains(&at) {
                 continue;
             }
             let whole = !word.contains(['(', ')', '\'', '"', '=', ';', '[', ']', '{', '}']);
@@ -2401,6 +2617,7 @@ fn shell_local_reads(cmd: &str) -> Vec<LocalRead> {
         for path in named {
             push(&mut reads, &folder, path, search);
         }
+        }
     }
     for script in &scripts {
         if !script.lines().any(segment_reads_local) {
@@ -2415,6 +2632,111 @@ fn shell_local_reads(cmd: &str) -> Vec<LocalRead> {
         }
     }
     reads
+}
+
+/// Fix round 2 (H6 a, review): the indices of `words` that are a search's pattern, never a path it reads: `grep`'s and
+/// `rg`'s first operand (or each `-e`/`--regexp` value, after which every operand is a path), `findstr`'s first
+/// operand and its `/c:` string, `Select-String`'s `-Pattern` value (or its first operand), and the value of `find`'s
+/// `-name`, `-iname`, `-path`, `-ipath`, `-wholename` and `-regex`. `grep -rn "Docs/B.md" .` vouched for `Docs/B.md`.
+fn pattern_words(words: &[String]) -> Vec<usize> {
+    let mut out = Vec::new();
+    let base = |word: &str| {
+        let lower = word.rsplit(['/', '\\']).next().unwrap_or(word).to_ascii_lowercase();
+        lower.strip_suffix(".exe").unwrap_or(&lower).to_owned()
+    };
+    let mut at = 0;
+    while at < words.len() {
+        let command = base(&words[at]);
+        let rest = at + 1;
+        match command.as_str() {
+            "grep" | "rg" | "egrep" | "fgrep" => {
+                let mut explicit = false;
+                let mut first = None;
+                let mut i = rest;
+                while i < words.len() && !matches!(words[i].as_str(), "|" | ";") {
+                    let word = words[i].as_str();
+                    if matches!(word, "-e" | "--regexp" | "-f" | "--file") {
+                        explicit = true;
+                        out.push(i + 1);
+                        i += 2;
+                        continue;
+                    }
+                    // A flag whose value is the next word: no operand.
+                    if matches!(
+                        word,
+                        "-A" | "-B" | "-C" | "-m" | "-g" | "-t" | "-T" | "-d" | "-D" | "--glob" | "--type"
+                            | "--type-not" | "--max-count" | "--include" | "--exclude" | "--exclude-dir"
+                            | "--context" | "--after-context" | "--before-context"
+                    ) {
+                        i += 2;
+                        continue;
+                    }
+                    if word.starts_with("--regexp=") {
+                        explicit = true;
+                        out.push(i);
+                    } else if !word.starts_with('-') && first.is_none() {
+                        first = Some(i);
+                    }
+                    i += 1;
+                }
+                if let (false, Some(first)) = (explicit, first) {
+                    out.push(first);
+                }
+            }
+            "findstr" => {
+                let mut first = None;
+                for (i, word) in words.iter().enumerate().skip(rest) {
+                    let lower = word.to_ascii_lowercase();
+                    if lower.starts_with("/c:") || lower.starts_with("/g:") {
+                        out.push(i);
+                        first = Some(usize::MAX);
+                    } else if !word.starts_with('/') && first.is_none() {
+                        first = Some(i);
+                    }
+                }
+                if let Some(first) = first.filter(|first| *first != usize::MAX) {
+                    out.push(first);
+                }
+            }
+            "select-string" | "sls" => {
+                let mut named = false;
+                let mut first = None;
+                let mut i = rest;
+                while i < words.len() {
+                    let lower = words[i].to_ascii_lowercase();
+                    if lower.starts_with('-') {
+                        if "-pattern".starts_with(lower.as_str()) && lower.len() >= 2 {
+                            named = true;
+                            out.push(i + 1);
+                        }
+                        i += 2;
+                        continue;
+                    }
+                    if first.is_none() {
+                        first = Some(i);
+                    }
+                    i += 1;
+                }
+                if let (false, Some(first)) = (named, first) {
+                    out.push(first);
+                }
+            }
+            "find" => {
+                for i in rest..words.len() {
+                    if matches!(
+                        words[i].as_str(),
+                        "-name" | "-iname" | "-path" | "-ipath" | "-wholename" | "-regex" | "-iregex"
+                    ) {
+                        out.push(i + 1);
+                    }
+                }
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    out.retain(|i| *i < words.len());
+    out
 }
 
 /// A shell variable set by a segment of its own: bash's `NAME=value` (one word once quotes are gone) or pwsh's
@@ -2481,37 +2803,70 @@ fn expand_vars(segment: &str, vars: &[(String, String)]) -> String {
 /// Fix round F5 (review finding 5): the first cut took anything with no `://`, `www.` or `host.tld/` as local, so
 /// `Smith et al 2023`, `RFC 9110` or a bare `example.com` was a local entry, which research.read skips, and its axis
 /// passed with "0 source(s) cited, each verified". Now an entry is local only when it holds a `/` or `\`, or one of
-/// its pieces (`local_pieces`, a parenthesised note dropped) ends in a known file extension (`FILE_EXTENSIONS`);
+/// its pieces (`local_pieces`, a parenthesised note dropped) ends in a known file extension (a list fix round 2 removed);
 /// anything else is checked as a web source and fails unfetched, as before plan 43. Megajam's a1-asset-wiring-audit
 /// cited `git ls-tree -r --name-only HEAD (assets/, Content/, Source/)`: a slash, so local, and not checked.
-pub fn local_entry(url: &str) -> bool {
+///
+/// Fix round 2 (H7, review): a slash alone made `N/A`, `and/or` and `TCP/IP` local, a known extension made `docs.rs`
+/// and `tokio.rs` local, and `Makefile`, `LICENSE`, `.gitignore` or an `.hlsl` on disk read as the web. Now a piece of
+/// the entry (`local_pieces`) is local when it resolves to a file or folder that exists, absolute or under one of
+/// `roots` (the worktree, then the project), or when it holds a path separator and its last component has a file
+/// extension (`Docs/x.md`, `Shaders/ink.hlsl`); `file://` entries are read the same way.
+pub fn local_entry(url: &str, roots: &[&Path]) -> bool {
     let url = url.trim();
     let lower = url.to_ascii_lowercase();
-    if lower.starts_with("file://") {
+    // A `host.tld/` anywhere in it, not only first: `see example.com/x` holds a slash and is the web.
+    let web = !lower.starts_with("file://")
+        && (lower.contains("://") || lower.starts_with("www.") || bare_domain(url).is_some());
+    if web {
+        return false;
+    }
+    let on_disk = |piece: &str| {
+        if absolute(piece) {
+            Path::new(piece).exists()
+        } else {
+            roots.iter().any(|root| root.join(piece).exists())
+        }
+    };
+    // Megajam's a1-asset-wiring-audit cited `git ls-tree -r --name-only HEAD (assets/, Content/, Source/)`: a command
+    // over folders named in its note, which exist; such an entry is local when a folder or file its note names exists.
+    let mut noted = String::new();
+    let mut depth = 0usize;
+    for c in url.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                noted.push(',');
+            }
+            _ if depth > 0 => noted.push(c),
+            _ => {}
+        }
+    }
+    if local_pieces(&noted).iter().any(|piece| on_disk(piece)) {
         return true;
     }
-    // A `host.tld/` anywhere in it, not only first: `see example.com/x` holds a slash and is the web.
-    let web = lower.contains("://") || lower.starts_with("www.") || bare_domain(url).is_some();
-    !web && (url.contains(['/', '\\'])
-        || local_pieces(url).iter().any(|piece| {
-            piece.rsplit_once('.').is_some_and(|(stem, ext)| {
-                !stem.is_empty() && FILE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
-            })
-        }))
+    local_pieces(url).iter().any(|piece| {
+        let on_disk = on_disk(piece);
+        let last = piece
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .to_owned();
+        let shaped = piece.contains(['/', '\\'])
+            && last.rsplit_once('.').is_some_and(|(stem, ext)| {
+                !stem.is_empty()
+                    && (1..=8).contains(&ext.len())
+                    && ext.chars().all(|c| c.is_ascii_alphanumeric())
+                    && ext.chars().any(|c| c.is_ascii_alphabetic())
+            });
+        // A folder written as one (`Docs/AssetGen/`, `.nirvana/lessons/`) is a path too; `N/A` and `TCP/IP` are not.
+        let folder = piece.len() > 1 && piece.ends_with(['/', '\\']);
+        on_disk || shaped || folder
+    })
 }
-
-/// Fix round F5: the extensions that make a bare name (`README.md`, `Cargo.toml`) a file. No top-level domain that is
-/// also a web host's (`.com`, `.org`, `.io`, `.dev`) is here; `.md` and `.rs` are both, and a file far more often in a
-/// Work Report. Media files are `MEDIA_EXTENSIONS`.
-const FILE_EXTENSIONS: &[&str] = &[
-    "md", "markdown", "txt", "rst", "adoc", "json", "jsonl", "toml", "yaml", "yml", "ini", "cfg",
-    "conf", "csv", "tsv", "xml", "html", "htm", "css", "scss", "rs", "py", "ipynb", "ts", "tsx",
-    "js", "jsx", "mjs", "cjs", "c", "h", "cc", "cpp", "hpp", "cs", "go", "java", "kt", "swift",
-    "rb", "lua", "sh", "ps1", "psm1", "bat", "cmd", "sql", "log", "lock", "pdf", "svg", "zip",
-    "uasset", "umap", "uproject", "uplugin", "usf", "ush", "glb", "gltf", "fbx", "obj", "blend",
-    "mp4", "webm", "mkv", "mov", "m4v", "avi", "m4a", "mp3", "wav", "opus", "ogg", "flac", "aac",
-    "jpg", "jpeg", "png", "webp", "gif", "vtt", "srt",
-];
 
 /// The paths one cited local entry names, as written. Megajam's research.read orders cited `Config/DefaultEngine.ini,
 /// Config/DefaultGame.ini`, `<folder>/ (folder listing)` and `Front/InkTitleRoot.cpp, InkTitleGameMode.cpp` (the
@@ -3155,7 +3510,7 @@ check ({asked})"
         if stable_read(url, &reads) {
             continue;
         }
-        if local_entry(url) {
+        if local_entry(url, roots) {
             if class == READ_CLASS {
                 skipped += 1;
             } else if !local_read(url, &reads, roots) {
@@ -3621,7 +3976,8 @@ pub fn run_command(cwd: &Path, line: &str, timeout: Duration) -> CommandRun {
         if !output.is_empty() && !output.ends_with('\n') {
             output.push('\n');
         }
-        output.push_str("herdr gate: the output pipes were still open after the test ended; the rest was not read\n");
+        output.push_str(UNREAD_OUTPUT);
+        output.push('\n');
     }
     if !stderr.is_empty() {
         if !output.is_empty() && !output.ends_with('\n') {
@@ -4027,30 +4383,49 @@ pub fn set_aside_harness(cwd: &Path, onto: &str, aside: &Path) -> Result<Vec<Str
     }
     // Every copy and the manifest first: nothing in the worktree has changed if this fails.
     let mut manifest = AsideManifest::default();
-    for (path, was_tracked) in tracked
-        .iter()
-        .map(|path| (path, true))
-        .chain(untracked.iter().map(|path| (path, false)))
-    {
-        let from = cwd.join(path);
-        let copied = from.is_file();
-        if copied {
-            let to = aside.join(path);
-            if let Some(parent) = to.parent() {
-                std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    // Fix round 2 (H5 d): the copies this call wrote, removed again when a copy or the manifest fails, so a full disk
+    // leaves no half set-aside behind (the review found them kept until a later gate succeeded).
+    let mut written: Vec<PathBuf> = Vec::new();
+    let copied_all = (|| -> Result<(), String> {
+        for (path, was_tracked) in tracked
+            .iter()
+            .map(|path| (path, true))
+            .chain(untracked.iter().map(|path| (path, false)))
+        {
+            let from = cwd.join(path);
+            let copied = from.is_file();
+            if copied {
+                #[cfg(test)]
+                if !written.is_empty() && TEST_ASIDE_COPY_FAILS.replace(false) {
+                    return Err("a test's copy failure".into());
+                }
+                let to = aside.join(path);
+                if let Some(parent) = to.parent() {
+                    std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+                }
+                std::fs::copy(&from, &to).map_err(|err| format!("{}: {err}", from.display()))?;
+                written.push(to);
             }
-            std::fs::copy(&from, &to).map_err(|err| format!("{}: {err}", from.display()))?;
+            manifest.entries.push(AsideEntry {
+                path: path.clone(),
+                tracked: was_tracked,
+                copied,
+            });
         }
-        manifest.entries.push(AsideEntry {
-            path: path.clone(),
-            tracked: was_tracked,
-            copied,
-        });
+        std::fs::create_dir_all(aside).map_err(|err| err.to_string())?;
+        let text = serde_json::to_string_pretty(&manifest).map_err(|err| err.to_string())?;
+        nirvana_seat::write_atomic(&aside.join(ASIDE_MANIFEST), text.as_bytes())
+            .map_err(|err| err.to_string())
+    })();
+    if let Err(why) = copied_all {
+        for copy in &written {
+            let _ = std::fs::remove_file(copy);
+        }
+        let _ = std::fs::remove_file(aside.join(ASIDE_MANIFEST));
+        // Only folders left empty: copies an earlier restore kept on purpose stay.
+        let _ = remove_empty_dirs(aside);
+        return Err(why);
     }
-    std::fs::create_dir_all(aside).map_err(|err| err.to_string())?;
-    let text = serde_json::to_string_pretty(&manifest).map_err(|err| err.to_string())?;
-    nirvana_seat::write_atomic(&aside.join(ASIDE_MANIFEST), text.as_bytes())
-        .map_err(|err| err.to_string())?;
     let cleared = (|| -> Result<(), String> {
         for chunk in tracked.chunks(64) {
             let mut args = vec!["reset", "-q", "--"];
@@ -4091,10 +4466,44 @@ pub fn set_aside_harness(cwd: &Path, onto: &str, aside: &Path) -> Result<Vec<Str
     Ok(moved)
 }
 
+/// Removes `dir` and the folders under it that hold no file, deepest first; a folder with a file stays.
+fn remove_empty_dirs(dir: &Path) -> std::io::Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        if entry.path().is_dir() {
+            let _ = remove_empty_dirs(&entry.path());
+        }
+    }
+    std::fs::remove_dir(dir)
+}
+
 #[cfg(test)]
 thread_local! {
     /// Fix round G1's hook: the next set-aside on this thread fails once, after it reset the tracked files.
     pub(crate) static TEST_ASIDE_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Fix round 2 (H5 d): the next set-aside's second copy fails once, the first written.
+    pub(crate) static TEST_ASIDE_COPY_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Fix round 2 (H5 c): the next restore's removal of its aside folder fails once (a Windows lock).
+    pub(crate) static TEST_ASIDE_REMOVE_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Fix round 2 (H8): the next `gate_amend` on this thread errs once, after its amend is journaled.
+    pub(crate) static TEST_REGATE_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The folder a worktree's set-aside lives in, under the run's gate folder. Fix round 2 (H5 a): keyed by the worktree,
+/// not the order: a send-back child shares its parent's worktree, and the parent's leftover belongs to that worktree;
+/// two gates of one worktree are one at a time (`gate_lock`).
+pub fn aside_dir(project: &Project, run: &str, worktree: &Path) -> PathBuf {
+    let name = worktree
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' })
+        .collect();
+    gate_dir(project, run).join(format!("{name}-aside"))
 }
 
 /// The record of a set-aside, `<aside>/manifest.json`: written before the worktree changes, deleted once each file is
@@ -4121,19 +4530,112 @@ pub struct AsideEntry {
 /// rebase left it absent; where the rebase brought a tracked copy of it, that copy stays, and the old one, when it
 /// differs, is kept in `aside` and named in the result. With no manifest, nothing to do. An error leaves the manifest,
 /// so the next gate tries again.
-pub fn restore_harness(cwd: &Path, aside: &Path) -> Result<Vec<String>, String> {
-    let Ok(text) = std::fs::read_to_string(aside.join(ASIDE_MANIFEST)) else {
-        return Ok(Vec::new());
+///
+/// Fix round 2 (H5): an entry whose aside copy is gone is skipped and named (`Restored::missing`), not an error that
+/// failed every later gate of the order; and the manifest goes before the folder, so a folder Windows will not let go
+/// of (`Restored::left`) never makes the next gate restore again over newer edits.
+pub fn restore_harness(cwd: &Path, aside: &Path) -> Result<Restored, String> {
+    restore_from(cwd, aside, false)
+}
+
+/// Fix round 2 (H5 a): what a dead gate left, restored by the next gate of the worktree (`deterministic`). That gate
+/// may be a send-back child's, which shares the worktree and may have changed the file since: a tracked file the
+/// dead gate left as `HEAD` has it (or absent) is put back, but one whose content differs from `HEAD`'s and whose
+/// modification time is after the manifest's was changed since by someone else, and the live file stays
+/// (`Restored::live`). The time alone is not enough: the dead gate's own `git checkout` wrote every file it set aside
+/// after its manifest.
+pub fn restore_leftover(cwd: &Path, aside: &Path) -> Result<Restored, String> {
+    restore_from(cwd, aside, true)
+}
+
+/// What a restore did beside putting files back. Each list holds paths under `.nirvana/`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Restored {
+    /// Untracked files the rebase brought a different tracked copy of; the old copy stays in the aside folder.
+    pub kept: Vec<String>,
+    /// Entries whose aside copy was gone: skipped.
+    pub missing: Vec<String>,
+    /// Leftover entries whose live file is newer than the manifest and not as the dead gate left it: kept live.
+    pub live: Vec<String>,
+    /// The aside folder could not be removed after the manifest was (a Windows lock): why.
+    pub left: Option<String>,
+}
+
+impl Restored {
+    /// The note a gate adds for anything beside a plain put-back, or None.
+    pub fn note(&self, aside: &Path) -> Option<String> {
+        let mut parts = Vec::new();
+        if !self.missing.is_empty() {
+            parts.push(format!(
+                "{} set-aside file(s) had no copy left and were skipped: {}",
+                self.missing.len(),
+                self.missing.join(", ")
+            ));
+        }
+        if !self.live.is_empty() {
+            parts.push(format!(
+                "{} file(s) changed after the set-aside were kept as they are now, not restored: {}",
+                self.live.len(),
+                self.live.join(", ")
+            ));
+        }
+        if let Some(why) = &self.left {
+            parts.push(format!(
+                "the aside folder {} could not be removed ({why}); its manifest is gone, so nothing restores from it",
+                aside.display()
+            ));
+        }
+        (!parts.is_empty()).then(|| parts.join("; "))
+    }
+}
+
+fn restore_from(cwd: &Path, aside: &Path, leftover: bool) -> Result<Restored, String> {
+    let manifest_path = aside.join(ASIDE_MANIFEST);
+    let Ok(text) = std::fs::read_to_string(&manifest_path) else {
+        return Ok(Restored::default());
     };
     let manifest: AsideManifest = serde_json::from_str(&text).map_err(|err| err.to_string())?;
-    let mut kept = Vec::new();
+    let written_at = std::fs::metadata(&manifest_path)
+        .and_then(|meta| meta.modified())
+        .ok();
+    // A leftover's tracked file someone changed after the dead gate: newer than the manifest, and not what the gate's
+    // checkout (or its rebase) left, which is `HEAD`'s blob or no file.
+    let changed_since = |path: &str, to: &Path| -> bool {
+        if !leftover || !to.is_file() {
+            return false;
+        }
+        let newer = match (written_at, std::fs::metadata(to).and_then(|meta| meta.modified())) {
+            (Some(manifest), Ok(live)) => live > manifest,
+            _ => false,
+        };
+        if !newer {
+            return false;
+        }
+        let normal = |text: &str| text.replace("\r\n", "\n");
+        let live = std::fs::read(to)
+            .map(|bytes| normal(&String::from_utf8_lossy(&bytes)))
+            .unwrap_or_default();
+        match git(cwd, &["show", &format!("HEAD:{path}")]) {
+            Ok(head) => normal(&head) != live,
+            Err(_) => true,
+        }
+    };
+    let mut done = Restored::default();
     for entry in &manifest.entries {
         let to = cwd.join(&entry.path);
         let from = aside.join(&entry.path);
+        if entry.tracked && changed_since(&entry.path, &to) {
+            done.live.push(entry.path.clone());
+            continue;
+        }
         if !entry.copied {
             if entry.tracked && to.exists() {
                 std::fs::remove_file(&to).map_err(|err| format!("{}: {err}", to.display()))?;
             }
+            continue;
+        }
+        if !from.is_file() {
+            done.missing.push(entry.path.clone());
             continue;
         }
         let put_back = entry.tracked || !to.exists();
@@ -4143,22 +4645,36 @@ pub fn restore_harness(cwd: &Path, aside: &Path) -> Result<Vec<String>, String> 
             }
             std::fs::copy(&from, &to).map_err(|err| format!("{}: {err}", to.display()))?;
         } else if std::fs::read(&to).ok() != std::fs::read(&from).ok() {
-            kept.push(entry.path.clone());
+            done.kept.push(entry.path.clone());
         }
     }
-    if kept.is_empty() {
-        std::fs::remove_dir_all(aside).map_err(|err| format!("{}: {err}", aside.display()))?;
+    // Fix round 2 (H5 c): the manifest first. Kept with the folder, a lock on the folder left it, and the next gate
+    // restored it again over the edits made since.
+    if let Err(err) = std::fs::remove_file(&manifest_path) {
+        // Marked instead: a manifest by another name restores nothing.
+        std::fs::rename(&manifest_path, aside.join(format!("{ASIDE_MANIFEST}.done")))
+            .map_err(|rename| format!("{}: {err}; {rename}", manifest_path.display()))?;
+    }
+    if done.kept.is_empty() {
+        #[cfg(test)]
+        if TEST_ASIDE_REMOVE_FAILS.replace(false) {
+            done.left = Some("a test's lock".into());
+            return Ok(done);
+        }
+        if let Err(err) = std::fs::remove_dir_all(aside) {
+            done.left = Some(err.to_string());
+        }
     } else {
         for entry in manifest
             .entries
             .iter()
-            .filter(|entry| !kept.contains(&entry.path))
+            .filter(|entry| !done.kept.contains(&entry.path))
         {
             let _ = std::fs::remove_file(aside.join(&entry.path));
         }
-        std::fs::remove_file(aside.join(ASIDE_MANIFEST)).map_err(|err| err.to_string())?;
+        let _ = std::fs::remove_file(aside.join(format!("{ASIDE_MANIFEST}.done")));
     }
-    Ok(kept)
+    Ok(done)
 }
 
 /// Fix round G1: the restore runs on every way out of the rebase, a panic among them.
@@ -4169,7 +4685,7 @@ struct AsideGuard<'a> {
 }
 
 impl AsideGuard<'_> {
-    fn restore(mut self) -> Result<Vec<String>, String> {
+    fn restore(mut self) -> Result<Restored, String> {
         self.armed = false;
         restore_harness(self.cwd, self.aside)
     }
@@ -4380,18 +4896,20 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
     let (base, worktree) = match subject.branch {
         Some(_) => {
             // Fix round G1: a gate that died between set-aside and restore left a manifest; its files go back first.
-            let aside = gate_dir(&Project::at(subject.root), subject.run)
-                .join(format!("{}-aside", subject.order));
+            let aside = aside_dir(&Project::at(subject.root), subject.run, subject.cwd);
             if aside.join(ASIDE_MANIFEST).is_file() {
-                match restore_harness(subject.cwd, &aside) {
-                    Ok(_) => axes.push(Axis::new(
+                match restore_leftover(subject.cwd, &aside) {
+                    Ok(restored) => axes.push(Axis::new(
                         "aside",
                         Mark::Note,
                         format!(
-                            "an earlier gate of {} stopped between setting herdr's own files aside and putting them \
-back; they were put back from {} first",
-                            subject.order,
-                            aside.display()
+                            "an earlier gate of this worktree stopped between setting herdr's own files aside and \
+putting them back; they were put back from {} first{}",
+                            aside.display(),
+                            restored
+                                .note(&aside)
+                                .map(|note| format!("; {note}"))
+                                .unwrap_or_default()
                         ),
                     )),
                     Err(why) => {
@@ -4476,16 +4994,18 @@ back; they were put back from {} first",
             let restored = guard.restore();
             let aside_note = match (&restored, moved.is_empty()) {
                 (_, true) => String::new(),
-                (Ok(kept), false) if kept.is_empty() => format!(
-                    "; {} of herdr's own file(s) under .nirvana/ set aside for it and put back",
-                    moved.len()
-                ),
-                (Ok(kept), false) => format!(
-                    "; {} of herdr's own file(s) under .nirvana/ set aside for it and put back; the rebase brought {} \
-of them, whose old copies are kept in {}",
+                (Ok(done), false) if done.kept.is_empty() => format!(
+                    "; {} of herdr's own file(s) under .nirvana/ set aside for it and put back{}",
                     moved.len(),
-                    kept.len(),
-                    aside.display()
+                    done.note(&aside).map(|note| format!("; {note}")).unwrap_or_default()
+                ),
+                (Ok(done), false) => format!(
+                    "; {} of herdr's own file(s) under .nirvana/ set aside for it and put back; the rebase brought {} \
+of them, whose old copies are kept in {}{}",
+                    moved.len(),
+                    done.kept.len(),
+                    aside.display(),
+                    done.note(&aside).map(|note| format!("; {note}")).unwrap_or_default()
                 ),
                 (Err(why), false) => format!(
                     "; {} of herdr's own file(s) under .nirvana/ set aside for it and NOT put back ({why}): the next \
@@ -6925,6 +7445,22 @@ pub fn gate_amend(
             child.id()
         ));
     }
+    // Fix round 2 (H8, review): a child that went on past its worker (delivered, gated, merged, asked or reseated) has
+    // put its own work on this branch; re-gating the parent would rule on the child's work under the parent's name.
+    // Only a child that ended with nothing usable (interrupted or failed, as `herdr seat stop` leaves it) lets the
+    // parent be amended. A helper (a lesson review, `<order>-lr`) writes nothing on the branch and never counts.
+    if let Some(child) = state.orders.iter().find(|child| {
+        child.seated.parent.as_deref() == Some(order)
+            && !owns_nothing(&child.seated.class)
+            && !matches!(child.phase, Phase::Interrupted | Phase::Failed)
+    }) {
+        return Err(format!(
+            "{} is {} already and its work is on {order}'s branch: amend {} instead",
+            child.id(),
+            child.phase.word(),
+            child.id()
+        ));
+    }
     let (root, _) = chain(&state, order);
     let root_seated = state
         .order(&root)
@@ -7014,6 +7550,12 @@ pub fn gate_amend(
         ));
     }
     let sidecar = read_sidecar(project, run, order);
+    // Fix round 2 (H8): the re-gate erring (a herdr that dies in a long `test:`, a journal it cannot write), after the
+    // amend was journaled.
+    #[cfg(test)]
+    if TEST_REGATE_FAILS.replace(false) {
+        return Err("a test's re-gate failure".into());
+    }
     let table = nirvana_seat::table_for(&project.root).ok();
     let state = replay(&journal.read().0);
     let known = state.order(order).cloned().unwrap_or(known);

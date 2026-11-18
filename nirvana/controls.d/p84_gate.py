@@ -75,8 +75,8 @@ CONTROLS = (
             _T + "p43_gate_amend_adds_owns_and_regates_the_same_branch_with_no_child", "rust"),
     # A test command whose python -c code does not parse is the brief's
     Control("p84_python_c_unparsed", GATE,
-            "    if plain.contains(\"File \\\"<string>\\\"\") {\n",
-            "    if plain.contains(\"File \\\"<nothing>\\\"\") {\n",
+            "    if inline && is_python(base) && plain.contains(\"File \\\"<string>\\\"\") {\n",
+            "    if inline && is_python(base) && plain.contains(\"File \\\"<nothing>\\\"\") {\n",
             _T + "p43_a_test_command_that_does_not_parse_is_the_briefs", "rust"),
     # A pwsh -Command that does not parse is the brief's
     Control("p84_pwsh_unparsed", GATE,
@@ -171,7 +171,7 @@ CONTROLS = (
             _T + "p43_f2_a_fenced_new_file_fails_as_the_workers_and_an_ordinary_one_is_a_note", "rust"),
     # F2: a dot-prefixed component is fenced
     Control("p84_f2_dot_prefixed", GATE,
-            "    if parts.iter().any(|part| part.starts_with('.')) {\n",
+            "    if parts.iter().any(dotted) {\n",
             "    if parts.iter().any(|part| part.starts_with(\"never.\")) {\n",
             _T + "p43_f2_a_fenced_new_file_fails_as_the_workers_and_an_ordinary_one_is_a_note", "rust"),
     # F2: nirvana/controls.d/ is fenced
@@ -191,7 +191,7 @@ CONTROLS = (
             _T + "p43_f2_a_fenced_new_file_fails_as_the_workers_and_an_ordinary_one_is_a_note", "rust"),
     # F2: a credential-looking name is fenced (p72's secret.txt)
     Control("p84_f2_credential_names", GATE,
-            "    if key_ext || ssh_key || lower.contains(\"secret\") || lower.contains(\"credential\") {\n",
+            "    if key_ext || ssh_key || secretive {\n",
             "    if key_ext || ssh_key {\n",
             _T + "p72_a_forged_start_record_passes_nothing", "rust"),
     # F3: an amend's wake names the command that prints the line whole
@@ -219,10 +219,10 @@ CONTROLS = (
             "            .any(|read| !read.search && media_file(&read.path));\n",
             "            .any(|read| !read.search);\n",
             _T + "p43_f4_a_media_order_that_read_only_text_files_and_cited_none_fails", "rust"),
-    # F5: a bare name is local only with a known file extension
+    # F5 (rewritten in fix round 2, H7): a piece is local only when it exists or is shaped like a file path
     Control("p84_f5_local_needs_a_file", GATE,
-            "                !stem.is_empty() && FILE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())\n",
-            "                !stem.is_empty()\n",
+            "        on_disk || shaped || folder\n",
+            "        true\n",
             _T + "p43_f5_research_read_cannot_cite_invented_sources", "rust"),
     # F5: every entry skipped says none was checked
     Control("p84_f5_none_checked", GATE,
@@ -256,13 +256,13 @@ CONTROLS = (
             _T + "p43_g1_a_set_aside_comes_back_as_it_was_and_leaves_no_copy", "rust"),
     # G1: the aside copy is deleted after the restore
     Control("p84_g1_aside_deleted", GATE,
-            "        std::fs::remove_dir_all(aside).map_err(|err| format!(\"{}: {err}\", aside.display()))?;\n",
-            "        let _ = aside;\n",
+            "        if let Err(err) = std::fs::remove_dir_all(aside) {\n",
+            "        if let Err(err) = Ok::<(), std::io::Error>(()) {\n",
             _T + "p43_g1_a_set_aside_comes_back_as_it_was_and_leaves_no_copy", "rust"),
     # G1: the restore runs when the rebase fails
     Control("p84_g1_restore_after_failed_rebase", GATE,
             "            let restored = guard.restore();\n",
-            "            let restored: Result<Vec<String>, String> = { std::mem::forget(guard); Ok(Vec::new()) };\n",
+            "            let restored: Result<Restored, String> = { std::mem::forget(guard); Ok(Restored::default()) };\n",
             _T + "p43_g1_a_failed_rebase_still_puts_herdrs_files_back", "rust"),
     # G1: a set-aside that fails midway restores before it returns
     Control("p84_g1_midway_restores", GATE,
@@ -309,4 +309,136 @@ CONTROLS = (
             "            if !on_branch(&full) {\n",
             "            if false && !on_branch(&full) {\n",
             _T + "p43_a_hand_merge_is_journaled_with_its_sha_and_reason", "rust"),
+
+    # --- plan 43 fix round 2 (H2 to H8) ---
+    # H2: only an interpreter's inline code is the brief's text; a script's or a runner's parse error is the worker's
+    Control("p84_r2_inline_only", GATE,
+            "    let inline = inline_code(base, argv.get(1..).unwrap_or(&[]));\n",
+            "    let inline = true;\n",
+            _T + "p43_r2_h2_a_workers_module_or_script_is_never_the_briefs", "rust"),
+    # H2: a pwsh ParserError followed by a loaded file's line is the worker's
+    Control("p84_r2_loaded_module", GATE,
+            "                if lines[at + 1..].iter().any(|line| loaded(line)) {\n",
+            "                if false && lines[at + 1..].iter().any(|line| loaded(line)) {\n",
+            _T + "p43_r2_h2_a_workers_module_or_script_is_never_the_briefs", "rust"),
+    # H2: Windows PowerShell 5's module error names its file, the worker's
+    Control("p84_r2_ps5_loaded", GATE,
+            "            && !lines.iter().any(|line| loaded(line))\n",
+            "            && true\n",
+            _T + "p43_r2_h2_a_workers_module_or_script_is_never_the_briefs", "rust"),
+    # H2: output a pipe of which was never read is never the brief's
+    Control("p84_r2_unread_not_briefs", GATE,
+            "    if output.contains(UNREAD_OUTPUT) {\n",
+            "    if false && output.contains(UNREAD_OUTPUT) {\n",
+            _T + "p43_r2_h2_a_workers_module_or_script_is_never_the_briefs", "rust"),
+    # H3: an order left amending is recorded as the amend, which the tally ignores
+    Control("p84_r2_amending_word", RUN,
+            "    if order.verdict.as_deref() == Some(Outcome::AMENDING) {\n        return Outcome::Amend.word().into();\n",
+            "    if order.verdict.as_deref() == Some(\"never\") {\n        return Outcome::Amend.word().into();\n",
+            _T + "p43_r2_h3_an_order_left_amending_is_not_counted_against_its_seat", "rust"),
+    # H4: config a test runner or the build reads by itself is fenced
+    Control("p84_r2_auto_read_config", GATE,
+            "    if AUTO_READ.contains(&name) {\n",
+            "    if false && AUTO_READ.contains(&name) {\n",
+            _T + "p43_r2_h4_the_fence_reads_config_folds_case_and_spares_prose", "rust"),
+    # H4: a hook-only name counts only as the whole file name with no extension
+    Control("p84_r2_hook_whole_name", GATE,
+            "        || (!name.contains('.') && ONLY_HOOKS.contains(&name))\n",
+            "        || ONLY_HOOKS.contains(&stem)\n",
+            _T + "p43_r2_h4_the_fence_reads_config_folds_case_and_spares_prose", "rust"),
+    # H4: a hook's folder is named hooks (or githooks), not merely holding "hook"
+    Control("p84_r2_hooks_folder", GATE,
+            "    let in_hooks = parts.len() >= 2 && matches!(parts[parts.len() - 2], \"hooks\" | \"githooks\");\n",
+            "    let in_hooks = parts.len() >= 2 && parts[parts.len() - 2].contains(\"hook\");\n",
+            _T + "p43_r2_h4_the_fence_reads_config_folds_case_and_spares_prose", "rust"),
+    # H4: secret and credential in the file name only, never a Markdown file's
+    Control("p84_r2_secret_name_only", GATE,
+            "    let secretive = !name.ends_with(\".md\") && (name.contains(\"secret\") || name.contains(\"credential\"));\n",
+            "    let secretive = lower.contains(\"secret\") || lower.contains(\"credential\");\n",
+            _T + "p43_r2_h4_the_fence_reads_config_folds_case_and_spares_prose", "rust"),
+    # H4: .gitkeep is not fenced
+    Control("p84_r2_gitkeep", GATE,
+            "    let dotted = |part: &&str| part.starts_with('.') && !(*part == \".gitkeep\" && *part == name);\n",
+            "    let dotted = |part: &&str| part.starts_with('.');\n",
+            _T + "p43_r2_h4_the_fence_reads_config_folds_case_and_spares_prose", "rust"),
+    # H4: the fence folds case (BUILD.RS, Secret.TXT, PYTEST.INI)
+    Control("p84_r2_case_folded", GATE,
+            "    let lower = path.replace('\\\\', \"/\").to_ascii_lowercase();\n",
+            "    let lower = path.replace('\\\\', \"/\");\n",
+            _T + "p43_r2_h4_the_fence_reads_config_folds_case_and_spares_prose", "rust"),
+    # H4: a fenced file's reason names the amend that would own it
+    Control("p84_r2_fence_says_how", GATE,
+            "            owns_flags(&fenced_paths).unwrap_or_default()\n",
+            "            String::new()\n",
+            _T + "p43_r2_h4_the_fence_reads_config_folds_case_and_spares_prose", "rust"),
+    # H5 a: a leftover's tracked file changed since is kept live
+    Control("p84_r2_leftover_keeps_live", GATE,
+            "        if entry.tracked && changed_since(&entry.path, &to) {\n",
+            "        if false && entry.tracked && changed_since(&entry.path, &to) {\n",
+            _T + "p43_r2_h5_a_leftover_never_overwrites_a_newer_edit", "rust"),
+    # H5 a: the set-aside is keyed by the worktree, so a child's gate finds its parent's leftover
+    Control("p84_r2_aside_by_worktree", GATE,
+            "            let aside = aside_dir(&Project::at(subject.root), subject.run, subject.cwd);\n",
+            "            let aside = gate_dir(&Project::at(subject.root), subject.run).join(format!(\"{}-aside\", subject.order));\n",
+            _T + "p43_r2_h5_a_leftover_never_overwrites_a_newer_edit", "rust"),
+    # H5 b: an entry whose copy is gone is skipped, not an error
+    Control("p84_r2_missing_copy_skipped", GATE,
+            "        if !from.is_file() {\n            done.missing.push(entry.path.clone());\n            continue;\n        }\n",
+            "",
+            _T + "p43_r2_h5_a_missing_aside_copy_is_skipped", "rust"),
+    # H5 c: the manifest goes before the folder
+    Control("p84_r2_manifest_first", GATE,
+            "    if let Err(err) = std::fs::remove_file(&manifest_path) {\n",
+            "    if let Err(err) = Ok::<(), std::io::Error>(()) {\n",
+            _T + "p43_r2_h5_a_folder_that_will_not_go_restores_nothing_again", "rust"),
+    # H5 d: a failed copy removes the copies it wrote
+    Control("p84_r2_partial_copies_removed", GATE,
+            "        for copy in &written {\n            let _ = std::fs::remove_file(copy);\n        }\n",
+            "",
+            _T + "p43_r2_h5_a_failed_copy_leaves_no_partial_copy", "rust"),
+    # H6 a: a search's pattern is no path read
+    Control("p84_r2_pattern_not_read", GATE,
+            "            if after_redirect || word.starts_with('>') || word.contains(\">>\") || patterns.contains(&at) {\n",
+            "            if after_redirect || word.starts_with('>') || word.contains(\">>\") {\n",
+            _T + "p43_r2_h6_patterns_git_show_loops_and_subshells", "rust"),
+    # H6 b: git show <rev>:<path> reads the path
+    Control("p84_r2_git_show_reads", GATE,
+            "                if let Some(path) = path_word(path) {\n",
+            "                if let Some(path) = path_word(path).filter(|_| false) {\n",
+            _T + "p43_r2_h6_patterns_git_show_loops_and_subshells", "rust"),
+    # H6 c: a for loop reads its words
+    Control("p84_r2_for_loop_words", GATE,
+            "            loops.push((words[1].clone(), words[3..].to_vec()));\n",
+            "            let _ = &loops;\n",
+            _T + "p43_r2_h6_patterns_git_show_loops_and_subshells", "rust"),
+    # H6 d: a subshell's variable does not leak out
+    Control("p84_r2_subshell_scoped", GATE,
+            "            if let Some((outer_vars, outer_folder)) = scopes.pop() {\n",
+            "            if let Some((outer_vars, outer_folder)) = None::<(Vec<(String, String)>, Option<String>)> {\n",
+            _T + "p43_r2_h6_patterns_git_show_loops_and_subshells", "rust"),
+    # H7: a piece that exists on disk is local
+    Control("p84_r2_local_on_disk", GATE,
+            "        let on_disk = on_disk(piece);\n",
+            "        let on_disk = false;\n",
+            _T + "p43_r2_h7_a_local_entry_exists_or_looks_like_a_file_path", "rust"),
+    # H7: a slash alone is no file path (N/A, TCP/IP)
+    Control("p84_r2_local_slash_alone", GATE,
+            "        let shaped = piece.contains(['/', '\\\\'])\n            && last",
+            "        let shaped = piece.contains(['/', '\\\\'])\n            || false && last",
+            _T + "p43_r2_h7_a_local_entry_exists_or_looks_like_a_file_path", "rust"),
+    # H7: a command over folders its note names that exist is local (Megajam's a1)
+    Control("p84_r2_local_noted_folders", GATE,
+            "    if local_pieces(&noted).iter().any(|piece| on_disk(piece)) {\n",
+            "    if false && local_pieces(&noted).iter().any(|piece| on_disk(piece)) {\n",
+            _T + "p43_f5_research_read_cannot_cite_invented_sources", "rust"),
+    # H8: a child that went on past its worker refuses the parent's amend
+    Control("p84_r2_went_on_child_refuses", GATE,
+            "            && !matches!(child.phase, Phase::Interrupted | Phase::Failed)\n",
+            "            && false\n",
+            _T + "p43_r2_h8_a_parent_whose_child_delivered_is_not_amended", "rust"),
+    # H8: a re-gate that errs leaves the amend journaled with its values
+    Control("p84_r2_regate_err_journal", GATE,
+            "                    verdict: Outcome::AMENDING.into(),\n                    reason: Some(reason.clone()),\n",
+            "                    verdict: Outcome::Amend.word().into(),\n                    reason: Some(reason.clone()),\n",
+            _T + "p43_r2_h8_a_regate_that_errs_keeps_the_amend_journaled", "rust"),
 )

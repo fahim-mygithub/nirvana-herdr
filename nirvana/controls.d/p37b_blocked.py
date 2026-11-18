@@ -47,8 +47,12 @@ CONTROLS = (
             '        Some("done" | "blocked") => Axis::new("report", Mark::Pass, "well formed, status done"),',
             T_ASK, "rust"),
     Control("p37b_hand_gate_of_asked_errs", GATE,
-            "Some(verdict) if verdict == Outcome::SentBack.word() || verdict == Outcome::Asked.word()",
-            "Some(verdict) if verdict == Outcome::SentBack.word()", T_ASK, "rust"),
+            # Plan 43 fix round 2 (H1): plan 43 A1 added the amend to the arm, and rustfmt broke it over lines.
+            "                Some(verdict) if verdict == Outcome::SentBack.word()\n"
+            "                    || verdict == Outcome::Asked.word()\n"
+            "                    || verdict == Outcome::Amend.word()\n",
+            "                Some(verdict) if verdict == Outcome::SentBack.word()\n"
+            "                    || verdict == Outcome::Amend.word()\n", T_ASK, "rust"),
     # The block wins over invented sources: no step-up, no redo.
     Control("p37b_invented_steps_up", GATE, ASKS,
             "    if let Some(block) = block.as_ref().filter(|_| invented_videos(&axes).is_empty()) {\n",

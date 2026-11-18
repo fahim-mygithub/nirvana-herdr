@@ -2241,6 +2241,11 @@ pub fn outcome_word(order: &OrderState) -> String {
     if order.verdict.as_deref() == Some(Outcome::ACCEPTED) {
         return Outcome::ACCEPTED.into();
     }
+    // Plan 43 fix round 2 (H3): an amend whose re-gate gave no verdict is recorded as the amend it was, which the tally
+    // does not count; `amending` is no `Outcome::parse` word, so it fell to `failed`, against the seat.
+    if order.verdict.as_deref() == Some(Outcome::AMENDING) {
+        return Outcome::Amend.word().into();
+    }
     if let Some(verdict) = order.verdict.as_deref().and_then(Outcome::parse) {
         // Plan 37b review S1: asked on its own block, which the seat's tally does not count.
         let blocked = order

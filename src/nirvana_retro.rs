@@ -742,7 +742,7 @@ pub fn draft(key: &str, rows: &[&Row], record: &[RecordLine]) -> Proposal {
     let effort = first.effort.clone().unwrap_or_else(|| "?".into());
     let tagged = rows.iter().any(|row| row.found.outcome_tagged);
     let (target, changed, remove) = match first.kind.as_str() {
-        "send_back" | "send_back_cap" => {
+        "send_back" | "send_back_cap" | "brief_fault" => {
             let axis = first.axis.clone().unwrap_or_default();
             (
                 "skills/seat/SKILL.md".to_owned(),

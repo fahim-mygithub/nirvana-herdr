@@ -5326,11 +5326,15 @@ fn p43_research_read_skips_local_entries_and_an_unfetched_url_still_fails() {
     // Another class still checks them.
     let axis = sources_axis_at("research.web", Some("asked"), Some(&local), "", &[]).expect("axis");
     assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
-    assert!(local_entry("Docs/x.md") && local_entry("file:///C:/x") && local_entry("C:\\x"));
     assert!(
-        !local_entry("https://x.org/a")
-            && !local_entry("docs.rs/serde")
-            && !local_entry("www.x.org")
+        local_entry("Docs/x.md", &[])
+            && local_entry("file:///C:/x.md", &[])
+            && local_entry("C:\\x\\y.txt", &[])
+    );
+    assert!(
+        !local_entry("https://x.org/a", &[])
+            && !local_entry("docs.rs/serde", &[])
+            && !local_entry("www.x.org", &[])
     );
 }
 
@@ -5758,18 +5762,28 @@ fn p43_f5_research_read_cannot_cite_invented_sources() {
         "the Unreal docs",
         "see example.com/x",
     ] {
-        assert!(!local_entry(web), "{web}");
+        assert!(!local_entry(web, &[]), "{web}");
     }
-    // Megajam's a1-asset-wiring-audit cited a git command over folders: a slash, so local.
+    // Fix round 2 (H7): a bare name or a folder is local when it exists under the order's folders; Megajam's
+    // a1-asset-wiring-audit cited a git command over folders its note names, which exist.
+    let root = temp("p43-f5-local");
+    for dir in ["Docs/AssetGen", "assets", "Content"] {
+        std::fs::create_dir_all(root.join(dir)).expect("dir");
+    }
+    for file in ["README.md", "Cargo.toml"] {
+        std::fs::write(root.join(file), "x\n").expect("file");
+    }
+    let roots = [root.as_path()];
     for local in [
         "README.md",
         "Cargo.toml (the manifest)",
         "Docs/AssetGen/ (directory listing)",
-        "C:\\p\\x",
+        "C:\\p\\x.txt",
         "git ls-tree -r --name-only HEAD (assets/, Content/, Source/)",
     ] {
-        assert!(local_entry(local), "{local}");
+        assert!(local_entry(local, &roots), "{local}");
     }
+    assert!(!local_entry("git ls-tree -r --name-only HEAD (assets/, Content/, Source/)", &[]));
     let invented = p43_report(&["Smith et al 2023", "example.com", "Docs/read.md"]);
     let axis =
         sources_axis_at("research.read", Some("asked"), Some(&invented), "", &[]).expect("axis");
@@ -5779,8 +5793,8 @@ fn p43_f5_research_read_cannot_cite_invented_sources() {
         vec!["Smith et al 2023".to_owned(), "example.com".to_owned()]
     );
     let local = p43_report(&["Docs/never_opened.md", "README.md"]);
-    let axis =
-        sources_axis_at("research.read", Some("asked"), Some(&local), "", &[]).expect("axis");
+    let axis = sources_axis_at("research.read", Some("asked"), Some(&local), "", &roots)
+        .expect("axis");
     assert_eq!(axis.mark, Mark::Pass, "{axis:?}");
     assert!(!axis.why.contains("each verified"), "{axis:?}");
     assert!(axis.why.contains("none checked"), "{axis:?}");
@@ -5962,7 +5976,11 @@ fn p43_aside_repo(name: &str) -> (PathBuf, PathBuf) {
 }
 
 fn p43_aside_dir(root: &Path) -> PathBuf {
-    gate_dir(&Project::at(root), "r1").join("o1-aside")
+    aside_dir(
+        &Project::at(root),
+        "r1",
+        &root.join(".nirvana").join("worktrees").join("o1"),
+    )
 }
 
 /// G1: a tracked file of herdr's with edits comes back as it was after the rebase, and the aside copy is deleted.
@@ -6058,4 +6076,450 @@ fn p43_g1_the_next_gate_restores_what_a_dead_gate_set_aside() {
         "{\"offered\": 1}\n"
     );
     assert!(!aside.exists());
+}
+
+// ---- plan 43 fix round 2: H2 to H8 ----
+
+/// H2: a worker's broken module or script is never the brief's. `pwsh -NoProfile -Command "Import-Module ./bad.psm1;
+/// 'x'"` on a module holding `function f { (`, as pwsh 7 and Windows PowerShell 5 printed it on 2026-11-18 (the
+/// module's folder shortened). A test whose program is a script or a runner has no text of the brief's; an
+/// interpreter's inline code still does; output whose pipe was never read is never the brief's.
+#[test]
+fn p43_r2_h2_a_workers_module_or_script_is_never_the_briefs() {
+    let pwsh7 = "\u{1b}[31;1mParserError: \u{1b}[31;1mAn expression was expected after '('.\u{1b}[0m\r\n\u{1b}[31;1mImport-Module: \u{1b}[31;1mThe specified module './bad.psm1' was not loaded because no valid module file was found in any module directory.\u{1b}[0m\r\n";
+    assert_eq!(
+        test_unparsed("pwsh -NoProfile -Command \"Import-Module ./bad.psm1; 'x'\"", pwsh7),
+        None
+    );
+    let pwsh5 = "At C:\\p\\h2\\bad.psm\n1:1 char:15\n+ function f { (\n+               ~\nAn expression was expected after '('.\n    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException\n    + FullyQualifiedErrorId : ExpectedExpression\n \nImport-Module : The specified module './bad.psm1' was not loaded because no valid module file was found in any module \ndirectory.\nAt line:1 char:1\n+ Import-Module ./bad.psm1; 'x'\n";
+    assert_eq!(
+        test_unparsed("powershell -NoProfile -Command \"Import-Module ./bad.psm1; 'x'\"", pwsh5),
+        None
+    );
+    // Windows PowerShell 5 on the command's own broken text: `At line:` only.
+    let own5 = "At line:1 char:4\n+ f (\n+    ~\nAn expression was expected after '('.\n    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException\n";
+    assert_eq!(
+        test_unparsed("powershell -NoProfile -Command \"f (\"", own5).as_deref(),
+        Some("ParserError")
+    );
+    // A script or a runner: a parse error anywhere in its output is the worker's.
+    let bash_c = "bash: -c: line 1: syntax error near unexpected token `then'\n";
+    assert_eq!(test_unparsed("bash run.sh", bash_c), None);
+    assert!(test_unparsed("bash -lc \"if then\"", bash_c).is_some());
+    let python_c = "  File \"<string>\", line 1\n    x = (\n        ^\nSyntaxError: '(' was never closed\n";
+    assert_eq!(test_unparsed("python run.py", python_c), None);
+    assert_eq!(test_unparsed("python -m pytest -q", python_c), None);
+    assert_eq!(test_unparsed("pytest -q", python_c), None);
+    assert!(test_unparsed("python -I -c \"x = (\"", python_c).is_some());
+    let parser = "ParserError: An expression was expected after '('.\n";
+    assert_eq!(test_unparsed("pwsh -NoProfile -File run.ps1", parser), None);
+    assert_eq!(test_unparsed("cargo test -q", parser), None);
+    assert!(test_unparsed("pwsh -NoProfile -Command \"f (\"", parser).is_some());
+    // A pipe never read: the output is not whole.
+    let unread = format!("{python_c}{UNREAD_OUTPUT}\n");
+    assert_eq!(test_unparsed("python -I -c \"x = (\"", &unread), None);
+}
+
+/// H3: an order left `gated amending` is recorded as the amend it was, which the seat's tally does not count; it was
+/// recorded `failed`.
+#[test]
+fn p43_r2_h3_an_order_left_amending_is_not_counted_against_its_seat() {
+    let root = repo("p43-r2-amending-word");
+    let cwd = p43_delivered(&root, "aw", "build.bounded", P43_ORDER);
+    work(&cwd);
+    p43_deliver(&root, "aw");
+    let project = Project::at(&root);
+    project
+        .journal("r1")
+        .append(
+            3,
+            Kind::Gated {
+                order: "aw".into(),
+                verdict: Outcome::AMENDING.into(),
+                reason: Some("herdr gate amend aw: owns + README.md (was calc.py test_mul.py)".into()),
+                axes: Vec::new(),
+            },
+        )
+        .expect("amending");
+    let state = replay(&project.journal("r1").read().0);
+    let word = nirvana_run::outcome_word(state.order("aw").expect("aw"));
+    assert_eq!(word, Outcome::Amend.word());
+    assert_eq!(Outcome::tally(&word), None);
+}
+
+/// H4: the fence reads the config a test runner or a build reads by itself, folds case, and spares prose and
+/// `.gitkeep`; its reason names both ways on.
+#[test]
+fn p43_r2_h4_the_fence_reads_config_folds_case_and_spares_prose() {
+    for fenced in [
+        "pytest.ini",
+        "tox.ini",
+        "setup.cfg",
+        "tools/pyproject.toml",
+        "Makefile",
+        "GNUmakefile",
+        "justfile",
+        "rust-toolchain",
+        "rust-toolchain.toml",
+        "secret.txt",
+        // The case folded: each of these fails to match if `fenced_new` stops lowering the path.
+        "Secret.TXT",
+        "BUILD.RS",
+        "PYTEST.INI",
+        "hooks/Pre-Commit",
+        ".ENV",
+        "pre-push",
+        "hooks/pre-commit.sh",
+    ] {
+        assert!(fenced_new(fenced).is_some(), "{fenced} not fenced");
+    }
+    for spared in [
+        "Docs/pre-push.md",
+        "Docs/secretary.md",
+        "secrets/README.md",
+        "secrets/notes.txt",
+        "credentials/plan.txt",
+        "webhooks/update.py",
+        "assets/.gitkeep",
+        "Cargo.toml",
+    ] {
+        assert_eq!(fenced_new(spared), None, "{spared} fenced");
+    }
+    let (owned, _) = owned_axes(
+        "build.bounded",
+        &["calc.py".to_owned(), "pytest.ini".to_owned()],
+        &["calc.py".to_owned()],
+        &|_| true,
+        &[],
+    );
+    assert_eq!(owned.fault, Some(Fault::Worker), "{owned:?}");
+    assert!(owned.why.contains("remove the fenced file(s)"), "{owned:?}");
+    assert!(
+        owned
+            .why
+            .contains("runs `herdr gate amend <order> --owns pytest.ini`"),
+        "{owned:?}"
+    );
+}
+
+/// H4 (c): a fenced new file sends the order back; once its child is stopped, an explicit `--owns` of the file passes
+/// the re-gate, and the journal holds the amend.
+#[test]
+fn p43_r2_h4_an_explicit_owns_of_a_fenced_file_passes_and_is_journaled() {
+    let _home = crate::nirvana::with_test_home("p43-r2-fence-owns");
+    nirvana_seat::set_test_world(Some(BTreeMap::new()));
+    let root = repo("p43-r2-fence-owns");
+    let cwd = p43_delivered(&root, "fe", "build.bounded", P43_ORDER);
+    work(&cwd);
+    std::fs::write(cwd.join("pytest.ini"), "[pytest]\n").expect("pytest.ini");
+    // Staged, as p72's worker staged secret.txt: an unstaged new file no `owns:` names is left out of the commit and
+    // never reaches the owned axis.
+    sh(&cwd, &["add", "calc.py", "test_mul.py", "pytest.ini"]);
+    p43_deliver(&root, "fe");
+    let project = Project::at(&root);
+    let ruling = gate(&project, "r1", "fe").expect("gate");
+    assert_eq!(ruling.verdict, "sent_back", "{ruling:#?}");
+    let owned = ruling.axes.iter().find(|axis| axis.axis == "owned").expect("owned");
+    assert!(owned.why.contains("--owns pytest.ini"), "{owned:?}");
+    // The child is live: the amend waits for it to stop.
+    let early = gate_amend(&project, "r1", "fe", &["pytest.ini".to_owned()], None, false);
+    assert!(early.is_err(), "{early:?}");
+    project
+        .journal("r1")
+        .append(
+            4,
+            Kind::Interrupted {
+                order: "fe-s1".into(),
+                why: "stopped by the orchestrator".into(),
+            },
+        )
+        .expect("stopped");
+    // The lesson review the gate queued (`fe-lr`) is live too, and today's live-child refusal counts it.
+    project
+        .journal("r1")
+        .append(
+            5,
+            Kind::Interrupted {
+                order: "fe-lr".into(),
+                why: "stopped".into(),
+            },
+        )
+        .expect("review stopped");
+    let amended =
+        gate_amend(&project, "r1", "fe", &["pytest.ini".to_owned()], None, false).expect("amend");
+    assert_eq!(amended.verdict, "pass", "{amended:#?}");
+    let events = project.journal("r1").read().0;
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.kind,
+            Kind::Gated { order, verdict, reason: Some(reason), .. }
+                if order == "fe"
+                    && verdict == Outcome::AMENDING
+                    && reason.contains("owns + pytest.ini (was calc.py test_mul.py)")
+        )),
+        "{events:#?}"
+    );
+    nirvana_seat::set_test_world(None);
+}
+
+/// The deterministic axes of `order` gated in `cwd` on `branch`: a send-back child's gate runs in its parent's
+/// worktree.
+fn p43_r2_det_as(root: &Path, cwd: &Path, order: &str, branch: &str) -> Det {
+    let spec = spec_with(&["calc.py", "test_mul.py"], "git ls-files", &["test_mul"]);
+    deterministic(
+        &Subject {
+            root,
+            cwd,
+            run: "r1",
+            order,
+            branch: Some(branch),
+            class: "build.bounded",
+            report: Some(&done()),
+            spec: &spec,
+            ports: &no_ports,
+        },
+        None,
+    )
+}
+
+/// H5 (a): the set-aside belongs to the worktree, so a send-back child's gate finds its parent's leftover; a file
+/// changed since that leftover (newer, and not as the dead gate left it) is kept live, and the rest is put back.
+#[test]
+fn p43_r2_h5_a_leftover_never_overwrites_a_newer_edit() {
+    let (root, cwd) = p43_aside_repo("p43-r2-h5-newer");
+    work(&cwd);
+    let aside = p43_aside_dir(&root);
+    // The parent's dead gate: set aside, and nothing after.
+    set_aside_harness(&cwd, "nirvana-integrate/r1", &aside).expect("set aside");
+    let lessons = cwd.join(".nirvana").join("lessons");
+    // The child edits herdr's tracked index after it.
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(lessons.join("index.json"), "{\"child\": 2}\n").expect("child edit");
+    let det = p43_r2_det_as(&root, &cwd, "o1-s1", "nirvana/o1");
+    let note = axis(&det, "aside");
+    assert!(note.why.contains("kept as they are now"), "{note:?}");
+    assert!(note.why.contains(".nirvana/lessons/index.json"), "{note:?}");
+    assert_eq!(axis(&det, "rebase").mark, Mark::Pass, "{det:#?}");
+    assert_eq!(
+        std::fs::read_to_string(lessons.join("index.json")).expect("index"),
+        "{\"child\": 2}\n",
+        "the child's edit stays"
+    );
+    assert_eq!(
+        std::fs::read_to_string(lessons.join("x.md")).expect("x"),
+        "a verified lesson\n"
+    );
+}
+
+/// H5 (b): an entry whose aside copy is gone is skipped with a note, and the next gate does not fail on it.
+#[test]
+fn p43_r2_h5_a_missing_aside_copy_is_skipped() {
+    let (root, cwd) = p43_aside_repo("p43-r2-h5-missing");
+    work(&cwd);
+    let aside = p43_aside_dir(&root);
+    set_aside_harness(&cwd, "nirvana-integrate/r1", &aside).expect("set aside");
+    std::fs::remove_file(aside.join(".nirvana").join("lessons").join("index.json")).expect("lose a copy");
+    let det = run_det(&root, &cwd, "o1", &spec_with(&["calc.py", "test_mul.py"], "git ls-files", &["test_mul"]), Some(&done()));
+    let note = axis(&det, "aside");
+    assert!(note.why.contains("had no copy left and were skipped"), "{note:?}");
+    assert_eq!(axis(&det, "rebase").mark, Mark::Pass, "{det:#?}");
+    assert!(!aside.join(ASIDE_MANIFEST).exists());
+    let again = run_det(&root, &cwd, "o1", &spec_with(&["calc.py", "test_mul.py"], "git ls-files", &["test_mul"]), Some(&done()));
+    assert!(again.axes.iter().all(|axis| axis.axis != "aside"), "{again:#?}");
+    assert_eq!(axis(&again, "rebase").mark, Mark::Pass, "{again:#?}");
+}
+
+/// H5 (c): an aside folder that will not go after a good restore loses its manifest first, so the next gate does not
+/// restore it again over newer edits.
+#[test]
+fn p43_r2_h5_a_folder_that_will_not_go_restores_nothing_again() {
+    let (root, cwd) = p43_aside_repo("p43-r2-h5-locked");
+    work(&cwd);
+    let aside = p43_aside_dir(&root);
+    let spec = spec_with(&["calc.py", "test_mul.py"], "git ls-files", &["test_mul"]);
+    TEST_ASIDE_REMOVE_FAILS.set(true);
+    let det = run_det(&root, &cwd, "o1", &spec, Some(&done()));
+    TEST_ASIDE_REMOVE_FAILS.set(false);
+    let rebase = axis(&det, "rebase");
+    assert_eq!(rebase.mark, Mark::Pass, "{det:#?}");
+    assert!(rebase.why.contains("could not be removed"), "{rebase:?}");
+    assert!(aside.exists(), "the folder stays");
+    assert!(!aside.join(ASIDE_MANIFEST).exists(), "its manifest does not");
+    let index = cwd.join(".nirvana").join("lessons").join("index.json");
+    std::fs::write(&index, "{\"newer\": 3}\n").expect("newer edit");
+    let again = run_det(&root, &cwd, "o1", &spec, Some(&done()));
+    assert!(again.axes.iter().all(|axis| axis.axis != "aside"), "{again:#?}");
+    assert_eq!(std::fs::read_to_string(&index).expect("index"), "{\"newer\": 3}\n");
+}
+
+/// H5 (d): a copy that fails leaves the worktree untouched and no partial copy behind.
+#[test]
+fn p43_r2_h5_a_failed_copy_leaves_no_partial_copy() {
+    let (root, cwd) = p43_aside_repo("p43-r2-h5-copy");
+    work(&cwd);
+    let aside = p43_aside_dir(&root);
+    let spec = spec_with(&["calc.py", "test_mul.py"], "git ls-files", &["test_mul"]);
+    TEST_ASIDE_COPY_FAILS.set(true);
+    let det = run_det(&root, &cwd, "o1", &spec, Some(&done()));
+    TEST_ASIDE_COPY_FAILS.set(false);
+    let rebase = axis(&det, "rebase");
+    assert_eq!(rebase.mark, Mark::Fail, "{det:#?}");
+    assert!(rebase.why.contains("a test's copy failure"), "{rebase:?}");
+    let lessons = cwd.join(".nirvana").join("lessons");
+    assert_eq!(
+        std::fs::read_to_string(lessons.join("index.json")).expect("index"),
+        "{\"offered\": 1}\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(lessons.join("x.md")).expect("x"),
+        "a verified lesson\n"
+    );
+    assert!(!aside.exists(), "a partial copy stayed: {aside:?}");
+}
+
+/// H6: a search's pattern is no path read; `git show <rev>:<path>` reads the path; a `for` loop reads its words; a
+/// subshell's variable does not leak out.
+#[test]
+fn p43_r2_h6_patterns_git_show_loops_and_subshells() {
+    let roots = [Path::new("C:/w/o1"), Path::new("C:/w")];
+    let reads = |command: &str| stream_reads(&claude_bash(command, "read"));
+    let grep = reads("grep -rn \"Docs/B.md\" .");
+    assert!(!local_read("Docs/B.md", &grep, &roots));
+    let rg = reads("rg -n -e Docs/C.md Docs/notes.md");
+    assert!(local_read("Docs/notes.md", &rg, &roots));
+    assert!(!local_read("Docs/C.md", &rg, &roots));
+    let context = reads("grep -A 3 Docs/E.md Docs/real.md");
+    assert!(!local_read("Docs/E.md", &context, &roots));
+    assert!(local_read("Docs/real.md", &context, &roots));
+    let find = reads("find Docs -name Never.md");
+    assert!(!local_read("Docs/Never.md", &find, &roots));
+    assert!(!local_read("Never.md", &find, &roots));
+    let sls = stream_reads(&agy_run("Select-String -Pattern \"Docs/B.md\" -Path Docs/real.md"));
+    assert!(local_read("Docs/real.md", &sls, &roots));
+    assert!(!local_read("Docs/B.md", &sls, &roots));
+    let show = reads("git show HEAD:Docs/D.md; git cat-file -p main:src/lib.rs");
+    assert!(local_read("Docs/D.md", &show, &roots));
+    assert!(local_read("src/lib.rs", &show, &roots));
+    let looped = reads("for f in Docs/a.md Docs/b.md; do cat \"$f\"; done");
+    assert!(local_read("Docs/a.md", &looped, &roots));
+    assert!(local_read("Docs/b.md", &looped, &roots));
+    let sub = reads("S=Docs/outer.md; (S=Docs/inner.md; head -1 Docs/x.txt); cat $S");
+    assert!(local_read("Docs/outer.md", &sub, &roots));
+    assert!(!local_read("Docs/inner.md", &sub, &roots));
+    let inside = reads("(S=Docs/inner.md; cat $S)");
+    assert!(local_read("Docs/inner.md", &inside, &roots));
+}
+
+/// H7: an entry is local when it exists under the order's folders, or holds a separator and its last piece a file
+/// extension. `N/A`, `and/or`, `TCP/IP`, `docs.rs` and `tokio.rs` are not; `Makefile`, `LICENSE`, `.gitignore` and an
+/// `.hlsl` that exist are.
+#[test]
+fn p43_r2_h7_a_local_entry_exists_or_looks_like_a_file_path() {
+    let root = temp("p43-r2-h7");
+    for file in ["Makefile", "LICENSE", ".gitignore", "x.hlsl"] {
+        std::fs::write(root.join(file), "x\n").expect("file");
+    }
+    let roots = [root.as_path()];
+    for web in ["N/A", "and/or", "TCP/IP", "docs.rs", "tokio.rs", "Makefile.am"] {
+        assert!(!local_entry(web, &roots), "{web}");
+    }
+    for local in [
+        "Makefile",
+        "LICENSE",
+        ".gitignore",
+        "x.hlsl",
+        "Shaders/ink.hlsl",
+        "Docs/x.md",
+    ] {
+        assert!(local_entry(local, &roots), "{local}");
+    }
+    assert!(!local_entry("Makefile", &[]), "nothing on disk to resolve against");
+}
+
+/// H8: a sent-back order whose child has delivered is not amended; the child is.
+#[test]
+fn p43_r2_h8_a_parent_whose_child_delivered_is_not_amended() {
+    let _home = crate::nirvana::with_test_home("p43-r2-h8-child");
+    nirvana_seat::set_test_world(Some(BTreeMap::new()));
+    let root = repo("p43-r2-h8-child");
+    let cwd = p43_delivered(&root, "sb", "build.bounded", P43_ORDER);
+    work(&cwd);
+    std::fs::write(cwd.join("README.md"), "calc, changed\n").expect("readme");
+    p43_deliver(&root, "sb");
+    let project = Project::at(&root);
+    assert_eq!(gate(&project, "r1", "sb").expect("gate").verdict, "amend");
+    let sent = gate_amend(&project, "r1", "sb", &[], None, true).expect("send back");
+    assert_eq!(sent.verdict, "sent_back", "{sent:#?}");
+    project
+        .journal("r1")
+        .append(
+            5,
+            Kind::Delivered {
+                order: "sb-s1".into(),
+                report: done(),
+            },
+        )
+        .expect("child delivered");
+    // The lesson review the first gate queued (`sb-lr`, seated) is stopped, so the live-child refusal does not come
+    // first; as a helper it never counts for the new refusal.
+    project
+        .journal("r1")
+        .append(
+            6,
+            Kind::Interrupted {
+                order: "sb-lr".into(),
+                why: "stopped".into(),
+            },
+        )
+        .expect("review stopped");
+    let refused = gate_amend(&project, "r1", "sb", &["README.md".to_owned()], None, false);
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|why| why.starts_with("sb-s1 is delivered already")),
+        "{refused:?}"
+    );
+    assert!(read_sidecar(&project, "r1", "sb").amends.is_empty());
+    nirvana_seat::set_test_world(None);
+}
+
+/// H8: a re-gate that errs after the amend leaves the amend journaled, its old and new values with it, and `herdr gate
+/// run` finishes it.
+#[test]
+fn p43_r2_h8_a_regate_that_errs_keeps_the_amend_journaled() {
+    let _home = crate::nirvana::with_test_home("p43-r2-h8-err");
+    nirvana_seat::set_test_world(Some(BTreeMap::new()));
+    let root = repo("p43-r2-h8-err");
+    let cwd = p43_delivered(&root, "am", "build.bounded", P43_ORDER);
+    work(&cwd);
+    std::fs::write(cwd.join("README.md"), "calc, changed\n").expect("readme");
+    p43_deliver(&root, "am");
+    let project = Project::at(&root);
+    assert_eq!(gate(&project, "r1", "am").expect("gate").verdict, "amend");
+    TEST_REGATE_FAILS.set(true);
+    let erred = gate_amend(&project, "r1", "am", &["README.md".to_owned()], None, false);
+    TEST_REGATE_FAILS.set(false);
+    assert!(erred.is_err(), "{erred:?}");
+    let state = replay(&project.journal("r1").read().0);
+    let known = state.order("am").expect("am");
+    assert_eq!(known.verdict.as_deref(), Some(Outcome::AMENDING));
+    let events = project.journal("r1").read().0;
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.kind,
+            Kind::Gated { verdict, reason: Some(reason), .. }
+                if verdict == Outcome::AMENDING
+                    && reason.contains("owns + README.md (was calc.py test_mul.py)")
+        )),
+        "{events:#?}"
+    );
+    let card = read_sidecar(&project, "r1", "am");
+    assert_eq!(card.amends.len(), 1);
+    assert_eq!(card.amends[0].owns_added, vec!["README.md".to_owned()]);
+    assert_eq!(
+        card.amends[0].owns_before,
+        vec!["calc.py".to_owned(), "test_mul.py".to_owned()]
+    );
+    assert_eq!(gate(&project, "r1", "am").expect("finished").verdict, "pass");
+    nirvana_seat::set_test_world(None);
 }

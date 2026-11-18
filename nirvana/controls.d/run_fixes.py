@@ -170,8 +170,9 @@ CONTROLS = (
         'p24_gate_sources_axis_in_deterministic',
         'src/nirvana_gate.rs',
         # Live checks F2 (gsrc): the call takes the order's web ask.
-        '    if let Some(axis) = sources_axis(subject.class, web, subject.report, &stream) {\n',
-        '    if let Some(axis) = sources_axis(subject.class, web, subject.report, &stream).filter(|_| false) {\n',
+        # Plan 43 fix round 2 (H1): plan 43 A3 passes the order's folders (`sources_axis_at`).
+        '    if let Some(axis) = sources_axis_at(subject.class, web, subject.report, &stream, &roots) {\n',
+        '    if let Some(axis) = sources_axis_at(subject.class, web, subject.report, &stream, &roots).filter(|_| false) {\n',
         'deterministic_includes_sources_axis_for_research_and_media',
         'rust',
     ),
@@ -225,8 +226,9 @@ CONTROLS = (
     Control(
         'p24_owned_axis_empty_fails_build',
         'src/nirvana_gate.rs',
-        '        if requires_owns(class) {\n            return Axis::new(\n                "owned",\n                Mark::Fail,\n                "unbounded: the order names no owned file",\n            )\n            .with(changed.iter().map(|path| (*path).clone()).collect());\n        }\n',
-        '        if false && requires_owns(class) {\n            return Axis::new("owned", Mark::Fail, "unbounded").with(vec![]);\n        }\n',
+        # Plan 43 fix round 2 (H1): plan 43 A1 made the fail the brief's, with its `--owns` hint, in a `let`.
+        '        if requires_owns(class) {\n            let mut axis = Axis::new(\n',
+        '        if false && requires_owns(class) {\n            let mut axis = Axis::new(\n',
         'owned_axis_empty_owns_fails_for_build_fix_plan_and_notes_for_read_only',
         'rust',
     ),

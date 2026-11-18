@@ -30,9 +30,12 @@ apps and to run work that outlives one session. You plan, seat, watch and gate. 
    the reason at 90 characters and marks the cut with `…`, so a cut amend line is never whole: run
    `herdr gate run <order>` for it. Run that line, with the flags fixed if they are wrong, and it re-gates the same
    branch; `--send-back` seats a worker instead. An order gated asked waits on the owner and cannot be amended. A
-   new file outside `owns:` that no live order owns is a note, not a fail, unless it is fenced (a dot-prefixed path,
-   `nirvana/controls.d/`, `build.rs`, `conftest.py`, a git hook, or a credential-looking name): that is the
-   worker's fail. A merge you make yourself is recorded with `herdr gate merge <order> --by-hand "<reason>"`.
+   new file outside `owns:` that no live order owns is a note, not a fail, unless it is fenced (a dot-prefixed path
+   other than `.gitkeep`, `nirvana/controls.d/`, `build.rs`, `conftest.py`, test or build config such as
+   `pytest.ini`, `pyproject.toml` or `Makefile`, a git hook, or a credential-looking file name): that is the worker's
+   fail. If the brief truly needs that file, stop the child (`herdr seat stop <child>`) and run `herdr gate amend
+   <order> --owns <path>`. A parent whose child has delivered, been gated or merged is not amended; amend the child.
+   A merge you make yourself is recorded with `herdr gate merge <order> --by-hand "<reason>"`.
 6. The run ends when its plan is done and gated. Answer the owner in one message.
 
 Call herdr by the path the session digest names, or as the skills write it. A plain `herdr` on PATH may be
