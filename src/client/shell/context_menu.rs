@@ -95,10 +95,12 @@ impl ClientContextMenuOverlay {
             ..
         } = &self.target
         {
-            let label = match (target.armed, target.switch) {
-                (true, _) => SPACE_RESTART_ARMED,
-                (false, true) => SPACE_RESTART_SWITCH,
-                (false, false) => SPACE_RESTART,
+            let armed = super::nirvana_seats::armed_now(target.armed);
+            let label = match (target.restarting, armed, target.switch) {
+                (true, _, _) => SPACE_RESTARTING,
+                (false, true, _) => SPACE_RESTART_ARMED,
+                (false, false, true) => SPACE_RESTART_SWITCH,
+                (false, false, false) => SPACE_RESTART,
             };
             items.insert(1, item(label, Action::RestartClaude));
         }
@@ -110,6 +112,7 @@ impl ClientContextMenuOverlay {
 pub(super) const SPACE_RESTART: &str = "Restart Claude";
 pub(super) const SPACE_RESTART_SWITCH: &str = "Restart Claude to switch seat";
 pub(super) const SPACE_RESTART_ARMED: &str = "Restart Claude? It is working";
+pub(super) const SPACE_RESTARTING: &str = "Restart Claude: restarting\u{2026}";
 
 impl ClientShellState {
     pub(super) fn open_workspace_context_menu(&mut self, workspace_id: String, x: u16, y: u16) {
@@ -136,7 +139,14 @@ impl ClientShellState {
         let collapsed = worktree.is_some_and(|worktree| {
             self.group_is_collapsed(&self.active_endpoint_id, &worktree.key)
         });
-        let nirvana_claude = super::nirvana_seats::space_restart_target(snapshot, &workspace_id);
+        let nirvana_claude = super::nirvana_seats::space_restart_target(snapshot, &workspace_id)
+            .map(|mut target| {
+                target.restarting = super::nirvana_seats::restart_live(
+                    self.nirvana_restarting.get(&target.pane_id).copied(),
+                    target.switch,
+                );
+                target
+            });
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target: ClientContextMenuTarget::Workspace {
                 workspace_id,
@@ -252,28 +262,59 @@ impl ClientShellState {
         };
         let mut menu = menu;
         // Nirvana fork: a working Nirvana Claude restarts on the second press, as the header's reload badge does;
-        // the first keeps the menu open and its label says why.
+        // the first keeps the menu open and its label says why. Review of aa340405, item b3: the status and the
+        // switch are read again now, not kept from when the menu opened, so a Claude that started working while the
+        // menu was open still asks first.
+        let mut space_restart = None;
         if let ClientContextMenuTarget::Workspace {
+            workspace_id,
             nirvana_claude: Some(target),
             ..
         } = &mut menu.target
         {
-            if action == ClientContextMenuAction::RestartClaude && target.working && !target.armed {
-                target.armed = true;
-                menu.highlighted = index;
-                self.overlay = Some(ClientShellOverlay::ContextMenu(menu));
-                outcome.repaint = true;
-                return;
+            if action == ClientContextMenuAction::RestartClaude {
+                let Some(fresh) = self.snapshot.as_deref().and_then(|snapshot| {
+                    super::nirvana_seats::space_restart_target(snapshot, workspace_id)
+                }) else {
+                    // The space's Nirvana Claude closed while the menu was open: nothing to restart.
+                    outcome.repaint = true;
+                    return;
+                };
+                let sent = self.nirvana_restarting.get(&fresh.pane_id).copied();
+                if super::nirvana_seats::restart_live(sent, fresh.switch) {
+                    // Item b1: sent a moment ago and not shown yet; a second would restart the fresh Claude.
+                    outcome.repaint = true;
+                    return;
+                }
+                if fresh.working && !super::nirvana_seats::armed_now(target.armed) {
+                    target.armed = Some(std::time::Instant::now());
+                    target.working = fresh.working;
+                    menu.highlighted = index;
+                    self.overlay = Some(ClientShellOverlay::ContextMenu(menu));
+                    outcome.repaint = true;
+                    return;
+                }
+                space_restart = Some((workspace_id.clone(), fresh));
             }
         }
-        match menu.target {
-            ClientContextMenuTarget::Workspace {
+        if let Some((workspace_id, fresh)) = space_restart {
+            self.push_restart_claude(
                 workspace_id,
-                nirvana_claude: Some(target),
-                ..
-            } if action == ClientContextMenuAction::RestartClaude => {
-                self.push_restart_claude(workspace_id, target.tab_id, Some(target.pane_id), outcome)
-            }
+                fresh.tab_id.clone(),
+                Some(fresh.pane_id.clone()),
+                outcome,
+            );
+            self.nirvana_restarting.insert(
+                fresh.pane_id,
+                ClientRestartSent {
+                    at: std::time::Instant::now(),
+                    asked: fresh.switch,
+                },
+            );
+            outcome.repaint = true;
+            return;
+        }
+        match menu.target {
             ClientContextMenuTarget::Workspace {
                 workspace_id,
                 close_group,

@@ -218,3 +218,52 @@ fn p87_a_working_spaces_restart_asks_again() {
         )]
     );
 }
+
+/// P87 fix round (review of aa340405, item b3): the menu read the status once, when it opened, so a Claude that
+/// started working while it was open restarted on the first click. The click reads it again.
+#[test]
+fn p87_a_space_claude_that_starts_working_while_the_menu_is_open_asks_first() {
+    let mut state = two_spaces(AgentStatus::Idle);
+    assert_eq!(
+        right_click_space(&mut state, "ws_2"),
+        ["Rename", "Restart Claude", "Close"]
+    );
+    let mut projected = state.snapshot.as_deref().cloned().expect("snapshot");
+    projected.agents[1].agent_status = AgentStatus::Working;
+    state.set_snapshot(Box::new(projected));
+    let outcome = click_menu_row(&mut state, 1);
+    assert!(super::nirvana_seats::restarts(&outcome).is_empty());
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("the menu stays open");
+    };
+    assert_eq!(menu.items()[1].label, "Restart Claude? It is working");
+}
+
+/// P87 fix round (item b1): a space menu's restart is not sent twice while the fresh Claude starts. Opened again, the
+/// menu says it is restarting and a click sends nothing; once `RESTART_PENDING_WINDOW` has passed it restarts again.
+#[test]
+fn p87_a_space_menu_restart_is_not_sent_twice() {
+    let mut state = two_spaces(AgentStatus::Idle);
+    let _ = right_click_space(&mut state, "ws_2");
+    let outcome = click_menu_row(&mut state, 1);
+    assert_eq!(super::nirvana_seats::restarts(&outcome).len(), 1);
+    assert_eq!(
+        right_click_space(&mut state, "ws_2"),
+        ["Rename", "Restart Claude: restarting\u{2026}", "Close"]
+    );
+    let outcome = click_menu_row(&mut state, 1);
+    assert!(super::nirvana_seats::restarts(&outcome).is_empty());
+    assert!(state.overlay.is_none(), "the menu closes");
+    for sent in state.nirvana_restarting.values_mut() {
+        sent.at = sent
+            .at
+            .checked_sub(std::time::Duration::from_secs(16))
+            .expect("the clock reaches that far back");
+    }
+    assert_eq!(
+        right_click_space(&mut state, "ws_2"),
+        ["Rename", "Restart Claude", "Close"]
+    );
+    let outcome = click_menu_row(&mut state, 1);
+    assert_eq!(super::nirvana_seats::restarts(&outcome).len(), 1);
+}

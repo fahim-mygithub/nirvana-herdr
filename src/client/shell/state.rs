@@ -619,7 +619,23 @@ pub(super) struct ClientRestartTarget {
     pub(super) working: bool,
     /// The Seats square reads `restart to switch` for it: the label says the restart switches the seat.
     pub(super) switch: bool,
-    pub(super) armed: bool,
+    /// When a first press on a working Claude armed the restart; it lapses after `nirvana_seats::RESTART_ARM_WINDOW`.
+    pub(super) armed: Option<std::time::Instant>,
+    /// A restart of this pane was sent and has not shown yet (`nirvana_seats::RESTART_PENDING_WINDOW`): the menu says
+    /// so and sends none again.
+    pub(super) restarting: bool,
+}
+
+/// Nirvana fork, P87 fix round: a Restart Claude sent for one Nirvana Claude pane. Until the view stops asking for it
+/// (when it asked) or `nirvana_seats::RESTART_PENDING_WINDOW` passes, the Seats panel and the space menu send no
+/// second one: the row reads `restart to switch` until the fresh Claude's SessionStart rewrites its seat record and
+/// the square's cache re-reads (`REREAD`, 2 s), and a second press in that window restarted the fresh Claude again
+/// (review of aa340405, item b1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ClientRestartSent {
+    pub(super) at: std::time::Instant,
+    /// The view read `restart to switch` when it was sent: once it no longer does, the restart has shown.
+    pub(super) asked: bool,
 }
 
 #[derive(Debug)]
@@ -1042,6 +1058,9 @@ pub(crate) struct ClientShellState {
     pub(super) nirvana_accounts: Option<super::nirvana_accounts::AccountsPanel>,
     /// Plan 12 O8a: the Seats panel, while open.
     pub(super) nirvana_seats: Option<super::nirvana_seats::SeatsPanel>,
+    /// Nirvana fork, P87 fix round: the Restart Claude requests sent per Nirvana Claude pane id, so neither the Seats
+    /// panel nor a space's menu sends a second one before the first has shown.
+    pub(super) nirvana_restarting: std::collections::HashMap<String, ClientRestartSent>,
     /// Plan 15: the Jobs panel, while open.
     pub(super) nirvana_jobs: Option<super::nirvana_jobs::JobsPanel>,
     /// Plan 16: the Git panel, while open.
@@ -1223,6 +1242,7 @@ impl ClientShellState {
             nirvana_running: None,
             nirvana_memory: None,
             nirvana_seats: None,
+            nirvana_restarting: std::collections::HashMap::new(),
             nirvana_jobs: None,
             nirvana_git: None,
             nirvana_learning: None,

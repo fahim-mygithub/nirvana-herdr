@@ -39,41 +39,14 @@ impl App {
         let Some((ws_idx, tab_idx)) = self.parse_tab_id(tab_id) else {
             return encode_error(id, "tab_not_found", format!("tab not found: {tab_id}"));
         };
-        // The owner, 2026-11-18: a space's menu and the Seats panel restart "that specific project" Claude, so
-        // they name its pane; a worker sharing the tab keeps running. The tab menu names none: every Claude in it.
-        let only = match params.pane_id.as_deref() {
-            None => None,
-            Some(pane) => match self.parse_pane_id(pane) {
-                Some((pane_ws, pane_id))
-                    if pane_ws == ws_idx
-                        && self.state.workspaces[ws_idx].tabs[tab_idx]
-                            .panes
-                            .contains_key(&pane_id) =>
-                {
-                    Some(pane_id)
-                }
-                _ => {
-                    return encode_error(
-                        id,
-                        "pane_not_found",
-                        format!("pane {pane} is not in tab {tab_id}"),
-                    )
-                }
-            },
-        };
-        let panes: Vec<_> = {
-            let tab = &self.state.workspaces[ws_idx].tabs[tab_idx];
-            tab.layout
-                .pane_ids()
-                .into_iter()
-                .filter(|pane_id| only.is_none_or(|only| only == *pane_id))
-                .filter_map(|pane_id| {
-                    Some((
-                        pane_id,
-                        tab.panes.get(&pane_id)?.attached_terminal_id.clone(),
-                    ))
-                })
-                .collect()
+        let only = params.pane_id.is_some();
+        let Some(panes) = self.nirvana_restart_panes(ws_idx, tab_idx, params.pane_id.as_deref()) else {
+            let pane = params.pane_id.as_deref().unwrap_or_default();
+            return encode_error(
+                id,
+                "pane_not_found",
+                format!("pane {pane} is not in tab {tab_id}"),
+            );
         };
 
         let mut restarted = Vec::new();
@@ -87,7 +60,7 @@ impl App {
         }
         if restarted.is_empty() {
             let message = failures.first().cloned().unwrap_or_else(|| {
-                if only.is_some() {
+                if only {
                     "no Claude Code is running in that pane".into()
                 } else {
                     "no Claude Code is running in this tab".into()
@@ -105,6 +78,42 @@ impl App {
             );
         }
         encode_success(id, crate::api::schema::ResponseResult::Ok {})
+    }
+
+    /// The panes of the tab Restart Claude looks for Claude in, each with its terminal; `None` when `pane` names no
+    /// pane of this tab, so nothing is stopped. The owner, 2026-11-18: a space's menu and the Seats panel restart
+    /// "that specific project" Claude, so they name its pane and a worker sharing the tab keeps running. The tab menu
+    /// names none: every Claude in it. Its own function so a test can see which panes the stopper is handed without a
+    /// real Claude in them.
+    fn nirvana_restart_panes(
+        &self,
+        ws_idx: usize,
+        tab_idx: usize,
+        pane: Option<&str>,
+    ) -> Option<Vec<(crate::layout::PaneId, crate::terminal::TerminalId)>> {
+        let tab = &self.state.workspaces[ws_idx].tabs[tab_idx];
+        let only = match pane {
+            None => None,
+            Some(pane) => match self.parse_pane_id(pane) {
+                Some((pane_ws, pane_id)) if pane_ws == ws_idx && tab.panes.contains_key(&pane_id) => {
+                    Some(pane_id)
+                }
+                _ => return None,
+            },
+        };
+        Some(
+            tab.layout
+                .pane_ids()
+                .into_iter()
+                .filter(|pane_id| only.is_none_or(|only| only == *pane_id))
+                .filter_map(|pane_id| {
+                    Some((
+                        pane_id,
+                        tab.panes.get(&pane_id)?.attached_terminal_id.clone(),
+                    ))
+                })
+                .collect(),
+        )
     }
 
     /// `Ok(None)`: the pane does not run Claude under a shell, so it is left alone.
@@ -422,5 +431,85 @@ mod tests {
         let error: crate::api::schema::ErrorResponse =
             serde_json::from_str(&invoke_pane(&mut app, &tab_id, Some("p_999"))).unwrap();
         assert_eq!(error.error.code, "pane_not_found");
+    }
+
+    /// A tab with Nirvana Claude in its first pane and a Claude worker split beside it, as the client's snapshot names
+    /// them, and a second workspace whose pane is not in that tab. The agent names make each pane an agent in
+    /// `session_metadata_snapshot`, the snapshot `server::client_shell` copies `pane_id` from unchanged.
+    fn app_with_orchestrator_and_worker() -> (App, crate::layout::PaneId, crate::layout::PaneId) {
+        let mut app = app_with_a_tab();
+        let orchestrator = app.state.workspaces[0].tabs[0].layout.pane_ids()[0];
+        let worker = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state
+            .workspaces
+            .push(crate::workspace::Workspace::test_new("other"));
+        app.state.ensure_test_terminals();
+        for (pane, name) in [(orchestrator, "nirvana"), (worker, "worker-mul")] {
+            let terminal = app.state.workspaces[0].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.state.terminals.get_mut(&terminal).unwrap().agent_name = Some(name.into());
+        }
+        (app, orchestrator, worker)
+    }
+
+    /// The agent's pane id as the snapshot the client holds gives it.
+    fn snapshot_pane_id(app: &App, name: &str) -> String {
+        let snapshot = app.session_metadata_snapshot();
+        snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.name.as_deref() == Some(name))
+            .map(|agent| agent.pane_id.clone())
+            .unwrap_or_else(|| panic!("{name} in the snapshot's agents: {:?}", snapshot.agents))
+    }
+
+    /// P87 fix round (review of aa340405, item b6, first part): the client's ids were made up (`pane_1`, `w1:p2`).
+    /// Here the id is the one the real snapshot gives Nirvana Claude, through the real `parse_pane_id`, to the real
+    /// action: it is accepted (no `pane_not_found`), and the panes handed to the stopper are Nirvana Claude's alone,
+    /// not the Claude worker split beside it. This proves the id form and the narrowing; it does not prove the
+    /// process side (`foreground_job` finding Claude under a shell), which needs a real Claude.
+    #[test]
+    fn restart_claude_takes_the_snapshots_pane_id_and_leaves_the_tabs_worker() {
+        let (mut app, orchestrator, worker) = app_with_orchestrator_and_worker();
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+        let orchestrator_id = snapshot_pane_id(&app, "nirvana");
+        let worker_id = snapshot_pane_id(&app, "worker-mul");
+        assert_ne!(orchestrator_id, worker_id);
+        let only = |app: &App, pane: Option<&str>| -> Option<Vec<crate::layout::PaneId>> {
+            app.nirvana_restart_panes(0, 0, pane)
+                .map(|panes| panes.into_iter().map(|(pane, _)| pane).collect())
+        };
+        assert_eq!(only(&app, Some(&orchestrator_id)), Some(vec![orchestrator]));
+        assert_eq!(only(&app, Some(&worker_id)), Some(vec![worker]));
+        let mut both = only(&app, None).unwrap();
+        both.sort_by_key(|pane| pane.raw());
+        let mut expected = vec![orchestrator, worker];
+        expected.sort_by_key(|pane| pane.raw());
+        assert_eq!(both, expected, "the tab menu, naming no pane, still covers the tab");
+        let error: crate::api::schema::ErrorResponse =
+            serde_json::from_str(&invoke_pane(&mut app, &tab_id, Some(&orchestrator_id))).unwrap();
+        assert_eq!(error.error.code, "claude_not_restarted", "{:?}", error.error);
+        assert_eq!(error.error.message, "no Claude Code is running in that pane");
+    }
+
+    /// Item b6: a stale or malformed pane id stops nothing. Each is refused before the stopper is handed a pane: an id
+    /// of no pane, garbage, an empty one, and a real pane of another workspace.
+    #[test]
+    fn restart_claude_with_a_stale_or_malformed_pane_id_stops_nothing() {
+        let (mut app, _, _) = app_with_orchestrator_and_worker();
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+        let other_ws = app.state.workspaces[1].tabs[0].layout.pane_ids()[0];
+        let foreign = app.public_pane_id(1, other_ws).unwrap();
+        let stale = format!("{}:p99", app.public_workspace_id(0));
+        for pane in ["p_999", "not a pane", "", stale.as_str(), foreign.as_str()] {
+            assert!(
+                app.nirvana_restart_panes(0, 0, Some(pane)).is_none(),
+                "{pane:?} names a pane of the tab"
+            );
+            let error: crate::api::schema::ErrorResponse =
+                serde_json::from_str(&invoke_pane(&mut app, &tab_id, Some(pane))).unwrap();
+            assert_eq!(error.error.code, "pane_not_found", "{pane:?}");
+        }
     }
 }
