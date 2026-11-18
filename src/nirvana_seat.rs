@@ -7010,9 +7010,9 @@ mod tests {
         let got = chosen(&table, &world, &video);
         assert_eq!((got.seat.as_str(), got.effort), ("carbon", Effort::Medium));
         let week = got.windows.iter().find(|w| w.window == "week").unwrap();
-        // carbon medium's 0.1803% x 2 (price) x 2 (weight) x 5 (medium).
+        // carbon medium's 0.03786% x 2 (price) x 2 (weight) x 5 (medium).
         assert!(
-            close(week.expected, 0.001803 * 2.0 * 2.0 * 5.0),
+            close(week.expected, 0.0003786 * 2.0 * 2.0 * 5.0),
             "{:?}",
             got.windows
         );
@@ -8685,14 +8685,21 @@ mod tests {
                     || c.basis.contains("same two sources")
             );
         }
-        // Low's cells are the measured probe's quota scaled to a real order by flash's fit x8.97, the gemini
-        // pool's only fit: unscaled, carbon would read a ninth of its cost beside the fitted seats.
+        // Low's cells are the measured probe's quota scaled to a real order: plan 70 by flash's fit x8.97, the gemini
+        // pool's only fit then (unscaled, carbon would read a ninth of its cost beside the fitted seats); the seats
+        // refresh fix round then by carbon high's own refit x0.21 in place of flash's, a prior for low and medium, so
+        // high no longer reads under them.
         let cell = |effort: Effort| carbon.uses.iter().find(|u| u.effort == effort).unwrap();
-        assert!(close(cell(Effort::Low).windows["week"], 0.000167 * 8.97));
-        assert!(close(cell(Effort::Low).windows["5h"], 0.000667 * 8.97));
+        // Relative: `close` is absolute at 1e-4, about a third of these shares.
+        let near = |a: f32, b: f32| (a / b - 1.0).abs() < 1e-3;
+        assert!(near(cell(Effort::Low).windows["week"], 0.000167 * 8.97 * 0.21), "{:?}", cell(Effort::Low).windows);
+        assert!(near(cell(Effort::Low).windows["5h"], 0.000667 * 8.97 * 0.21), "{:?}", cell(Effort::Low).windows);
         assert!(cell(Effort::Low).basis.contains("fit x8.97"));
-        assert!(cell(Effort::Low).basis.starts_with("measured: plan 70"));
-        assert!(cell(Effort::Medium).basis.starts_with("derived: plan 70"));
+        for effort in [Effort::Low, Effort::Medium] {
+            let basis = &cell(effort).basis;
+            assert!(basis.starts_with("prior: plan 70"), "{effort:?}: {basis}");
+            assert!(basis.contains("refit x0.21, carbon high's own fit"), "{effort:?}: {basis}");
+        }
         // The seats refresh: carbon high carries its own orders' refit (seat_fit.py, n 15), no longer a prior.
         assert!(cell(Effort::High).basis.starts_with("derived:"));
         assert!(cell(Effort::High).basis.contains("refit x0.21"));
@@ -8739,7 +8746,9 @@ mod tests {
     /// Plan 71: Gemini 4 Hydrogen takes Flash 3.8's seat. The owner, 2026-11-12: "it supposidly costs the same as 3.8"
     /// and "Hydrogen can do media level work replace flash". Ten orders, all right; by tokens at Flash's price Hydrogen
     /// cost 0.74x at low, 0.71x at medium, 0.57x at high (the quota could not be read). Hydrogen is on in gemini's pool
-    /// with Flash's capabilities; Flash stays in the table, off. The seats refresh gave it Google's own price row.
+    /// with Flash's capabilities; Flash stays in the table, off. The seats refresh gave it Google's own price row, twice
+    /// Flash's in and out, so the name's "at the same cost" no longer holds: each at its own price Hydrogen costs 1.43x,
+    /// 1.39x and 1.12x Flash per order (nirvana/seat_refresh.py). The name stays; controls and older notes cite it.
     #[test]
     fn p71_hydrogen_takes_flashs_seat_at_the_same_cost() {
         let table = table();
@@ -8907,9 +8916,20 @@ mod tests {
         let near = |a: f32, b: f32| (a / b - 1.0).abs() < 1e-3;
         let carbon_high = cell("carbon", Effort::High);
         assert!(near(carbon_high.windows["week"], 0.0006059), "{:?}", carbon_high.windows);
+        assert!(near(carbon_high.windows["5h"], 0.00242), "{:?}", carbon_high.windows);
         assert!(carbon_high.basis.contains("n 15"));
+        // The fix round: carbon's cells do not fall as its effort rises. High's own refit left low and medium on
+        // flash's x8.97 and put high under both; they now carry high's x0.21 as a prior.
+        for window in ["5h", "week"] {
+            let shares: Vec<f32> = [Effort::Low, Effort::Medium, Effort::High]
+                .into_iter()
+                .map(|effort| cell("carbon", effort).windows[window])
+                .collect();
+            assert!(shares.windows(2).all(|w| w[0] <= w[1]), "carbon {window}: {shares:?}");
+        }
         // Opus high is not refit: the record's 2.26 (n 63) is run ia1's SOTA build.bounded orders, and with it Fable high
-        // read cheaper than Opus high, so Balanced seated plan on Fable (test l3_balanced_on_cool_world...). The owner's
+        // read cheaper than Opus high, so Balanced seated plan on Fable (test
+        // l3_balanced_on_cool_world_seats_opus_and_sonnet_and_climbs). The owner's
         // call; its fit stays x7.1, and its basis names it the record's word now that it carries its own orders' fit.
         let opus_high = cell("opus", Effort::High);
         assert!(opus_high.basis.contains("fit x7.1 (seat_fit.py, n 9)"), "{}", opus_high.basis);

@@ -5,7 +5,8 @@ CLAUDE.md rule 4: a count in prose rots, so the table's comments name this scrip
     python nirvana/seat_refresh.py classes <journal.jsonl> [--by seat,effort,class] [--min N]
     python nirvana/seat_refresh.py hydrogen [--check]
 
-`classes` reads one herdr run journal (run ia1's was the source) and prints, per group of seated orders:
+`classes` reads one herdr run journal (run ia1's was the source), prints how many lines it skipped (not JSON, not an
+object, or a `seated` row missing a key) and then, per group of seated orders:
   n           seated orders (a send-back's `-sN` child and a reseat's `-rN` are their own orders, as the journal has them)
   ovr         orders whose `seated.override` is set (the seat was chosen, not the rule's)
   gated       orders with at least one `gated` event
@@ -77,18 +78,30 @@ def usd(price: dict, tokens: dict) -> float:
 
 # ---- classes ----
 
-def load(journal: Path) -> dict[str, dict]:
+def load(journal: Path, skipped: list[str] | None = None) -> dict[str, dict]:
+    """Seated orders by name. A line that is not JSON, not an object, or a `seated` row missing a key is skipped,
+    and its reason appended to `skipped`, so the caller can print the count: a silent drop would bias every group."""
     orders: dict[str, dict] = {}
-    for line in journal.open(encoding="utf-8"):
+    skipped = [] if skipped is None else skipped
+    with journal.open(encoding="utf-8") as handle:
+        lines = list(handle)
+    for number, line in enumerate(lines, 1):
         try:
             e = json.loads(line)
         except ValueError:
+            skipped.append(f"line {number}: not JSON")
+            continue
+        if not isinstance(e, dict):
+            skipped.append(f"line {number}: not an object")
             continue
         ev, name = e.get("event"), e.get("order")
         if ev == "seated":
-            orders[name] = {"seat": e["seat"], "effort": e["effort"], "class": e["class"], "mode": e.get("mode"),
-                            "override": e.get("override"), "seated_at": e["at"], "verdicts": [], "merged": False,
-                            "ended_at": None, "usage": {}}
+            try:
+                orders[name] = {"seat": e["seat"], "effort": e["effort"], "class": e["class"],
+                                "mode": e.get("mode"), "override": e.get("override"), "seated_at": e["at"],
+                                "verdicts": [], "merged": False, "ended_at": None, "usage": {}}
+            except KeyError as missing:
+                skipped.append(f"line {number}: seated without {missing}")
             continue
         o = orders.get(name) if name else None
         if o is None:
@@ -122,7 +135,9 @@ def median(xs):
 
 def classes(args) -> int:
     seats = {s["id"]: s for s in tomllib.loads(args.table.read_text(encoding="utf-8"))["seat"]}
-    orders = load(args.journal)
+    skipped: list[str] = []
+    orders = load(args.journal, skipped)
+    print(f"skipped {len(skipped)} line(s)" + (f", first: {skipped[0]}" if skipped else ""))
     keys = args.by.split(",")
     groups = defaultdict(list)
     for o in orders.values():

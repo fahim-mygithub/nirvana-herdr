@@ -6,10 +6,13 @@
 TABLE = "src/nirvana_seats.toml"
 SEAT = "src/nirvana_seat.rs"
 PLUGIN = "nirvana/agy_plugin.py"
+REFRESH = "nirvana/seat_refresh.py"
 
 T_SEATS = "nirvana_seat::tests::p83_seats_refresh_models_prices_refits_and_scores"
 T_UPGRADE = "nirvana_seat::tests::c40a_the_shipped_default_is_new_and_every_old_one_upgrades"
 T_CARBON = "nirvana_seat::tests::p70_carbon_takes_argons_seat_at_the_same_cost"
+T_DECEMBER = "nirvana_seat::tests::argons_price_doubles_on_2026_11_30_and_its_expected_use_with_it"
+T_LOAD = "nirvana.test_scripts.SeatRefreshTest.test_load_skips_and_counts_lines_it_cannot_read"
 T_BOM = "nirvana.test_agy_plugin.AgyFilesTest.test_plugin_json_has_no_byte_order_mark"
 T_REPRICE = "nirvana.test_scripts.SeatRefreshTest.test_hydrogens_cells_are_the_probe_at_its_own_price"
 
@@ -36,6 +39,14 @@ CONTROLS = (
     # S2: the record's refits and retags
     Control("p83_carbon_high_cell", TABLE, 'windows = { "5h" = 0.00242, week = 0.0006059 }',
             'windows = { "5h" = 0.00242, week = 0.002885 }', T_SEATS, "rust"),
+    Control("p83_carbon_high_5h", TABLE, 'windows = { "5h" = 0.00242, week = 0.0006059 }',
+            'windows = { "5h" = 0.011525, week = 0.0006059 }', T_SEATS, "rust"),
+    # The fix round: carbon's cells do not fall as its effort rises; medium back on flash's x8.97 sits over high
+    Control("p83_carbon_monotonic", TABLE, 'windows = { "5h" = 0.001513, week = 0.0003786 }',
+            'windows = { "5h" = 0.007203, week = 0.001803 }', T_SEATS, "rust"),
+    # The December pick expects carbon medium's cell, now on the x0.21 refit
+    Control("p83_carbon_medium_december", TABLE, 'windows = { "5h" = 0.001513, week = 0.0003786 }',
+            'windows = { "5h" = 0.001513, week = 0.001803 }', T_DECEMBER, "rust"),
     Control("p83_carbon_high_n", TABLE, "refit x0.21 to carbon high's own orders (seat_fit.py, n 15)",
             "refit x0.21 to carbon high's own orders (seat_fit.py, n 5)", T_SEATS, "rust"),
     Control("p83_carbon_high_prior", TABLE, 'basis = "derived: medium x 1.6, refit x0.21',
@@ -54,6 +65,11 @@ CONTROLS = (
     # Hydrogen's cells are plan 71's probe at each model's own price (nirvana/seat_refresh.py)
     Control("p83_hydrogen_low_reprice", TABLE, 'windows = { "5h" = 0.0002235, week = 0.0001118 }',
             'windows = { "5h" = 0.0002235, week = 5.783e-05 }', T_REPRICE, "python"),
+    # The fix round: load() skips and counts a line that is not an object or a seated row missing a key
+    Control("p83_load_not_object", REFRESH, '        if not isinstance(e, dict):\n',
+            '        if False:\n', T_LOAD, "python"),
+    Control("p83_load_missing_key", REFRESH, '            except KeyError as missing:',
+            '            except IndexError as missing:', T_LOAD, "python"),
     # S4: agy up to 1.5.10 did not load a plugin.json with a BOM
     Control("p83_plugin_json_bom", PLUGIN, 'path.write_bytes(text.encode("utf-8"))',
             'path.write_bytes(text.encode("utf-8-sig"))', T_BOM, "python"),

@@ -35,11 +35,14 @@ CONTROLS = (
             '{ from = "2026-11-30", input = 4.0, output = 20.0, cache_read = 0.20, cache_write = 4.0, basis = "the same',
             '{ from = "2026-11-30", input = 2.0, output = 20.0, cache_read = 0.20, cache_write = 4.0, basis = "the same',
             T_CARBON, "rust"),
-    # The measured cell and its basis
-    Control("p70_cell_low", TABLE, 'windows = { "5h" = 0.005983, week = 0.001498 }',
-            'windows = { "5h" = 0.005983, week = 0.000167 }', T_CARBON, "rust"),
-    Control("p70_cell_basis", TABLE, 'basis = "measured: plan 70 carbon low', 'basis = "prior: plan 70 carbon low',
+    # The measured cell and its basis. The seats refresh fix round: low carries carbon high's refit x0.21 in place of
+    # flash's x8.97, a prior, so each sabotage puts back what the fix round took out.
+    Control("p70_cell_low", TABLE, 'windows = { "5h" = 0.001256, week = 0.0003146 }',
+            'windows = { "5h" = 0.001256, week = 0.001498 }', T_CARBON, "rust"),
+    Control("p70_cell_basis", TABLE, 'basis = "prior: plan 70 carbon low', 'basis = "measured: plan 70 carbon low',
             T_CARBON, "rust"),
+    Control("p70_cell_medium_basis", TABLE, 'basis = "prior: plan 70 carbon medium',
+            'basis = "derived: plan 70 carbon medium', T_CARBON, "rust"),
     # The classes: carbon just before argon, at argon's score and effort
     Control("p70_class_missing", TABLE, '  { seat = "carbon", score = 87 },\n', "", T_CARBON, "rust"),
     Control("p70_class_effort", TABLE, '  { seat = "carbon", score = 85, effort = "high" },',
