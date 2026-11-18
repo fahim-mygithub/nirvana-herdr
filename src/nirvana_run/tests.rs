@@ -3,6 +3,9 @@ use super::*;
 /// Fix wake-pane: a run follows the orchestrator that seats into it.
 mod wake_pane;
 
+/// Plan 43 A6 and A7: orders a dead worker left running, the reseat's end, and a quota error's named reset.
+mod restart;
+
 /// 2026-10-18T02:08:38Z, when the live run `live1` seated its first order.
 const T0: u64 = 1_792_289_318;
 

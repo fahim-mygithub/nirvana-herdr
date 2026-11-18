@@ -300,6 +300,11 @@ pub fn ended_of(home: &Path, pane: &str, cwd: Option<&str>, owner: &Owner, now: 
                 if known.phase.wants_worker() {
                     return Ended::Stopped(known.last_at);
                 }
+                // Plan 43 A6: an order the restart check interrupted keeps its pane the stopped hour, as it would
+                // have unmarked, so the owner may still read where it stopped.
+                if died_unmarked(known) {
+                    return Ended::Stopped(known.last_at);
+                }
                 return Ended::At(known.last_at);
             }
             Ended::Unknown
@@ -320,6 +325,44 @@ pub fn ended_of(home: &Path, pane: &str, cwd: Option<&str>, owner: &Owner, now: 
             }
         }
     }
+}
+
+/// Plan 43 A6: the order was interrupted by the restart check (`nirvana_run::interrupt_dead`), not ended by its worker.
+fn died_unmarked(order: &nirvana_run::OrderState) -> bool {
+    order.phase == Phase::Interrupted
+        && order
+            .why
+            .as_deref()
+            .is_some_and(|why| why.starts_with(nirvana_run::WORKER_DIED))
+}
+
+/// Plan 43 A6: the projects the restart check reads. Each project an ended order's record line names
+/// (`nirvana_idle_review::known_projects_in`, which leaves out roots under the temp folder), then each project a pane's
+/// folder is in, climbing to the first folder that holds `.nirvana/runs` (a worktree's cwd climbs to its project).
+/// One root spelled in two cases is one on Windows.
+pub fn restart_projects(record: &Path, temp: &Path, cwds: &[String]) -> Vec<PathBuf> {
+    let mut roots = crate::nirvana_idle_review::known_projects_in(record, temp).unwrap_or_default();
+    for cwd in cwds.iter().filter(|cwd| !cwd.is_empty()) {
+        let mut dir = Some(PathBuf::from(cwd));
+        while let Some(at) = dir {
+            if at.join(nirvana_run::DIR).join("runs").is_dir() {
+                roots.push(at);
+                break;
+            }
+            dir = at.parent().map(Path::to_path_buf);
+        }
+    }
+    let fold = |path: &Path| {
+        let text = path.display().to_string().replace('/', "\\");
+        if cfg!(windows) {
+            text.to_lowercase()
+        } else {
+            text
+        }
+    };
+    let mut seen = HashSet::new();
+    roots.retain(|root| seen.insert(fold(root)));
+    roots
 }
 
 fn str_at<'a>(value: &'a Value, pointers: &[&str]) -> Option<&'a str> {
@@ -710,6 +753,8 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         server_started: now,
         ..Pass::at(now)
     };
+    // Plan 43 A6: only the server's own pass names its start, and only that start runs the full restart check.
+    let mut started_by_server = None;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
@@ -717,6 +762,7 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             "--server-started" => {
                 if let Some(at) = rest.next().and_then(|at| at.parse().ok()) {
                     pass.server_started = at;
+                    started_by_server = Some(at);
                 }
             }
             "--watched" => pass.watched_tabs.extend(rest.next().cloned()),
@@ -742,6 +788,26 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         return Ok(());
     };
     let herdr = |args: &[&str]| crate::nirvana_worker::herdr_json_within(args, CALL_LIMIT);
+    // Plan 43 A6: before the sweep, so a pane list that fails below still leaves the record's projects checked.
+    let cwds: Vec<String> = herdr(&["pane", "list"])
+        .map(|value| array_at(&value, &["/result/panes", "/panes"]))
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|pane| str_at(pane, &["/cwd"]).map(str::to_owned))
+        .collect();
+    let projects = restart_projects(
+        &home.join(crate::nirvana_seat::DIR).join(crate::nirvana_seat::RECORD_FILE),
+        &std::env::temp_dir(),
+        &cwds,
+    );
+    let restart =
+        nirvana_run::restart_check_live(&home, &projects, started_by_server, pass.dry_run);
+    for line in &restart {
+        println!("{line}");
+    }
+    if !pass.dry_run && !restart.is_empty() {
+        log_lines(&home, &restart);
+    }
     let lines = match sweep(&home, &herdr, &pass) {
         Ok(lines) => lines,
         Err(why) => {
