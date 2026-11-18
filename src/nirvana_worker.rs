@@ -1563,9 +1563,14 @@ pub fn write_diff(
             .filter(|out| out.status.success())
             .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
     };
+    // Plan 43 fix round F5: reading a worktree whose worker may still run (the restart check judges before it re-checks
+    // under the journal's lock, and `resume` reads a stopped one) must never take its `index.lock`. `status` with
+    // `--no-optional-locks` leaves the index alone; porcelain `git diff HEAD` rewrote a stat-dirty index even with the
+    // flag (git 2.50.1, measured in a scratch repository and in the test), so the diff is the plumbing `diff-index`,
+    // which never writes the index: the same patch, `-M` for porcelain's default rename detection.
     let (Some(status), Some(diff)) = (
-        git(&["status", "--porcelain=v1"]),
-        git(&["diff", "HEAD", "--no-color"]),
+        git(&["--no-optional-locks", "status", "--porcelain=v1"]),
+        git(&["--no-optional-locks", "diff-index", "-p", "-M", "--no-color", "HEAD"]),
     ) else {
         return (None, None);
     };

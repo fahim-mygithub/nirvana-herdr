@@ -22,6 +22,17 @@ T_DECIDE = _T + "resets_in_a_short_named_reset_is_the_deferral_and_a_long_one_bo
 T_RESEAT_SITE = _T + "reseat_events_a_rate_limited_reseat_ends_its_parent"
 T_AGY_SITE = _T + "resets_in_agy_rate_limit_fills_the_named_reset"
 T_PID = _T +"restart_pid_seen_reads_a_running_process_and_a_finished_child"
+# Plan 43 fix round (F1 to F7).
+T_MAC = _T + "restart_a_free_lock_that_proves_nothing_kills_no_order"
+T_TWO = _T + "restart_two_server_starts_keep_their_marks_and_a_doubt_is_not_repeated"
+T_ONCE = _T + "restart_a_marked_start_does_not_read_every_run_again"
+T_FAIL = _T + "restart_a_run_that_cannot_be_written_leaves_the_start_unmarked"
+T_STALE = _T + "restart_a_stale_marker_doubt_is_told_once"
+T_CAP = _T + "rate_decision_a_deferral_past_the_cap_is_asked"
+T_INDEX = _T + "restart_write_diff_leaves_the_worktrees_index_as_it_was"
+T_PANE = _T + "reseat_events_leave_no_pane_finished_early"
+T_REAL = _T + "restart_a_real_lock_and_a_real_worker_are_read_by_the_os"
+WORKER = "src/nirvana_worker.rs"
 _D = "nirvana_dead::tests::"
 T_HOUR = _D + "a_restart_interrupted_order_keeps_its_pane_the_stopped_hour"
 T_PROJECTS = _D + "restart_projects_reads_the_record_and_climbs_the_panes_folders"
@@ -79,8 +90,8 @@ CONTROLS = (
             T_UNKNOWN, "rust"),
     # R1: an ended run is never touched.
     Control("p86_ended_run", RUN,
-            "    let state = replay(&journal.read().0);\n    if state.ended.is_some() {\n        return Ok((Vec::new(), false));\n",
-            "    let state = replay(&journal.read().0);\n    if false {\n        return Ok((Vec::new(), false));\n",
+            "    let mut checked = RunChecked::default();\n    if state.ended.is_some() {\n        return checked;\n",
+            "    let mut checked = RunChecked::default();\n    if false {\n        return checked;\n",
             T_SAFE, "rust"),
     # R1: an exited process whose handle is still held is gone, not running.
     Control("p86_pid_exited", RUN,
@@ -99,8 +110,8 @@ CONTROLS = (
             T_PID, "rust"),
     # R1: a doubt is written on the start's pass.
     Control("p86_doubt_written", RUN,
-            "                if doubts && !dry_run {\n",
-            "                if false {\n",
+            "                if dry_run {\n                    checked.lines.push(line);\n                    continue;\n",
+            "                if true {\n                    checked.lines.push(line);\n                    continue;\n",
             T_LIVE, "rust"),
     # R1: the reason opens with WORKER_DIED and names the checkpoint.
     Control("p86_died_reason", RUN,
@@ -119,7 +130,7 @@ CONTROLS = (
             T_BACK, "rust"),
     # R1: the orchestrator is woken after a write.
     Control("p86_wakes", RUN,
-            "    if wrote {\n        (world.wake)(project, run);\n",
+            "    if checked.wrote {\n        (world.wake)(project, run);\n",
             "    if false {\n        (world.wake)(project, run);\n",
             T_ORDER, "rust"),
     # R1: an old run is not read.
@@ -129,12 +140,12 @@ CONTROLS = (
             T_SAFE, "rust"),
     # R1: once per server start.
     Control("p86_once_per_start", RUN,
-            "    let full = server_started.is_some_and(|at| restart_mark(home) != Some(at));\n",
+            "    let full = server_started.is_some_and(|at| !restart_marked(home, at));\n",
             "    let full = server_started.is_some();\n",
-            T_LIVE, "rust"),
+            T_ONCE, "rust"),
     # R1: the mark is written after the start's pass.
     Control("p86_mark_written", RUN,
-            "        let _ = std::fs::write(dir.join(RESTART_MARK), at.to_string());\n",
+            "    std::fs::write(dir.join(at.to_string()), \"\")?;\n",
             "",
             T_ORDER, "rust"),
     # R1: a pass with no server start reads only orders with a stale pane marker.
@@ -154,7 +165,7 @@ CONTROLS = (
             T_ORDER, "rust"),
     # R1: a doubt reaches the orchestrator's queue.
     Control("p86_doubt_line", RUN,
-            "            \"{order}: herdr could not prove its worker dead after a server restart ({}); it stays running: \\\n",
+            "            \"{order}: herdr found no supervisor for it but could not prove its worker dead ({}); it stays running: \\\n",
             "            \"{order}: herdr thinks it is fine ({}); it stays running: \\\n",
             T_LIVE, "rust"),
     # R1: a restart-interrupted order keeps its pane the stopped hour.
@@ -212,6 +223,116 @@ CONTROLS = (
             "        if units > 0 && digits.is_empty() {\n",
             "        if units > 0 {\n",
             T_RESETS, "rust"),
+    # F1: where a free lock proves nothing (macOS), a death is a doubt.
+    Control("p86_lock_proves_nothing", RUN,
+            "        Liveness::Dead(cause) if !world.lock_proves_free => Some(Liveness::Doubt(format!(\n",
+            "        Liveness::Dead(cause) if false => Some(Liveness::Doubt(format!(\n",
+            T_MAC, "rust"),
+    # F1: and no pane marker reads stale there.
+    Control("p86_stale_needs_lock_read", RUN,
+            "    if !world.lock_proves_free {\n        return Vec::new();\n",
+            "    if false {\n        return Vec::new();\n",
+            T_MAC, "rust"),
+    # F1: on Windows the lock read proves a free lock.
+    Control("p86_lock_reads_free_windows", RUN,
+            "    #[cfg(windows)]\n    {\n        true\n    }\n",
+            "    #[cfg(windows)]\n    {\n        false\n    }\n",
+            T_REAL, "rust"),
+    # F2: each start has its own mark.
+    Control("p86_mark_per_start", RUN,
+            "    restart_marks(home).join(at.to_string()).is_file()\n",
+            "    restart_marks(home).is_dir()\n",
+            T_ONCE, "rust"),
+    # F2: a run that failed leaves the start unmarked.
+    Control("p86_mark_not_after_failure", RUN,
+            "    if let (true, false, false, Some(at)) = (full, dry_run, failed, server_started) {\n",
+            "    if let (true, false, _, Some(at)) = (full, dry_run, failed, server_started) {\n",
+            T_FAIL, "rust"),
+    # F2: an order that could not be interrupted marks the run failed.
+    Control("p86_interrupt_failure_counted", RUN,
+            "                        checked.failed = true;\n                        checked\n                            .lines\n                            .push(format!(\"{run}: {id} could not be interrupted: {err}\"));\n",
+            "                        checked\n                            .lines\n                            .push(format!(\"{run}: {id} could not be interrupted: {err}\"));\n",
+            T_FAIL, "rust"),
+    # F2: one order's failure does not skip the run's other orders.
+    Control("p86_failure_goes_on", RUN,
+            "                        checked.failed = true;\n                        checked\n                            .lines\n                            .push(format!(\"{run}: {id} could not be interrupted: {err}\"));\n                        false\n",
+            "                        checked.failed = true;\n                        checked\n                            .lines\n                            .push(format!(\"{run}: {id} could not be interrupted: {err}\"));\n                        return checked;\n",
+            T_FAIL, "rust"),
+    # F2: the same doubt is not written twice.
+    Control("p86_doubt_dedupe", RUN,
+            "                if order.last_doubt.as_deref() == Some(why.as_str()) {\n",
+            "                if false {\n",
+            T_TWO, "rust"),
+    # F2: the replay keeps the latest doubt's reason.
+    Control("p86_doubt_recorded", RUN,
+            "                    known.last_doubt = Some(why.clone());\n",
+            "",
+            T_TWO, "rust"),
+    # F2: a new `started` clears it.
+    Control("p86_doubt_cleared_by_start", RUN,
+            "                    known.last_doubt = None;\n",
+            "",
+            T_TWO, "rust"),
+    # F2 b: a mark that cannot be written is said.
+    Control("p86_mark_failure_said", RUN,
+            "                \"the restart check's mark could not be written ({err}); the next pass checks again\"\n",
+            "                \"\"\n",
+            T_TWO, "rust"),
+    # F3: the every-minute pass tells a stale marker's doubt once.
+    Control("p86_stale_doubt_once", RUN,
+            "                if order.last_doubt.as_deref() == Some(why.as_str()) {\n                    continue;\n",
+            "                if order.last_doubt.as_deref() == Some(why.as_str()) && false {\n                    continue;\n",
+            T_STALE, "rust"),
+    # F4: auto mode asks past the cap.
+    Control("p86_defer_cap", RUN,
+            "        (true, Some(at)) if at.saturating_sub(now) > AUTO_DEFER_CAP_S => RateDecision::Ask {\n",
+            "        (true, Some(at)) if false && at.saturating_sub(now) > AUTO_DEFER_CAP_S => RateDecision::Ask {\n",
+            T_CAP, "rust"),
+    # F4: the 79 h ia1 reset is asked.
+    Control("p86_defer_cap_ia1", RUN,
+            "        (true, Some(at)) if at.saturating_sub(now) > AUTO_DEFER_CAP_S => RateDecision::Ask {\n",
+            "        (true, Some(at)) if at.saturating_sub(now) > 100 * 3600 => RateDecision::Ask {\n",
+            T_DECIDE, "rust"),
+    # F4: the cap is 6 h.
+    Control("p86_defer_cap_value", RUN,
+            "pub const AUTO_DEFER_CAP_S: u64 = 6 * 3600;\n",
+            "pub const AUTO_DEFER_CAP_S: u64 = 24 * 3600;\n",
+            T_CAP, "rust"),
+    # F5: a checkpoint no event names is removed.
+    Control("p86_stray_checkpoint_removed", RUN,
+            "                    let _ = std::fs::remove_file(journal.dir().join(diff));\n",
+            "",
+            T_BACK, "rust"),
+    # F5: `git status` takes no optional lock.
+    Control("p86_status_no_locks", WORKER,
+            "        git(&[\"--no-optional-locks\", \"status\", \"--porcelain=v1\"]),\n",
+            "        git(&[\"status\", \"--porcelain=v1\"]),\n",
+            T_INDEX, "rust"),
+    # F5: the diff is the plumbing, which writes no index.
+    Control("p86_diff_plumbing", WORKER,
+            "        git(&[\"--no-optional-locks\", \"diff-index\", \"-p\", \"-M\", \"--no-color\", \"HEAD\"]),\n",
+            "        git(&[\"--no-optional-locks\", \"diff\", \"HEAD\", \"--no-color\"]),\n",
+            T_INDEX, "rust"),
+    # F6 a: the parent's end keeps why it stopped.
+    Control("p86_reseat_end_keeps_why", RUN,
+            "            why: Some(format!(\"{why}; re-seated as {child_id} on {seat}\")),\n",
+            "            why: Some(format!(\"re-seated as {child_id} on {seat}\")),\n",
+            T_RESEAT, "rust"),
+    # F6 b: a pane whose order's supervisor is live is not finished (the parent launching its child).
+    Control("p86_pane_live_parent", WORKER,
+            "    let (seq, order) = started;\n    if live(run, order) {\n        return None;\n",
+            "    let (seq, order) = started;\n    if false && live(run, order) {\n        return None;\n",
+            T_PANE, "rust"),
+    # F7: the real lock reads held while its process runs.
+    Control("p86_real_lock_held", WORKER,
+            "            Ok(_) => false,\n            Err(err) => err.kind() != std::io::ErrorKind::NotFound,\n",
+            "            Ok(_) => false,\n            Err(_) => false,\n",
+            T_REAL, "rust"),
+    # F7: the real worker's pid reads with its creation time, so a live worker is not taken for a reused pid.
+    Control("p86_real_pid_since", RUN,
+            "        PidSeen::Since(created) => Liveness::Doubt(format!(\n",
+            "        PidSeen::Since(created) => Liveness::Dead(format!(\n",
+            T_LIVE, "rust"),
     # R3: the duration is added to now.
     Control("p86_resets_from_now", RUN,
             "            return Some(now.saturating_add(total));\n",
