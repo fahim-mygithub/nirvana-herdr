@@ -36,18 +36,20 @@ CONTROLS = (
             T_HYDROGEN, "rust"),
     Control("p71_flash_on", TABLE, "every class still\n# lists it.\nenabled = false",
             "every class still\n# lists it.\nenabled = true", T_HYDROGEN, "rust"),
-    # The price row: Flash's, said unverified
-    Control("p71_price", TABLE, '{ from = "2026-11-12", input = 0.75,', '{ from = "2026-11-12", input = 2.0,',
-            T_HYDROGEN, "rust"),
+    # The price row: Google's since the seats refresh (twice Flash's in and out); the sabotage is plan 71's Flash row
+    Control("p71_price", TABLE, '{ from = "2026-11-12", input = 1.50, output = 7.50,',
+            '{ from = "2026-11-12", input = 0.75, output = 3.75,', T_HYDROGEN, "rust"),
     # The cells: Flash's times the measured ratio, xhigh a prior from high
-    Control("p71_cell_low", TABLE, 'windows = { "5h" = 0.0001157, week = 5.783e-05 }',
-            'windows = { "5h" = 0.0001563, week = 7.815e-05 }', T_HYDROGEN, "rust"),
-    Control("p71_cell_medium", TABLE, 'windows = { "5h" = 0.0003224, week = 0.0001612 }',
-            'windows = { "5h" = 0.0003224, week = 0.000227 }', T_HYDROGEN, "rust"),
-    Control("p71_cell_high", TABLE, 'windows = { "5h" = 0.0001535, week = 7.675e-05 }',
-            'windows = { "5h" = 0.00026928, week = 7.675e-05 }', T_HYDROGEN, "rust"),
-    Control("p71_cell_xhigh", TABLE, 'windows = { "5h" = 0.0002456, week = 0.0001228 }',
-            'windows = { "5h" = 0.0002456, week = 0.0003 }', T_HYDROGEN, "rust"),
+    # The seats refresh moved each cell to its own price (and medium and high to their record's refit); each sabotage
+    # puts back plan 71's value at Flash's price in one window.
+    Control("p71_cell_low", TABLE, 'windows = { "5h" = 0.0002235, week = 0.0001118 }',
+            'windows = { "5h" = 0.0001157, week = 5.783e-05 }', T_HYDROGEN, "rust"),
+    Control("p71_cell_medium", TABLE, 'windows = { "5h" = 0.0002588, week = 0.0001294 }',
+            'windows = { "5h" = 0.0002588, week = 0.0001612 }', T_HYDROGEN, "rust"),
+    Control("p71_cell_high", TABLE, 'windows = { "5h" = 0.0006786, week = 0.0003393 }',
+            'windows = { "5h" = 0.0001535, week = 0.0003393 }', T_HYDROGEN, "rust"),
+    Control("p71_cell_xhigh", TABLE, 'windows = { "5h" = 0.001086, week = 0.0005429 }',
+            'windows = { "5h" = 0.001086, week = 0.0003 }', T_HYDROGEN, "rust"),
     # The classes: hydrogen just before flash, at flash's score; under the load-bearing bar with flash
     Control("p71_class_missing", TABLE, '  { seat = "hydrogen", score = 86 },\n', "", T_HYDROGEN, "rust"),
     Control("p71_class_score", TABLE, '  { seat = "hydrogen", score = 85 },\n', '  { seat = "hydrogen", score = 84 },\n',
@@ -56,7 +58,7 @@ CONTROLS = (
             '  { seat = "hydrogen", score = 68 },\n  { seat = "flash", score = 68 },\n',
             '  { seat = "hydrogen", score = 74 },\n  { seat = "flash", score = 68 },\n', T_RECORD, "rust"),
     # The upgrade path: the 0.70.0 default is historical
-    Control("p71_v14_not_historical", SEAT, '    include_str!("nirvana_seats_v14.toml"),\n];', "];",
+    Control("p71_v14_not_historical", SEAT, '    include_str!("nirvana_seats_v14.toml"),\n', "",
             T_UPGRADE, "rust"),
     # Labels: the chip and the subagent row read "Hydrogen"
     Control("p71_chip_line", SPACES, '        } else if has("hydrogen") {\n            GeminiLine::Hydrogen\n', "",

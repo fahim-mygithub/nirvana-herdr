@@ -3,6 +3,34 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.79.0: the seat table refreshed: Hydrogen at Google's price, run ia1's record, agy 1.5.11
+
+- **Changed:** Hydrogen's price row is Google's own ($1.50 in, $7.50 out, $0.075 cache), not Flash 3.8's, and its
+  cells are plan 71's ten probe orders priced again, each model at its own row. Flash 3.8 gets its 2027-01-01 row.
+  Carbon high x0.21, Hydrogen medium x0.41 and Hydrogen high x2.25 take their own orders' fit from the record. Carbon
+  low and medium take Carbon high's x0.21 as a prior in place of the fit borrowed from Flash, so Carbon's cells no
+  longer fall as effort rises. Fable high's fit is confirmed by its own orders. Sizes are small 1.9 and large 5.1;
+  minutes are 7, 24 and 82 from run ia1. Two scores move by a rule written before it was applied: Sonnet in
+  build.load_bearing 85 to 68, Carbon in build.bounded 84 to 86. `seat_cells.py` tags an effort's own fit "derived".
+  New `nirvana/seat_refresh.py`. A test holds `plugin.json` to no byte order mark. The 0.78.2 table is kept as
+  `nirvana_seats_v15.toml`, so an installed default upgrades.
+- **Because:** the owner, 2026-11-18: "update our Nirvana on new models for seating, use our megajam to update any
+  past seats ther emight also be a new seat potentially called gemini 4 neon? Also agy updated ... 1.5.11".
+- **Measured:** agy 1.5.11 lists no Neon; `--model gemini-4-neon-low` is "not recognized", at no cost. Its two new
+  Orchestrator ids get no seat: each plans on Carbon and hands the work to Hydrogen, and a seat is one model. At each
+  model's own price Hydrogen cost 1.43x, 1.39x and 1.12x Flash per order (0.74x, 0.71x, 0.57x at Flash's price);
+  Hydrogen stays on and Flash off, the owner's "replace flash", though it now fails plan 71's 1.25 rule. In run ia1
+  Sonnet in build.load_bearing passed its first gate 7 of 28 (7 of 18 without owned or rebase refusals), and Carbon in
+  build.bounded 9 of 10, 75% merged. The refits close each refitted cell to a median ratio of 1.00. Carbon medium's
+  own 6 orders read 0.38, 1.8 times high's 0.21; Carbon low has 1 order. Opus high's 2.26 (n 63) is not applied: with
+  it Balanced seated plan on Fable, and the number reflects ia1's SOTA work mix. 114 `nirvana_seat` tests pass. The
+  p83 controls and the retargeted p70, p71 and c40a controls each turned their test red. Hypothesis, not measured:
+  that these picks raise first-pass rates on the next run. Not checked: agy 1.5.10's weekly-quota stop against
+  Nirvana's exit handling; Argon and Carbon's price doubling is dated 2026-11-30 here and 2026-12-01 by Google.
+- **If you remove this:** the router prices Hydrogen at half its cost and Carbon low and medium at about five times
+  theirs, Sonnet keeps taking load-bearing builds it passed 1 time in 4, and Carbon is never the Balanced pick for
+  bounded builds it passed 9 times in 10.
+
 ## alpha 0.78.3: the Jobs square and panel show only their own project's jobs
 
 - **Changed:** a space's Jobs square and panel read only the jobs whose working folder is the space's folder or under

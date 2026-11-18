@@ -71,6 +71,9 @@ pub const HISTORICAL_DEFAULTS: &[&str] = &[
     // Plan 71: the default before Gemini 4 Hydrogen took Flash 3.8's seat (20b42c2c), copied before the edit so an
     // installed copy upgrades.
     include_str!("nirvana_seats_v14.toml"),
+    // The seats refresh (2026-11-18): the default before Hydrogen's price, the record's refits and two scores moved
+    // (ce8a2a08), copied before the edit so an installed copy upgrades.
+    include_str!("nirvana_seats_v15.toml"),
 ];
 pub const DIR: &str = "nirvana";
 pub const SEATS_FILE: &str = "seats.toml";
@@ -7007,9 +7010,9 @@ mod tests {
         let got = chosen(&table, &world, &video);
         assert_eq!((got.seat.as_str(), got.effort), ("carbon", Effort::Medium));
         let week = got.windows.iter().find(|w| w.window == "week").unwrap();
-        // carbon medium's 0.1803% x 2 (price) x 2 (weight) x 5 (medium).
+        // carbon medium's 0.03786% x 2 (price) x 2 (weight) x 5 (medium).
         assert!(
-            close(week.expected, 0.001803 * 2.0 * 2.0 * 5.0),
+            close(week.expected, 0.0003786 * 2.0 * 2.0 * 5.0),
             "{:?}",
             got.windows
         );
@@ -8092,10 +8095,12 @@ mod tests {
         }
         assert_eq!(
             HISTORICAL_DEFAULTS.last().copied(),
-            Some(include_str!("nirvana_seats_v14.toml"))
+            Some(include_str!("nirvana_seats_v15.toml"))
         );
         // Plan 71: v14 went after v13, which stays historical (control p70_v13_not_historical).
         assert!(HISTORICAL_DEFAULTS.contains(&include_str!("nirvana_seats_v13.toml")));
+        // The seats refresh: v15 went after v14, which stays historical (control p71_v14_not_historical).
+        assert!(HISTORICAL_DEFAULTS.contains(&include_str!("nirvana_seats_v14.toml")));
         assert!(!differs_from_default(DEFAULT));
         assert!(!differs_from_default(&replace_mode_line(
             DEFAULT,
@@ -8485,9 +8490,10 @@ mod tests {
     #[test]
     fn c40a_the_record_sets_the_sizes_and_two_scores() {
         let table = table();
-        assert!(close(table.size(SizeName::Small).use_factor, 3.0));
+        // The seats refresh: seat_fit.py section 2 on the whole record, run ia1 in it.
+        assert!(close(table.size(SizeName::Small).use_factor, 1.9));
         assert!(close(table.size(SizeName::Medium).use_factor, 5.0));
-        assert!(close(table.size(SizeName::Large).use_factor, 4.1));
+        assert!(close(table.size(SizeName::Large).use_factor, 5.1));
         let score = |class: &str, seat: &str| {
             let class = table.class(class).unwrap();
             let entry = class.seats.iter().find(|e| e.seat == seat).unwrap();
@@ -8679,16 +8685,26 @@ mod tests {
                     || c.basis.contains("same two sources")
             );
         }
-        // Low's cells are the measured probe's quota scaled to a real order by flash's fit x8.97, the gemini
-        // pool's only fit: unscaled, carbon would read a ninth of its cost beside the fitted seats.
+        // Low's cells are the measured probe's quota scaled to a real order: plan 70 by flash's fit x8.97, the gemini
+        // pool's only fit then (unscaled, carbon would read a ninth of its cost beside the fitted seats); the seats
+        // refresh fix round then by carbon high's own refit x0.21 in place of flash's, a prior for low and medium, so
+        // high no longer reads under them.
         let cell = |effort: Effort| carbon.uses.iter().find(|u| u.effort == effort).unwrap();
-        assert!(close(cell(Effort::Low).windows["week"], 0.000167 * 8.97));
-        assert!(close(cell(Effort::Low).windows["5h"], 0.000667 * 8.97));
+        // Relative: `close` is absolute at 1e-4, about a third of these shares.
+        let near = |a: f32, b: f32| (a / b - 1.0).abs() < 1e-3;
+        assert!(near(cell(Effort::Low).windows["week"], 0.000167 * 8.97 * 0.21), "{:?}", cell(Effort::Low).windows);
+        assert!(near(cell(Effort::Low).windows["5h"], 0.000667 * 8.97 * 0.21), "{:?}", cell(Effort::Low).windows);
         assert!(cell(Effort::Low).basis.contains("fit x8.97"));
-        assert!(cell(Effort::Low).basis.starts_with("measured: plan 70"));
-        assert!(cell(Effort::Medium).basis.starts_with("derived: plan 70"));
-        assert!(cell(Effort::High).basis.starts_with("prior:"));
-        // Every class that lists argon lists carbon just before it, at argon's score and effort.
+        for effort in [Effort::Low, Effort::Medium] {
+            let basis = &cell(effort).basis;
+            assert!(basis.starts_with("prior: plan 70"), "{effort:?}: {basis}");
+            assert!(basis.contains("refit x0.21, carbon high's own fit"), "{effort:?}: {basis}");
+        }
+        // The seats refresh: carbon high carries its own orders' refit (seat_fit.py, n 15), no longer a prior.
+        assert!(cell(Effort::High).basis.starts_with("derived:"));
+        assert!(cell(Effort::High).basis.contains("refit x0.21"));
+        // Every class that lists argon lists carbon just before it, at argon's score and effort. The seats refresh
+        // moved carbon over the Balanced bar in build.bounded on run ia1's record; argon has none, so it stays.
         let mut classes = 0;
         for class in &table.classes {
             let Some(at) = class.seats.iter().position(|e| e.seat == "argon") else {
@@ -8702,9 +8718,10 @@ mod tests {
             classes += 1;
             let (c, a) = (&class.seats[at - 1], &class.seats[at]);
             assert_eq!(c.seat, "carbon", "{}", class.id);
+            let score = if class.id == "build.bounded" { 86.0 } else { a.score };
             assert_eq!(
                 (c.score, c.effort, &c.only_with),
-                (a.score, a.effort, &a.only_with),
+                (score, a.effort, &a.only_with),
                 "{}",
                 class.id
             );
@@ -8729,7 +8746,9 @@ mod tests {
     /// Plan 71: Gemini 4 Hydrogen takes Flash 3.8's seat. The owner, 2026-11-12: "it supposidly costs the same as 3.8"
     /// and "Hydrogen can do media level work replace flash". Ten orders, all right; by tokens at Flash's price Hydrogen
     /// cost 0.74x at low, 0.71x at medium, 0.57x at high (the quota could not be read). Hydrogen is on in gemini's pool
-    /// with Flash's price row and capabilities; Flash stays in the table, off.
+    /// with Flash's capabilities; Flash stays in the table, off. The seats refresh gave it Google's own price row, twice
+    /// Flash's in and out, so the name's "at the same cost" no longer holds: each at its own price Hydrogen costs 1.43x,
+    /// 1.39x and 1.12x Flash per order (nirvana/seat_refresh.py). The name stays; controls and older notes cite it.
     #[test]
     fn p71_hydrogen_takes_flashs_seat_at_the_same_cost() {
         let table = table();
@@ -8755,6 +8774,7 @@ mod tests {
         assert_eq!(hydrogen.capabilities, flash.capabilities);
         assert!(hydrogen.capabilities.iter().any(|c| c == "video"));
         assert!(hydrogen.capabilities.iter().any(|c| c == "audio"));
+        // The seats refresh: Google's own price, twice Flash's in and out (plan 71 had Flash's, unverified).
         let day = date("2026-11-12").unwrap();
         let (h, f) = (
             hydrogen.price_at(day).unwrap(),
@@ -8762,10 +8782,11 @@ mod tests {
         );
         assert_eq!(
             (h.input, h.output, h.cache_read, h.cache_write),
-            (f.input, f.output, f.cache_read, f.cache_write)
+            (2.0 * f.input, 2.0 * f.output, f.cache_read, 2.0 * f.cache_write)
         );
-        assert!(h.basis.contains("unverified"), "{}", h.basis);
-        // Each cell is Flash's cell times the measured ratio at that effort, so it keeps Flash's fit to real orders.
+        assert!(h.basis.contains("Google's Gemini API pricing page"), "{}", h.basis);
+        // Each cell is Flash's cell times the measured ratio at that effort, each model at its own price, so it keeps
+        // Flash's fit to real orders; medium and high then carry their own orders' refit (seat_fit.py, n 13 and 25).
         let cell = |seat: &Seat, effort: Effort| {
             seat.uses
                 .iter()
@@ -8775,9 +8796,9 @@ mod tests {
                 .clone()
         };
         for (effort, ratio) in [
-            (Effort::Low, 0.74),
-            (Effort::Medium, 0.71),
-            (Effort::High, 0.57),
+            (Effort::Low, 1.43),
+            (Effort::Medium, 1.39 * 0.41),
+            (Effort::High, 1.12 * 2.25),
         ] {
             let (h, f) = (cell(hydrogen, effort), cell(flash, effort));
             for window in ["5h", "week"] {
@@ -8825,5 +8846,105 @@ mod tests {
         let mut over = request("build.bounded");
         over.override_seat = Some(("flash".into(), "x".into()));
         assert!(pick(&table, &world(), &over).is_err());
+    }
+
+    // ---- the seats refresh (2026-11-18) ----
+
+    /// `agy models` on agy 1.5.11, 2026-11-18, the ids only. No Gemini 4 Neon: `--model gemini-4-neon-low` answers
+    /// "not recognized as a known model". The two `gemini-pro-orchestrator` ids are agy's planner-and-worker pair, no
+    /// seat (the table's comment says why).
+    const AGY_1_5_11_MODELS: &[&str] = &[
+        "gemini-4-carbon-medium",
+        "gemini-4-carbon-high",
+        "gemini-4-carbon-low",
+        "gemini-4-argon-medium",
+        "gemini-4-argon-high",
+        "gemini-4-argon-low",
+        "gemini-4-hydrogen-high",
+        "gemini-4-hydrogen-xhigh",
+        "gemini-4-hydrogen-medium",
+        "gemini-4-hydrogen-low",
+        "gemini-pro-orchestrator",
+        "gemini-pro-orchestrator-argon",
+        "gemini-3.8-flash-high",
+        "gemini-3.8-flash-medium",
+        "gemini-3.8-flash-low",
+        "claude-opus-5-5-low",
+        "claude-opus-5-5-medium",
+        "claude-opus-5-5-high",
+        "claude-sonnet-5-5-low",
+        "claude-sonnet-5-5-medium",
+        "claude-sonnet-5-5-high",
+        "gpt-oss-120b-medium",
+    ];
+    /// The newest id of each Claude line in Claude Code 2.1.327's binary, 2026-11-18.
+    const CLAUDE_2_1_327_MODELS: &[&str] = &[
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "claude-fable-5-2",
+    ];
+
+    /// The owner, 2026-11-18: "update our Nirvana on new models for seating, use our megajam to update any past
+    /// seats". Every seat's model at every effort is one its CLI lists today; Hydrogen and Flash 3.8 carry Google's
+    /// prices; the record's refits and the two scores it moved (nirvana/seat_refresh.py, nirvana/seat_fit.py).
+    #[test]
+    fn p83_seats_refresh_models_prices_refits_and_scores() {
+        let table = table();
+        for seat in table.seats.iter().filter(|seat| seat.id != "local") {
+            for effort in &seat.efforts {
+                let id = seat.model_for(*effort);
+                let listed = match seat.cli.as_str() {
+                    "agy" => AGY_1_5_11_MODELS.contains(&id.as_str()),
+                    "claude" => CLAUDE_2_1_327_MODELS.contains(&id.as_str()),
+                    other => panic!("{}: a cli this test does not know: {other}", seat.id),
+                };
+                assert!(listed, "{} {effort:?}: {id} is not a model its CLI lists", seat.id);
+            }
+        }
+        // Flash 3.8's price doubles on 2027-01-01 (Google's page); Hydrogen's does not.
+        let (flash, hydrogen) = (table.seat("flash").unwrap(), table.seat("hydrogen").unwrap());
+        let (dec, jan) = (date("2026-12-31").unwrap(), date("2027-01-01").unwrap());
+        assert!(close(flash.price_at(jan).unwrap().input as f32, 2.0 * flash.price_at(dec).unwrap().input as f32));
+        assert!(close(flash.price_at(jan).unwrap().cache_read as f32, 0.15));
+        assert!(close(hydrogen.price_at(jan).unwrap().input as f32, hydrogen.price_at(dec).unwrap().input as f32));
+        // The refits: each cell times seat_fit.py's ratio of its own orders, n 10 or more.
+        let cell = |seat: &str, effort: Effort| {
+            table.seat(seat).unwrap().uses.iter().find(|u| u.effort == effort).unwrap().clone()
+        };
+        // Relative: `close` is absolute at 1e-4, wider than these shares.
+        let near = |a: f32, b: f32| (a / b - 1.0).abs() < 1e-3;
+        let carbon_high = cell("carbon", Effort::High);
+        assert!(near(carbon_high.windows["week"], 0.0006059), "{:?}", carbon_high.windows);
+        assert!(near(carbon_high.windows["5h"], 0.00242), "{:?}", carbon_high.windows);
+        assert!(carbon_high.basis.contains("n 15"));
+        // The fix round: carbon's cells do not fall as its effort rises. High's own refit left low and medium on
+        // flash's x8.97 and put high under both; they now carry high's x0.21 as a prior.
+        for window in ["5h", "week"] {
+            let shares: Vec<f32> = [Effort::Low, Effort::Medium, Effort::High]
+                .into_iter()
+                .map(|effort| cell("carbon", effort).windows[window])
+                .collect();
+            assert!(shares.windows(2).all(|w| w[0] <= w[1]), "carbon {window}: {shares:?}");
+        }
+        // Opus high is not refit: the record's 2.26 (n 63) is run ia1's SOTA build.bounded orders, and with it Fable high
+        // read cheaper than Opus high, so Balanced seated plan on Fable (test
+        // l3_balanced_on_cool_world_seats_opus_and_sonnet_and_climbs). The owner's
+        // call; its fit stays x7.1, and its basis names it the record's word now that it carries its own orders' fit.
+        let opus_high = cell("opus", Effort::High);
+        assert!(opus_high.basis.contains("fit x7.1 (seat_fit.py, n 9)"), "{}", opus_high.basis);
+        let fable_high = cell("fable", Effort::High);
+        assert!(fable_high.basis.starts_with("derived:") && fable_high.basis.contains("n 10"));
+        // The two scores run ia1 moved: sonnet under build.load_bearing's Efficient bar, carbon over build.bounded's
+        // Balanced bar.
+        let score = |class: &str, seat: &str| {
+            let class = table.class(class).unwrap();
+            let entry = class.seats.iter().find(|e| e.seat == seat).unwrap();
+            (entry.score, table.bars(class))
+        };
+        let (sonnet, bars) = score("build.load_bearing", "sonnet");
+        assert!(sonnet < bars.at(Mode::Efficient), "sonnet {sonnet}");
+        let (carbon, bars) = score("build.bounded", "carbon");
+        assert!(carbon >= bars.at(Mode::Balanced), "carbon {carbon}");
     }
 }
