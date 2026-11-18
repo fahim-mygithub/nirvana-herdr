@@ -153,6 +153,11 @@ pub const AGY_TOOLS: &[(&str, &str)] = &[
     ("define_subagent", "Agent"),
     ("run_workflow", "Agent"),
     ("run_command", "Bash"),
+    // Plan 43 A4: agy's modal question to the owner. `ask_question` is in the tool list of every agy init recorded in
+    // `nirvana_worker/fixtures/` and 27 times in agy 1.5.11's binary; no hook payload for it was ever captured, so
+    // the name a hook sees is unmeasured (P41a found hook names differ from the list's for file tools). The agy
+    // orchestrator agent's `MAIN_TOOLS` (`agy_plugin.py`) does not list it, so today it should never fire.
+    ("ask_question", "AskUserQuestion"),
 ];
 
 pub fn claude_tool(agy: &str) -> Option<&'static str> {
@@ -170,6 +175,7 @@ pub fn verb_tools(verb: &str) -> Option<&'static [&'static str]> {
         "guard-spawn" => &["Agent"],
         "guard-edit" => &["Edit", "Write", "MultiEdit"],
         "guard-read" => &["Read"],
+        "guard-ask" => &["AskUserQuestion"],
         "check-edit" => &["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"],
         _ => return None,
     })

@@ -192,8 +192,10 @@ class AgyHooksTest(AgyBuilt):
         self.assertIn("notebook_edit", groups[("PostToolUse", "check-edit")])
         self.assertIn("run_command", groups[("PostToolUse", "check-edit")])
         self.assertIn("edit_file", groups[("PostToolUse", "check-edit")])
+        # Plan 43 A4: agy's modal question, from its tool list (no hook payload for it was captured).
+        self.assertEqual(groups[("PreToolUse", "guard-ask")], ["ask_question"])
         for names in groups.values():
-            for claude in ("Edit", "Write", "MultiEdit", "NotebookEdit", "Read", "Bash", "Agent"):
+            for claude in ("Edit", "Write", "MultiEdit", "NotebookEdit", "Read", "Bash", "Agent", "AskUserQuestion"):
                 self.assertNotIn(claude, names)
 
     def test_the_matchers_cover_the_hook_adapters_tool_table(self):
