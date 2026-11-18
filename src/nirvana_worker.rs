@@ -1062,12 +1062,14 @@ pub fn agy_rate_limit(exit: Option<i32>, stderr: &str, pool: &str) -> Option<Rat
             }
         }
         if quota {
+            let detail = format!("AGY_ERROR: {value}");
             return Some(RateLimit {
                 signal: "agy_exit_3".into(),
                 pool: Some(pool.to_owned()),
                 window: None,
-                resets_at: None,
-                detail: format!("AGY_ERROR: {value}"),
+                // Plan 43 A7: agy names its own reset only in text ("Resets in 79h6m53s", run ia1).
+                resets_at: nirvana_run::resets_in(&detail, now()),
+                detail,
             });
         }
     }
@@ -2353,17 +2355,10 @@ pub(crate) fn rate_limited(
                     limit.signal
                 )
             };
+            // Plan 43 A7: the parent's `ended` (outcome reseated) goes in the same transaction.
             journal.transact(now(), |_| {
                 Ok((
-                    vec![
-                        Kind::Seated(Box::new(child_seated.clone())),
-                        Kind::Reseated {
-                            order: order.clone(),
-                            child: child.clone(),
-                            seat: seat.clone(),
-                            why: why.clone(),
-                        },
-                    ],
+                    nirvana_run::reseat_events(child_seated.clone(), order, &seat, &why),
                     (),
                 ))
             })?;

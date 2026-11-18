@@ -19,7 +19,9 @@ T_UNSTARTED = _T + "restart_an_unstarted_seated_order_past_its_grace_is_interrup
 T_RESEAT = _T + "reseat_events_end_the_parent_and_its_line_is_told_once"
 T_RESETS = _T + "resets_in_reads_the_duration_a_quota_error_names"
 T_DECIDE = _T + "resets_in_a_short_named_reset_is_the_deferral_and_a_long_one_bounds_none"
-T_PID = _T + "restart_pid_seen_reads_a_running_process_and_a_finished_child"
+T_RESEAT_SITE = _T + "reseat_events_a_rate_limited_reseat_ends_its_parent"
+T_AGY_SITE = _T + "resets_in_agy_rate_limit_fills_the_named_reset"
+T_PID = _T +"restart_pid_seen_reads_a_running_process_and_a_finished_child"
 _D = "nirvana_dead::tests::"
 T_HOUR = _D + "a_restart_interrupted_order_keeps_its_pane_the_stopped_hour"
 T_PROJECTS = _D + "restart_projects_reads_the_record_and_climbs_the_panes_folders"
@@ -180,6 +182,16 @@ CONTROLS = (
             "        } if outcome != \"delivered\" && outcome != RESEATED => match why {\n",
             "        } if outcome != \"delivered\" => match why {\n",
             T_RESEAT, "rust"),
+    # R2: the reseat's call site writes the parent's end.
+    Control("p86_worker_reseat_ends_parent", "src/nirvana_worker.rs",
+            "                    nirvana_run::reseat_events(child_seated.clone(), order, &seat, &why),\n",
+            "                    nirvana_run::reseat_events(child_seated.clone(), order, &seat, &why)[..2].to_vec(),\n",
+            T_RESEAT_SITE, "rust"),
+    # R3: agy's call site fills the reset its 429 names.
+    Control("p86_worker_agy_reset", "src/nirvana_worker.rs",
+            "                resets_at: nirvana_run::resets_in(&detail, now()),\n",
+            "                resets_at: None,\n",
+            T_AGY_SITE, "rust"),
     # R3: the mark the text is found by.
     Control("p86_resets_mark", RUN,
             "    const MARK: &str = \"resets in \";\n",

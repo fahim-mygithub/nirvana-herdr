@@ -421,3 +421,61 @@ fn restart_pid_seen_reads_a_running_process_and_a_finished_child() {
     drop(child);
     assert_eq!(pid_seen(pid), PidSeen::Gone, "exited and let go");
 }
+
+/// Plan 43 A7, the call site in `nirvana_worker::agy_rate_limit`: the ia1 429 carries its named reset.
+#[test]
+fn resets_in_agy_rate_limit_fills_the_named_reset() {
+    let before = now();
+    let stderr = format!("{AGY_429}\n");
+    let limit = crate::nirvana_worker::agy_rate_limit(Some(3), &stderr, "google3p").expect("a limit");
+    let at = limit.resets_at.expect("a reset");
+    let secs = 79 * 3600 + 6 * 60 + 53;
+    assert!(at >= before + secs && at <= now() + secs, "{at}");
+}
+
+/// Plan 43 A7, the call site in `nirvana_worker::rate_limited`: a reseat writes its parent's end.
+#[test]
+fn reseat_events_a_rate_limited_reseat_ends_its_parent() {
+    let home = crate::nirvana::with_test_home("p43-reseat-ended");
+    let seats = home.path.join("nirvana").join(crate::nirvana_seat::SEATS_FILE);
+    std::fs::create_dir_all(seats.parent().unwrap()).unwrap();
+    std::fs::write(&seats, crate::nirvana_seat::DEFAULT).unwrap();
+    let project = Project::at(home.path.join("project"));
+    project.ensure().unwrap();
+    crate::nirvana_seat::set_test_world(Some(BTreeMap::new()));
+    let journal = project.journal("r1");
+    let mut seat = seated("o1");
+    seat.cwd = project.root.display().to_string();
+    seat.order_file = project.root.join("order.md").display().to_string();
+    std::fs::write(&seat.order_file, "# The order\nowns: a.txt\n").unwrap();
+    journal.append(T0, opened(None)).unwrap();
+    journal.append(T0 + 1, Kind::Seated(Box::new(seat.clone()))).unwrap();
+    let child = crate::nirvana_worker::child_id(&replay(&journal.read().0), "o1");
+    // A held lock on the child: its launch finds a supervisor and starts nothing.
+    let _live = crate::nirvana_worker::take_live(&project, "r1", &child).unwrap().unwrap();
+    let limit = crate::nirvana_worker::RateLimit {
+        signal: "rate_limit_event".into(),
+        pool: Some("max".into()),
+        window: None,
+        resets_at: None,
+        detail: String::new(),
+    };
+    let mut out = Vec::new();
+    crate::nirvana_worker::rate_limited(
+        &project,
+        &journal,
+        "r1",
+        &seat,
+        &limit,
+        &crate::nirvana_worker::Stream::new("claude"),
+        &mut out,
+    )
+    .unwrap();
+    crate::nirvana_seat::set_test_world(None);
+    let view = String::from_utf8_lossy(&out).into_owned();
+    let state = replay(&journal.read().0);
+    assert!(state.order(&child).is_some(), "re-seated: {view}");
+    let parent = state.order("o1").unwrap();
+    assert_eq!(parent.phase, Phase::Reseated, "{view}");
+    assert_eq!(parent.outcome.as_deref(), Some(RESEATED), "{view}");
+}
