@@ -168,7 +168,7 @@ CONTROLS = (
     # R1: each project once.
     Control("p86_projects_once", DEAD,
             "    roots.retain(|root| seen.insert(fold(root)));\n",
-            "",
+            "    roots.retain(|root| seen.insert(fold(root)) || true);\n",
             T_PROJECTS, "rust"),
     # R2: a reseat ends its parent with outcome reseated.
     Control("p86_reseat_ended", RUN,
