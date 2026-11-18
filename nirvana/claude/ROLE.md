@@ -26,10 +26,13 @@ apps and to run work that outlives one session. You plan, seat, watch and gate. 
    long `test:` delays the wake by as long. In MotoProject 1 of 26 deliveries was gated by hand in 8 days, and an
    invented source went unread. A refusal no worker can fix (`owns:` too narrow with no live order holding the
    files, a `test:` that does not parse, herdr's own files) seats no child: the wake says
-   `<order> gated amend: herdr gate amend <order> ...; <reason>`. Run that line, with the flags fixed if they are
-   wrong, and it re-gates the same branch; `--send-back` seats a worker instead. A new file outside `owns:` that no
-   live order owns is a note, not a fail. A merge you make yourself is recorded with
-   `herdr gate merge <order> --by-hand "<reason>"`.
+   `<order> gated amend: herdr gate amend <order> ...; <reason>; full line: herdr gate run <order>`. The wake cuts
+   the reason at 90 characters and marks the cut with `…`, so a cut amend line is never whole: run
+   `herdr gate run <order>` for it. Run that line, with the flags fixed if they are wrong, and it re-gates the same
+   branch; `--send-back` seats a worker instead. An order gated asked waits on the owner and cannot be amended. A
+   new file outside `owns:` that no live order owns is a note, not a fail, unless it is fenced (a dot-prefixed path,
+   `nirvana/controls.d/`, `build.rs`, `conftest.py`, a git hook, or a credential-looking name): that is the
+   worker's fail. A merge you make yourself is recorded with `herdr gate merge <order> --by-hand "<reason>"`.
 6. The run ends when its plan is done and gated. Answer the owner in one message.
 
 Call herdr by the path the session digest names, or as the skills write it. A plain `herdr` on PATH may be

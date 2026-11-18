@@ -137,10 +137,16 @@ of redoing it on the seat that invented it.
   `main` asks the owner, except in auto mode within its budgets.
 - `herdr gate amend <order> [--owns <glob>]... [--test "<cmd>"] [--send-back]`: for a `gated amend` wake, a refusal
   no worker can fix (`owns:` too narrow with no live order holding the files, a `test:` that does not parse,
-  herdr's own files). It adds the owns or replaces the test, journals the old value, and re-gates the same branch
-  with no new worker. `--send-back` seats a worker instead. A new file outside `owns:` that no live order owns is a
-  note (`owned_new`), not a fail (plan 43).
+  herdr's own files). The wake cuts its reason at 90 characters, `…` marking the cut, and ends with
+  `full line: herdr gate run <order>`, which prints the amend line whole. The amend adds the owns or replaces the
+  test, journals the old and new values as `gated amending` before the re-gate, and re-gates the same branch with no
+  new worker; an order left amending is re-gated by `herdr gate run`. `--send-back` seats a worker instead. It
+  refuses an order gated asked (the owner's answer is pending), one delivered and not gated yet, and one whose child
+  is live. A new file outside `owns:` that no live order owns is a note (`owned_new`), not a fail (plan 43), unless
+  it is fenced: a dot-prefixed path, `nirvana/controls.d/`, `build.rs`, `conftest.py`, a git hook, or a
+  credential-looking name fails as the worker's.
 - `herdr gate merge <order> --by-hand "<reason>" [--sha <sha>]`: records a merge you made yourself, with its commit.
+  It takes none of `gate amend`'s flags and exits 2 on a refusal, as `gate amend` does.
 - `herdr gate status [<order>] --run <run>`.
 
 The `gate` skill holds the axes and the send-back loop. When the plan is done and gated, `herdr run end <run>`

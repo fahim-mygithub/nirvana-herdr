@@ -45,8 +45,8 @@ serves: 8770                             ops.terminal orders only: the port the 
 | rebase | the branch rebases onto `nirvana-integrate/<run>`; the worker's uncommitted work is committed first | the conflicting files |
 | tests | `test:` exits 0 and every `check:` name is in the filtered output | the filtered lines |
 | report | the Work Report is well formed and its status is `done` | why |
-| owned | every changed file matches an `owns:` pattern (herdr's `.nirvana/` never counts) | the unowned files |
-| sources | research and media orders: cited URLs appear in the worker's stream as fetch, read or browser calls; one that asks for the web, or whose worker opened a page, cites at least one | unverified URLs, or none cited by an order that asks for the web or opened pages |
+| owned | every changed file matches an `owns:` pattern (herdr's `.nirvana/` never counts); a new file no live order owns is a note (`owned_new`), unless fenced (a dot-prefixed path, `nirvana/controls.d/`, `build.rs`, `conftest.py`, a git hook, a credential-looking name), and one another live order owns is the worker's fail (plan 43) | the unowned files |
+| sources | research and media orders: cited URLs appear in the worker's stream as fetch, read or browser calls; one that asks for the web, or whose worker opened a page, cites at least one; a local path counts when a file tool or a shell reader in its own segment opened it without an error; research.read's local entries (a path, or a name with a file extension) are not checked | unverified URLs, or none cited by an order that asks for the web or opened pages |
 | served | ops orders: each `serves:` port is listened on in the worker's own pane | what it does listen on |
 | heldout | feature-size orders (a build or debug fix, size medium or large): the held-out check passes at the head | the failing case ids only |
 | review | load-bearing orders (plan, build.load_bearing): a reviewer of another family approves | the reviewer's gotchas |
@@ -67,7 +67,9 @@ A `note` is said and never blocks. A `wait` means a review or a held-out check i
 
 A failing axis seats a child `<root>-s<n>` in the same worktree with the reasons, on the seat the rule picks, and
 starts it. At most 3 per order. The fourth failure asks the owner: the order is `asked`, and you take the question
-to the owner, not the worker. Do not seat the order again by hand to dodge the cap.
+to the owner, not the worker. Do not seat the order again by hand to dodge the cap. A refusal no axis of which is
+the worker's seats no child: it is `gated amend`, and you run the `herdr gate amend` line its reason opens with
+(`herdr gate run <order>` prints it whole when the wake cut it at 90 characters).
 
 A `blocked` delivery is never sent back: its worker said it cannot go on, so a redo would pay for the same block.
 herdr gates what it did deliver and asks; the question opens with the block and names any other axis that failed

@@ -132,6 +132,11 @@ impl Outcome {
     /// verdict `accepted` with a reason). Its journal verdict is the same word; the tally counts it a pass.
     pub const ACCEPTED: &'static str = "accepted";
 
+    /// Plan 43 fix round F6: the journal's word for an amend recorded before its re-gate (`gate_amend`). Its
+    /// `gated` event carries the old and the new values; the re-gate's own verdict follows it. An order left here (the
+    /// re-gate errored, or herdr died in it) is re-gated by `herdr gate run`. The tally does not count it.
+    pub const AMENDING: &'static str = "amending";
+
     /// What the seat record's tally counts (decision 0029's blend): `Some(true)` a pass, `Some(false)` a failure,
     /// `None` not counted. A re-seat is not counted: the pool's window ran out, which says nothing of the seat's
     /// work, and its child's own line carries the outcome. Nor is a `blocked` one (`BLOCKED`). A word this herdr does
@@ -144,6 +149,9 @@ impl Outcome {
         // as a pass (`PASS_WORDS`). Read as a failure, 65 of 323 record lines called delivered work failed.
         if word == Self::ACCEPTED {
             return Some(true);
+        }
+        if word == Self::AMENDING {
+            return None;
         }
         match Self::parse(word) {
             Some(Self::Pass) => Some(true),
@@ -483,10 +491,14 @@ pub fn owned_axes(
             .map(|holder| holder.order.clone())
     };
     let (mut held, mut narrow, mut fresh) = (Vec::new(), Vec::new(), Vec::new());
+    let mut fenced = Vec::new();
     for path in outside {
         match holder_of(path) {
             Some(holder) => held.push(format!("{path} (owned by {holder})")),
-            None if is_new(path) => fresh.push(path.clone()),
+            None if is_new(path) => match fenced_new(path) {
+                Some(why) => fenced.push(format!("{path} (new, and {why})")),
+                None => fresh.push(path.clone()),
+            },
             None => narrow.push(path.clone()),
         }
     }
@@ -501,7 +513,7 @@ pub fn owned_axes(
         )
         .with(capped(fresh.clone()))
     });
-    if held.is_empty() && narrow.is_empty() {
+    if held.is_empty() && narrow.is_empty() && fenced.is_empty() {
         let why = if fresh.is_empty() {
             format!("{} changed file(s), each owned", changed.len())
         } else {
@@ -516,21 +528,119 @@ pub fn owned_axes(
     }
     let mut why = format!(
         "{} file(s) changed that the order does not own",
-        held.len() + narrow.len()
+        held.len() + fenced.len() + narrow.len()
     );
     if !held.is_empty() {
         why.push_str(&format!("; {} of them another live order owns", held.len()));
     }
-    let lines = capped(held.iter().chain(&narrow).cloned().collect());
-    let mut axis = Axis::new("owned", Mark::Fail, why)
-        .with(lines)
-        .fault(if held.is_empty() {
+    if !fenced.is_empty() {
+        why.push_str(&format!(
+            "; {} of them new and fenced (they run by themselves, configure tooling or look like a secret), so never a note",
+            fenced.len()
+        ));
+    }
+    let lines = capped(held.iter().chain(&fenced).chain(&narrow).cloned().collect());
+    let mut axis = Axis::new("owned", Mark::Fail, why).with(lines).fault(
+        if held.is_empty() && fenced.is_empty() {
             Fault::Brief
         } else {
             Fault::Worker
-        });
+        },
+    );
     axis.amend = owns_flags(&narrow);
     (axis, note)
+}
+
+/// Fix round F2: why a new file outside `owns:` is never a note, or None for an ordinary one. Owner ruling R4 made a
+/// new file no live order owns a note (Megajam: 165 of 273 flagged files were evidence, helper scripts, new assets),
+/// and that stays for ordinary files, new source files (`*.rs`, `*.py`) among them: they are what the ruling covers.
+/// The files below run by themselves, set up tooling, or look like a secret; a worker that writes one outside
+/// `owns:` fails, its own fault. This list is the orchestrator's reading of a safety boundary (fix round, 2026-11-18),
+/// not an owner ruling, and the owner may change it:
+/// - a dot-prefixed component anywhere: `.env`, `.github/`, `.claude/`, `.agents/`, `.nirvana/`, `.gitattributes`,
+///   `.git/hooks/`, `.husky/`, `.vscode/` (CI, agent settings, editor tasks and git attributes run or steer tools);
+/// - `nirvana/controls.d/`: the controls runner discovers and executes every file there;
+/// - `build.rs` (cargo runs it at every build) and `conftest.py` (pytest imports it from any folder it collects);
+/// - a git hook: a hook's name in a folder named for hooks (`githooks/pre-push`), or one of the names that are only
+///   ever hooks (`pre-commit`, `pre-push`, `commit-msg`, ...), or `lefthook.yml`;
+/// - a credential-looking name: `*.pem`, `*.key`, `*.pfx`, `*.p12`, `id_rsa*` (and `id_dsa*`, `id_ecdsa*`,
+///   `id_ed25519*`), and any path that holds `secret` or `credential`.
+pub fn fenced_new(path: &str) -> Option<&'static str> {
+    let lower = path.replace('\\', "/").to_ascii_lowercase();
+    let parts: Vec<&str> = lower.split('/').filter(|part| !part.is_empty()).collect();
+    let name = parts.last().copied().unwrap_or("");
+    if parts.iter().any(|part| part.starts_with('.')) {
+        return Some("dot-prefixed (CI, agent or tool settings, or git's own files)");
+    }
+    if lower.starts_with("nirvana/controls.d/") {
+        return Some("under nirvana/controls.d/, which the controls runner executes");
+    }
+    if name == "build.rs" || name == "conftest.py" {
+        return Some("a file the build or the test runner runs by itself");
+    }
+    // Every git hook's name (githooks(5)); these alone are never anything else.
+    const HOOKS: &[&str] = &[
+        "applypatch-msg",
+        "pre-applypatch",
+        "post-applypatch",
+        "pre-commit",
+        "pre-merge-commit",
+        "prepare-commit-msg",
+        "commit-msg",
+        "post-commit",
+        "pre-rebase",
+        "post-checkout",
+        "post-merge",
+        "pre-push",
+        "pre-receive",
+        "update",
+        "proc-receive",
+        "post-receive",
+        "post-update",
+        "reference-transaction",
+        "push-to-checkout",
+        "pre-auto-gc",
+        "post-rewrite",
+        "sendemail-validate",
+        "fsmonitor-watchman",
+        "p4-changelist",
+        "p4-prepare-changelist",
+        "p4-post-changelist",
+        "p4-pre-submit",
+        "post-index-change",
+    ];
+    const ONLY_HOOKS: &[&str] = &[
+        "pre-commit",
+        "pre-push",
+        "commit-msg",
+        "prepare-commit-msg",
+        "post-checkout",
+        "post-merge",
+        "post-commit",
+        "pre-rebase",
+        "post-rewrite",
+        "pre-merge-commit",
+        "pre-receive",
+        "post-receive",
+    ];
+    let stem = name.split('.').next().unwrap_or(name);
+    let in_hooks = parts.len() >= 2 && parts[parts.len() - 2].contains("hook");
+    if (in_hooks && HOOKS.contains(&stem))
+        || ONLY_HOOKS.contains(&stem)
+        || matches!(name, "lefthook.yml" | "lefthook.yaml")
+    {
+        return Some("a git hook, which git runs by itself");
+    }
+    let key_ext = [".pem", ".key", ".pfx", ".p12"]
+        .iter()
+        .any(|ext| name.ends_with(ext));
+    let ssh_key = ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"]
+        .iter()
+        .any(|key| name.starts_with(key));
+    if key_ext || ssh_key || lower.contains("secret") || lower.contains("credential") {
+        return Some("a credential-looking name");
+    }
+    None
 }
 
 /// The `--owns` flags of `herdr gate amend` that cover `paths`: each file, folded a level up (`dir/` for two or more
@@ -582,8 +692,9 @@ pub fn owns_flags(paths: &[String]) -> Option<String> {
     )
 }
 
-/// The most `--owns` patterns a hint names before it folds a level up. A hypothesis: the wake line keeps 120
-/// characters, and four short paths fit it beside the command.
+/// The most `--owns` patterns a hint names before it folds a level up. A hypothesis: four short paths fit the wake
+/// beside the command. The wake keeps 90 characters of a gated reason (`nirvana_run::queue_line`), so two long paths
+/// do not fit; it marks the cut with `…` and ends with `full line: herdr gate run <order>` (fix round F3).
 pub const OWNS_HINT_MOST: usize = 4;
 
 /// `word` as one shell word in Bash and PowerShell alike: bare when it is plain, else in double quotes.
@@ -811,6 +922,16 @@ fn strip_ansi(text: &str) -> String {
 /// is the `-c` text; cmd's "is not recognized" names the program itself. Megajam's r1-tripo-v3 printed `SyntaxError:
 /// unterminated string literal` under `File "<string>"`; a3-megascans-fit and v12-valise-wording a bare
 /// `ParserError:`. A worker's own broken `.py` or `.ps1` names its file, and stays the worker's.
+///
+/// Fix round F1: `python -c "import brokenmod"` on a module holding `x = (` prints the `-c` frame `File "<string>",
+/// line 1, in <module>`, then `File "...brokenmod.py", line 1`, then `SyntaxError`: the worker's module, not the
+/// brief's text. So the error is the brief's only when the frame right above it is `File "<string>"` and that frame
+/// opens no traceback: a compile error of the `-c` text itself prints that one frame and no `Traceback (most recent
+/// call last):` line (`exec()` of a string read from the worker's file prints the traceback first, and stays the
+/// worker's). bash: only a line that opens with the shell's own name and `-c:` (`bash: -c: line 1: syntax error`); a
+/// script the `-c` text sources names its file (`./bad.sh: line 1: ...`). A worker's script that itself runs `bash
+/// -c` or `pwsh -Command` on broken text still reads as the brief's: an open hole, rare, said in the fix round's
+/// report.
 pub fn test_unparsed(test: &str, output: &str) -> Option<String> {
     let plain = strip_ansi(output);
     let lines: Vec<&str> = plain.lines().map(str::trim).collect();
@@ -822,12 +943,34 @@ pub fn test_unparsed(test: &str, output: &str) -> Option<String> {
         .to_ascii_lowercase();
     let base = base.strip_suffix(".exe").unwrap_or(&base);
     if plain.contains("File \"<string>\"") {
-        if let Some(line) = lines.iter().find(|line| {
-            ["SyntaxError", "IndentationError", "TabError"]
+        for (at, line) in lines.iter().enumerate() {
+            if !["SyntaxError", "IndentationError", "TabError"]
                 .iter()
                 .any(|kind| line.starts_with(kind))
-        }) {
-            return Some((*line).to_owned());
+            {
+                continue;
+            }
+            // The frame the error is in: the nearest `File "` line above it.
+            let Some(frame) = lines[..at]
+                .iter()
+                .rposition(|line| line.starts_with("File \""))
+            else {
+                continue;
+            };
+            if !lines[frame].starts_with("File \"<string>\"") {
+                continue;
+            }
+            // A traceback over the frame: the `-c` text ran, and imported or exec'd the broken code. Its frames and
+            // source lines are indented; the first line above them that is not is its header, or other output.
+            let raw: Vec<&str> = plain.lines().collect();
+            let traced = raw[..frame]
+                .iter()
+                .rev()
+                .find(|line| !line.starts_with([' ', '\t']))
+                .is_some_and(|line| line.trim().starts_with("Traceback (most recent call last)"));
+            if !traced {
+                return Some((*line).to_owned());
+            }
         }
     }
     if matches!(base, "pwsh" | "powershell") {
@@ -863,8 +1006,20 @@ pub fn test_unparsed(test: &str, output: &str) -> Option<String> {
         }
     }
     if matches!(base, "bash" | "sh") {
+        // Fix round F1: the shell's own `-c:` line opens with its name as run (`bash: -c:`, `/usr/bin/bash: -c:`); a
+        // line that only holds `-c:` somewhere is another program's.
+        let own = |line: &str| {
+            line.split_once(": -c:").is_some_and(|(head, _)| {
+                let name = head
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                name.strip_suffix(".exe").unwrap_or(&name) == base
+            })
+        };
         if let Some(line) = lines.iter().find(|line| {
-            line.contains("-c:")
+            own(line)
                 && (line.contains("syntax error")
                     || line.contains("unexpected EOF while looking for matching"))
         }) {
@@ -1673,6 +1828,9 @@ pub struct Reads {
 struct LocalRead {
     path: String,
     search: bool,
+    /// Fix round F4: the call that read it (a Claude `tool_use` id, or an agy step's tool and parameters), so an
+    /// answer that is an error takes its reads back. Empty until `stream_reads` tags it.
+    call: String,
 }
 
 /// Addendum B (plan 40): a `media.*` order's cited source counts as read when a call that fetches or opens media names
@@ -1925,8 +2083,13 @@ fn json_text(val: &Value) -> String {
 /// A command without the bodies of its heredocs (`<<EOF`, `<<'EOF'`, `<<-EOF`) and PowerShell here-strings
 /// (`@'...'@`, `@"..."@`): text a command writes, never a path it reads. Megajam's s2-sound-audit-s1 wrote its whole
 /// sources list into a report with `cat >> Docs/Audio/SOUND_AUDIT.md <<'EOF'`.
-fn without_heredocs(cmd: &str) -> String {
+///
+/// Fix round F4: a body fed to a shell (`bash <<EOF`) is shell text and stays in the first value; a body fed to a
+/// script interpreter (`python - <<'EOF'`) is returned whole in the second, one script each, since its lines are no
+/// shell segments: a path set on one line (`p=r"C:\x.csv"`) is opened on another (`open(p)`).
+fn without_heredocs(cmd: &str) -> (String, Vec<String>) {
     let mut out = String::new();
+    let mut scripts = Vec::new();
     let mut lines = cmd.lines();
     while let Some(line) = lines.next() {
         // A here-string opens at a line's end and closes at a line's start.
@@ -1966,25 +2129,36 @@ fn without_heredocs(cmd: &str) -> String {
         }
         // A script fed to an interpreter (`python - <<'EOF'`) is code that may read; it is kept. Megajam's
         // w7-size-audit read its build's container_Win64.csv from such a body.
-        let feeds_script = split_command(&line[..at]).iter().any(|word| {
+        let fed = split_command(&line[..at]).iter().find_map(|word| {
             let base = word
                 .rsplit(['/', '\\'])
                 .next()
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            HEREDOC_READERS.contains(&base.strip_suffix(".exe").unwrap_or(&base))
+            let base = base.strip_suffix(".exe").unwrap_or(&base).to_owned();
+            HEREDOC_READERS.contains(&base.as_str()).then_some(base)
         });
+        let shell = fed
+            .as_deref()
+            .is_some_and(|base| matches!(base, "bash" | "sh" | "pwsh" | "powershell"));
+        let mut script = String::new();
         for body in lines.by_ref() {
             if body.trim() == tag {
                 break;
             }
-            if feeds_script {
+            if shell {
                 out.push_str(body);
                 out.push('\n');
+            } else if fed.is_some() {
+                script.push_str(body);
+                script.push('\n');
             }
         }
+        if !script.is_empty() {
+            scripts.push(script);
+        }
     }
-    out
+    (out, scripts)
 }
 
 /// The interpreters whose heredoc body is a script, not text written to a file.
@@ -2124,15 +2298,22 @@ fn path_word(word: &str) -> Option<String> {
     named.then(|| local_path(word.trim_start_matches("./")))
 }
 
-/// Plan 43 A3: the local paths a shell command reads. A command reads when one of its segments runs a reader
-/// (`segment_reads_local`, `LOCAL_COUNTERS`); then every path word in its segments counts but a writer's and a
-/// redirect's target, outside heredoc bodies. Words inside a script's code (`pathlib.Path('x.md').read_text()`)
-/// count by their quoted parts. A relative path after a `cd` in the same command is under that folder. Megajam's
-/// a1-asset-wiring-audit-s1 read with `ls Docs/AssetGen/` and `wc -l Docs/AssetGen/L02B_FIT/DECISIONS.md`,
-/// s2-sound-audit-s1 with `head -n 4 "Docs/Pipeline/CORE_SPEC.md"`, and w7-size-audit with `cd ".../jobs"; head -5
-/// container_Win64.csv`.
+/// Plan 43 A3: the local paths a shell command reads. Megajam's a1-asset-wiring-audit-s1 read with `ls Docs/AssetGen/`
+/// and `wc -l Docs/AssetGen/L02B_FIT/DECISIONS.md`, s2-sound-audit-s1 with `head -n 4 "Docs/Pipeline/CORE_SPEC.md"`, and
+/// w7-size-audit with `cd ".../jobs"; head -5 container_Win64.csv`.
+///
+/// Fix round F4 (review finding 4): the first cut let a command that read anything vouch for every path word in it,
+/// so `cat a.md; echo "Docs/B.md"` vouched for `Docs/B.md`. Now a path is read only when it is an argument of a
+/// reading command (`segment_reads_local`, `LOCAL_COUNTERS`) in its own segment (`shell_segments`: cut at `;`, `&&`,
+/// `||`, an unquoted `|` and newlines), and never a writer's (`LOCAL_WRITERS`) or a redirect's target. Heredoc bodies
+/// a command writes are gone (`without_heredocs`). A script body fed to an interpreter is one unit: when a line of it
+/// reads (`open(`, `.read_text(`, ...), each path in its quoted strings counts, a path being set on one line and
+/// opened on the next. A relative path after a `cd` in the same command is under that folder, and a reader with no
+/// path reads that folder (`cd x && ls -la`). A variable set in an earlier segment (`S="C:/x"; ls "$S/fab"`, pwsh's
+/// `$S = "C:/x"`) is read as its value: Megajam's a1-asset-wiring-audit-s1 listed its sourced assets so. Not covered,
+/// so stricter than a worker's real reads: a `for f in a b; do cat "$f"` loop vouches for neither file.
 fn shell_local_reads(cmd: &str) -> Vec<LocalRead> {
-    let text = without_heredocs(cmd);
+    let (text, scripts) = without_heredocs(cmd);
     let segs = shell_segments(&text);
     let runs = |segment: &str, words: &[&str]| {
         let code = segment_code(segment).to_ascii_lowercase();
@@ -2140,14 +2321,25 @@ fn shell_local_reads(cmd: &str) -> Vec<LocalRead> {
             .iter()
             .any(|word| command_words(&code, word).next().is_some())
     };
-    if !segs
-        .iter()
-        .any(|segment| segment_reads_local(segment) || runs(segment, LOCAL_COUNTERS))
-    {
-        return Vec::new();
-    }
     let mut reads = Vec::new();
     let mut folder: Option<String> = None;
+    let push = |reads: &mut Vec<LocalRead>, folder: &Option<String>, path: String, search: bool| {
+        // After a `cd`, a relative path is under its folder; it is kept as written too, since an order's `cd` is most
+        // often into its own folder, which the check resolves against anyway.
+        if let Some(dir) = folder.as_ref().filter(|_| !absolute(&path)) {
+            reads.push(LocalRead {
+                path: local_path(&format!("{dir}/{path}")),
+                search,
+                call: String::new(),
+            });
+        }
+        reads.push(LocalRead {
+            path,
+            search,
+            call: String::new(),
+        });
+    };
+    let mut vars: Vec<(String, String)> = Vec::new();
     for segment in &segs {
         let words = split_command(segment);
         if let Some(to) = moves_to(&words) {
@@ -2155,33 +2347,27 @@ fn shell_local_reads(cmd: &str) -> Vec<LocalRead> {
                 Some(from) if !absolute(to) => format!("{from}/{to}"),
                 _ => to.to_owned(),
             };
-            // A reader with no path reads its folder: a1-asset-wiring-audit's `cd ".../assets/sourced" && ls -la`.
-            reads.push(LocalRead {
-                path: local_path(&to),
-                search: false,
-            });
             folder = Some(to);
             continue;
         }
-        if runs(segment, LOCAL_WRITERS) {
+        if let Some((name, value)) = assignment(&words) {
+            vars.retain(|(known, _)| *known != name);
+            vars.push((name, value));
+            continue;
+        }
+        let reads_here = segment_reads_local(segment) || runs(segment, LOCAL_COUNTERS);
+        if !reads_here || runs(segment, LOCAL_WRITERS) {
             continue;
         }
         let search = runs(segment, LOCAL_SEARCHERS);
-        // After a `cd`, a relative path is under its folder; it is kept as written too, since an order's `cd` is most
-        // often into its own folder, which the check resolves against anyway.
-        let mut push = |path: String| {
-            if let Some(dir) = folder.as_ref().filter(|_| !absolute(&path)) {
-                reads.push(LocalRead {
-                    path: local_path(&format!("{dir}/{path}")),
-                    search,
-                });
-            }
-            reads.push(LocalRead { path, search });
-        };
+        let expanded = expand_vars(segment, &vars);
+        let segment = &expanded;
+        let words = split_command(segment);
+        let mut named = Vec::new();
         // A script's quoted strings, read whole from the raw text: `r"C:\x\a.csv"` loses its quotes to the words.
         for part in quoted_parts(segment) {
             if let Some(path) = path_word(part.trim()) {
-                push(path);
+                named.push(path);
             }
         }
         for (at, word) in words.iter().enumerate() {
@@ -2198,7 +2384,32 @@ fn shell_local_reads(cmd: &str) -> Vec<LocalRead> {
             };
             for piece in pieces {
                 if let Some(path) = path_word(piece.trim()) {
-                    push(path);
+                    named.push(path);
+                }
+            }
+        }
+        // A reader with no path reads its folder: a1-asset-wiring-audit's `cd ".../assets/sourced" && ls -la`.
+        if named.is_empty() {
+            if let Some(dir) = &folder {
+                reads.push(LocalRead {
+                    path: local_path(dir),
+                    search,
+                    call: String::new(),
+                });
+            }
+        }
+        for path in named {
+            push(&mut reads, &folder, path, search);
+        }
+    }
+    for script in &scripts {
+        if !script.lines().any(segment_reads_local) {
+            continue;
+        }
+        for line in script.lines() {
+            for part in quoted_parts(line) {
+                if let Some(path) = path_word(part.trim()) {
+                    push(&mut reads, &folder, path, false);
                 }
             }
         }
@@ -2206,21 +2417,101 @@ fn shell_local_reads(cmd: &str) -> Vec<LocalRead> {
     reads
 }
 
+/// A shell variable set by a segment of its own: bash's `NAME=value` (one word once quotes are gone) or pwsh's
+/// `$NAME = value`. The name and the value as written.
+fn assignment(words: &[String]) -> Option<(String, String)> {
+    let ident = |name: &str| {
+        !name.is_empty()
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    match words {
+        [one] => one
+            .split_once('=')
+            .filter(|(name, value)| ident(name) && !value.is_empty())
+            .map(|(name, value)| (name.to_owned(), value.to_owned())),
+        [name, eq, value] if eq == "=" => name
+            .strip_prefix('$')
+            .filter(|name| ident(name))
+            .map(|name| (name.to_owned(), value.clone())),
+        _ => None,
+    }
+}
+
+/// `segment` with each `$NAME` and `${NAME}` of `vars` replaced by its value; any other `$` is left.
+fn expand_vars(segment: &str, vars: &[(String, String)]) -> String {
+    if vars.is_empty() || !segment.contains('$') {
+        return segment.to_owned();
+    }
+    let mut out = String::with_capacity(segment.len());
+    let mut rest = segment;
+    while let Some(at) = rest.find('$') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        let (name, used) = match after.strip_prefix('{') {
+            Some(inner) => match inner.find('}') {
+                Some(end) => (&inner[..end], end + 2),
+                None => ("", 0),
+            },
+            None => {
+                let end = after
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(after.len());
+                (&after[..end], end)
+            }
+        };
+        match vars.iter().find(|(known, _)| known == name) {
+            Some((_, value)) if !name.is_empty() => {
+                out.push_str(value);
+                rest = &after[used..];
+            }
+            _ => {
+                out.push('$');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// A cited source that is no web page: a path, absolute or relative to the repository, or a `file://` URL. A bare
 /// domain (`docs.rs/serde`) and `www.` are the web.
+///
+/// Fix round F5 (review finding 5): the first cut took anything with no `://`, `www.` or `host.tld/` as local, so
+/// `Smith et al 2023`, `RFC 9110` or a bare `example.com` was a local entry, which research.read skips, and its axis
+/// passed with "0 source(s) cited, each verified". Now an entry is local only when it holds a `/` or `\`, or one of
+/// its pieces (`local_pieces`, a parenthesised note dropped) ends in a known file extension (`FILE_EXTENSIONS`);
+/// anything else is checked as a web source and fails unfetched, as before plan 43. Megajam's a1-asset-wiring-audit
+/// cited `git ls-tree -r --name-only HEAD (assets/, Content/, Source/)`: a slash, so local, and not checked.
 pub fn local_entry(url: &str) -> bool {
     let url = url.trim();
     let lower = url.to_ascii_lowercase();
     if lower.starts_with("file://") {
         return true;
     }
-    !lower.contains("://")
-        && !lower.starts_with("www.")
-        && url
-            .split_whitespace()
-            .next()
-            .is_none_or(|first| bare_domain(first).is_none())
+    // A `host.tld/` anywhere in it, not only first: `see example.com/x` holds a slash and is the web.
+    let web = lower.contains("://") || lower.starts_with("www.") || bare_domain(url).is_some();
+    !web && (url.contains(['/', '\\'])
+        || local_pieces(url).iter().any(|piece| {
+            piece.rsplit_once('.').is_some_and(|(stem, ext)| {
+                !stem.is_empty() && FILE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
+            })
+        }))
 }
+
+/// Fix round F5: the extensions that make a bare name (`README.md`, `Cargo.toml`) a file. No top-level domain that is
+/// also a web host's (`.com`, `.org`, `.io`, `.dev`) is here; `.md` and `.rs` are both, and a file far more often in a
+/// Work Report. Media files are `MEDIA_EXTENSIONS`.
+const FILE_EXTENSIONS: &[&str] = &[
+    "md", "markdown", "txt", "rst", "adoc", "json", "jsonl", "toml", "yaml", "yml", "ini", "cfg",
+    "conf", "csv", "tsv", "xml", "html", "htm", "css", "scss", "rs", "py", "ipynb", "ts", "tsx",
+    "js", "jsx", "mjs", "cjs", "c", "h", "cc", "cpp", "hpp", "cs", "go", "java", "kt", "swift",
+    "rb", "lua", "sh", "ps1", "psm1", "bat", "cmd", "sql", "log", "lock", "pdf", "svg", "zip",
+    "uasset", "umap", "uproject", "uplugin", "usf", "ush", "glb", "gltf", "fbx", "obj", "blend",
+    "mp4", "webm", "mkv", "mov", "m4v", "avi", "m4a", "mp3", "wav", "opus", "ogg", "flac", "aac",
+    "jpg", "jpeg", "png", "webp", "gif", "vtt", "srt",
+];
 
 /// The paths one cited local entry names, as written. Megajam's research.read orders cited `Config/DefaultEngine.ini,
 /// Config/DefaultGame.ini`, `<folder>/ (folder listing)` and `Front/InkTitleRoot.cpp, InkTitleGameMode.cpp` (the
@@ -2366,6 +2657,17 @@ pub fn local_read(entry: &str, reads: &Reads, roots: &[&Path]) -> bool {
 
 pub fn stream_reads(stream: &str) -> Reads {
     let mut reads = Reads::default();
+    // Fix round F4: each local read and file path with the call that made it; an answer that is an error takes that
+    // call's back (`Read` of a missing file, a shell read whose command failed: Claude's `is_error`, agy's `ERROR` or
+    // its `Command exited with code N`). A call with no answer in the stream keeps its reads, as `media_files` does
+    // not: an excerpt or a killed worker leaves calls unanswered, and an unanswered read is no error.
+    let mut paths: Vec<(String, String)> = Vec::new();
+    let tag = |mut found: Vec<LocalRead>, call: &str| {
+        for read in &mut found {
+            read.call = call.to_owned();
+        }
+        found
+    };
     let mut fetch_ids: Vec<String> = Vec::new();
     // Review round (S1): a Claude call's media files wait here for its `tool_result`; only one without `is_error`
     // counts them. A `Read` of a missing file or a failed ffprobe answers with `is_error: true`.
@@ -2390,7 +2692,7 @@ pub fn stream_reads(stream: &str) -> Reads {
                             let (urls, files) = command_media(command);
                             reads.media_urls.extend(urls);
                             media_pending.push((id.to_owned(), files));
-                            reads.local.extend(shell_local_reads(command));
+                            reads.local.extend(tag(shell_local_reads(command), id));
                         }
                         // Plan 43 A3: a search names its folder; with none it searched the worker's folder, which
                         // vouches for no one file.
@@ -2402,6 +2704,7 @@ pub fn stream_reads(stream: &str) -> Reads {
                             reads.local.push(LocalRead {
                                 path: local_path(path),
                                 search: name == "Grep",
+                                call: id.to_owned(),
                             });
                         }
                         let text = match name {
@@ -2422,10 +2725,11 @@ pub fn stream_reads(stream: &str) -> Reads {
                             }
                             "Read" => {
                                 if let Some(path) = input.get("file_path").and_then(Value::as_str) {
-                                    reads.paths.push(local_path(path));
+                                    paths.push((id.to_owned(), local_path(path)));
                                     reads.local.push(LocalRead {
                                         path: local_path(path),
                                         search: false,
+                                        call: id.to_owned(),
                                     });
                                     if media_file(path) {
                                         media_pending.push((id.to_owned(), vec![path.to_owned()]));
@@ -2458,6 +2762,11 @@ pub fn stream_reads(stream: &str) -> Reads {
                                 reads.media_files.extend(files);
                             }
                         }
+                        let errored = block.get("is_error").and_then(Value::as_bool) == Some(true);
+                        if errored && !id.is_empty() {
+                            reads.local.retain(|read| read.call != id);
+                            paths.retain(|(call, _)| call != id);
+                        }
                     }
                     _ => {}
                 }
@@ -2474,13 +2783,26 @@ pub fn stream_reads(stream: &str) -> Reads {
         // `tool_info.error`); the `ACTIVE` line is the call alone.
         let answered = step.get("state").and_then(Value::as_str) == Some("DONE")
             && step["tool_info"].get("error").is_none_or(Value::is_null);
+        let state = step.get("state").and_then(Value::as_str);
+        // Fix round F4: an agy step's call is its tool and parameters, the same on its `ACTIVE` and its answer's line.
+        // An answer that failed takes the step's reads back and adds none.
+        let call = format!("agy:{tool}:{params}");
+        let failed = state == Some("ERROR")
+            || !step["tool_info"].get("error").is_none_or(Value::is_null)
+            || (tool == "run_command" && state == Some("DONE") && !agy_command_ok(output));
+        if failed {
+            reads.local.retain(|read| read.call != call);
+            paths.retain(|(at, _)| *at != call);
+        }
         let text = match tool {
             "run_command" => {
                 let command = params["CommandLine"].as_str().unwrap_or("");
                 let (urls, files) = command_media(command);
                 reads.media_urls.extend(urls);
                 // Plan 43 A3: agy repeats a step on its `DONE` line; a path read twice is still one read.
-                reads.local.extend(shell_local_reads(command));
+                if !failed {
+                    reads.local.extend(tag(shell_local_reads(command), &call));
+                }
                 if answered && agy_command_ok(output) {
                     reads.media_files.extend(files);
                 }
@@ -2488,11 +2810,13 @@ pub fn stream_reads(stream: &str) -> Reads {
             }
             "read_file" | "view_file" => {
                 for key in ["Path", "AbsolutePath", "file_path"] {
-                    if let Some(path) = params.get(key).and_then(Value::as_str) {
-                        reads.paths.push(local_path(path));
+                    if let Some(path) = params.get(key).and_then(Value::as_str).filter(|_| !failed)
+                    {
+                        paths.push((call.clone(), local_path(path)));
                         reads.local.push(LocalRead {
                             path: local_path(path),
                             search: false,
+                            call: call.clone(),
                         });
                         if answered && media_file(path) {
                             reads.media_files.push(path.to_owned());
@@ -2511,6 +2835,7 @@ pub fn stream_reads(stream: &str) -> Reads {
             reads.texts.push(text);
         }
     }
+    reads.paths = paths.into_iter().map(|(_, path)| path).collect();
     reads
 }
 
@@ -2768,7 +3093,13 @@ pub fn sources_axis_at(
     }
     let reads = stream_reads(stream);
     let opened = page_reads(&reads);
-    let judged_local = !reads.media_files.is_empty() || !reads.local.is_empty();
+    // Fix round F4 (review finding 4): media judged, not any read. Every worker reads its own order file, so "any
+    // local read" downgraded a media order that asked for the web, cited nothing and fetched nothing to a note.
+    let judged_local = !reads.media_files.is_empty()
+        || reads
+            .local
+            .iter()
+            .any(|read| !read.search && media_file(&read.path));
     let none_cited = |why: &str| {
         match web {
         Some(asked) if class.starts_with("media.") && opened.is_empty() && judged_local => Axis::new(
@@ -2844,7 +3175,17 @@ check ({asked})"
     } else {
         String::new()
     };
-    if missing.is_empty() {
+    // Fix round F5: with every entry skipped, nothing was verified, and the axis must not say so.
+    if missing.is_empty() && skipped == sources.len() {
+        Some(Axis::new(
+            "sources",
+            Mark::Pass,
+            format!(
+                "{skipped} local entr(y/ies) cited and none checked ({READ_CLASS} reads the project); no web \
+source cited"
+            ),
+        ))
+    } else if missing.is_empty() {
         Some(Axis::new(
             "sources",
             Mark::Pass,
@@ -3620,9 +3961,15 @@ pub fn rebase_fault(cwd: &Path, fail: &RebaseFail) -> Fault {
 /// Plan 43 A1, the root of the three rebases above: herdr's own files under `.nirvana/` that would stop a rebase onto
 /// `onto`, set aside under `aside` first. They are every tracked one with a change (git refuses a dirty tree, and the
 /// gate's commit leaves `.nirvana/` out) and every untracked one `onto` tracks (git will not overwrite it; the project
-/// tracks `.nirvana/lessons/`, and a worktree holds offered copies). Each is copied to `aside`, then put back as
-/// `HEAD` has it or removed. `restore_harness` copies back each one the rebase left absent; one the rebase brought is
-/// kept as the rebase left it, its old copy staying in `aside`. Returns the paths set aside.
+/// tracks `.nirvana/lessons/`, and a worktree holds offered copies). Returns the paths set aside.
+///
+/// Fix round G1 (review (b)): the first cut could leave the worktree changed. A `set_aside_harness` that failed
+/// midway returned before any restore; a tracked file with edits came back as `HEAD` had it; a death between set-aside
+/// and restore left it so for good; and the aside copy was never deleted (one folder per gated order, on a disk 99%
+/// full). Now every file is copied, and `aside/manifest.json` written, before anything in the worktree changes; a
+/// failure after that restores from the manifest before it returns; `restore_harness` puts each file back as it was,
+/// and deletes the copy; and the next gate of the order restores from a manifest a dead gate left before it does
+/// anything else (`deterministic`).
 pub fn set_aside_harness(cwd: &Path, onto: &str, aside: &Path) -> Result<Vec<String>, String> {
     let status = git(
         cwd,
@@ -3678,53 +4025,160 @@ pub fn set_aside_harness(cwd: &Path, onto: &str, aside: &Path) -> Result<Vec<Str
     if moved.is_empty() {
         return Ok(moved);
     }
-    for path in &moved {
+    // Every copy and the manifest first: nothing in the worktree has changed if this fails.
+    let mut manifest = AsideManifest::default();
+    for (path, was_tracked) in tracked
+        .iter()
+        .map(|path| (path, true))
+        .chain(untracked.iter().map(|path| (path, false)))
+    {
         let from = cwd.join(path);
-        if from.is_file() {
+        let copied = from.is_file();
+        if copied {
             let to = aside.join(path);
             if let Some(parent) = to.parent() {
                 std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
             }
             std::fs::copy(&from, &to).map_err(|err| format!("{}: {err}", from.display()))?;
         }
+        manifest.entries.push(AsideEntry {
+            path: path.clone(),
+            tracked: was_tracked,
+            copied,
+        });
     }
-    for chunk in tracked.chunks(64) {
-        let mut args = vec!["reset", "-q", "--"];
-        args.extend(chunk.iter().map(String::as_str));
-        git(cwd, &args)?;
-        let in_head: Vec<&str> = chunk
-            .iter()
-            .map(String::as_str)
-            .filter(|path| git(cwd, &["cat-file", "-e", &format!("HEAD:{path}")]).is_ok())
-            .collect();
-        if !in_head.is_empty() {
-            let mut args = vec!["checkout", "-q", "--"];
-            args.extend(in_head.iter().copied());
+    std::fs::create_dir_all(aside).map_err(|err| err.to_string())?;
+    let text = serde_json::to_string_pretty(&manifest).map_err(|err| err.to_string())?;
+    nirvana_seat::write_atomic(&aside.join(ASIDE_MANIFEST), text.as_bytes())
+        .map_err(|err| err.to_string())?;
+    let cleared = (|| -> Result<(), String> {
+        for chunk in tracked.chunks(64) {
+            let mut args = vec!["reset", "-q", "--"];
+            args.extend(chunk.iter().map(String::as_str));
             git(cwd, &args)?;
+            let in_head: Vec<&str> = chunk
+                .iter()
+                .map(String::as_str)
+                .filter(|path| git(cwd, &["cat-file", "-e", &format!("HEAD:{path}")]).is_ok())
+                .collect();
+            if !in_head.is_empty() {
+                let mut args = vec!["checkout", "-q", "--"];
+                args.extend(in_head.iter().copied());
+                git(cwd, &args)?;
+            }
+            for path in chunk
+                .iter()
+                .filter(|path| !in_head.contains(&path.as_str()))
+            {
+                let _ = std::fs::remove_file(cwd.join(path));
+            }
         }
-        for path in chunk
-            .iter()
-            .filter(|path| !in_head.contains(&path.as_str()))
-        {
+        #[cfg(test)]
+        if TEST_ASIDE_FAILS.replace(false) {
+            return Err("a test's set-aside failure, midway".into());
+        }
+        for path in &untracked {
             let _ = std::fs::remove_file(cwd.join(path));
         }
-    }
-    for path in &untracked {
-        let _ = std::fs::remove_file(cwd.join(path));
+        Ok(())
+    })();
+    if let Err(why) = cleared {
+        let restored = restore_harness(cwd, aside)
+            .map(|_| "each file was put back".to_owned())
+            .unwrap_or_else(|err| format!("and the restore failed too: {err}"));
+        return Err(format!("{why}; {restored}"));
     }
     Ok(moved)
 }
 
-/// Copies back each file `set_aside_harness` moved that the rebase left absent.
-pub fn restore_harness(cwd: &Path, aside: &Path, moved: &[String]) {
-    for path in moved {
-        let to = cwd.join(path);
-        let from = aside.join(path);
-        if !to.exists() && from.is_file() {
-            if let Some(parent) = to.parent() {
-                let _ = std::fs::create_dir_all(parent);
+#[cfg(test)]
+thread_local! {
+    /// Fix round G1's hook: the next set-aside on this thread fails once, after it reset the tracked files.
+    pub(crate) static TEST_ASIDE_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The record of a set-aside, `<aside>/manifest.json`: written before the worktree changes, deleted once each file is
+/// back. A gate that finds one restores from it first (fix round G1).
+pub const ASIDE_MANIFEST: &str = "manifest.json";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AsideManifest {
+    pub entries: Vec<AsideEntry>,
+}
+
+/// One file set aside: tracked or untracked before the rebase, and whether it existed (a tracked file the worker
+/// deleted has no copy, and is deleted again).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AsideEntry {
+    pub path: String,
+    pub tracked: bool,
+    pub copied: bool,
+}
+
+/// Puts back every file `set_aside_harness` moved, from its manifest, and deletes the aside copies. A tracked file
+/// comes back as it was, the worker's edits and all, over whatever the rebase left (it is herdr's own state, which the
+/// gate's commit leaves out); one the worker had deleted is deleted again. An untracked one comes back where the
+/// rebase left it absent; where the rebase brought a tracked copy of it, that copy stays, and the old one, when it
+/// differs, is kept in `aside` and named in the result. With no manifest, nothing to do. An error leaves the manifest,
+/// so the next gate tries again.
+pub fn restore_harness(cwd: &Path, aside: &Path) -> Result<Vec<String>, String> {
+    let Ok(text) = std::fs::read_to_string(aside.join(ASIDE_MANIFEST)) else {
+        return Ok(Vec::new());
+    };
+    let manifest: AsideManifest = serde_json::from_str(&text).map_err(|err| err.to_string())?;
+    let mut kept = Vec::new();
+    for entry in &manifest.entries {
+        let to = cwd.join(&entry.path);
+        let from = aside.join(&entry.path);
+        if !entry.copied {
+            if entry.tracked && to.exists() {
+                std::fs::remove_file(&to).map_err(|err| format!("{}: {err}", to.display()))?;
             }
-            let _ = std::fs::copy(&from, &to);
+            continue;
+        }
+        let put_back = entry.tracked || !to.exists();
+        if put_back {
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+            }
+            std::fs::copy(&from, &to).map_err(|err| format!("{}: {err}", to.display()))?;
+        } else if std::fs::read(&to).ok() != std::fs::read(&from).ok() {
+            kept.push(entry.path.clone());
+        }
+    }
+    if kept.is_empty() {
+        std::fs::remove_dir_all(aside).map_err(|err| format!("{}: {err}", aside.display()))?;
+    } else {
+        for entry in manifest
+            .entries
+            .iter()
+            .filter(|entry| !kept.contains(&entry.path))
+        {
+            let _ = std::fs::remove_file(aside.join(&entry.path));
+        }
+        std::fs::remove_file(aside.join(ASIDE_MANIFEST)).map_err(|err| err.to_string())?;
+    }
+    Ok(kept)
+}
+
+/// Fix round G1: the restore runs on every way out of the rebase, a panic among them.
+struct AsideGuard<'a> {
+    cwd: &'a Path,
+    aside: &'a Path,
+    armed: bool,
+}
+
+impl AsideGuard<'_> {
+    fn restore(mut self) -> Result<Vec<String>, String> {
+        self.armed = false;
+        restore_harness(self.cwd, self.aside)
+    }
+}
+
+impl Drop for AsideGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = restore_harness(self.cwd, self.aside);
         }
     }
 }
@@ -3925,6 +4379,38 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
     let mut det = Det::default();
     let (base, worktree) = match subject.branch {
         Some(_) => {
+            // Fix round G1: a gate that died between set-aside and restore left a manifest; its files go back first.
+            let aside = gate_dir(&Project::at(subject.root), subject.run)
+                .join(format!("{}-aside", subject.order));
+            if aside.join(ASIDE_MANIFEST).is_file() {
+                match restore_harness(subject.cwd, &aside) {
+                    Ok(_) => axes.push(Axis::new(
+                        "aside",
+                        Mark::Note,
+                        format!(
+                            "an earlier gate of {} stopped between setting herdr's own files aside and putting them \
+back; they were put back from {} first",
+                            subject.order,
+                            aside.display()
+                        ),
+                    )),
+                    Err(why) => {
+                        axes.push(
+                            Axis::new(
+                                "rebase",
+                                Mark::Fail,
+                                format!(
+                                    "herdr's own files an earlier gate set aside could not be put back from {}: {why}",
+                                    aside.display()
+                                ),
+                            )
+                            .fault(Fault::Gate),
+                        );
+                        det.axes = axes;
+                        return det;
+                    }
+                }
+            }
             let base = match ensure_integration(subject.root, subject.run) {
                 Ok(base) => base,
                 Err(why) => {
@@ -3963,8 +4449,6 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
             }
             let integration = integration_branch(subject.run);
             // Plan 43 A1: herdr's own files out of the rebase's way first (`set_aside_harness`).
-            let aside = gate_dir(&Project::at(subject.root), subject.run)
-                .join(format!("{}-aside", subject.order));
             let moved = match set_aside_harness(subject.cwd, &integration, &aside) {
                 Ok(moved) => moved,
                 Err(why) => {
@@ -3983,16 +4467,32 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
                     return det;
                 }
             };
+            let guard = AsideGuard {
+                cwd: subject.cwd,
+                aside: &aside,
+                armed: !moved.is_empty(),
+            };
             let rebased = rebase(subject.cwd, &integration);
-            restore_harness(subject.cwd, &aside, &moved);
-            let aside_note = if moved.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "; {} of herdr's own file(s) under .nirvana/ set aside for it ({})",
+            let restored = guard.restore();
+            let aside_note = match (&restored, moved.is_empty()) {
+                (_, true) => String::new(),
+                (Ok(kept), false) if kept.is_empty() => format!(
+                    "; {} of herdr's own file(s) under .nirvana/ set aside for it and put back",
+                    moved.len()
+                ),
+                (Ok(kept), false) => format!(
+                    "; {} of herdr's own file(s) under .nirvana/ set aside for it and put back; the rebase brought {} \
+of them, whose old copies are kept in {}",
+                    moved.len(),
+                    kept.len(),
+                    aside.display()
+                ),
+                (Err(why), false) => format!(
+                    "; {} of herdr's own file(s) under .nirvana/ set aside for it and NOT put back ({why}): the next \
+gate restores them from {}",
                     moved.len(),
                     aside.display()
-                )
+                ),
             };
             match rebased {
                 Ok(()) => axes.push(Axis::new(
@@ -4262,6 +4762,7 @@ pub fn live_holders(project: &Project, run: &str, order: &str) -> Vec<Holder> {
                 known.verdict.as_deref(),
                 Some(verdict) if verdict == Outcome::Pass.word()
                     || verdict == Outcome::Amend.word()
+                    || verdict == Outcome::AMENDING
                     || verdict == Outcome::ACCEPTED
             ),
             Phase::Merged | Phase::Failed | Phase::Reseated | Phase::Interrupted => false,
@@ -4774,6 +5275,8 @@ pub fn gate(project: &Project, run: &str, order: &str) -> Result<Ruling, String>
             })
         }
         Phase::Gated if known.verdict.as_deref() == Some("pass") => {}
+        // Plan 43 fix round F6: an amend journaled whose re-gate never gave its verdict.
+        Phase::Gated if known.verdict.as_deref() == Some(Outcome::AMENDING) => {}
         // Review S2: an order gated sent_back or asked is ruled on already; a gate by hand (the wake that carried the
         // verdict was missed, or the orchestrator wants it again) gives the stored verdict, with the child or the
         // question, and journals nothing.
@@ -6218,14 +6721,19 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
                 }
                 Err(why) => {
                     eprintln!("herdr gate amend: {why}");
-                    std::process::exit(2);
+                    std::process::exit(REFUSED_EXIT);
                 }
             }
         }
+        // Fix round G2: `--by-hand` takes none of `gate amend`'s flags, as `gate merge` takes none, and it exits 2 on a
+        // refusal as `gate amend` does (a blank reason is a usage error, exit 2 too).
         Some("merge") if parsed.by_hand.is_some() => {
             let order = parsed.positional.clone().unwrap_or_else(|| usage_exit());
-            let run = run_for(&project, &order, parsed.run);
             let reason = parsed.by_hand.clone().unwrap_or_default();
+            if !merge_flags_ok(&parsed) {
+                usage_exit();
+            }
+            let run = run_for(&project, &order, parsed.run);
             match merge_by_hand(&project, &run, &order, &reason, parsed.sha.as_deref()) {
                 Ok(line) => {
                     println!("{line}");
@@ -6233,13 +6741,13 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
                 }
                 Err(why) => {
                     eprintln!("herdr gate merge --by-hand: {why}");
-                    std::process::exit(1);
+                    std::process::exit(REFUSED_EXIT);
                 }
             }
         }
         Some("merge") => {
             let order = parsed.positional.clone().unwrap_or_else(|| usage_exit());
-            if parsed.sha.is_some() || !parsed.owns.is_empty() || parsed.test.is_some() {
+            if !merge_flags_ok(&parsed) {
                 usage_exit();
             }
             let run = run_for(&project, &order, parsed.run);
@@ -6256,6 +6764,20 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         }
         Some("status") => status_cli(&project, parsed),
         _ => usage_exit(),
+    }
+}
+
+/// Fix round G2: the exit of `gate amend` and `gate merge --by-hand` when herdr refuses the call: 2, the usage
+/// errors' code too.
+const REFUSED_EXIT: i32 = 2;
+
+/// Fix round G2: `gate merge` takes none of `gate amend`'s flags (`--owns`, `--test`, `--send-back`), with or without
+/// `--by-hand`; `--sha` only with `--by-hand`; and `--by-hand` needs a reason that is not blank.
+fn merge_flags_ok(parsed: &Args) -> bool {
+    let amend_flags = !parsed.owns.is_empty() || parsed.test.is_some() || parsed.send_back;
+    match &parsed.by_hand {
+        Some(reason) => !amend_flags && !reason.trim().is_empty(),
+        None => !amend_flags && parsed.sha.is_none(),
     }
 }
 
@@ -6302,6 +6824,7 @@ fn merge_cli(project: &Project, run: &str, order: &str) -> Result<String, String
             Kind::Merged {
                 order: order.to_owned(),
                 sha: Some(sha.clone()),
+                by_hand: None,
             },
         )
         .map_err(|err| err.to_string())?;
@@ -6331,10 +6854,12 @@ fn merge_cli(project: &Project, run: &str, order: &str) -> Result<String, String
 }
 
 /// Plan 43 A1: `herdr gate amend <order> [--owns <glob>]... [--test <cmd>] [--send-back]`. Adds `owns:` patterns and
-/// replaces the `test:` of the order's chain root, journaled with the old values (the sidecar's `amends`, and an
-/// `amend` note axis in the `gated` event of the re-gate), then re-gates the same delivered branch with no new worker.
-/// `--send-back` seats a child for the refusal even when no axis is the worker's. With no flag it re-gates as is (a
-/// gate fault). The send-back cap is untouched: an amend is no send-back.
+/// replaces the `test:` of the order's chain root, journaled with the old and new values as `gated amending` in the
+/// transaction that writes the sidecar's `amends` (fix round F6), then re-gates the same delivered branch with no new
+/// worker; the re-gate's `gated` event carries an `amend` note axis too. `--send-back` seats a child for the refusal
+/// even when no axis is the worker's. With no flag it re-gates as is (a gate fault). It refuses an order gated asked
+/// (the owner's answer is pending), one delivered and not gated yet, and one whose child is live. The send-back cap is
+/// untouched: an amend is no send-back.
 pub fn gate_amend(
     project: &Project,
     run: &str,
@@ -6357,9 +6882,23 @@ pub fn gate_amend(
         ));
     }
     let verdict = known.verdict.as_deref().unwrap_or("");
-    let amendable = known.phase == Phase::Delivered
-        || (known.phase == Phase::Gated
-            && [Outcome::Amend, Outcome::SentBack, Outcome::Asked]
+    // Fix round F6 (review finding 6): an order asked waits on the owner; an amend would re-gate, and could pass, it
+    // past the owner's answer.
+    if known.phase == Phase::Gated && verdict == Outcome::Asked.word() {
+        return Err(format!(
+            "{order} is gated asked: the owner's answer is pending, and an amend would re-gate it past that answer"
+        ));
+    }
+    // Fix round F6: a delivered order not gated yet is gated first (`herdr gate run`): the amend's own `gated
+    // amending` event would be its first verdict, which takes the wake that its real verdict is owed.
+    if known.phase == Phase::Delivered {
+        return Err(format!(
+            "{order} is delivered and not gated yet: gate it first with `herdr gate run {order}`"
+        ));
+    }
+    let amendable = known.phase == Phase::Gated
+        && (verdict == Outcome::AMENDING
+            || [Outcome::Amend, Outcome::SentBack]
                 .iter()
                 .any(|outcome| outcome.word() == verdict));
     if !amendable {
@@ -6422,7 +6961,17 @@ pub fn gate_amend(
                 .map_or("none".to_owned(), |old| format!("`{old}`"))
         ));
     }
+    let note = Axis::new(
+        "amend",
+        Mark::Note,
+        if said.is_empty() {
+            format!("re-gated as it was, by `herdr gate amend {order}`")
+        } else {
+            format!("by `herdr gate amend {order}`: {}", said.join("; "))
+        },
+    );
     if !said.is_empty() {
+        let old_card = root_card.clone();
         root_card.amends.push(Amend {
             at: now(),
             order: order.to_owned(),
@@ -6431,17 +6980,32 @@ pub fn gate_amend(
             test_before: test.as_ref().and(before.test.clone()),
             test,
         });
-        write_sidecar(project, run, &root_card).map_err(|err| err.to_string())?;
+        // Fix round F6 (review finding 6): the first cut wrote the sidecar and then re-gated, so a re-gate that erred
+        // (or a herdr that died in a long `test:`) left `owns:`/`test:` changed with no journal event. Now the amend is
+        // a `gated amending` event, carrying the old and the new values, written in one journal transaction with the
+        // sidecar: the sidecar is written inside it, and put back when the event is not written. The re-gate's verdict
+        // follows; `herdr gate run` finishes an order left amending.
+        let reason = format!("herdr gate amend {order}: {}", said.join("; "));
+        let written = journal.transact(now(), |_| {
+            write_sidecar(project, run, &root_card)?;
+            Ok((
+                vec![Kind::Gated {
+                    order: order.to_owned(),
+                    verdict: Outcome::AMENDING.into(),
+                    reason: Some(reason.clone()),
+                    axes: axes_values(std::slice::from_ref(&note)),
+                }],
+                (),
+            ))
+        });
+        if let Err(err) = written {
+            let _ = write_sidecar(project, run, &old_card);
+            return Err(format!(
+                "the amend was not journaled, and nothing changed: {err}"
+            ));
+        }
     }
-    let mut notes = vec![Axis::new(
-        "amend",
-        Mark::Note,
-        if said.is_empty() {
-            format!("re-gated as it was, by `herdr gate amend {order}`")
-        } else {
-            format!("by `herdr gate amend {order}`: {}", said.join("; "))
-        },
-    )];
+    let mut notes = vec![note];
     if send_back {
         notes.push(Axis::new(
             "amend",
@@ -6451,6 +7015,8 @@ pub fn gate_amend(
     }
     let sidecar = read_sidecar(project, run, order);
     let table = nirvana_seat::table_for(&project.root).ok();
+    let state = replay(&journal.read().0);
+    let known = state.order(order).cloned().unwrap_or(known);
     gate_subject(
         project,
         run,
@@ -6473,8 +7039,8 @@ pub fn gate_amend(
 /// `merged` events had no sha. The commit is `--sha` when given, which must be on the integration branch; else the
 /// first commit there with the order's branch head as a parent (the head itself when it is the tip). Journals a
 /// `gated accepted` event whose reason is `by hand: <reason>` and whose `by_hand` axis names the sha, then `merged`
-/// with the sha: `nirvana_run::Kind::Merged` has no field for a reason (the hunk that adds one is in plan 43's
-/// record). Nothing is cleaned up: the orchestrator's own merge may still use the worktree.
+/// with the sha and the reason in its `by_hand` field. Nothing is cleaned up: the orchestrator's own merge may still
+/// use the worktree.
 pub fn merge_by_hand(
     project: &Project,
     run: &str,
@@ -6562,6 +7128,7 @@ with --sha",
                     Kind::Merged {
                         order: order.to_owned(),
                         sha: Some(landed.clone()),
+                        by_hand: Some(reason.to_owned()),
                     },
                 ],
                 (),
