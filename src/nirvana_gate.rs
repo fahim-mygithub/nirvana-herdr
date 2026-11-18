@@ -92,15 +92,19 @@ pub enum Outcome {
     Asked,
     /// Its pool ran out and a child on another seat carries the work (§5.6).
     Reseated,
+    /// Plan 43 A1: refused for the brief's or the gate's fault alone; no child is seated, and the orchestrator is
+    /// woken with the `herdr gate amend` line that re-gates the same branch.
+    Amend,
 }
 
 impl Outcome {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Pass,
         Self::SentBack,
         Self::Failed,
         Self::Asked,
         Self::Reseated,
+        Self::Amend,
     ];
 
     pub fn word(self) -> &'static str {
@@ -110,6 +114,7 @@ impl Outcome {
             Self::Failed => "failed",
             Self::Asked => "asked",
             Self::Reseated => "reseated",
+            Self::Amend => "amend",
         }
     }
 
@@ -142,7 +147,8 @@ impl Outcome {
         }
         match Self::parse(word) {
             Some(Self::Pass) => Some(true),
-            Some(Self::Reseated) => None,
+            // Plan 43 A1: the brief's or the gate's fault says nothing of the seat; the amend's re-gate decides.
+            Some(Self::Reseated | Self::Amend) => None,
             Some(Self::SentBack | Self::Failed | Self::Asked) | None => Some(false),
         }
     }
@@ -162,6 +168,31 @@ pub enum Mark {
     Wait,
 }
 
+/// Plan 43 A1: whose fault a failing axis is. Megajam run ia1 (2026-11-12 to 18): of 91 refusals 45 were right, 29
+/// came from the orchestrator's brief and 17 from the gate itself, and the send-back child it seated for them was
+/// stopped at 0 minutes 35 times. Only a worker fault seats a child; a refusal with no worker fault goes to the
+/// orchestrator as a `herdr gate amend` line (`send_back`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Fault {
+    /// A worker can fix it: a failing test, a real conflict, a source it never read, a file another live order owns.
+    Worker,
+    /// The brief's: `owns:` too narrow with no live order holding the files, a `test:` that does not parse or start.
+    Brief,
+    /// The gate's own: herdr's files under `.nirvana/` breaking the rebase, a commit herdr could not make.
+    Gate,
+}
+
+impl Fault {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::Brief => "brief",
+            Self::Gate => "gate",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Axis {
     pub axis: String,
@@ -170,6 +201,12 @@ pub struct Axis {
     /// The filtered output, the conflicting or unowned files: what the reader needs, never the raw output.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lines: Vec<String>,
+    /// Plan 43 A1: a failing axis's fault, when the gate can tell; none reads as a worker's (`fault_of`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault: Option<Fault>,
+    /// Plan 43 A1: the `herdr gate amend` flags that would fix a brief fault, e.g. `--owns Docs/x/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amend: Option<String>,
 }
 
 impl Axis {
@@ -179,6 +216,8 @@ impl Axis {
             mark,
             why: why.into(),
             lines: Vec::new(),
+            fault: None,
+            amend: None,
         }
     }
 
@@ -186,6 +225,22 @@ impl Axis {
         self.lines = lines;
         self
     }
+
+    fn fault(mut self, fault: Fault) -> Self {
+        self.fault = Some(fault);
+        self
+    }
+}
+
+/// A failing axis's fault: what the gate said, else a worker's (an axis written before plan 43 carries none).
+pub fn fault_of(axis: &Axis) -> Fault {
+    axis.fault.unwrap_or(Fault::Worker)
+}
+
+/// Plan 43 A1: every failing axis is the brief's or the gate's, so no worker can fix the refusal.
+pub fn no_worker_fault(axes: &[Axis]) -> bool {
+    let failing = failing(axes);
+    !failing.is_empty() && failing.iter().all(|axis| fault_of(axis) != Fault::Worker)
 }
 
 /// Plan 40 T1: the most file paths an axis keeps. The lines are printed in the ruling, journaled in the `Gated`
@@ -293,24 +348,47 @@ pub fn spec(text: &str) -> Spec {
 
 /// `*` and `?` within one path segment, `**` across any number of segments, `/` the only separator. A pattern ending
 /// in `/` names a folder and matches everything under it, as `<folder>/**` does. 0.71.1: c0-skeleton-s1's `owns:
-/// Config/` and `owns: Source/InkAether/` matched nothing, and the order was sent back for 309 files it owned.
+/// Config/` and `owns: Source/InkAether/` matched nothing, and the order was sent back for 309 files it owned. Plan 43:
+/// the gate matches `owns:` with `owns_match`; this case-exact form is the tests'.
+#[cfg(test)]
 pub fn glob_match(pattern: &str, path: &str) -> bool {
-    fn segments(p: &[&str], s: &[&str]) -> bool {
+    glob_match_case(pattern, path, false)
+}
+
+/// Plan 43 A2: whether `owns:` ignores case. Windows folders do: Megajam's h3-hand-seq (2026-11-14) owned
+/// `source/inkaether/public/hands/iahandsequence.h` and was sent back twice for `Source/InkAether/Public/Hands/
+/// IAHandSequence.h`, the same file.
+pub const OWNS_FOLD_CASE: bool = cfg!(windows);
+
+/// An `owns:` pattern names `path`: `glob_match`, with the case ignored where the file system ignores it.
+pub fn owns_match(pattern: &str, path: &str) -> bool {
+    glob_match_case(pattern, path, OWNS_FOLD_CASE)
+}
+
+/// `glob_match`, ASCII case ignored when `fold` is set.
+pub fn glob_match_case(pattern: &str, path: &str, fold: bool) -> bool {
+    fn segments(p: &[&str], s: &[&str], fold: bool) -> bool {
         match (p.first(), s.first()) {
             (None, None) => true,
-            (Some(&"**"), _) => segments(&p[1..], s) || (!s.is_empty() && segments(p, &s[1..])),
+            (Some(&"**"), _) => {
+                segments(&p[1..], s, fold) || (!s.is_empty() && segments(p, &s[1..], fold))
+            }
             (Some(pat), Some(seg)) => {
-                segment(pat.as_bytes(), seg.as_bytes()) && segments(&p[1..], &s[1..])
+                segment(pat.as_bytes(), seg.as_bytes(), fold) && segments(&p[1..], &s[1..], fold)
             }
             _ => false,
         }
     }
-    fn segment(p: &[u8], s: &[u8]) -> bool {
+    fn segment(p: &[u8], s: &[u8], fold: bool) -> bool {
         match (p.first(), s.first()) {
             (None, None) => true,
-            (Some(b'*'), _) => segment(&p[1..], s) || (!s.is_empty() && segment(p, &s[1..])),
-            (Some(b'?'), Some(_)) => segment(&p[1..], &s[1..]),
-            (Some(a), Some(b)) => a == b && segment(&p[1..], &s[1..]),
+            (Some(b'*'), _) => {
+                segment(&p[1..], s, fold) || (!s.is_empty() && segment(p, &s[1..], fold))
+            }
+            (Some(b'?'), Some(_)) => segment(&p[1..], &s[1..], fold),
+            (Some(a), Some(b)) => {
+                (a == b || (fold && a.eq_ignore_ascii_case(b))) && segment(&p[1..], &s[1..], fold)
+            }
             _ => false,
         }
     }
@@ -321,7 +399,7 @@ pub fn glob_match(pattern: &str, path: &str) -> bool {
         p.push("**");
     }
     let s: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    segments(&p, &s)
+    segments(&p, &s, fold)
 }
 
 /// herdr's own folder in a worktree: the order copy, offered lessons, `.gitignore`. Never the worker's change.
@@ -335,52 +413,189 @@ pub fn requires_owns(class: &str) -> bool {
     class.starts_with("build.") || class.starts_with("fix.") || class == "plan"
 }
 
-/// Axis 4. Plan 24 §6: build.*, fix.*, and plan orders must name the files they own.
+/// Axis 4. Plan 24 §6: build.*, fix.*, and plan orders must name the files they own. Every changed file counts as one
+/// the base already had and no other order holds: `owned_axes` with nothing new and no holder. The tests' since plan 43.
+#[cfg(test)]
 pub fn owned_axis(class: &str, changed: &[String], owns: &[String]) -> Axis {
+    owned_axes(class, changed, owns, &|_| false, &[]).0
+}
+
+/// Plan 43 A2: another live order of the run and the `owns:` it holds (its chain root's, with its amendments).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Holder {
+    pub order: String,
+    pub owns: Vec<String>,
+}
+
+/// The name of an axis listing new files outside `owns:` that no live order holds (plan 43 A2).
+pub const OWNED_NEW: &str = "owned_new";
+
+/// Axis 4 with plan 43 A2 (owner ruling R4, 2026-11-18: "4. Yes"). A changed file outside `owns:` is one of three:
+/// - held by another live order (`holders`): a fail, the worker's (a real collision; Megajam had 3 of 26);
+/// - new, absent on the order's base (`is_new`), and held by no one: a note, in a second axis `owned_new`. Megajam:
+///   165 of the 273 flagged files were new files the order made (evidence, helper scripts, new assets);
+/// - on the base already and held by no one: a fail, the brief's (`owns:` too narrow), with the `--owns` flags that
+///   would cover it.
+/// `owns:` is matched with `owns_match` (the case ignored on Windows).
+pub fn owned_axes(
+    class: &str,
+    changed: &[String],
+    owns: &[String],
+    is_new: &dyn Fn(&str) -> bool,
+    holders: &[Holder],
+) -> (Axis, Option<Axis>) {
     let changed: Vec<&String> = changed.iter().filter(|path| !harness_path(path)).collect();
     if owns.is_empty() {
         // Plan 40 T1: the paths shown are capped (`capped`); the count said is the whole list's.
         let total = changed.len();
-        let shown = capped(changed.iter().map(|path| (*path).clone()).collect());
-        let changed: Vec<&String> = shown.iter().collect();
+        let all: Vec<String> = changed.iter().map(|path| (*path).clone()).collect();
+        let shown = capped(all.clone());
         if requires_owns(class) {
-            return Axis::new(
+            let mut axis = Axis::new(
                 "owned",
                 Mark::Fail,
                 "unbounded: the order names no owned file",
             )
-            .with(changed.iter().map(|path| (*path).clone()).collect());
+            .with(shown)
+            .fault(Fault::Brief);
+            axis.amend = owns_flags(&all);
+            return (axis, None);
         }
-        return Axis::new(
-            "owned",
+        return (
+            Axis::new(
+                "owned",
+                Mark::Note,
+                format!("the order names no owned file; {total} file(s) changed, not checked"),
+            )
+            .with(shown),
+            None,
+        );
+    }
+    let outside: Vec<&String> = changed
+        .iter()
+        .filter(|path| !owns.iter().any(|pattern| owns_match(pattern, path)))
+        .copied()
+        .collect();
+    let holder_of = |path: &str| {
+        holders
+            .iter()
+            .find(|holder| holder.owns.iter().any(|pattern| owns_match(pattern, path)))
+            .map(|holder| holder.order.clone())
+    };
+    let (mut held, mut narrow, mut fresh) = (Vec::new(), Vec::new(), Vec::new());
+    for path in outside {
+        match holder_of(path) {
+            Some(holder) => held.push(format!("{path} (owned by {holder})")),
+            None if is_new(path) => fresh.push(path.clone()),
+            None => narrow.push(path.clone()),
+        }
+    }
+    let note = (!fresh.is_empty()).then(|| {
+        Axis::new(
+            OWNED_NEW,
             Mark::Note,
             format!(
-                "the order names no owned file; {total} file(s) changed, not checked"
+                "{} new file(s) outside `owns:` that no live order owns: a note, not a fail (plan 43 A2)",
+                fresh.len()
             ),
         )
-        .with(changed.iter().map(|path| (*path).clone()).collect());
-    }
-    let outside: Vec<String> = changed
-        .iter()
-        .filter(|path| !owns.iter().any(|pattern| glob_match(pattern, path)))
-        .map(|path| (*path).clone())
-        .collect();
-    if outside.is_empty() {
-        Axis::new(
-            "owned",
-            Mark::Pass,
-            format!("{} changed file(s), each owned", changed.len()),
-        )
-    } else {
-        Axis::new(
-            "owned",
-            Mark::Fail,
+        .with(capped(fresh.clone()))
+    });
+    if held.is_empty() && narrow.is_empty() {
+        let why = if fresh.is_empty() {
+            format!("{} changed file(s), each owned", changed.len())
+        } else {
             format!(
-                "{} file(s) changed that the order does not own",
-                outside.len()
-            ),
-        )
-        .with(capped(outside))
+                "{} changed file(s): {} owned, {} new that no live order owns (noted in {OWNED_NEW})",
+                changed.len(),
+                changed.len() - fresh.len(),
+                fresh.len()
+            )
+        };
+        return (Axis::new("owned", Mark::Pass, why), note);
+    }
+    let mut why = format!(
+        "{} file(s) changed that the order does not own",
+        held.len() + narrow.len()
+    );
+    if !held.is_empty() {
+        why.push_str(&format!("; {} of them another live order owns", held.len()));
+    }
+    let lines = capped(held.iter().chain(&narrow).cloned().collect());
+    let mut axis = Axis::new("owned", Mark::Fail, why)
+        .with(lines)
+        .fault(if held.is_empty() {
+            Fault::Brief
+        } else {
+            Fault::Worker
+        });
+    axis.amend = owns_flags(&narrow);
+    (axis, note)
+}
+
+/// The `--owns` flags of `herdr gate amend` that cover `paths`: each file, folded a level up (`dir/` for two or more
+/// patterns in one folder) while more than `OWNS_HINT_MOST` remain. None for no path. A hint: the orchestrator reads
+/// it before it runs it.
+pub fn owns_flags(paths: &[String]) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+    // One level per round: a pattern goes to its folder when another pattern shares that folder.
+    let fold = |patterns: &[String]| -> Vec<String> {
+        let parent = |path: &str| {
+            path.trim_end_matches('/')
+                .rsplit_once('/')
+                .map(|(dir, _)| format!("{dir}/"))
+        };
+        let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+        for pattern in patterns {
+            if let Some(dir) = parent(pattern) {
+                *counts.entry(dir).or_default() += 1;
+            }
+        }
+        let mut next: Vec<String> = Vec::new();
+        for pattern in patterns {
+            let folded = parent(pattern)
+                .filter(|dir| counts.get(dir).copied().unwrap_or(0) >= 2)
+                .unwrap_or_else(|| pattern.clone());
+            if !next.contains(&folded) {
+                next.push(folded);
+            }
+        }
+        next
+    };
+    // Each file as itself while few: a folder would own more than the order touched.
+    let mut patterns: Vec<String> = paths.to_vec();
+    while patterns.len() > OWNS_HINT_MOST {
+        let next = fold(&patterns);
+        if next == patterns {
+            break;
+        }
+        patterns = next;
+    }
+    Some(
+        patterns
+            .iter()
+            .map(|pattern| format!("--owns {}", shell_word(pattern)))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+/// The most `--owns` patterns a hint names before it folds a level up. A hypothesis: the wake line keeps 120
+/// characters, and four short paths fit it beside the command.
+pub const OWNS_HINT_MOST: usize = 4;
+
+/// `word` as one shell word in Bash and PowerShell alike: bare when it is plain, else in double quotes.
+fn shell_word(word: &str) -> String {
+    if !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
+    {
+        word.to_owned()
+    } else {
+        format!("\"{}\"", word.replace('"', "'"))
     }
 }
 
@@ -446,7 +661,12 @@ pub fn filter(output: &str, checks: &[String]) -> Vec<String> {
         line.replace(check, " ")
             .to_ascii_lowercase()
             .split(|c: char| !c.is_ascii_alphanumeric())
-            .any(|word| matches!(word, "ok" | "pass" | "passed" | "fail" | "failed" | "error" | "panicked"))
+            .any(|word| {
+                matches!(
+                    word,
+                    "ok" | "pass" | "passed" | "fail" | "failed" | "error" | "panicked"
+                )
+            })
     };
     let mut pinned = vec![false; kept.len()];
     for check in checks {
@@ -455,7 +675,9 @@ pub fn filter(output: &str, checks: &[String]) -> Vec<String> {
                 .enumerate()
                 .filter(|(_, line)| line.contains(check.as_str()))
         };
-        let result = naming().find(|(_, line)| reports(line, check)).or_else(|| naming().next_back());
+        let result = naming()
+            .find(|(_, line)| reports(line, check))
+            .or_else(|| naming().next_back());
         if let Some((at, _)) = result {
             pinned[at] = true;
         }
@@ -472,23 +694,41 @@ pub fn filter(output: &str, checks: &[String]) -> Vec<String> {
 /// Axis 2, from a finished run of the order's test command.
 pub fn tests_axis(test: Option<&str>, run: Option<&CommandRun>, checks: &[String]) -> Axis {
     let (Some(test), Some(run)) = (test, run) else {
-        return Axis::new(
+        if checks.is_empty() {
+            return Axis::new("tests", Mark::Note, "the order names no test command");
+        }
+        // Plan 43 A1: the brief's to fix, as a `test:` it never wrote.
+        let mut axis = Axis::new(
             "tests",
-            if checks.is_empty() {
-                Mark::Note
-            } else {
-                Mark::Fail
-            },
-            if checks.is_empty() {
-                "the order names no test command".to_owned()
-            } else {
-                "the order names checks but no `test:` command to run them".to_owned()
-            },
-        );
+            Mark::Fail,
+            "the order names checks but no `test:` command to run them",
+        )
+        .fault(Fault::Brief);
+        axis.amend = Some("--test \"<a command that prints the checks>\"".into());
+        return axis;
     };
     let lines = filter(&run.output, checks);
     if let Some(why) = &run.error {
-        return Axis::new("tests", Mark::Fail, format!("`{test}` did not run: {why}")).with(lines);
+        let mut axis = Axis::new("tests", Mark::Fail, format!("`{test}` did not run: {why}"))
+            .with(lines)
+            .fault(Fault::Brief);
+        axis.amend = Some("--test \"<the fixed command>\"".into());
+        return axis;
+    }
+    // Plan 43 A1: Megajam's r1-tripo-v3, a3-megascans-fit and v12-valise-wording were sent back for their own `test:`,
+    // which did not parse; a worker cannot fix the orchestrator's command.
+    if run.exit != Some(0) && !run.timed_out {
+        if let Some(why) = test_unparsed(test, &run.output) {
+            let mut axis = Axis::new(
+                "tests",
+                Mark::Fail,
+                format!("`{test}` did not parse: {why}"),
+            )
+            .with(lines)
+            .fault(Fault::Brief);
+            axis.amend = Some("--test \"<the fixed command>\"".into());
+            return axis;
+        }
     }
     if run.timed_out {
         return Axis::new(
@@ -542,6 +782,102 @@ pub fn tests_axis(test: Option<&str>, run: Option<&CommandRun>, checks: &[String
         },
     )
     .with(lines)
+}
+
+/// `text` without its ANSI escapes (pwsh colours `ParserError:`).
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Plan 43 A1: why a `test:` command's own text did not parse or start, read from its output; None when the command
+/// ran, its test passing or not. Only the command's own text counts, never a file it runs: python's `File
+/// "<string>"` is the `-c` code; a pwsh `ParserError` that names no `.ps1` is the `-Command` text; bash's `-c:` line
+/// is the `-c` text; cmd's "is not recognized" names the program itself. Megajam's r1-tripo-v3 printed `SyntaxError:
+/// unterminated string literal` under `File "<string>"`; a3-megascans-fit and v12-valise-wording a bare
+/// `ParserError:`. A worker's own broken `.py` or `.ps1` names its file, and stays the worker's.
+pub fn test_unparsed(test: &str, output: &str) -> Option<String> {
+    let plain = strip_ansi(output);
+    let lines: Vec<&str> = plain.lines().map(str::trim).collect();
+    let program = split_command(test).into_iter().next().unwrap_or_default();
+    let base = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let base = base.strip_suffix(".exe").unwrap_or(&base);
+    if plain.contains("File \"<string>\"") {
+        if let Some(line) = lines.iter().find(|line| {
+            ["SyntaxError", "IndentationError", "TabError"]
+                .iter()
+                .any(|kind| line.starts_with(kind))
+        }) {
+            return Some((*line).to_owned());
+        }
+    }
+    if matches!(base, "pwsh" | "powershell") {
+        let script = |text: &str| {
+            let lower = text.to_ascii_lowercase();
+            lower.contains(".ps1") || lower.contains(".psm1")
+        };
+        for (at, line) in lines.iter().enumerate() {
+            if let Some(rest) = line.strip_prefix("ParserError:") {
+                if script(rest) {
+                    continue;
+                }
+                // pwsh 7 prints the message last, on a `|` line of its own.
+                let message = lines[at + 1..]
+                    .iter()
+                    .take(8)
+                    .filter_map(|line| line.strip_prefix('|'))
+                    .map(str::trim)
+                    .rfind(|line| !line.is_empty() && !line.chars().all(|c| c == '~' || c == ' '));
+                return Some(match message {
+                    Some(message) => format!("ParserError: {message}"),
+                    None => "ParserError".to_owned(),
+                });
+            }
+        }
+        // Windows PowerShell 5: `At line:1 char:5` for the command's text, `At C:\x.ps1:3 char:5` for a script's.
+        if plain.contains("At line:")
+            && lines
+                .iter()
+                .any(|line| line.contains("CategoryInfo") && line.contains("ParserError"))
+        {
+            return Some("ParserError".to_owned());
+        }
+    }
+    if matches!(base, "bash" | "sh") {
+        if let Some(line) = lines.iter().find(|line| {
+            line.contains("-c:")
+                && (line.contains("syntax error")
+                    || line.contains("unexpected EOF while looking for matching"))
+        }) {
+            return Some((*line).to_owned());
+        }
+    }
+    if !program.is_empty() {
+        let needle = format!("'{program}' is not recognized as an internal or external command");
+        if plain.contains(&needle) {
+            return Some(needle);
+        }
+    }
+    None
 }
 
 /// Axis 5. `listened` is every port listened on inside the worker's pane's process tree.
@@ -1325,6 +1661,18 @@ pub struct Reads {
     /// Each media file (`media_file`) a call opened and that was answered without an error: a `Read`/`read_file`/
     /// `view_file` result, or an ffprobe or ffmpeg input whose command exited 0.
     media_files: Vec<String>,
+    /// Plan 43 A3: each local path a call read, as written (`local_path` form): a `Read`/`read_file`/`view_file`
+    /// path, a `Grep` or `Glob` folder, and the paths a shell command that reads local files names
+    /// (`shell_local_reads`). A relative one is resolved against the order's folders when a source is checked.
+    local: Vec<LocalRead>,
+}
+
+/// One local path a call read. `search`: a search over a folder (`Grep`, `rg`, `grep`, `findstr`, `Select-String`),
+/// which reads every file under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalRead {
+    path: String,
+    search: bool,
 }
 
 /// Addendum B (plan 40): a `media.*` order's cited source counts as read when a call that fetches or opens media names
@@ -1350,8 +1698,8 @@ pub fn media_read(url: &str, reads: &Reads) -> bool {
 /// `.info.json`), the frames a worker cuts from it, and its captions. A plain `.json`, `.md` or `.txt` is not here:
 /// the worker's own notes in the id's folder (yt-breakdown's `ingest.json`) are no sign it watched anything.
 const MEDIA_EXTENSIONS: &[&str] = &[
-    "mp4", "webm", "mkv", "mov", "m4v", "avi", "m4a", "mp3", "wav", "opus", "ogg", "flac", "aac", "jpg", "jpeg",
-    "png", "webp", "gif", "vtt", "srt", "ttml", "sbv", "json3",
+    "mp4", "webm", "mkv", "mov", "m4v", "avi", "m4a", "mp3", "wav", "opus", "ogg", "flac", "aac",
+    "jpg", "jpeg", "png", "webp", "gif", "vtt", "srt", "ttml", "sbv", "json3",
 ];
 
 fn media_file(path: &str) -> bool {
@@ -1374,7 +1722,11 @@ fn media_file(path: &str) -> bool {
 fn command_media(cmd: &str) -> (Vec<String>, Vec<String>) {
     let mut urls = Vec::new();
     if command_fetches(cmd) {
-        urls.extend(extract_url_tokens(cmd).iter().map(|token| normalize_url(token)));
+        urls.extend(
+            extract_url_tokens(cmd)
+                .iter()
+                .map(|token| normalize_url(token)),
+        );
     }
     let mut files = Vec::new();
     for segment in segments(cmd) {
@@ -1393,7 +1745,11 @@ fn command_media(cmd: &str) -> (Vec<String>, Vec<String>) {
             if !input {
                 continue;
             }
-            urls.extend(extract_url_tokens(word).iter().map(|token| normalize_url(token)));
+            urls.extend(
+                extract_url_tokens(word)
+                    .iter()
+                    .map(|token| normalize_url(token)),
+            );
             if media_file(word) {
                 files.push((*word).to_owned());
             }
@@ -1564,6 +1920,450 @@ fn json_text(val: &Value) -> String {
     strings.join("\n")
 }
 
+// ---- plan 43 A3: local sources ----
+
+/// A command without the bodies of its heredocs (`<<EOF`, `<<'EOF'`, `<<-EOF`) and PowerShell here-strings
+/// (`@'...'@`, `@"..."@`): text a command writes, never a path it reads. Megajam's s2-sound-audit-s1 wrote its whole
+/// sources list into a report with `cat >> Docs/Audio/SOUND_AUDIT.md <<'EOF'`.
+fn without_heredocs(cmd: &str) -> String {
+    let mut out = String::new();
+    let mut lines = cmd.lines();
+    while let Some(line) = lines.next() {
+        // A here-string opens at a line's end and closes at a line's start.
+        if let Some(at) = line.find("@'").or_else(|| line.find("@\"")) {
+            if line[at + 2..].trim().is_empty() {
+                let close = if line[at..].starts_with("@'") {
+                    "'@"
+                } else {
+                    "\"@"
+                };
+                out.push_str(&line[..at]);
+                out.push('\n');
+                for body in lines.by_ref() {
+                    if let Some(rest) = body.trim_start().strip_prefix(close) {
+                        out.push_str(rest);
+                        out.push('\n');
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+        let Some(at) = line.find("<<") else {
+            continue;
+        };
+        let tag: String = line[at + 2..]
+            .trim_start_matches('-')
+            .trim_start()
+            .trim_start_matches(['\'', '"'])
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if tag.is_empty() {
+            continue;
+        }
+        // A script fed to an interpreter (`python - <<'EOF'`) is code that may read; it is kept. Megajam's
+        // w7-size-audit read its build's container_Win64.csv from such a body.
+        let feeds_script = split_command(&line[..at]).iter().any(|word| {
+            let base = word
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            HEREDOC_READERS.contains(&base.strip_suffix(".exe").unwrap_or(&base))
+        });
+        for body in lines.by_ref() {
+            if body.trim() == tag {
+                break;
+            }
+            if feeds_script {
+                out.push_str(body);
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+/// The interpreters whose heredoc body is a script, not text written to a file.
+const HEREDOC_READERS: &[&str] = &[
+    "python",
+    "python3",
+    "py",
+    "node",
+    "bash",
+    "sh",
+    "pwsh",
+    "powershell",
+    "ruby",
+    "perl",
+];
+
+/// A command cut at `;`, `|`, `&&`, `||` and newlines outside quotes (`segments` cuts inside them too: s2-sound-audit-s1's
+/// `grep -n -i "sound\|A_" "Docs/FRONT_ASSETS.md"` lost its path). A quote after a backslash is no quote.
+fn shell_segments(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut at = 0;
+    while at < chars.len() {
+        let c = chars[at];
+        let next = chars.get(at + 1).copied();
+        if c == '\\' && matches!(next, Some('"' | '\'')) {
+            current.push(c);
+            current.extend(next);
+            at += 2;
+            continue;
+        }
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+                current.push(c);
+            }
+            None => match c {
+                '"' | '\'' => {
+                    quote = Some(c);
+                    current.push(c);
+                }
+                '\n' | ';' | '|' => out.push(std::mem::take(&mut current)),
+                '&' if next == Some('&') => {
+                    out.push(std::mem::take(&mut current));
+                    at += 1;
+                }
+                _ => current.push(c),
+            },
+        }
+        at += 1;
+    }
+    out.push(current);
+    out.retain(|segment| !segment.trim().is_empty());
+    out
+}
+
+/// The contents of each quoted string in `segment`, `'...'` or `"..."`, a backslash before a quote escaping it.
+fn quoted_parts(segment: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let bytes = segment.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        let q = bytes[at];
+        if q != b'"' && q != b'\'' {
+            at += 1;
+            continue;
+        }
+        let start = at + 1;
+        let mut end = start;
+        while end < bytes.len() && !(bytes[end] == q && bytes[end - 1] != b'\\') {
+            end += 1;
+        }
+        if end >= bytes.len() {
+            break;
+        }
+        parts.push(&segment[start..end]);
+        at = end + 1;
+    }
+    parts
+}
+
+/// The folder a `cd`, `pushd`, `Set-Location` or `sl` segment moves to, as written.
+fn moves_to(words: &[String]) -> Option<&str> {
+    let first = words.first()?.to_ascii_lowercase();
+    if !matches!(
+        first.as_str(),
+        "cd" | "pushd" | "set-location" | "sl" | "chdir"
+    ) {
+        return None;
+    }
+    words[1..]
+        .iter()
+        .find(|word| !word.starts_with('-'))
+        .map(String::as_str)
+}
+
+/// Commands that read a file's bytes beside `LOCAL_READERS`: they count lines, hash or query it.
+const LOCAL_COUNTERS: &[&str] = &["wc", "jq", "md5sum", "sha1sum", "sha256sum", "get-filehash"];
+
+/// Commands that search every file under a folder.
+const LOCAL_SEARCHERS: &[&str] = &["rg", "grep", "findstr", "select-string", "sls"];
+
+/// Commands whose path arguments are written, not read.
+const LOCAL_WRITERS: &[&str] = &[
+    "tee",
+    "out-file",
+    "set-content",
+    "add-content",
+    "touch",
+    "mkdir",
+];
+
+/// A word of a command that names a local path: a `/` or `\` in it or a file name's extension, no URL, flag or
+/// variable.
+fn path_word(word: &str) -> Option<String> {
+    let word = word
+        .trim_matches(|c: char| matches!(c, '`' | ',' | ':' | ';'))
+        .trim_end_matches(')');
+    if word.len() < 3
+        || word.contains("://")
+        || word.starts_with(['-', '$', '%', '@', '&', '|'])
+        || word.contains(['*', '>', '<'])
+    {
+        return None;
+    }
+    let named = word.contains(['/', '\\'])
+        || word.rsplit_once('.').is_some_and(|(stem, ext)| {
+            !stem.is_empty()
+                && (1..=8).contains(&ext.len())
+                && ext.chars().all(|c| c.is_ascii_alphanumeric())
+                && ext.chars().any(|c| c.is_ascii_alphabetic())
+        });
+    named.then(|| local_path(word.trim_start_matches("./")))
+}
+
+/// Plan 43 A3: the local paths a shell command reads. A command reads when one of its segments runs a reader
+/// (`segment_reads_local`, `LOCAL_COUNTERS`); then every path word in its segments counts but a writer's and a
+/// redirect's target, outside heredoc bodies. Words inside a script's code (`pathlib.Path('x.md').read_text()`)
+/// count by their quoted parts. A relative path after a `cd` in the same command is under that folder. Megajam's
+/// a1-asset-wiring-audit-s1 read with `ls Docs/AssetGen/` and `wc -l Docs/AssetGen/L02B_FIT/DECISIONS.md`,
+/// s2-sound-audit-s1 with `head -n 4 "Docs/Pipeline/CORE_SPEC.md"`, and w7-size-audit with `cd ".../jobs"; head -5
+/// container_Win64.csv`.
+fn shell_local_reads(cmd: &str) -> Vec<LocalRead> {
+    let text = without_heredocs(cmd);
+    let segs = shell_segments(&text);
+    let runs = |segment: &str, words: &[&str]| {
+        let code = segment_code(segment).to_ascii_lowercase();
+        words
+            .iter()
+            .any(|word| command_words(&code, word).next().is_some())
+    };
+    if !segs
+        .iter()
+        .any(|segment| segment_reads_local(segment) || runs(segment, LOCAL_COUNTERS))
+    {
+        return Vec::new();
+    }
+    let mut reads = Vec::new();
+    let mut folder: Option<String> = None;
+    for segment in &segs {
+        let words = split_command(segment);
+        if let Some(to) = moves_to(&words) {
+            let to = match &folder {
+                Some(from) if !absolute(to) => format!("{from}/{to}"),
+                _ => to.to_owned(),
+            };
+            // A reader with no path reads its folder: a1-asset-wiring-audit's `cd ".../assets/sourced" && ls -la`.
+            reads.push(LocalRead {
+                path: local_path(&to),
+                search: false,
+            });
+            folder = Some(to);
+            continue;
+        }
+        if runs(segment, LOCAL_WRITERS) {
+            continue;
+        }
+        let search = runs(segment, LOCAL_SEARCHERS);
+        // After a `cd`, a relative path is under its folder; it is kept as written too, since an order's `cd` is most
+        // often into its own folder, which the check resolves against anyway.
+        let mut push = |path: String| {
+            if let Some(dir) = folder.as_ref().filter(|_| !absolute(&path)) {
+                reads.push(LocalRead {
+                    path: local_path(&format!("{dir}/{path}")),
+                    search,
+                });
+            }
+            reads.push(LocalRead { path, search });
+        };
+        // A script's quoted strings, read whole from the raw text: `r"C:\x\a.csv"` loses its quotes to the words.
+        for part in quoted_parts(segment) {
+            if let Some(path) = path_word(part.trim()) {
+                push(path);
+            }
+        }
+        for (at, word) in words.iter().enumerate() {
+            let after_redirect = at > 0 && words[at - 1].ends_with('>');
+            if after_redirect || word.starts_with('>') || word.contains(">>") {
+                continue;
+            }
+            let whole = !word.contains(['(', ')', '\'', '"', '=', ';', '[', ']', '{', '}']);
+            let pieces: Vec<&str> = if whole {
+                vec![word.as_str()]
+            } else {
+                word.split(['(', ')', '\'', '"', '=', ';', '[', ']', '{', '}', ','])
+                    .collect()
+            };
+            for piece in pieces {
+                if let Some(path) = path_word(piece.trim()) {
+                    push(path);
+                }
+            }
+        }
+    }
+    reads
+}
+
+/// A cited source that is no web page: a path, absolute or relative to the repository, or a `file://` URL. A bare
+/// domain (`docs.rs/serde`) and `www.` are the web.
+pub fn local_entry(url: &str) -> bool {
+    let url = url.trim();
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("file://") {
+        return true;
+    }
+    !lower.contains("://")
+        && !lower.starts_with("www.")
+        && url
+            .split_whitespace()
+            .next()
+            .is_none_or(|first| bare_domain(first).is_none())
+}
+
+/// The paths one cited local entry names, as written. Megajam's research.read orders cited `Config/DefaultEngine.ini,
+/// Config/DefaultGame.ini`, `<folder>/ (folder listing)` and `Front/InkTitleRoot.cpp, InkTitleGameMode.cpp` (the
+/// second in the first's folder). Parenthesised notes, `:line` and `#L` tails and a trailing `/*` are dropped.
+pub fn local_pieces(entry: &str) -> Vec<String> {
+    let mut text = String::new();
+    let mut depth = 0usize;
+    for c in entry.trim().chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => text.push(c),
+            _ => {}
+        }
+    }
+    let text = match text.trim().strip_prefix("file://") {
+        Some(rest) => {
+            let rest = percent_decoded(rest);
+            let b = rest.as_bytes();
+            if b.len() > 2 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+                rest[1..].to_owned()
+            } else {
+                rest
+            }
+        }
+        None => text.trim().to_owned(),
+    };
+    let mut pieces = Vec::new();
+    let mut folder: Option<String> = None;
+    for piece in text
+        .split([',', ';', '+'])
+        .flat_map(|part| part.split(" and "))
+        .map(|piece| piece.trim().trim_matches(['`', '"', '\'']).trim())
+    {
+        let mut piece = piece.split('#').next().unwrap_or("").trim().to_owned();
+        // `x.rs:120` or `x.rs:12-40`, never a drive's `C:`.
+        if let Some((head, tail)) = piece.rsplit_once(':') {
+            if head.len() > 1
+                && !tail.is_empty()
+                && tail.chars().all(|c| c.is_ascii_digit() || c == '-')
+            {
+                piece = head.to_owned();
+            }
+        }
+        let piece = piece
+            .trim_end_matches("/*")
+            .trim_end_matches("\\*")
+            .trim_end_matches("/**")
+            .to_owned();
+        if piece.is_empty() || (piece.contains(char::is_whitespace) && !piece.contains(['/', '\\']))
+        {
+            continue;
+        }
+        let piece = match &folder {
+            Some(dir) if !piece.contains(['/', '\\']) => format!("{dir}/{piece}"),
+            _ => piece,
+        };
+        folder = piece
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .rsplit_once('/')
+            .map(|(dir, _)| dir.to_owned());
+        pieces.push(piece);
+    }
+    pieces
+}
+
+/// A path absolute on this machine: a drive (`C:/`, `C:\`), a root `/`, or a share `\\`.
+fn absolute(path: &str) -> bool {
+    let b = path.as_bytes();
+    (b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'/' | b'\\'))
+        || path.starts_with('/')
+        || path.starts_with("\\\\")
+}
+
+/// `path` in `local_path` form with `.` segments and trailing separators gone, and Git Bash's `/c/x` read as `c:/x`.
+fn clean_path(path: &str) -> String {
+    let mut path = local_path(path);
+    let b = path.as_bytes();
+    if b.len() > 2 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b'/' {
+        path = format!("{}:{}", &path[1..2], &path[2..]);
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "." => {}
+            ".." if parts
+                .last()
+                .is_some_and(|last| !last.is_empty() && *last != "..") =>
+            {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
+    let joined = parts.join("/");
+    let trimmed = joined.trim_end_matches('/');
+    if trimmed.is_empty() {
+        joined
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// Where a path written in a stream or a Work Report may be: itself when absolute, else under each of `roots`.
+fn resolved(path: &str, roots: &[&Path]) -> Vec<String> {
+    if absolute(path) {
+        return vec![clean_path(path)];
+    }
+    let mut places: Vec<String> = roots
+        .iter()
+        .map(|root| clean_path(&format!("{}/{path}", root.display())))
+        .collect();
+    places.push(clean_path(path));
+    places
+}
+
+/// Plan 43 A3: a cited local entry the stream shows read: each of its pieces (`local_pieces`) is a path a call read,
+/// resolved against the order's folders (`roots`: its worktree, then the project), or lies under a folder a search
+/// read. A search of a whole root vouches for no file in it.
+pub fn local_read(entry: &str, reads: &Reads, roots: &[&Path]) -> bool {
+    let pieces = local_pieces(entry);
+    if pieces.is_empty() {
+        return false;
+    }
+    let tops: Vec<String> = roots
+        .iter()
+        .map(|root| clean_path(&root.display().to_string()))
+        .collect();
+    pieces.iter().all(|piece| {
+        let cited = resolved(piece, roots);
+        reads.local.iter().any(|read| {
+            resolved(&read.path, roots).iter().any(|place| {
+                cited.contains(place)
+                    || (read.search
+                        && !tops.contains(place)
+                        && !tops.iter().any(|top| top.starts_with(&format!("{place}/")))
+                        && cited.iter().any(|c| c.starts_with(&format!("{place}/"))))
+            })
+        })
+    })
+}
+
 pub fn stream_reads(stream: &str) -> Reads {
     let mut reads = Reads::default();
     let mut fetch_ids: Vec<String> = Vec::new();
@@ -1590,6 +2390,19 @@ pub fn stream_reads(stream: &str) -> Reads {
                             let (urls, files) = command_media(command);
                             reads.media_urls.extend(urls);
                             media_pending.push((id.to_owned(), files));
+                            reads.local.extend(shell_local_reads(command));
+                        }
+                        // Plan 43 A3: a search names its folder; with none it searched the worker's folder, which
+                        // vouches for no one file.
+                        if let Some(path) = input
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .filter(|_| matches!(name, "Grep" | "Glob"))
+                        {
+                            reads.local.push(LocalRead {
+                                path: local_path(path),
+                                search: name == "Grep",
+                            });
                         }
                         let text = match name {
                             "Bash" | "PowerShell" => input
@@ -1610,6 +2423,10 @@ pub fn stream_reads(stream: &str) -> Reads {
                             "Read" => {
                                 if let Some(path) = input.get("file_path").and_then(Value::as_str) {
                                     reads.paths.push(local_path(path));
+                                    reads.local.push(LocalRead {
+                                        path: local_path(path),
+                                        search: false,
+                                    });
                                     if media_file(path) {
                                         media_pending.push((id.to_owned(), vec![path.to_owned()]));
                                     }
@@ -1662,6 +2479,8 @@ pub fn stream_reads(stream: &str) -> Reads {
                 let command = params["CommandLine"].as_str().unwrap_or("");
                 let (urls, files) = command_media(command);
                 reads.media_urls.extend(urls);
+                // Plan 43 A3: agy repeats a step on its `DONE` line; a path read twice is still one read.
+                reads.local.extend(shell_local_reads(command));
                 if answered && agy_command_ok(output) {
                     reads.media_files.extend(files);
                 }
@@ -1671,6 +2490,10 @@ pub fn stream_reads(stream: &str) -> Reads {
                 for key in ["Path", "AbsolutePath", "file_path"] {
                     if let Some(path) = params.get(key).and_then(Value::as_str) {
                         reads.paths.push(local_path(path));
+                        reads.local.push(LocalRead {
+                            path: local_path(path),
+                            search: false,
+                        });
                         if answered && media_file(path) {
                             reads.media_files.push(path.to_owned());
                         }
@@ -1911,19 +2734,51 @@ fn page_reads(reads: &Reads) -> Vec<&str> {
 /// Fails for each source URL that does not appear in the order's stream as a fetch, read or browser call. URLs are
 /// compared after trimming a trailing `/` and the fragment. Citing nothing fails an order that asks for the web
 /// (`web`, from `web_of`) and an order whose worker opened pages; for any other it is a note (live checks 2026-11-01,
-/// F2, and review S4: what the worker did decides first). Every source cited is checked.
+/// F2, and review S4: what the worker did decides first). Every source cited is checked. With no folder to resolve a
+/// relative path against: the tests' since plan 43, whose gate calls `sources_axis_at`.
+#[cfg(test)]
 pub fn sources_axis(
     class: &str,
     web: Option<&str>,
     report: Option<&Value>,
     stream: &str,
 ) -> Option<Axis> {
+    sources_axis_at(class, web, report, stream, &[])
+}
+
+/// The class whose local entries the sources axis does not check (plan 43 A3): it reads the project, and Megajam's
+/// research.read passed its first gate 0 times of 6 on local paths it had read.
+pub const READ_CLASS: &str = "research.read";
+
+/// `sources_axis` with the order's folders (`roots`: its worktree, then the project), against which a cited local
+/// path relative to the repository is resolved (plan 43 A3). A local entry counts as read when a `Read`, `Grep`,
+/// `Glob`, agy `read_file`/`view_file` or a shell read names it (`local_read`); a research.read order's local entries
+/// are not checked at all. A web URL cited and never fetched still fails. A media order that cites nothing, opened no
+/// page and read local files gets a note, whatever its brief said of the web: Megajam's r15-meadow-rescore-o and
+/// r16-meadow3-rescore-o judged local stills, were refused "no sources", and were merged by hand.
+pub fn sources_axis_at(
+    class: &str,
+    web: Option<&str>,
+    report: Option<&Value>,
+    stream: &str,
+    roots: &[&Path],
+) -> Option<Axis> {
     if !class.starts_with("research.") && !class.starts_with("media.") {
         return None;
     }
     let reads = stream_reads(stream);
     let opened = page_reads(&reads);
-    let none_cited = |why: &str| match web {
+    let judged_local = !reads.media_files.is_empty() || !reads.local.is_empty();
+    let none_cited = |why: &str| {
+        match web {
+        Some(asked) if class.starts_with("media.") && opened.is_empty() && judged_local => Axis::new(
+            "sources",
+            Mark::Note,
+            format!(
+                "no sources: {why}; the worker opened no web page and judged local files, so nothing is cited to \
+check ({asked})"
+            ),
+        ),
         Some(asked) => Axis::new(
             "sources",
             Mark::Fail,
@@ -1949,6 +2804,7 @@ pub fn sources_axis(
             Mark::Note,
             format!("no web asked; none cited and no page opened ({why})"),
         ),
+    }
     };
     let Some(report) = report else {
         return Some(none_cited("no Work Report was delivered"));
@@ -1958,6 +2814,7 @@ pub fn sources_axis(
         _ => return Some(none_cited("the Work Report names no sources")),
     };
     let mut missing = Vec::new();
+    let mut skipped = 0usize;
     for item in sources {
         let Some(url) = item.get("url").and_then(Value::as_str) else {
             missing.push("item without url".to_owned());
@@ -1967,6 +2824,14 @@ pub fn sources_axis(
         if stable_read(url, &reads) {
             continue;
         }
+        if local_entry(url) {
+            if class == READ_CLASS {
+                skipped += 1;
+            } else if !local_read(url, &reads, roots) {
+                missing.push(url.to_owned());
+            }
+            continue;
+        }
         if class.starts_with("media.") && media_read(url, &reads) {
             continue;
         }
@@ -1974,11 +2839,19 @@ pub fn sources_axis(
             missing.push(url.to_owned());
         }
     }
+    let unchecked = if skipped > 0 {
+        format!("; {skipped} local entr(y/ies) not checked ({READ_CLASS} reads the project)")
+    } else {
+        String::new()
+    };
     if missing.is_empty() {
         Some(Axis::new(
             "sources",
             Mark::Pass,
-            format!("{} source(s) cited, each verified in stream", sources.len()),
+            format!(
+                "{} source(s) cited, each verified in stream{unchecked}",
+                sources.len() - skipped
+            ),
         ))
     } else {
         Some(
@@ -1986,7 +2859,7 @@ pub fn sources_axis(
                 "sources",
                 Mark::Fail,
                 format!(
-                    "{} source(s) cited that were not fetched, read or browsed",
+                    "{} source(s) cited that were not fetched, read or browsed{unchecked}",
                     missing.len()
                 ),
             )
@@ -2651,7 +3524,7 @@ pub fn commit_work(cwd: &Path, order: &str, owns: &[String]) -> Result<Vec<Strin
         let path = line[3..].to_owned();
         if !line.starts_with("??") {
             tracked = true;
-        } else if owns.is_empty() || owns.iter().any(|pattern| glob_match(pattern, &path)) {
+        } else if owns.is_empty() || owns.iter().any(|pattern| owns_match(pattern, &path)) {
             new.push(path);
         } else {
             left_out.push(path);
@@ -2683,8 +3556,15 @@ pub fn commit_work(cwd: &Path, order: &str, owns: &[String]) -> Result<Vec<Strin
     Ok(left_out)
 }
 
+/// Why a rebase failed: the conflicting files, or, when git stopped before any conflict, its message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebaseFail {
+    pub files: Vec<String>,
+    pub why: String,
+}
+
 /// Rebases the worktree's branch onto `onto`. A conflict aborts the rebase and names the files.
-pub fn rebase(cwd: &Path, onto: &str) -> Result<(), Vec<String>> {
+pub fn rebase(cwd: &Path, onto: &str) -> Result<(), RebaseFail> {
     let mut args = identity(cwd);
     args.extend(["rebase", "-q", onto].map(str::to_owned));
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -2697,7 +3577,154 @@ pub fn rebase(cwd: &Path, onto: &str) -> Result<(), Vec<String>> {
                 .map(str::to_owned)
                 .collect();
             let _ = git(cwd, &["rebase", "--abort"]);
-            Err(if files.is_empty() { vec![why] } else { files })
+            Err(RebaseFail { files, why })
+        }
+    }
+}
+
+/// The paths a git refusal lists, one per tab-indented line ("would be overwritten by checkout:\n\t.nirvana/x").
+fn listed_paths(why: &str) -> Vec<String> {
+    why.lines()
+        .filter(|line| line.starts_with('\t'))
+        .map(|line| line.trim().to_owned())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+/// Plan 43 A1: a failed rebase is the gate's own fault when only herdr's files stood in its way: its conflicting or
+/// listed paths are all under `.nirvana/`, or git refused the worker's tree as dirty when every change outside
+/// `.nirvana/` is committed (the gate's commit leaves herdr's folder out). Megajam: c0-skeleton and c1-rules ("cannot
+/// rebase: You have unstaged changes"), l04-build-s2-r1 (".nirvana/lessons/index.json ... would be overwritten").
+pub fn rebase_fault(cwd: &Path, fail: &RebaseFail) -> Fault {
+    let listed = if fail.files.is_empty() {
+        listed_paths(&fail.why)
+    } else {
+        fail.files.clone()
+    };
+    if !listed.is_empty() {
+        return if listed.iter().all(|path| harness_path(path)) {
+            Fault::Gate
+        } else {
+            Fault::Worker
+        };
+    }
+    let dirty_refusal =
+        fail.why.contains("unstaged changes") || fail.why.contains("uncommitted changes");
+    if dirty_refusal && uncommitted(cwd).is_ok_and(|paths| paths.is_empty()) {
+        Fault::Gate
+    } else {
+        Fault::Worker
+    }
+}
+
+/// Plan 43 A1, the root of the three rebases above: herdr's own files under `.nirvana/` that would stop a rebase onto
+/// `onto`, set aside under `aside` first. They are every tracked one with a change (git refuses a dirty tree, and the
+/// gate's commit leaves `.nirvana/` out) and every untracked one `onto` tracks (git will not overwrite it; the project
+/// tracks `.nirvana/lessons/`, and a worktree holds offered copies). Each is copied to `aside`, then put back as
+/// `HEAD` has it or removed. `restore_harness` copies back each one the rebase left absent; one the rebase brought is
+/// kept as the rebase left it, its old copy staying in `aside`. Returns the paths set aside.
+pub fn set_aside_harness(cwd: &Path, onto: &str, aside: &Path) -> Result<Vec<String>, String> {
+    let status = git(
+        cwd,
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "-uall",
+            "--",
+            nirvana_run::DIR,
+        ],
+    )?;
+    let mut tracked = Vec::new();
+    let mut untracked = Vec::new();
+    let mut entries = status.split('\0');
+    while let Some(entry) = entries.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        if matches!(entry.as_bytes()[0], b'R' | b'C') {
+            entries.next();
+        }
+        let path = entry[3..].to_owned();
+        if !harness_path(&path) {
+            continue;
+        }
+        if entry.starts_with("??") {
+            untracked.push(path);
+        } else {
+            tracked.push(path);
+        }
+    }
+    if !untracked.is_empty() {
+        let theirs: HashSet<String> = git(
+            cwd,
+            &[
+                "ls-tree",
+                "-r",
+                "--name-only",
+                "-z",
+                onto,
+                "--",
+                nirvana_run::DIR,
+            ],
+        )?
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect();
+        untracked.retain(|path| theirs.contains(path));
+    }
+    let moved: Vec<String> = tracked.iter().chain(&untracked).cloned().collect();
+    if moved.is_empty() {
+        return Ok(moved);
+    }
+    for path in &moved {
+        let from = cwd.join(path);
+        if from.is_file() {
+            let to = aside.join(path);
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+            }
+            std::fs::copy(&from, &to).map_err(|err| format!("{}: {err}", from.display()))?;
+        }
+    }
+    for chunk in tracked.chunks(64) {
+        let mut args = vec!["reset", "-q", "--"];
+        args.extend(chunk.iter().map(String::as_str));
+        git(cwd, &args)?;
+        let in_head: Vec<&str> = chunk
+            .iter()
+            .map(String::as_str)
+            .filter(|path| git(cwd, &["cat-file", "-e", &format!("HEAD:{path}")]).is_ok())
+            .collect();
+        if !in_head.is_empty() {
+            let mut args = vec!["checkout", "-q", "--"];
+            args.extend(in_head.iter().copied());
+            git(cwd, &args)?;
+        }
+        for path in chunk
+            .iter()
+            .filter(|path| !in_head.contains(&path.as_str()))
+        {
+            let _ = std::fs::remove_file(cwd.join(path));
+        }
+    }
+    for path in &untracked {
+        let _ = std::fs::remove_file(cwd.join(path));
+    }
+    Ok(moved)
+}
+
+/// Copies back each file `set_aside_harness` moved that the rebase left absent.
+pub fn restore_harness(cwd: &Path, aside: &Path, moved: &[String]) {
+    for path in moved {
+        let to = cwd.join(path);
+        let from = aside.join(path);
+        if !to.exists() && from.is_file() {
+            if let Some(parent) = to.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::copy(&from, &to);
         }
     }
 }
@@ -2901,7 +3928,7 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
             let base = match ensure_integration(subject.root, subject.run) {
                 Ok(base) => base,
                 Err(why) => {
-                    axes.push(Axis::new("rebase", Mark::Fail, why));
+                    axes.push(Axis::new("rebase", Mark::Fail, why).fault(Fault::Gate));
                     det.axes = axes;
                     return det;
                 }
@@ -2921,37 +3948,78 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
                 ),
                 Ok(_) => {}
                 Err(why) => {
-                    axes.push(Axis::new(
-                        "rebase",
-                        Mark::Fail,
-                        format!("the worker's work could not be committed: {why}"),
-                    ));
+                    // Plan 43 A1: herdr's commit, which no worker can make for it.
+                    axes.push(
+                        Axis::new(
+                            "rebase",
+                            Mark::Fail,
+                            format!("the worker's work could not be committed: {why}"),
+                        )
+                        .fault(Fault::Gate),
+                    );
                     det.axes = axes;
                     return det;
                 }
             }
-            match rebase(subject.cwd, &integration_branch(subject.run)) {
-                Ok(()) => axes.push(Axis::new(
-                    "rebase",
-                    Mark::Pass,
-                    format!(
-                        "onto {} at {}",
-                        integration_branch(subject.run),
-                        short_sha(&base)
-                    ),
-                )),
-                Err(files) => {
+            let integration = integration_branch(subject.run);
+            // Plan 43 A1: herdr's own files out of the rebase's way first (`set_aside_harness`).
+            let aside = gate_dir(&Project::at(subject.root), subject.run)
+                .join(format!("{}-aside", subject.order));
+            let moved = match set_aside_harness(subject.cwd, &integration, &aside) {
+                Ok(moved) => moved,
+                Err(why) => {
                     axes.push(
                         Axis::new(
                             "rebase",
                             Mark::Fail,
                             format!(
-                                "the branch does not rebase onto {}: {} file(s) conflict",
-                                integration_branch(subject.run),
-                                files.len()
+                                "herdr's own files under .nirvana/ could not be set aside: {why}"
                             ),
                         )
-                        .with(capped(files)),
+                        .fault(Fault::Gate),
+                    );
+                    det.base = Some(base);
+                    det.axes = axes;
+                    return det;
+                }
+            };
+            let rebased = rebase(subject.cwd, &integration);
+            restore_harness(subject.cwd, &aside, &moved);
+            let aside_note = if moved.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; {} of herdr's own file(s) under .nirvana/ set aside for it ({})",
+                    moved.len(),
+                    aside.display()
+                )
+            };
+            match rebased {
+                Ok(()) => axes.push(Axis::new(
+                    "rebase",
+                    Mark::Pass,
+                    format!("onto {integration} at {}{aside_note}", short_sha(&base)),
+                )),
+                Err(fail) => {
+                    let fault = rebase_fault(subject.cwd, &fail);
+                    let (why, lines) = if fail.files.is_empty() {
+                        (
+                            format!("the branch does not rebase onto {integration}: git stopped before any conflict"),
+                            fail.why.lines().map(str::to_owned).collect(),
+                        )
+                    } else {
+                        (
+                            format!(
+                                "the branch does not rebase onto {integration}: {} file(s) conflict",
+                                fail.files.len()
+                            ),
+                            fail.files.clone(),
+                        )
+                    };
+                    axes.push(
+                        Axis::new("rebase", Mark::Fail, format!("{why}{aside_note}"))
+                            .with(capped(lines))
+                            .fault(fault),
                     );
                     det.base = Some(base);
                     det.axes = axes;
@@ -3012,16 +4080,35 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
         (Some(base), true) => without_begun_with(subject.cwd, base, changed),
         _ => (changed, note.map(str::to_owned)),
     });
+    let mut owned_new = None;
     axes.push(match changed {
         Ok((changed, note)) => {
-            let mut owned = owned_axis(subject.class, &changed, &subject.spec.owns);
+            // Plan 43 A2: new against the base the axes ran on (the integration tip, or the project's HEAD for an
+            // order in the project's folder), and held by the run's other live orders.
+            let tree = base.clone().unwrap_or_else(|| "HEAD".to_owned());
+            let git_dir = if worktree { subject.cwd } else { subject.root };
+            let known = tracked_in(git_dir, &tree, &changed);
+            let is_new = |path: &str| known.as_ref().is_ok_and(|known| !known.contains(path));
+            let holders = live_holders(&Project::at(subject.root), subject.run, subject.order);
+            let (mut owned, new_note) = owned_axes(
+                subject.class,
+                &changed,
+                &subject.spec.owns,
+                &is_new,
+                &holders,
+            );
             if let Some(note) = note {
                 owned.why = format!("{} ({note})", owned.why);
             }
+            if let Err(why) = &known {
+                owned.why = format!("{} (no file was read as new: {why})", owned.why);
+            }
+            owned_new = new_note;
             owned
         }
         Err(why) => Axis::new("owned", Mark::Fail, why),
     });
+    axes.extend(owned_new);
     let listened = if subject.class == "ops.terminal" {
         (subject.ports)()
     } else {
@@ -3030,7 +4117,9 @@ pub fn deterministic(subject: &Subject, log: Option<&Path>) -> Det {
     axes.push(served_axis(subject.class, &subject.spec.serves, listened));
     let stream = stream_text(&Project::at(subject.root), subject.run, subject.order);
     let web = web_of(subject.class, subject.spec);
-    if let Some(axis) = sources_axis(subject.class, web, subject.report, &stream) {
+    // Plan 43 A3: a cited path relative to the repository is looked for in the worker's folder, then the project's.
+    let roots = [subject.cwd, subject.root];
+    if let Some(axis) = sources_axis_at(subject.class, web, subject.report, &stream, &roots) {
         // Plan 37 §1.2: reel-motion-gemini's six YouTube ids were invented, and only a reader caught it, 8 days late.
         let (axis, note) = match oembed_base() {
             Some(base) => check_videos(
@@ -3073,6 +4162,126 @@ pub struct Sidecar {
     /// The subject when this order is a reviewer or an author: `(kind, subject)`.
     #[serde(default)]
     pub helps: Option<(String, String)>,
+    /// Plan 43 A1: `herdr gate amend`'s edits of this chain root's gate lines, oldest first, each with what it
+    /// replaced. The order file stays as the worker read it; `amended_spec` lays these over it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub amends: Vec<Amend>,
+}
+
+/// One `herdr gate amend` (plan 43 A1).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Amend {
+    pub at: u64,
+    /// The order the amend was typed for; the edit is its chain root's.
+    pub order: String,
+    /// Patterns added to `owns:`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns_added: Vec<String>,
+    /// `owns:` as it stood before.
+    #[serde(default)]
+    pub owns_before: Vec<String>,
+    /// The new `test:` command, and the one it replaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_before: Option<String>,
+}
+
+/// The chain root's gate lines with its amends laid over them: owns added, the test replaced.
+pub fn amend_spec(mut spec: Spec, amends: &[Amend]) -> Spec {
+    for amend in amends {
+        for pattern in &amend.owns_added {
+            if !spec.owns.contains(pattern) {
+                spec.owns.push(pattern.clone());
+            }
+        }
+        if let Some(test) = &amend.test {
+            spec.test = Some(test.clone());
+        }
+    }
+    spec
+}
+
+/// The gate lines of `root`'s order as the gate holds it to them: its order file and its amends.
+fn amended_spec(project: &Project, run: &str, root: &Seated) -> Spec {
+    amend_spec(
+        spec(&order_text(root)),
+        &read_sidecar(project, run, &root.order).amends,
+    )
+}
+
+/// Of `paths`, those `tree` holds. `--literal-pathspecs`: a path is a name, never a pattern.
+fn tracked_in(cwd: &Path, tree: &str, paths: &[String]) -> Result<HashSet<String>, String> {
+    let mut found = HashSet::new();
+    for chunk in paths.chunks(64) {
+        let mut args = vec![
+            "--literal-pathspecs",
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "-z",
+            tree,
+            "--",
+        ];
+        args.extend(chunk.iter().map(String::as_str));
+        found.extend(
+            git(cwd, &args)?
+                .split('\0')
+                .filter(|path| !path.is_empty())
+                .map(str::to_owned),
+        );
+    }
+    Ok(found)
+}
+
+/// Plan 43 A2: the classes that own no file: reviewers, lesson reviews, held-out authors and teachers.
+fn owns_nothing(class: &str) -> bool {
+    class == crate::nirvana_review::CLASS
+        || class == "review.adversary"
+        || class == "acceptance.author"
+        || class == crate::nirvana_knowledge::TEACH_CLASS
+}
+
+/// Plan 43 A2: the run's other live orders and the `owns:` each holds, `order`'s own chain left out. Live is seated,
+/// running, deferred, delivered or asked, or gated and not yet merged as a pass, an amend or an accept: work that may
+/// still land. A send-back is left out (its child holds the same lines), as are merged, failed, re-seated and
+/// interrupted orders. Each holds its chain root's lines, amended.
+pub fn live_holders(project: &Project, run: &str, order: &str) -> Vec<Holder> {
+    let state = replay(&project.journal(run).read().0);
+    let (own_root, _) = chain(&state, order);
+    let mut holders: Vec<Holder> = Vec::new();
+    for known in &state.orders {
+        if owns_nothing(&known.seated.class) {
+            continue;
+        }
+        let live = match known.phase {
+            Phase::Seated | Phase::Running | Phase::Deferred | Phase::Delivered | Phase::Asked => {
+                true
+            }
+            Phase::Gated => matches!(
+                known.verdict.as_deref(),
+                Some(verdict) if verdict == Outcome::Pass.word()
+                    || verdict == Outcome::Amend.word()
+                    || verdict == Outcome::ACCEPTED
+            ),
+            Phase::Merged | Phase::Failed | Phase::Reseated | Phase::Interrupted => false,
+        };
+        if !live {
+            continue;
+        }
+        let (root, _) = chain(&state, known.id());
+        if root == own_root || holders.iter().any(|holder| holder.order == root) {
+            continue;
+        }
+        let Some(root_seated) = state.order(&root).map(|root| &root.seated) else {
+            continue;
+        };
+        let owns = amended_spec(project, run, root_seated).owns;
+        if !owns.is_empty() {
+            holders.push(Holder { order: root, owns });
+        }
+    }
+    holders
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -3568,10 +4777,13 @@ pub fn gate(project: &Project, run: &str, order: &str) -> Result<Ruling, String>
         // Review S2: an order gated sent_back or asked is ruled on already; a gate by hand (the wake that carried the
         // verdict was missed, or the orchestrator wants it again) gives the stored verdict, with the child or the
         // question, and journals nothing.
+        // Plan 43 A1: an amend's ruling too, its `herdr gate amend` line again.
         Phase::Gated
             if matches!(
                 known.verdict.as_deref(),
-                Some(verdict) if verdict == Outcome::SentBack.word() || verdict == Outcome::Asked.word()
+                Some(verdict) if verdict == Outcome::SentBack.word()
+                    || verdict == Outcome::Asked.word()
+                    || verdict == Outcome::Amend.word()
             ) =>
         {
             return Ok(stored_ruling(&state, &known, run, sidecar))
@@ -3596,7 +4808,18 @@ pub fn gate(project: &Project, run: &str, order: &str) -> Result<Ruling, String>
         &known,
         sidecar,
         table.as_ref(),
+        Route::ByFault,
+        Vec::new(),
     )
+}
+
+/// Plan 43 A1: where a refusal goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    /// A child for a worker fault; the orchestrator's `herdr gate amend` line when no failing axis is the worker's.
+    ByFault,
+    /// A child whatever the fault: `herdr gate amend --send-back`, the orchestrator's choice.
+    Child,
 }
 
 /// Whether the trees a passed order's gate ran on are gone: its branch's head or the integration tip moved.
@@ -3652,6 +4875,7 @@ fn stored_ruling(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn gate_subject(
     project: &Project,
     run: &str,
@@ -3660,6 +4884,8 @@ fn gate_subject(
     known: &OrderState,
     mut sidecar: Sidecar,
     table: Option<&Table>,
+    route: Route,
+    notes: Vec<Axis>,
 ) -> Result<Ruling, String> {
     let order = known.id().to_owned();
     let seated = &known.seated;
@@ -3668,7 +4894,8 @@ fn gate_subject(
         .order(&root)
         .map_or_else(|| seated.clone(), |root| root.seated.clone());
     let root_text = order_text(&root_seated);
-    let spec = spec(&root_text);
+    // Plan 43 A1: the chain root's `herdr gate amend` edits, laid over its order file.
+    let spec = amend_spec(spec(&root_text), &read_sidecar(project, run, &root).amends);
     let cwd = PathBuf::from(&seated.cwd);
     let pane = known.pane.clone();
     let ports = move || live_ports(pane.as_deref());
@@ -3710,6 +4937,8 @@ fn gate_subject(
     };
     sidecar.last = Some(det.clone());
     let mut axes = det.axes.clone();
+    // Plan 43 A1: what `herdr gate amend` changed, journaled with the verdict it led to.
+    axes.extend(notes);
     // Held-out: the chain root's check, run at this order's head.
     let root_sidecar = if root == order {
         sidecar.clone()
@@ -3894,6 +5123,11 @@ fn gate_subject(
     // Plan 37b review S1: a block is the owner's or the orchestrator's to answer, so the lessons and cards the worker
     // opened are not counted as failing after it (a give-up counts nothing too: S3's hypothesis, unmeasured).
     let blocked = block_reason(known).is_some();
+    // Plan 43 A1: no failing axis is the worker's, so no child: the orchestrator amends the brief and re-gates the same
+    // branch. A block still wins (`send_back`), and the worker's lessons are not counted against a fault not its own.
+    if !blocked && route == Route::ByFault && no_worker_fault(&axes) {
+        return amend_refusal(project, run, journal, &order, axes);
+    }
     if !blocked {
         let _ = crate::nirvana_lessons::note_gated(&project.root, &stream, &order, false);
     }
@@ -4004,6 +5238,82 @@ fn blocked_question(order: &str, block: &str, axes: &[Axis]) -> String {
     )
 }
 
+/// A child's brief section that states the amended gate lines (plan 43 A1).
+fn amended_section(spec: &Spec) -> String {
+    let mut text = String::from(
+        "\n## The gate lines as amended by the orchestrator (`herdr gate amend`)\n\nThese replace the original's \
+`owns:` and `test:` lines.\n\n",
+    );
+    for pattern in &spec.owns {
+        text.push_str(&format!("- `owns: {pattern}`\n"));
+    }
+    if let Some(test) = &spec.test {
+        text.push_str(&format!("- `test: {test}`\n"));
+    }
+    text
+}
+
+/// Plan 43 A1: the `herdr gate amend` line a refusal with no worker fault names: the order, then each failing axis's
+/// flags (`Axis::amend`), each once. A gate fault has no flag: the same line re-gates the branch as it is.
+pub fn amend_line(order: &str, axes: &[Axis]) -> String {
+    let mut line = format!("herdr gate amend {order}");
+    let mut seen: Vec<&str> = Vec::new();
+    for flags in failing(axes)
+        .iter()
+        .filter_map(|axis| axis.amend.as_deref())
+    {
+        if !seen.contains(&flags) {
+            seen.push(flags);
+            line.push(' ');
+            line.push_str(flags);
+        }
+    }
+    line
+}
+
+/// Plan 43 A1: a refusal no worker can fix. Journaled `gated amend` with every axis and its fault, and no child; the
+/// reason opens with the exact `herdr gate amend` line, so the wake (`<order> gated amend: <reason>`) carries it. Megajam
+/// run ia1: the orchestrator stopped the send-back child 26 times and merged the parent by hand 11 times.
+fn amend_refusal(
+    project: &Project,
+    run: &str,
+    journal: &Journal,
+    order: &str,
+    axes: Vec<Axis>,
+) -> Result<Ruling, String> {
+    let line = amend_line(order, &axes);
+    let faults: Vec<String> = failing(&axes)
+        .iter()
+        .map(|axis| format!("{} ({})", axis.axis, fault_of(axis).word()))
+        .collect();
+    let reason = format!("{line}; {}", reason_line(&axes).unwrap_or_default());
+    journal
+        .append(
+            now(),
+            Kind::Gated {
+                order: order.to_owned(),
+                verdict: Outcome::Amend.word().into(),
+                reason: Some(reason),
+                axes: axes_values(&axes),
+            },
+        )
+        .map_err(|err| err.to_string())?;
+    record(project, run, order);
+    Ok(Ruling {
+        order: order.to_owned(),
+        run: run.to_owned(),
+        verdict: Outcome::Amend.word().into(),
+        axes,
+        next: vec![
+            format!(
+                "{line}: no worker was seated, since every failing axis is the brief's or the gate's: {}",
+                faults.join(", ")
+            ),
+            format!("or seat a worker for it anyway: herdr gate amend {order} --send-back"),
+        ],
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn send_back(
     project: &Project,
@@ -4081,7 +5391,12 @@ fn send_back(
         );
     };
     let seated = &known.seated;
-    let brief = send_back_brief(&order, root, n, &axes, root_text, &integration_branch(run));
+    let mut brief = send_back_brief(&order, root, n, &axes, root_text, &integration_branch(run));
+    // Plan 43 A1: the gate holds the child to the amended lines, so its worker reads them too.
+    let amends = read_sidecar(project, run, root).amends;
+    if !amends.is_empty() {
+        brief.push_str(&amended_section(&amend_spec(spec(root_text), &amends)));
+    }
     // Plan 31 review S1: the child never inherits the approval; it keeps the device line, and hears the parent may
     // have sent.
     let brief = crate::nirvana_gui_tools::child_brief_lines(&brief, known.seated.send_ok.is_some());
@@ -4743,6 +6058,10 @@ const USAGE: &str = "usage: herdr gate run <order> [--run r] [--json]       rule
                                                          or asked, 4 waiting for a review or a held-out check)
        herdr gate author <order> --order <file> [--run r]  book the held-out author for a booked builder
        herdr gate merge <order> [--run r]                 merge a passed order into nirvana-integrate/<run>
+       herdr gate merge <order> --by-hand <reason> [--sha s] [--run r]
+                                                         record a merge the orchestrator made itself
+       herdr gate amend <order> [--owns <glob>]... [--test <cmd>] [--send-back] [--run r] [--json]
+                                                         amend the brief's owns/test and re-gate the same branch
        herdr gate status [<order>] [--run r] [--json]";
 
 fn usage_exit() -> ! {
@@ -4750,29 +6069,34 @@ fn usage_exit() -> ! {
     std::process::exit(2);
 }
 
+#[derive(Default)]
 struct Args {
     positional: Option<String>,
     run: Option<String>,
     order_file: Option<PathBuf>,
     json: bool,
+    /// Plan 43: `gate amend`'s flags.
+    owns: Vec<String>,
+    test: Option<String>,
+    send_back: bool,
+    /// Plan 43: `gate merge --by-hand <reason> [--sha <sha>]`.
+    by_hand: Option<String>,
+    sha: Option<String>,
 }
 
 fn parse_args(args: &[String]) -> Args {
-    let mut parsed = Args {
-        positional: None,
-        run: None,
-        order_file: None,
-        json: false,
-    };
+    let mut parsed = Args::default();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
+        let mut value = || iter.next().cloned().unwrap_or_else(|| usage_exit());
         match arg.as_str() {
-            "--run" => parsed.run = Some(iter.next().cloned().unwrap_or_else(|| usage_exit())),
-            "--order" => {
-                parsed.order_file = Some(PathBuf::from(
-                    iter.next().cloned().unwrap_or_else(|| usage_exit()),
-                ))
-            }
+            "--run" => parsed.run = Some(value()),
+            "--order" => parsed.order_file = Some(PathBuf::from(value())),
+            "--owns" => parsed.owns.push(value()),
+            "--test" => parsed.test = Some(value()),
+            "--send-back" => parsed.send_back = true,
+            "--by-hand" => parsed.by_hand = Some(value()),
+            "--sha" => parsed.sha = Some(value()),
             "--json" => parsed.json = true,
             other if !other.starts_with("--") && parsed.positional.is_none() => {
                 parsed.positional = Some(other.to_owned())
@@ -4874,8 +6198,50 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
                 }
             }
         }
+        Some("amend") => {
+            let order = parsed.positional.clone().unwrap_or_else(|| usage_exit());
+            if parsed.by_hand.is_some() || parsed.sha.is_some() {
+                usage_exit();
+            }
+            let run = run_for(&project, &order, parsed.run);
+            match gate_amend(
+                &project,
+                &run,
+                &order,
+                &parsed.owns,
+                parsed.test.as_deref(),
+                parsed.send_back,
+            ) {
+                Ok(ruling) => {
+                    print_ruling(&ruling, parsed.json)?;
+                    std::process::exit(ruling.exit());
+                }
+                Err(why) => {
+                    eprintln!("herdr gate amend: {why}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        Some("merge") if parsed.by_hand.is_some() => {
+            let order = parsed.positional.clone().unwrap_or_else(|| usage_exit());
+            let run = run_for(&project, &order, parsed.run);
+            let reason = parsed.by_hand.clone().unwrap_or_default();
+            match merge_by_hand(&project, &run, &order, &reason, parsed.sha.as_deref()) {
+                Ok(line) => {
+                    println!("{line}");
+                    Ok(())
+                }
+                Err(why) => {
+                    eprintln!("herdr gate merge --by-hand: {why}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Some("merge") => {
             let order = parsed.positional.clone().unwrap_or_else(|| usage_exit());
+            if parsed.sha.is_some() || !parsed.owns.is_empty() || parsed.test.is_some() {
+                usage_exit();
+            }
             let run = run_for(&project, &order, parsed.run);
             match merge_cli(&project, &run, &order) {
                 Ok(line) => {
@@ -4962,6 +6328,277 @@ fn merge_cli(project: &Project, run: &str, order: &str) -> Result<String, String
         integration_branch(run),
         short_sha(&sha)
     ))
+}
+
+/// Plan 43 A1: `herdr gate amend <order> [--owns <glob>]... [--test <cmd>] [--send-back]`. Adds `owns:` patterns and
+/// replaces the `test:` of the order's chain root, journaled with the old values (the sidecar's `amends`, and an
+/// `amend` note axis in the `gated` event of the re-gate), then re-gates the same delivered branch with no new worker.
+/// `--send-back` seats a child for the refusal even when no axis is the worker's. With no flag it re-gates as is (a
+/// gate fault). The send-back cap is untouched: an amend is no send-back.
+pub fn gate_amend(
+    project: &Project,
+    run: &str,
+    order: &str,
+    owns: &[String],
+    test: Option<&str>,
+    send_back: bool,
+) -> Result<Ruling, String> {
+    let _lock = gate_lock(project).map_err(|err| err.to_string())?;
+    let journal = project.journal(run);
+    let state = replay(&journal.read().0);
+    let known = state
+        .order(order)
+        .ok_or(format!("no order {order} in run {run}"))?
+        .clone();
+    if owns_nothing(&known.seated.class) || helps_of(project, run, &state, order).is_some() {
+        return Err(format!(
+            "{order} is a helper or a review ({}): its gate has no `owns:` or `test:` to amend",
+            known.seated.class
+        ));
+    }
+    let verdict = known.verdict.as_deref().unwrap_or("");
+    let amendable = known.phase == Phase::Delivered
+        || (known.phase == Phase::Gated
+            && [Outcome::Amend, Outcome::SentBack, Outcome::Asked]
+                .iter()
+                .any(|outcome| outcome.word() == verdict));
+    if !amendable {
+        return Err(format!(
+            "{order} is {}{}: an amend re-gates a delivered order the gate refused",
+            known.phase.word(),
+            known
+                .verdict
+                .as_deref()
+                .map(|v| format!(" ({v})"))
+                .unwrap_or_default()
+        ));
+    }
+    // The re-gate runs in the worktree a live child works in: the child is stopped first.
+    if let Some(child) = state
+        .orders
+        .iter()
+        .find(|child| child.seated.parent.as_deref() == Some(order) && child.phase.wants_worker())
+    {
+        return Err(format!(
+            "{} works on {order}'s branch now ({}): stop it first with `herdr seat stop {}`",
+            child.id(),
+            child.phase.word(),
+            child.id()
+        ));
+    }
+    let (root, _) = chain(&state, order);
+    let root_seated = state
+        .order(&root)
+        .map_or_else(|| known.seated.clone(), |root| root.seated.clone());
+    let mut root_card = read_sidecar(project, run, &root);
+    let before = amend_spec(spec(&order_text(&root_seated)), &root_card.amends);
+    let mut added: Vec<String> = Vec::new();
+    for pattern in owns.iter().map(|pattern| pattern.trim().replace('\\', "/")) {
+        if !pattern.is_empty() && !before.owns.contains(&pattern) && !added.contains(&pattern) {
+            added.push(pattern);
+        }
+    }
+    let test = test
+        .map(|test| test.trim().trim_matches('`').trim().to_owned())
+        .filter(|test| !test.is_empty() && before.test.as_ref() != Some(test));
+    let mut said = Vec::new();
+    if !added.is_empty() {
+        said.push(format!(
+            "owns + {} (was {})",
+            added.join(" "),
+            if before.owns.is_empty() {
+                "none".to_owned()
+            } else {
+                before.owns.join(" ")
+            }
+        ));
+    }
+    if let Some(test) = &test {
+        said.push(format!(
+            "test `{test}` (was {})",
+            before
+                .test
+                .as_deref()
+                .map_or("none".to_owned(), |old| format!("`{old}`"))
+        ));
+    }
+    if !said.is_empty() {
+        root_card.amends.push(Amend {
+            at: now(),
+            order: order.to_owned(),
+            owns_added: added,
+            owns_before: before.owns.clone(),
+            test_before: test.as_ref().and(before.test.clone()),
+            test,
+        });
+        write_sidecar(project, run, &root_card).map_err(|err| err.to_string())?;
+    }
+    let mut notes = vec![Axis::new(
+        "amend",
+        Mark::Note,
+        if said.is_empty() {
+            format!("re-gated as it was, by `herdr gate amend {order}`")
+        } else {
+            format!("by `herdr gate amend {order}`: {}", said.join("; "))
+        },
+    )];
+    if send_back {
+        notes.push(Axis::new(
+            "amend",
+            Mark::Note,
+            "--send-back: a refusal seats a worker whatever its fault",
+        ));
+    }
+    let sidecar = read_sidecar(project, run, order);
+    let table = nirvana_seat::table_for(&project.root).ok();
+    gate_subject(
+        project,
+        run,
+        &journal,
+        &state,
+        &known,
+        sidecar,
+        table.as_ref(),
+        if send_back {
+            Route::Child
+        } else {
+            Route::ByFault
+        },
+        notes,
+    )
+}
+
+/// Plan 43 A7 (C10): `herdr gate merge <order> --by-hand <reason> [--sha <sha>]`, the record of a merge the
+/// orchestrator made itself. Megajam run ia1: 43 orders landed on its integration branch with no `merged` event, and 9
+/// `merged` events had no sha. The commit is `--sha` when given, which must be on the integration branch; else the
+/// first commit there with the order's branch head as a parent (the head itself when it is the tip). Journals a
+/// `gated accepted` event whose reason is `by hand: <reason>` and whose `by_hand` axis names the sha, then `merged`
+/// with the sha: `nirvana_run::Kind::Merged` has no field for a reason (the hunk that adds one is in plan 43's
+/// record). Nothing is cleaned up: the orchestrator's own merge may still use the worktree.
+pub fn merge_by_hand(
+    project: &Project,
+    run: &str,
+    order: &str,
+    reason: &str,
+    sha: Option<&str>,
+) -> Result<String, String> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err("--by-hand needs the reason the orchestrator merged it itself".into());
+    }
+    let _lock = gate_lock(project).map_err(|err| err.to_string())?;
+    let journal = project.journal(run);
+    let state = replay(&journal.read().0);
+    let known = state
+        .order(order)
+        .ok_or(format!("no order {order} in {run}"))?
+        .clone();
+    if known.phase == Phase::Merged {
+        return Ok(format!(
+            "{order} is merged already ({})",
+            known.merged_sha.clone().unwrap_or_default()
+        ));
+    }
+    if known.phase.wants_worker() {
+        return Err(format!(
+            "{order} is {}: its worker may still change the work; stop it first",
+            known.phase.word()
+        ));
+    }
+    let branch = integration_branch(run);
+    let tip = rev(&project.root, &format!("refs/heads/{branch}"))
+        .ok_or(format!("no branch {branch}: nothing was merged into it"))?;
+    let on_branch =
+        |sha: &str| git(&project.root, &["merge-base", "--is-ancestor", sha, &tip]).is_ok();
+    let landed = match sha {
+        Some(sha) => {
+            let full = rev(&project.root, sha).ok_or(format!("{sha} names no commit"))?;
+            if !on_branch(&full) {
+                return Err(format!("{} is not on {branch}", short_sha(&full)));
+            }
+            full
+        }
+        None => {
+            let head = known
+                .seated
+                .branch
+                .as_deref()
+                .and_then(|name| {
+                    rev(&project.root, &format!("refs/heads/{name}"))
+                        .or_else(|| rev(Path::new(&known.seated.cwd), "HEAD"))
+                })
+                .ok_or(format!(
+                    "{order} has no branch of its own: name the commit that landed it with --sha"
+                ))?;
+            if !on_branch(&head) {
+                return Err(format!(
+                    "{order}'s branch head {} is not on {branch} (a cherry-pick?): name the commit that landed it \
+with --sha",
+                    short_sha(&head)
+                ));
+            }
+            landing_commit(&project.root, &head, &tip)
+        }
+    };
+    let axis = Axis::new(
+        "by_hand",
+        Mark::Note,
+        format!(
+            "merged into {branch} by the orchestrator at {}: {reason}",
+            short_sha(&landed)
+        ),
+    )
+    .with(vec![landed.clone()]);
+    journal
+        .transact(now(), |_| {
+            Ok((
+                vec![
+                    Kind::Gated {
+                        order: order.to_owned(),
+                        verdict: Outcome::ACCEPTED.into(),
+                        reason: Some(format!("by hand: {reason}")),
+                        axes: axes_values(std::slice::from_ref(&axis)),
+                    },
+                    Kind::Merged {
+                        order: order.to_owned(),
+                        sha: Some(landed.clone()),
+                    },
+                ],
+                (),
+            ))
+        })
+        .map_err(|err| err.to_string())?;
+    record(project, run, order);
+    Ok(format!(
+        "{order} recorded as merged by hand into {branch} at {}: {reason}",
+        short_sha(&landed)
+    ))
+}
+
+/// The commit on `tip`'s history that took `head` in: the oldest with `head` as a parent; `head` itself when it is
+/// the tip or no commit names it as a parent.
+fn landing_commit(root: &Path, head: &str, tip: &str) -> String {
+    git(
+        root,
+        &[
+            "rev-list",
+            "--ancestry-path",
+            "--reverse",
+            "--parents",
+            &format!("{head}..{tip}"),
+        ],
+    )
+    .ok()
+    .and_then(|list| {
+        list.lines().find_map(|line| {
+            let mut words = line.split_whitespace();
+            let commit = words.next()?;
+            words
+                .any(|parent| parent == head)
+                .then(|| commit.to_owned())
+        })
+    })
+    .unwrap_or_else(|| head.to_owned())
 }
 
 fn status_cli(project: &Project, args: Args) -> std::io::Result<()> {

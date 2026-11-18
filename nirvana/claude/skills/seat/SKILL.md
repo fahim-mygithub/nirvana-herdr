@@ -135,6 +135,12 @@ of redoing it on the seat that invented it.
   reason; 4 waits for a review or a held-out check.
 - `herdr gate merge <order> --run <run>`: merges a passed order into the run's integration branch. A merge to
   `main` asks the owner, except in auto mode within its budgets.
+- `herdr gate amend <order> [--owns <glob>]... [--test "<cmd>"] [--send-back]`: for a `gated amend` wake, a refusal
+  no worker can fix (`owns:` too narrow with no live order holding the files, a `test:` that does not parse,
+  herdr's own files). It adds the owns or replaces the test, journals the old value, and re-gates the same branch
+  with no new worker. `--send-back` seats a worker instead. A new file outside `owns:` that no live order owns is a
+  note (`owned_new`), not a fail (plan 43).
+- `herdr gate merge <order> --by-hand "<reason>" [--sha <sha>]`: records a merge you made yourself, with its commit.
 - `herdr gate status [<order>] --run <run>`.
 
 The `gate` skill holds the axes and the send-back loop. When the plan is done and gated, `herdr run end <run>`

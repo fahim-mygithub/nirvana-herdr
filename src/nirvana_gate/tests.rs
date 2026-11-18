@@ -730,13 +730,16 @@ fn feature_size_orders_get_a_held_out_check_and_load_bearing_ones_a_reviewer() {
 fn the_outcome_words_and_what_the_tally_counts() {
     assert_eq!(
         Outcome::ALL.map(Outcome::word),
-        ["pass", "sent_back", "failed", "asked", "reseated"]
+        ["pass", "sent_back", "failed", "asked", "reseated", "amend"]
     );
     assert_eq!(Outcome::tally("pass"), Some(true));
     for word in ["sent_back", "failed", "asked", "sent back", "crash_loop"] {
         assert_eq!(Outcome::tally(word), Some(false), "{word}");
     }
     assert_eq!(Outcome::tally("reseated"), None);
+    // Plan 43 A1: an amend is the brief's or the gate's fault, never the seat's; its re-gate decides.
+    assert_eq!(Outcome::tally("amend"), None);
+    assert_eq!(nirvana_seat::tally_word("amend"), None);
     // Plan 37b review S1: an order asked on its own block is the record's `blocked`, and not counted.
     assert_eq!(Outcome::tally(Outcome::BLOCKED), None);
     // Plan 40a's review round: one order and run is decided by its last line, so each line is its own order.
@@ -1933,7 +1936,9 @@ fn p35a_real_sources_send_backs_count_what_the_twin_counts() {
             "repo-breakdown",
             include_str!("fixtures/repo-breakdown.jsonl"),
             6,
-            0,
+            // Plan 43 A3: three of its six are local paths its shell read (`ls .nirvana/lessons`, `cat
+            // .nirvana/retro/gaps.jsonl`, `head -60 .nirvana/reports/asl-inspiration.md`); plan 35a counted 0.
+            3,
         ),
         (
             "video-breakdown",
@@ -2429,7 +2434,7 @@ fn p35a_yt_dlp_is_a_fetch_word() {
 }
 
 /// The MotoProject round: a `file:///` source counts when a file tool opened that path, the case and separators
-/// aside; a shell `type` of it does not.
+/// aside. Plan 43 A3: a shell `type` of it counts too ("count Read, Grep and shell reads"); another file does not.
 #[test]
 fn p35a_a_file_source_counts_against_read_file() {
     let url = "file:///D:/MotoProject/scripts/post.py";
@@ -2444,7 +2449,7 @@ fn p35a_a_file_source_counts_against_read_file() {
     assert_eq!(p35a_mark(url, &claude), Mark::Pass);
     assert_eq!(
         p35a_mark(url, &agy_run("type D:\\MotoProject\\scripts\\post.py")),
-        Mark::Fail
+        Mark::Pass
     );
     assert_eq!(
         p35a_mark("file:///D:/MotoProject/scripts/other.py", &agy),
@@ -2495,8 +2500,13 @@ fn p35a_a_sources_send_back_says_no_cited_source_is_trusted() {
 
 /// The owned axis of an order in the project folder, gated with no branch.
 fn p35a_root_owned(root: &Path, order: &str, owns: &[&str]) -> Axis {
+    axis(&p35a_root_det(root, order, owns), "owned").clone()
+}
+
+/// The axes of an order in the project folder, gated with no branch.
+fn p35a_root_det(root: &Path, order: &str, owns: &[&str]) -> Det {
     let spec = spec_with(owns, "git ls-files", &[]);
-    let det = deterministic(
+    deterministic(
         &Subject {
             root,
             cwd: root,
@@ -2509,8 +2519,7 @@ fn p35a_root_owned(root: &Path, order: &str, owns: &[&str]) -> Axis {
             ports: &no_ports,
         },
         None,
-    );
-    axis(&det, "owned").clone()
+    )
 }
 
 fn p35a_seat_in_root(root: &Path, order: &str, at: u64) {
@@ -2552,12 +2561,12 @@ fn p35a_the_owned_axis_in_the_project_folder_counts_only_the_orders_changes() {
     )
     .unwrap();
     std::fs::write(root.join("new.txt"), "the order's\n").unwrap();
-    let owned = p35a_root_owned(&root, "root-order", &["calc.py"]);
+    let det = p35a_root_det(&root, "root-order", &["calc.py"]);
+    let owned = axis(&det, "owned");
     assert_eq!(owned.mark, Mark::Fail, "{owned:?}");
-    assert_eq!(
-        owned.lines,
-        vec!["README.md".to_owned(), "new.txt".to_owned()]
-    );
+    // Plan 43 A2: the new file, which HEAD lacks and no live order owns, is a note; the dirty one still fails.
+    assert_eq!(owned.lines, vec!["README.md".to_owned()]);
+    assert_eq!(axis(&det, OWNED_NEW).lines, vec!["new.txt".to_owned()]);
 }
 
 /// The MotoProject round: an order seated before the snapshot existed (r2 itself) counts a dirty file only when it was
@@ -2594,9 +2603,12 @@ fn p35a_with_no_snapshot_the_owned_axis_counts_files_modified_since_seating() {
     std::fs::write(root.join("notes").join("caf\u{e9}.md"), "the order's\n").unwrap();
     std::fs::write(root.join("clip.mp4"), "downloaded with the upload date\n").unwrap();
     age(&root.join("clip.mp4"));
-    let owned = p35a_root_owned(&root, "old-order", &["calc.py"]);
+    let det = p35a_root_det(&root, "old-order", &["calc.py"]);
+    let owned = axis(&det, "owned");
     assert_eq!(owned.mark, Mark::Fail, "{owned:?}");
-    let mut expected = vec!["notes/caf\u{e9}.md", "test_calc.py"];
+    // Plan 43 A2: the deleted tracked file fails; the new ones are a note.
+    assert_eq!(owned.lines, vec!["test_calc.py".to_owned()], "{owned:?}");
+    let mut expected = vec!["notes/caf\u{e9}.md"];
     // A platform with no creation time sees only the modification time.
     if std::fs::metadata(root.join("clip.mp4"))
         .and_then(|meta| meta.created())
@@ -2604,9 +2616,9 @@ fn p35a_with_no_snapshot_the_owned_axis_counts_files_modified_since_seating() {
     {
         expected.insert(0, "clip.mp4");
     }
-    let mut lines = owned.lines.clone();
+    let mut lines = axis(&det, OWNED_NEW).lines.clone();
     lines.sort();
-    assert_eq!(lines, expected, "{owned:?}");
+    assert_eq!(lines, expected, "{det:?}");
 }
 
 // ---- plan 37: cited videos are checked, and invented ones step the redo up ----
@@ -4220,7 +4232,10 @@ fn c40b_the_pinned_check_line_is_its_result() {
     let kept = filter(&output, &checks);
     assert_eq!(kept.len(), KEPT_LINES);
     assert_eq!(kept[0], "test c40b_probe ... ok", "{kept:?}");
-    assert!(!kept.iter().any(|line| line.contains("Compiling")), "{kept:?}");
+    assert!(
+        !kept.iter().any(|line| line.contains("Compiling")),
+        "{kept:?}"
+    );
     // A name holding a result word (`fail`) is not its own result.
     let checks = vec!["test_fail_case".to_owned()];
     let output = format!(
@@ -4240,7 +4255,14 @@ fn c40b_a_non_ascii_new_file_is_committed() {
     assert!(left.is_empty(), "{left:?}");
     let files = sh(
         &cwd,
-        &["-c", "core.quotepath=false", "show", "--name-only", "--format=", "HEAD"],
+        &[
+            "-c",
+            "core.quotepath=false",
+            "show",
+            "--name-only",
+            "--format=",
+            "HEAD",
+        ],
     );
     assert_eq!(files.lines().collect::<Vec<_>>(), vec!["caf\u{e9}.md"]);
 }
@@ -4341,8 +4363,16 @@ fn c40b_a_media_order_cites_the_video_it_opened_by_path() {
         serde_json::json!({"sources": [{"url": "https://www.youtube.com/watch?v=8aQ8SoQl5EY"}]}),
     );
     let notes = [
-        agy_tool(6, "read_file", serde_json::json!({"Path": format!(r"{kit}\ingest.json")})),
-        agy_tool(35, "run_command", serde_json::json!({ "CommandLine": probe })),
+        agy_tool(
+            6,
+            "read_file",
+            serde_json::json!({"Path": format!(r"{kit}\ingest.json")}),
+        ),
+        agy_tool(
+            35,
+            "run_command",
+            serde_json::json!({ "CommandLine": probe }),
+        ),
         finish.clone(),
     ]
     .join("\n");
@@ -4353,14 +4383,26 @@ fn c40b_a_media_order_cites_the_video_it_opened_by_path() {
     // Its `read_file` of the downloaded proxy, answered: the video was opened.
     let stream = format!(
         "{notes}\n{}",
-        agy_tool(9, "read_file", serde_json::json!({"Path": format!(r"{kit}\proxy.mp4")}))
+        agy_tool(
+            9,
+            "read_file",
+            serde_json::json!({"Path": format!(r"{kit}\proxy.mp4")})
+        )
     );
     let axis = sources_axis("media.video", None, Some(&report), &stream).expect("an axis");
     assert_eq!(axis.mark, Mark::Pass, "{axis:?}");
     // The real streams, whole: each cited video passes under media.video.
     for (order, fixture, video) in [
-        ("yt-breakdown", include_str!("fixtures/yt-breakdown.jsonl"), "8aQ8SoQl5EY"),
-        ("yt-breakdown-illit", include_str!("fixtures/yt-breakdown-illit.jsonl"), "KuKVOfwBPQI"),
+        (
+            "yt-breakdown",
+            include_str!("fixtures/yt-breakdown.jsonl"),
+            "8aQ8SoQl5EY",
+        ),
+        (
+            "yt-breakdown-illit",
+            include_str!("fixtures/yt-breakdown-illit.jsonl"),
+            "KuKVOfwBPQI",
+        ),
     ] {
         let (_, real) = fixture.split_once('\n').expect("head line");
         let report = cites(&[&format!("https://www.youtube.com/watch?v={video}")]);
@@ -4387,7 +4429,11 @@ fn c40b_a_media_order_still_fails_pages_it_never_fetched() {
     );
     let tunebat = "https://tunebat.com/Info/Do-the-Dance/6A1s2x4N6C9w7Y6tH7xX7P";
     let songbpm = "https://songbpm.com/@illit/do-the-dance";
-    let report = cites(&["https://www.youtube.com/watch?v=KuKVOfwBPQI", tunebat, songbpm]);
+    let report = cites(&[
+        "https://www.youtube.com/watch?v=KuKVOfwBPQI",
+        tunebat,
+        songbpm,
+    ]);
     let axis = sources_axis("media.video", None, Some(&report), &stream).expect("an axis");
     assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
     assert_eq!(axis.lines, vec![tunebat.to_owned(), songbpm.to_owned()]);
@@ -4416,37 +4462,79 @@ fn s1_mark(stream: &str) -> Mark {
 #[test]
 fn c40b_a_media_cite_needs_a_call_that_opened_it() {
     let bash = |command: &str, is_error: bool| {
-        claude_call("t1", "Bash", serde_json::json!({ "command": command }), is_error)
+        claude_call(
+            "t1",
+            "Bash",
+            serde_json::json!({ "command": command }),
+            is_error,
+        )
     };
     let proxy = r"C:\x\8aQ8SoQl5EY\proxy.mp4";
     // echo: names the URL, fetches nothing.
-    assert_eq!(s1_mark(&bash(&format!("echo {S1_VIDEO}"), false)), Mark::Fail, "echo");
+    assert_eq!(
+        s1_mark(&bash(&format!("echo {S1_VIDEO}"), false)),
+        Mark::Fail,
+        "echo"
+    );
     // A heredoc that writes the URL into a notes file.
     let heredoc = format!("cat > notes.md <<'EOF'\n{S1_VIDEO}\nEOF");
     assert_eq!(s1_mark(&bash(&heredoc, false)), Mark::Fail, "heredoc");
     // ls of the id's folder and of its media file: it lists, it does not open.
-    assert_eq!(s1_mark(&bash(r"ls C:\x\8aQ8SoQl5EY", false)), Mark::Fail, "ls folder");
-    assert_eq!(s1_mark(&bash(&format!("ls {proxy}"), false)), Mark::Fail, "ls file");
+    assert_eq!(
+        s1_mark(&bash(r"ls C:\x\8aQ8SoQl5EY", false)),
+        Mark::Fail,
+        "ls folder"
+    );
+    assert_eq!(
+        s1_mark(&bash(&format!("ls {proxy}"), false)),
+        Mark::Fail,
+        "ls file"
+    );
     // A Read of a missing path: the answer is an error.
     let read = |path: &str, is_error: bool| {
-        claude_call("t2", "Read", serde_json::json!({ "file_path": path }), is_error)
+        claude_call(
+            "t2",
+            "Read",
+            serde_json::json!({ "file_path": path }),
+            is_error,
+        )
     };
     assert_eq!(s1_mark(&read(proxy, true)), Mark::Fail, "missing Read");
     assert_eq!(
-        s1_mark(&agy_step(3, "ERROR", "read_file", serde_json::json!({ "Path": proxy }), "")),
+        s1_mark(&agy_step(
+            3,
+            "ERROR",
+            "read_file",
+            serde_json::json!({ "Path": proxy }),
+            ""
+        )),
         Mark::Fail,
         "missing read_file"
     );
     // An unanswered agy call is the call alone.
     assert_eq!(
-        s1_mark(&agy_step(3, "ACTIVE", "read_file", serde_json::json!({ "Path": proxy }), "")),
+        s1_mark(&agy_step(
+            3,
+            "ACTIVE",
+            "read_file",
+            serde_json::json!({ "Path": proxy }),
+            ""
+        )),
         Mark::Fail,
         "unanswered read_file"
     );
     // A file in the id's folder that holds no media.
-    assert_eq!(s1_mark(&read(r"C:\x\8aQ8SoQl5EY\notes.md", false)), Mark::Fail, "notes Read");
+    assert_eq!(
+        s1_mark(&read(r"C:\x\8aQ8SoQl5EY\notes.md", false)),
+        Mark::Fail,
+        "notes Read"
+    );
     // A failed ffprobe, in both streams.
-    assert_eq!(s1_mark(&bash(&format!("ffprobe {proxy}"), true)), Mark::Fail, "ffprobe Bash");
+    assert_eq!(
+        s1_mark(&bash(&format!("ffprobe {proxy}"), true)),
+        Mark::Fail,
+        "ffprobe Bash"
+    );
     let failed = agy_step(
         4,
         "DONE",
@@ -4464,12 +4552,35 @@ fn c40b_a_media_cite_needs_a_call_that_opened_it() {
 /// URL as input, a media file of its id read or probed without an error.
 #[test]
 fn c40b_a_media_cite_counts_a_call_that_opened_it() {
-    let bash = |command: &str| claude_call("t1", "Bash", serde_json::json!({ "command": command }), false);
+    let bash = |command: &str| {
+        claude_call(
+            "t1",
+            "Bash",
+            serde_json::json!({ "command": command }),
+            false,
+        )
+    };
     let proxy = r"C:\x\8aQ8SoQl5EY\proxy.mp4";
-    assert_eq!(s1_mark(&bash(&format!("ffprobe -v error {S1_VIDEO}"))), Mark::Pass, "ffprobe url");
-    assert_eq!(s1_mark(&bash(&format!("ffmpeg -i \"{S1_VIDEO}\" out.mp4"))), Mark::Pass, "ffmpeg url");
-    assert_eq!(s1_mark(&bash(&format!("ffprobe \"{proxy}\""))), Mark::Pass, "ffprobe file");
-    assert_eq!(s1_mark(&bash(&format!("ffmpeg -ss 0 -i {proxy} -frames:v 1 f.jpg"))), Mark::Pass, "ffmpeg file");
+    assert_eq!(
+        s1_mark(&bash(&format!("ffprobe -v error {S1_VIDEO}"))),
+        Mark::Pass,
+        "ffprobe url"
+    );
+    assert_eq!(
+        s1_mark(&bash(&format!("ffmpeg -i \"{S1_VIDEO}\" out.mp4"))),
+        Mark::Pass,
+        "ffmpeg url"
+    );
+    assert_eq!(
+        s1_mark(&bash(&format!("ffprobe \"{proxy}\""))),
+        Mark::Pass,
+        "ffprobe file"
+    );
+    assert_eq!(
+        s1_mark(&bash(&format!("ffmpeg -ss 0 -i {proxy} -frames:v 1 f.jpg"))),
+        Mark::Pass,
+        "ffmpeg file"
+    );
     let ok = agy_step(
         4,
         "DONE",
@@ -4581,9 +4692,15 @@ fn p72_without_the_start_record_the_owners_files_still_count() {
     let det = run_det(&root, &cwd, "am1", &spec, Some(&done()));
     let owned = axis(&det, "owned");
     assert_eq!(owned.mark, Mark::Fail, "{det:#?}");
+    // Plan 43 A2: the owner's new file, absent on the base, is counted as the order's and, held by no live order,
+    // noted; the owner's edit of README.md still fails.
+    assert!(owned.lines.iter().any(|f| f == "README.md"), "{owned:?}");
     assert!(
-        owned.lines.iter().any(|f| f == "Docs/Handoff/TABLE.md"),
-        "{owned:?}"
+        axis(&det, OWNED_NEW)
+            .lines
+            .iter()
+            .any(|f| f == "Docs/Handoff/TABLE.md"),
+        "{det:?}"
     );
 }
 
@@ -4616,8 +4733,17 @@ fn p72_a_forged_start_record_passes_nothing() {
     let spec = spec_with(&["calc.py", "test_*.py"], "git ls-files", &["test_mul"]);
     let det = run_det(&root, &cwd, "am1", &spec, Some(&done()));
     let owned = axis(&det, "owned");
+    // The forged record leaves nothing out: README.md, the owner's edit, still counts and fails. Plan 43 A2: the
+    // worker's new secret.txt, held by no live order, is a note.
     assert_eq!(owned.mark, Mark::Fail, "{det:#?}");
-    assert!(owned.lines.iter().any(|f| f == "secret.txt"), "{owned:?}");
+    assert!(owned.lines.iter().any(|f| f == "README.md"), "{owned:?}");
+    assert!(
+        axis(&det, OWNED_NEW)
+            .lines
+            .iter()
+            .any(|f| f == "secret.txt"),
+        "{det:?}"
+    );
 }
 
 #[test]
@@ -4644,4 +4770,690 @@ fn p72_a_branch_that_undoes_merged_work_keeps_the_file_as_the_orders() {
         begun_with(&path, &fork, &start, &changed),
         Ok(vec!["README.md".to_owned()])
     );
+}
+
+// ---- plan 43: refusals no worker can fix go to the orchestrator; new files, local sources, hand merges ----
+
+/// An order seated in its own worktree with `text` as its order file, delivered `done`, in run `r1`.
+fn p43_delivered(root: &Path, id: &str, class: &str, text: &str) -> PathBuf {
+    let project = Project::at(root);
+    let cwd = worktree(root, id);
+    let order_file = crate::nirvana_worker::write_order(&project, &cwd, id, text).expect("order");
+    let mut order = seated(id, None);
+    order.class = class.into();
+    order.cwd = cwd.display().to_string();
+    order.worktree = Some(cwd.display().to_string());
+    order.branch = Some(format!("nirvana/{id}"));
+    order.order_file = order_file;
+    let journal = project.journal("r1");
+    journal
+        .append(1, Kind::Seated(Box::new(order)))
+        .expect("seated");
+    cwd
+}
+
+fn p43_deliver(root: &Path, id: &str) {
+    Project::at(root)
+        .journal("r1")
+        .append(
+            2,
+            Kind::Delivered {
+                order: id.into(),
+                report: done(),
+            },
+        )
+        .expect("delivered");
+}
+
+const P43_ORDER: &str =
+    "# Add mul\n\nowns: calc.py test_mul.py\ntest: git ls-files\ncheck: test_mul\n";
+
+/// A2 (owner ruling R4): a file outside `owns:` the base already had and no one holds is the brief's fail, with the
+/// `--owns` that covers it; a new one no live order holds is a note in `owned_new`, never a fail.
+#[test]
+fn p43_a_new_file_no_live_order_owns_is_a_note_and_an_old_one_the_briefs_fail() {
+    let changed: Vec<String> = [
+        "calc.py",
+        "Docs/proof/a.png",
+        "Docs/proof/b.png",
+        "README.md",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    let owns = vec!["calc.py".to_owned()];
+    let is_new = |path: &str| path.starts_with("Docs/");
+    let (owned, note) = owned_axes("build.bounded", &changed, &owns, &is_new, &[]);
+    assert_eq!(owned.mark, Mark::Fail, "{owned:?}");
+    assert_eq!(owned.fault, Some(Fault::Brief), "{owned:?}");
+    assert_eq!(owned.lines, vec!["README.md".to_owned()]);
+    assert_eq!(owned.amend.as_deref(), Some("--owns README.md"));
+    let note = note.expect("the new files' note");
+    assert_eq!((note.axis.as_str(), note.mark), (OWNED_NEW, Mark::Note));
+    assert_eq!(
+        note.lines,
+        vec!["Docs/proof/a.png".to_owned(), "Docs/proof/b.png".to_owned()]
+    );
+    // Only new files outside `owns:`: the owned axis passes and says so; the note lists them.
+    let (owned, note) = owned_axes("build.bounded", &changed[..3], &owns, &is_new, &[]);
+    assert_eq!(owned.mark, Mark::Pass, "{owned:?}");
+    assert!(
+        owned.why.contains("2 new that no live order owns"),
+        "{owned:?}"
+    );
+    assert_eq!(note.map(|note| note.lines.len()), Some(2));
+    // `owned_axis` keeps its old reading: nothing new, no holder.
+    assert_eq!(
+        owned_axis("build.bounded", &changed[..3], &owns).mark,
+        Mark::Fail
+    );
+}
+
+/// A2: a file another live order owns stays a fail, and it is the worker's: a real collision.
+#[test]
+fn p43_a_file_another_live_order_owns_stays_the_workers_fail() {
+    let changed = vec!["calc.py".to_owned(), "Docs/proof/a.png".to_owned()];
+    let holders = vec![Holder {
+        order: "other".into(),
+        owns: vec!["Docs/proof/".into()],
+    }];
+    let (owned, note) = owned_axes(
+        "build.bounded",
+        &changed,
+        &["calc.py".to_owned()],
+        &|_| true,
+        &holders,
+    );
+    assert_eq!(owned.mark, Mark::Fail, "{owned:?}");
+    assert_eq!(owned.fault, Some(Fault::Worker), "{owned:?}");
+    assert_eq!(
+        owned.lines,
+        vec!["Docs/proof/a.png (owned by other)".to_owned()]
+    );
+    assert!(note.is_none(), "{note:?}");
+}
+
+/// A2: Megajam's h3-hand-seq (2026-11-14) owned `source/inkaether/public/hands/iahandsequence.h` and was sent back for
+/// `Source/InkAether/Public/Hands/IAHandSequence.h`. On Windows `owns:` ignores case; `glob_match` itself does not.
+#[test]
+fn p43_owns_ignores_case_where_the_file_system_does() {
+    let pattern = "source/inkaether/public/hands/iahandsequence.h";
+    let path = "Source/InkAether/Public/Hands/IAHandSequence.h";
+    assert_eq!(owns_match(pattern, path), cfg!(windows));
+    assert_eq!(
+        owns_match(
+            "content/inkaether/hands/seq/",
+            "Content/InkAether/Hands/Seq/L_HandSeq.umap"
+        ),
+        cfg!(windows)
+    );
+    assert!(!glob_match(pattern, path));
+    assert!(owns_match(path, path));
+    let axis = owned_axis(
+        "build.load_bearing",
+        &[path.to_owned()],
+        &[pattern.to_owned()],
+    );
+    assert_eq!(axis.mark == Mark::Pass, cfg!(windows), "{axis:?}");
+}
+
+/// A2 through the gate: a new file is read against the base the axes ran on, and the run's other live orders are read
+/// from the journal, each holding its own `owns:`.
+#[test]
+fn p43_the_gate_reads_new_files_from_the_base_and_holders_from_the_journal() {
+    let _home = crate::nirvana::with_test_home("p43-holders");
+    let root = repo("p43-holders");
+    let cwd = p43_delivered(&root, "o1", "build.bounded", P43_ORDER);
+    work(&cwd);
+    std::fs::write(cwd.join("README.md"), "calc, changed\n").expect("readme");
+    std::fs::create_dir_all(cwd.join("proof")).expect("proof");
+    std::fs::write(cwd.join("proof").join("shot.png"), "png").expect("shot");
+    // The worker commits its proof itself, as Megajam's did; the gate's own commit leaves an unowned new file out.
+    sh(&cwd, &["add", "proof/shot.png"]);
+    sh(&cwd, &["commit", "-q", "-m", "proof"]);
+    let spec = spec_with(&["calc.py", "test_mul.py"], "git ls-files", &["test_mul"]);
+    let det = run_det(&root, &cwd, "o1", &spec, Some(&done()));
+    let owned = axis(&det, "owned");
+    assert_eq!(owned.mark, Mark::Fail, "{det:#?}");
+    assert_eq!(owned.fault, Some(Fault::Brief), "{owned:?}");
+    assert_eq!(owned.lines, vec!["README.md".to_owned()]);
+    assert_eq!(
+        axis(&det, OWNED_NEW).lines,
+        vec!["proof/shot.png".to_owned()]
+    );
+    // Another order of the run, seated and not ended, owns README.md: now it is a collision, the worker's.
+    let project = Project::at(&root);
+    let other_file = project.orders_dir().join("o2.md");
+    std::fs::create_dir_all(project.orders_dir()).expect("orders");
+    std::fs::write(&other_file, "# Docs\n\nowns: README.md\n").expect("o2");
+    let mut other = seated("o2", None);
+    other.order_file = other_file.display().to_string();
+    project
+        .journal("r1")
+        .append(3, Kind::Seated(Box::new(other)))
+        .expect("o2 seated");
+    let det = run_det(&root, &cwd, "o1", &spec, Some(&done()));
+    let owned = axis(&det, "owned");
+    assert_eq!(owned.fault, Some(Fault::Worker), "{det:#?}");
+    assert_eq!(owned.lines, vec!["README.md (owned by o2)".to_owned()]);
+}
+
+/// A1: every failing axis is the brief's, so the gate seats no child; the journal says `gated amend`, its reason opens
+/// with the exact `herdr gate amend` line, and the wake carries it. A gate by hand gives it again.
+#[test]
+fn p43_a_refusal_no_worker_can_fix_seats_no_child_and_names_the_amend_line() {
+    let _home = crate::nirvana::with_test_home("p43-amend");
+    nirvana_seat::set_test_world(Some(BTreeMap::new()));
+    let root = repo("p43-amend");
+    let cwd = p43_delivered(&root, "am", "build.bounded", P43_ORDER);
+    work(&cwd);
+    std::fs::write(cwd.join("README.md"), "calc, changed\n").expect("readme");
+    p43_deliver(&root, "am");
+    let project = Project::at(&root);
+    let ruling = gate(&project, "r1", "am").expect("gate");
+    assert_eq!(ruling.verdict, "amend", "{ruling:#?}");
+    let state = replay(&project.journal("r1").read().0);
+    assert!(
+        state
+            .orders
+            .iter()
+            .all(|order| order.seated.why.as_deref() != Some("send_back")),
+        "a child was seated: {:?}",
+        state
+            .orders
+            .iter()
+            .map(|order| order.id())
+            .collect::<Vec<_>>()
+    );
+    let known = state.order("am").expect("am");
+    assert_eq!(known.verdict.as_deref(), Some("amend"));
+    let why = known.why.clone().unwrap_or_default();
+    assert!(
+        why.starts_with("herdr gate amend am --owns README.md; owned: "),
+        "{why}"
+    );
+    assert!(
+        state.queue.iter().any(|item| item
+            .line
+            .starts_with("am gated amend: herdr gate amend am --owns README.md")),
+        "{:?}",
+        state.queue
+    );
+    let owned = ruling
+        .axes
+        .iter()
+        .find(|axis| axis.axis == "owned")
+        .expect("owned");
+    assert_eq!(owned.fault, Some(Fault::Brief));
+    let again = gate(&project, "r1", "am").expect("gate again");
+    assert_eq!(again.verdict, "amend");
+    assert!(
+        again.next[0].starts_with("herdr gate amend am --owns README.md"),
+        "{again:?}"
+    );
+    nirvana_seat::set_test_world(None);
+}
+
+/// A1: `herdr gate amend` adds the owns, journals the old value, and re-gates the same branch with no new worker; the
+/// order file stays as the worker read it, and a passed order is not amended again.
+#[test]
+fn p43_gate_amend_adds_owns_and_regates_the_same_branch_with_no_child() {
+    let _home = crate::nirvana::with_test_home("p43-amend-run");
+    nirvana_seat::set_test_world(Some(BTreeMap::new()));
+    let root = repo("p43-amend-run");
+    let cwd = p43_delivered(&root, "am", "build.bounded", P43_ORDER);
+    work(&cwd);
+    std::fs::write(cwd.join("README.md"), "calc, changed\n").expect("readme");
+    p43_deliver(&root, "am");
+    let project = Project::at(&root);
+    assert_eq!(gate(&project, "r1", "am").expect("gate").verdict, "amend");
+    let head = rev(&cwd, "HEAD");
+    let amended =
+        gate_amend(&project, "r1", "am", &["README.md".to_owned()], None, false).expect("amend");
+    assert_eq!(amended.verdict, "pass", "{amended:#?}");
+    let state = replay(&project.journal("r1").read().0);
+    assert!(
+        state
+            .orders
+            .iter()
+            .all(|order| order.seated.why.as_deref() != Some("send_back")),
+        "a child was seated"
+    );
+    let note = amended
+        .axes
+        .iter()
+        .find(|axis| axis.axis == "amend")
+        .expect("the amend note");
+    assert!(
+        note.why
+            .contains("owns + README.md (was calc.py test_mul.py)"),
+        "{note:?}"
+    );
+    let card = read_sidecar(&project, "r1", "am");
+    assert_eq!(card.amends.len(), 1);
+    assert_eq!(
+        card.amends[0].owns_before,
+        vec!["calc.py".to_owned(), "test_mul.py".to_owned()]
+    );
+    assert_eq!(card.amends[0].owns_added, vec!["README.md".to_owned()]);
+    let order_file = &state.order("am").expect("am").seated.order_file;
+    assert!(!std::fs::read_to_string(order_file)
+        .expect("order")
+        .contains("README.md"));
+    assert_eq!(rev(&cwd, "HEAD"), head, "the same branch, no new commit");
+    let refused = gate_amend(&project, "r1", "am", &["x.md".to_owned()], None, false);
+    assert!(refused.is_err(), "{refused:?}");
+    nirvana_seat::set_test_world(None);
+}
+
+/// A1: one worker fault among the failing axes keeps today's child.
+#[test]
+fn p43_a_refusal_with_a_worker_fault_still_seats_the_child() {
+    let _home = crate::nirvana::with_test_home("p43-mixed");
+    nirvana_seat::set_test_world(Some(BTreeMap::new()));
+    let root = repo("p43-mixed");
+    let text =
+        "# Add mul\n\nowns: calc.py test_mul.py\ntest: git ls-files\ncheck: test_never_written\n";
+    let cwd = p43_delivered(&root, "mx", "build.bounded", text);
+    work(&cwd);
+    std::fs::write(cwd.join("README.md"), "calc, changed\n").expect("readme");
+    p43_deliver(&root, "mx");
+    let project = Project::at(&root);
+    let ruling = gate(&project, "r1", "mx").expect("gate");
+    assert_eq!(ruling.verdict, "sent_back", "{ruling:#?}");
+    let state = replay(&project.journal("r1").read().0);
+    assert!(state.order("mx-s1").is_some(), "no child");
+    assert!(!no_worker_fault(&ruling.axes));
+    nirvana_seat::set_test_world(None);
+}
+
+/// A1 (C5): a `test:` whose own text does not parse is the brief's; a worker's broken file, or a test that ran and
+/// failed, is the worker's. Megajam's r1-tripo-v3 (python), a3-megascans-fit and v12-valise-wording (pwsh).
+#[test]
+fn p43_a_test_command_that_does_not_parse_is_the_briefs() {
+    let python = "  File \"<string>\", line 1\n    import re;t='\n              ^\nSyntaxError: unterminated string literal (detected at line 1)\n";
+    assert_eq!(
+        test_unparsed("python -I -c \"import re\"", python).as_deref(),
+        Some("SyntaxError: unterminated string literal (detected at line 1)")
+    );
+    let workers = "Traceback (most recent call last):\n  File \"C:\\p\\calc.py\", line 3\n    def mul(a, b)\n                 ^\nSyntaxError: expected ':'\n";
+    assert_eq!(test_unparsed("python -m pytest -q", workers), None);
+    let pwsh = "\u{1b}[31;1mParserError: \u{1b}[0m\n\u{1b}[31;1mLine |\u{1b}[0m\n\u{1b}[31;1m   1 | \u{1b}[0m $d='x'; $h=Get-Content -Raw \\\"$d/a.html\\\"\n\u{1b}[31;1m     | \u{1b}[31;1m                          ~\u{1b}[0m\n\u{1b}[31;1m     | \u{1b}[31;1mThe string is missing the terminator: \".\u{1b}[0m\n";
+    let said = test_unparsed("pwsh -NoProfile -Command \"$d='x'\"", pwsh).expect("pwsh");
+    assert!(said.starts_with("ParserError"), "{said}");
+    assert!(said.contains("missing the terminator"), "{said}");
+    let script = "ParserError: C:\\p\\check.ps1:3\nLine |\n   3 |  if ( {\n";
+    assert_eq!(
+        test_unparsed("pwsh -NoProfile -File check.ps1", script),
+        None
+    );
+    assert_eq!(
+        test_unparsed("pwsh -NoProfile -Command \"exit 1\"", ""),
+        None
+    );
+    let run = CommandRun {
+        exit: Some(1),
+        output: python.into(),
+        timed_out: false,
+        error: None,
+    };
+    let axis = tests_axis(Some("python -I -c \"import re\""), Some(&run), &[]);
+    assert_eq!(
+        (axis.mark, axis.fault),
+        (Mark::Fail, Some(Fault::Brief)),
+        "{axis:?}"
+    );
+    assert!(axis
+        .amend
+        .as_deref()
+        .is_some_and(|flags| flags.starts_with("--test ")));
+    let ran = CommandRun {
+        exit: Some(1),
+        output: workers.into(),
+        timed_out: false,
+        error: None,
+    };
+    assert_eq!(
+        tests_axis(Some("python -m pytest -q"), Some(&ran), &[]).fault,
+        None
+    );
+}
+
+/// A1, at the root: herdr's own files under `.nirvana/` never stop the rebase. Megajam's l04-build-s2-r1 had untracked
+/// lesson copies the integration branch tracked; c0-skeleton and c1-rules a changed tracked one ("unstaged changes").
+#[test]
+fn p43_herdrs_own_files_never_stop_the_rebase() {
+    let root = repo("p43-aside");
+    let lessons = root.join(".nirvana").join("lessons");
+    std::fs::create_dir_all(&lessons).expect("lessons");
+    std::fs::write(lessons.join("index.json"), "{}\n").expect("index");
+    sh(&root, &["add", "-f", ".nirvana/lessons/index.json"]);
+    sh(&root, &["commit", "-q", "-m", "track the lessons index"]);
+    let cwd = worktree(&root, "o1");
+    // The integration branch gains a lesson the worktree holds an untracked copy of.
+    std::fs::write(lessons.join("x.md"), "a verified lesson\n").expect("lesson");
+    sh(&root, &["add", "-f", ".nirvana/lessons/x.md"]);
+    sh(&root, &["commit", "-q", "-m", "a lesson"]);
+    ensure_integration(&root, "r1").expect("integration");
+    let wt_lessons = cwd.join(".nirvana").join("lessons");
+    std::fs::create_dir_all(&wt_lessons).expect("wt lessons");
+    std::fs::write(wt_lessons.join("x.md"), "the offered copy\n").expect("copy");
+    std::fs::write(wt_lessons.join("index.json"), "{\"offered\": 1}\n").expect("changed index");
+    work(&cwd);
+    let spec = spec_with(&["calc.py", "test_mul.py"], "git ls-files", &["test_mul"]);
+    let det = run_det(&root, &cwd, "o1", &spec, Some(&done()));
+    let rebase = axis(&det, "rebase");
+    assert_eq!(rebase.mark, Mark::Pass, "{det:#?}");
+    assert!(
+        rebase
+            .why
+            .contains("2 of herdr's own file(s) under .nirvana/ set aside"),
+        "{rebase:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt_lessons.join("x.md")).expect("x"),
+        "a verified lesson\n",
+        "the rebased, tracked copy stays"
+    );
+}
+
+/// A1: a failed rebase is the gate's own fault only when herdr's files alone stood in its way.
+#[test]
+fn p43_a_rebase_stopped_by_herdrs_files_alone_is_the_gates() {
+    let root = repo("p43-rebase-fault");
+    let listed = RebaseFail {
+        files: Vec::new(),
+        why: "error: The following untracked working tree files would be overwritten by checkout:\n\t.nirvana/lessons/index.json\n\t.nirvana/lessons/x.md\nPlease move or remove them".into(),
+    };
+    assert_eq!(rebase_fault(&root, &listed), Fault::Gate);
+    let theirs = RebaseFail {
+        files: Vec::new(),
+        why: "error: The following untracked working tree files would be overwritten by checkout:\n\tcalc.py\n".into(),
+    };
+    assert_eq!(rebase_fault(&root, &theirs), Fault::Worker);
+    let conflict = RebaseFail {
+        files: vec!["calc.py".into()],
+        why: "CONFLICT".into(),
+    };
+    assert_eq!(rebase_fault(&root, &conflict), Fault::Worker);
+    let dirty = RebaseFail {
+        files: Vec::new(),
+        why: "error: cannot rebase: You have unstaged changes.".into(),
+    };
+    assert_eq!(
+        rebase_fault(&root, &dirty),
+        Fault::Gate,
+        "nothing outside .nirvana/ is uncommitted"
+    );
+    std::fs::write(root.join("calc.py"), "changed\n").expect("dirty");
+    assert_eq!(rebase_fault(&root, &dirty), Fault::Worker);
+}
+
+const P43_WT: &str =
+    "C:/Users/owner/Desktop/Megajam - Ink & Aether/.nirvana/worktrees/a1-asset-wiring-audit";
+const P43_PROJECT: &str = "C:/Users/owner/Desktop/Megajam - Ink & Aether";
+const P43_A1: &str = include_str!("fixtures/p43-a1-asset-wiring-audit-s1.jsonl");
+const P43_S2: &str = include_str!("fixtures/p43-s2-sound-audit-s1.jsonl");
+const P43_R16: &str = include_str!("fixtures/p43-r16-meadow3-rescore-o.jsonl");
+
+fn p43_report(urls: &[&str]) -> Value {
+    let sources: Vec<Value> = urls
+        .iter()
+        .map(|url| serde_json::json!({"url": url, "used_for": "the audit"}))
+        .collect();
+    serde_json::json!({"status":"done","summary":"audited","files":[],"tests":[],"gotchas":[],"sources":sources})
+}
+
+/// A3 on Megajam's a1-asset-wiring-audit-s1 (2026-11-14): it read `DECISIONS.md` with `Read` on its worktree's absolute
+/// path and listed and counted the rest from its worktree, and was refused for each repo-relative path it cited.
+#[test]
+fn p43_a_repo_relative_source_read_in_the_worktree_counts() {
+    let roots = [Path::new(P43_WT), Path::new(P43_PROJECT)];
+    let cited = [
+        "Docs/AssetGen/L02B_FIT/DECISIONS.md",
+        "Docs/AssetGen/L02B_FIT/SOURCED.md",
+        "Docs/AssetGen/PROPS_OWN_REPORT.md",
+        "Docs/AssetGen/ (directory listing)",
+    ];
+    let report = p43_report(&cited);
+    let axis = sources_axis_at("research.web", Some("asked"), Some(&report), P43_A1, &roots)
+        .expect("axis");
+    assert_eq!(axis.mark, Mark::Pass, "{axis:?}");
+    // `Read` alone, by absolute path: the cited relative path resolves against the worktree, and only there.
+    let read_only = P43_A1.lines().nth(1).expect("the Read line");
+    assert!(read_only.contains("\"Read\""), "{read_only}");
+    let reads = stream_reads(read_only);
+    assert!(local_read(cited[0], &reads, &roots));
+    assert!(!local_read(cited[0], &reads, &[]));
+    // The `wc -l` line read SOURCED.md, which no `Read` opened.
+    let shell_only = P43_A1.lines().next().expect("the shell line");
+    assert!(local_read(cited[1], &stream_reads(shell_only), &roots));
+    // A file it never opened is still unread.
+    assert!(!local_read(
+        "Docs/AssetGen/NEVER_OPENED.md",
+        &stream_reads(P43_A1),
+        &roots
+    ));
+}
+
+/// A3 on Megajam's s2-sound-audit-s1: `head` read a local file; a `for` loop of `[ -f "$f" ]` checked that files
+/// exist and read none; the paths a heredoc writes into a report (its own sources list, `cat >> ... <<'EOF'`) are
+/// never a read.
+#[test]
+fn p43_a_heredoc_body_is_no_read_and_a_shell_read_is() {
+    let roots = [Path::new(P43_WT), Path::new(P43_PROJECT)];
+    let reads = stream_reads(P43_S2);
+    assert!(local_read("Docs/Pipeline/CORE_SPEC.md", &reads, &roots));
+    let exists = P43_S2.lines().next().expect("the for line");
+    assert!(exists.contains("[ -f"), "{exists}");
+    assert!(!local_read(
+        "Docs/TITLE_SCREEN_SPEC.md",
+        &stream_reads(exists),
+        &roots
+    ));
+    let heredoc = P43_S2.lines().nth(2).expect("the heredoc line");
+    assert!(heredoc.contains("<<'EOF'"), "{heredoc}");
+    let written = stream_reads(heredoc);
+    assert!(!local_read(
+        "Docs/Design/INK_AND_AETHER_DESIGN.md",
+        &written,
+        &roots
+    ));
+}
+
+/// A3: an agy `run_command` read and a `Grep` folder count; a `Grep` over the whole worktree vouches for no file.
+#[test]
+fn p43_agy_shell_reads_and_a_search_folder_count() {
+    let roots = [Path::new("C:/w/o1"), Path::new("C:/w")];
+    let stream = agy_run("Get-Content -Raw Docs/Spec/A.md | Select-Object -First 5");
+    assert!(local_read("Docs/Spec/A.md", &stream_reads(&stream), &roots));
+    let grep = |path: &str| {
+        serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"g1","name":"Grep",
+            "input":{"pattern":"PlaySfx","path":path}}]}})
+        .to_string()
+    };
+    assert!(local_read(
+        "Source/Audio/Bus.cpp",
+        &stream_reads(&grep("C:\\w\\o1\\Source")),
+        &roots
+    ));
+    assert!(!local_read(
+        "Source/Audio/Bus.cpp",
+        &stream_reads(&grep("C:\\w\\o1")),
+        &roots
+    ));
+    // Comma-joined entries and a file in the last one's folder (Megajam's a1 cited both forms).
+    let both = agy_run("cat Source/Front/Root.cpp Source/Front/Mode.cpp Config/A.ini Config/B.ini");
+    let reads = stream_reads(&both);
+    assert!(local_read("Config/A.ini, Config/B.ini", &reads, &roots));
+    assert!(local_read(
+        "Source/Front/Root.cpp, Mode.cpp",
+        &reads,
+        &roots
+    ));
+    assert!(!local_read("Config/A.ini, Config/C.ini", &reads, &roots));
+}
+
+/// A3: research.read's local entries are not checked; a web URL it cited and never fetched still fails. Megajam's
+/// w7-size-audit cited two itch.io pages beside its local files.
+#[test]
+fn p43_research_read_skips_local_entries_and_an_unfetched_url_still_fails() {
+    let report = p43_report(&["Docs/never_opened.md", "https://itch.io/post/15588986"]);
+    let axis =
+        sources_axis_at("research.read", Some("asked"), Some(&report), "", &[]).expect("axis");
+    assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+    assert_eq!(axis.lines, vec!["https://itch.io/post/15588986".to_owned()]);
+    assert!(
+        axis.why.contains("1 local entr(y/ies) not checked"),
+        "{axis:?}"
+    );
+    let local = p43_report(&["Docs/never_opened.md", "C:\\p\\Builds\\x.zip"]);
+    let axis =
+        sources_axis_at("research.read", Some("asked"), Some(&local), "", &[]).expect("axis");
+    assert_eq!(axis.mark, Mark::Pass, "{axis:?}");
+    // Another class still checks them.
+    let axis = sources_axis_at("research.web", Some("asked"), Some(&local), "", &[]).expect("axis");
+    assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+    assert!(local_entry("Docs/x.md") && local_entry("file:///C:/x") && local_entry("C:\\x"));
+    assert!(
+        !local_entry("https://x.org/a")
+            && !local_entry("docs.rs/serde")
+            && !local_entry("www.x.org")
+    );
+}
+
+/// A3: a media order that cites nothing, opened no page and judged local files is a note, whatever its brief said of
+/// the web. Megajam's r16-meadow3-rescore-o viewed its stills with agy `read_file` and was refused "no sources".
+#[test]
+fn p43_a_media_order_that_judged_local_files_and_cited_none_is_a_note() {
+    let report = serde_json::json!({"status":"done","summary":"scored 5/10","files":[],"tests":[],"gotchas":[]});
+    let web = Some("herdr's brief asked it for its sources");
+    let axis = sources_axis_at("media.video", web, Some(&report), P43_R16, &[]).expect("axis");
+    assert_eq!(axis.mark, Mark::Note, "{axis:?}");
+    // It opened a page and cited nothing: a fail, as before.
+    let fetched = format!(
+        "{P43_R16}{}\n",
+        claude_bash("curl -s https://example.org/meadows", "look")
+    );
+    let axis = sources_axis_at("media.video", web, Some(&report), &fetched, &[]).expect("axis");
+    assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+    // A research order is not a media order: still a fail.
+    let axis = sources_axis_at("research.web", web, Some(&report), P43_R16, &[]).expect("axis");
+    assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+}
+
+/// A7 (C10): a hand merge is journaled with the commit that landed it and the orchestrator's reason. Megajam: 43
+/// orders landed with no `merged` event, and 9 `merged` events had no sha.
+#[test]
+fn p43_a_hand_merge_is_journaled_with_its_sha_and_reason() {
+    let _home = crate::nirvana::with_test_home("p43-by-hand");
+    let root = repo("p43-by-hand");
+    let cwd = p43_delivered(&root, "hm", "build.bounded", P43_ORDER);
+    work(&cwd);
+    sh(&cwd, &["add", "-A", "--", "calc.py", "test_mul.py"]);
+    sh(&cwd, &["commit", "-q", "-m", "mul"]);
+    let project = Project::at(&root);
+    let journal = project.journal("r1");
+    p43_deliver(&root, "hm");
+    journal
+        .append(
+            3,
+            Kind::Gated {
+                order: "hm".into(),
+                verdict: "sent_back".into(),
+                reason: Some("owned: 1 file(s) changed that the order does not own".into()),
+                axes: Vec::new(),
+            },
+        )
+        .expect("gated");
+    let base = ensure_integration(&root, "r1").expect("integration");
+    let head = rev(&cwd, "HEAD").expect("head");
+    let landed = merge(&root, "r1", "hm", &base, &head).expect("the orchestrator's own merge");
+    assert!(merge_by_hand(&project, "r1", "hm", "  ", None).is_err());
+    let said =
+        merge_by_hand(&project, "r1", "hm", "the owns were too narrow", None).expect("by hand");
+    assert!(said.contains(short_sha(&landed)), "{said}");
+    let state = replay(&journal.read().0);
+    let known = state.order("hm").expect("hm");
+    assert_eq!(known.phase, Phase::Merged);
+    assert_eq!(known.merged_sha.as_deref(), Some(landed.as_str()));
+    assert_eq!(known.verdict.as_deref(), Some(Outcome::ACCEPTED));
+    assert_eq!(
+        known.why.as_deref(),
+        Some("by hand: the owns were too narrow")
+    );
+    let again = merge_by_hand(&project, "r1", "hm", "again", None).expect("again");
+    assert!(again.contains("merged already"), "{again}");
+    // A commit that is not on the integration branch is refused.
+    let other = p43_delivered(&root, "hm2", "build.bounded", P43_ORDER);
+    p43_deliver(&root, "hm2");
+    std::fs::write(other.join("README.md"), "elsewhere\n").expect("readme");
+    sh(&other, &["commit", "-q", "-am", "not merged"]);
+    let stray = rev(&other, "HEAD").expect("stray");
+    let refused = merge_by_hand(&project, "r1", "hm2", "landed", Some(&stray));
+    assert!(
+        refused.as_ref().is_err_and(|why| why.contains("is not on")),
+        "{refused:?}"
+    );
+}
+
+/// A3 on three more of Megajam's read shapes, as the workers wrote them: w7-size-audit `cd` into its build's `jobs`
+/// folder and read there by relative name; it read a CSV from a `python -I - <<'EOF'` script; s2-sound-audit-s1 grepped
+/// with a `\|` inside quotes, which a cut at every `|` split from its path.
+#[test]
+fn p43_a_shell_read_follows_cd_quoted_pipes_and_script_heredocs() {
+    let jobs = "C:/Users/owner/Desktop/Megajam - Ink & Aether/Builds/w6-playtest-build-o/jobs";
+    let roots = [Path::new(P43_WT), Path::new(P43_PROJECT)];
+    let cd = claude_bash(
+        &format!("cd \"{jobs}\"; cat list_containers.ps1 zip_win64.py; head -5 container_Win64.csv; wc -l container_*.csv"),
+        "read the job files",
+    );
+    let reads = stream_reads(&cd);
+    assert!(local_read(
+        &format!("{jobs}/container_Win64.csv"),
+        &reads,
+        &roots
+    ));
+    assert!(local_read(&format!("{jobs}/zip_win64.py"), &reads, &roots));
+    assert!(
+        !local_read(&format!("{jobs}/container_Wasm.csv"), &reads, &roots),
+        "a glob names no one file"
+    );
+    // Git Bash's own spelling of the same folder.
+    let msys = claude_bash(
+        "cd /c/Users/owner/Desktop/Pojects/groove-coach; head -60 .nirvana/reports/asl-inspiration.md",
+        "read",
+    );
+    assert!(local_read(
+        "C:/Users/owner/Desktop/Pojects/groove-coach/.nirvana/reports/asl-inspiration.md",
+        &stream_reads(&msys),
+        &roots
+    ));
+    let piped = claude_bash(
+        "grep -n -i \"sound\\|A_\" \"Docs/FRONT_ASSETS.md\" | head -n 8",
+        "grep",
+    );
+    assert!(local_read(
+        "Docs/FRONT_ASSETS.md",
+        &stream_reads(&piped),
+        &roots
+    ));
+    let script = claude_bash(
+        "python -I - <<'EOF'\nimport csv\np=r\"C:\\Users\\owner\\Desktop\\Megajam - Ink & Aether\\Builds\\w6-playtest-build-o\\jobs\\container_Wasm.csv\"\nrows=list(csv.reader(open(p,encoding=\"utf-8\")))\nprint(len(rows))\nEOF",
+        "sum",
+    );
+    assert!(local_read(
+        &format!("{jobs}/container_Wasm.csv"),
+        &stream_reads(&script),
+        &roots
+    ));
+    // A body written to a file is still no read.
+    let written = claude_bash(
+        "cat > notes.md <<'EOF'\nsee Docs/Never/READ.md\nEOF",
+        "write",
+    );
+    assert!(!local_read(
+        "Docs/Never/READ.md",
+        &stream_reads(&written),
+        &roots
+    ));
 }
