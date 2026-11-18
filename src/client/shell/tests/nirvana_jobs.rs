@@ -377,3 +377,57 @@ fn click_on_claude_task_tails_file() {
 
     done(root);
 }
+
+/// The owner, 2026-11-18, of the MotoProject Jobs panel listing Megajam's `lk24-*` jobs: "the jobs list and its
+/// failures should be project specific not accross the whole Nirvana". Read through the real view (no test view):
+/// the square counts this space's job only, and the panel lists it alone. The other job's folder is a sibling whose
+/// name starts with this folder's name, which a string-prefix match would take.
+#[test]
+fn the_jobs_square_and_panel_show_only_this_spaces_jobs() {
+    let home = crate::nirvana::with_test_home("jobs_ui_scope");
+    let (mut state, root) = state_for("scope");
+    set_view_for_test(None);
+    let now = crate::nirvana_job::now();
+    let record = |id: &str, cwd: String, exit: i32| JobRecord {
+        id: id.into(),
+        name: id.into(),
+        argv: vec!["cargo".into()],
+        cwd,
+        space: Some("ws_1".into()),
+        pane: None,
+        started: now - 100,
+        ended: Some(now - 50),
+        exit: Some(exit),
+        pid: None,
+    };
+    let own = record("moto-build", root.join("src").display().to_string(), 0);
+    let other = record("lk24-prev1", format!("{}-two", root.display()), 1);
+    crate::nirvana_job::write_job(&home.path, &own).expect("write own job");
+    crate::nirvana_job::write_job(&home.path, &other).expect("write other job");
+
+    let wide = strip(&mut state, 200);
+    assert!(
+        wide.contains(" Jobs 1 passed \u{25BE}"),
+        "this space's job only: {wide:?}"
+    );
+    assert!(
+        !wide.contains("failed"),
+        "another project's failure is not counted here: {wide:?}"
+    );
+
+    let square = state.hits.nirvana_jobs;
+    click(&mut state, square.x + 1, square.y);
+    assert!(state.nirvana_jobs.is_some(), "panel opens on click");
+    let text = rows_of(&mut state, 160, 40).join("\n");
+    assert!(
+        text.contains("moto-build"),
+        "lists this space's job: {text}"
+    );
+    assert!(
+        !text.contains("lk24-prev1"),
+        "does not list another project's job: {text}"
+    );
+
+    done(root);
+    drop(home);
+}

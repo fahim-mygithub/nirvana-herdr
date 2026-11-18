@@ -3,6 +3,20 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.78.3: the Jobs square and panel show only their own project's jobs
+
+- **Changed:** a space's Jobs square and panel read only the jobs whose working folder is the space's folder or under
+  it, worker worktrees included. Paths are compared whole, so `C:\proj` does not take `C:\proj-two`. `herdr job list`
+  still prints every job on the machine.
+- **Because:** the owner, 2026-11-18, with a screenshot: "I think the jobs list and its failures should be project
+  specific not accross the whole Nirvana". MotoProject's panel listed Megajam's `lk24-*` jobs and counted their
+  failures, because the view took every record under `<home>/nirvana/jobs` and filtered only by age.
+- **Measured:** 23 `nirvana_job` tests pass, 3 of them new. The 5 `p88_*` controls each turn their test red. Of the
+  owner's job records, 23 were running or under 12 hours old at the fix, and all 23 showed in every space's panel. Not
+  yet seen in a live window. Known gaps: a job started in a folder outside every space shows only in `herdr job list`,
+  and a space whose Claude pane sits in a subfolder does not show jobs run at the project root.
+- **If you remove this:** every space's square counts every project's failures, and its panel lists their jobs.
+
 ## alpha 0.78.2: the phone's choice sheet reads on an iPhone
 
 - **Changed:** in the phone's prompt sheet the heading stays pinned at the top, and the body shrinks to fit the sheet
