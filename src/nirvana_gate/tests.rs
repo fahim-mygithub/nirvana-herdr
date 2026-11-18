@@ -5260,6 +5260,17 @@ fn p43_a_heredoc_body_is_no_read_and_a_shell_read_is() {
         &written,
         &roots
     ));
+    // Fix round: a body line that reads like a command (a how-to written into a report) is still written text. Since
+    // reads are scoped to their segment, only a body line that opens with a reader tells the heredoc rule apart.
+    let how_to = claude_bash(
+        "cat >> Docs/HOWTO.md <<'EOF'\ncat Docs/Never/READ.md\nEOF",
+        "write",
+    );
+    assert!(!local_read(
+        "Docs/Never/READ.md",
+        &stream_reads(&how_to),
+        &roots
+    ));
 }
 
 /// A3: an agy `run_command` read and a `Grep` folder count; a `Grep` over the whole worktree vouches for no file.
