@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import install  # noqa: E402
 import version  # noqa: E402
+import seat_refresh  # noqa: E402
 from test_windows_shell import *  # noqa: E402,F401,F403  plan 12 O4a: the Windows side of install
 from test_ab import *  # noqa: E402,F401,F403  plan 12 O7: the A/B driver (nirvana/bench/ab.py)
 
@@ -658,6 +659,20 @@ class VersionTest(unittest.TestCase):
         text = version.FILE.read_bytes()
         self.assertTrue(text.endswith(b"\n") and text.count(b"\n") == 1 and b"\r" not in text, text)
         self.assertEqual(len(text.strip().split(b".")), 3)
+
+
+
+class SeatRefreshTest(unittest.TestCase):
+    """The seats refresh (2026-11-18): Hydrogen's cells are plan 71's probe priced again at each model's own row."""
+
+    def test_hydrogens_cells_are_the_probe_at_its_own_price(self):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = seat_refresh.main(["hydrogen", "--check"])
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertIn("low: hydrogen over flash 1.43 at its own price (0.74 at flash's)", out.getvalue())
 
 
 if __name__ == "__main__":

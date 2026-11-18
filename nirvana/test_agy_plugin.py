@@ -239,6 +239,11 @@ class AgyFilesTest(AgyBuilt):
             self.assertTrue((self.dot / part).is_dir(), part)
         self.assertFalse((self.dot / "mcp_config.json").exists())
 
+    def test_plugin_json_has_no_byte_order_mark(self):
+        # agy 1.5.11's notes: a `plugin.json` that starts with a UTF-8 BOM did not load on agy up to 1.5.10, though
+        # `agy plugin install` reported success. `json.loads` on bytes reads past a BOM, so the test above cannot see it.
+        self.assertFalse((self.dot / "plugin.json").read_bytes().startswith(b"\xef\xbb\xbf"))
+
     def test_a_rebuild_writes_the_same_bytes(self):
         again = self.tmp / "again" / ".agents"
         agy_plugin.build(again, self.home)

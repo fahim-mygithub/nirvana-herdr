@@ -93,6 +93,10 @@ def row(seat: dict, effort: str, at: str, usd: float, windows: dict) -> str:
     if effort == "medium":
         basis = (f"derived: P4's 43,807 cache reads and 1,286 out at {name}'s {at} prices, ${usd:.4f}{fitted}, "
                  "times per_usd (nirvana/seat_cells.py)")
+    elif source and source != "medium's":
+        # The seats refresh (2026-11-18): a fit of the effort's own orders makes the cell the record's word, so it is
+        # derived like medium's; the effort multiplier only places the cell the fit was measured against.
+        basis = f"derived: medium x {EFFORT[effort]}{fitted} (nirvana/seat_cells.py)"
     else:
         basis = f"prior: medium x {EFFORT[effort]}{fitted} (nirvana/seat_cells.py)"
     return f'  {{ effort = "{effort}", windows = {{ {inner} }}, at = "{at}", basis = "{basis}" }},'

@@ -84,26 +84,29 @@ unread = { seat = "opus", effort = "medium" }
 
 # An order's size scales its expected use and its lease. `use` is a multiple of probe P4's order (one
 # `slugify` function and its tests, about 45k tokens read and 1.3k written), against `medium = 5`.
-# small and large are measured from the record (the review round, `python nirvana/seat_fit.py`, section 2): the median
-# across seat-and-effort groups of what an order of that size spent against a medium one, small 0.59 of medium (6
-# groups, n 115), large 0.83 (4 groups, n 27). Large under medium is the record's word, not a slip: the orchestrator's
-# size labels do not separate large from medium orders yet. The old priors were 1 and 20.
-# `minutes` is how long an order runs, for the reset discount; `lease_minutes` how long a booking holds
-# when its runner never releases it. Priors, kept: seat_fit.py section 3 prints the record's p90 at 16, 35 and 108
-# minutes, inside each `lease_minutes`.
+# small and large are measured from the record (`python nirvana/seat_fit.py`, section 2): the median across
+# seat-and-effort groups of what an order of that size spent against a medium one. The seats refresh (2026-11-18, the
+# whole record with run ia1 in it): small 0.386 of medium (15 groups, n 1862), large 1.025 (9 groups, n 161). The
+# review round had 0.59 (n 115) and 0.83 (n 27); the old priors were 1 and 20. Run ia1 alone puts large at 2.26 (7
+# groups, n 105): its large orders are larger, the record's others are not yet.
+# `minutes` is how long an order runs, for the reset discount; `lease_minutes` how long a booking holds when its runner
+# never releases it. The seats refresh: `minutes` is run ia1's median from seated to ended (seat_fit.py section 3 on
+# ia1's lines): 7 (n 47), 24 (n 165), 82 (n 109). The whole record's small median is 0 minutes (n 1872, sub-minute
+# chores), no figure for a reset discount, so ia1's is taken for all three. `lease_minutes` are priors, kept: ia1's p90
+# is 38, 86 and 246 minutes, inside each.
 [size.small]
-use = 3.0
-minutes = 15
+use = 1.9
+minutes = 7
 lease_minutes = 60
 
 [size.medium]
 use = 5.0
-minutes = 45
+minutes = 24
 lease_minutes = 180
 
 [size.large]
-use = 4.1
-minutes = 120
+use = 5.1
+minutes = 82
 lease_minutes = 480
 
 # A pool is one quota several seats spend (plan 12 §3). `windows` are the windows every seat of the pool
@@ -146,6 +149,12 @@ basis = "free: the local GPU"
 # effort as {effort} where the CLI takes it in the model id (agy).
 # `prices` are USD per million tokens, each from its date. `use` is the expected share of each window for
 # P4's order at each effort, on the date `at`; a later price scales it.
+# The seats refresh, 2026-11-18: every model id below is one its CLI offers today. `agy models` (agy 1.5.11) lists the
+# carbon, argon, hydrogen, flash, g-opus, g-sonnet and gpt-oss ids here and no Gemini 4 Neon (`--model
+# gemini-4-neon-low` answers "not recognized as a known model"). It also lists `gemini-pro-orchestrator` and
+# `gemini-pro-orchestrator-argon`, agy's Orchestrator, which plans on Carbon (or Argon) high and hands the work to
+# Hydrogen high (agy 1.5.10's notes). No seat for it: a seat is one model at one effort with one price, and Nirvana
+# Claude already plans. Claude Code 2.1.327 names no Claude model newer than opus, sonnet and haiku 5.5 and fable 5.2.
 
 [[seat]]
 id = "opus"
@@ -162,7 +171,7 @@ prices = [
 use = [
   { effort = "low", windows = { "5h" = 0.001598, week = 0.0001707 }, at = "2026-10-17", basis = "prior: medium x 0.6, fit x10.58 (medium's) (nirvana/seat_cells.py)" },
   { effort = "medium", windows = { "5h" = 0.002663, week = 0.0002846 }, at = "2026-10-17", basis = "derived: P4's 43,807 cache reads and 1,286 out at opus's 2026-10-17 prices, $0.0345, fit x10.58 (seat_fit.py, n 8), times per_usd (nirvana/seat_cells.py)" },
-  { effort = "high", windows = { "5h" = 0.002859, week = 0.0003055 }, at = "2026-10-17", basis = "prior: medium x 1.6, fit x7.1 (seat_fit.py, n 9) (nirvana/seat_cells.py)" },
+  { effort = "high", windows = { "5h" = 0.002859, week = 0.0003055 }, at = "2026-10-17", basis = "derived: medium x 1.6, fit x7.1 (seat_fit.py, n 9) (nirvana/seat_cells.py)" },
   { effort = "xhigh", windows = { "5h" = 0.006658, week = 0.0007114 }, at = "2026-10-17", basis = "prior: medium x 2.5, fit x10.58 (medium's) (nirvana/seat_cells.py)" },
 ]
 
@@ -224,7 +233,7 @@ prices = [
 use = [
   { effort = "low", windows = { "5h" = 0.00279, week = 0.0002981, "week.fable" = 0.001911 }, at = "2026-11-09", basis = "prior: medium x 0.6, fit x10.58 (medium's) (nirvana/seat_cells.py)" },
   { effort = "medium", windows = { "5h" = 0.00465, week = 0.0004968, "week.fable" = 0.003185 }, at = "2026-11-09", basis = "derived: P4's 43,807 cache reads and 1,286 out at fable's 2026-11-09 prices, $0.0602, fit x10.58 (opus medium's, a prior: no Fable order in the record), times per_usd (nirvana/seat_cells.py)" },
-  { effort = "high", windows = { "5h" = 0.004992, week = 0.0005334, "week.fable" = 0.003419 }, at = "2026-11-09", basis = "prior: medium x 1.6, fit x7.1 (opus high's, a prior: no Fable order in the record) (nirvana/seat_cells.py)" },
+  { effort = "high", windows = { "5h" = 0.004992, week = 0.0005334, "week.fable" = 0.003419 }, at = "2026-11-09", basis = "derived: medium x 1.6, fit x7.1 (seat_fit.py: fable high's own orders at 1.11 of it, n 10, inside the band so kept) (nirvana/seat_cells.py)" },
   { effort = "xhigh", windows = { "5h" = 0.01162, week = 0.001242, "week.fable" = 0.007962 }, at = "2026-11-09", basis = "prior: medium x 2.5, fit x10.58 (medium's) (nirvana/seat_cells.py)" },
 ]
 
@@ -318,14 +327,16 @@ prices = [
 use = [
   { effort = "low", windows = { "5h" = 0.005983, week = 0.001498 }, at = "2026-11-11", basis = "measured: plan 70 carbon low, one probe order alone (0.0667% 5h, 0.0167% week), fit x8.97 (flash's, seat_fit.py, n 12): a probe is not a real order" },
   { effort = "medium", windows = { "5h" = 0.007203, week = 0.001803 }, at = "2026-11-11", basis = "derived: plan 70 carbon medium's $0.0401 at low's measured 0.0200 (5h) and 0.0050 (week) per dollar, fit x8.97 (flash's, seat_fit.py, n 12)" },
-  { effort = "high", windows = { "5h" = 0.011525, week = 0.002885 }, at = "2026-11-11", basis = "prior: medium x 1.6" },
+  { effort = "high", windows = { "5h" = 0.00242, week = 0.0006059 }, at = "2026-11-11", basis = "derived: medium x 1.6, refit x0.21 to carbon high's own orders (seat_fit.py, n 15): the fit x8.97 it carried was flash's, a prior" },
 ]
 
 # Plan 71: Gemini 4 Hydrogen, the owner 2026-11-12: "Gemini 4 Hydrogen potentially replacing the flash 3.8 model",
 # "it supposidly costs the same as 3.8", and "Hydrogen can do media level work replace flash". `agy models` (agy
 # 1.5.7) lists gemini-4-hydrogen-low|medium|high|xhigh. Its pool is `gemini`: agy's /usage has only the "Gemini Models"
 # group for Gemini. The capabilities are Flash's: the owner's word for media; context and input types are unmeasured,
-# a prior. The prices are Flash's: the owner's word, unverified.
+# a prior. The seats refresh, 2026-11-18: the price is Google's own, not Flash's. ai.google.dev/gemini-api/docs/pricing
+# lists gemini-4-hydrogen at $1.50 in, $7.50 out (thinking included), $0.075 cache, twice Flash 3.8's in and out until
+# Flash's own price doubles on 2027-01-01.
 [[seat]]
 id = "hydrogen"
 cli = "agy"
@@ -336,17 +347,18 @@ efforts = ["low", "medium", "high", "xhigh"]
 capabilities = ["code", "tools", "image", "pdf", "web", "browser", "image_gen", "video", "audio", "context_1m"]
 enabled = true
 prices = [
-  { from = "2026-11-12", input = 0.75, output = 3.75, cache_read = 0.075, cache_write = 0.75, basis = "Flash 3.8's row: the owner 2026-11-12 'it supposidly costs the same as 3.8', unverified" },
+  { from = "2026-11-12", input = 1.50, output = 7.50, cache_read = 0.075, cache_write = 1.50, basis = "Google's Gemini API pricing page for gemini-4-hydrogen, read 2026-11-18: $1.50 in, $7.50 out with thinking, $0.075 cache, implicit caching only; cache write at input, a prior" },
 ]
 # Ten orders one at a time (plan 71, 2026-11-12): read a 42-line file and answer one question, Flash 3.8 and Hydrogen
 # alternating. The quota could not be read (other agy runs moved the buckets; two readings went negative), so each cell
-# is Flash's cell times Hydrogen's cost per order over Flash's by tokens at the same price: low 0.74 (n 2 each), medium
-# 0.71 (n 2 each), high 0.57 (n 1 each). Hydrogen read ~10.6k of ~26k input from cache; Flash read none.
+# is Flash's cell times Hydrogen's cost per order over Flash's by tokens, each at its own price (the seats refresh,
+# nirvana/seat_refresh.py): low 1.43 (n 2 each), medium 1.39 (n 2 each), high 1.12 (n 1 each). At Flash's price they
+# were 0.74, 0.71 and 0.57. Hydrogen read ~10.6k of ~26k input from cache; Flash read none.
 use = [
-  { effort = "low", windows = { "5h" = 0.0001157, week = 5.783e-05 }, at = "2026-11-12", basis = "derived: flash low's cell x0.74, plan 71 tokens at the same price (n 2 each); carries flash's fit x8.97" },
-  { effort = "medium", windows = { "5h" = 0.0003224, week = 0.0001612 }, at = "2026-11-12", basis = "derived: flash medium's cell x0.71, plan 71 tokens at the same price (n 2 each); carries flash's fit x2.73" },
-  { effort = "high", windows = { "5h" = 0.0001535, week = 7.675e-05 }, at = "2026-11-12", basis = "derived: flash high's cell x0.57, plan 71 tokens at the same price (n 1 each)" },
-  { effort = "xhigh", windows = { "5h" = 0.0002456, week = 0.0001228 }, at = "2026-11-12", basis = "prior: high x 1.6" },
+  { effort = "low", windows = { "5h" = 0.0002235, week = 0.0001118 }, at = "2026-11-12", basis = "derived: flash low's cell x1.43, plan 71 tokens each at its own price (n 2 each); carries flash's fit x8.97" },
+  { effort = "medium", windows = { "5h" = 0.0002588, week = 0.0001294 }, at = "2026-11-12", basis = "derived: flash medium's cell x1.39 (plan 71 tokens each at its own price, n 2 each), refit x0.41 to hydrogen medium's own orders (seat_fit.py, n 13)" },
+  { effort = "high", windows = { "5h" = 0.0006786, week = 0.0003393 }, at = "2026-11-12", basis = "derived: flash high's cell x1.12 (plan 71 tokens each at its own price, n 1 each), refit x2.25 to hydrogen high's own orders (seat_fit.py, n 25)" },
+  { effort = "xhigh", windows = { "5h" = 0.001086, week = 0.0005429 }, at = "2026-11-12", basis = "prior: high x 1.6" },
 ]
 
 [[seat]]
@@ -359,11 +371,16 @@ efforts = ["low", "medium", "high"]
 capabilities = ["code", "tools", "image", "pdf", "web", "browser", "image_gen", "video", "audio", "context_1m"]
 # Off since plan 71, 2026-11-12: Hydrogen took its seat at the same cost or less. Ten orders, the same question on the
 # same file, all answers right; by tokens at Flash's price Hydrogen cost 0.74x at low, 0.71x at medium, 0.57x at high
-# (0.78x to 1.11x if its cache reads were full price). Turn it back on here to give the router both; every class still
+# (0.78x to 1.11x if its cache reads were full price). The seats refresh, 2026-11-18: Google's page prices Hydrogen at
+# twice Flash's in and out, so each at its own price Hydrogen costs 1.43x, 1.39x and 1.12x per order until Flash's
+# price doubles on 2027-01-01, over the 1.25 rule at low and medium. Kept off: the owner's "replace flash" (2026-11-12),
+# and in run ia1 Hydrogen's gated orders passed first time 99 of 114 (seat_refresh.py). Turn it back on here to give
+# the router both; every class still
 # lists it.
 enabled = false
 prices = [
   { from = "2026-10-17", input = 0.75, output = 3.75, cache_read = 0.075, cache_write = 0.75, basis = "aggregators, medium confidence (plan 12 §2); cache read at a tenth of input, unverified" },
+  { from = "2027-01-01", input = 1.50, output = 7.50, cache_read = 0.15, cache_write = 1.50, basis = "Google's Gemini API pricing page for gemini-3.8-flash, read 2026-11-18: $0.75 / $3.75 / $0.075 cache through 2026-12-31, $1.50 / $7.50 / $0.15 from 2027-01-01" },
 ]
 use = [
   { effort = "low", windows = { "5h" = 0.0001563, week = 7.815e-05 }, at = "2026-10-20", basis = "derived: plan 19 §2, scaled by 0.0396 from P4 tokens, fit x8.97 (seat_fit.py, n 12)" },
@@ -444,13 +461,13 @@ efficient_effort = "medium"
 sota_effort = "high"
 weight = 3.0
 bars = { efficient = 70, balanced = 90, sota = 100 }
-why = "plan 19 §4: quality first; plan 40a: fable 97, a prior (decision 0012), the prompting guide's hard-coding seat; the review round: flash 74 to 68, under the Efficient bar, because the record has it at 9 passes of 28 with 15 send-backs, $5.47 a pass against sonnet's $1.44 (usage audit finding 7, section B)"
+why = "plan 19 §4: quality first; plan 40a: fable 97, a prior (decision 0012), the prompting guide's hard-coding seat; the review round: flash 74 to 68, under the Efficient bar, because the record has it at 9 passes of 28 with 15 send-backs, $5.47 a pass against sonnet's $1.44 (usage audit finding 7, section B); the seats refresh: sonnet 85 to 68, under the Efficient bar, because run ia1 has it at 7 first passes of 28 gated (42 seated, 19% merged; nirvana/seat_refresh.py)"
 seats = [
   { seat = "opus", score = 95 },
   { seat = "fable", score = 97 },
   { seat = "carbon", score = 86 },
   { seat = "argon", score = 86 },
-  { seat = "sonnet", score = 85 },
+  { seat = "sonnet", score = 68 },
   { seat = "hydrogen", score = 68 },
   { seat = "flash", score = 68 },
   { seat = "g-opus", score = 95 },
@@ -465,11 +482,11 @@ efficient_effort = "low"
 sota_effort = "high"
 weight = 1.0
 bars = { efficient = 70, balanced = 85, sota = 100 }
-why = "plan 19 §4: bounded build tasks"
+why = "plan 19 §4: bounded build tasks; the seats refresh: carbon 84 to 86, over the Balanced bar, because run ia1 has it at 9 first passes of 10 gated (12 seated, 75% merged; nirvana/seat_refresh.py)"
 seats = [
   { seat = "opus", score = 92 },
   { seat = "sonnet", score = 88 },
-  { seat = "carbon", score = 84 },
+  { seat = "carbon", score = 86 },
   { seat = "argon", score = 84 },
   { seat = "hydrogen", score = 80 },
   { seat = "flash", score = 80 },
