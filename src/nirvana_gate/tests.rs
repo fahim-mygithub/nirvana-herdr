@@ -6102,6 +6102,16 @@ fn p43_r2_h2_a_workers_module_or_script_is_never_the_briefs() {
         test_unparsed("powershell -NoProfile -Command \"f (\"", own5).as_deref(),
         Some("ParserError")
     );
+    // Inline code that dot-sources the worker's script: the `ParserError:` names the script (its echo lines do not
+    // count as a loaded file), so the worker's. Since H2, `-File` never reaches this skip.
+    let sourced = "ParserError: C:\\p\\check.ps1:3\nLine |\n   3 |  if ( {\n";
+    assert_eq!(
+        test_unparsed("pwsh -NoProfile -Command \". ./check.ps1\"", sourced),
+        None
+    );
+    // Inline `bash -c` that runs the worker's script: another shell's `-c:` line is not this command's text.
+    let nested = "sh: -c: line 1: syntax error near unexpected token `then'\n";
+    assert_eq!(test_unparsed("bash -c \"./run.sh\"", nested), None);
     // A script or a runner: a parse error anywhere in its output is the worker's.
     let bash_c = "bash: -c: line 1: syntax error near unexpected token `then'\n";
     assert_eq!(test_unparsed("bash run.sh", bash_c), None);

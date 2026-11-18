@@ -84,10 +84,11 @@ CONTROLS = (
             "            if let Some(rest) = line.strip_prefix(\"ParserErr0r:\") {\n",
             _T + "p43_a_test_command_that_does_not_parse_is_the_briefs", "rust"),
     # A worker's own broken .ps1 stays the worker's
+    # Fix round 2: retargeted; since H2 a `-File` script never reaches this skip, an inline dot-source does
     Control("p84_script_stays_the_workers", GATE,
             "                if script(rest) {\n                    continue;\n                }\n",
             "                if script(rest) && false {\n                    continue;\n                }\n",
-            _T + "p43_a_test_command_that_does_not_parse_is_the_briefs", "rust"),
+            _T + "p43_r2_h2_a_workers_module_or_script_is_never_the_briefs", "rust"),
     # herdr's own files are set aside for the rebase
     Control("p84_harness_set_aside", GATE,
             "            let moved = match set_aside_harness(subject.cwd, &integration, &aside) {\n",
@@ -160,10 +161,11 @@ CONTROLS = (
             "            if !traced || true {\n",
             _T + "p43_f1_a_workers_broken_module_under_python_c_stays_the_workers", "rust"),
     # F1: bash's own -c: line only, not another shell's
+    # Fix round 2: retargeted; since H2 `bash run.sh` is never the brief's, an inline `bash -c` running a script is
     Control("p84_f1_bash_own_c_line", GATE,
             "            own(line)\n",
             "            line.contains(\"-c:\")\n",
-            _T + "p43_f1_a_workers_broken_module_under_python_c_stays_the_workers", "rust"),
+            _T + "p43_r2_h2_a_workers_module_or_script_is_never_the_briefs", "rust"),
     # F2: a fenced new file is no note
     Control("p84_f2_fence_applies", GATE,
             "            None if is_new(path) => match fenced_new(path) {\n",
