@@ -75,3 +75,146 @@ fn restart_claude_asks_the_server_for_that_tab() {
     assert_eq!(invoked[0].tab_id.as_deref(), Some("tab_1"));
     assert_eq!(invoked[0].workspace_id.as_deref(), Some("ws_1"));
 }
+
+/// Two spaces, each with a Nirvana Claude; the first is focused. `ws_2` is a plain folder (no git), so its menu is
+/// Rename and Close plus the restart.
+fn two_spaces(second_status: AgentStatus) -> ClientShellState {
+    let mut projected = snapshot();
+    projected.workspaces.push(ClientShellWorkspace {
+        workspace_id: "ws_2".into(),
+        active_tab_id: "tab_2".into(),
+        new_workspace_cwd: "/moto".into(),
+        number: 2,
+        label: "MotoProject".into(),
+        custom_label: false,
+        branch: None,
+        git_ahead_behind: None,
+        tokens: Vec::new(),
+        worktree: None,
+        focused: false,
+        agent_status: second_status,
+    });
+    projected.tabs.push(ClientShellTab {
+        tab_id: "tab_2".into(),
+        workspace_id: "ws_2".into(),
+        number: 1,
+        label: "1".into(),
+        custom_label: false,
+        zoomed: false,
+        focused: false,
+        agent_status: second_status,
+    });
+    projected.panes.push(ClientShellPane {
+        pane_id: "pane_2".into(),
+        workspace_id: "ws_2".into(),
+        tab_id: "tab_2".into(),
+        label: None,
+        cwd: Some("/moto".into()),
+        foreground_cwd: Some("/moto".into()),
+        focused: false,
+        right_click_passthrough: false,
+    });
+    let mut first = agent("claude");
+    first.name = Some("nirvana".into());
+    let mut second = agent("claude");
+    second.name = Some("nirvana".into());
+    second.pane_id = "pane_2".into();
+    second.workspace_id = "ws_2".into();
+    second.tab_id = "tab_2".into();
+    second.focused = false;
+    second.agent_status = second_status;
+    projected.agents = vec![first, second];
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state
+}
+
+/// Right-clicks the space `workspace_id` in the sidebar: its menu's labels.
+fn right_click_space(state: &mut ClientShellState, workspace_id: &str) -> Vec<&'static str> {
+    state.compose(106, 20).expect("composed frame");
+    let space = state
+        .hits
+        .workspaces
+        .iter()
+        .find(|hit| hit.workspace_id == workspace_id)
+        .map(|hit| hit.rect)
+        .expect("the space is in the sidebar");
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: space.x + 2,
+        row: space.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("space context menu");
+    };
+    menu.items().iter().map(|item| item.label).collect()
+}
+
+/// Clicks the menu's row `index`, as drawn.
+fn click_menu_row(state: &mut ClientShellState, index: usize) -> ClientShellInput {
+    state.compose(106, 20).expect("menu drawn");
+    let row = state.hits.context_menu_rows[index].0;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: row.x + 1,
+        row: row.y,
+        modifiers: KeyModifiers::empty(),
+    })])
+}
+
+/// P87 U2: the owner, 2026-11-18, "if your right click the project an option appears to restart that specific
+/// project". A right-click on a space that is not focused offers Restart Claude, and the restart names that space's
+/// Nirvana Claude pane, not the focused one. U3: it is the tab menu's own command.
+#[test]
+fn p87_a_spaces_menu_restarts_that_spaces_nirvana_claude() {
+    let mut state = two_spaces(AgentStatus::Idle);
+    let labels = right_click_space(&mut state, "ws_2");
+    assert_eq!(labels, ["Rename", "Restart Claude", "Close"]);
+    let outcome = click_menu_row(&mut state, 1);
+    assert_eq!(
+        super::nirvana_seats::restarts(&outcome),
+        vec![(
+            Some("ws_2".into()),
+            Some("tab_2".into()),
+            Some("pane_2".into())
+        )]
+    );
+    assert!(state.overlay.is_none(), "the menu closes");
+}
+
+/// P87 U2: a space with no Nirvana Claude (a plain Claude Code, or none) gets no Restart Claude in its menu.
+#[test]
+fn p87_a_space_without_nirvana_claude_offers_no_restart() {
+    let mut state = two_spaces(AgentStatus::Idle);
+    let mut projected = state.snapshot.as_deref().cloned().expect("snapshot");
+    projected.agents[1].name = Some("moto".into());
+    state.set_snapshot(Box::new(projected));
+    assert_eq!(right_click_space(&mut state, "ws_2"), ["Rename", "Close"]);
+}
+
+/// P87: a working Nirvana Claude restarts on the second click; the first keeps the menu open and says why.
+#[test]
+fn p87_a_working_spaces_restart_asks_again() {
+    let mut state = two_spaces(AgentStatus::Working);
+    assert_eq!(
+        right_click_space(&mut state, "ws_2"),
+        ["Rename", "Restart Claude", "Close"]
+    );
+    let outcome = click_menu_row(&mut state, 1);
+    assert!(super::nirvana_seats::restarts(&outcome).is_empty());
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("the menu stays open");
+    };
+    assert_eq!(menu.items()[1].label, "Restart Claude? It is working");
+    let outcome = click_menu_row(&mut state, 1);
+    assert_eq!(
+        super::nirvana_seats::restarts(&outcome),
+        vec![(
+            Some("ws_2".into()),
+            Some("tab_2".into()),
+            Some("pane_2".into())
+        )]
+    );
+}

@@ -39,11 +39,34 @@ impl App {
         let Some((ws_idx, tab_idx)) = self.parse_tab_id(tab_id) else {
             return encode_error(id, "tab_not_found", format!("tab not found: {tab_id}"));
         };
+        // The owner, 2026-11-18: a space's menu and the Seats panel restart "that specific project" Claude, so
+        // they name its pane; a worker sharing the tab keeps running. The tab menu names none: every Claude in it.
+        let only = match params.pane_id.as_deref() {
+            None => None,
+            Some(pane) => match self.parse_pane_id(pane) {
+                Some((pane_ws, pane_id))
+                    if pane_ws == ws_idx
+                        && self.state.workspaces[ws_idx].tabs[tab_idx]
+                            .panes
+                            .contains_key(&pane_id) =>
+                {
+                    Some(pane_id)
+                }
+                _ => {
+                    return encode_error(
+                        id,
+                        "pane_not_found",
+                        format!("pane {pane} is not in tab {tab_id}"),
+                    )
+                }
+            },
+        };
         let panes: Vec<_> = {
             let tab = &self.state.workspaces[ws_idx].tabs[tab_idx];
             tab.layout
                 .pane_ids()
                 .into_iter()
+                .filter(|pane_id| only.is_none_or(|only| only == *pane_id))
                 .filter_map(|pane_id| {
                     Some((
                         pane_id,
@@ -63,10 +86,13 @@ impl App {
             }
         }
         if restarted.is_empty() {
-            let message = failures
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "no Claude Code is running in this tab".into());
+            let message = failures.first().cloned().unwrap_or_else(|| {
+                if only.is_some() {
+                    "no Claude Code is running in that pane".into()
+                } else {
+                    "no Claude Code is running in this tab".into()
+                }
+            });
             return encode_error(id, "claude_not_restarted", message);
         }
         self.state.mark_session_dirty();
@@ -348,13 +374,17 @@ mod tests {
     }
 
     fn invoke(app: &mut App, tab_id: &str) -> String {
+        invoke_pane(app, tab_id, None)
+    }
+
+    fn invoke_pane(app: &mut App, tab_id: &str, pane_id: Option<&str>) -> String {
         app.handle_command_invoke(
             "req".into(),
             crate::api::schema::CommandInvokeParams {
                 command_id: crate::nirvana::RESTART_CLAUDE_COMMAND.into(),
                 workspace_id: None,
                 tab_id: Some(tab_id.into()),
-                pane_id: None,
+                pane_id: pane_id.map(Into::into),
                 selection: None,
             },
         )
@@ -371,5 +401,26 @@ mod tests {
         let error: crate::api::schema::ErrorResponse =
             serde_json::from_str(&invoke(&mut app, "tab_missing")).unwrap();
         assert_eq!(error.error.code, "tab_not_found");
+    }
+
+    /// The owner, 2026-11-18: the space menu and the Seats panel restart "that specific project" Claude by its pane.
+    /// A pane of the tab narrows the restart to it (no Claude there, so nothing stops); a pane not in the tab is
+    /// refused before anything is stopped.
+    #[test]
+    fn restart_claude_narrows_to_the_named_pane_and_refuses_a_pane_not_in_the_tab() {
+        let mut app = app_with_a_tab();
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+        let pane = app.state.workspaces[0].tabs[0].layout.pane_ids()[0];
+        let pane_id = app.public_pane_id(0, pane).unwrap();
+        let error: crate::api::schema::ErrorResponse =
+            serde_json::from_str(&invoke_pane(&mut app, &tab_id, Some(&pane_id))).unwrap();
+        assert_eq!(error.error.code, "claude_not_restarted");
+        assert_eq!(
+            error.error.message,
+            "no Claude Code is running in that pane"
+        );
+        let error: crate::api::schema::ErrorResponse =
+            serde_json::from_str(&invoke_pane(&mut app, &tab_id, Some("p_999"))).unwrap();
+        assert_eq!(error.error.code, "pane_not_found");
     }
 }

@@ -586,6 +586,8 @@ pub(super) enum ClientContextMenuTarget {
         has_worktree_children: bool,
         close_group: bool,
         collapsed: bool,
+        /// Nirvana fork: the space's Nirvana Claude, so the menu offers Restart Claude for it.
+        nirvana_claude: Option<ClientRestartTarget>,
     },
     Tab {
         tab_id: String,
@@ -605,6 +607,19 @@ pub(super) enum ClientContextMenuTarget {
         workspace_id: Option<String>,
         cwd: Option<String>,
     },
+}
+
+/// Nirvana fork: the Nirvana Claude a space's Restart Claude restarts (the owner, 2026-11-18: "if your right
+/// click the project an option appears to restart that specific project").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ClientRestartTarget {
+    pub(super) tab_id: String,
+    pub(super) pane_id: String,
+    /// Not idle: a restart now cuts its turn, so the first press arms and the second restarts.
+    pub(super) working: bool,
+    /// The Seats square reads `restart to switch` for it: the label says the restart switches the seat.
+    pub(super) switch: bool,
+    pub(super) armed: bool,
 }
 
 #[derive(Debug)]
