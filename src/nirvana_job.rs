@@ -283,12 +283,34 @@ pub struct JobsView {
     pub passed_count: usize,
 }
 
+/// Whether a job started in `cwd` belongs to the space whose folder is `folder`: `cwd` is the folder or lies under
+/// it, which takes in a project's worker worktrees under `.nirvana/worktrees/<order>`.
+///
+/// The owner, 2026-11-18: "I think the jobs list and its failures should be project specific not accross the whole
+/// Nirvana". The MotoProject square read "1 running · 2 failed" from Megajam's `lk24-*` jobs, because the view took
+/// every record under `<home>/nirvana/jobs`. Each ancestor of `cwd` is compared whole with
+/// `nirvana_spaces::same_folder` (case, both slash kinds, `\\?\`, a trailing separator), so `C:\proj` never takes
+/// `C:\proj-two`: a string prefix would. An empty `folder` takes nothing: a relative path's last ancestor is the empty
+/// path, which `same_folder` would call equal to it.
+pub fn job_in_folder(cwd: &str, folder: &Path) -> bool {
+    if folder.as_os_str().is_empty() {
+        return false;
+    }
+    Path::new(cwd)
+        .ancestors()
+        .any(|ancestor| crate::nirvana_spaces::same_folder(ancestor, folder))
+}
+
+/// The Jobs square's and panel's view for one space: only the jobs whose `cwd` is under `space_folder`
+/// (`job_in_folder`), and the Claude tasks of that folder. A job outside every open space stays in `herdr job list`,
+/// which still reads every record machine-wide.
 pub fn load_jobs_view(space_folder: &Path, home: &Path, now_secs: u64) -> JobsView {
     let all_jobs = list_jobs(home);
     let twelve_hours = 12 * 3600;
 
     let mut jobs: Vec<JobRecord> = all_jobs
         .into_iter()
+        .filter(|j| job_in_folder(&j.cwd, space_folder))
         .filter(|j| {
             let is_alive = j.pid.is_some_and(is_process_alive);
             let state = j.state(is_alive);
@@ -2076,5 +2098,130 @@ mod tests {
         let future_now = real_now + 13 * 3600;
         let empty_tasks = list_claude_tasks_in(&temp_dir, space_folder, future_now);
         assert!(empty_tasks.is_empty());
+    }
+
+    /// The owner, 2026-11-18: the Jobs list "should be project specific". A job is its space's when its cwd is the
+    /// space's folder or under it; spelling differences on Windows do not matter, and a sibling with the folder's
+    /// name as a prefix is not under it.
+    #[test]
+    fn a_job_belongs_to_the_folder_it_ran_in_or_below_and_never_to_a_sibling() {
+        let proj = Path::new(r"C:\Pojects\proj");
+        for cwd in [
+            r"C:\Pojects\proj",
+            r"c:/pojects/PROJ/",
+            r"C:\Pojects\proj\.nirvana\worktrees\o12",
+            r"C:/Pojects\proj/src",
+            r"\\?\C:\Pojects\proj\Builds",
+        ] {
+            assert!(
+                job_in_folder(cwd, proj),
+                "{cwd} is under {}",
+                proj.display()
+            );
+        }
+        assert!(job_in_folder(
+            r"C:\Pojects\proj\x",
+            Path::new(r"C:\Pojects\proj\")
+        ));
+        for cwd in [
+            r"C:\Pojects\proj-two",
+            r"C:\Pojects\proj-two\.nirvana\worktrees\o1",
+            r"C:\Pojects\projx",
+            r"C:\Pojects",
+            r"C:\",
+            r"D:\Pojects\proj",
+            "",
+            ".",
+        ] {
+            assert!(
+                !job_in_folder(cwd, proj),
+                "{cwd:?} is not under {}",
+                proj.display()
+            );
+        }
+        assert!(
+            !job_in_folder("proj", Path::new("")),
+            "an empty folder takes nothing"
+        );
+    }
+
+    fn scoped_job(id: &str, cwd: &Path, now: u64, exit: Option<i32>) -> JobRecord {
+        JobRecord {
+            id: id.into(),
+            name: id.into(),
+            argv: vec!["cargo".into()],
+            cwd: cwd.display().to_string(),
+            // The same workspace id on every record: ids are reused after a restart (the real records held one id
+            // across two projects), so the view must not lean on it.
+            space: Some("w1".into()),
+            pane: None,
+            started: now - 100,
+            ended: exit.map(|_| now - 50),
+            exit,
+            // A running job needs a live pid: this test's own.
+            pid: exit.is_none().then(std::process::id),
+        }
+    }
+
+    /// J1 and J2: the view for one space lists and counts that space's jobs only, so another project's failure does
+    /// not turn this square red. J3: every record stays in `list_jobs`, which `herdr job list` prints.
+    #[test]
+    fn the_jobs_view_lists_and_counts_only_the_spaces_own_jobs() {
+        let guard = crate::nirvana::with_test_home("jobs_scope");
+        let now = now();
+        let proj = guard.path.join("proj");
+        let two = guard.path.join("proj-two");
+        let records = [
+            scoped_job("own-run", &proj, now, None),
+            scoped_job(
+                "own-fail",
+                &proj.join(".nirvana").join("worktrees").join("o1"),
+                now,
+                Some(1),
+            ),
+            scoped_job("own-pass", &proj, now, Some(0)),
+            scoped_job("two-fail", &two, now, Some(2)),
+            scoped_job("two-run", &two.join("sub"), now, None),
+            scoped_job("elsewhere-fail", &guard.path.join("other"), now, Some(1)),
+        ];
+        for record in &records {
+            write_job(&guard.path, record).expect("write job");
+        }
+
+        let view = load_jobs_view(&proj, &guard.path, now);
+        let mut ids: Vec<&str> = view.jobs.iter().map(|j| j.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            ["own-fail", "own-pass", "own-run"],
+            "proj lists its own jobs only"
+        );
+        assert_eq!(
+            (view.running_count, view.failed_count, view.passed_count),
+            (1, 1, 1),
+            "proj counts its own jobs only"
+        );
+
+        let view = load_jobs_view(&two, &guard.path, now);
+        let mut ids: Vec<&str> = view.jobs.iter().map(|j| j.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            ["two-fail", "two-run"],
+            "proj-two lists its own jobs only"
+        );
+        assert_eq!(
+            (view.running_count, view.failed_count, view.passed_count),
+            (1, 1, 0)
+        );
+
+        // J3: a job under no space's folder is still a record `herdr job list` prints.
+        let all: Vec<String> = list_jobs(&guard.path).into_iter().map(|j| j.id).collect();
+        assert_eq!(
+            all.len(),
+            records.len(),
+            "every record stays listed machine-wide: {all:?}"
+        );
+        assert!(all.iter().any(|id| id == "elsewhere-fail"));
     }
 }
