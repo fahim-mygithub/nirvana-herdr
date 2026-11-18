@@ -3,6 +3,24 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.80.0: in auto mode the orchestrator files its question, it does not stop on a modal
+
+- **Changed:** a new PreToolUse hook, `herdr nirvana guard-ask`, runs on `AskUserQuestion` and on agy's
+  `ask_question`. While the project holds an open run whose `opened` event has `auto: true`, it refuses the
+  orchestrator's modal question and says to file it with `herdr ask add`, keep working on what does not depend on the
+  answer, and name the question id at the end of the turn. ROLE.md says the same in one sentence. Workers, subagents
+  and sessions outside the orchestrator are not touched, and with no open auto run the modal works as before. The hook
+  fails open: no project, no journal or a timeout allows the modal. Plan 43 A4.
+- **Because:** plan 43 C4. On 2026-11-15 at 07:49Z, run ia1's orchestrator called AskUserQuestion in the owner's
+  autonomous night. The modal held for 406 minutes, 9 passed orders waited 173 to 407 minutes to merge, and nothing ran
+  from 11:43Z to 14:36Z. The owner's ruling R5, 2026-11-18: "5.yes".
+- **Measured:** 7 new Rust tests and 27 plugin tests pass, and the 15 `p85_` controls each turned their test red. On a
+  copy of ia1's 11 MB journal the hook refuses in about 440 ms on a debug build, inside its 10 s timeout. Hypotheses,
+  not measured: that a live orchestrator files the question and keeps working after the refusal, and the name agy's
+  hook sees for `ask_question`. Known gap: the Questions square (P42b) and the answer on the next prompt (P42d) are not
+  built, so a filed question shows only in the end-of-turn message and in `herdr ask list`.
+- **If you remove this:** an auto run can again stop for hours on one modal question while the owner is away.
+
 ## alpha 0.79.0: the seat table refreshed: Hydrogen at Google's price, run ia1's record, agy 1.5.11
 
 - **Changed:** Hydrogen's price row is Google's own ($1.50 in, $7.50 out, $0.075 cache), not Flash 3.8's, and its

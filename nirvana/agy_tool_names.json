@@ -25,5 +25,8 @@
   ],
   "Bash": [
     "run_command"
+  ],
+  "AskUserQuestion": [
+    "ask_question"
   ]
 }

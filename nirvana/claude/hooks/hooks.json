@@ -110,6 +110,20 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/../../bin/herdr.exe",
+            "args": [
+              "nirvana",
+              "guard-ask"
+            ],
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PostToolUse": [

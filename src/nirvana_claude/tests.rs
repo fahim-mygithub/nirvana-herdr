@@ -2790,3 +2790,187 @@ fn c40b_the_image_guard_is_a_read_hook() {
     assert_eq!(read["hooks"][0]["args"], json!(["nirvana", "guard-read"]));
     assert!(SUBCOMMANDS.contains(&"guard-read"));
 }
+
+// ---- Plan 43 A4: guard-ask, no modal question in auto mode ----
+
+/// A project whose run `run` is open (`ended` false) or ended, in auto mode or not, as `herdr seat run` opens one.
+fn ask_project(name: &str, runs: &[(&str, bool, bool)]) -> (PathBuf, Project) {
+    let dir = scratch(name);
+    let project = Project::at(&dir);
+    for (run, auto, ended) in runs {
+        let journal = project.journal(run);
+        journal
+            .append(
+                1,
+                crate::nirvana_run::Kind::Opened {
+                    project: dir.display().to_string(),
+                    orchestrator_pane: Some("w1:p1".into()),
+                    auto: *auto,
+                    pools: vec![],
+                    pools_basis: None,
+                },
+            )
+            .expect("opened");
+        if *ended {
+            journal
+                .append(
+                    2,
+                    crate::nirvana_run::Kind::Ended {
+                        order: None,
+                        outcome: "done".into(),
+                        why: None,
+                        exit: None,
+                        pools: vec![],
+                        pools_basis: None,
+                    },
+                )
+                .expect("ended");
+        }
+    }
+    (dir, project)
+}
+
+fn ask_hook() -> Value {
+    json!({"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion",
+        "tool_input": {"questions": [{"question": "Ship it?", "options": [{"label": "yes"}, {"label": "no"}]}]}})
+}
+
+/// N2: the refusal's exact words, owner ruling R5's three asks in them.
+#[test]
+fn p85_the_ask_refusal_says_file_it_keep_working_and_name_the_id() {
+    assert_eq!(
+        ask_refusal("ia1"),
+        "Run ia1 is in auto mode, so do not ask with AskUserQuestion: a modal question stops the whole run until the \
+         owner comes back (on 2026-11-15 one held a run for 406 minutes). File the question instead: `herdr ask add \
+         \"<text>\" [--option <a> --option <b> --recommended <a>] [--blocks <order>]`. Then keep working on everything \
+         that does not depend on the answer, and name the question id it prints (such as q3) in your end-of-turn \
+         message. Asking the same text again later prints the answer once the owner has given one."
+    );
+}
+
+/// N1: an open run in auto mode refuses the orchestrator's modal question, naming the run.
+#[test]
+fn p85_auto_mode_refuses_the_modal_question() {
+    let (dir, project) = ask_project("ask-auto", &[("r0", false, true), ("r1", true, false)]);
+    let denied = guard_ask_decision(&ask_hook(), Some(&dir), true, Some(&project)).expect("a refusal");
+    assert_eq!(denied["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+    assert_eq!(denied["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert_eq!(
+        denied["hookSpecificOutput"]["permissionDecisionReason"],
+        json!(ask_refusal("r1"))
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// N3: with no run in auto mode the modal works as before: no run, a run not in auto mode, an auto run that ended,
+/// no project.
+#[test]
+fn p85_without_an_open_auto_run_the_modal_works() {
+    for (name, runs) in [
+        ("ask-none", vec![]),
+        ("ask-manual", vec![("r1", false, false)]),
+        ("ask-ended", vec![("r1", true, true)]),
+    ] {
+        let (dir, project) = ask_project(name, &runs);
+        assert!(
+            guard_ask_decision(&ask_hook(), Some(&dir), true, Some(&project)).is_none(),
+            "{name}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    assert!(guard_ask_decision(&ask_hook(), None, true, None).is_none());
+}
+
+/// N3: only the orchestrator is guarded, even with an auto run open: a plain Claude Code session (no marker), a
+/// subagent, a worker in its worktree are all allowed.
+#[test]
+fn p85_only_the_orchestrator_is_refused() {
+    let (dir, project) = ask_project("ask-scope", &[("r1", true, false)]);
+    assert!(guard_ask_decision(&ask_hook(), Some(&dir), false, Some(&project)).is_none());
+    let mut sub = ask_hook();
+    sub["agent_id"] = json!("a1");
+    assert!(guard_ask_decision(&sub, Some(&dir), true, Some(&project)).is_none());
+    let worktree = dir.join(".nirvana").join("worktrees").join("o1");
+    assert!(guard_ask_decision(&ask_hook(), Some(&worktree), true, Some(&project)).is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The hook is wired: `PreToolUse` on `AskUserQuestion` runs `herdr nirvana guard-ask`, a subcommand the CLI knows,
+/// and the agy adapter runs the verb for that tool only.
+#[test]
+fn p85_the_ask_guard_is_a_pre_tool_hook() {
+    let hooks: Value = serde_json::from_str(include_str!("../../nirvana/claude/hooks/hooks.json")).expect("JSON");
+    let entries = hooks["hooks"]["PreToolUse"].as_array().expect("PreToolUse");
+    let ask = entries
+        .iter()
+        .find(|entry| entry["matcher"] == "AskUserQuestion")
+        .expect("an AskUserQuestion matcher");
+    assert_eq!(ask["hooks"][0]["args"], json!(["nirvana", "guard-ask"]));
+    assert!(SUBCOMMANDS.contains(&"guard-ask"));
+    assert_eq!(
+        crate::nirvana_hookhost::verb_tools("guard-ask"),
+        Some(&["AskUserQuestion"][..])
+    );
+}
+
+const ASK_CHILD: &str = "NIRVANA_GUARD_ASK_CHILD";
+
+/// Not a test of its own: `p85_the_ask_hook_reads_the_marker_and_the_project` runs it in a child process, with the
+/// hook on stdin. Without the variable it does nothing.
+#[test]
+fn guard_ask_child() {
+    if std::env::var_os(ASK_CHILD).is_none() {
+        return;
+    }
+    let _ = cli("guard-ask");
+}
+
+/// N3 end to end: the hook command itself reads `NIRVANA_ORCHESTRATOR` and finds the project's runs from
+/// `NIRVANA_PROJECT`. With the marker and an auto run it prints the refusal; without the marker it prints nothing.
+#[test]
+fn p85_the_ask_hook_reads_the_marker_and_the_project() {
+    let (dir, _) = ask_project("ask-child", &[("r1", true, false)]);
+    let mut hook = ask_hook();
+    hook["cwd"] = json!(dir.display().to_string());
+    let run = |marker: Option<&str>| {
+        use std::io::Write;
+        let mut cmd = std::process::Command::new(std::env::current_exe().expect("test binary"));
+        cmd.args(["--exact", "nirvana_claude::tests::guard_ask_child", "--nocapture", "--test-threads=1"])
+            .env(ASK_CHILD, "1")
+            .env(crate::nirvana_run::PROJECT_ENV, &dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        match marker {
+            Some(value) => cmd.env(crate::nirvana_launch::ORCHESTRATOR_ENV, value),
+            None => cmd.env_remove(crate::nirvana_launch::ORCHESTRATOR_ENV),
+        };
+        let mut child = cmd.spawn().expect("child runs");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(hook.to_string().as_bytes())
+            .expect("hook written");
+        let out = child.wait_with_output().expect("child ends");
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let inside = run(Some("1"));
+    assert!(inside.contains(r#""permissionDecision":"deny""#), "{inside}");
+    assert!(inside.contains("Run r1 is in auto mode"), "{inside}");
+    for marker in [None, Some("0")] {
+        let outside = run(marker);
+        assert!(!outside.contains("permissionDecision"), "{marker:?}: {outside}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The role tells the orchestrator how to ask in auto mode, before the hook has to; the agy plugin's agent body is
+/// built from the same file (`agy_plugin.py`).
+#[test]
+fn p85_the_role_says_ask_with_herdr_ask_add_in_auto_mode() {
+    let role = include_str!("../../nirvana/claude/ROLE.md");
+    assert!(role.contains("- In auto mode, ask the owner with `herdr ask add \"<text>\""), "{role}");
+    assert!(role.contains("never `AskUserQuestion`: the `guard-ask` hook refuses it"), "{role}");
+    assert!(role.contains("name the question id in your end-of-turn message"), "{role}");
+}

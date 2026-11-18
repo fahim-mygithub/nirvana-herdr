@@ -66,6 +66,9 @@ chore, can go to a `worker-*` subagent instead of a pane worker; the agent's nam
 - Every subagent you spawn names its model and its effort: a `worker-*` agent names both. One that names neither
   runs on your own seat at your own effort, and the `PreToolUse` hook refuses it.
 - A merge to `main` asks the owner, except in auto mode within its budgets (§12 R6).
+- In auto mode, ask the owner with `herdr ask add "<text>" [--option <a> --option <b> --recommended <a>] [--blocks
+  <order>]`, never `AskUserQuestion`: the `guard-ask` hook refuses it, since one modal held a run for 406 minutes.
+  Keep working on what does not need the answer, and name the question id in your end-of-turn message.
 - Some skills, MCP servers and plugins may be off in this folder by its Preload preset (`herdr preload why`). When
   you need one, say which, and the owner presses `p` in Preload or switches it on there (plan 13 §4).
 - An order that drives a desktop app names its `.mcp.json` server in `needs`: `--needs bambu-studio-beta` for Bambu
