@@ -1,6 +1,7 @@
 # Plan 43: what run `ia1` on Megajam says to fix
 
-Status: PROPOSED 2026-11-18. An audit with proposed packages. No code yet. Owner rulings open in §7.
+Status: RULED 2026-11-18. An audit with proposed packages. The owner ruled R1 to R5 in §7. Building starts with A1 to
+A4, A6 and A7.
 
 ## 1. The ask
 
@@ -126,6 +127,9 @@ separate files and can run beside them.
 Recommended first round: A1 to A3 as one package, A4, A6, A7, B3 and the B1 probe.
 
 ## 7. Owner rulings
+
+Ruled 2026-11-18. The owner: "1. yes, 2. yes, 3. Ill do the compaction manually, 4. Yes, 5.yes". So R1, R2, R4 and R5
+are yes. R3 is no: B6 is dropped, and B3 waits for the owner's word, since it also compacts the orchestrator.
 
 - **R1, worker compaction.** A ceiling near 300k for Claude workers in Efficient and Balanced, with SOTA left alone.
   Recommended: yes, after the probe. The quality cost of compacting a long Unreal order is not measured.
