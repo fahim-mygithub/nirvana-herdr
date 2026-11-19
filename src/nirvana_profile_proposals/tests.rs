@@ -24,7 +24,8 @@ fn project(name: &str) -> (crate::nirvana::TestHomeGuard, PathBuf) {
     (home, root)
 }
 
-const NEW: &str = "---\ndescription: Judges renders against the rubric card.\nclass: media.video\neffort: high\n\
+const NEW: &str =
+    "---\ndescription: Judges renders against the rubric card.\nclass: media.video\neffort: high\n\
 needs: [video, fake-tool]\nskills: [alpha]\n---\nYou judge renders. Open every file yourself.\n";
 const EVIDENCE: &str =
     "7 orders repeat a 412-character paragraph: \"Judge the rendered frame, never the plan or the code\"";
@@ -137,7 +138,9 @@ fn p92_a_proposal_may_not_carry_pins_unknown_skills_needs_or_what_parse_refuses(
         ),
     );
     assert!(
-        found.iter().any(|why| why.contains("the body grants a Send")),
+        found
+            .iter()
+            .any(|why| why.contains("the body grants a Send")),
         "{found:?}"
     );
     existing(
@@ -249,7 +252,8 @@ fn p92_a_dismissed_proposal_is_not_made_again_until_the_dismissal_is_rolled_back
     let found = refused(&root, &same);
     assert!(
         found.len() == 1
-            && found[0].starts_with("the owner dismissed this proposal (new of render-judge) on 20"),
+            && found[0]
+                .starts_with("the owner dismissed this proposal (new of render-judge) on 20"),
         "{found:?}"
     );
     let mut other = first.clone();
@@ -309,7 +313,10 @@ fn p92_the_cli_lists_shows_accepts_dismisses_and_takes_only_proposal_ids() {
         "{out}"
     );
     let (code, out, _) = run(&["dismiss", "pp-1", "--reason", "later"]);
-    assert!(code == 0 && out.starts_with("op-3: dismissed pp-1"), "{out}");
+    assert!(
+        code == 0 && out.starts_with("op-3: dismissed pp-1"),
+        "{out}"
+    );
     let (code, _, err) = run(&["dismiss"]);
     assert!(
         code == 2 && err.starts_with("usage: herdr profile proposals"),

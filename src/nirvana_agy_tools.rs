@@ -446,11 +446,11 @@ pub fn claude_skills(cwd: &Path, root: &Path, out: &mut dyn Write) -> Vec<(Strin
 /// Plan 45 §5: the project's skills a profile's `skills` may name, `<root>/.claude/skills/<name>/SKILL.md`, by name,
 /// links left out as `claude_skills` leaves them. `herdr profile check` and a proposal read against this.
 pub fn project_skills(root: &Path) -> Vec<String> {
-    let from = root.join(".claude").join("skills");
-    if is_link(&from) {
+    let skills = root.join(".claude").join("skills");
+    if is_link(&skills) {
         return Vec::new();
     }
-    let mut names: Vec<String> = std::fs::read_dir(&from)
+    let mut names: Vec<String> = std::fs::read_dir(&skills)
         .into_iter()
         .flatten()
         .flatten()

@@ -85,8 +85,8 @@ CONTROLS = (
             '        "--mcp-config".to_owned(),\n', '        "--mcp-configs".to_owned(),\n', T_ARGV, "rust"),
     # §5.1 and §5.4: the worker's file under the run, its argv, the line; agy, no server, or an error: today's argv.
     Control("p29_order_agy_too", GUI,
-            '    if needs.is_empty() || !matches!(cli, Some("claude" | "agy")) {\n',
-            '    if needs.is_empty() || cli != Some("claude") {\n', T_ORDER, "rust"),
+            '    if !matches!(cli, Some("claude" | "agy")) {\n',
+            '    if cli != Some("claude") {\n', T_ORDER, "rust"),
     Control("p29_order_wrong_dir", GUI,
             '    run_dir.join("mcp").join(format!("{order}.json"))\n',
             '    run_dir.join(format!("{order}.json"))\n', T_ORDER, "rust"),
@@ -97,8 +97,8 @@ CONTROLS = (
             '                "seats.toml is refused ({why}); the needs {MCP_FILE} names are read as its servers"\n',
             '                "{why}"\n', T_ORDER, "rust"),
     Control("p29_order_empty_config_written", GUI,
-            "    if servers.is_empty() && blade.is_none() {\n        return Ok(argv);\n    }\n    let cannot = |why: String| {",
-            "    let cannot = |why: String| {", T_ORDER, "rust"),
+            "    if servers.is_empty() && blade.is_none() && own.is_empty() {\n        return Ok(argv);\n    }\n",
+            "", T_ORDER, "rust"),
     # §5.3 and review F4: every server order's brief says never start a device; a desktop one batches too.
     Control("p29_brief_no_device_line", GUI,
             "\n    text.push_str(DEVICE_LINE);\n    if servers\n", "\n    if servers\n", T_BRIEF, "rust"),

@@ -591,9 +591,9 @@ pub fn with_server_lines(mut text: String, servers: &[String]) -> String {
 /// reseat's copy, which has them, is left byte for byte. A desktop server among them adds `BRIEF_LINE` when neither it
 /// nor `DESKTOP_SEND_LINE` is there.
 pub fn with_granted_lines(mut text: String, servers: &[String]) -> String {
-    if servers.is_empty() {
+    let [_, ..] = servers else {
         return text;
-    }
+    };
     if !text.contains(DEVICE_LINE) && !text.contains(SEND_LINE) {
         return with_server_lines(text, servers);
     }

@@ -1071,9 +1071,9 @@ fn p92_skills_parse_and_check_refuses_a_skill_the_project_lacks() {
     let text = SLICER.replace("effort: medium\n", "effort: medium\nskills: [alpha, \"beta\"]\n");
     let profile = parsed(&text);
     assert_eq!(profile.skills, ["alpha", "beta"]);
-    let found = refusals("slicer", &SLICER.replace("effort: medium\n", "effort: medium\nskills: [../up]\n"));
+    let found = refusals("slicer", &SLICER.replace("effort: medium\n", "effort: medium\nskills: [..]\n"));
     assert!(
-        found.len() == 1 && found[0].ends_with("skills: `../up` is not a skill's folder name"),
+        found.len() == 1 && found[0].ends_with("skills: `..` is not a skill's folder name"),
         "{found:?}"
     );
     skill(&project.root, "alpha");

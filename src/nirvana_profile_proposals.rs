@@ -242,13 +242,25 @@ pub fn render(draft: &Draft, date: &str) -> String {
 /// Parses a proposal file's text; `id` is its file's stem. Every problem is returned.
 pub fn parse(file: &Path, id: &str, text: &str) -> Result<Proposal, Vec<String>> {
     let shown = file.display();
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text).replace("\r\n", "\n");
+    let text = text
+        .strip_prefix('\u{feff}')
+        .unwrap_or(text)
+        .replace("\r\n", "\n");
     let lines: Vec<&str> = text.split('\n').collect();
     if lines.first() != Some(&"---") {
-        return Err(vec![format!("{shown}: line 1: a proposal starts with a `---` line")]);
+        return Err(vec![format!(
+            "{shown}: line 1: a proposal starts with a `---` line"
+        )]);
     }
-    let Some(close) = lines.iter().skip(1).position(|line| *line == "---").map(|at| at + 1) else {
-        return Err(vec![format!("{shown}: no closing `---` line after the keys")]);
+    let Some(close) = lines
+        .iter()
+        .skip(1)
+        .position(|line| *line == "---")
+        .map(|at| at + 1)
+    else {
+        return Err(vec![format!(
+            "{shown}: no closing `---` line after the keys"
+        )]);
     };
     let mut problems = Vec::new();
     if !valid_id(id) {
@@ -257,7 +269,10 @@ pub fn parse(file: &Path, id: &str, text: &str) -> Result<Proposal, Vec<String>>
     let mut values: Vec<(&str, String)> = Vec::new();
     for (index, line) in lines.iter().enumerate().take(close).skip(1) {
         let Some((key, value)) = line.split_once(':') else {
-            problems.push(format!("{shown}: line {}: expected `key: value`", index + 1));
+            problems.push(format!(
+                "{shown}: line {}: expected `key: value`",
+                index + 1
+            ));
             continue;
         };
         let key = key.trim();
@@ -399,7 +414,9 @@ fn field_problems(by: &str, run: &str, key: &str, evidence: &str) -> Vec<String>
 fn new_problems(root: &Path, name: &str, body: &str) -> Vec<String> {
     let file = nirvana_profiles::folder_of(root, name).join(nirvana_profiles::PROFILE_FILE);
     let mut problems = Vec::new();
-    if nirvana_profiles::path(root, name).exists() || nirvana_profiles::folder_of(root, name).exists() {
+    if nirvana_profiles::path(root, name).exists()
+        || nirvana_profiles::folder_of(root, name).exists()
+    {
         problems.push(format!(
             "a profile {name} exists already: propose a patch of its body instead"
         ));
@@ -413,12 +430,19 @@ fn new_problems(root: &Path, name: &str, body: &str) -> Vec<String> {
     };
     if profile.model.is_some() || profile.family.is_some() {
         problems.push(
-            "a proposal never pins a model or a family: the owner sets those by hand (plan 45 §6)".into(),
+            "a proposal never pins a model or a family: the owner sets those by hand (plan 45 §6)"
+                .into(),
         );
     }
     let skills = crate::nirvana_agy_tools::project_skills(root);
-    for skill in profile.skills.iter().filter(|skill| !skills.contains(skill)) {
-        problems.push(format!("skills {skill}: the project has no such skill in .claude/skills"));
+    for skill in profile
+        .skills
+        .iter()
+        .filter(|skill| !skills.contains(skill))
+    {
+        problems.push(format!(
+            "skills {skill}: the project has no such skill in .claude/skills"
+        ));
     }
     let table = crate::nirvana_seat::table_for(root);
     if let Some(class) = &profile.class {
@@ -432,9 +456,9 @@ fn new_problems(root: &Path, name: &str, body: &str) -> Vec<String> {
     }
     let servers = crate::nirvana_gui_tools::project_servers(root);
     for need in &profile.needs {
-        let capability = table
-            .as_ref()
-            .is_ok_and(|table| crate::nirvana_gui_tools::capabilities(table).contains(&need.as_str()));
+        let capability = table.as_ref().is_ok_and(|table| {
+            crate::nirvana_gui_tools::capabilities(table).contains(&need.as_str())
+        });
         let server = servers.as_ref().is_ok_and(|names| names.contains(need));
         if !capability && !server {
             problems.push(format!(
@@ -460,7 +484,10 @@ fn patch_problems(root: &Path, name: &str, body: &str, base_sha: Option<&str>) -
         }
     };
     let Some(current) = read_lf(&file) else {
-        problems.push(format!("no profile {name} to patch: {} is not there", file.display()));
+        problems.push(format!(
+            "no profile {name} to patch: {} is not there",
+            file.display()
+        ));
         return problems;
     };
     match patched(&current, body) {
@@ -476,7 +503,13 @@ fn patch_problems(root: &Path, name: &str, body: &str, base_sha: Option<&str>) -
 
 /// Every reason a proposal of these parts may not be written or accepted now. Stale and dismissed are not here: the
 /// first is `accept`'s and the second `write`'s.
-fn content_problems(root: &Path, kind: Kind, name: &str, body: &str, base_sha: Option<&str>) -> Vec<String> {
+fn content_problems(
+    root: &Path,
+    kind: Kind,
+    name: &str,
+    body: &str,
+    base_sha: Option<&str>,
+) -> Vec<String> {
     if !nirvana_profiles::valid_name(name) {
         return vec![format!(
             "profile `{name}` is not 1 to {} of [a-z0-9-]",
@@ -543,7 +576,8 @@ fn lock(root: &Path) -> Result<Lock, String> {
         .truncate(false)
         .open(&path)
         .map_err(|err| format!("cannot open {}: {err}", path.display()))?;
-    file.lock().map_err(|err| format!("the proposals' lock: {err}"))?;
+    file.lock()
+        .map_err(|err| format!("the proposals' lock: {err}"))?;
     Ok(Lock(file))
 }
 
@@ -687,9 +721,14 @@ pub fn write(root: &Path, draft: &Draft) -> Result<String, Refusal> {
     }
     let sha = key_sha(&draft.key);
     if let Some(waiting) = list(root).iter().find(|waiting| {
-        waiting.kind == draft.kind && waiting.profile == draft.profile && key_sha(&waiting.key) == sha
+        waiting.kind == draft.kind
+            && waiting.profile == draft.profile
+            && key_sha(&waiting.key) == sha
     }) {
-        problems.push(format!("the same proposal is waiting already as {}", waiting.id));
+        problems.push(format!(
+            "the same proposal is waiting already as {}",
+            waiting.id
+        ));
     }
     if !problems.is_empty() {
         return Err(Refusal(problems));
@@ -703,8 +742,12 @@ pub fn write(root: &Path, draft: &Draft) -> Result<String, Refusal> {
         .unwrap_or(0);
     let id = format!("pp-{}", top + 1);
     let file = path(root, &id);
-    std::fs::create_dir_all(folder(root))
-        .map_err(|err| Refusal(vec![format!("cannot create {}: {err}", folder(root).display())]))?;
+    std::fs::create_dir_all(folder(root)).map_err(|err| {
+        Refusal(vec![format!(
+            "cannot create {}: {err}",
+            folder(root).display()
+        )])
+    })?;
     crate::nirvana_seat::write_atomic(&file, render(&draft, &today()).as_bytes())
         .map_err(|err| Refusal(vec![format!("cannot write {}: {err}", file.display())]))?;
     Ok(id)
@@ -830,14 +873,18 @@ fn remove_new(dir: &Path) -> std::io::Result<()> {
 
 /// Whether a new profile's folder holds anything but `profile.md` and an empty `knowledge/` (cards taught since).
 fn holds_more(dir: &Path) -> bool {
-    std::fs::read_dir(dir).into_iter().flatten().flatten().any(|entry| {
-        let name = entry.file_name();
-        if name == nirvana_profiles::PROFILE_FILE {
-            return false;
-        }
-        name != nirvana_profiles::KNOWLEDGE
-            || std::fs::read_dir(entry.path()).is_ok_and(|mut inside| inside.next().is_some())
-    })
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            let name = entry.file_name();
+            if name == nirvana_profiles::PROFILE_FILE {
+                return false;
+            }
+            name != nirvana_profiles::KNOWLEDGE
+                || std::fs::read_dir(entry.path()).is_ok_and(|mut inside| inside.next().is_some())
+        })
 }
 
 /// Dismisses a waiting proposal: the ledger keeps its identity, its text and the reason, so `write` refuses the same
@@ -910,7 +957,9 @@ pub fn rollback(root: &Path, op: &str) -> Result<String, String> {
     if row.action == "accept" {
         let name = &row.profile;
         let file = match row.kind {
-            Kind::New => nirvana_profiles::folder_of(root, name).join(nirvana_profiles::PROFILE_FILE),
+            Kind::New => {
+                nirvana_profiles::folder_of(root, name).join(nirvana_profiles::PROFILE_FILE)
+            }
             Kind::Patch => nirvana_profiles::resolve(root, name)?,
         };
         let now = std::fs::read_to_string(&file).ok();
@@ -931,14 +980,17 @@ pub fn rollback(root: &Path, op: &str) -> Result<String, String> {
                         dir.display()
                     ));
                 }
-                remove_new(&dir).map_err(|err| format!("cannot remove {}: {err}", dir.display()))?;
+                remove_new(&dir)
+                    .map_err(|err| format!("cannot remove {}: {err}", dir.display()))?;
             }
             (Kind::Patch, Some(before)) => {
                 crate::nirvana_seat::write_atomic(&file, before.as_bytes())
                     .map_err(|err| format!("cannot write {}: {err}", file.display()))?;
             }
             (Kind::Patch, None) => {
-                return Err(format!("{op} keeps no text before: the ledger was edited by hand"));
+                return Err(format!(
+                    "{op} keeps no text before: the ledger was edited by hand"
+                ));
             }
         }
     }
