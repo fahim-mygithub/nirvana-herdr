@@ -26,8 +26,13 @@ use crate::nirvana_seat::{self, Effort, RecordLine, SizeName, Table, Tokens};
 
 pub const FILE: &str = "seat-calibration.json";
 pub const LEDGER_FILE: &str = "seat-calibration.ledger.jsonl";
-/// The file's schema. A file of another version reads as none, and the next check writes this one.
-pub const VERSION: u32 = 1;
+/// The file's schema. A file of another version reads as none, and the next check writes this one. 2 (the P46a review,
+/// finding 1): the file names the table it was measured against (`Calibration::table_fingerprint`); a version 1 file
+/// has none, so it reads as no file and the next tick checks again.
+pub const VERSION: u32 = 2;
+/// Where a check that could not write its file says when (unix seconds), so the idle tick backs off `BACKOFF_S`
+/// instead of replaying every journal at every tick (the P46a review, finding 4).
+pub const FAILED_FILE: &str = "seat-calibration.failed";
 
 // ---- seat_fit.py's numbers (nirvana/seat_fit.py, its constants of the same names) ----
 
@@ -73,6 +78,20 @@ pub const MOVE: f64 = 0.10;
 /// The idle tick checks again when the record has grown by this many lines, or after `DUE_S`.
 pub const DUE_LINES: usize = 20;
 pub const DUE_S: u64 = 86_400;
+/// After a check that could not write its file, the idle tick waits this long before it tries again.
+pub const BACKOFF_S: u64 = 3_600;
+
+// ---- the idle check's bounds (the P46a review, finding 4: nothing bounded the tick, which holds the idle lock) ----
+
+/// A journal larger than this is skipped, by its size on disk, before it is read. On the 2026-11-19 record the 116
+/// journals it names measured 8 KB at the least, 31 KB at the median, 170 KB at p90 and 11.8 MB at the most (one
+/// run): this cap skips none of them and leaves the largest room to grow to more than twice its size.
+pub const JOURNAL_MAX_BYTES: u64 = 32 << 20;
+/// At most this many journals per check, newest run first. The 2026-11-19 record named 116 over 60 days.
+pub const JOURNAL_MAX_FILES: usize = 500;
+/// The whole check's wall time, after which the journals not yet read are skipped and the check completes with what it
+/// has. The check on the 2026-11-19 record took 1.2 s with 116 journals.
+pub const CHECK_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// What `calibrate` returns and `seat-calibration.json` holds.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -86,6 +105,11 @@ pub struct Calibration {
     pub record_bytes: u64,
     /// Lines of the last `KEEP_S` that the figures read.
     pub lines_used: usize,
+    /// `fingerprint` of the table the figures were measured against (the P46a review, finding 1): a factor is a ratio
+    /// to a cell as it stood, so when the table in use has another fingerprint no reader applies the file's factors
+    /// and the next idle tick is due at once. Empty (a hand-made file) never fits.
+    #[serde(default)]
+    pub table_fingerprint: String,
     /// The table's `calibration` when this was computed: off, the file is written and no pick reads it.
     pub on: bool,
     /// Medium orders against the cell: one row per seat and effort (no project), then one per project.
@@ -105,10 +129,17 @@ pub struct CostRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     pub n: usize,
-    /// seat_fit.py's "median ratio": 1.0 is the table's booking exactly.
+    /// seat_fit.py's "median ratio": 1.0 is the table's booking exactly. Read leniently: serde_json writes a NaN as
+    /// `null`, which would otherwise make the whole file unreadable.
+    #[serde(default, deserialize_with = "lenient_f64")]
     pub median: f64,
-    /// What the booking is multiplied by; `None` books as the table says.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// What the booking is multiplied by; `None` books as the table says. Read leniently (a number, or a number as
+    /// text, "NaN" included) so that one bad row is dropped by `Factors::from_calibration` instead of losing the file.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_factor"
+    )]
     pub factor: Option<f64>,
     /// The median was outside `CLAMP`, so the factor is the clamp's edge: a gap larger than one step.
     #[serde(default)]
@@ -233,6 +264,152 @@ pub struct Journals {
     pub merging: BTreeSet<String>,
     /// Journal files read.
     pub files: usize,
+    /// Journal files named and not read, by why (the P46a review, finding 4).
+    pub skipped: Skipped,
+}
+
+/// The journals a check named and did not read.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Skipped {
+    /// Not there, or its size or text did not read.
+    pub missing: usize,
+    /// Over `Limits::max_bytes` on disk.
+    pub large: usize,
+    /// Past `Limits::max_files` (the oldest runs).
+    pub many: usize,
+    /// Not reached within `Limits::budget`.
+    pub late: usize,
+}
+
+impl Skipped {
+    pub fn total(&self) -> usize {
+        self.missing + self.large + self.many + self.late
+    }
+
+    /// "3 journal files skipped (1 missing, 2 past the 15 s budget)"; `None` when none was.
+    pub fn words(&self, limits: &Limits) -> Option<String> {
+        let parts: Vec<String> = [
+            (self.missing, "missing or unreadable".to_owned()),
+            (
+                self.large,
+                format!("over {} MB", limits.max_bytes / (1 << 20)),
+            ),
+            (self.many, format!("past the {}-file cap", limits.max_files)),
+            (
+                self.late,
+                format!("past the {} s budget", limits.budget.as_secs()),
+            ),
+        ]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, why)| format!("{n} {why}"))
+        .collect();
+        (!parts.is_empty()).then(|| {
+            format!(
+                "{} skipped ({})",
+                plural(self.total(), "journal file", "journal files"),
+                parts.join(", ")
+            )
+        })
+    }
+}
+
+/// The bounds of one check's journal replay; `Limits::default()` is the constants'.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Limits {
+    pub max_bytes: u64,
+    pub max_files: usize,
+    pub budget: std::time::Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_bytes: JOURNAL_MAX_BYTES,
+            max_files: JOURNAL_MAX_FILES,
+            budget: CHECK_BUDGET,
+        }
+    }
+}
+
+/// A number, a number written as text ("NaN", "1e9"), or nothing: anything else reads as nothing.
+fn lenient_number(value: Option<serde_json::Value>) -> Option<f64> {
+    match value? {
+        serde_json::Value::Number(number) => number.as_f64(),
+        serde_json::Value::String(text) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn lenient_factor<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<f64>, D::Error> {
+    Ok(lenient_number(Option::<serde_json::Value>::deserialize(
+        de,
+    )?))
+}
+
+fn lenient_f64<'de, D: serde::Deserializer<'de>>(de: D) -> Result<f64, D::Error> {
+    Ok(lenient_number(Option::<serde_json::Value>::deserialize(de)?).unwrap_or(f64::NAN))
+}
+
+/// The P46a review, finding 1: a fingerprint of everything `unit` reads from the table, so a factor is applied only
+/// against the cells it was measured on. Hashed: each seat's id and pool; each of its use cells (effort, `at`, and every
+/// window's share: a factor scales every window of the cell, so an edit of any of them restates the cell); each of its
+/// price rows (date and the four prices); each pool's `per_usd`; each class's weight; and `size.medium.use`. Not
+/// hashed, so an edit there keeps the factors: scores, bars, `overrides_per_run` and every other constant, `mode`,
+/// `calibration`, `calibration_hold`, comments and every `basis` text. Sorted by id, so moving a block is no change.
+/// Floats as Rust's shortest round-trip text; sha256, its first 16 hex digits.
+pub fn fingerprint(table: &Table) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let mut text = String::new();
+    let _ = writeln!(text, "size.medium.use {:?}", table.size.medium.use_factor);
+    let mut classes: Vec<_> = table.classes.iter().collect();
+    classes.sort_by(|a, b| a.id.cmp(&b.id));
+    for class in classes {
+        let _ = writeln!(text, "class {} weight {:?}", class.id, class.weight);
+    }
+    let mut pools: Vec<_> = table.pools.iter().collect();
+    pools.sort_by(|a, b| a.id.cmp(&b.id));
+    for pool in pools {
+        let _ = writeln!(text, "pool {} per_usd {:?}", pool.id, pool.per_usd);
+    }
+    let mut seats: Vec<_> = table.seats.iter().collect();
+    seats.sort_by(|a, b| a.id.cmp(&b.id));
+    for seat in seats {
+        let _ = writeln!(text, "seat {} pool {}", seat.id, seat.pool);
+        let mut uses: Vec<_> = seat.uses.iter().collect();
+        uses.sort_by_key(|cell| cell.effort);
+        for cell in uses {
+            let _ = writeln!(
+                text,
+                "  use {} at {} {:?}",
+                cell.effort.word(),
+                cell.at,
+                cell.windows
+            );
+        }
+        let mut prices: Vec<_> = seat.prices.iter().collect();
+        prices.sort_by(|a, b| a.from.cmp(&b.from));
+        for price in prices {
+            let _ = writeln!(
+                text,
+                "  price {} {:?} {:?} {:?} {:?}",
+                price.from, price.input, price.output, price.cache_read, price.cache_write
+            );
+        }
+    }
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+impl Calibration {
+    /// The figures were measured against this table's cells (`fingerprint`).
+    pub fn fits(&self, table: &Table) -> bool {
+        self.table_fingerprint == fingerprint(table)
+    }
 }
 
 // ---- the arithmetic ----
@@ -284,7 +461,9 @@ pub fn unit(table: &Table, line: &RecordLine) -> Option<f64> {
             .filter(|share| *share != 0.0)?,
     );
     let weight = f64::from(table.class(&line.class)?.weight);
+    // A class weight of 0 divides by zero: an infinite ratio is no measurement (the script stops there with an error).
     Some(nirvana_seat::cost(price, &tokens) * per / (share * weight))
+        .filter(|unit| unit.is_finite())
 }
 
 /// The booking rule: a factor at `MIN_N` or more orders whose median is outside `BAND`, clamped to `CLAMP`.
@@ -402,10 +581,22 @@ pub fn calibrate(
         .collect();
     let medium_use = f64::from(table.size.medium.use_factor);
 
-    // Cost: every line, as seat_fit.py reads them (it keeps a corrected line's one copy; the record has one per order).
+    // One line per order and run, the last (as `nirvana_seat::tally`), subagents left out: the cost, the scores and the
+    // reference rows all read these. The P46a review, finding 6: cost read every line, so a corrected line repeating
+    // its order's tokens counted that order twice toward the n of 5. The record of 2026-11-19 held no such pair (2457
+    // lines, no order and run with two), so no figure moved there. seat_fit.py dedupes the same way.
+    let mut last: BTreeMap<(Option<&str>, &str), &RecordLine> = BTreeMap::new();
+    for line in &kept {
+        if line.chain.as_deref() == Some(crate::nirvana_claude::SUBAGENT_CHAIN) {
+            continue;
+        }
+        last.insert((line.run.as_deref(), line.order.as_str()), line);
+    }
+
+    // Cost: the medium orders, as seat_fit.py reads them.
     let mut pooled: BTreeMap<(String, Effort), Vec<f64>> = BTreeMap::new();
     let mut own: BTreeMap<(String, String, Effort), Vec<f64>> = BTreeMap::new();
-    for line in &kept {
+    for line in last.values() {
         if line.size != Some(SizeName::Medium) {
             continue;
         }
@@ -446,14 +637,7 @@ pub fn calibrate(
             .map(|((project, seat, effort), values)| row(seat, *effort, Some(project), values)),
     );
 
-    // Scores and reference rows: one line per order and run, the last (as `nirvana_seat::tally`), subagents left out.
-    let mut last: BTreeMap<(Option<&str>, &str), &RecordLine> = BTreeMap::new();
-    for line in &kept {
-        if line.chain.as_deref() == Some(crate::nirvana_claude::SUBAGENT_CHAIN) {
-            continue;
-        }
-        last.insert((line.run.as_deref(), line.order.as_str()), line);
-    }
+    // Scores and reference rows: the same deduplicated orders.
     let orders: Vec<Order> = last
         .values()
         .map(|line| {
@@ -593,6 +777,7 @@ pub fn calibrate(
         record_lines: lines.len(),
         record_bytes: 0,
         lines_used: kept.len(),
+        table_fingerprint: fingerprint(table),
         on: table.calibration,
         cost,
         findings,
@@ -735,19 +920,36 @@ pub struct Factors {
 }
 
 impl Factors {
+    /// The rows as a pick applies them. The P46a review, finding 3: the file is checked here, where it is read, as well
+    /// as where it is written: a factor that is not finite and positive drops its row (a project's then falls back to
+    /// the pooled figure), any other is clamped to `CLAMP` and flagged, and a row under `MIN_N` orders is dropped. A
+    /// hand edit or a bad write of 0 booked a seat as free. Whether the file fits the table is the reader's question
+    /// (`Calibration::fits`), asked by `from_file`, `for_this_project` and the Seats square.
     pub fn from_calibration(calibration: &Calibration, project: Option<String>) -> Self {
         let mut factors = Self {
             project,
             ..Self::default()
         };
         for row in &calibration.cost {
-            let applied = row.factor.map(|factor| Applied {
-                factor,
-                n: row.n,
-                median: row.median,
-                clamped: row.clamped,
-                project: row.project.clone(),
-            });
+            if row.n < MIN_N {
+                continue;
+            }
+            let applied = match row.factor {
+                Some(raw) if !(raw.is_finite() && raw > 0.0) => continue,
+                Some(raw) => {
+                    let factor = raw.clamp(CLAMP.0, CLAMP.1);
+                    Some(Applied {
+                        factor,
+                        n: row.n,
+                        // The words say "the record reads x…" for a clamped factor: a factor clamped here was never a
+                        // median the check wrote, so the raw figure is what the file said.
+                        median: if factor == raw { row.median } else { raw },
+                        clamped: row.clamped || factor != raw,
+                        project: row.project.clone(),
+                    })
+                }
+                None => None,
+            };
             match &row.project {
                 None => {
                     if let Some(applied) = applied {
@@ -756,28 +958,30 @@ impl Factors {
                             .insert((row.seat.clone(), row.effort), applied);
                     }
                 }
-                Some(project) if row.n >= MIN_N => {
+                Some(project) => {
                     factors
                         .own
                         .entry(project.clone())
                         .or_default()
                         .insert((row.seat.clone(), row.effort), applied);
                 }
-                Some(_) => {}
             }
         }
         factors
     }
 
-    /// `from_calibration` on the file in `dir`; empty when there is none.
-    pub fn from_file(dir: &Path, project: Option<String>) -> Self {
-        read(dir).map_or_else(Self::default, |cal| Self::from_calibration(&cal, project))
+    /// `from_calibration` on the file in `dir`; empty when there is none or it was measured against another table
+    /// (the P46a review, finding 1).
+    pub fn from_file(dir: &Path, table: &Table, project: Option<String>) -> Self {
+        read(dir)
+            .filter(|cal| cal.fits(table))
+            .map_or_else(Self::default, |cal| Self::from_calibration(&cal, project))
     }
 
     /// The factors for the project this process runs in (`Project::from_env`, which may ask `git`): asked only when the
-    /// file holds a project's own figure.
-    pub fn for_this_project(dir: &Path) -> Self {
-        let Some(calibration) = read(dir) else {
+    /// file holds a project's own figure. Empty when the file was measured against another table.
+    pub fn for_this_project(dir: &Path, table: &Table) -> Self {
+        let Some(calibration) = read(dir).filter(|cal| cal.fits(table)) else {
             return Self::default();
         };
         let has_own = calibration
@@ -853,23 +1057,64 @@ fn record_count(path: &Path) -> Option<usize> {
 }
 
 /// Replays each journal the record's recent lines name, once: the first verdicts and the merges a line written before
-/// plan 46 does not carry. A journal that is gone or does not read is skipped; its orders read as ungated.
-pub fn read_journals(lines: &[RecordLine], now: u64) -> Journals {
-    let mut runs: BTreeMap<String, String> = BTreeMap::new();
-    for line in lines
-        .iter()
-        .filter(|line| line_at(line).is_some_and(|at| at.saturating_add(KEEP_S) >= now))
-    {
+/// plan 46 does not carry. A journal that is skipped reads as none: its orders read as ungated.
+///
+/// Bounded (the P46a review, finding 4: the tick holds the idle lock, and the paths can be anywhere): newest run first;
+/// a journal that is missing or over `limits.max_bytes` by its metadata is skipped before it is read; at most
+/// `limits.max_files` are read; once `started` is `limits.budget` old the rest are skipped, and the check completes
+/// with what it has. What this cannot do: a read, or the metadata call before it, that blocks (a dead network drive)
+/// blocks the tick until the operating system gives up, since a blocking read cannot be cancelled; the budget is
+/// checked between files only.
+pub fn read_journals(
+    lines: &[RecordLine],
+    now: u64,
+    limits: &Limits,
+    started: std::time::Instant,
+) -> Journals {
+    // run -> (journal path, the run's newest line time)
+    let mut runs: BTreeMap<String, (String, u64)> = BTreeMap::new();
+    for line in lines.iter() {
+        let Some(at) = line_at(line).filter(|at| at.saturating_add(KEEP_S) >= now) else {
+            continue;
+        };
         if let (Some(run), Some(journal)) = (&line.run, &line.journal) {
             let path = journal
                 .rsplit_once('#')
                 .map_or(journal.as_str(), |(path, _)| path);
-            runs.entry(run.clone()).or_insert_with(|| path.to_owned());
+            let entry = runs
+                .entry(run.clone())
+                .or_insert_with(|| (path.to_owned(), at));
+            entry.1 = entry.1.max(at);
         }
     }
+    let mut order: Vec<(String, String, u64)> = runs
+        .into_iter()
+        .map(|(run, (path, at))| (run, path, at))
+        .collect();
+    order.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
     let mut journals = Journals::default();
-    for (run, path) in runs {
+    for (run, path, _) in order {
+        if started.elapsed() >= limits.budget {
+            journals.skipped.late += 1;
+            continue;
+        }
+        if journals.files >= limits.max_files {
+            journals.skipped.many += 1;
+            continue;
+        }
+        match std::fs::metadata(&path) {
+            Err(_) => {
+                journals.skipped.missing += 1;
+                continue;
+            }
+            Ok(meta) if meta.len() > limits.max_bytes => {
+                journals.skipped.large += 1;
+                continue;
+            }
+            Ok(_) => {}
+        }
         let Ok(text) = std::fs::read_to_string(&path) else {
+            journals.skipped.missing += 1;
             continue;
         };
         journals.files += 1;
@@ -890,16 +1135,33 @@ pub fn read_journals(lines: &[RecordLine], now: u64) -> Journals {
     journals
 }
 
-/// Whether the idle tick should check again: the record grew by `DUE_LINES` or shrank, `DUE_S` passed, or there is no
-/// readable calibration. No record: never.
-pub fn due(dir: &Path, now: u64) -> bool {
+pub fn failed_path(dir: &Path) -> PathBuf {
+    dir.join(FAILED_FILE)
+}
+
+/// A write failed under `BACKOFF_S` ago (`FAILED_FILE`).
+fn backing_off(dir: &Path, now: u64) -> bool {
+    std::fs::read_to_string(failed_path(dir))
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .is_some_and(|at| now < at.saturating_add(BACKOFF_S))
+}
+
+/// Whether the idle tick should check again: the record grew by `DUE_LINES` or shrank, `DUE_S` passed, there is no
+/// readable calibration, or the one there was measured against another table (the P46a review, finding 1: at once).
+/// No record: never. A write that failed under `BACKOFF_S` ago: not yet, whatever else holds.
+pub fn due(dir: &Path, table: &Table, now: u64) -> bool {
+    if backing_off(dir, now) {
+        return false;
+    }
     let Some(lines) = record_count(&dir.join(nirvana_seat::RECORD_FILE)) else {
         return false;
     };
     match read(dir) {
         None => true,
         Some(cal) => {
-            now >= cal.computed_at.saturating_add(DUE_S)
+            !cal.fits(table)
+                || now >= cal.computed_at.saturating_add(DUE_S)
                 || lines >= cal.record_lines + DUE_LINES
                 || lines < cal.record_lines
         }
@@ -915,14 +1177,25 @@ pub struct Checked {
     /// Journal files the check replayed, and its wall time with them.
     pub journals: usize,
     pub millis: u128,
+    /// Journal files it named and did not read (finding 4), and the words for them, already in the summary.
+    pub skipped: Skipped,
 }
 
-/// Computes from the record in `dir` and, when `write`, writes the file (atomic) and appends the ledger. A record or
-/// file that does not read is an `Err`, and nothing is written.
+/// Computes from the record in `dir` and, when `write`, writes the file (atomic) and appends the ledger. A record that
+/// does not read, or a file that does not write, is an `Err`. `compute` and `save` are its two halves.
 pub fn check(dir: &Path, table: &Table, now: u64, write: bool) -> Result<Checked, String> {
+    let mut checked = compute(dir, table, now, &Limits::default())?;
+    if write {
+        save(dir, &mut checked)?;
+    }
+    Ok(checked)
+}
+
+/// The figures from the record in `dir`, against `table`, with `limits` on the journals; nothing written.
+pub fn compute(dir: &Path, table: &Table, now: u64, limits: &Limits) -> Result<Checked, String> {
     let started = std::time::Instant::now();
     let record = read_record(&dir.join(nirvana_seat::RECORD_FILE))?;
-    let journals = read_journals(&record.lines, now);
+    let journals = read_journals(&record.lines, now, limits, started);
     let mut calibration = calibrate(table, &record.lines, &journals, now);
     calibration.record_lines = record.count;
     calibration.record_bytes = record.bytes;
@@ -934,44 +1207,66 @@ pub fn check(dir: &Path, table: &Table, now: u64, write: bool) -> Result<Checked
             plural(ledger.len(), "booking changed", "bookings changed")
         ));
     }
-    if write {
-        let mut text = serde_json::to_string_pretty(&calibration).map_err(|err| err.to_string())?;
-        text.push('\n');
-        nirvana_seat::write_atomic(&path(dir), text.as_bytes())
-            .map_err(|err| format!("{}: {err}", path(dir).display()))?;
-        if !ledger.is_empty() {
-            let mut rows = String::new();
-            for row in &ledger {
-                rows.push_str(&serde_json::to_string(row).map_err(|err| err.to_string())?);
-                rows.push('\n');
-            }
-            use std::io::Write;
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(ledger_path(dir))
-                .and_then(|mut file| file.write_all(rows.as_bytes()))
-                .map_err(|err| format!("{}: {err}", ledger_path(dir).display()))?;
-        }
+    if let Some(words) = journals.skipped.words(limits) {
+        calibration.summary.push_str(&format!("; {words}"));
     }
     Ok(Checked {
         calibration,
         ledger,
-        written: write,
+        written: false,
         journals: journals.files,
         millis: started.elapsed().as_millis(),
+        skipped: journals.skipped,
     })
 }
 
+/// Writes `checked`'s file (atomic) and appends its ledger rows; marks it written.
+pub fn save(dir: &Path, checked: &mut Checked) -> Result<(), String> {
+    let mut text =
+        serde_json::to_string_pretty(&checked.calibration).map_err(|err| err.to_string())?;
+    text.push('\n');
+    nirvana_seat::write_atomic(&path(dir), text.as_bytes())
+        .map_err(|err| format!("{}: {err}", path(dir).display()))?;
+    if !checked.ledger.is_empty() {
+        let mut rows = String::new();
+        for row in &checked.ledger {
+            rows.push_str(&serde_json::to_string(row).map_err(|err| err.to_string())?);
+            rows.push('\n');
+        }
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(ledger_path(dir))
+            .and_then(|mut file| file.write_all(rows.as_bytes()))
+            .map_err(|err| format!("{}: {err}", ledger_path(dir).display()))?;
+    }
+    checked.written = true;
+    Ok(())
+}
+
 /// The idle tick's step: a check when `due`, its summary for the Learning panel's line. Model-free and seat-free, so it
-/// sits behind none of the review's gates. `None` when not due or when anything failed to read (nothing written).
+/// sits behind none of the review's gates. `None` when not due or when the record failed to read (nothing written).
+/// A file that does not write is said, and the tick backs off `BACKOFF_S` (`FAILED_FILE`) instead of replaying every
+/// journal at the next tick; if that note cannot be written either, nothing backs off.
 pub fn tick(dir: &Path, table: &Table, now: u64) -> Option<String> {
-    if !due(dir, now) {
+    if !due(dir, table, now) {
         return None;
     }
-    check(dir, table, now, true)
-        .ok()
-        .map(|checked| checked.calibration.summary)
+    let mut checked = compute(dir, table, now, &Limits::default()).ok()?;
+    match save(dir, &mut checked) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(failed_path(dir));
+            Some(checked.calibration.summary)
+        }
+        Err(why) => {
+            let _ = std::fs::write(failed_path(dir), format!("{now}\n"));
+            Some(format!(
+                "the check could not be written ({why}); the next try is in {} min",
+                BACKOFF_S / 60
+            ))
+        }
+    }
 }
 
 // ---- the CLI ----
@@ -1071,8 +1366,14 @@ pub fn text(checked: &Checked, record: &Path) -> String {
     }
     out.push_str(&format!("{}\n", cal.summary));
     out.push_str(&format!(
-        "checked in {} ms, {} journal files read\n",
-        checked.millis, checked.journals
+        "checked in {} ms, {} journal files read{}\n",
+        checked.millis,
+        checked.journals,
+        if checked.skipped.total() > 0 {
+            format!(", {} skipped", checked.skipped.total())
+        } else {
+            String::new()
+        }
     ));
     out
 }
@@ -1181,6 +1482,7 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             "written": checked.written,
             "journals": checked.journals,
             "millis": checked.millis,
+            "journals_skipped": checked.skipped.total(),
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {

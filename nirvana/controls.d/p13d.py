@@ -89,8 +89,10 @@ CONTROLS = (
     Control(
         "p13d_seats_backup",
         SEAT,
-        "let _ = std::fs::copy(path, &backup);",
-        "// backup skipped\n    let _ = ();",
+        # P46a fix round: the copy is checked now, and a table whose backup was not taken is not upgraded; skipping the
+        # copy still turns the upgrade test red (the file is left as it was).
+        "    std::fs::copy(path, &backup).map_err(|err| {",
+        "    // backup skipped\n    Ok::<u64, std::io::Error>(0).map_err(|err| {",
         "unedited_seats_toml_upgrades_itself_preserving_mode_and_backs_up_old_default",
         "rust",
     ),

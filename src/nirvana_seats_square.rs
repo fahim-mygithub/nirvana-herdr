@@ -322,9 +322,24 @@ pub fn matrix(table: &Table, live: &World, calibration: Option<&Calibration>) ->
     Matrix {
         rows,
         checked_at: calibration.map(|cal| cal.computed_at),
-        summary: calibration.map(|cal| cal.summary.clone()),
+        summary: calibration.map(|cal| summary_for(table, cal)),
     }
 }
+
+/// The P46a review, finding 1: a check measured against other cells books nothing, and the line says so in place of
+/// what it booked; the next idle tick checks again at once.
+pub fn summary_for(table: &Table, calibration: &Calibration) -> String {
+    if calibration.fits(table) {
+        calibration.summary.clone()
+    } else {
+        STALE_SUMMARY.to_owned()
+    }
+}
+
+/// What the Table page's check line ends with while the file's factors are ignored: "checked 2h 0m ago: seats.toml
+/// changed since …" (`checked_line`).
+pub const STALE_SUMMARY: &str =
+    "seats.toml changed since this check, so every cost books as the table says until the next one";
 
 impl View {
     /// The orders waiting on someone.
@@ -625,9 +640,14 @@ fn read(root: &Path, seats_dir: &Path, replays: &mut Replays, now: u64) -> View 
         // Plan 46: the calibration file read once, here, never computed: a check reads every journal and runs in the
         // idle tick. Its factors are this project's.
         let calibration = calib::read(seats_dir);
-        let factors = calibration.as_ref().map_or_else(Default::default, |cal| {
-            calib::Factors::from_calibration(cal, Some(calib::root_key(root)))
-        });
+        // Booked only when the table says on and the file was measured against this table (the P46a review, finding
+        // 1); the reference rows are shown either way.
+        let factors = calibration
+            .as_ref()
+            .filter(|cal| table.calibration && cal.fits(table))
+            .map_or_else(Default::default, |cal| {
+                calib::Factors::from_calibration(cal, Some(calib::root_key(root)))
+            });
         // The cache alone, never a CLI read from the square (nirvana_seat::cached_world).
         let mut world = nirvana_seat::cached_world(seats_dir, now);
         world.leases = leases.leases.clone();

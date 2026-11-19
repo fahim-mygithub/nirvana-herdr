@@ -1312,6 +1312,9 @@ pub fn tick_in(dir: &Path, projects: &[PathBuf]) -> Vec<String> {
     // S1: `cached_world` reads an unreadable `leases.json` as no leases, which is "nothing runs". The tick reads it
     // itself and fails closed; `cached_world` is shared, so it is left as it is.
     let mut world = nirvana_seat::cached_world(dir, nirvana_run::now());
+    // Plan 46: the review's pick books by the measured costs as `seat pick` does, pooled (one pick for every project),
+    // only when the table says on and the file was measured against it (`cached_world` no longer reads them).
+    world.calibration = nirvana_seat::pooled_factors(&table, dir);
     let doubt = match nirvana_seat::load_leases(&dir.join(nirvana_seat::LEASES_FILE)) {
         Ok(leases) => {
             world.leases = leases.leases;

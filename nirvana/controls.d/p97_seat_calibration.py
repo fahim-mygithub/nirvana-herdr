@@ -21,7 +21,12 @@ T_LEDGER = _C + "p97_the_ledger_writes_a_row_when_a_factor_appears_moves_or_goes
 T_CHECK = _C + "p97_a_check_writes_the_file_and_a_failed_read_writes_nothing"
 T_RECORD = _C + "p97_the_record_line_and_the_journals_carry_the_first_verdict"
 T_IDLE = _C + "p97_the_idle_tick_checks_the_table_with_no_seat_and_no_review"
-T_CACHED = _C + "p97_the_cached_world_reads_the_factors"
+T_CACHED = _C + "p97_the_cached_world_reads_no_factors_and_the_idle_pick_reads_the_pooled"
+# The P46a review's fix round: findings 1 to 7 and the two cases the review did not run.
+T_STALE = _C + "p97_a_factor_belongs_to_the_cells_it_was_measured_on"
+T_CLAMP_READ = _C + "p97_factors_are_clamped_when_read"
+T_BOUNDED = _C + "p97_the_idle_check_is_bounded"
+T_DEDUPE = _C + "p97_cost_counts_one_line_per_order"
 _S = "nirvana_seat::tests::"
 T_EMPTY = _S + "p97_an_empty_calibration_or_off_moves_no_pick"
 T_SCALE = _S + "p97_a_factor_scales_only_the_booked_use"
@@ -38,6 +43,10 @@ T_KEEPS_PLAN = _S + "p97_the_default_holds_opus_high_and_keeps_balanced_plan"
 T_HOLD_LINE = _S + "p97_the_hold_line_carries_and_names_a_seat"
 T_LIVE = _S + "p97_the_live_worlds_factors_follow_the_switch"
 T_CALIB_HELD = _C + "p97_held_pairs_are_measured_and_marked"
+T_NO_BACKUP = _S + "p97_no_upgrade_without_a_backup"
+T_ADDED = _S + "p97_an_added_plain_line_carries"
+T_TRAILING = _S + "p97_trailing_whitespace_is_no_edit"
+T_DROPPED = _S + "p97_a_dropped_key_is_named_once"
 
 CONTROLS = (
     # ---- the cost fit, seat_fit.py's section 1 ----
@@ -59,8 +68,9 @@ CONTROLS = (
     # ---- a project's own figure ----
     Control("p97_project_ignored", CALIB, "            return own.as_ref();", "            return self.pooled.get(&key);",
             T_PROJECT, "rust"),
-    Control("p97_project_under_five", CALIB, "                Some(project) if row.n >= MIN_N => {",
-            "                Some(project) => {", T_PROJECT, "rust"),
+    # Fix round: the n check moved to the top of the read, for pooled rows too (finding 3).
+    Control("p97_project_under_five", CALIB, "            if row.n < MIN_N {\n                continue;\n            }\n",
+            "", T_PROJECT, "rust"),
     Control("p97_project_of_any_path", CALIB, '    let (root, _) = unified.split_once("/.nirvana/")?;',
             '    let root = unified.split_once("/.nirvana/").map_or(unified.as_str(), |(root, _)| root);', T_PROJECT,
             "rust"),
@@ -95,8 +105,8 @@ CONTROLS = (
             "                (None, None) => false,\n                (None, Some(_)) => true,\n                _ => false,",
             T_LEDGER, "rust"),
     # ---- the file, the dry run, a failed read, due ----
-    Control("p97_dry_run_writes", CALIB, "    if write {\n        let mut text", "    if true {\n        let mut text",
-            T_CHECK, "rust"),
+    Control("p97_dry_run_writes", CALIB, "    if write {\n        save(dir, &mut checked)?;",
+            "    if true {\n        save(dir, &mut checked)?;", T_CHECK, "rust"),
     Control("p97_due_at_nineteen", CALIB, "|| lines >= cal.record_lines + DUE_LINES",
             "|| lines >= cal.record_lines + DUE_LINES - 1", T_CHECK, "rust"),
     Control("p97_due_without_record", CALIB,
@@ -143,11 +153,16 @@ CONTROLS = (
     Control("p97_absent_reads_on", SEAT, "    #[serde(default)]\n    pub calibration: bool,",
             '    #[serde(default = "crate::api::schema::common::default_true")]\n    pub calibration: bool,', T_EMPTY,
             "rust"),
-    Control("p97_cached_world_no_factors", SEAT,
-            "    let calibration = crate::nirvana_seat_calib::Factors::from_file(dir, None);",
-            "    let calibration = crate::nirvana_seat_calib::Factors::default();", T_CACHED, "rust"),
+    # Fix round (finding 7): the cached world reads no factors; the idle pick's pooled ones follow the switch.
+    Control("p97_cached_world_reads_factors", SEAT, "            .leases,\n        ..World::default()\n    }\n}",
+            "            .leases,\n        calibration: crate::nirvana_seat_calib::read(dir)\n"
+            "            .map(|cal| crate::nirvana_seat_calib::Factors::from_calibration(&cal, None))\n"
+            "            .unwrap_or_default(),\n        ..World::default()\n    }\n}", T_CACHED, "rust"),
+    Control("p97_pooled_ignores_the_switch", SEAT,
+            "    if table.calibration {\n        crate::nirvana_seat_calib::Factors::from_file(dir, table, None)",
+            "    if true {\n        crate::nirvana_seat_calib::Factors::from_file(dir, table, None)", T_CACHED, "rust"),
     # ---- the upgrade that carries plain edits ----
-    Control("p97_upgrade_never_carries", SEAT, "        let carried = carried_from_kept(&canonical)?;",
+    Control("p97_upgrade_never_carries", SEAT, "        let carried = carried_from_kept(&canonical, default, kept)?;",
             "        let carried: Carried = None?;", T_OWNER, "rust"),
     Control("p97_carried_value_lost", SEAT, "            Some(i) => out[i] = mine.clone(),", "            Some(_) => {}",
             T_OWNER, "rust"),
@@ -155,8 +170,9 @@ CONTROLS = (
             '    let mut name = backup_dir.join(format!("seats-{stamp}.toml"));\n    let mut n = 2;\n    while name.exists() {',
             "    let mut name = backup_dir.join(SEATS_FILE);\n    let mut n = 2;\n    while false && name.exists() {",
             T_OWNER, "rust"),
-    Control("p97_no_upgrade_note", SEAT, "            .open(backup_dir.join(UPGRADE_LOG))",
-            '            .open(backup_dir.join("missing").join(UPGRADE_LOG))', T_OWNER, "rust"),
+    Control("p97_no_upgrade_note", SEAT,
+            '    for log in [dir.join("backup").join(UPGRADE_LOG), dir.join(UPGRADE_LOG)] {',
+            "    for log in [dir.join(UPGRADE_LOG)] {", T_OWNER, "rust"),
     Control("p97_differs_line_unnamed", SEAT,
             "                \"seats.toml keeps your {}; the rest is herdr's default.\",",
             '                "{} differs",', T_OWNER, "rust"),
@@ -169,7 +185,7 @@ CONTROLS = (
             "    if false {\n        return None;\n    }\n    let at", T_ALONE, "rust"),
     Control("p97_carry_unparsed", SEAT, "        parse(&upgraded).ok()?;", "        let _ = parse(&upgraded);",
             T_ALONE, "rust"),
-    Control("p97_current_rewritten", SEAT, "    if nearest.1 == without_hold(&current).0 {\n        return None;\n    }\n",
+    Control("p97_current_rewritten", SEAT, "    if kept == current {\n        return None;\n    }\n",
             "", T_ALONE, "rust"),
     Control("p97_v18_not_historical", SEAT, '    include_str!("nirvana_seats_v18.toml"),\n', "", T_V18, "rust"),
     Control("p97_v17_dropped", SEAT, '    include_str!("nirvana_seats_v17.toml"),\n', "", T_V18, "rust"),
@@ -218,11 +234,13 @@ CONTROLS = (
     Control("p97_hold_unchecked", SEAT,
             "            if named.is_none_or(|(seat, effort)| !seat.efforts.contains(&effort)) {",
             "            if named.is_none() && false {", T_HOLD_LINE, "rust"),
+    # Fix round (finding 5): the hold's special case is now the rule for any added top-level plain line.
     Control("p97_hold_line_not_carried", SEAT,
-            "        carried.lines.push((None, HOLD_KEY.to_owned(), line, value));",
-            "        let _ = (line, value);", T_HOLD_LINE, "rust"),
-    Control("p97_hold_not_taken_out", SEAT, "    let (installed, hold) = without_hold(installed);",
-            "    let (installed, hold) = (installed.to_owned(), None::<String>);", T_HOLD_LINE, "rust"),
+            "        carried\n            .lines\n            .push((None, key, lines[index].to_owned(), value));",
+            "        let _ = (&carried, key, value);", T_HOLD_LINE, "rust"),
+    Control("p97_hold_not_taken_out", SEAT,
+            "                .filter(|(key, _)| !theirs.contains_key(*key) && known.contains_key(*key))",
+            "                .filter(|_| false)", T_HOLD_LINE, "rust"),
     Control("p97_arrays_not_plain", SEAT, "        toml::Value::Array(items) => items.iter().all(scalar),",
             "        toml::Value::Array(_) => false,", T_HOLD_LINE, "rust"),
     Control("p97_calib_held_unmarked", CALIB, "            held: table.held(seat, effort),", "            held: false,",
@@ -244,6 +262,75 @@ CONTROLS = (
             "    let Some((key, value)) = entries.next() else {\n"
             '        return Some(("#".to_owned(), toml::Value::Boolean(true)));\n    };', T_ALONE, "rust"),
     Control("p97_live_world_always_reads", SEAT,
-            "    if table.calibration {\n        crate::nirvana_seat_calib::Factors::for_this_project(dir)",
-            "    if true {\n        crate::nirvana_seat_calib::Factors::for_this_project(dir)", T_LIVE, "rust"),
+            "    if table.calibration {\n        crate::nirvana_seat_calib::Factors::for_this_project(dir, table)",
+            "    if true {\n        crate::nirvana_seat_calib::Factors::for_this_project(dir, table)", T_LIVE, "rust"),
+    # ---- the P46a review's fix round. Expected red, written before the run: the test named in each line fails at
+    # the assertion the comment names. ----
+    # Finding 1: a factor belongs to the cells it was measured on. Red: "fits" on today's refit cell.
+    Control("p97_stale_factor_fits", CALIB, "        self.table_fingerprint == fingerprint(table)\n",
+            "        self.table_fingerprint == fingerprint(table) || !table.seats.is_empty()\n", T_STALE, "rust"),
+    # Red: "not due at once" for every changed table.
+    Control("p97_stale_not_due", CALIB, "            !cal.fits(table)\n                || now",
+            "            false\n                || now", T_STALE, "rust"),
+    # Red: "overrides_per_run: does not fit" (an unrelated edit dropped the factors).
+    Control("p97_fingerprint_reads_constants", CALIB,
+            '    let _ = writeln!(text, "size.medium.use {:?}", table.size.medium.use_factor);\n',
+            '    let _ = writeln!(text, "size.medium.use {:?}", table.size.medium.use_factor);\n'
+            '    let _ = writeln!(text, "overrides {}", table.constants.overrides_per_run);\n', T_STALE, "rust"),
+    # Red: "a price: fits".
+    Control("p97_fingerprint_no_prices", CALIB, "        let mut prices: Vec<_> = seat.prices.iter().collect();",
+            "        let mut prices: Vec<_> = seat.prices.iter().take(0).collect();", T_STALE, "rust"),
+    # Red: the square's "nothing booked" on a stale file.
+    Control("p97_square_books_stale", SQUARE, "            .filter(|cal| table.calibration && cal.fits(table))",
+            "            .filter(|_| table.calibration)", T_SQUARE, "rust"),
+    # Red: the square's summary is the stale file's own ("checked"), not STALE_SUMMARY.
+    Control("p97_square_stale_unsaid", SQUARE, "    if calibration.fits(table) {\n        calibration.summary.clone()",
+            "    if true {\n        calibration.summary.clone()", T_SQUARE, "rust"),
+    # Finding 3: clamped when read. Red: opus high reads 1e9, not CLAMP.1.
+    Control("p97_read_unclamped", CALIB, "                    let factor = raw.clamp(CLAMP.0, CLAMP.1);",
+            "                    let factor = raw;", T_CLAMP_READ, "rust"),
+    # Red: hydrogen low (0) and medium (-2) are booked.
+    Control("p97_read_keeps_zero", CALIB, "                Some(raw) if !(raw.is_finite() && raw > 0.0) => continue,",
+            "                Some(raw) if raw.is_nan() => continue,", T_CLAMP_READ, "rust"),
+    # Red: a file of another version reads.
+    Control("p97_any_version_reads", CALIB, "        .filter(|cal| cal.version == VERSION)", "        .filter(|_| true)",
+            T_CLAMP_READ, "rust"),
+    # Red: one text-valued factor loses the whole file ("one bad row does not lose the file").
+    Control("p97_factor_strict", CALIB,
+            "    Ok(lenient_number(Option::<serde_json::Value>::deserialize(\n        de,\n    )?))\n}\n\nfn lenient_f64",
+            "    Option::<f64>::deserialize(de)\n}\n\nfn lenient_f64", T_CLAMP_READ, "rust"),
+    # Finding 4: bounded. Red: the 5000-byte journal is read (large 0, files 3).
+    Control("p97_journal_no_size_cap", CALIB, "            Ok(meta) if meta.len() > limits.max_bytes => {",
+            "            Ok(meta) if false && meta.len() > limits.max_bytes => {", T_BOUNDED, "rust"),
+    # Red: capped.files is 2, not 1.
+    Control("p97_journal_no_file_cap", CALIB, "        if journals.files >= limits.max_files {",
+            "        if false {", T_BOUNDED, "rust"),
+    # Red: late.files is 2, not 0.
+    Control("p97_journal_no_budget", CALIB, "        if started.elapsed() >= limits.budget {",
+            "        if false {", T_BOUNDED, "rust"),
+    # Red: the summary does not end with the skipped journals.
+    Control("p97_skipped_unsaid", CALIB, '        calibration.summary.push_str(&format!("; {words}"));',
+            "        let _ = words;", T_BOUNDED, "rust"),
+    # Red: "backing off" (due a second after the failed write).
+    Control("p97_failed_write_replays", CALIB, "    if backing_off(dir, now) {\n        return false;",
+            "    if false && backing_off(dir, now) {\n        return false;", T_BOUNDED, "rust"),
+    # Finding 2: no upgrade without a backup. Red: the carried table is rewritten with the folder blocked.
+    Control("p97_upgrade_without_backup", SEAT, "    let backup = match take_backup(path, &bytes, &backup_dir) {",
+            "    let backup = match take_backup(path, &bytes, &backup_dir)\n"
+            '        .or_else(|_| Ok::<PathBuf, String>(backup_dir.join("none")))\n    {', T_NO_BACKUP, "rust"),
+    # Red: the log holds two lines after the second read.
+    Control("p97_refusal_said_every_read", SEAT, "        if said_last {\n            return;",
+            "        if said_last && false {\n            return;", T_NO_BACKUP, "rust"),
+    # Finding 5. Red: an unknown added key (`mystery = 1`) is taken and the table rewritten.
+    Control("p97_added_unknown_key_taken", SEAT,
+            "!theirs.contains_key(*key) && known.contains_key(*key)", "!theirs.contains_key(*key)", T_ADDED, "rust"),
+    # Finding 6. Red: the hydrogen row of the doubled fixture has n 14.
+    Control("p97_cost_reads_every_line", CALIB, "    for line in last.values() {", "    for line in &kept {", T_DEDUPE,
+            "rust"),
+    # Finding 7. Red: the trailing space is carried and the upgraded table is not the default.
+    Control("p97_trailing_space_is_an_edit", SEAT, "        if mine.trim_end() == theirs.trim_end() {",
+            "        if mine == theirs {", T_TRAILING, "rust"),
+    # The dropped-key path. Red: the log reads "keeping your retired_knob = 2".
+    Control("p97_dropped_named_as_kept", SEAT, "                .filter(|(_, key, _, _)| !dropped.contains(key))",
+            "                .filter(|_| true)", T_DROPPED, "rust"),
 )

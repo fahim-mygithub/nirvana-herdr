@@ -464,10 +464,10 @@ fn p97_a_check_writes_the_file_and_a_failed_read_writes_nothing() {
         "no record, nothing to check"
     );
     assert!(!path(&dir).exists());
-    assert!(!due(&dir, NOW), "no record is never due");
+    assert!(!due(&dir, &table, NOW), "no record is never due");
     assert_eq!(tick(&dir, &table, NOW), None);
     std::fs::write(dir.join(nirvana_seat::RECORD_FILE), FIXTURE).unwrap();
-    assert!(due(&dir, NOW), "no calibration yet");
+    assert!(due(&dir, &table, NOW), "no calibration yet");
     let dry = check(&dir, &table, NOW, false).expect("a dry run");
     assert!(!dry.written && !path(&dir).exists() && !ledger_path(&dir).exists());
     assert!(!dry.ledger.is_empty());
@@ -504,16 +504,16 @@ fn p97_a_check_writes_the_file_and_a_failed_read_writes_nothing() {
     // Pooled argon, hydrogen and opus; alpha's opus and beta's argon.
     assert_eq!(ledger_rows.lines().count(), 5, "{ledger_rows}");
     // Not due again until the record grows by 20 lines or a day passes.
-    assert!(!due(&dir, NOW + 60));
+    assert!(!due(&dir, &table, NOW + 60));
     assert_eq!(tick(&dir, &table, NOW + 60), None);
     let one = FIXTURE.lines().next().unwrap();
     let grown = |n: usize| format!("{FIXTURE}{}", format!("{one}\n").repeat(n));
     std::fs::write(dir.join(nirvana_seat::RECORD_FILE), grown(19)).unwrap();
-    assert!(!due(&dir, NOW + 60), "19 lines more");
+    assert!(!due(&dir, &table, NOW + 60), "19 lines more");
     std::fs::write(dir.join(nirvana_seat::RECORD_FILE), grown(20)).unwrap();
-    assert!(due(&dir, NOW + 60), "20 lines more");
+    assert!(due(&dir, &table, NOW + 60), "20 lines more");
     std::fs::write(dir.join(nirvana_seat::RECORD_FILE), FIXTURE).unwrap();
-    assert!(due(&dir, NOW + DUE_S), "a day on");
+    assert!(due(&dir, &table, NOW + DUE_S), "a day on");
     // A second check finds nothing changed: no new ledger rows.
     tick(&dir, &table, NOW + DUE_S).expect("checked again");
     assert_eq!(
@@ -645,7 +645,12 @@ fn p97_the_record_line_and_the_journals_carry_the_first_verdict() {
     (bare.first_verdict, bare.first_no_worker_fault) = (None, None);
     bare.journal = Some(format!("{}#12", journal.path.display()));
     bare.at = Some(NOW);
-    let journals = read_journals(std::slice::from_ref(&bare), NOW);
+    let journals = read_journals(
+        std::slice::from_ref(&bare),
+        NOW,
+        &Limits::default(),
+        std::time::Instant::now(),
+    );
     assert_eq!(
         journals.first.get(&("r1".into(), "o1".into())),
         Some(&("sent_back".to_owned(), Some(true)))
@@ -750,6 +755,7 @@ fn p97_held_pairs_are_measured_and_marked() {
         written: true,
         journals: 0,
         millis: 0,
+        skipped: Skipped::default(),
     };
     let said = text(&checked, Path::new("record.jsonl"));
     assert!(
@@ -793,26 +799,431 @@ fn p97_held_pairs_are_measured_and_marked() {
     );
 }
 
-/// The cached world (the Seats square, the idle tick, the launch) carries the file's pooled factors, so their picks
-/// book as `seat pick` does.
+/// The P46a review, finding 7: the cached world (the prompt hook, the launch, the media doctor) reads no factors, so
+/// it never parses the file; the idle review's pick reads the pooled ones (`pooled_factors`), only when the table says
+/// on and the file fits the table, so it books as `seat pick` does.
 #[test]
-fn p97_the_cached_world_reads_the_factors() {
+fn p97_the_cached_world_reads_no_factors_and_the_idle_pick_reads_the_pooled() {
     let dir = temp("cached");
+    let table = v18_on();
+    let cal = calibrate(&table, &fixture(), &Journals::default(), NOW);
+    std::fs::write(path(&dir), serde_json::to_string(&cal).unwrap()).unwrap();
     assert_eq!(
         nirvana_seat::cached_world(&dir, NOW).calibration,
-        Factors::default()
+        Factors::default(),
+        "the cached world reads none"
     );
-    let cal = calibrate(&v18(), &fixture(), &Journals::default(), NOW);
-    std::fs::write(path(&dir), serde_json::to_string(&cal).unwrap()).unwrap();
-    let world = nirvana_seat::cached_world(&dir, NOW);
-    let applied = world
-        .calibration
+    let factors = nirvana_seat::pooled_factors(&table, &dir);
+    let applied = factors
         .for_cell("hydrogen", Effort::Low)
         .expect("hydrogen low");
     assert_eq!(applied.n, 7);
+    assert_eq!(factors.project, None, "no project: the pooled factors");
+    // Off in the table: none, and the file is not read (a file that does not parse changes nothing).
     assert_eq!(
-        world.calibration.project, None,
-        "no project: the pooled factors"
+        nirvana_seat::pooled_factors(&v18(), &dir),
+        Factors::default()
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// v18 with `calibration = true`: v18's cells, so the fixture's factors are what the script printed.
+fn v18_on() -> Table {
+    let mut table = v18();
+    table.calibration = true;
+    table
+}
+
+/// The table v18 with one line's text replaced, parsed.
+fn v18_edited(find: &str, replace: &str) -> Table {
+    assert_eq!(V18.matches(find).count(), 1, "{find}");
+    let mut table = parse(&V18.replacen(find, replace, 1)).expect("the edit parses");
+    table.calibration = true;
+    table
+}
+
+/// The P46a review, finding 1: a factor belongs to the cells it was measured against. A file computed on v18's
+/// Hydrogen low cell is ignored once the table carries today's refit cell, and the same for a hand edit of one cell, a
+/// price, a pool's per_usd, a class weight or the medium size's use: every reader books by the table and the check is
+/// due at once. An edit nothing in the ratio reads (`overrides_per_run`, a comment, the hold, a score, the mode) keeps
+/// the factors.
+#[test]
+fn p97_a_factor_belongs_to_the_cells_it_was_measured_on() {
+    let dir = temp("fingerprint");
+    std::fs::write(dir.join(nirvana_seat::RECORD_FILE), FIXTURE).unwrap();
+    let measured = v18_on();
+    let checked = check(&dir, &measured, NOW, true).expect("checked");
+    assert_eq!(
+        checked.calibration.table_fingerprint,
+        fingerprint(&measured)
+    );
+    let cal = read(&dir).expect("the file");
+    assert!(cal.fits(&measured));
+    assert!(!due(&dir, &measured, NOW + 60), "just checked");
+    let booked = |table: &Table| {
+        nirvana_seat::pooled_factors(table, &dir)
+            .for_cell("hydrogen", Effort::Low)
+            .is_some()
+    };
+    assert!(booked(&measured), "measured on this table: booked");
+    let low = "{ effort = \"low\", windows = { \"5h\" = 0.0002235, week = 0.0001118 }";
+    let changed = [
+        ("today's refit hydrogen low cell", {
+            let mut today = parse(nirvana_seat::DEFAULT).unwrap();
+            today.calibration_hold.clear();
+            today
+        }),
+        (
+            "a hand edit of one cell",
+            v18_edited(
+                low,
+                "{ effort = \"low\", windows = { \"5h\" = 0.0002235, week = 0.0001119 }",
+            ),
+        ),
+        (
+            "the cell's date",
+            v18_edited(
+                "windows = { \"5h\" = 0.0002235, week = 0.0001118 }, at = \"2026-11-12\"",
+                "windows = { \"5h\" = 0.0002235, week = 0.0001118 }, at = \"2026-11-13\"",
+            ),
+        ),
+        ("the medium size's use", {
+            let mut table = v18_on();
+            table.size.medium.use_factor *= 1.5;
+            table
+        }),
+        ("a class weight", {
+            let mut table = v18_on();
+            table.classes[0].weight *= 2.0;
+            table
+        }),
+        ("a pool's per_usd", {
+            let mut table = v18_on();
+            for per in table.pools[0].per_usd.values_mut() {
+                *per *= 2.0;
+            }
+            table
+        }),
+        ("a price", {
+            let mut table = v18_on();
+            let seat = table
+                .seats
+                .iter_mut()
+                .find(|seat| !seat.prices.is_empty())
+                .unwrap();
+            seat.prices[0].input *= 2.0;
+            table
+        }),
+    ];
+    for (what, table) in &changed {
+        assert!(!cal.fits(table), "{what}: fits");
+        assert!(!booked(table), "{what}: the file's factor is still booked");
+        assert_eq!(
+            nirvana_seat::world_factors(table, &dir),
+            Factors::default(),
+            "{what}: live"
+        );
+        assert!(due(&dir, table, NOW + 60), "{what}: not due at once");
+    }
+    let mut unrelated = vec![
+        (
+            "overrides_per_run",
+            v18_edited("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n"),
+        ),
+        (
+            "a comment",
+            v18_edited(
+                "# Overrides the orchestrator",
+                "# Overrides that the orchestrator",
+            ),
+        ),
+        (
+            "a basis",
+            v18_edited(
+                "carries flash's fit x8.97\" }",
+                "carries flash's fit x8.97, noted\" }",
+            ),
+        ),
+    ];
+    let mut held = v18_on();
+    held.calibration_hold = vec!["opus:high".into()];
+    unrelated.push(("the hold line", held));
+    let mut scored = v18_on();
+    scored.classes[0].seats[0].score -= 1.0;
+    unrelated.push(("a score", scored));
+    let mut mode = v18_on();
+    mode.mode = Mode::Sota;
+    unrelated.push(("the mode", mode));
+    for (what, table) in &unrelated {
+        assert!(cal.fits(table), "{what}: does not fit");
+        assert!(booked(table), "{what}: the factor was dropped");
+        assert!(!due(&dir, table, NOW + 60), "{what}: due");
+    }
+    // The idle tick checks again against the new table at once, and books by it from then on.
+    let (_, today) = &changed[0];
+    let summary = tick(&dir, today, NOW + 120).expect("due, so checked");
+    assert!(read(&dir).unwrap().fits(today), "{summary}");
+    assert!(!due(&dir, today, NOW + 180));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The P46a review, finding 3: the file is checked where it is read. A factor that is not finite and positive drops
+/// its row, a huge one is clamped to `CLAMP` and flagged, a good one is kept; an unknown file version is ignored whole.
+#[test]
+fn p97_factors_are_clamped_when_read() {
+    let dir = temp("clamp-read");
+    let table = v18_on();
+    let row = |seat: &str, effort: &str, factor: Value| json!({"seat": seat, "effort": effort, "n": 7, "median": 1.0, "factor": factor});
+    let file = |version: u32| {
+        json!({
+            "version": version, "computed_at": NOW, "date": "2026-11-18", "record_lines": 37, "record_bytes": 1,
+            "lines_used": 37, "on": true, "table_fingerprint": fingerprint(&table), "findings": [], "cells": [],
+            "summary": "s",
+            "cost": [
+                row("hydrogen", "low", json!(0.0)),
+                row("hydrogen", "medium", json!(-2.0)),
+                row("hydrogen", "high", json!("NaN")),
+                row("opus", "high", json!(1e9)),
+                row("sonnet", "medium", json!(0.37)),
+                {"seat": "sonnet", "effort": "high", "n": 7, "median": null, "factor": "0.41"},
+            ],
+        })
+    };
+    std::fs::write(path(&dir), serde_json::to_string(&file(VERSION)).unwrap()).unwrap();
+    let cal = read(&dir).expect("one bad row does not lose the file");
+    let factors = nirvana_seat::pooled_factors(&table, &dir);
+    for effort in [Effort::Low, Effort::Medium, Effort::High] {
+        assert_eq!(
+            factors.for_cell("hydrogen", effort),
+            None,
+            "{effort:?}: dropped"
+        );
+    }
+    let opus = factors.for_cell("opus", Effort::High).expect("1e9 clamped");
+    assert_eq!((opus.factor, opus.clamped), (CLAMP.1, true));
+    assert!(
+        opus.words().contains("the record reads x1000000000.00"),
+        "{}",
+        opus.words()
+    );
+    let sonnet = factors
+        .for_cell("sonnet", Effort::Medium)
+        .expect("a good row");
+    assert_eq!((sonnet.factor, sonnet.clamped), (0.37, false));
+    assert_eq!(
+        factors.for_cell("sonnet", Effort::High).map(|a| a.factor),
+        Some(0.41),
+        "a number as text"
+    );
+    assert!(
+        cal.cost[5].median.is_nan(),
+        "null reads as NaN, not as a lost file"
+    );
+    // A row under five orders books nothing, whatever it says.
+    let mut thin = cal.clone();
+    thin.cost[4].n = 4;
+    assert_eq!(
+        Factors::from_calibration(&thin, None).for_cell("sonnet", Effort::Medium),
+        None
+    );
+    // A project's dropped row falls back to the pooled figure.
+    let mut own = cal.clone();
+    own.cost.push(CostRow {
+        project: Some("c:/p".into()),
+        factor: Some(f64::NAN),
+        ..cal.cost[4].clone()
+    });
+    assert_eq!(
+        Factors::from_calibration(&own, Some("c:/p".into()))
+            .for_cell("sonnet", Effort::Medium)
+            .map(|a| a.factor),
+        Some(0.37)
+    );
+    // Another version: ignored whole, and due.
+    std::fs::write(
+        path(&dir),
+        serde_json::to_string(&file(VERSION + 1)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(read(&dir), None);
+    assert_eq!(
+        nirvana_seat::pooled_factors(&table, &dir),
+        Factors::default()
+    );
+    std::fs::write(dir.join(nirvana_seat::RECORD_FILE), FIXTURE).unwrap();
+    assert!(due(&dir, &table, NOW));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The P46a review, finding 4: the idle check is bounded. A missing journal and one over the byte cap are skipped by
+/// their metadata; past the file cap the oldest runs are skipped; past the budget every journal left is, and the
+/// check still completes and says how many it skipped. A write that fails backs off instead of replaying at every
+/// tick, and says so; a write that works clears it.
+#[test]
+fn p97_the_idle_check_is_bounded() {
+    let root = temp("bounded");
+    let line = |run: &str, ago: u64| -> RecordLine {
+        serde_json::from_value(json!({
+            "order": format!("o-{run}"), "run": run, "seat": "opus", "effort": "high", "class": "plan",
+            "outcome": "pass", "at": NOW - ago,
+            "journal": format!("{}/.nirvana/runs/{run}/journal.jsonl#1", root.display()),
+        }))
+        .expect("a line")
+    };
+    let journal = |run: &str, bytes: usize| {
+        let path = root
+            .join(".nirvana")
+            .join("runs")
+            .join(run)
+            .join("journal.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, " ".repeat(bytes)).unwrap();
+    };
+    journal("r-new", 10);
+    journal("r-mid", 10);
+    journal("r-big", 5_000);
+    let lines = vec![
+        line("r-new", 60),
+        line("r-mid", 600),
+        line("r-big", 900),
+        line("r-gone", 1_200),
+    ];
+    let limits = Limits {
+        max_bytes: 1_000,
+        max_files: 5,
+        budget: std::time::Duration::from_secs(60),
+    };
+    let got = read_journals(&lines, NOW, &limits, std::time::Instant::now());
+    assert_eq!(
+        (got.files, got.skipped),
+        (
+            2,
+            Skipped {
+                missing: 1,
+                large: 1,
+                many: 0,
+                late: 0
+            }
+        )
+    );
+    let capped = read_journals(
+        &lines,
+        NOW,
+        &Limits {
+            max_files: 1,
+            ..limits
+        },
+        std::time::Instant::now(),
+    );
+    assert_eq!(capped.files, 1);
+    assert_eq!(
+        capped.skipped.many, 3,
+        "the three older runs: {:?}",
+        capped.skipped
+    );
+    let late = read_journals(
+        &lines,
+        NOW,
+        &Limits {
+            budget: std::time::Duration::ZERO,
+            ..limits
+        },
+        std::time::Instant::now(),
+    );
+    assert_eq!((late.files, late.skipped.late), (0, 4));
+    assert_eq!(
+        late.skipped.words(&limits).as_deref(),
+        Some("4 journal files skipped (4 past the 60 s budget)")
+    );
+    assert_eq!(
+        got.skipped.words(&limits).as_deref(),
+        Some("2 journal files skipped (1 missing or unreadable, 1 over 0 MB)")
+    );
+    // The whole check completes past its budget and says so in its summary.
+    let dir = temp("bounded-home");
+    let record: String = lines
+        .iter()
+        .map(|l| format!("{}\n", serde_json::to_string(l).unwrap()))
+        .collect();
+    std::fs::write(dir.join(nirvana_seat::RECORD_FILE), &record).unwrap();
+    let table = v18_on();
+    let zero = Limits {
+        budget: std::time::Duration::ZERO,
+        ..Limits::default()
+    };
+    let checked = compute(&dir, &table, NOW, &zero).expect("completes");
+    assert_eq!((checked.journals, checked.skipped.late), (0, 4));
+    assert!(
+        checked
+            .calibration
+            .summary
+            .ends_with("; 4 journal files skipped (4 past the 0 s budget)"),
+        "{}",
+        checked.calibration.summary
+    );
+    assert!(text(&checked, Path::new("r")).contains("0 journal files read, 4 skipped\n"));
+    // A write that fails: said, and backed off for an hour; the record is not read again meanwhile.
+    std::fs::create_dir(path(&dir)).unwrap();
+    let said = tick(&dir, &table, NOW).expect("said");
+    assert!(
+        said.starts_with("the check could not be written ("),
+        "{said}"
+    );
+    assert!(said.ends_with("; the next try is in 60 min"), "{said}");
+    assert_eq!(
+        std::fs::read_to_string(failed_path(&dir)).unwrap(),
+        format!("{NOW}\n")
+    );
+    assert!(!due(&dir, &table, NOW + BACKOFF_S - 1), "backing off");
+    assert_eq!(tick(&dir, &table, NOW + 60), None);
+    assert!(due(&dir, &table, NOW + BACKOFF_S), "an hour on");
+    std::fs::remove_dir(path(&dir)).unwrap();
+    tick(&dir, &table, NOW + BACKOFF_S).expect("checked");
+    assert!(
+        read(&dir).is_some() && !failed_path(&dir).exists(),
+        "written, and the note cleared"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The P46a review, finding 6: cost reads one line per order and run, the last, as the scores do. A corrected line
+/// repeating an order's tokens no longer counts it twice toward the n of 5.
+#[test]
+fn p97_cost_counts_one_line_per_order() {
+    let lines = fixture();
+    let base = calibrate(&v18(), &lines, &Journals::default(), NOW);
+    let hydrogen = pooled(&base, "hydrogen", Effort::Low).clone();
+    let mut doubled = lines.clone();
+    doubled.extend(lines.iter().filter(|l| l.seat == "hydrogen").cloned());
+    let again = calibrate(&v18(), &doubled, &Journals::default(), NOW);
+    assert_eq!(
+        pooled(&again, "hydrogen", Effort::Low),
+        &hydrogen,
+        "a repeated line counts once"
+    );
+    // Four orders written twice stay four: no factor.
+    let four: Vec<RecordLine> = lines
+        .iter()
+        .filter(|l| l.seat == "carbon")
+        .cloned()
+        .collect();
+    assert_eq!(four.len(), 4);
+    let twice: Vec<RecordLine> = four.iter().chain(&four).cloned().collect();
+    let row = calibrate(&v18(), &twice, &Journals::default(), NOW);
+    assert_eq!((row.cost[0].n, row.cost[0].factor), (4, None));
+    // The last line of an order is the one read.
+    let mut corrected = four[0].clone();
+    corrected.tokens = corrected.tokens.map(|mut t| {
+        t.output *= 10;
+        t
+    });
+    let last = calibrate(
+        &v18(),
+        &[four[0].clone(), corrected.clone()],
+        &Journals::default(),
+        NOW,
+    );
+    let only = calibrate(&v18(), &[corrected], &Journals::default(), NOW);
+    assert_eq!(last.cost[0].median, only.cost[0].median);
 }

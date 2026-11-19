@@ -36,7 +36,7 @@
 //! the next pick reads it; the hypotheses are tagged there.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -1108,15 +1108,23 @@ fn replace_mode_line(text: &str, new_mode_line: &str) -> String {
 }
 
 fn maybe_upgrade(path: &Path) -> Option<()> {
-    let text = std::fs::read_to_string(path).ok()?;
+    maybe_upgrade_with(path, DEFAULT, HISTORICAL_DEFAULTS)
+}
+
+/// `maybe_upgrade` against `default` and the `kept` defaults before it: a parameter so a test can hold an older kept
+/// default with a key today's lacks (the dropped-key path; no real kept default has one on 2026-11-19).
+fn maybe_upgrade_with(path: &Path, default: &str, kept: &[&str]) -> Option<()> {
+    // The bytes, so the backup can be checked against exactly what was read.
+    let bytes = std::fs::read(path).ok()?;
+    let text = std::str::from_utf8(&bytes).ok()?;
     let normalized = text.replace("\r\n", "\n");
     let mode_line = extract_mode_line(&normalized)?;
     let canonical = replace_mode_line(&normalized, "mode = \"balanced\"");
-    let current_canonical = DEFAULT.replace("\r\n", "\n");
+    let current_canonical = default.replace("\r\n", "\n");
     if canonical == current_canonical {
         return None;
     }
-    let is_historical = HISTORICAL_DEFAULTS
+    let is_historical = kept
         .iter()
         .any(|hist| canonical == hist.replace("\r\n", "\n"));
     // Plan 46: a kept default with plain values edited takes the new default with those values carried. The owner's
@@ -1125,7 +1133,7 @@ fn maybe_upgrade(path: &Path) -> Option<()> {
     let (current_canonical, carried) = if is_historical {
         (current_canonical, None)
     } else {
-        let carried = carried_from_kept(&canonical)?;
+        let carried = carried_from_kept(&canonical, default, kept)?;
         let (upgraded, dropped) = with_carried(&current_canonical, &carried.lines);
         // The carried values must still parse in the new default, or the file is left as it is.
         parse(&upgraded).ok()?;
@@ -1133,36 +1141,107 @@ fn maybe_upgrade(path: &Path) -> Option<()> {
     };
     let dir = path.parent()?;
     let backup_dir = dir.join("backup");
-    let _ = std::fs::create_dir_all(&backup_dir);
-    // Plan 46: a dated name, so a later upgrade never writes over an earlier backup (it was one `seats.toml`).
-    let backup = backup_name(&backup_dir, now());
-    let _ = std::fs::copy(path, &backup);
+    // The P46a review, finding 2: the table is never written over unless its backup was written and read back holding
+    // the bytes read above. With the backup folder blocked (a file where the folder goes), the carried path rewrote the
+    // table with no backup and no log, and the owner's layout and any dropped key were gone. Both paths: the whole-text
+    // path's old file is a kept default and so could be rebuilt, but nothing documents an upgrade without a backup.
+    let backup = match take_backup(path, &bytes, &backup_dir) {
+        Ok(backup) => backup,
+        Err(why) => {
+            upgrade_note(
+                dir,
+                &format!("seats.toml was not upgraded and is left as it was: {why}"),
+            );
+            return None;
+        }
+    };
 
-    if let Some((carried, dropped)) = carried {
-        let note = format!(
-            "{} seats.toml took herdr's default, keeping your {}{}; the file before is {}\n",
-            crate::nirvana_run::utc(now()),
-            carried.words(),
-            if dropped.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "; dropped, no longer in the default: {}",
-                    dropped.join(", ")
-                )
-            },
-            backup.display()
+    if let Some((carried, dropped)) = carried.filter(|(carried, _)| !carried.lines.is_empty()) {
+        // Review of the dropped-key path (not run by the P46a review): a dropped key was named under "keeping your"
+        // as well as under "dropped". The kept words now name only what the new default took.
+        let kept_words = Carried {
+            lines: carried
+                .lines
+                .iter()
+                .filter(|(_, key, _, _)| !dropped.contains(key))
+                .cloned()
+                .collect(),
+        }
+        .words();
+        upgrade_note(
+            dir,
+            &format!(
+                "seats.toml took herdr's default{}{}; the file before is {}",
+                if kept_words.is_empty() {
+                    String::new()
+                } else {
+                    format!(", keeping your {kept_words}")
+                },
+                if dropped.is_empty() {
+                    String::new()
+                } else {
+                    format!("; dropped, no longer in the default: {}", dropped.join(", "))
+                },
+                backup.display()
+            ),
         );
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(backup_dir.join(UPGRADE_LOG))
-            .and_then(|mut file| file.write_all(note.as_bytes()));
     }
 
     let upgraded = replace_mode_line(&current_canonical, mode_line);
     let _ = write_atomic(path, upgraded.as_bytes());
     Some(())
+}
+
+/// The backup of the table at `path`, whose bytes are `bytes`: a new dated file in `backup_dir`, read back and
+/// compared. `Err` says why there is none.
+fn take_backup(path: &Path, bytes: &[u8], backup_dir: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(backup_dir).map_err(|err| {
+        format!(
+            "the backup folder {} cannot be made ({err})",
+            backup_dir.display()
+        )
+    })?;
+    // Plan 46: a dated name, so a later upgrade never writes over an earlier backup (it was one `seats.toml`).
+    let backup = backup_name(backup_dir, now());
+    std::fs::copy(path, &backup).map_err(|err| {
+        format!("the backup {} cannot be written ({err})", backup.display())
+    })?;
+    match std::fs::read(&backup) {
+        Ok(copy) if copy == bytes => Ok(backup),
+        Ok(_) => Err(format!(
+            "the backup {} does not hold the table as it was read",
+            backup.display()
+        )),
+        Err(err) => Err(format!(
+            "the backup {} cannot be read back ({err})",
+            backup.display()
+        )),
+    }
+}
+
+/// One dated line in `backup/seats-upgrades.log`, where the upgrade reports. When that folder is what failed, the line
+/// goes to `seats-upgrades.log` beside `seats.toml` instead. A refusal repeats at every read of the table (every pick),
+/// so a line whose words equal the log's last line's is not written again.
+fn upgrade_note(dir: &Path, words: &str) {
+    let line = format!("{} {words}\n", crate::nirvana_run::utc(now()));
+    for log in [dir.join("backup").join(UPGRADE_LOG), dir.join(UPGRADE_LOG)] {
+        let said_last = std::fs::read_to_string(&log).is_ok_and(|text| {
+            text.lines()
+                .last()
+                .is_some_and(|last| last.ends_with(&format!("Z {words}")))
+        });
+        if said_last {
+            return;
+        }
+        let written = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .and_then(|mut file| file.write_all(line.as_bytes()));
+        if written.is_ok() {
+            return;
+        }
+    }
 }
 
 /// Plan 46: beside the backups, one line per upgrade that carried the owner's values, with any it dropped.
@@ -1206,25 +1285,15 @@ fn plain_assignment(line: &str) -> Option<(String, toml::Value)> {
     plain.then_some((key, value))
 }
 
-/// Plan 46: the hold line is the owner's to add to a kept default that predates it: its top-level line is taken out
-/// before the comparison and carried as the owner wrote it.
-const HOLD_KEY: &str = "calibration_hold";
-
-/// The text without its top-level `calibration_hold` line, and that line.
-fn without_hold(text: &str) -> (String, Option<String>) {
-    let lines: Vec<&str> = text.lines().collect();
-    let at = sections(&lines);
-    let mut hold = None;
-    let mut rest = String::with_capacity(text.len());
-    for (line, section) in lines.iter().zip(&at) {
-        if section.is_none() && plain_assignment(line).is_some_and(|(key, _)| key == HOLD_KEY) {
-            hold = Some((*line).to_owned());
-            continue;
-        }
-        rest.push_str(line);
-        rest.push('\n');
-    }
-    (rest, hold)
+/// The top-level plain assignments of a table's lines: each key and its line's index.
+fn top_level_plain(lines: &[&str]) -> BTreeMap<String, usize> {
+    let at = sections(lines);
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| at[*index].is_none())
+        .filter_map(|(index, line)| plain_assignment(line).map(|(key, _)| (key, index)))
+        .collect()
 }
 
 /// The section each line sits in: `None` at the top level, else its header's text (`constants`, `[seat]`).
@@ -1274,7 +1343,8 @@ pub fn carried_edits(installed: &str, kept: &str) -> Option<Carried> {
     let at = sections(&b);
     let mut lines = Vec::new();
     for (index, (mine, theirs)) in a.iter().zip(&b).enumerate() {
-        if mine == theirs {
+        // The P46a review, finding 7: trailing whitespace is no edit (it logged "keeping your overrides_per_run = 3").
+        if mine.trim_end() == theirs.trim_end() {
             continue;
         }
         let section = &at[index];
@@ -1291,32 +1361,62 @@ pub fn carried_edits(installed: &str, kept: &str) -> Option<Carried> {
 }
 
 /// Plan 46: what `installed` (canonical) carries from the kept default it is nearest to, by lines that differ; `None`
-/// when that nearest default is the current one (nothing to upgrade), or the difference is not plain values only.
-fn carried_from_kept(installed: &str) -> Option<Carried> {
-    let current = canonical(DEFAULT);
-    let (installed, hold) = without_hold(installed);
-    let installed = installed.as_str();
-    // A default of another length is never carried from (`carried_edits` refuses an added or removed line), so the
-    // count over the shorter text is enough to find the nearest.
-    let nearest = std::iter::once(DEFAULT)
-        .chain(HISTORICAL_DEFAULTS.iter().copied())
+/// when that nearest default is `default` itself (nothing to upgrade), or the difference is not plain values only.
+/// An empty `Carried` is a kept default whose lines differ only by trailing whitespace: it upgrades, carrying nothing.
+///
+/// Added lines (the P46a review, finding 5): a top-level plain line whose key that kept default lacks and `default`
+/// has as a plain value is the owner's, added ahead of the default: it is set aside before the comparison and carried
+/// as written. This was a special case for `calibration_hold` only, so a kept default with `calibration = false` added
+/// was left alone and never upgraded again. A multi-line value, or a key `default` does not know, is still an added
+/// line the upgrade will not take: the table stays as it is.
+fn carried_from_kept(installed: &str, default: &str, kept: &[&str]) -> Option<Carried> {
+    let current = canonical(default);
+    let current_lines: Vec<&str> = current.lines().collect();
+    let known = top_level_plain(&current_lines);
+    let lines: Vec<&str> = installed.lines().collect();
+    let mine = top_level_plain(&lines);
+    let nearest = std::iter::once(default)
+        .chain(kept.iter().copied())
         .map(canonical)
-        .map(|kept| without_hold(&kept).0)
         .map(|kept| {
-            let differ = installed.lines().zip(kept.lines()).filter(|(a, b)| a != b).count();
-            (differ, kept)
+            let kept_lines: Vec<&str> = kept.lines().collect();
+            let theirs = top_level_plain(&kept_lines);
+            let added: BTreeSet<usize> = mine
+                .iter()
+                .filter(|(key, _)| !theirs.contains_key(*key) && known.contains_key(*key))
+                .map(|(_, index)| *index)
+                .collect();
+            let rest: Vec<&str> = lines
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !added.contains(index))
+                .map(|(_, line)| *line)
+                .collect();
+            // A default of another length is never carried from (`carried_edits` refuses an added or removed line):
+            // the lines that differ over the shorter text, and the difference in length.
+            let differ = rest
+                .iter()
+                .zip(&kept_lines)
+                .filter(|(a, b)| a.trim_end() != b.trim_end())
+                .count()
+                + rest.len().abs_diff(kept_lines.len());
+            let rest = rest.join("\n");
+            (differ, kept, rest, added)
         })
         // The first of the fewest: the current default wins a tie, so an edited current table is never rewritten.
-        .min_by_key(|(differ, _)| *differ)?;
-    if nearest.1 == without_hold(&current).0 {
+        .min_by_key(|(differ, ..)| *differ)?;
+    let (_, kept, rest, added) = nearest;
+    if kept == current {
         return None;
     }
-    let mut carried = carried_edits(installed, &nearest.1)?;
-    if let Some(line) = hold {
-        let value = plain_assignment(&line).map(|(_, value)| value)?;
-        carried.lines.push((None, HOLD_KEY.to_owned(), line, value));
+    let mut carried = carried_edits(&rest, &kept)?;
+    for index in added {
+        let (key, value) = plain_assignment(lines[index])?;
+        carried
+            .lines
+            .push((None, key, lines[index].to_owned(), value));
     }
-    Some(carried).filter(|carried| !carried.lines.is_empty())
+    Some(carried)
 }
 
 /// `default` with each carried key set to the owner's line, in the same section; the keys the default no longer has.
@@ -4851,9 +4951,11 @@ fn leases_or_exit(path: &Path) -> Leases {
 /// test with no cache ran the real CLIs on the owner's sign-in (review of the p20 build, 2026-10-20). A stale
 /// reading here is stale, which the rule turns into opus medium.
 pub fn cached_world(dir: &Path, now: u64) -> World {
-    // Plan 46: the measured cost factors too, with no project (no `git` here): the pooled factor for every cell. The
-    // Seats square sets its own project's (`nirvana_seats_square::read`).
-    let calibration = crate::nirvana_seat_calib::Factors::from_file(dir, None);
+    // Plan 46: no measured cost factors here (the P46a review, finding 7: this read the file at every call, the prompt
+    // hook's included, with the table saying off). It has no table to say whether they are on, and of its callers only
+    // the idle review picks a worker's seat, which books by them: it sets them itself (`pooled_factors`). The prompt
+    // hook's `check_seat_notice` and the launch read `orchestrator_seat`, which books no use cell; the media doctor
+    // picks nothing; the Seats square sets its own project's factors.
     let cache = nirvana_usage::read_cache(&dir.join(nirvana_usage::CACHE_FILE));
     World {
         now,
@@ -4865,7 +4967,6 @@ pub fn cached_world(dir: &Path, now: u64) -> World {
         leases: load_leases(&dir.join(LEASES_FILE))
             .unwrap_or_default()
             .leases,
-        calibration,
         ..World::default()
     }
 }
@@ -4951,7 +5052,17 @@ pub fn live_world(table: &Table) -> World {
 /// Plan 46: `live_world`'s factors: the file's, for this process's project, when the table books by them; else none.
 pub fn world_factors(table: &Table, dir: &Path) -> crate::nirvana_seat_calib::Factors {
     if table.calibration {
-        crate::nirvana_seat_calib::Factors::for_this_project(dir)
+        crate::nirvana_seat_calib::Factors::for_this_project(dir, table)
+    } else {
+        crate::nirvana_seat_calib::Factors::default()
+    }
+}
+
+/// Plan 46: the pooled factors (no project, so no `git`) when the table books by them and the file was measured
+/// against it; else none. The idle review's pick reads these on the cached world.
+pub fn pooled_factors(table: &Table, dir: &Path) -> crate::nirvana_seat_calib::Factors {
+    if table.calibration {
+        crate::nirvana_seat_calib::Factors::from_file(dir, table, None)
     } else {
         crate::nirvana_seat_calib::Factors::default()
     }
@@ -10672,6 +10783,8 @@ worker_autocompact_tokens = 300000\n";
                 clamped: false,
                 held: false,
             }],
+            // The P46a review, finding 1: measured against today's table, or no reader applies it.
+            table_fingerprint: crate::nirvana_seat_calib::fingerprint(&table()),
             ..Default::default()
         };
         std::fs::write(crate::nirvana_seat_calib::path(&dir), serde_json::to_string(&cal).unwrap()).unwrap();
@@ -10679,6 +10792,158 @@ worker_autocompact_tokens = 300000\n";
         assert_eq!(on.for_cell("hydrogen", Effort::Low).map(|a| a.n), Some(7));
         let off = parse(&DEFAULT.replacen("\ncalibration = true\n", "\ncalibration = false\n", 1)).unwrap();
         assert_eq!(world_factors(&off, &dir), crate::nirvana_seat_calib::Factors::default());
+        assert_eq!(pooled_factors(&off, &dir), crate::nirvana_seat_calib::Factors::default());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- the P46a review's fix round ----
+
+    /// v15 with the owner's `overrides_per_run = 5` and a mode: the carried path's input.
+    fn p97_owners_v15() -> String {
+        replace_mode_line(P97_V15, "mode = \"sota\"").replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1)
+    }
+
+    /// Finding 2: the upgrade never writes over the owner's table unless its backup was written and read back. With
+    /// the backup folder blocked (a file where it goes), the table stays byte for byte, one line says why beside it
+    /// (said once, not at every read), and with the folder free again it upgrades. Both paths: carried and whole-text.
+    #[test]
+    fn p97_no_upgrade_without_a_backup() {
+        for (what, installed) in [("carried", p97_owners_v15()), ("whole text", replace_mode_line(P97_V15, "mode = \"sota\""))] {
+            let dir = temp_dir(&format!("p97-nobackup-{}", what.replace(' ', "-")));
+            let path = dir.join(SEATS_FILE);
+            let bytes = installed.replace('\n', "\r\n");
+            std::fs::write(&path, &bytes).unwrap();
+            std::fs::write(dir.join("backup"), "a file where the backup folder goes").unwrap();
+            assert_eq!(read_or_create(&path), bytes, "{what}");
+            assert_eq!(std::fs::read(&path).unwrap(), bytes.as_bytes(), "{what}: byte for byte");
+            let log = std::fs::read_to_string(dir.join(UPGRADE_LOG)).expect("a line beside seats.toml");
+            assert_eq!(log.lines().count(), 1, "{log}");
+            assert!(
+                log.contains(" seats.toml was not upgraded and is left as it was: the backup folder "),
+                "{what}: {log}"
+            );
+            // Every read of the table (every pick) tries again: the same reason is not written again.
+            read_or_create(&path);
+            assert_eq!(std::fs::read_to_string(dir.join(UPGRADE_LOG)).unwrap(), log, "{what}");
+            std::fs::remove_file(dir.join("backup")).unwrap();
+            let want = replace_mode_line(DEFAULT, "mode = \"sota\"");
+            let want = if what == "carried" {
+                want.replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1)
+            } else {
+                want
+            };
+            assert_eq!(read_or_create(&path), want, "{what}: free again, it upgrades");
+            assert_eq!(p97_backups(&dir), [bytes], "{what}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Finding 5: an owner's ADDED top-level line is carried when the new default has that key as a plain value, as
+    /// the hold line was: `calibration = false` added to a kept default upgrades and keeps false. An added key the new
+    /// default does not know, or a multi-line value, leaves the table alone; so does a current table with its hold line
+    /// deleted (a removed line).
+    #[test]
+    fn p97_an_added_plain_line_carries() {
+        let cases = [
+            ("calibration = false", vec!["calibration = false"]),
+            ("both lines", vec!["calibration = false", "calibration_hold = []"]),
+        ];
+        for (what, added) in cases {
+            let dir = temp_dir(&format!("p97-added-{}", what.replace([' ', '='], "-")));
+            let path = dir.join(SEATS_FILE);
+            let installed = P97_V15.replacen(
+                "\nuse_record = false\n",
+                &format!("\nuse_record = false\n{}\n", added.join("\n")),
+                1,
+            );
+            std::fs::write(&path, &installed).unwrap();
+            let mut want = DEFAULT.replacen("\ncalibration = true\n", "\ncalibration = false\n", 1);
+            if added.len() == 2 {
+                want = want.replacen(P97_HOLD, "calibration_hold = []", 1);
+            }
+            assert_eq!(read_or_create(&path), want, "{what}");
+            let table = parse(&want).unwrap();
+            assert!(!table.calibration, "{what}: kept false");
+            assert_eq!(p97_backups(&dir), [installed], "{what}");
+            let log = std::fs::read_to_string(dir.join("backup").join(UPGRADE_LOG)).unwrap();
+            assert!(log.contains("keeping your calibration = false"), "{what}: {log}");
+            // Stable: a second read neither rewrites nor backs up.
+            assert_eq!(read_or_create(&path), want);
+            assert_eq!(p97_backups(&dir).len(), 1);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        let alone = [
+            ("an added key the default lacks", P97_V15.replacen("\nuse_record = false\n", "\nuse_record = false\nmystery = 1\n", 1)),
+            (
+                "a multi-line array at top level",
+                P97_V15.replacen(
+                    "\nuse_record = false\n",
+                    "\nuse_record = false\ncalibration_hold = [\n  \"opus:high\",\n]\n",
+                    1,
+                ),
+            ),
+            ("a current table with its hold deleted", DEFAULT.replacen(&format!("{P97_HOLD}\n"), "", 1)),
+        ];
+        for (what, text) in alone {
+            let dir = temp_dir(&format!("p97-added-alone-{}", what.len()));
+            let path = dir.join(SEATS_FILE);
+            std::fs::write(&path, &text).unwrap();
+            assert_eq!(read_or_create(&path), text, "{what}");
+            assert!(p97_backups(&dir).is_empty(), "{what}: no backup");
+            assert_eq!(differs_line(&text).as_deref(), Some(DIFFERS_LINE), "{what}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Finding 7: a line that differs from a kept default only by trailing whitespace is no edit: the table upgrades as
+    /// an unedited one does, with no "keeping your" line.
+    #[test]
+    fn p97_trailing_whitespace_is_no_edit() {
+        let dir = temp_dir("p97-trailing");
+        let path = dir.join(SEATS_FILE);
+        let installed = replace_mode_line(P97_V15, "mode = \"efficient\"")
+            .replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 3  \n", 1);
+        std::fs::write(&path, &installed).unwrap();
+        assert_eq!(read_or_create(&path), replace_mode_line(DEFAULT, "mode = \"efficient\""));
+        assert_eq!(p97_backups(&dir), [installed]);
+        assert!(!dir.join("backup").join(UPGRADE_LOG).exists(), "nothing carried, no line");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The dropped-key path, which the P46a review did not run (no real kept default has a key today's lacks): an older
+    /// kept default's edited key that the new default dropped is named as dropped, and not as kept, in the log line.
+    #[test]
+    fn p97_a_dropped_key_is_named_once() {
+        let old = P97_V18.replacen("\nuse_record = false\n", "\nuse_record = false\nretired_knob = 1\n", 1);
+        assert_ne!(old, P97_V18);
+        for (what, installed, kept) in [
+            ("dropped only", old.replacen("\nretired_knob = 1\n", "\nretired_knob = 2\n", 1), ""),
+            (
+                "dropped and kept",
+                old.replacen("\nretired_knob = 1\n", "\nretired_knob = 2\n", 1)
+                    .replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1),
+                ", keeping your overrides_per_run = 5",
+            ),
+        ] {
+            let dir = temp_dir(&format!("p97-dropped-{}", what.replace(' ', "-")));
+            let path = dir.join(SEATS_FILE);
+            let installed = replace_mode_line(&installed, "mode = \"efficient\"");
+            std::fs::write(&path, &installed).unwrap();
+            assert_eq!(maybe_upgrade_with(&path, DEFAULT, &[old.as_str()]), Some(()), "{what}");
+            let mut want = replace_mode_line(DEFAULT, "mode = \"efficient\"");
+            if !kept.is_empty() {
+                want = want.replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1);
+            }
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), want, "{what}");
+            assert_eq!(p97_backups(&dir), [installed.clone()], "{what}");
+            let log = std::fs::read_to_string(dir.join("backup").join(UPGRADE_LOG)).unwrap();
+            assert!(
+                log.contains(&format!(
+                    " seats.toml took herdr's default{kept}; dropped, no longer in the default: retired_knob; the file before is "
+                )),
+                "{what}: {log}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

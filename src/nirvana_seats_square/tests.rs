@@ -620,6 +620,8 @@ fn p97_every_cell_is_the_pick_on_the_same_table_and_readings() {
         version: calib::VERSION,
         computed_at: NOW - 7_200,
         summary: "1 cost booked as measured, 0 score findings".into(),
+        // Measured against this table (the P46a review, finding 1), so its summary is shown as written.
+        table_fingerprint: calib::fingerprint(&table),
         cells: vec![CellRow {
             class: "build.bounded".into(),
             seat: "sonnet".into(),
@@ -736,11 +738,13 @@ fn p97_the_matrix_is_cheap() {
 fn p97_the_square_reads_the_calibration_and_names_what_differs() {
     let (root, home) = project("p97", None);
     let carried = nirvana_seat::DEFAULT.replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1);
-    std::fs::write(home.join(nirvana_seat::SEATS_FILE), carried).unwrap();
+    std::fs::write(home.join(nirvana_seat::SEATS_FILE), &carried).unwrap();
     let calibration = Calibration {
         version: calib::VERSION,
         computed_at: NOW - 60,
         summary: "checked".into(),
+        // `overrides_per_run` and the hold are not in the fingerprint: the file fits every table this test writes.
+        table_fingerprint: calib::fingerprint(&nirvana_seat::parse(&carried).unwrap()),
         cost: vec![calib::CostRow {
             seat: "hydrogen".into(),
             effort: Effort::Low,
@@ -791,8 +795,38 @@ fn p97_the_square_reads_the_calibration_and_names_what_differs() {
         .collect();
     assert!(!cells.is_empty() && cells.iter().all(|c| c.held), "held cells");
     let carried = nirvana_seat::DEFAULT.replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1);
-    std::fs::write(home.join(nirvana_seat::SEATS_FILE), carried).unwrap();
+    std::fs::write(home.join(nirvana_seat::SEATS_FILE), &carried).unwrap();
     assert_eq!(read(&root, &home, &mut Replays::new(), NOW), view, "the same inputs, the same view");
+    // The P46a review, finding 1: a file measured against other cells books nothing, and the check line says so.
+    let stale = Calibration {
+        table_fingerprint: "measured on another table".into(),
+        ..calibration.clone()
+    };
+    std::fs::write(calib::path(&home), serde_json::to_string(&stale).unwrap()).unwrap();
+    let ignored = read(&root, &home, &mut Replays::new(), NOW);
+    let stale_matrix = ignored.matrix.as_ref().unwrap();
+    assert!(
+        stale_matrix.rows.iter().flat_map(|r| &r.cells).all(|c| c.measured.is_none()),
+        "nothing booked"
+    );
+    assert_eq!(stale_matrix.summary.as_deref(), Some(super::STALE_SUMMARY));
+    assert_eq!(
+        checked_line(stale_matrix, NOW),
+        format!("checked {} ago: {}", crate::nirvana_running::elapsed(60), super::STALE_SUMMARY)
+    );
+    // Off in the table: nothing booked, though the file fits.
+    std::fs::write(calib::path(&home), serde_json::to_string(&calibration).unwrap()).unwrap();
+    std::fs::write(
+        home.join(nirvana_seat::SEATS_FILE),
+        carried.replacen("\ncalibration = true\n", "\ncalibration = false\n", 1),
+    )
+    .unwrap();
+    let off = read(&root, &home, &mut Replays::new(), NOW);
+    assert!(
+        off.matrix.unwrap().rows.iter().flat_map(|r| &r.cells).all(|c| c.measured.is_none()),
+        "off in the table"
+    );
+    std::fs::write(home.join(nirvana_seat::SEATS_FILE), &carried).unwrap();
     // No file: the matrix still draws, unchecked; a refused table has none.
     std::fs::remove_file(calib::path(&home)).unwrap();
     let plain = read(&root, &home, &mut Replays::new(), NOW);
