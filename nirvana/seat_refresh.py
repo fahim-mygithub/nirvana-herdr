@@ -4,6 +4,7 @@ CLAUDE.md rule 4: a count in prose rots, so the table's comments name this scrip
 
     python nirvana/seat_refresh.py classes <journal.jsonl> [--by seat,effort,class] [--min N]
     python nirvana/seat_refresh.py hydrogen [--check]
+    python nirvana/seat_refresh.py neon [--check] [--before src/nirvana_seats_v16.toml]
 
 `classes` reads one herdr run journal (run ia1's was the source), prints how many lines it skipped (not JSON, not an
 object, or a `seated` row missing a key) and then, per group of seated orders:
@@ -24,6 +25,14 @@ review round's sonnet review, 17 of 17, to 89). Any other group keeps its score.
 Hydrogen twice Flash 3.8's in and out; plan 71 had assumed the same), and prints Hydrogen's cost per order over Flash's
 at each effort. `--check` exits 1 when a Hydrogen cell is not Flash's cell times that ratio (rounded to 2 places)
 times the `refit x<r>` its basis names, if any.
+
+`neon` (the Neon seat, 2026-11-18) prices the Neon seat's fourteen probe orders, each model at its own price row, and
+prints Neon's cost per order over Carbon's at low, medium and high, and Neon xhigh's over Neon high's. Both rules were
+written before they were applied. Cells: Carbon's cell times that ratio rounded to 2 places; xhigh is Neon high's cell
+times max(1, its ratio) rounded; a cell under a lower effort's is raised to it. Scores: in every class of the table
+before Neon (`--before`, v16) that lists carbon, Carbon's score plus 2, capped at the lower of opus and fable where the
+class lists either, else at the best other enabled seat's score less 1. `--check` exits 1 when a Neon cell or score in
+the table differs.
 
 Standard library only. Reads; writes nothing.
 """
@@ -61,6 +70,31 @@ PLAN71 = (
 )
 # Both models were probed on this day, so it picks each one's price row.
 PLAN71_DAY = "2026-11-12"
+
+# The Neon seat's probe (2026-11-18, agy 1.5.11): plan 71's order with one sentence forbidding any write, the worker's
+# agy argv (stream-json, --dangerously-skip-permissions, no --json-schema), each in its own fresh scratch folder holding
+# only the file; Carbon and Neon alternating, then Neon xhigh. All fourteen answers right, no file written. (model,
+# input, cache_read, output) from each order's `result.usage`, the same fields as PLAN71. The quota could not be read:
+# another agy run moved the "Gemini Models" buckets, and some deltas were negative.
+NEON_PROBE = (
+    ("gemini-4-carbon-low", 15301, 10424, 349),
+    ("gemini-4-neon-low", 15468, 10423, 437),
+    ("gemini-4-carbon-low", 15293, 10416, 252),
+    ("gemini-4-neon-low", 15473, 10423, 589),
+    ("gemini-4-carbon-medium", 15389, 10417, 760),
+    ("gemini-4-neon-medium", 15423, 10416, 655),
+    ("gemini-4-carbon-medium", 15293, 10416, 354),
+    ("gemini-4-neon-medium", 15478, 10416, 673),
+    ("gemini-4-carbon-high", 17576, 23224, 6052),
+    ("gemini-4-neon-high", 15494, 10424, 1147),
+    ("gemini-4-carbon-high", 17629, 22688, 7092),
+    ("gemini-4-neon-high", 15475, 10421, 1098),
+    ("gemini-4-neon-xhigh", 15529, 10427, 1911),
+    ("gemini-4-neon-xhigh", 15446, 10423, 1248),
+)
+NEON_DAY = "2026-11-18"
+# The 0.79.0 default, the table before Neon: the score rule reads Carbon's and the caps from it.
+BEFORE_NEON = ROOT / "src" / "nirvana_seats_v16.toml"
 REFIT = re.compile(r"refit x([0-9.]+)")
 SLACK = 1e-3
 
@@ -205,6 +239,82 @@ def hydrogen(args) -> int:
     return 0
 
 
+# ---- neon ----
+
+def neon_ratios(table: dict) -> dict[str, float]:
+    """effort -> Neon's mean cost per order over Carbon's at that effort, each at its own price row on NEON_DAY;
+    xhigh (Carbon has none) -> Neon xhigh's mean over Neon high's."""
+    seats = {s["id"]: s for s in table["seat"]}
+    price = {seat: price_at(seats[seat], NEON_DAY) for seat in ("carbon", "neon")}
+    cost = defaultdict(lambda: defaultdict(list))
+    for model, inp, cache, out in NEON_PROBE:
+        seat, effort = model.split("-")[2], model.rsplit("-", 1)[1]
+        cost[effort][seat].append(usd(price[seat], {"input": inp, "cache_read": cache, "output": out}))
+    mean = {e: {s: statistics.mean(v) for s, v in c.items()} for e, c in cost.items()}
+    out = {e: m["neon"] / m["carbon"] for e, m in mean.items() if "carbon" in m}
+    out["xhigh"] = mean["xhigh"]["neon"] / mean["high"]["neon"]
+    return out
+
+
+def neon_cells(table: dict) -> dict[str, dict[str, float]]:
+    """Neon's cells by the rule written before the probe: Carbon's cell x round(ratio, 2) at low, medium and high;
+    xhigh is Neon high's x round(max(1, ratio), 2); a cell under a lower effort's is raised to it."""
+    seats = {s["id"]: s for s in table["seat"]}
+    carbon = {c["effort"]: c["windows"] for c in seats["carbon"]["use"]}
+    ratio = neon_ratios(table)
+    cells: dict[str, dict[str, float]] = {}
+    for effort in ("low", "medium", "high"):
+        cells[effort] = {w: share * round(ratio[effort], 2) for w, share in carbon[effort].items()}
+    cells["xhigh"] = {w: share * round(max(1.0, ratio["xhigh"]), 2) for w, share in cells["high"].items()}
+    order = ("low", "medium", "high", "xhigh")
+    for lower, higher in zip(order, order[1:]):
+        cells[higher] = {w: max(cells[higher][w], cells[lower][w]) for w in cells[higher]}
+    return cells
+
+
+def neon_scores(old: dict) -> dict[str, float]:
+    """class -> Neon's score by the rule written before it was applied, from the table before Neon (v16): Carbon's
+    plus 2, capped at the lowest of opus and fable when the class lists either, else at the highest other enabled
+    seat's less 1 (Neon is listed before Carbon, so a tie at the top would give it SOTA's pick by list order)."""
+    enabled = {s["id"]: s["enabled"] for s in old["seat"]}
+    out = {}
+    for c in old["class"]:
+        seats = {e["seat"]: e["score"] for e in c["seats"]}
+        if "carbon" not in seats:
+            continue
+        claude = [seats[s] for s in ("opus", "fable") if s in seats]
+        cap = min(claude) if claude else max(s for k, s in seats.items() if enabled[k] and k != "neon") - 1
+        out[c["id"]] = min(seats["carbon"] + 2, cap)
+    return out
+
+
+def neon(args) -> int:
+    table = tomllib.loads(args.table.read_text(encoding="utf-8"))
+    old = tomllib.loads(args.before.read_text(encoding="utf-8"))
+    seats = {s["id"]: s for s in table["seat"]}
+    have = {c["effort"]: c["windows"] for c in seats["neon"]["use"]}
+    wrong = []
+    for effort, r in neon_ratios(table).items():
+        print(f"{effort}: neon over {'neon high' if effort == 'xhigh' else 'carbon'} {r:.2f} at its own price")
+    for effort, want in neon_cells(table).items():
+        for window, share in want.items():
+            got = have.get(effort, {}).get(window)
+            if got is None or abs(got - share) > SLACK * share + 5e-8:
+                wrong.append(f"neon {effort} {window}: toml {got}, computed {share:.4g}")
+    for cid, score in neon_scores(old).items():
+        entry = [e for e in next(c for c in table["class"] if c["id"] == cid)["seats"] if e["seat"] == "neon"]
+        got = entry[0]["score"] if entry else None
+        print(f"{cid}: neon {score}")
+        if got != score:
+            wrong.append(f"neon in {cid}: toml {got}, rule {score}")
+    for line in wrong:
+        print(f"seat_refresh: {line}")
+    if args.check:
+        print(f"seat_refresh neon --check: {'FAIL' if wrong else 'ok'}, {len(wrong)} difference(s)")
+        return 1 if wrong else 0
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--table", type=Path, default=TABLE)
@@ -215,8 +325,11 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--min", type=int, default=1)
     h = sub.add_parser("hydrogen")
     h.add_argument("--check", action="store_true")
+    n = sub.add_parser("neon")
+    n.add_argument("--check", action="store_true")
+    n.add_argument("--before", type=Path, default=BEFORE_NEON)
     args = parser.parse_args(argv)
-    return classes(args) if args.what == "classes" else hydrogen(args)
+    return {"classes": classes, "hydrogen": hydrogen, "neon": neon}[args.what](args)
 
 
 if __name__ == "__main__":

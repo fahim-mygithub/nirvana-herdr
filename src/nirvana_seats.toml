@@ -150,11 +150,12 @@ basis = "free: the local GPU"
 # `prices` are USD per million tokens, each from its date. `use` is the expected share of each window for
 # P4's order at each effort, on the date `at`; a later price scales it.
 # The seats refresh, 2026-11-18: every model id below is one its CLI offers today. `agy models` (agy 1.5.11) lists the
-# carbon, argon, hydrogen, flash, g-opus, g-sonnet and gpt-oss ids here and no Gemini 4 Neon (`--model
-# gemini-4-neon-low` answers "not recognized as a known model"). It also lists `gemini-pro-orchestrator` and
-# `gemini-pro-orchestrator-argon`, agy's Orchestrator, which plans on Carbon (or Argon) high and hands the work to
-# Hydrogen high (agy 1.5.10's notes). No seat for it: a seat is one model at one effort with one price, and Nirvana
-# Claude already plans. Claude Code 2.1.327 names no Claude model newer than opus, sonnet and haiku 5.5 and fable 5.2.
+# neon, carbon, argon, hydrogen, flash, g-opus, g-sonnet and gpt-oss ids here. Neon's four were refused that morning
+# (`--model gemini-4-neon-low` answered "not recognized as a known model") and listed by the evening. It also lists
+# `gemini-pro-orchestrator`, `gemini-pro-orchestrator-argon` and `gemini-pro-orchestrator-neon`, agy's Orchestrator,
+# which plans on one model's high and hands the work to another's (agy 1.5.10's notes). No seat for it: a seat is one
+# model at one effort with one price, and Nirvana Claude already plans. Claude Code 2.1.327 names no Claude model
+# newer than opus, sonnet and haiku 5.5 and fable 5.2.
 
 [[seat]]
 id = "opus"
@@ -303,6 +304,39 @@ use = [
   { effort = "high", windows = { week = 0.0162 }, at = "2026-10-17", basis = "prior: medium x 1.6" },
 ]
 
+# The Neon seat, the owner 2026-11-18: "there might also be a new seat potentially called gemini 4 neon" and "its
+# supposidly better then hydrogen but you may need to lookup its cost and capabilities". `agy models` (agy 1.5.11)
+# lists gemini-4-neon-low|medium|high|xhigh. Its pool is `gemini`: agy's /usage names "Gemini 4 Neon" among the
+# "Gemini Models" group's models, the group Carbon and Hydrogen spend. The capabilities are Google's model page
+# (ai.google.dev/gemini-api/docs/models/gemini-4-neon, read 2026-11-18): text, image, video, audio and PDF in, text out,
+# a 1,048,576-token context; image and audio generation not supported, so no `image_gen` (Carbon's list has it, a
+# prior from Argon's).
+[[seat]]
+id = "neon"
+cli = "agy"
+model = "gemini-4-neon-{effort}"
+family = "google"
+pool = "gemini"
+efforts = ["low", "medium", "high", "xhigh"]
+capabilities = ["code", "tools", "image", "pdf", "web", "browser", "video", "audio", "context_1m"]
+enabled = true
+prices = [
+  { from = "2026-11-18", input = 3.0, output = 15.0, cache_read = 0.15, cache_write = 3.0, basis = "Google's Gemini API pricing page (ai.google.dev/gemini-api/docs/pricing) for gemini-4-neon, read 2026-11-18: $3.00 in, $15.00 out with thinking, $0.15 cache, implicit caching only, no dated change; cache write at input, a prior" },
+]
+# Fourteen orders one at a time (2026-11-18): plan 71's order (read a 42-line file, answer one two-part question), Carbon
+# and Neon alternating, then Neon xhigh; all answers right. The quota could not be read (another agy run moved the
+# buckets and some deltas went negative), so, as for Hydrogen, each cell is Carbon's cell times Neon's cost
+# per order over Carbon's by tokens, each at its own price (nirvana/seat_refresh.py neon): low 1.61, medium 1.55,
+# high 0.63 (n 2 each). Carbon high thought for 6-7k output tokens and Neon high for about 1.1k. By the rule written before the
+# run, a cell under a lower effort's is raised to it, so high and xhigh sit at medium's. Every cell is a prior: no Neon
+# order is in the record.
+use = [
+  { effort = "low", windows = { "5h" = 0.002022, week = 0.0005065 }, at = "2026-11-18", basis = "prior: carbon low's cell x1.61, neon over carbon by tokens each at its own price (n 2 each, nirvana/seat_refresh.py neon); carries carbon low's refit x0.21, itself a prior: no neon order in the record" },
+  { effort = "medium", windows = { "5h" = 0.002345, week = 0.0005868 }, at = "2026-11-18", basis = "prior: carbon medium's cell x1.55, neon over carbon by tokens each at its own price (n 2 each, nirvana/seat_refresh.py neon); carries carbon medium's refit x0.21, itself a prior: no neon order in the record" },
+  { effort = "high", windows = { "5h" = 0.002345, week = 0.0005868 }, at = "2026-11-18", basis = "prior: carbon high's cell x0.63 (n 2 each, nirvana/seat_refresh.py neon) fell under medium's, so it is raised to medium's (the rule's floor); carbon high's refit x0.21 is carbon's own orders', not neon's" },
+  { effort = "xhigh", windows = { "5h" = 0.002345, week = 0.0005868 }, at = "2026-11-18", basis = "prior: high x1.11, neon xhigh over neon high by tokens (n 2 each), fell under medium's, so it is raised to medium's (the rule's floor)" },
+]
+
 # Plan 70: Gemini 4 Carbon, the owner 2026-11-10: "Check the cost and if its the same it might be used to replace
 # Argon." `agy models` lists gemini-4-carbon-low|medium|high. Its pool is `gemini`: on 2026-11-11 agy's /usage had
 # no Argon group, and both Carbon's and Argon's orders moved the "Gemini Models" buckets. The capabilities are
@@ -432,6 +466,12 @@ use = [
 # carbon in build.bounded alone, to 86 against argon's 84, on run ia1's record; argon has no record to move it.
 # Plan 71: hydrogen stands just before flash in every class that lists flash, at flash's score and effort, a prior
 # (decision 0012). With flash off, hydrogen is the Gemini fast seat the rule picks.
+# The Neon seat (2026-11-18): neon stands just before carbon in every class that lists carbon, at carbon's effort, a
+# prior by a rule written before it was applied (nirvana/seat_refresh.py `neon`): carbon's score plus 2, never above
+# the lower of opus and fable where the class lists either, and in a class that lists neither one under the best other
+# seat, so SOTA's top pick does not move on a benchmark headline. No other seat's score moved. The headlines are at
+# xhigh (Artificial Analysis 61 against Carbon high's 60 and Fable 5.2 max's 65; Vals Index 70.87%); at high,
+# Artificial Analysis has Neon matching Carbon high, so the plus 2 is the owner's to argue with.
 # `only_with` takes the seat only when the order needs all of those. A class lists its seats in §5.4's
 # order, and that order breaks the last tie.
 
@@ -448,6 +488,7 @@ why = "plan 19 §4: strongest at agentic coding; plan 40a: fable 97, a prior (de
 seats = [
   { seat = "opus", score = 95 },
   { seat = "fable", score = 97 },
+  { seat = "neon", score = 89 },
   { seat = "carbon", score = 87 },
   { seat = "argon", score = 87 },
   { seat = "sonnet", score = 86 },
@@ -469,6 +510,7 @@ why = "plan 19 §4: quality first; plan 40a: fable 97, a prior (decision 0012), 
 seats = [
   { seat = "opus", score = 95 },
   { seat = "fable", score = 97 },
+  { seat = "neon", score = 88 },
   { seat = "carbon", score = 86 },
   { seat = "argon", score = 86 },
   { seat = "sonnet", score = 68 },
@@ -490,6 +532,7 @@ why = "plan 19 §4: bounded build tasks; the seats refresh: carbon 84 to 86, ove
 seats = [
   { seat = "opus", score = 92 },
   { seat = "sonnet", score = 88 },
+  { seat = "neon", score = 88 },
   { seat = "carbon", score = 86 },
   { seat = "argon", score = 84 },
   { seat = "hydrogen", score = 80 },
@@ -512,6 +555,7 @@ seats = [
   { seat = "opus", score = 95 },
   { seat = "fable", score = 96 },
   { seat = "sonnet", score = 86 },
+  { seat = "neon", score = 88 },
   { seat = "carbon", score = 86 },
   { seat = "argon", score = 86 },
   { seat = "hydrogen", score = 72 },
@@ -532,6 +576,7 @@ why = "plan 19 §4: visual verification goes to Opus; argon now competes at 86; 
 seats = [
   { seat = "opus", score = 95 },
   { seat = "fable", score = 96 },
+  { seat = "neon", score = 88 },
   { seat = "carbon", score = 86 },
   { seat = "argon", score = 86 },
   { seat = "sonnet", score = 84 },
@@ -553,6 +598,7 @@ why = "plan 19 §4: argon at medium under-reasons on a root cause, so it runs hi
 seats = [
   { seat = "opus", score = 93 },
   { seat = "fable", score = 95 },
+  { seat = "neon", score = 87, effort = "high" },
   { seat = "carbon", score = 85, effort = "high" },
   { seat = "argon", score = 85, effort = "high" },
   { seat = "sonnet", score = 84 },
@@ -593,6 +639,7 @@ why = "plan 19 §4: adversary review across families; plan 40a: fable 96, a prio
 seats = [
   { seat = "opus", score = 94 },
   { seat = "fable", score = 96 },
+  { seat = "neon", score = 92 },
   { seat = "carbon", score = 90 },
   { seat = "argon", score = 90 },
   { seat = "sonnet", score = 89 },
@@ -613,6 +660,7 @@ bars = { efficient = 70, balanced = 84, sota = 100 }
 why = "plan 19 §4: held-out check author"
 seats = [
   { seat = "opus", score = 90 },
+  { seat = "neon", score = 87 },
   { seat = "carbon", score = 85 },
   { seat = "argon", score = 85 },
   { seat = "sonnet", score = 85 },
@@ -635,6 +683,7 @@ seats = [
   { seat = "opus", score = 88 },
   { seat = "hydrogen", score = 78 },
   { seat = "flash", score = 78 },
+  { seat = "neon", score = 82 },
   { seat = "carbon", score = 80 },
   { seat = "argon", score = 80 },
   { seat = "haiku", score = 70 },
@@ -653,6 +702,7 @@ why = "plan 35: agy searches with search_web and reads pages with bladebro when 
 seats = [
   { seat = "hydrogen", score = 84 },
   { seat = "flash", score = 84 },
+  { seat = "neon", score = 82 },
   { seat = "carbon", score = 84 },
   { seat = "argon", score = 84 },
   { seat = "sonnet", score = 80 },
@@ -674,6 +724,7 @@ why = "plan 19 §4: huge context over 400k tokens"
 seats = [
   { seat = "hydrogen", score = 85 },
   { seat = "flash", score = 85 },
+  { seat = "neon", score = 84 },
   { seat = "carbon", score = 83 },
   { seat = "argon", score = 83 },
 ]
@@ -689,6 +740,7 @@ weight = 0.8
 bars = { efficient = 70, balanced = 82, sota = 100 }
 why = "plan 19 §4: docs drafting and editing"
 seats = [
+  { seat = "neon", score = 84 },
   { seat = "carbon", score = 86 },
   { seat = "argon", score = 86 },
   { seat = "sonnet", score = 82 },
@@ -710,6 +762,7 @@ weight = 2.0
 bars = { efficient = 70, balanced = 85, sota = 100 }
 why = "plan 19 §4: video processing on Gemini"
 seats = [
+  { seat = "neon", score = 89 },
   { seat = "carbon", score = 90 },
   { seat = "argon", score = 90 },
   { seat = "hydrogen", score = 82 },
@@ -730,6 +783,7 @@ why = "plan 19 §4: audio processing on Gemini"
 seats = [
   { seat = "hydrogen", score = 86 },
   { seat = "flash", score = 86 },
+  { seat = "neon", score = 85 },
   { seat = "carbon", score = 85 },
   { seat = "argon", score = 85 },
 ]

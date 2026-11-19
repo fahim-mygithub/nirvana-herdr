@@ -30,8 +30,12 @@ CONTROLS = (
             T_HYDROGEN, "rust"),
     Control("p71_hydrogen_pool", TABLE, 'model = "gemini-4-hydrogen-{effort}"\nfamily = "google"\npool = "gemini"',
             'model = "gemini-4-hydrogen-{effort}"\nfamily = "google"\npool = "argon"', T_HYDROGEN, "rust"),
-    Control("p71_no_xhigh", TABLE, 'pool = "gemini"\nefforts = ["low", "medium", "high", "xhigh"]\ncapabilities',
-            'pool = "gemini"\nefforts = ["low", "medium", "high"]\ncapabilities', T_HYDROGEN, "rust"),
+    # The Neon seat (2026-11-18) has the same efforts line in the same pool, so the find names hydrogen's model too.
+    Control("p71_no_xhigh", TABLE,
+            'model = "gemini-4-hydrogen-{effort}"\nfamily = "google"\npool = "gemini"\n'
+            'efforts = ["low", "medium", "high", "xhigh"]\ncapabilities',
+            'model = "gemini-4-hydrogen-{effort}"\nfamily = "google"\npool = "gemini"\n'
+            'efforts = ["low", "medium", "high"]\ncapabilities', T_HYDROGEN, "rust"),
     Control("p71_no_video", TABLE, _HYDROGEN_ON, _HYDROGEN_ON.replace('"video", "audio", ', ""),
             T_HYDROGEN, "rust"),
     Control("p71_flash_on", TABLE, "every class still\n# lists it.\nenabled = false",

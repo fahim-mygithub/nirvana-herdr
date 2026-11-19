@@ -673,6 +673,18 @@ class SeatRefreshTest(unittest.TestCase):
         self.assertEqual(code, 0, out.getvalue())
         self.assertIn("low: hydrogen over flash 1.43 at its own price (0.74 at flash's)", out.getvalue())
 
+    def test_neons_cells_and_scores_are_the_probe_and_the_rule(self):
+        # The Neon seat (2026-11-18): every Neon cell is Carbon's times the probe's ratio (raised so none falls as the
+        # effort rises), and every Neon score is the rule's from the table before Neon (v16), both written before.
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = seat_refresh.main(["neon", "--check"])
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertIn("high: neon over carbon 0.63 at its own price", out.getvalue())
+        self.assertIn("research.web: neon 82", out.getvalue())
+
     def test_load_skips_and_counts_lines_it_cannot_read(self):
         # The fix round: load() caught only ValueError, so a JSON line that is not an object raised AttributeError and
         # a seated row missing a key raised KeyError. Each is skipped and counted, and the order after it still loads.
