@@ -1566,6 +1566,11 @@ fn p92_granted_lines_are_added_once_and_only_where_missing() {
 /// A folder profile `name` with its own servers `servers`, its copy in `run_dir`, and the order copy of `order` in
 /// `root` naming it, as `seat run --profile` leaves them.
 fn profiled(root: &Path, run_dir: &Path, name: &str, servers: &str, order: &str) {
+    profiled_as(root, run_dir, name, servers, order, "build.bounded");
+}
+
+/// `profiled`, the order journaled as `class`.
+fn profiled_as(root: &Path, run_dir: &Path, name: &str, servers: &str, order: &str, class: &str) {
     let dir = crate::nirvana_profiles::folder_of(root, name);
     std::fs::create_dir_all(dir.join("knowledge")).unwrap();
     std::fs::write(
@@ -1583,6 +1588,94 @@ fn profiled(root: &Path, run_dir: &Path, name: &str, servers: &str, order: &str)
         sha: loaded.sha,
     });
     std::fs::write(&file, format!("{lines}\n# Do it\n")).unwrap();
+    journal_seated(run_dir, order, class, &file);
+}
+
+/// The `seated` record `seat run` journals for `order` of `class`, whose brief is `order_file`: the launch reads the
+/// class from it (P45c fix round F1).
+fn journal_seated(run_dir: &Path, order: &str, class: &str, order_file: &Path) {
+    let seated = crate::nirvana_run::Seated {
+        order: order.into(),
+        seat: "sonnet".into(),
+        cli: "claude".into(),
+        model: "claude-sonnet-5-5".into(),
+        effort: Effort::Medium,
+        pool: "max".into(),
+        class: class.into(),
+        chain: None,
+        size: crate::nirvana_seat::SizeName::Small,
+        mode: crate::nirvana_seat::Mode::Balanced,
+        needs: Vec::new(),
+        not_family: Vec::new(),
+        reason: "r".into(),
+        override_reason: None,
+        order_file: order_file.display().to_string(),
+        cwd: "C:/p".into(),
+        worktree: None,
+        branch: None,
+        parent: None,
+        why: None,
+        rule_pick: None,
+        bar_dropped: None,
+        step_down: None,
+        use_basis: None,
+        expected: std::collections::BTreeMap::new(),
+        jev_pick: None,
+        send_ok: None,
+    };
+    crate::nirvana_run::Journal::new(run_dir.join(crate::nirvana_run::JOURNAL))
+        .append(1, crate::nirvana_run::Kind::Seated(Box::new(seated)))
+        .unwrap();
+}
+
+/// P45c fix round (review F1): a teach order and a lesson review get none of a profile's own servers, on claude and on
+/// agy, by the class journaled, though the brief names the profile; an order whose class cannot be read is refused.
+#[test]
+fn p92_a_teach_or_review_order_gets_no_profile_server_by_its_class() {
+    let home = crate::nirvana::with_test_home("p92-own-class");
+    let root = project(&home.path, Some(MCP_JSON));
+    let run_dir = root.join(".nirvana").join("runs").join("r1");
+    let servers = r#"{"mcpServers": {"fake-tool": {"command": "fake-mcp-not-real"}}}"#;
+    let agy = vec!["agy".to_owned(), "--print=x".to_owned()];
+    let launch = |order: &str, argv: &[String], out: &mut Vec<u8>| {
+        order_argv_seated(
+            argv.to_vec(),
+            &root,
+            &root,
+            &run_dir,
+            order,
+            &[],
+            &crate::nirvana_bladebro::Seat::default(),
+            Ok(vec!["code", "tools"]),
+            out,
+        )
+    };
+    for (order, class) in [
+        ("t1", crate::nirvana_knowledge::TEACH_CLASS),
+        ("v1", crate::nirvana_review::CLASS),
+    ] {
+        profiled_as(&root, &run_dir, "op", servers, order, class);
+        let brief = std::fs::read_to_string(order_copy_path(&root, order)).unwrap();
+        assert!(brief.starts_with(crate::nirvana_profiles::LINE), "{brief}");
+        assert_eq!(launch(order, &claude_argv(), &mut Vec::new()).unwrap(), claude_argv(), "{class}");
+        assert!(!order_config_path(&run_dir, order).exists(), "{class}");
+        assert_eq!(launch(order, &agy, &mut Vec::new()).unwrap(), agy, "{class}");
+        assert!(
+            !crate::nirvana_agy_tools::tools_dir(&run_dir, order)
+                .join(".agents")
+                .exists(),
+            "{class}"
+        );
+    }
+    // The same profile on a build order gets its server, so the classes above are what withheld it.
+    profiled(&root, &run_dir, "op", servers, "b1");
+    let got = launch("b1", &claude_argv(), &mut Vec::new()).unwrap();
+    assert!(got.contains(&"mcp__fake-tool__*".to_owned()), "{got:?}");
+    // No seated record: never granted on a guess.
+    let file = order_copy_path(&root, "n1");
+    std::fs::write(&file, std::fs::read_to_string(order_copy_path(&root, "b1")).unwrap()).unwrap();
+    let why = launch("n1", &claude_argv(), &mut Vec::new()).unwrap_err();
+    assert!(why.contains("holds no seated record of n1"), "{why}");
 }
 
 #[test]

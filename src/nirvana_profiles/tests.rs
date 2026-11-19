@@ -1070,7 +1070,21 @@ fn p92_skills_parse_and_check_refuses_a_skill_the_project_lacks() {
     let (_home, project) = project("p92-skills");
     let text = SLICER.replace("effort: medium\n", "effort: medium\nskills: [alpha, \"beta\"]\n");
     let profile = parsed(&text);
-    assert_eq!(profile.skills, ["alpha", "beta"]);
+    assert_eq!(profile.skills, Some(vec!["alpha".to_owned(), "beta".to_owned()]));
+    // P45c review F6: `skills: []` is none, the key absent is all, and a name twice is refused.
+    assert_eq!(parsed(SLICER).skills, None);
+    assert_eq!(
+        parsed(&SLICER.replace("effort: medium\n", "effort: medium\nskills: []\n")).skills,
+        Some(Vec::new())
+    );
+    let twice = refusals(
+        "slicer",
+        &SLICER.replace("effort: medium\n", "effort: medium\nskills: [alpha, beta, alpha]\n"),
+    );
+    assert!(
+        twice.len() == 1 && twice[0].ends_with("skills: `alpha` is named twice"),
+        "{twice:?}"
+    );
     let found = refusals("slicer", &SLICER.replace("effort: medium\n", "effort: medium\nskills: [..]\n"));
     assert!(
         found.len() == 1 && found[0].ends_with("skills: `..` is not a skill's folder name"),
@@ -1116,6 +1130,19 @@ fn p92_a_claude_worker_with_skills_gets_one_line_naming_them_and_none_without() 
         std::fs::read_to_string(&args[1]).unwrap(),
         "You drive Bambu Studio only through the bambu-studio-beta tools.\nowns: src/never.rs\n"
     );
+    // P45c review F6: `skills: []` asks for none, in so many words.
+    let none = Ref {
+        name: "bare".into(),
+        sha: "c".repeat(64),
+    };
+    let empty = parsed(&SLICER.replace("effort: medium\n", "effort: medium\nskills: []\n"));
+    let args = claude_args(&run_dir, &none, &empty).unwrap();
+    assert!(
+        std::fs::read_to_string(&args[1])
+            .unwrap()
+            .ends_with("owns: src/never.rs\n\nUse none of this project's skills.\n"),
+        "{args:?}"
+    );
     nirvana_seat::set_test_world(None);
 }
 
@@ -1133,10 +1160,13 @@ fn p92_a_profiles_own_servers_reach_its_order_pinned_by_the_run_copy() {
     write_folder_profile(&project, "operator", OPERATOR, Some(OWN_SERVERS));
     let loaded = load(&project.root, "operator").unwrap();
     assert_eq!(loaded.profile.servers, ["fake-tool"]);
-    assert_eq!(
-        loaded.sha,
-        seated_sha(OPERATOR.as_bytes(), Some(OWN_SERVERS.as_bytes()))
-    );
+    // The sha covers the profile and the pin, and the pin holds the mcp.json's sha256 and names only.
+    let pin = ServersPin {
+        sha256: sha256_hex(OWN_SERVERS.as_bytes()),
+        names: vec!["fake-tool".into()],
+        claude_only: None,
+    };
+    assert_eq!(loaded.sha, seated_sha(OPERATOR.as_bytes(), Some(&pin.bytes())));
     let seat = rule_seat(&project, "sweep.mechanical", &loaded.profile);
     std::fs::write(project.root.join("order.md"), "# Run the fake tool\n").unwrap();
     let live = nirvana_worker::take_live(&project, "r1", "s1")
@@ -1208,9 +1238,51 @@ fn p92_a_profiles_own_servers_reach_its_order_pinned_by_the_run_copy() {
     .unwrap();
     let why = launch(&seated).unwrap_err();
     assert!(
-        why.starts_with("s1 was seated with a profile's own MCP servers and cannot get them: the profile copy ")
-            && why.contains(" has sha256 "),
+        why.starts_with("s1 was seated with a profile's own MCP servers and cannot get them: the profile's servers ")
+            && why.contains(" have sha256 "),
         "{why}"
+    );
+    // The pin changed since seating: the sha fails, as the profile copy's always did.
+    let pin_file = pin_path(&run_dir, "operator", &loaded.sha);
+    let pinned = std::fs::read(&pin_file).unwrap();
+    assert_eq!(pinned, pin.bytes());
+    std::fs::write(
+        &pin_file,
+        String::from_utf8(pin.bytes()).unwrap().replace("fake-tool", "fake-tool2"),
+    )
+    .unwrap();
+    let why = launch(&seated).unwrap_err();
+    assert!(
+        why.contains("the profile copy ") && why.contains(" has sha256 "),
+        "{why}"
+    );
+    std::fs::write(&pin_file, &pinned).unwrap();
+    // P45c review F3: the order's end takes the definitions copy out; the pin, with no definition, stays.
+    std::fs::write(servers_copy_path(&run_dir, "operator", &loaded.sha), OWN_SERVERS).unwrap();
+    crate::nirvana_gui_tools::remove_order_config(&run_dir, "s1", &mut Vec::new());
+    assert!(!servers_copy_path(&run_dir, "operator", &loaded.sha).exists());
+    assert!(!String::from_utf8(std::fs::read(&pin_file).unwrap())
+        .unwrap()
+        .contains("fake-mcp-not-real"));
+    // A reader after the end needs names only, and has them.
+    let after = from_run(
+        &run_dir,
+        &Ref {
+            name: "operator".into(),
+            sha: loaded.sha.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(after.servers, ["fake-tool"]);
+    // A later start (a restart, a send-back on the same copy) takes the profile's file, only at the pinned sha: the
+    // owner's edit above fails it, and the file put back starts it.
+    let why = launch(&seated).unwrap_err();
+    assert!(why.contains(" have sha256 ") && why.contains("mcp.json"), "{why}");
+    std::fs::write(&profile_mcp, OWN_SERVERS).unwrap();
+    assert_eq!(command_of(&launch(&seated).unwrap()), "fake-mcp-not-real");
+    assert!(
+        !servers_copy_path(&run_dir, "operator", &loaded.sha).exists(),
+        "the fallback writes no copy back"
     );
     // An order seated without the profile gets neither the server nor the line.
     let table = nirvana_seat::table_for(&project.root).unwrap();
@@ -1336,5 +1408,102 @@ fn p92_every_shape_writes_the_folder_form_and_passes_check() {
     assert!(new_profile_shape(root, "x", "critic")
         .unwrap_err()
         .starts_with("no shape \"critic\""));
+    nirvana_seat::set_test_world(None);
+}
+
+// ---- P45c fix round ----
+
+/// Review F3: a written-out value under a secret-looking key of a profile's own servers is noted, naming the server and
+/// the key, never the value; a `${VAR}` value, one holding one, and an ordinary key are not; the note refuses nothing.
+#[test]
+fn p92_a_literal_token_in_a_profiles_servers_is_noted_by_key_never_by_value() {
+    let (_home, project) = project("p92-secret-notes");
+    let servers = r#"{"mcpServers": {"fake-tool": {"command": "fake-mcp-not-real",
+        "env": {"API_TOKEN": "FAKE-TOKEN-123", "MODE": "fast", "Secret_Ref": "${FAKE_SECRET}", "PASSWORD": ""},
+        "headers": {"Authorization": "Bearer ${FAKE_BEARER}", "X-Cookie": "FAKE-COOKIE-456"}}}}"#;
+    let file = write_folder_profile(&project, "operator", OPERATOR, Some(servers));
+    let found = notes(&project.root, "operator");
+    let mcp = folder_of(&project.root, "operator").join(SERVERS_FILE);
+    assert_eq!(
+        found,
+        [
+            format!(
+                "note: {}: server fake-tool: env API_TOKEN is written out, not `${{VAR}}`; put the value in the \
+                 environment and write `${{API_TOKEN}}` (a literal is copied into each run that seats the profile)",
+                mcp.display()
+            ),
+            format!(
+                "note: {}: server fake-tool: headers X-Cookie is written out, not `${{VAR}}`; put the value in the \
+                 environment and write `${{X-Cookie}}` (a literal is copied into each run that seats the profile)",
+                mcp.display()
+            ),
+        ]
+    );
+    assert!(found.iter().all(|note| !note.contains("FAKE-TOKEN-123") && !note.contains("FAKE-COOKIE-456")));
+    // A note, not a refusal: check passes and the profile loads.
+    let table = nirvana_seat::table_for(&project.root);
+    let names = crate::nirvana_gui_tools::project_servers(&project.root).unwrap();
+    let parsed = parse(&file, "operator", OPERATOR);
+    assert_eq!(check_one(&project.root, "operator", &file, &parsed, &table, &names), Vec::<String>::new());
+    assert!(load(&project.root, "operator").is_ok());
+    nirvana_seat::set_test_world(None);
+}
+
+/// Review F7: a new profile never takes a Windows device name, in any case, though such a name still parses and loads
+/// (Windows itself will not let a test write `con.md`, so the load side is the name check `load` uses).
+#[test]
+fn p92_a_new_profile_never_takes_a_windows_device_name() {
+    let (_home, project) = project("p92-device-names");
+    for name in ["con", "nul", "aux", "prn", "com1", "lpt9"] {
+        assert!(!valid_new_name(name), "{name}");
+        assert!(valid_name(name), "{name} still names a profile on disk");
+        let why = new_profile(&project.root, name).unwrap_err();
+        assert!(why.contains("is a Windows device name"), "{name}: {why}");
+        let why = new_profile_shape(&project.root, name, "builder").unwrap_err();
+        assert!(why.contains("is a Windows device name"), "{name}: {why}");
+    }
+    assert!(crate::nirvana_knowledge::windows_device("CON.md"));
+    assert!(crate::nirvana_knowledge::windows_device("Com1.txt"));
+    for name in ["com10", "console", "con-x", "nully"] {
+        assert!(valid_new_name(name), "{name}");
+    }
+    assert!(parse(&file("con"), "con", SLICER).is_ok());
+    nirvana_seat::set_test_world(None);
+}
+
+/// Review F3: `.nirvana/.gitignore` ignores a profile's own `mcp.json`, in a new project and in one whose file was
+/// written before (it is never rewritten, so the rule is appended once); an owner who takes the rule out and keeps its
+/// comment is not overridden. git itself is asked.
+#[test]
+fn p92_the_project_ignore_covers_a_profiles_servers_in_new_and_old_projects() {
+    let (_home, project) = project("p92-ignore");
+    let ignore = project.dir().join(".gitignore");
+    let fresh = std::fs::read_to_string(&ignore).unwrap();
+    assert!(fresh.lines().any(|line| line == "profiles/*/mcp.json"), "{fresh}");
+    // A project made before: the file as herdr wrote it then, with no newline at its end.
+    let old = crate::nirvana_run::GITIGNORE.trim_end();
+    std::fs::write(&ignore, old).unwrap();
+    project.ensure().unwrap();
+    project.ensure().unwrap();
+    let now = std::fs::read_to_string(&ignore).unwrap();
+    assert_eq!(now, format!("{old}\n{}", crate::nirvana_run::GITIGNORE_PROFILE_SERVERS));
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&project.root)
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q"]).status.success());
+    write_folder_profile(&project, "operator", OPERATOR, Some(OWN_SERVERS));
+    let checked = git(&["check-ignore", "-q", ".nirvana/profiles/operator/mcp.json"]);
+    assert_eq!(checked.status.code(), Some(0), "mcp.json is ignored");
+    let checked = git(&["check-ignore", "-q", ".nirvana/profiles/operator/profile.md"]);
+    assert_eq!(checked.status.code(), Some(1), "profile.md is tracked");
+    // The owner takes the rule out and keeps the comment: it stays out.
+    let edited = now.replace("profiles/*/mcp.json\n", "");
+    std::fs::write(&ignore, &edited).unwrap();
+    project.ensure().unwrap();
+    assert_eq!(std::fs::read_to_string(&ignore).unwrap(), edited);
     nirvana_seat::set_test_world(None);
 }

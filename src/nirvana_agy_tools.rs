@@ -464,9 +464,23 @@ pub fn project_skills(root: &Path) -> Vec<String> {
 }
 
 /// Plan 45 §5: the skills the order's profile names, from the run's copy the order was seated with; `None` when the
-/// order copy names no profile, or one with no `skills` (every skill is copied, as before). A copy that fails its sha
-/// is an error here as it is in `with_profile`.
-pub fn profile_skills(run_dir: &Path, order_file: &str) -> Result<Option<Vec<String>>, String> {
+/// order copy names no profile, or one with no `skills` key (every skill is copied, as before). `skills: []` is
+/// `Some([])`, none copied (P45c review F6). A copy that fails its sha is an error here as it is in `with_profile`.
+///
+/// P45c fix round (review F1): `None` for a teach order or a lesson review, by the class the order was journaled with
+/// (`nirvana_profiles::takes_no_profile_servers`). Neither is the profile's own work, so the profile neither narrows nor
+/// widens its skills; before, a review kept every skill only because its brief has the `Profile:` lines taken out. An
+/// order with no seated record takes the profile's selection, the narrower side.
+pub fn profile_skills(
+    run_dir: &Path,
+    order: &str,
+    order_file: &str,
+) -> Result<Option<Vec<String>>, String> {
+    if crate::nirvana_gui_tools::seated_record(run_dir, order)
+        .is_some_and(|seated| crate::nirvana_profiles::takes_no_profile_servers(&seated.class))
+    {
+        return Ok(None);
+    }
     let Ok(text) = std::fs::read_to_string(order_file) else {
         return Ok(None);
     };
@@ -474,7 +488,7 @@ pub fn profile_skills(run_dir: &Path, order_file: &str) -> Result<Option<Vec<Str
         return Ok(None);
     };
     let parsed = crate::nirvana_profiles::from_run(run_dir, &found)?;
-    Ok(Some(parsed.skills).filter(|skills| !skills.is_empty()))
+    Ok(parsed.skills)
 }
 
 /// `skills` narrowed to the names a profile gives, in the project's order; each named one that is not there says so
@@ -622,7 +636,7 @@ pub fn with_tools(
         write_file(&tools.join("AGENTS.md"), text.as_bytes(), false)?;
     }
     // Plan 45 §5: a profile's `skills` selects; read from the run's copy, as `with_profile` reads its body.
-    let named = profile_skills(order.run_dir, order.order_file)?;
+    let named = profile_skills(order.run_dir, order.order, order.order_file)?;
     copy_skills(
         &selected_skills(claude_skills(order.cwd, order.root, out), named.as_deref(), out),
         &tools.join(".agents").join("skills"),

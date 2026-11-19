@@ -30,7 +30,9 @@
 //! `needs` line, merged into the same per-order config (claude) or tools folder (agy), each under the same rules: a
 //! desktop server or a definition agy cannot take keeps the order on claude, a name the project's `.mcp.json` defines
 //! too refuses the start (no silent override), and the definitions come from the run's copy, checked by its sha
-//! (`nirvana_profiles::run_servers`), never from the project's file as it stands at launch.
+//! (`nirvana_profiles::run_servers`), never from the project's file as it stands at launch. P45c fix round: a teach
+//! order and a lesson review get none (review F1), and the run's definitions copy goes with the order's config when
+//! it ends (review F3); a later start of the same copy takes the profile's file only when its sha is the pin's.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -315,17 +317,48 @@ pub fn order_copy_path(cwd: &Path, order: &str) -> PathBuf {
         .join(format!("{order}.md"))
 }
 
-/// Plan 45 §5: the definitions of the servers in the own `mcp.json` of the profile the order copy names, from the
-/// run's copy and checked by its sha. None when the copy cannot be read or names no profile: a lesson review's brief
-/// has its subject's `Profile:` lines taken out (`nirvana_review::quoted_order`), so it is granted none of them, and a
-/// line that is not herdr's fails the order in `with_profile` before it starts.
-fn profile_servers(cwd: &Path, run_dir: &Path, order: &str) -> Result<Map<String, Value>, String> {
+/// The order's `seated` record in the run's journal, as `replay` reads it (the first for its id); `None` when the journal
+/// holds none.
+pub(crate) fn seated_record(run_dir: &Path, order: &str) -> Option<crate::nirvana_run::Seated> {
+    let journal = crate::nirvana_run::Journal::new(run_dir.join(crate::nirvana_run::JOURNAL));
+    crate::nirvana_run::replay(&journal.read().0)
+        .order(order)
+        .map(|known| known.seated.clone())
+}
+
+fn no_record(run_dir: &Path, order: &str) -> String {
+    format!(
+        "{} holds no seated record of {order}, so its class (a teacher and a lesson review get no profile server) \
+         cannot be read",
+        run_dir.join(crate::nirvana_run::JOURNAL).display()
+    )
+}
+
+/// Plan 45 §5: the definitions of the servers in the own `mcp.json` of the profile the order copy names, checked by
+/// the run's pin (`nirvana_profiles::run_servers`). None when the copy cannot be read or names no profile; a line that
+/// is not herdr's fails the order in `with_profile` before it starts.
+///
+/// P45c fix round (review F1): none for a teach order or a lesson review, by the class the order was journaled with
+/// (`nirvana_profiles::takes_no_profile_servers`), on claude and agy alike, whatever its brief says. An order whose
+/// copy names a profile and whose class cannot be read from the journal is refused, never granted on a guess.
+fn profile_servers(
+    root: &Path,
+    cwd: &Path,
+    run_dir: &Path,
+    order: &str,
+) -> Result<Map<String, Value>, String> {
     let Ok(text) = std::fs::read_to_string(order_copy_path(cwd, order)) else {
         return Ok(Map::new());
     };
-    match crate::nirvana_profiles::in_order(&text) {
-        Some(Ok(found)) => crate::nirvana_profiles::run_servers(run_dir, &found),
-        _ => Ok(Map::new()),
+    let Some(Ok(found)) = crate::nirvana_profiles::in_order(&text) else {
+        return Ok(Map::new());
+    };
+    match seated_record(run_dir, order) {
+        Some(seated) if crate::nirvana_profiles::takes_no_profile_servers(&seated.class) => {
+            Ok(Map::new())
+        }
+        Some(_) => crate::nirvana_profiles::run_servers(root, run_dir, &found),
+        None => Err(no_record(run_dir, order)),
     }
 }
 
@@ -416,6 +449,23 @@ pub fn remove_order_config(run_dir: &Path, order: &str, out: &mut dyn Write) {
         }
         _ => {}
     }
+    // P45c fix round (review F3): the run's copy of the order's profile's own `mcp.json` goes too, since a definition
+    // can hold a token; its pin stays, so a send-back's seating and the rows still have the names, and the next start
+    // of that copy takes the profile's file only when its sha is the pin's (`nirvana_profiles::run_servers`).
+    let profile = seated_record(run_dir, order)
+        .and_then(|seated| std::fs::read_to_string(&seated.order_file).ok())
+        .and_then(|text| crate::nirvana_profiles::in_order(&text))
+        .and_then(Result::ok);
+    if let Some(profile) = profile {
+        if let Err(err) = crate::nirvana_profiles::remove_servers_copy(run_dir, &profile) {
+            let _ = writeln!(
+                out,
+                "the run's copy of profile {}'s servers stays at {}: {err}",
+                profile.name,
+                crate::nirvana_profiles::servers_copy_path(run_dir, &profile.name, &profile.sha).display()
+            );
+        }
+    }
 }
 
 /// §5.1: the worker's argv with its order's servers, for an order with a server need. A claude argv gets the
@@ -447,7 +497,7 @@ pub fn order_argv_seated(
         return Ok(argv);
     }
     // Plan 45 §5: the profile's own servers need no `needs` line, so an order with no needs may still have some.
-    let own = profile_servers(cwd, run_dir, order).map_err(|why| {
+    let own = profile_servers(root, cwd, run_dir, order).map_err(|why| {
         format!("{order} was seated with a profile's own MCP servers and cannot get them: {why}")
     })?;
     if needs.is_empty() && own.is_empty() {

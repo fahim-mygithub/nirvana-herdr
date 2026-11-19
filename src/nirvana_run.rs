@@ -44,6 +44,12 @@ pub const GITIGNORE: &str = "# Written by herdr (plan 12 O3). Runs, orders and w
 runs/\norders/\nworktrees/\n\
 # The Questions record, its lock and its read cursor (plan 42 P42a).\n\
 questions.jsonl\nquestions.lock\nquestions.cursor.json\n";
+/// Plan 45 P45c fix round (review F3): a folder profile's own servers, `profiles/<name>/mcp.json`, can hold a token,
+/// and `profiles/` is tracked with the project (CLAUDE.md rule 12: no credential in a tracked file). `ensure_dir`
+/// writes this after `GITIGNORE` into a new file, and appends it once to a file that lacks its first line, so a
+/// project made before it gets it too; an owner who takes the rule out but keeps the comment is not overridden.
+pub const GITIGNORE_PROFILE_SERVERS: &str = "# A profile's own servers can hold a token (plan 45 P45c).\n\
+profiles/*/mcp.json\n";
 pub const JOURNAL: &str = "journal.jsonl";
 const JOURNAL_LOCK: &str = "journal.lock";
 
@@ -173,7 +179,21 @@ pub fn ensure_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let ignore = dir.join(".gitignore");
     if !ignore.exists() {
-        std::fs::write(ignore, GITIGNORE)?;
+        std::fs::write(ignore, format!("{GITIGNORE}{GITIGNORE_PROFILE_SERVERS}"))?;
+        return Ok(());
+    }
+    // P45c fix round (review F3): the file is never rewritten, so the profile-servers rule is appended once, keyed by
+    // its comment line. A file that cannot be read as text is left alone.
+    let marker = GITIGNORE_PROFILE_SERVERS.lines().next().unwrap_or_default();
+    if let Ok(text) = std::fs::read_to_string(&ignore) {
+        if !text.lines().any(|line| line.trim_end() == marker) {
+            use std::io::Write;
+            let gap = if text.is_empty() || text.ends_with('\n') { "" } else { "\n" };
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&ignore)?
+                .write_all(format!("{gap}{GITIGNORE_PROFILE_SERVERS}").as_bytes())?;
+        }
     }
     Ok(())
 }

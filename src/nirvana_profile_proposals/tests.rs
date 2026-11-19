@@ -98,7 +98,10 @@ fn p92_a_new_proposal_is_written_listed_accepted_and_rolled_back_exactly() {
     let card = nirvana_profiles::folder_of(&root, "render-judge").join("knowledge/taught.md");
     std::fs::write(&card, "a card\n").unwrap();
     let why = rollback(&root, "op-1").unwrap_err();
-    assert!(why.contains("holds more than the profile op-1 accepted"), "{why}");
+    assert!(
+        why.contains("holds more than the profile op-1 accepted"),
+        "{why}"
+    );
     assert!(card.is_file());
     std::fs::remove_file(&card).unwrap();
     let back = rollback(&root, "op-1").unwrap();
@@ -329,4 +332,224 @@ fn p92_the_cli_lists_shows_accepts_dismisses_and_takes_only_proposal_ids() {
         code == 2 && err.starts_with("usage: herdr profile proposals"),
         "{err}"
     );
+}
+
+// ---- P45c fix round ----
+
+/// Review F4, confirmed by running: a ledger line torn mid-write (no newline) swallowed the next dismissal, which was
+/// then dropped with it, so the same proposal would be made again and an op id could repeat. Now the next row goes on
+/// a line of its own and is remembered, the torn line is reported, and no op number it may hold is used again.
+#[test]
+fn p92_a_torn_ledger_line_loses_no_later_row_and_its_op_is_not_reused() {
+    let (_home, root) = project("p92-pp-torn");
+    let first = write(&root, &draft(Kind::New, "render-judge", NEW, None)).unwrap();
+    let mut other = draft(Kind::New, "render-judge", NEW, None);
+    other.key = "paragraph:other".into();
+    let second = write(&root, &other).unwrap();
+    assert!(dismiss(&root, &first, None)
+        .unwrap()
+        .starts_with("op-1: dismissed"));
+    let ledger_file = folder(&root).join(LEDGER);
+    let mut text = std::fs::read_to_string(&ledger_file).unwrap();
+    text.push_str("{\"v\":1,\"op\":\"op-9\",\"at\":1,\"action\":\"dis");
+    std::fs::write(&ledger_file, &text).unwrap();
+    let line = dismiss(&root, &second, None).unwrap();
+    assert!(line.starts_with("op-10: dismissed pp-2"), "{line}");
+    assert!(
+        was_dismissed(&root, Kind::New, "render-judge", "paragraph:other").is_some(),
+        "the dismissal after the torn line is remembered"
+    );
+    assert_eq!(ledger(&root).len(), 2);
+    let torn = broken(&root);
+    assert!(torn.len() == 1 && torn[0].0 == 2, "{torn:?}");
+    let shown = unreadable(&root);
+    assert!(
+        shown.iter().any(|(file, why)| *file == ledger_file
+            && why.starts_with("line 2 does not parse (")
+            && !why.contains("\"dis")),
+        "{shown:?}"
+    );
+    // And the same proposal is refused again, not made a second time.
+    let found = refused(&root, &other);
+    assert!(
+        found
+            .iter()
+            .any(|why| why.starts_with("the owner dismissed this proposal")),
+        "{found:?}"
+    );
+}
+
+/// Review F5: the writer's key is redacted before it lands, as the evidence and the body are, and keeps its identity
+/// (two paragraph shas stay two); `accept` redacts the body it writes, so a hand-edited proposal cannot put a secret
+/// into a profile.
+#[test]
+fn p92_the_key_and_an_accepted_body_are_redacted() {
+    let (_home, root) = project("p92-pp-redact");
+    let token = "ghp_FAKEFAKEFAKEFAKEFAKE1234567890";
+    let mut secret = draft(Kind::New, "render-judge", NEW, None);
+    secret.key = format!("header:{token}");
+    let id = write(&root, &secret).unwrap();
+    let text = std::fs::read_to_string(path(&root, &id)).unwrap();
+    assert!(!text.contains(token), "{text}");
+    assert!(was_dismissed(&root, Kind::New, "render-judge", &secret.key).is_none());
+    dismiss(&root, &id, None).unwrap();
+    assert!(
+        was_dismissed(&root, Kind::New, "render-judge", &secret.key).is_some(),
+        "a raw key and the key on disk are one identity"
+    );
+    let shas = ["a".repeat(63) + "1", "b".repeat(63) + "2"];
+    let ids: Vec<String> = shas
+        .iter()
+        .map(|sha| {
+            let mut one = draft(Kind::New, "render-judge", NEW, None);
+            one.key = format!("paragraph:{sha}");
+            write(&root, &one).unwrap()
+        })
+        .collect();
+    let keys: Vec<String> = ids.iter().map(|id| get(&root, id).unwrap().key).collect();
+    assert!(
+        keys[0] != keys[1] && keys.iter().all(|key| key.starts_with("paragraph:h:")),
+        "{keys:?}"
+    );
+    assert!(keys
+        .iter()
+        .all(|key| !shas.iter().any(|sha| key.contains(sha.as_str()))));
+    // A body edited by hand to carry a token: accept writes it redacted.
+    let file = path(&root, &ids[0]);
+    let edited = std::fs::read_to_string(&file).unwrap().replace(
+        "Open every file yourself.",
+        "Open every file yourself. Use sk-FAKEFAKEFAKEFAKEFAKE1234.",
+    );
+    std::fs::write(&file, edited).unwrap();
+    accept(&root, &ids[0]).unwrap();
+    let written = std::fs::read_to_string(
+        nirvana_profiles::folder_of(&root, "render-judge").join("profile.md"),
+    )
+    .unwrap();
+    assert!(
+        written.contains("Use [redacted].") && !written.contains("sk-FAKE"),
+        "{written}"
+    );
+}
+
+/// Review section 5: a patch of a legacy one-file profile, `<name>.md` with CRLF line ends, is accepted into that
+/// file and rolled back to its exact bytes.
+#[test]
+fn p92_a_patch_of_a_legacy_one_file_profile_rolls_back_to_the_exact_bytes() {
+    let (_home, root) = project("p92-pp-legacy");
+    let bytes = b"---\r\ndescription: Builds the engine.\r\neffort: high\r\n---\r\nOld body.\r\n";
+    let file = nirvana_profiles::path(&root, "legacy");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, bytes).unwrap();
+    let sha = profile_sha(&root, "legacy").unwrap();
+    let id = write(&root, &draft(Kind::Patch, "legacy", "New body.", Some(sha))).unwrap();
+    accept(&root, &id).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "---\ndescription: Builds the engine.\neffort: high\n---\nNew body.\n"
+    );
+    assert!(
+        !nirvana_profiles::folder_of(&root, "legacy").exists(),
+        "no folder made"
+    );
+    rollback(&root, "op-1").unwrap();
+    assert_eq!(std::fs::read(&file).unwrap(), bytes);
+}
+
+/// Review section 5: the front matter of a `new` body edited by hand at accept: ` model:` (a leading space), a
+/// duplicate key, and a second front-matter block; and a proposal's own front matter with a key twice. Accept never
+/// writes an `mcp.json`, whatever the body says.
+#[test]
+fn p92_hand_edited_front_matter_at_accept_and_no_mcp_json() {
+    let (_home, root) = project("p92-pp-front");
+    let edit = |id: &str, from: &str, to: &str| {
+        let file = path(&root, id);
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains(from), "{text}");
+        std::fs::write(&file, text.replacen(from, to, 1)).unwrap();
+    };
+    let id = write(&root, &draft(Kind::New, "one", NEW, None)).unwrap();
+    edit(
+        &id,
+        "effort: high\n",
+        "effort: high\n model: claude-opus-5-5\n",
+    );
+    let why = accept(&root, &id).unwrap_err();
+    assert!(why.contains("never pins a model or a family"), "{why}");
+    let id = write(&root, &draft(Kind::New, "two", NEW, None)).unwrap();
+    edit(
+        &id,
+        "effort: high\n",
+        "effort: high\ndescription: A second one.\n",
+    );
+    let why = accept(&root, &id).unwrap_err();
+    assert!(why.contains("duplicate `description`"), "{why}");
+    let id = write(&root, &draft(Kind::New, "three", NEW, None)).unwrap();
+    edit(&id, "evidence:", "key: another\nevidence:");
+    let why = accept(&root, &id).unwrap_err();
+    assert!(why.contains("duplicate `key`"), "{why}");
+    for name in ["one", "two", "three"] {
+        assert!(!nirvana_profiles::folder_of(&root, name).exists(), "{name}");
+    }
+    // A second block lands as body text: the keys are the first block's, and no mcp.json is written.
+    let id = write(&root, &draft(Kind::New, "four", NEW, None)).unwrap();
+    edit(
+        &id,
+        "You judge renders.",
+        "---\nmodel: claude-opus-5-5\n---\n{\"mcpServers\": {\"fake-x\": {\"command\": \"fake\"}}}\nYou judge renders.",
+    );
+    accept(&root, &id).unwrap();
+    let loaded = nirvana_profiles::load(&root, "four").unwrap();
+    assert_eq!(
+        (loaded.profile.model, loaded.servers.is_none()),
+        (None, true)
+    );
+    let mut entries: Vec<String> = std::fs::read_dir(nirvana_profiles::folder_of(&root, "four"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    entries.sort();
+    assert_eq!(entries, ["knowledge", "profile.md"]);
+}
+
+/// Review F7: a new profile named for a Windows device is refused at write and at accept, and the failed accept
+/// leaves no folder.
+#[test]
+fn p92_a_proposal_for_a_windows_device_name_is_refused() {
+    let (_home, root) = project("p92-pp-device");
+    let found = refused(&root, &draft(Kind::New, "con", NEW, None));
+    assert!(
+        found.len() == 1 && found[0].contains("is a Windows device name"),
+        "{found:?}"
+    );
+    let id = write(&root, &draft(Kind::New, "ok-name", NEW, None)).unwrap();
+    let file = path(&root, &id);
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, text.replace("profile: ok-name\n", "profile: nul\n")).unwrap();
+    let why = accept(&root, &id).unwrap_err();
+    assert!(why.contains("is a Windows device name"), "{why}");
+    assert!(nirvana_profiles::list(&root).is_empty());
+}
+
+/// Concurrent writers: four threads write four proposals at once; the lock gives each its own id and file.
+#[test]
+fn p92_concurrent_writers_get_distinct_proposals() {
+    let (_home, root) = project("p92-pp-threads");
+    let handles: Vec<_> = (0..4)
+        .map(|n| {
+            let root = root.clone();
+            std::thread::spawn(move || {
+                let mut one = draft(Kind::New, "render-judge", NEW, None);
+                one.key = format!("paragraph:thread-{n}");
+                write(&root, &one).unwrap()
+            })
+        })
+        .collect();
+    let mut ids: Vec<String> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+    ids.sort();
+    assert_eq!(ids, ["pp-1", "pp-2", "pp-3", "pp-4"]);
+    assert_eq!(list(&root).len(), 4);
 }

@@ -31,9 +31,15 @@
 //! - **`<name>/mcp.json`**, a folder profile's own servers in a project `.mcp.json`'s shape, are granted to every order
 //!   seated with the profile, merged into the per-order config as a `needs` server is (`nirvana_gui_tools`). A name the
 //!   project's `.mcp.json` defines too is refused (no silent override), and agy's limits hold (`servers_claude_only`).
-//!   The run pins it: its bytes are copied beside the profile copy, `<name>-<sha16>.mcp.json`, and the order's
-//!   `Profile sha256:` is then `seated_sha` over both files, so the check before every start covers the servers too and
-//!   an edit mid-run never reaches a running order. A profile with no `mcp.json` keeps the sha of its file alone.
+//!   The run pins it: its bytes are copied beside the profile copy, `<name>-<sha16>.mcp.json`, with a `ServersPin`
+//!   (names, and the bytes' sha256) as `<name>-<sha16>.servers.json`, and the order's `Profile sha256:` is then
+//!   `seated_sha` over the profile and the pin, so the check before every start covers the servers too and an edit
+//!   mid-run never reaches a running order. A profile with no `mcp.json` keeps the sha of its file alone. P45c fix
+//!   round (review F1-F3): a teach order and a lesson review get none of them (`takes_no_profile_servers`); the
+//!   definitions copy goes when the order ends (`remove_servers_copy`), the pin stays; `.nirvana/.gitignore` ignores
+//!   `profiles/*/mcp.json`, and `check` and `show` note a literal under a secret-looking key (`secret_notes`).
+//! - **`skills: []`** names none (P45c review F6); without the key every skill stays, as before.
+//! - **A new profile's name** is never a Windows device name (`valid_new_name`); one already on disk still loads.
 //! - **Shapes**: `herdr profile new <name> --shape reviewer|operator|builder|researcher` writes the folder form with a
 //!   starter body and starter cards, adopted, so the profile passes `profile check` as written.
 //! - **Teaching** takes none of the taught profile's seat pins (`narrow`): Megajam, 2026-11-16, a teach was refused on
@@ -91,8 +97,10 @@ pub struct Profile {
     pub effort: Option<Effort>,
     pub needs: Vec<String>,
     pub disallowed_tools: Vec<String>,
-    /// Plan 45 §5: the project skills the worker is to use; empty for no selection (every skill, as before).
-    pub skills: Vec<String>,
+    /// Plan 45 §5: the project skills the worker is to use. `None` (no `skills` key) selects nothing, so the worker
+    /// has every skill, as before; `Some([])` (`skills: []`) is none. P45c review F6: an owner who wrote an empty list
+    /// expecting none got all.
+    pub skills: Option<Vec<String>>,
     pub body: String,
     /// Plan 45 §5: the server names of the profile's own `mcp.json`. The parser leaves it empty; `load` and `from_run`
     /// fill it from the file, never the definitions (a definition can hold a token, and a `Profile` is printed).
@@ -107,7 +115,7 @@ pub struct Profile {
 pub struct Loaded {
     pub profile: Profile,
     pub bytes: Vec<u8>,
-    /// `seated_sha`: of `bytes` alone, or of `bytes` and the profile's `mcp.json` when it has one.
+    /// `seated_sha`: of `bytes` alone, or of `bytes` and the `ServersPin` of the profile's `mcp.json` when it has one.
     pub sha: String,
     /// Plan 45 §5: the profile's own `mcp.json` as read with `bytes`; `None` when it has none.
     pub servers: Option<ServerFile>,
@@ -119,6 +127,33 @@ pub struct ServerFile {
     pub bytes: Vec<u8>,
     pub names: Vec<String>,
     pub claude_only: Option<String>,
+    /// `ServersPin::of` these bytes, serialized: what the seated sha covers in place of the definitions.
+    pub pin: Vec<u8>,
+    /// `secret_notes` of the definitions: server and key names only, never a value.
+    pub notes: Vec<String>,
+}
+
+/// P45c fix round (review F3): what the run keeps of a profile's own servers after its orders end. The definitions
+/// copy (`servers_copy_path`) can hold a token, so `nirvana_gui_tools::remove_order_config` takes it out when the order
+/// ends; this pin stays beside the profile copy, `<name>-<sha16>.servers.json`, and holds the servers' names, why only
+/// claude can take them, and the sha256 of the `mcp.json` bytes. The order's `Profile sha256:` is `seated_sha` over the
+/// profile copy and this pin, so it is as strict as before: an edit to the pin fails the sha, and definitions whose
+/// sha256 is not the pin's are never granted. A reader after the order ended (a send-back's seating, the rows) needs
+/// the names only, and has them.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ServersPin {
+    pub sha256: String,
+    pub names: Vec<String>,
+    pub claude_only: Option<String>,
+}
+
+impl ServersPin {
+    /// The pin's bytes, one JSON line: field order is the struct's, so the same `mcp.json` pins to the same bytes.
+    pub fn bytes(&self) -> Vec<u8> {
+        let mut line = serde_json::to_string(self).unwrap_or_default();
+        line.push('\n');
+        line.into_bytes()
+    }
 }
 
 impl std::fmt::Debug for ServerFile {
@@ -144,6 +179,29 @@ pub fn valid_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// The name a NEW profile may take: `valid_name`, and no Windows device name (`con`, `nul`, `com1` ... `lpt9`), which
+/// Windows opens as a device whatever the extension, so `con.md` is the console (P45c review F7: a profile `con` was
+/// accepted). Only what herdr creates is held to this; a profile already on disk keeps loading by `valid_name`.
+pub fn valid_new_name(name: &str) -> bool {
+    valid_name(name) && !crate::nirvana_knowledge::windows_device(name)
+}
+
+/// Why `name` may not be a new profile's, for a refusal; `None` when it may.
+pub fn new_name_problem(name: &str) -> Option<String> {
+    if !valid_name(name) {
+        Some(format!(
+            "{name:?}: a profile's name is 1 to {NAME_MAX} of [a-z0-9-]"
+        ))
+    } else if !valid_new_name(name) {
+        Some(format!(
+            "{name:?} is a Windows device name (con, prn, aux, nul, com1-9, lpt1-9): Windows would open {name}.md as \
+             a device, so a new profile never takes it"
+        ))
+    } else {
+        None
+    }
 }
 
 pub fn folder(root: &Path) -> PathBuf {
@@ -191,7 +249,8 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// The sha an order is seated with (`Profile sha256:`): of the profile file's bytes alone, as since plan 33, or, for a
-/// profile with its own `mcp.json` (plan 45), of both, so the check before every start pins its servers too.
+/// profile with its own `mcp.json` (plan 45), of the profile's bytes and its `ServersPin` bytes, which hold the
+/// `mcp.json`'s sha256, so the check before every start pins its servers too.
 pub fn seated_sha(profile: &[u8], servers: Option<&[u8]>) -> String {
     match servers {
         None => sha256_hex(profile),
@@ -295,11 +354,77 @@ pub fn read_servers(root: &Path, name: &str) -> Result<Option<ServerFile>, Vec<S
     let project = crate::nirvana_gui_tools::project_servers(root);
     let (names, defined) = servers_problems(&file, text, &project)?;
     let claude_only = crate::nirvana_gui_tools::claude_only(&names, &defined);
+    let pin = ServersPin {
+        sha256: sha256_hex(&bytes),
+        names: names.clone(),
+        claude_only: claude_only.clone(),
+    }
+    .bytes();
     Ok(Some(ServerFile {
+        notes: secret_notes(&file, &defined),
         bytes,
         names,
         claude_only,
+        pin,
     }))
+}
+
+/// The words of a key that holds a secret (P45c review F3), matched case-insensitively anywhere in the key.
+pub const SECRET_WORDS: [&str; 7] = [
+    "token",
+    "key",
+    "secret",
+    "password",
+    "authorization",
+    "bearer",
+    "cookie",
+];
+
+/// P45c review F3: one note for each `env` or `headers` entry of a profile's servers whose key looks like a secret's
+/// and whose value is written out rather than taken from the environment (`${VAR}`, or a value that holds one, such as
+/// `Bearer ${TOKEN}`). `profile.md` and `mcp.json` sit in a tracked folder; `.nirvana/.gitignore` ignores
+/// `profiles/*/mcp.json`, but a literal still lands in every run copy. A note, not a refusal: the owner may mean it.
+/// Each note names the file, the server and the key, never the value.
+pub fn secret_notes(file: &Path, defined: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
+    let mut notes = Vec::new();
+    for (server, definition) in defined {
+        for field in ["env", "headers"] {
+            let Some(entries) = definition.get(field).and_then(serde_json::Value::as_object) else {
+                continue;
+            };
+            for (key, value) in entries {
+                let lower = key.to_ascii_lowercase();
+                if !SECRET_WORDS.iter().any(|word| lower.contains(word)) {
+                    continue;
+                }
+                let literal = match value.as_str() {
+                    Some(text) => {
+                        !text.trim().is_empty()
+                            && !text.split("${").skip(1).any(|rest| rest.contains('}'))
+                    }
+                    None => !value.is_null(),
+                };
+                if literal {
+                    notes.push(format!(
+                        "note: {}: server {server}: {field} {key} is written out, not `${{VAR}}`; put the value in \
+                         the environment and write `${{{key}}}` (a literal is copied into each run that seats the \
+                         profile)",
+                        file.display()
+                    ));
+                }
+            }
+        }
+    }
+    notes
+}
+
+/// The notes `herdr profile check` and `profile show` print for a profile: `secret_notes` of its own `mcp.json`.
+/// Empty for a profile with none, or one whose file is refused (the refusal is printed instead).
+pub fn notes(root: &Path, name: &str) -> Vec<String> {
+    match read_servers(root, name) {
+        Ok(Some(servers)) => servers.notes,
+        _ => Vec::new(),
+    }
 }
 
 pub(crate) fn unquote(value: &str) -> &str {
@@ -379,7 +504,7 @@ pub fn parse(path: &Path, name: &str, text: &str) -> Result<Profile, Vec<String>
         effort: None,
         needs: Vec::new(),
         disallowed_tools: Vec::new(),
-        skills: Vec::new(),
+        skills: None,
         body: String::new(),
         servers: Vec::new(),
         servers_claude_only: None,
@@ -462,12 +587,20 @@ pub fn parse(path: &Path, name: &str, text: &str) -> Result<Profile, Vec<String>
                 },
                 Err(why) => bad(why),
             },
-            // Plan 45 §5: a skill is a folder name; `check` reads that it is there (`skill_problems`).
+            // Plan 45 §5: a skill is a folder name; `check` reads that it is there (`project_problems`). P45c review
+            // F6: a name twice is refused, since it reads as a typo for another skill.
             "skills" => match one_line(value) {
-                Ok(items) => match items.iter().find(|item| !skill_word(item)) {
-                    Some(item) => bad(format!("`{item}` is not a skill's folder name")),
-                    None => profile.skills = items,
-                },
+                Ok(items) => {
+                    let twice = items
+                        .iter()
+                        .enumerate()
+                        .find(|(at, item)| items[..*at].contains(item));
+                    match (items.iter().find(|item| !skill_word(item)), twice) {
+                        (Some(item), _) => bad(format!("`{item}` is not a skill's folder name")),
+                        (None, Some((_, item))) => bad(format!("`{item}` is named twice")),
+                        (None, None) => profile.skills = Some(items),
+                    }
+                }
                 Err(why) => bad(why),
             },
             _ => unreachable!("every key is matched above"),
@@ -540,7 +673,7 @@ pub fn load(root: &Path, name: &str) -> Result<Loaded, String> {
     }
     Ok(Loaded {
         profile,
-        sha: seated_sha(&bytes, servers.as_ref().map(|found| found.bytes.as_slice())),
+        sha: seated_sha(&bytes, servers.as_ref().map(|found| found.pin.as_slice())),
         bytes,
         servers,
     })
@@ -562,35 +695,61 @@ pub fn servers_copy_path(run_dir: &Path, name: &str, sha: &str) -> PathBuf {
     copy_path(run_dir, name, sha).with_extension("mcp.json")
 }
 
-/// The run's copies of `name` at `sha`, the profile copy's bytes and the servers copy's when there is one, with their
+/// P45c fix round (review F3): where the run keeps the `ServersPin` of that copy, which outlives it.
+pub fn pin_path(run_dir: &Path, name: &str, sha: &str) -> PathBuf {
+    copy_path(run_dir, name, sha).with_extension("servers.json")
+}
+
+/// The run's copies of `name` at `sha`, the profile copy's bytes and the servers pin's when there is one, with their
 /// seated sha. `None` when the profile copy cannot be read.
 fn copies(run_dir: &Path, name: &str, sha: &str) -> Option<(Vec<u8>, Option<Vec<u8>>, String)> {
     let bytes = std::fs::read(copy_path(run_dir, name, sha)).ok()?;
-    let servers = std::fs::read(servers_copy_path(run_dir, name, sha)).ok();
-    let seated = seated_sha(&bytes, servers.as_deref());
-    Some((bytes, servers, seated))
+    let pin = std::fs::read(pin_path(run_dir, name, sha)).ok();
+    let seated = seated_sha(&bytes, pin.as_deref());
+    Some((bytes, pin, seated))
 }
 
 /// §2.2: "The profile file is copied, with its sha256, into the run folder at seating." The bytes `load` read, so the
 /// copy is what was parsed; a copy already there with the same sha is kept. Plan 45: a profile's own `mcp.json` is
-/// copied beside it, the owner's alone where `std` can say so (`write_private`), since a definition can hold a token.
+/// copied beside it, the owner's alone where `std` can say so (`write_private`), since a definition can hold a token,
+/// with its `ServersPin`. The definitions copy is written again when an earlier order's end took it out.
 pub fn copy_into_run(run_dir: &Path, loaded: &Loaded) -> Result<PathBuf, String> {
     let name = &loaded.profile.name;
     let file = copy_path(run_dir, name, &loaded.sha);
-    if copies(run_dir, name, &loaded.sha).is_some_and(|(_, _, sha)| sha == loaded.sha) {
-        return Ok(file);
-    }
     let dir = file.parent().unwrap_or(run_dir);
     std::fs::create_dir_all(dir)
         .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
     if let Some(servers) = &loaded.servers {
         let to = servers_copy_path(run_dir, name, &loaded.sha);
-        crate::nirvana_gui_tools::write_private(&to, &servers.bytes)
+        if std::fs::read(&to).ok().as_deref() != Some(servers.bytes.as_slice()) {
+            crate::nirvana_gui_tools::write_private(&to, &servers.bytes)
+                .map_err(|err| format!("cannot write {}: {err}", to.display()))?;
+        }
+    }
+    if copies(run_dir, name, &loaded.sha).is_some_and(|(_, _, sha)| sha == loaded.sha) {
+        return Ok(file);
+    }
+    if let Some(servers) = &loaded.servers {
+        let to = pin_path(run_dir, name, &loaded.sha);
+        nirvana_seat::write_atomic(&to, &servers.pin)
             .map_err(|err| format!("cannot write {}: {err}", to.display()))?;
     }
     nirvana_seat::write_atomic(&file, &loaded.bytes)
         .map_err(|err| format!("cannot write {}: {err}", file.display()))?;
     Ok(file)
+}
+
+/// P45c fix round (review F3): takes the run's definitions copy of the profile an order was seated with out, when the
+/// order ends (`nirvana_gui_tools::remove_order_config`), so a token in a profile's `mcp.json` does not stay in
+/// `runs/` for good. The pin stays. Another order of the run seated with the same copy gets the definitions again at
+/// its next start from the profile's `mcp.json`, checked against the pin (`run_servers`). `Ok(false)` when there was
+/// none.
+pub fn remove_servers_copy(run_dir: &Path, profile: &Ref) -> std::io::Result<bool> {
+    match std::fs::remove_file(servers_copy_path(run_dir, &profile.name, &profile.sha)) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
 }
 
 /// The profile an order copy names, from its two lines at line start; `None` when it names none, an error when the
@@ -625,16 +784,58 @@ pub fn from_run(run_dir: &Path, profile: &Ref) -> Result<Profile, String> {
     read_copy(run_dir, profile).map(|(parsed, _)| parsed)
 }
 
-/// Plan 45 §5: the definitions of the profile's own servers an order was seated with, from the run's copy, checked as
-/// `from_run` checks it; empty for a profile with no `mcp.json`. The launch merges them into the order's config.
+/// Plan 45 §5: the definitions of the profile's own servers an order was seated with, checked as `from_run` checks the
+/// copy; empty for a profile with no `mcp.json`. The launch merges them into the order's config.
+///
+/// P45c fix round (review F3): the definitions are the run's copy, or, when an earlier order's end took that out
+/// (`remove_servers_copy`), the profile's `mcp.json` in `root` now; either way their sha256 must be the pin's, so an
+/// edit since seating fails the order (it never reaches it), as an edit to the copy always did.
 pub fn run_servers(
+    root: &Path,
     run_dir: &Path,
     profile: &Ref,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    read_copy(run_dir, profile).map(|(_, servers)| servers.unwrap_or_default())
+    let (_, pin) = read_copy(run_dir, profile)?;
+    let Some(pin) = pin else {
+        return Ok(serde_json::Map::new());
+    };
+    let copy = servers_copy_path(run_dir, &profile.name, &profile.sha);
+    let (file, bytes) = match std::fs::read(&copy) {
+        Ok(bytes) => (copy, bytes),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let live = servers_path(root, &profile.name).ok_or_else(|| {
+                format!(
+                    "{} was taken out when an earlier order ended, and profile {} is no folder profile now",
+                    copy.display(),
+                    profile.name
+                )
+            })?;
+            let bytes = std::fs::read(&live).map_err(|err| {
+                format!(
+                    "{} was taken out when an earlier order ended, and {} cannot be read: {err}",
+                    copy.display(),
+                    live.display()
+                )
+            })?;
+            (live, bytes)
+        }
+        Err(err) => return Err(format!("cannot read {}: {err}", copy.display())),
+    };
+    let sha = sha256_hex(&bytes);
+    if sha != pin.sha256 {
+        return Err(format!(
+            "the profile's servers {} have sha256 {sha}, not the {} the order was seated with",
+            file.display(),
+            pin.sha256
+        ));
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| format!("{} is not UTF-8", file.display()))?;
+    let defined = crate::nirvana_gui_tools::definitions(text)
+        .map_err(|why| format!("{}: {why}", file.display()))?;
+    Ok(defined)
 }
 
-type Copy = (Profile, Option<serde_json::Map<String, serde_json::Value>>);
+type Copy = (Profile, Option<ServersPin>);
 
 fn read_copy(run_dir: &Path, profile: &Ref) -> Result<Copy, String> {
     let file = copy_path(run_dir, &profile.name, &profile.sha);
@@ -658,17 +859,16 @@ fn read_copy(run_dir: &Path, profile: &Ref) -> Result<Copy, String> {
     let text =
         std::str::from_utf8(&bytes).map_err(|_| format!("{} is not UTF-8", file.display()))?;
     let mut parsed = parse(&file, &profile.name, text).map_err(|problems| problems.join("\n"))?;
-    let Some(servers) = servers else {
+    let Some(pin) = servers else {
         return Ok((parsed, None));
     };
-    let shown = servers_copy_path(run_dir, &profile.name, &profile.sha);
-    let text = std::str::from_utf8(&servers)
-        .map_err(|_| format!("{} is not UTF-8", shown.display()))?;
-    let defined = crate::nirvana_gui_tools::definitions(text)
-        .map_err(|why| format!("{}: {why}", shown.display()))?;
-    parsed.servers = defined.keys().cloned().collect();
-    parsed.servers_claude_only = crate::nirvana_gui_tools::claude_only(&parsed.servers, &defined);
-    Ok((parsed, Some(defined)))
+    // Covered by the sha checked above, so what it says is what seating read.
+    let shown = pin_path(run_dir, &profile.name, &profile.sha);
+    let pin: ServersPin = serde_json::from_slice(&pin)
+        .map_err(|err| format!("{} does not parse: {err}", shown.display()))?;
+    parsed.servers = pin.names.clone();
+    parsed.servers_claude_only = pin.claude_only.clone();
+    Ok((parsed, Some(pin)))
 }
 
 /// The profile an order was seated with, as its `seated` event journals it: `seat run --profile` ends the reason with
@@ -764,6 +964,16 @@ pub fn order_text(text: &str, profile: &Ref, parsed: &Profile, cli: &str) -> Str
     crate::nirvana_gui_tools::with_granted_lines(out, &parsed.servers)
 }
 
+/// P45c fix round (review F1, F2): whether an order of `class` is granted nothing that is the profile's own work: no
+/// server of its `mcp.json`, no project server its `needs` names, and (agy) no narrowing of the skills. A teacher reads
+/// an untrusted page and writes cards, and a lesson review reads another order's stream, and `teach_denied` and the
+/// review's `DENIED` hold no `mcp__*` rule, so a server granted to either could be driven by what it reads. Decided by
+/// the class the order was journaled with, never by the brief: a review is safe today only because its brief has the
+/// subject's `Profile:` lines taken out (`nirvana_review::quoted_order`), and a teach brief keeps them.
+pub fn takes_no_profile_servers(class: &str) -> bool {
+    class == crate::nirvana_knowledge::TEACH_CLASS || class == crate::nirvana_review::CLASS
+}
+
 /// §2.2: the order's needs, then the profile's not already among them, before plan 29's server routing.
 pub fn joined_needs(order: &[String], profile: &Profile) -> Vec<String> {
     let mut needs = order.to_vec();
@@ -794,6 +1004,7 @@ pub fn narrow(request: &mut nirvana_seat::Request, profile: &Profile) {
     });
     if teach {
         // The teach order names no need of its own (`nirvana_knowledge::teach`), so each one here is the profile's.
+        // `seat_order_with` joins none for a teacher (P45c fix round F2); `seat pick --profile` still does.
         request.needs.retain(|need| !profile.needs.contains(need));
     }
     // Plan 45 §5: the profile's own servers hold agy's limits as a `needs` server does (plan 35 §3.2).
@@ -841,11 +1052,11 @@ pub fn narrow_for_order(
 pub fn claude_args(run_dir: &Path, profile: &Ref, parsed: &Profile) -> Result<Vec<String>, String> {
     let mut args = Vec::new();
     let mut prompt = parsed.body.clone();
-    if !parsed.skills.is_empty() {
+    if let Some(skills) = &parsed.skills {
         if !prompt.is_empty() {
             prompt.push_str("\n\n");
         }
-        prompt.push_str(&skills_line(&parsed.skills));
+        prompt.push_str(&skills_line(skills));
     }
     if !prompt.is_empty() {
         let file = body_path(run_dir, &profile.name, &profile.sha);
@@ -871,8 +1082,12 @@ pub fn claude_args(run_dir: &Path, profile: &Ref, parsed: &Profile) -> Result<Ve
 /// Plan 45 §5: the line a claude worker's system prompt gets for a profile's `skills`. Claude Code loads every project
 /// skill through `--setting-sources project`, and no flag herdr has measured selects among them. The docs describe a
 /// `Skill(name)` permission rule, which no probe here has run, so it is not used: a rule a worker may not get is no
-/// rule. This line asks; it does not enforce (an agy worker is given only the named skills).
+/// rule. This line asks; it does not enforce (an agy worker is given only the named skills). `skills: []` asks for
+/// none (P45c review F6).
 pub fn skills_line(skills: &[String]) -> String {
+    if skills.is_empty() {
+        return "Use none of this project's skills.".to_owned();
+    }
     format!(
         "Of this project's skills, use only these: {}. Leave the others unused.",
         skills.join(", ")
@@ -1221,11 +1436,12 @@ pub fn new_profile_shape(root: &Path, name: &str, shape_name: &str) -> Result<Pa
             SHAPES.join(", ")
         )
     })?;
-    if !valid_name(name) {
-        return Err(format!(
-            "{name:?}: a profile's name is 1 to {NAME_MAX} of [a-z0-9-]"
-        ));
+    if let Some(why) = new_name_problem(name) {
+        return Err(why);
     }
+    // P45c review F7: the proposals' lock, so an `accept` of a new profile of this name cannot land between the check
+    // below and the writes.
+    let _lock = crate::nirvana_profile_proposals::lock(root)?;
     let (file, dir) = (path(root, name), folder_of(root, name));
     if file.exists() {
         return Err(format!("{} is already there", file.display()));
@@ -1260,11 +1476,11 @@ pub fn new_profile(root: &Path, name: &str) -> Result<PathBuf, String> {
 }
 
 fn write_new(root: &Path, name: &str, text: &str) -> Result<PathBuf, String> {
-    if !valid_name(name) {
-        return Err(format!(
-            "{name:?}: a profile's name is 1 to {NAME_MAX} of [a-z0-9-]"
-        ));
+    if let Some(why) = new_name_problem(name) {
+        return Err(why);
     }
+    // P45c review F7: as `new_profile_shape`, under the proposals' lock.
+    let _lock = crate::nirvana_profile_proposals::lock(root)?;
     let file = path(root, name);
     if file.exists() {
         return Err(format!("{} is already there", file.display()));
@@ -1345,7 +1561,7 @@ pub fn project_problems(root: &Path, file: &Path, profile: &Profile) -> Vec<Stri
     let shown = file.display();
     let mut problems = Vec::new();
     let skills = crate::nirvana_agy_tools::project_skills(root);
-    for skill in &profile.skills {
+    for skill in profile.skills.iter().flatten() {
         if !skills.contains(skill) {
             problems.push(format!(
                 "{shown}: skills {skill}: no such skill in .claude/skills (the project's: {})",
@@ -1407,7 +1623,8 @@ const USAGE: &str = "usage: herdr profile list
                                          records the cards you wrote by hand as they stand, so they are offered
        herdr profile teach <name> --from <url|path> [--note \"what to learn\"] [--quote \"the owner's words\"] [--run <run>]
                                          seats a profile-teach order; its Work Report's card_ops become cards;
-                                         the teacher takes none of the profile's model, family, effort or needs
+                                         the teacher takes none of the profile's model, family, effort or needs,
+                                         and no MCP server of the profile's (its needs' or its own mcp.json's)
        herdr profile proposals           the proposals waiting: id, kind, profile, one line of evidence
        herdr profile proposal show <id>  one proposal whole
        herdr profile accept <id>         a new profile goes into profiles/<name>/profile.md, a patch into its body
@@ -1416,8 +1633,10 @@ const USAGE: &str = "usage: herdr profile list
        herdr profile proposals rollback <op>
                                          undoes one accept or dismiss from profile-proposals/ledger.jsonl
 A profile is used by `herdr seat run <seat> --profile <name> ...` and `herdr seat pick --profile <name> ...`.
-In profile.md: `skills: [a, b]` names the project skills (.claude/skills) its worker uses. A folder profile's
-mcp.json, in .mcp.json's shape, holds its own servers: every order seated with it gets them, no needs line.";
+In profile.md: `skills: [a, b]` names the project skills (.claude/skills) its worker uses; `skills: []` names
+none, and without the key it uses all. A folder profile's mcp.json, in .mcp.json's shape, holds its own servers:
+every order seated with it gets them, no needs line, except a teach order and a lesson review, which get none.
+.nirvana/.gitignore ignores profiles/*/mcp.json; write a token as ${VAR}, and check and show note one written out.";
 
 fn usage_exit() -> ! {
     eprintln!("{USAGE}");
@@ -1456,6 +1675,10 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
                         "own servers (mcp.json, in the sha above): {}",
                         servers.names.join(", ")
                     );
+                    // P45c review F3: a note, not a refusal; names only.
+                    for note in &servers.notes {
+                        println!("{note}");
+                    }
                 }
                 print!("{}", String::from_utf8_lossy(&loaded.bytes));
                 0
@@ -1561,6 +1784,10 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
                     for problem in problems {
                         println!("{problem}");
                     }
+                }
+                // P45c review F3: notes do not refuse; each names the server and the key, never the value.
+                for note in notes(&root, name) {
+                    println!("{note}");
                 }
             }
             i32::from(refused > 0 || (chosen.is_empty() && !names.is_empty()))

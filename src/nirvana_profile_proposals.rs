@@ -94,9 +94,9 @@ impl Kind {
     }
 }
 
-// P45b's proposer is the caller (plan 45 §8: it builds on this store); until it lands only the tests reach it.
-#[allow(dead_code)]
 /// What a writer (P45b's detector or a lesson review's `profile_ops`) hands `write`. herdr sets the id and the date.
+// P45b's proposer builds and passes it (plan 45 §8); until it lands only the tests do.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Draft {
     pub kind: Kind,
@@ -131,9 +131,9 @@ pub struct Proposal {
     pub file: PathBuf,
 }
 
-// P45b's proposer is the caller (plan 45 §8: it builds on this store); until it lands only the tests reach it.
-#[allow(dead_code)]
 /// Why `write` refused a draft: every reason, one each.
+// P45b's proposer reads it from `write` (plan 45 §8); until it lands only the tests do.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal(pub Vec<String>);
 
@@ -197,9 +197,36 @@ fn number(id: &str) -> u64 {
         .unwrap_or(0)
 }
 
-/// A key as a dismissal remembers it: whitespace collapsed, lowercased, hashed.
+/// A key as a dismissal remembers it: whitespace collapsed, lowercased, redacted (`redact_key`), hashed. Redacting
+/// here as well as in the file means a raw key and the key the file holds have one identity.
 pub fn key_sha(key: &str) -> String {
-    nirvana_lessons::sha256(&nirvana_lessons::one_line(key).to_lowercase())
+    nirvana_lessons::sha256(&redact_key(&nirvana_lessons::one_line(key).to_lowercase()))
+}
+
+/// P45c review F5: the key as it goes to disk. The folder is tracked, so a key is redacted as the evidence and the
+/// body are; but the key is an identity, and `nirvana_lessons::redact` would turn two keys that differ only in a long
+/// run (`paragraph:<sha>`, the writers' own form) into one `paragraph:[redacted]`, so one dismissal would refuse every
+/// paragraph. Each run that redaction takes (33 or more base64 characters, letters and digits both) is replaced here by
+/// `h:` and 16 hex of its lowercase sha256 instead: distinct runs stay distinct, the run itself never lands. The
+/// lessons' named patterns (`Bearer ...`, `sk-...`, GitHub tokens) are then redacted as they are anywhere.
+pub fn redact_key(key: &str) -> String {
+    use std::sync::OnceLock;
+    static RUN: OnceLock<regex::Regex> = OnceLock::new();
+    let run = RUN.get_or_init(|| regex::Regex::new(r"[A-Za-z0-9+/]{33,}={0,2}").expect("run"));
+    let hashed = run.replace_all(key, |found: &regex::Captures| {
+        let found = &found[0];
+        if found.bytes().any(|b| b.is_ascii_digit())
+            && found.bytes().any(|b| b.is_ascii_alphabetic())
+        {
+            format!(
+                "h:{}",
+                &nirvana_lessons::sha256(&found.to_lowercase())[..16]
+            )
+        } else {
+            found.to_owned()
+        }
+    });
+    nirvana_lessons::redact(&hashed)
 }
 
 /// The sha a `patch` names in `base_sha`: of the profile's file (`<name>.md` or `<name>/profile.md`) as it stands,
@@ -217,9 +244,9 @@ fn read_lf(file: &Path) -> Option<String> {
 
 // ---- the file ----
 
-// P45b's proposer is the caller (plan 45 §8: it builds on this store); until it lands only the tests reach it.
+/// The proposal file herdr writes for `draft` on `date`, as it is: `write` redacts the draft first, once.
+// Called by `write`, which P45b's proposer calls (plan 45 §8); until it lands only the tests reach it.
 #[allow(dead_code)]
-/// The proposal file herdr writes for `draft` on `date`.
 pub fn render(draft: &Draft, date: &str) -> String {
     let mut text = format!(
         "---\nkind: {}\nprofile: {}\nby: {}\nrun: {}\ndate: {date}\nkey: {}\nevidence: {}\n",
@@ -438,6 +465,7 @@ fn new_problems(root: &Path, name: &str, body: &str) -> Vec<String> {
     for skill in profile
         .skills
         .iter()
+        .flatten()
         .filter(|skill| !skills.contains(skill))
     {
         problems.push(format!(
@@ -516,6 +544,12 @@ fn content_problems(
             nirvana_profiles::NAME_MAX
         )];
     }
+    // P45c review F7: a new profile never takes a Windows device name; a patch names one on disk, which may.
+    if kind == Kind::New {
+        if let Some(why) = nirvana_profiles::new_name_problem(name) {
+            return vec![why];
+        }
+    }
     match kind {
         Kind::New => new_problems(root, name, body),
         Kind::Patch => patch_problems(root, name, body, base_sha),
@@ -524,36 +558,93 @@ fn content_problems(
 
 // ---- the ledger and the lock ----
 
+/// The rows of the ledger that parse, in order. A line that does not is never dropped in silence: `broken` names it,
+/// `unreadable` (and so `herdr profile proposals`) prints it, and no op or proposal number it may hold is used again.
 pub fn ledger(root: &Path) -> Vec<Row> {
-    std::fs::read_to_string(folder(root).join(LEDGER))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| serde_json::from_str(line.trim()).ok())
+    read_ledger(root).0
+}
+
+/// P45c review F4: the ledger's lines that do not parse, each with its line number (from 1), its text and why. A torn
+/// line, as a writer killed mid-append leaves, used to swallow the next row and be dropped with it.
+pub fn broken(root: &Path) -> Vec<(usize, String, String)> {
+    read_ledger(root).1
+}
+
+type Ledger = (Vec<Row>, Vec<(usize, String, String)>);
+
+fn read_ledger(root: &Path) -> Ledger {
+    let text = std::fs::read_to_string(folder(root).join(LEDGER)).unwrap_or_default();
+    let mut rows = Vec::new();
+    let mut bad = Vec::new();
+    for (at, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Row>(line) {
+            Ok(row) => rows.push(row),
+            Err(err) => bad.push((at + 1, line.to_owned(), err.to_string())),
+        }
+    }
+    (rows, bad)
+}
+
+/// Every `<prefix><digits>` in `text`, as numbers: what a line that does not parse may hold.
+fn numbers_in(text: &str, prefix: &str) -> Vec<u64> {
+    text.match_indices(prefix)
+        .filter_map(|(at, _)| {
+            let digits: String = text[at + prefix.len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            digits.parse().ok()
+        })
         .collect()
 }
 
-fn next_op(rows: &[Row]) -> String {
+/// `op-<n>`, past every op a row holds and every one a broken line may hold (P45c review F4: an op id a torn line
+/// held was handed out again). A line is one op, so the count of lines is a floor too: a torn line whose op id was
+/// cut is never reused.
+fn next_op(root: &Path, rows: &[Row]) -> String {
+    let bad = broken(root);
     let top = rows
         .iter()
         .filter_map(|row| row.op.strip_prefix("op-")?.parse::<u64>().ok())
+        .chain(
+            bad.iter()
+                .flat_map(|(_, line, _)| numbers_in(line, "\"op-")),
+        )
+        .chain(std::iter::once((rows.len() + bad.len()) as u64))
         .max()
         .unwrap_or(0);
     format!("op-{}", top + 1)
 }
 
+/// One row on a line of its own. P45c review F4: a ledger that does not end in a newline (a writer killed mid-line)
+/// gets one first, so the row is never glued onto the torn line and lost with it.
 fn append(root: &Path, row: &Row) -> std::io::Result<()> {
-    use std::io::Write;
+    use std::io::{Read, Seek, SeekFrom, Write};
     std::fs::create_dir_all(folder(root))?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .open(folder(root).join(LEDGER))?;
-    let mut line = serde_json::to_string(row)?;
+    let mut line = String::new();
+    if file.seek(SeekFrom::End(0))? > 0 {
+        file.seek(SeekFrom::End(-1))?;
+        let mut last = [0u8; 1];
+        file.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            line.push('\n');
+        }
+    }
+    line.push_str(&serde_json::to_string(row)?);
     line.push('\n');
     file.write_all(line.as_bytes())
 }
 
-struct Lock(std::fs::File);
+pub(crate) struct Lock(std::fs::File);
 
 impl Drop for Lock {
     fn drop(&mut self) {
@@ -561,8 +652,9 @@ impl Drop for Lock {
     }
 }
 
-/// Under `runs/`, which `.nirvana/.gitignore` ignores, as the knowledge cards' lock is.
-fn lock(root: &Path) -> Result<Lock, String> {
+/// Under `runs/`, which `.nirvana/.gitignore` ignores, as the knowledge cards' lock is. P45c review F7: `herdr profile
+/// new` takes it too, so it and an `accept` of a new profile of the same name cannot interleave.
+pub(crate) fn lock(root: &Path) -> Result<Lock, String> {
     let path = root
         .join(nirvana_run::DIR)
         .join("runs")
@@ -612,9 +704,11 @@ pub fn list(root: &Path) -> Vec<Proposal> {
     found
 }
 
-/// The `*.md` files in the folder that are not proposals herdr can read, each with why.
+/// The `*.md` files in the folder that are not proposals herdr can read, each with why, then each ledger line that does
+/// not parse (P45c review F4), as `line <n>: <why>` against the ledger's path. The line's text is not repeated: it can
+/// hold a proposal's text.
 pub fn unreadable(root: &Path) -> Vec<(PathBuf, String)> {
-    files(root)
+    let mut found: Vec<(PathBuf, String)> = files(root)
         .into_iter()
         .filter_map(|(id, file)| {
             let why = match std::fs::read_to_string(&file) {
@@ -623,7 +717,17 @@ pub fn unreadable(root: &Path) -> Vec<(PathBuf, String)> {
             };
             Some((file, why))
         })
-        .collect()
+        .collect();
+    let ledger = folder(root).join(LEDGER);
+    for (at, _, why) in broken(root) {
+        found.push((
+            ledger.clone(),
+            format!(
+                "line {at} does not parse ({why}); its op and proposal numbers are not used again"
+            ),
+        ));
+    }
+    found
 }
 
 fn files(root: &Path) -> Vec<(String, PathBuf)> {
@@ -658,10 +762,10 @@ pub fn get(root: &Path, id: &str) -> Result<Proposal, String> {
     parse(&file, id, &text).map_err(|problems| problems.join("\n"))
 }
 
-// P45b's proposer is the caller (plan 45 §8: it builds on this store); until it lands only the tests reach it.
-#[allow(dead_code)]
 /// When a dismissal of this proposal's identity (kind, profile, `key_sha` of `key`) stands, the date it was made;
 /// `None` when none does (or it was rolled back).
+// Called by `write`, and by P45b's proposer before it drafts (plan 45 §8); until it lands only the tests reach it.
+#[allow(dead_code)]
 pub fn was_dismissed(root: &Path, kind: Kind, profile: &str, key: &str) -> Option<String> {
     let rows = ledger(root);
     let undone = rolled_back(&rows);
@@ -678,19 +782,22 @@ pub fn was_dismissed(root: &Path, kind: Kind, profile: &str, key: &str) -> Optio
         .map(|row| row.date.clone())
 }
 
-// P45b's proposer is the caller (plan 45 §8: it builds on this store); until it lands only the tests reach it.
-#[allow(dead_code)]
 /// Writes `draft` as a waiting proposal and returns its id, or every reason it may not be written: its fields, what it
 /// carries (§6), a dismissal of the same identity, the same proposal already waiting, and for a patch a `base_sha`
-/// that is not the profile's now (the writer read something else).
+/// that is not the profile's now (the writer read something else). The key, the evidence and the body are redacted
+/// first, and every check reads them redacted, as they land on disk.
+// P45b's proposer calls it (plan 45 §8); until it lands only the tests do.
+#[allow(dead_code)]
 pub fn write(root: &Path, draft: &Draft) -> Result<String, Refusal> {
     let _lock = lock(root).map_err(|why| Refusal(vec![why]))?;
-    let mut problems = field_problems(&draft.by, &draft.run, &draft.key, &draft.evidence);
+    // P45c review F5: the key too, and every check below reads what lands on disk.
     let draft = Draft {
+        key: redact_key(&draft.key),
         evidence: nirvana_lessons::redact(&draft.evidence),
         body: nirvana_lessons::redact(&draft.body),
         ..draft.clone()
     };
+    let mut problems = field_problems(&draft.by, &draft.run, &draft.key, &draft.evidence);
     problems.extend(content_problems(
         root,
         draft.kind,
@@ -733,11 +840,15 @@ pub fn write(root: &Path, draft: &Draft) -> Result<String, Refusal> {
     if !problems.is_empty() {
         return Err(Refusal(problems));
     }
-    let rows = ledger(root);
+    let (rows, bad) = read_ledger(root);
     let top = files(root)
         .iter()
         .map(|(id, _)| number(id))
         .chain(rows.iter().map(|row| number(&row.proposal)))
+        .chain(
+            bad.iter()
+                .flat_map(|(_, line, _)| numbers_in(line, "\"pp-")),
+        )
         .max()
         .unwrap_or(0);
     let id = format!("pp-{}", top + 1);
@@ -789,7 +900,10 @@ fn accept_problems(root: &Path, proposal: &Proposal) -> Vec<String> {
 /// after and the proposal's text; the proposal file goes. The line says which op did it, for `rollback`.
 pub fn accept(root: &Path, id: &str) -> Result<String, String> {
     let _lock = lock(root)?;
-    let proposal = get(root, id)?;
+    let mut proposal = get(root, id)?;
+    // P45c review F5: the file may have been edited by hand since `write`, so what goes into the profile is redacted
+    // again here, and checked as it will be written.
+    proposal.body = nirvana_lessons::redact(&proposal.body);
     let problems = accept_problems(root, &proposal);
     if !problems.is_empty() {
         return Err(format!("{id} is refused: {}", problems.join("; ")));
@@ -798,8 +912,10 @@ pub fn accept(root: &Path, id: &str) -> Result<String, String> {
     let (file, before, after) = match proposal.kind {
         Kind::New => {
             let dir = nirvana_profiles::folder_of(root, name);
-            std::fs::create_dir_all(dir.join(nirvana_profiles::KNOWLEDGE))
-                .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
+            std::fs::create_dir_all(dir.join(nirvana_profiles::KNOWLEDGE)).map_err(|err| {
+                remove_empty(&dir);
+                format!("cannot create {}: {err}", dir.display())
+            })?;
             (
                 dir.join(nirvana_profiles::PROFILE_FILE),
                 None,
@@ -817,10 +933,15 @@ pub fn accept(root: &Path, id: &str) -> Result<String, String> {
     };
     let text = std::fs::read_to_string(&proposal.file)
         .map_err(|err| format!("cannot read {}: {err}", proposal.file.display()))?;
-    crate::nirvana_seat::write_atomic(&file, after.as_bytes())
-        .map_err(|err| format!("cannot write {}: {err}", file.display()))?;
+    crate::nirvana_seat::write_atomic(&file, after.as_bytes()).map_err(|err| {
+        // P45c review F7: a new profile's folder made above goes again, so a failed accept leaves nothing behind.
+        if proposal.kind == Kind::New {
+            remove_empty(&nirvana_profiles::folder_of(root, name));
+        }
+        format!("cannot write {}: {err}", file.display())
+    })?;
     let rows = ledger(root);
-    let op = next_op(&rows);
+    let op = next_op(root, &rows);
     let row = Row {
         v: 1,
         op: op.clone(),
@@ -864,11 +985,22 @@ pub fn accept(root: &Path, id: &str) -> Result<String, String> {
 }
 
 /// A new profile's folder taken out whole, when it holds nothing but its `profile.md` and an empty `knowledge/`.
+/// `knowledge/` goes first, and a card in it stops the removal before `profile.md` is touched (P45c review F7: a teach
+/// writes cards under the knowledge lock, not this one, so one may land after `holds_more` looked).
 fn remove_new(dir: &Path) -> std::io::Result<()> {
     let knowledge = dir.join(nirvana_profiles::KNOWLEDGE);
-    let _ = std::fs::remove_dir(&knowledge);
+    match std::fs::remove_dir(&knowledge) {
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
+        _ => {}
+    }
     std::fs::remove_file(dir.join(nirvana_profiles::PROFILE_FILE))?;
     std::fs::remove_dir(dir)
+}
+
+/// A new profile's folder `accept` made, taken out when the accept fails before it wrote: only empty folders go.
+fn remove_empty(dir: &Path) {
+    let _ = std::fs::remove_dir(dir.join(nirvana_profiles::KNOWLEDGE));
+    let _ = std::fs::remove_dir(dir);
 }
 
 /// Whether a new profile's folder holds anything but `profile.md` and an empty `knowledge/` (cards taught since).
@@ -895,7 +1027,7 @@ pub fn dismiss(root: &Path, id: &str, reason: Option<&str>) -> Result<String, St
     let text = std::fs::read_to_string(&proposal.file)
         .map_err(|err| format!("cannot read {}: {err}", proposal.file.display()))?;
     let rows = ledger(root);
-    let op = next_op(&rows);
+    let op = next_op(root, &rows);
     let row = Row {
         v: 1,
         op: op.clone(),
@@ -999,7 +1131,7 @@ pub fn rollback(root: &Path, op: &str) -> Result<String, String> {
         crate::nirvana_seat::write_atomic(&waiting, text.as_bytes())
             .map_err(|err| format!("cannot write {}: {err}", waiting.display()))?;
     }
-    let back = next_op(&rows);
+    let back = next_op(root, &rows);
     append(
         root,
         &Row {

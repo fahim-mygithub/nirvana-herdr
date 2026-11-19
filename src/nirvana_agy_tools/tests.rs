@@ -822,4 +822,72 @@ fn p92_an_agy_order_gets_only_its_profiles_skills_and_all_without_the_key() {
         copied_skills(&run_dir, "a3"),
         words(&["notes", "probe", "seat"])
     );
+    // P45c review F6: `skills: []` copies none (the key absent, above, copies all).
+    let bare = profiled_order(
+        &root,
+        &run_dir,
+        "bare",
+        "---\ndescription: Uses no skill.\nskills: []\n---\nWork.\n",
+        "a4",
+    );
+    run(&bare, "a4");
+    assert_eq!(copied_skills(&run_dir, "a4"), Vec::<String>::new());
+    // P45c fix round (review F1): a lesson review or a teacher is not the profile's work, so its profile neither
+    // narrows nor widens the skills, read from the class journaled, whatever the brief names.
+    for (order, class) in [
+        ("v1", crate::nirvana_review::CLASS),
+        ("t1", crate::nirvana_knowledge::TEACH_CLASS),
+    ] {
+        let file = profiled_order(
+            &root,
+            &run_dir,
+            "picky",
+            "---\ndescription: Uses two skills.\nskills: [seat, ghost]\n---\nWork.\n",
+            order,
+        );
+        journal_class(&run_dir, order, class, &file);
+        assert_eq!(profile_skills(&run_dir, order, &file).unwrap(), None, "{class}");
+        run(&file, order);
+        assert_eq!(
+            copied_skills(&run_dir, order),
+            words(&["notes", "probe", "seat"]),
+            "{class}"
+        );
+    }
+}
+
+/// The `seated` record of `order` with `class` and brief `file`, as seating journals it.
+fn journal_class(run_dir: &Path, order: &str, class: &str, file: &str) {
+    let seated = crate::nirvana_run::Seated {
+        order: order.into(),
+        seat: "flash".into(),
+        cli: "agy".into(),
+        model: "gemini-3.8-flash-low".into(),
+        effort: Effort::Low,
+        pool: "google".into(),
+        class: class.into(),
+        chain: None,
+        size: crate::nirvana_seat::SizeName::Small,
+        mode: crate::nirvana_seat::Mode::Balanced,
+        needs: Vec::new(),
+        not_family: Vec::new(),
+        reason: "r".into(),
+        override_reason: None,
+        order_file: file.into(),
+        cwd: "C:/p".into(),
+        worktree: None,
+        branch: None,
+        parent: None,
+        why: None,
+        rule_pick: None,
+        bar_dropped: None,
+        step_down: None,
+        use_basis: None,
+        expected: std::collections::BTreeMap::new(),
+        jev_pick: None,
+        send_ok: None,
+    };
+    crate::nirvana_run::Journal::new(run_dir.join(crate::nirvana_run::JOURNAL))
+        .append(1, crate::nirvana_run::Kind::Seated(Box::new(seated)))
+        .unwrap();
 }

@@ -4384,7 +4384,17 @@ pub fn seat_order_with(
     let request = &match &loaded {
         Some(loaded) => {
             let mut request = request.clone();
-            request.needs = crate::nirvana_profiles::joined_needs(&request.needs, &loaded.profile);
+            // P45c fix round (review F2): a teacher reads an untrusted page, so none of the profile's `needs` joins its
+            // request: not the seat pick, not the servers granted at launch, not the journaled `seated.needs`. Needs
+            // the caller names stay (`herdr profile teach` names none today).
+            if !request
+                .class
+                .as_deref()
+                .is_some_and(crate::nirvana_profiles::takes_no_profile_servers)
+            {
+                // One line: control p33a_needs_not_joined finds it.
+                request.needs = crate::nirvana_profiles::joined_needs(&request.needs, &loaded.profile);
+            }
             if request.class.is_none() {
                 request.class = loaded.profile.class.clone();
             }
