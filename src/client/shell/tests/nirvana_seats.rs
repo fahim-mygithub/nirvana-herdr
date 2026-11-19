@@ -731,3 +731,385 @@ fn c40a_the_square_shows_sotas_fallback_and_an_edited_table() {
     assert!(!orch.contains("restart to switch"), "{orch}");
     done(root, home);
 }
+
+/// The home reads the max week 90% used a day before its reset, so Balanced seats sonnet medium; this folder's
+/// Nirvana Claude runs on `seat` medium. `opus` makes the row say `restart to switch`, `sonnet` does not.
+fn running_on(home: &std::path::Path, root: &std::path::Path, seat: &str) {
+    let usage = format!(
+        r#"{{"version":1,"sources":{{"claude":{{"read_at":{NOW},"readings":[{{"pool":"max","window":"week","used":0.9,"resets_at":{},"read_at":{NOW},"source":"claude /usage"}}]}}}}}}"#,
+        NOW + 86_400
+    );
+    std::fs::write(home.join("usage.json"), usage).unwrap();
+    let sessions_dir = home.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    std::fs::write(
+        sessions_dir.join(format!("{}.json", crate::nirvana_launch::folder_hash(root))),
+        r#"{"session_id":"p87-sess","at":"2026-11-18T00:00:00Z","transcript":"t.jsonl"}"#,
+    )
+    .unwrap();
+    let record = crate::nirvana_claude::SessionSeatRecord {
+        session_id: "p87-sess".into(),
+        model: format!("claude-{seat}-5-5"),
+        seat: seat.into(),
+        effort: "medium".into(),
+        last_notified_seat: None,
+        last_notified_effort: None,
+    };
+    std::fs::write(
+        sessions_dir.join("p87-sess.json"),
+        serde_json::to_string(&record).unwrap(),
+    )
+    .unwrap();
+}
+
+type Restart = (Option<String>, Option<String>, Option<String>);
+
+/// The Restart Claude requests in an outcome: (workspace, tab, pane).
+pub(super) fn restarts(outcome: &ClientShellInput) -> Vec<Restart> {
+    outcome
+        .actions
+        .iter()
+        .filter_map(|action| match action {
+            ClientShellAction::Endpoint { request, .. } => match &request.method {
+                Method::CommandInvoke(params)
+                    if params.command_id == crate::nirvana::RESTART_CLAUDE_COMMAND =>
+                {
+                    Some((
+                        params.workspace_id.clone(),
+                        params.tab_id.clone(),
+                        params.pane_id.clone(),
+                    ))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+fn the_orchestrator() -> Restart {
+    (
+        Some("ws_1".into()),
+        Some("tab_1".into()),
+        Some("pane_1".into()),
+    )
+}
+
+/// P87 U1: the owner, 2026-11-18, "We should be able to click restart in this modal". The row's `restart to switch`
+/// words are a click target and `r`, shown in the footer, does the same: both ask the server's Restart Claude for
+/// this panel's Nirvana Claude pane, and the panel stays open to show the row clear.
+#[test]
+fn p87_the_restart_words_and_r_restart_the_panels_nirvana_claude() {
+    let (mut state, root, home) = state_for("p87-click", "nirvana");
+    running_on(&home, &root, "opus");
+    let rows = open(&mut state, 200);
+    let orch = line(&rows, "Nirvana Claude");
+    assert!(orch.contains("sonnet medium"), "{orch}");
+    assert!(orch.contains("restart to switch"), "{orch}");
+    let _ = line(&rows, "r restart \u{b7} m mode \u{b7} esc close");
+    let words = state.hits.nirvana_seats_panel.restart;
+    assert_eq!(
+        usize::from(words.width),
+        "restart to switch".len(),
+        "{words:?}"
+    );
+    let drawn: String = rows[usize::from(words.y)]
+        .chars()
+        .skip(usize::from(words.x))
+        .take(usize::from(words.width))
+        .collect();
+    assert_eq!(drawn, "restart to switch", "the hit is on the words");
+    let outcome = click(&mut state, words.x + 3, words.y);
+    assert_eq!(restarts(&outcome), vec![the_orchestrator()]);
+    assert!(state.nirvana_seats.is_some(), "the panel stays open");
+    let message = state
+        .nirvana_seats
+        .as_ref()
+        .and_then(|panel| panel.message.clone())
+        .expect("a message");
+    assert_eq!(
+        message,
+        "restarting Nirvana Claude on sonnet medium, same conversation"
+    );
+    // `r` does the same, on a panel with no restart sent yet (the one above holds a second press: the next test).
+    forget_restarts(&mut state);
+    let outcome = key(&mut state, KeyCode::Char('r'));
+    assert_eq!(restarts(&outcome), vec![the_orchestrator()]);
+    done(root, home);
+}
+
+/// Forgets the restarts sent, as if they were sent long ago and shown.
+fn forget_restarts(state: &mut ClientShellState) {
+    state.nirvana_restarting.clear();
+    if let Some(panel) = state.nirvana_seats.as_mut() {
+        panel.restarting = None;
+    }
+}
+
+/// Moves every restart sent, and an armed press, `secs` into the past.
+fn age(state: &mut ClientShellState, secs: u64) {
+    let back = |at: std::time::Instant| {
+        at.checked_sub(std::time::Duration::from_secs(secs))
+            .expect("the clock reaches that far back")
+    };
+    for sent in state.nirvana_restarting.values_mut() {
+        sent.at = back(sent.at);
+    }
+    if let Some(panel) = state.nirvana_seats.as_mut() {
+        if let Some(sent) = panel.restarting.as_mut() {
+            sent.at = back(sent.at);
+        }
+        panel.restart_armed = panel.restart_armed.map(back);
+    }
+}
+
+fn mouse(state: &mut ClientShellState, kind: MouseEventKind, column: u16, row: u16) -> ClientShellInput {
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::empty(),
+    })])
+}
+
+fn armed(state: &ClientShellState) -> bool {
+    state
+        .nirvana_seats
+        .as_ref()
+        .is_some_and(|panel| panel.restart_armed.is_some())
+}
+
+/// P87: a working Nirvana Claude waits for a second press, as the header's reload badge does; the row and the
+/// footer say why, and any other key puts the restart back.
+#[test]
+fn p87_a_working_nirvana_claude_restarts_on_the_second_press() {
+    let (mut state, root, home) = state_for("p87-working", "nirvana");
+    running_on(&home, &root, "opus");
+    let mut projected = state.snapshot.as_deref().cloned().expect("snapshot");
+    projected.agents[0].agent_status = AgentStatus::Working;
+    state.set_snapshot(Box::new(projected));
+    let _ = open(&mut state, 200);
+    let outcome = key(&mut state, KeyCode::Char('r'));
+    assert!(restarts(&outcome).is_empty(), "{:?}", outcome.actions);
+    let rows = rows_of(&mut state, 200, 40);
+    let _ = line(&rows, "restart? r again");
+    let _ = line(
+        &rows,
+        "Nirvana Claude is working: r again restarts it now and cuts its turn",
+    );
+    // Another key disarms; the next `r` arms again and restarts nothing.
+    let _ = key(&mut state, KeyCode::Down);
+    assert!(!armed(&state));
+    let outcome = key(&mut state, KeyCode::Char('r'));
+    assert!(restarts(&outcome).is_empty());
+    let _ = rows_of(&mut state, 200, 40);
+    // The armed words are the click target too: the second press restarts.
+    let words = state.hits.nirvana_seats_panel.restart;
+    assert_eq!(usize::from(words.width), "restart? r again".len());
+    let outcome = click(&mut state, words.x, words.y);
+    assert_eq!(restarts(&outcome), vec![the_orchestrator()]);
+    done(root, home);
+}
+
+/// P87: once the running seat matches the mode's, the next draw has no `restart to switch`, no button and no `r`
+/// in the footer, and `r` says so and restarts nothing.
+#[test]
+fn p87_no_restart_offered_when_the_running_seat_matches() {
+    let (mut state, root, home) = state_for("p87-match", "nirvana");
+    running_on(&home, &root, "opus");
+    let rows = open(&mut state, 200);
+    assert!(line(&rows, "Nirvana Claude").contains("restart to switch"));
+    // The restarted Claude's SessionStart writes its new seat.
+    running_on(&home, &root, "sonnet");
+    let rows = rows_of(&mut state, 200, 40);
+    let orch = line(&rows, "Nirvana Claude");
+    assert!(!orch.contains("restart"), "{orch}");
+    assert!(!rows.iter().any(|row| row.contains("r restart")));
+    assert_eq!(state.hits.nirvana_seats_panel.restart, Rect::default());
+    let outcome = key(&mut state, KeyCode::Char('r'));
+    assert!(restarts(&outcome).is_empty());
+    assert_eq!(
+        state.nirvana_seats.as_ref().unwrap().message.as_deref(),
+        Some("Nirvana Claude already runs the mode's seat: no restart needed")
+    );
+    done(root, home);
+}
+
+/// P87 U2: the space's own menu says when its restart switches the seat, from the same view the square reads.
+#[test]
+fn p87_the_space_menu_says_the_restart_switches_the_seat() {
+    let (mut state, root, home) = state_for("p87-menu", "nirvana");
+    running_on(&home, &root, "opus");
+    let labels = |state: &mut ClientShellState| {
+        state.open_workspace_context_menu("ws_1".into(), 0, 0);
+        let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+            panic!("space menu");
+        };
+        let labels: Vec<&str> = menu.items().iter().map(|item| item.label).collect();
+        state.overlay = None;
+        labels
+    };
+    assert_eq!(labels(&mut state)[1], "Restart Claude to switch seat");
+    running_on(&home, &root, "sonnet");
+    assert_eq!(labels(&mut state)[1], "Restart Claude");
+    done(root, home);
+}
+
+/// P87 fix round (review of aa340405, item b1): the row reads `restart to switch` until the fresh Claude's seat record
+/// is read, so a second click or `r` in that window restarted the fresh Claude again. Now the words read
+/// `restarting…` and are no button, and neither press sends a second restart, until the view stops asking (the new
+/// seat is read) or `RESTART_PENDING_WINDOW` passes, after which the row asks again.
+#[test]
+fn p87_a_second_press_does_not_restart_the_fresh_claude_again() {
+    let (mut state, root, home) = state_for("p87-twice", "nirvana");
+    running_on(&home, &root, "opus");
+    let _ = open(&mut state, 200);
+    let words = state.hits.nirvana_seats_panel.restart;
+    let outcome = click(&mut state, words.x + 3, words.y);
+    assert_eq!(restarts(&outcome), vec![the_orchestrator()]);
+    // The fresh Claude reads Idle and its seat record is not rewritten yet: the view still asks.
+    let rows = rows_of(&mut state, 200, 40);
+    let orch = line(&rows, "Nirvana Claude");
+    assert!(orch.contains("restarting\u{2026}"), "{orch}");
+    assert!(!orch.contains("restart to switch"), "{orch}");
+    assert_eq!(state.hits.nirvana_seats_panel.restart, Rect::default());
+    let outcome = click(&mut state, words.x + 3, words.y);
+    assert!(restarts(&outcome).is_empty(), "a second click");
+    let outcome = key(&mut state, KeyCode::Char('r'));
+    assert!(restarts(&outcome).is_empty(), "a second r");
+    assert_eq!(
+        state.nirvana_seats.as_ref().unwrap().message.as_deref(),
+        Some("Nirvana Claude is restarting: the row clears once its new seat is recorded")
+    );
+    // The space's menu holds it too, and so does the panel opened again.
+    state.nirvana_seats = None;
+    state.open_workspace_context_menu("ws_1".into(), 0, 0);
+    let mut outcome = ClientShellInput::default();
+    state.activate_context_menu_item(1, &mut outcome);
+    assert!(restarts(&outcome).is_empty(), "the space menu");
+    state.toggle_seats_panel();
+    let rows = rows_of(&mut state, 200, 40);
+    assert!(line(&rows, "Nirvana Claude").contains("restarting\u{2026}"));
+    // The window passes with the row still asking (the restart failed): it is a button again.
+    age(&mut state, 16);
+    let rows = rows_of(&mut state, 200, 40);
+    assert!(line(&rows, "Nirvana Claude").contains("restart to switch"));
+    let outcome = key(&mut state, KeyCode::Char('r'));
+    assert_eq!(restarts(&outcome), vec![the_orchestrator()]);
+    // The new seat is read: the row clears and the sent restart is dropped.
+    running_on(&home, &root, "sonnet");
+    let rows = rows_of(&mut state, 200, 40);
+    assert!(!line(&rows, "Nirvana Claude").contains("restart"));
+    assert_eq!(state.nirvana_seats.as_ref().unwrap().restarting, None);
+    done(root, home);
+}
+
+/// P87 fix round (item b2): an armed press keeps its prompt in the footer for as long as it is armed, holds over a
+/// pointer move, and lapses after `RESTART_ARM_WINDOW`; a lapsed press is a first press again.
+#[test]
+fn p87_an_armed_restart_keeps_its_prompt_and_lapses() {
+    let (mut state, root, home) = state_for("p87-lapse", "nirvana");
+    running_on(&home, &root, "opus");
+    let mut projected = state.snapshot.as_deref().cloned().expect("snapshot");
+    projected.agents[0].agent_status = AgentStatus::Working;
+    state.set_snapshot(Box::new(projected));
+    let _ = open(&mut state, 200);
+    let prompt = "Nirvana Claude is working: r again restarts it now and cuts its turn";
+    let _ = key(&mut state, KeyCode::Char('r'));
+    assert!(armed(&state));
+    // Whatever clears the message, the footer says it while armed.
+    state.nirvana_seats.as_mut().unwrap().message = None;
+    let rows = rows_of(&mut state, 200, 40);
+    let _ = line(&rows, prompt);
+    let words = state.hits.nirvana_seats_panel.restart;
+    let _ = mouse(&mut state, MouseEventKind::Moved, words.x, words.y);
+    assert!(armed(&state), "a move toward the words keeps it");
+    age(&mut state, 6);
+    let rows = rows_of(&mut state, 200, 40);
+    assert!(!rows.iter().any(|row| row.contains(prompt)), "the prompt goes with it");
+    assert!(line(&rows, "Nirvana Claude").contains("restart to switch"));
+    let outcome = key(&mut state, KeyCode::Char('r'));
+    assert!(restarts(&outcome).is_empty(), "a lapsed press restarts nothing");
+    assert!(armed(&state), "it arms again");
+    done(root, home);
+}
+
+/// P87 fix round (item b6): any other click cancels an armed press: one on the panel off the words, a right-click on
+/// the words, and the wheel. The next press on the words then arms again and restarts nothing.
+#[test]
+fn p87_another_click_or_the_wheel_cancels_an_armed_restart() {
+    let (mut state, root, home) = state_for("p87-cancel", "nirvana");
+    running_on(&home, &root, "opus");
+    let mut projected = state.snapshot.as_deref().cloned().expect("snapshot");
+    projected.agents[0].agent_status = AgentStatus::Working;
+    state.set_snapshot(Box::new(projected));
+    let _ = open(&mut state, 200);
+    let words = state.hits.nirvana_seats_panel.restart;
+    let area = state.hits.nirvana_seats_panel.area;
+    // The blank line above the footer: inside the panel, on nothing.
+    let blank = (area.x + 3, area.bottom().saturating_sub(3));
+    let cancels: [(MouseEventKind, (u16, u16)); 3] = [
+        (MouseEventKind::Down(MouseButton::Left), blank),
+        (MouseEventKind::Down(MouseButton::Right), (words.x, words.y)),
+        (MouseEventKind::ScrollDown, (words.x, words.y)),
+    ];
+    for (kind, (column, row)) in cancels {
+        let outcome = click(&mut state, words.x, words.y);
+        assert!(restarts(&outcome).is_empty());
+        assert!(armed(&state), "the first press arms");
+        let outcome = mouse(&mut state, kind, column, row);
+        assert!(restarts(&outcome).is_empty(), "{kind:?}");
+        assert!(!armed(&state), "{kind:?} cancels");
+        assert!(state.nirvana_seats.is_some(), "{kind:?} leaves the panel open");
+        let _ = rows_of(&mut state, 200, 40);
+    }
+    done(root, home);
+}
+
+/// P87 fix round (item b6): at every window width the panel is drawn at, nothing panics, a button is only ever on the
+/// whole drawn words, and where the words do not fit whole there is no button: a click anywhere on that row
+/// restarts nothing.
+#[test]
+fn p87_a_narrow_window_draws_no_button_where_the_words_do_not_fit() {
+    let (mut state, root, home) = state_for("p87-narrow", "nirvana");
+    running_on(&home, &root, "opus");
+    let mut cut = None;
+    for width in 20..=200u16 {
+        if state.nirvana_seats.is_none() {
+            state.toggle_seats_panel();
+        }
+        let rows = rows_of(&mut state, width, 40);
+        let hits = state.hits.nirvana_seats_panel.clone();
+        if hits.restart.width > 0 {
+            let drawn: String = rows[usize::from(hits.restart.y)]
+                .chars()
+                .skip(usize::from(hits.restart.x))
+                .take(usize::from(hits.restart.width))
+                .collect();
+            assert_eq!(drawn, "restart to switch", "at {width}");
+        } else if hits.area.width > 0 {
+            // The orchestrator row, inside the panel.
+            let row = (hits.area.y..hits.area.bottom()).find(|y| {
+                rows[usize::from(*y)]
+                    .chars()
+                    .skip(usize::from(hits.area.x))
+                    .take(usize::from(hits.area.width))
+                    .collect::<String>()
+                    .contains("Nirvana Claude")
+            });
+            if let Some(y) = row {
+                cut.get_or_insert((width, y));
+            }
+        }
+    }
+    let (width, y) = cut.expect("a width where the row is drawn but the words do not fit");
+    let _ = rows_of(&mut state, width, 40);
+    let area = state.hits.nirvana_seats_panel.area;
+    for column in area.x..area.right() {
+        let outcome = click(&mut state, column, y);
+        assert!(restarts(&outcome).is_empty(), "at {width} wide, column {column}");
+        assert!(state.nirvana_seats.is_some(), "a click inside the panel keeps it open");
+        let _ = rows_of(&mut state, width, 40);
+    }
+    done(root, home);
+}

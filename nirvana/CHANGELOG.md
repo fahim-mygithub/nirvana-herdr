@@ -3,6 +3,27 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.82.0: Restart Claude from the Seats panel and from a space's menu
+
+- **Changed:** in the Seats panel the words `restart to switch` are a button, and `r` does the same while the row
+  asks for a restart. A space's right-click menu offers Restart Claude, labelled "to switch seat" when the running
+  seat differs from the mode's. Both restart only that space's Nirvana Claude pane: the server action takes a
+  `pane_id` and refuses a pane that is not in the tab. A Claude that is not idle or done needs a second press, which
+  lapses after 5 s and is cancelled by any other key, a click elsewhere, a right-click or the wheel. After a restart is
+  sent the words read `restarting…` and nothing restarts again until the seat flips, or for at most 15 s. With no
+  `pane_id` the tab menu behaves as before.
+- **Because:** the owner, 2026-11-18, with a screenshot: "We should be able to click restart in this modal or if your
+  right click the project an option appears to restart that specific project." The row asked for a restart that
+  nothing in the window could do. The review of the first build found that a second press restarted the fresh Claude
+  again, and that the existing action restarted every Claude in the tab, workers included.
+- **Measured:** 36 `nirvana_seats`, 13 `nirvana_restart` and 8 `chrome_context` tests pass. A test takes pane ids from
+  the real snapshot code and passes them through the server's own parse. The 44 controls, 2 of them repaired `p20_`
+  ones, each turned their test red. From the code: the SessionStart hook has no matcher, so a resumed session rewrites
+  its seat record and the hint clears. Not seen in a live window. Hypotheses: the 5 s and 15 s windows. Not proven:
+  that the pane filter spares a real worker process; the test proves which panes are handed to the stopper.
+- **If you remove this:** the row asks for a restart nothing can do, the only restart is the tab menu's, which stops
+  every Claude in the tab, and a double press restarts twice.
+
 ## alpha 0.81.0: a worker a restart killed is found, checkpointed and reported
 
 - **Changed:** herdr's sweep checks every open run of the last 3 days once per server start, and every minute checks
