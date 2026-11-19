@@ -136,6 +136,9 @@ of redoing it on the seat that invented it.
 - `herdr gate merge <order> --run <run>`: merges a passed order into the run's integration branch. A merge to
   `main` asks the owner, except in auto mode within its budgets.
 - `herdr gate status [<order>] --run <run>`.
+- An order whose seat has an advisor in its mode starts with Claude Code's `--advisor`, and `seat run` prints
+  `advisor <model>`. Its consults, tokens and dollars are the journal's `advisor` row and count in the order's use; a
+  row with `dropped` ran without one, and says why.
 
 The `gate` skill holds the axes and the send-back loop. When the plan is done and gated, `herdr run end <run>`
 writes the receipt; name its file in your answer.

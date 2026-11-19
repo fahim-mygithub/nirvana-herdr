@@ -382,6 +382,18 @@ pub struct Constants {
     /// Plan 40a: Nirvana Claude's `--autocompact <tokens>`; 0 passes no flag.
     #[serde(default = "default_autocompact_tokens")]
     pub autocompact_tokens: u64,
+    /// Plan 90 (plan 43 B1, the owner's R1 "1. yes"): a Claude worker's `--autocompact <tokens>` in Efficient and
+    /// Balanced; SOTA is left alone; 0 passes no flag.
+    #[serde(default = "default_worker_autocompact_tokens")]
+    pub worker_autocompact_tokens: u64,
+}
+
+/// Plan 90's `worker_autocompact_tokens` when the table leaves the line out: plan 43 R1's "near 300,000". Run ia1's
+/// 313 Claude worker sessions made 0 compactions with a median peak context of 148k and a max of 902k, and cache
+/// reads above 200k per turn cost 18.7% of the run (plan 43 T1). A default here, not in the file, so an owner's table
+/// written before it gets the ceiling too; the owner turns it off with 0.
+fn default_worker_autocompact_tokens() -> u64 {
+    300_000
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -433,6 +445,57 @@ pub struct Seat {
     pub prices: Vec<Price>,
     #[serde(rename = "use")]
     pub uses: Vec<Use>,
+    /// Plan 90: Claude Code's `--advisor`, a seat id per mode. The owner, 2026-11-18: "Go ahead and build in the
+    /// consulting it might be cheaper in the long run for balanced runs". A table without it launches as before.
+    #[serde(default)]
+    pub advisor: Advisors,
+}
+
+/// Plan 90: a claude seat's advisor by mode, each a seat id. On the seat row, not a mode-level table: the advisor is a
+/// property of the model it advises (Claude Code drops a weaker one), so it sits beside that model, and a seat without
+/// the line has no advisor in any mode. Smaller than a `[advisor]` table keyed by mode then seat, which would repeat
+/// every seat id and need its own check that each names a seat.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Advisors {
+    #[serde(default)]
+    pub efficient: Option<String>,
+    #[serde(default)]
+    pub balanced: Option<String>,
+    #[serde(default)]
+    pub sota: Option<String>,
+}
+
+impl Advisors {
+    pub fn at(&self, mode: Mode) -> Option<&str> {
+        match mode {
+            Mode::Efficient => self.efficient.as_deref(),
+            Mode::Balanced => self.balanced.as_deref(),
+            Mode::Sota => self.sota.as_deref(),
+        }
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    }
+}
+
+/// Plan 90: the (main, advisor) families Claude Code 2.1.327 was measured to run with an advisor in the smoke test of
+/// 2026-11-18: Sonnet with Opus, Sonnet with Fable, Haiku with Opus, Opus with Fable, each with a consult in its
+/// stream. Claude Code itself takes any advisor "at least as capable as the main model" (its binary's own words) and
+/// drops a weaker one with a warning only (`--advisor haiku` on Sonnet exits 0 and runs without), so a pair outside
+/// this list is refused at load, not found missing in a stream. An equal pair is allowed there but buys nothing.
+pub const ADVISOR_PAIRS: [(&str, &str); 4] = [
+    ("sonnet", "opus"),
+    ("haiku", "opus"),
+    ("sonnet", "fable"),
+    ("opus", "fable"),
+];
+
+/// Plan 90: the Anthropic family a model id names (`claude-opus-5-5` is `opus`), for `ADVISOR_PAIRS`.
+pub fn claude_family(model: &str) -> Option<&'static str> {
+    let model = model.trim().to_ascii_lowercase();
+    ["haiku", "sonnet", "opus", "fable"]
+        .into_iter()
+        .find(|family| model == *family || model.starts_with(&format!("claude-{family}")))
 }
 
 /// USD per million tokens, from a date on (plan 12 §4: "a price schedule").
@@ -666,6 +729,15 @@ impl Table {
                     ));
                 }
             }
+            problems.extend(self.advisor_problems(seat));
+        }
+        if c.worker_autocompact_tokens != 0
+            && !(100_000..=1_000_000).contains(&c.worker_autocompact_tokens)
+        {
+            problems.push(format!(
+                "constants.worker_autocompact_tokens {} is not 0 or between 100000 and 1000000",
+                c.worker_autocompact_tokens
+            ));
         }
         let mut seen = Vec::new();
         for class in &self.classes {
@@ -708,6 +780,146 @@ fn seat_windows(seat: &Seat, pool: &Pool) -> Vec<String> {
     let mut windows = pool.windows.clone();
     windows.extend(seat.extra_windows.iter().cloned());
     windows
+}
+
+impl Table {
+    /// Plan 90: what is wrong with a seat's advisor lines. Only a claude seat takes `--advisor` (agy has no such
+    /// flag), the advisor is a claude seat of its own, and the pair is one of `ADVISOR_PAIRS`: a weaker advisor is
+    /// dropped by Claude Code without an error, and a seat believed to have an advisor must never silently lack one.
+    fn advisor_problems(&self, seat: &Seat) -> Vec<String> {
+        let mut problems = Vec::new();
+        for mode in [Mode::Efficient, Mode::Balanced, Mode::Sota] {
+            let Some(id) = seat.advisor.at(mode) else {
+                continue;
+            };
+            let at = format!("seat {}: advisor.{}", seat.id, mode.word());
+            if seat.cli != "claude" {
+                problems.push(format!(
+                    "{at}: only a claude seat has an advisor; {} has no --advisor",
+                    seat.cli
+                ));
+                continue;
+            }
+            let Some(advisor) = self.seat(id) else {
+                problems.push(format!("{at}: no seat {id}"));
+                continue;
+            };
+            if advisor.cli != "claude" {
+                problems.push(format!("{at}: {id} is not a claude seat"));
+                continue;
+            }
+            let pair = (claude_family(&seat.model), claude_family(&advisor.model));
+            let measured = ADVISOR_PAIRS
+                .iter()
+                .any(|(main, adv)| pair == (Some(*main), Some(*adv)));
+            if !measured {
+                problems.push(format!(
+                    "{at}: {} cannot advise {}; the advisor must be a stronger model, one of {}",
+                    advisor.model,
+                    seat.model,
+                    ADVISOR_PAIRS
+                        .iter()
+                        .map(|(main, adv)| format!("{adv} for {main}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+        problems
+    }
+
+    /// Plan 90: the advisor seat `seat_id` names for `mode`, when it names one and it is on. `Err` says why a seat
+    /// believed to have an advisor runs without: the advisor seat was turned off since the table was written.
+    pub fn advisor_of(&self, seat_id: &str, mode: Mode) -> Option<Result<&Seat, String>> {
+        let seat = self.seat(seat_id)?;
+        let id = seat.advisor.at(mode)?;
+        Some(match self.seat(id) {
+            Some(advisor) if advisor.enabled => Ok(advisor),
+            Some(_) => Err(format!("advisor {id} is off in seats.toml")),
+            None => Err(format!("no advisor seat {id} in seats.toml")),
+        })
+    }
+}
+
+/// Plan 90: the advisor a worker launches with, after the money check a Fable seat passes. A seat with its own window
+/// (Fable's `week.fable`) as the advisor is asked `may_spend_now` exactly as a Fable seat is at its own launch: every
+/// window read fresh and `fable_reserve` left after the order's expected use. That use is the whole order's on the
+/// advisor seat, more than a few consults cost, so it errs toward dropping the advisor. A refusal drops the advisor,
+/// never the order: the order was seated and booked on its own seat. `None`: the seat has no advisor in this mode.
+#[allow(clippy::too_many_arguments)]
+pub fn advisor_decision<'a>(
+    table: &'a Table,
+    world: &World,
+    seat_id: &str,
+    mode: Mode,
+    effort: Effort,
+    class_id: &str,
+    size: SizeName,
+    order: &str,
+) -> Option<Result<&'a Seat, String>> {
+    let advisor = match table.advisor_of(seat_id, mode)? {
+        Ok(advisor) => advisor,
+        Err(why) => return Some(Err(why)),
+    };
+    let effort = advisor
+        .efforts
+        .iter()
+        .copied()
+        .filter(|offered| *offered <= effort)
+        .max()
+        .or_else(|| advisor.efforts.first().copied())
+        .unwrap_or(effort);
+    Some(
+        may_spend_now(table, world, &advisor.id, effort, class_id, size, order)
+            .map(|()| advisor)
+            .map_err(|why| format!("advisor {why}")),
+    )
+}
+
+/// Plan 90: what `exec` launches a worker's advisor with: its model id, and its price on the day, for the journal's
+/// advisor row.
+#[derive(Debug, Clone)]
+pub struct AdvisorLaunch {
+    pub seat: String,
+    pub model: String,
+    pub price: Option<Price>,
+}
+
+/// Plan 90: `advisor_decision` at the moment a worker starts, on the project's table. Usage is read live only when the
+/// advisor has its own window (Fable): an Opus advisor spends the pool its seat already booked. A table that does not
+/// load gives `None`: `check_before_spend` already refused such an order.
+pub fn advisor_at_launch(
+    root: &Path,
+    seat_id: &str,
+    mode: Mode,
+    effort: Effort,
+    class_id: &str,
+    size: SizeName,
+    order: &str,
+) -> Option<Result<AdvisorLaunch, String>> {
+    let table = table_for(root).ok()?;
+    let scoped = match table.advisor_of(seat_id, mode)? {
+        Ok(advisor) => !advisor.extra_windows.is_empty(),
+        Err(why) => return Some(Err(why)),
+    };
+    let mut world = World {
+        now: now(),
+        ..World::default()
+    };
+    if scoped {
+        world = live_world(&table);
+        world.now = now();
+        match load_leases(&dir().join(LEASES_FILE)) {
+            Ok(leases) => world.leases = leases.leases,
+            Err(why) => return Some(Err(format!("advisor not checked: {why}"))),
+        }
+    }
+    let decision = advisor_decision(&table, &world, seat_id, mode, effort, class_id, size, order)?;
+    Some(decision.map(|advisor| AdvisorLaunch {
+        seat: advisor.id.clone(),
+        model: advisor.model_for(effort),
+        price: advisor.price_at(world.now).cloned(),
+    }))
 }
 
 impl Seat {
@@ -3165,6 +3377,48 @@ pub struct Tokens {
     pub output: u64,
 }
 
+/// Plan 90: what one worker's advisor did: Claude Code's `--advisor` consults, read from the worker's stream. Its
+/// tokens are the advisor model's own (`modelUsage` of the stream's result), which `Tokens` of the order leaves out: the
+/// result's `usage` counts the main model only, so before this an order's cost missed every consult (smoke test
+/// 2026-11-18: $0.04 of Sonnet beside $0.12 of Opus in one consult). `usd` is those tokens at the advisor seat's price
+/// row. `dropped` says why a seat believed to have an advisor ran without one.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AdvisorUse {
+    /// The advisor's model id, as `--advisor` named it.
+    pub model: String,
+    #[serde(default)]
+    pub consults: u32,
+    #[serde(default)]
+    pub tokens: Tokens,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped: Option<String>,
+}
+
+impl AdvisorUse {
+    /// Several attempts' advisor rows as one: consults, tokens and dollars summed, the last model and drop kept.
+    pub fn sum<'a>(uses: impl Iterator<Item = &'a AdvisorUse>) -> Option<AdvisorUse> {
+        let mut total: Option<AdvisorUse> = None;
+        for one in uses {
+            let sum = total.get_or_insert_with(AdvisorUse::default);
+            sum.model.clone_from(&one.model);
+            sum.consults += one.consults;
+            sum.tokens.input += one.tokens.input;
+            sum.tokens.cache_write += one.tokens.cache_write;
+            sum.tokens.cache_read += one.tokens.cache_read;
+            sum.tokens.output += one.tokens.output;
+            if let Some(usd) = one.usd {
+                *sum.usd.get_or_insert(0.0) += usd;
+            }
+            if one.dropped.is_some() {
+                sum.dropped.clone_from(&one.dropped);
+            }
+        }
+        total
+    }
+}
+
 /// One finished order, one line of `record.jsonl`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecordLine {
@@ -3239,6 +3493,9 @@ pub struct RecordLine {
     /// The run's journal and its last event when the line was written: `<path>#<seq>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub journal: Option<String>,
+    /// Plan 90: the order's advisor, when its seat had one; its cost is in `use` with the order's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advisor: Option<AdvisorUse>,
     /// Keys this herdr does not know, kept on a round trip (O2 review S5: a later field must not be dropped).
     #[serde(flatten, default)]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -3349,8 +3606,36 @@ pub fn complete(table: &Table, mut line: RecordLine, now: u64) -> Result<RecordL
         if let Some(tokens) = &line.tokens {
             line.spent = computed_use(table, seat, tokens, at);
         }
+        if let Some(spent) = line.spent.as_mut() {
+            for (window, share) in line
+                .advisor
+                .as_ref()
+                .and_then(|advisor| advisor_use(table, advisor, at))
+                .unwrap_or_default()
+            {
+                *spent.entry(window).or_insert(0.0) += share;
+            }
+        }
     }
     Ok(line)
+}
+
+/// Plan 90: the claude seat whose model an advisor ran on (`claude-opus-5-5` is the `opus` seat).
+pub fn advisor_seat<'a>(table: &'a Table, model: &str) -> Option<&'a Seat> {
+    table
+        .seats
+        .iter()
+        .find(|seat| seat.cli == "claude" && seat.model == model.trim())
+}
+
+/// Plan 90: an advisor's share of each window it spends, from its own tokens at its seat's price on the day: the same
+/// arithmetic as the order's own (`computed_use`), on the advisor's seat, so a Fable advisor spends `week.fable` too.
+/// The bucket a Fable advisor really bills to was not measured; this counts it where a Fable seat's order would go.
+pub fn advisor_use(table: &Table, advisor: &AdvisorUse, at: u64) -> Option<BTreeMap<String, f32>> {
+    if advisor.tokens == Tokens::default() {
+        return None;
+    }
+    computed_use(table, advisor_seat(table, &advisor.model)?, &advisor.tokens, at)
 }
 
 /// Appends one line in one write.
@@ -5018,7 +5303,7 @@ fn record_cli(args: &[String]) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// 2026-10-17T21:51:12Z, when O1's live readings were taken (nirvana_usage's `READ_1017`).
@@ -8739,6 +9024,230 @@ mod tests {
         let mut over = request("build.bounded");
         over.override_seat = Some(("argon".into(), "x".into()));
         assert!(pick(&table, &world(), &over).is_err());
+    }
+
+    // ---- plan 90: the advisor and the worker ceiling ----
+
+    /// Plan 90's default rows, the hunk the report hands the table's owner: Sonnet with an Opus advisor in Balanced,
+    /// nothing in Efficient or SOTA. The tests build their tables from it, so they hold once it lands.
+    pub(crate) const P90_FIND: &str = "id = \"sonnet\"\ncli = \"claude\"\nmodel = \"claude-sonnet-5-5\"\nfamily = \
+\"anthropic\"\npool = \"max\"\nefforts = [\"low\", \"medium\", \"high\"]\ncapabilities = [\"code\", \"tools\", \"image\", \
+\"pdf\", \"browser\"]\nenabled = true\n";
+    pub(crate) const P90_ADVISOR_LINES: &str = "# Plan 90: Claude Code's --advisor for this seat's workers, by mode. The owner, 2026-11-18: \"Go ahead and\n\
+# build in the consulting it might be cheaper in the long run for balanced runs\". Opus advises in Balanced only; a\n\
+# consult re-reads the whole conversation uncached (smoke test: 26,791 tokens, $0.12, at a 25k context). A hypothesis.\n\
+advisor = { balanced = \"opus\" }\n";
+
+    /// The ceiling's line, the second half of the same hunk, after Nirvana Claude's own `autocompact_tokens`.
+    pub(crate) const P90_CEILING_FIND: &str = "autocompact_tokens = 0\n";
+    pub(crate) const P90_CEILING_LINES: &str = "# Plan 90 (plan 43 B1, the owner's R1 \"1. yes\"): a Claude worker's `--autocompact <tokens>` in Efficient and\n\
+# Balanced; SOTA is left alone; 0 passes no flag. Probed 2026-11-18: a headless Haiku worker at 100000 compacted five\n\
+# times, `pre_tokens` 62k to 87k. 300000 is R1's \"near 300k\", a hypothesis: run ia1's Claude workers peaked at 148k\n\
+# median and 902k at most, and made 0 compactions (plan 43 T1).\n\
+worker_autocompact_tokens = 300000\n";
+
+    /// Today's default with the hunk applied; the default itself once the hunk has landed.
+    pub(crate) fn p90_default() -> String {
+        if DEFAULT.contains(P90_ADVISOR_LINES) {
+            return DEFAULT.to_owned();
+        }
+        assert_eq!(DEFAULT.matches(P90_FIND).count(), 1, "the hunk's anchor");
+        assert_eq!(DEFAULT.matches(P90_CEILING_FIND).count(), 1, "the ceiling's anchor");
+        DEFAULT
+            .replace(P90_FIND, &format!("{P90_FIND}{P90_ADVISOR_LINES}"))
+            .replace(P90_CEILING_FIND, &format!("{P90_CEILING_FIND}{P90_CEILING_LINES}"))
+    }
+
+    fn p90_table() -> Table {
+        parse(&p90_default()).expect("the default with plan 90's rows parses")
+    }
+
+    /// An edited copy of today's table with one advisor line on `seat`, to check the load rules one at a time.
+    fn p90_with(seat: &str, line: &str) -> Result<Table, String> {
+        let anchor = format!("id = \"{seat}\"\n");
+        let text = DEFAULT.replacen(&anchor, &format!("{anchor}{line}\n"), 1);
+        parse(&text)
+    }
+
+    /// V2's default: Sonnet with an Opus advisor in Balanced, nothing in Efficient, nothing in SOTA; no other seat.
+    #[test]
+    fn p90_the_default_rows_give_sonnet_an_opus_advisor_in_balanced_only() {
+        let table = p90_table();
+        let sonnet = table.seat("sonnet").expect("sonnet");
+        assert_eq!(sonnet.advisor.at(Mode::Balanced), Some("opus"));
+        assert_eq!(sonnet.advisor.at(Mode::Efficient), None);
+        assert_eq!(sonnet.advisor.at(Mode::Sota), None, "SOTA is left as it is");
+        for seat in table.seats.iter().filter(|seat| seat.id != "sonnet") {
+            assert_eq!(seat.advisor, Advisors::default(), "{}", seat.id);
+        }
+        assert_eq!(
+            table.advisor_of("sonnet", Mode::Balanced).map(|a| a.map(|s| s.model.clone())),
+            Some(Ok("claude-opus-5-5".into()))
+        );
+        assert!(table.advisor_of("sonnet", Mode::Sota).is_none());
+        assert!(table.advisor_of("opus", Mode::Balanced).is_none());
+        // Today's default, before the hunk: no seat has an advisor.
+        assert!(table_from_default().seats.iter().all(|s| s.advisor == Advisors::default()));
+    }
+
+    fn table_from_default() -> Table {
+        parse(DEFAULT).expect("default")
+    }
+
+    /// The load rules: only a claude seat has an advisor, the advisor is a claude seat, and the pair is a measured
+    /// stronger one. A weaker, equal or unknown pair is refused, since Claude Code drops a weaker one silently.
+    #[test]
+    fn p90_an_advisor_must_be_a_stronger_claude_seat_on_a_claude_seat() {
+        for (seat, line, ok) in [
+            ("haiku", "advisor = { efficient = \"opus\" }", true),
+            ("opus", "advisor = { balanced = \"fable\" }", true),
+            ("sonnet", "advisor = { sota = \"fable\" }", true),
+            // Weaker and equal: Claude Code would run without.
+            ("sonnet", "advisor = { balanced = \"haiku\" }", false),
+            ("opus", "advisor = { balanced = \"sonnet\" }", false),
+            ("opus", "advisor = { balanced = \"opus\" }", false),
+            // Not measured: Haiku with Fable.
+            ("haiku", "advisor = { balanced = \"fable\" }", false),
+            // Not a claude seat, either side.
+            ("g-sonnet", "advisor = { balanced = \"opus\" }", false),
+            ("haiku", "advisor = { balanced = \"g-opus\" }", false),
+            // The local seat runs qwen through the claude CLI: no Anthropic family.
+            ("local", "advisor = { balanced = \"opus\" }", false),
+            ("haiku", "advisor = { balanced = \"nosuch\" }", false),
+        ] {
+            let got = p90_with(seat, line);
+            assert_eq!(got.is_ok(), ok, "{seat} {line}: {got:?}", got = got.as_ref().err());
+        }
+        let why = p90_with("sonnet", "advisor = { balanced = \"haiku\" }").unwrap_err();
+        assert!(
+            why.contains("seat sonnet: advisor.balanced: claude-haiku-5-5 cannot advise claude-sonnet-5-5"),
+            "{why}"
+        );
+        assert!(p90_with("g-sonnet", "advisor = { balanced = \"opus\" }")
+            .unwrap_err()
+            .contains("only a claude seat has an advisor"));
+        // A misspelt mode is refused by the table's own rule for unknown fields.
+        assert!(p90_with("haiku", "advisor = { balance = \"opus\" }").is_err());
+        assert_eq!(claude_family("claude-fable-5-2"), Some("fable"));
+        assert_eq!(claude_family("qwen3.6:35b-a3b"), None);
+    }
+
+    /// A Fable advisor passes the money check a Fable seat passes (`may_spend_now`): unread or past the reserve, the
+    /// advisor is dropped with the same reason, and the order keeps its own seat. An Opus advisor is never asked.
+    #[test]
+    fn p90_a_fable_advisor_passes_the_fable_seats_money_check() {
+        let table = p90_with("opus", "advisor = { balanced = \"fable\" }").expect("table");
+        let ask = |world: &World| {
+            advisor_decision(&table, world, "opus", Mode::Balanced, Effort::Medium, "plan", SizeName::Large, "o-1")
+                .map(|got| got.map(|seat| seat.id.clone()))
+        };
+        assert_eq!(ask(&with_fable_week(Some(0.10))), Some(Ok("fable".into())));
+        let unread = ask(&with_fable_week(None)).unwrap().unwrap_err();
+        assert!(unread.starts_with("advisor fable: Fable week not read"), "{unread}");
+        let spent = ask(&with_fable_week(Some(0.88))).unwrap().unwrap_err();
+        assert!(spent.contains("under the reserve"), "{spent}");
+        // No advisor in SOTA here, and an Opus advisor is never read against usage.
+        assert_eq!(
+            advisor_decision(&table, &with_fable_week(None), "opus", Mode::Sota, Effort::Medium, "plan", SizeName::Large, "o-1")
+                .map(|got| got.is_ok()),
+            None
+        );
+        let sonnet = p90_table();
+        assert_eq!(
+            advisor_decision(&sonnet, &with_fable_week(None), "sonnet", Mode::Balanced, Effort::Medium, "plan", SizeName::Large, "o-1")
+                .map(|got| got.map(|seat| seat.id.clone())),
+            Some(Ok("opus".into()))
+        );
+        // An advisor seat turned off is a drop with its reason, not a silent run without.
+        let off = p90_default().replacen(
+            "id = \"opus\"\ncli = \"claude\"\nmodel = \"claude-opus-5-5\"\nfamily = \"anthropic\"\npool = \"max\"\nefforts = [\"low\", \"medium\", \"high\", \"xhigh\"]\ncapabilities = [\"code\", \"tools\", \"image\", \"pdf\", \"browser\"]\nenabled = true",
+            "id = \"opus\"\ncli = \"claude\"\nmodel = \"claude-opus-5-5\"\nfamily = \"anthropic\"\npool = \"max\"\nefforts = [\"low\", \"medium\", \"high\", \"xhigh\"]\ncapabilities = [\"code\", \"tools\", \"image\", \"pdf\", \"browser\"]\nenabled = false",
+            1,
+        );
+        let off = parse(&off).expect("opus off parses");
+        assert_eq!(
+            off.advisor_of("sonnet", Mode::Balanced).map(|got| got.map(|seat| seat.id.clone())),
+            Some(Err("advisor opus is off in seats.toml".into()))
+        );
+    }
+
+    /// V3: the record's use counts the advisor's tokens at the advisor seat's price, beside the order's own: one
+    /// consult of the smoke test, 26,791 in and 614 out on Opus, is $0.119444, Claude Code's own `costUSD` for it.
+    #[test]
+    fn p90_the_record_counts_the_advisors_tokens_at_its_own_price() {
+        let table = p90_table();
+        let opus = table.seat("opus").unwrap();
+        let advisor = AdvisorUse {
+            model: "claude-opus-5-5".into(),
+            consults: 1,
+            tokens: Tokens {
+                input: 26_791,
+                output: 614,
+                ..Tokens::default()
+            },
+            usd: None,
+            dropped: None,
+        };
+        let usd = cost(opus.price_at(NOW).unwrap(), &advisor.tokens);
+        assert!((usd - 0.119_444).abs() < 1e-9, "{usd}");
+        let line = |advisor: Option<AdvisorUse>| RecordLine {
+            advisor,
+            ..serde_json::from_value(serde_json::json!({"order":"o-1","seat":"sonnet","effort":"medium",
+                "class":"build.bounded","outcome":"pass","tokens":{"input":6,"cache_write":7603,"cache_read":68179,
+                "output":331}}))
+            .expect("line")
+        };
+        let plain = complete(&table, line(None), NOW).unwrap().spent.unwrap();
+        let with = complete(&table, line(Some(advisor.clone())), NOW).unwrap().spent.unwrap();
+        let pool = table.pool("max").unwrap();
+        for (window, share) in &plain {
+            let added = f64::from(with[window] - share);
+            let want = usd * pool.per_usd[window];
+            assert!((added - want).abs() < want * 1e-4 + 1e-9, "{window}: {added} against {want}");
+        }
+        // The line keeps the advisor, and a line without one is written as before.
+        let text = serde_json::to_string(&line(Some(advisor))).unwrap();
+        assert!(text.contains("\"advisor\":{\"model\":\"claude-opus-5-5\",\"consults\":1"), "{text}");
+        assert!(!serde_json::to_string(&line(None)).unwrap().contains("advisor"));
+        // A Fable advisor spends the Fable week too, as a Fable seat's order would.
+        let fable = AdvisorUse {
+            model: "claude-fable-5-2".into(),
+            tokens: Tokens { input: 1000, ..Tokens::default() },
+            ..AdvisorUse::default()
+        };
+        assert!(advisor_use(&table, &fable, NOW).unwrap().contains_key("week.fable"));
+        // Attempts sum.
+        let two = AdvisorUse::sum([&fable, &fable].into_iter()).unwrap();
+        assert_eq!((two.tokens.input, two.model.as_str()), (2000, "claude-fable-5-2"));
+    }
+
+    /// C1: the worker ceiling is a table setting, 300,000 by default even in a table written before it, 0 turns it
+    /// off, and a value Claude Code refuses is refused at load.
+    #[test]
+    fn p90_the_worker_ceiling_defaults_to_300k_and_is_checked() {
+        assert_eq!(table_from_default().constants.worker_autocompact_tokens, 300_000);
+        // The hunk's own line says the same, and a table without the line (today's default) reads it from serde.
+        assert_eq!(p90_table().constants.worker_autocompact_tokens, 300_000);
+        let without: String = p90_default()
+            .lines()
+            .filter(|line| !line.starts_with("worker_autocompact_tokens"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        assert_eq!(parse(&without).unwrap().constants.worker_autocompact_tokens, 300_000);
+        let with = |line: &str| {
+            parse(&without.replace(
+                P90_CEILING_FIND,
+                &format!("{P90_CEILING_FIND}{line}\n"),
+            ))
+        };
+        assert_eq!(with("worker_autocompact_tokens = 0").unwrap().constants.worker_autocompact_tokens, 0);
+        assert_eq!(
+            with("worker_autocompact_tokens = 250000").unwrap().constants.worker_autocompact_tokens,
+            250_000
+        );
+        assert!(with("worker_autocompact_tokens = 50000")
+            .unwrap_err()
+            .contains("worker_autocompact_tokens 50000 is not 0 or between 100000 and 1000000"));
     }
 
     // ---- plan 71 ----
