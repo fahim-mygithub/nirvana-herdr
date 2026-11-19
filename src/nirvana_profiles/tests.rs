@@ -132,7 +132,7 @@ fn p33_the_parser_refuses_each_bad_profile_naming_the_file_and_line() {
         found,
         [format!(
             "{shown}: line 5: unknown key `colour` (the keys: description, class, model, family, effort, needs, \
-             disallowed_tools)"
+             disallowed_tools, skills)"
         )]
     );
     // A Send key, by name: plan 31's approval is per order.
@@ -1035,4 +1035,306 @@ fn the_template_points_at_the_seat_table_for_a_model() {
     let model = text.lines().find(|line| line.starts_with("# model:")).expect("a model line");
     assert_eq!(model, "# model: a model id that herdr seat list shows");
     assert!(!text.contains("claude-"), "{text}");
+}
+
+// ---- plan 45 P45c: skills, a profile's own servers, shapes ----
+
+/// A profile's own servers, made up: a fake command, never a definition from this machine.
+const OWN_SERVERS: &str =
+    r#"{"mcpServers": {"fake-tool": {"command": "fake-mcp-not-real", "args": ["--fake"]}}}"#;
+const OPERATOR: &str = "---\ndescription: Drives the fake tool through its own server.\nclass: sweep.mechanical\n---\n\
+You drive the fake tool only through its server.\n";
+
+fn write_folder_profile(project: &Project, name: &str, text: &str, servers: Option<&str>) -> PathBuf {
+    let dir = folder_of(&project.root, name);
+    std::fs::create_dir_all(dir.join(KNOWLEDGE)).unwrap();
+    std::fs::write(dir.join(PROFILE_FILE), text).unwrap();
+    if let Some(servers) = servers {
+        std::fs::write(dir.join(SERVERS_FILE), servers).unwrap();
+    }
+    dir.join(PROFILE_FILE)
+}
+
+fn skill(root: &Path, name: &str) {
+    let dir = root.join(".claude").join("skills").join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: the {name} skill.\n---\nbody\n"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn p92_skills_parse_and_check_refuses_a_skill_the_project_lacks() {
+    let (_home, project) = project("p92-skills");
+    let text = SLICER.replace("effort: medium\n", "effort: medium\nskills: [alpha, \"beta\"]\n");
+    let profile = parsed(&text);
+    assert_eq!(profile.skills, ["alpha", "beta"]);
+    let found = refusals("slicer", &SLICER.replace("effort: medium\n", "effort: medium\nskills: [../up]\n"));
+    assert!(
+        found.len() == 1 && found[0].ends_with("skills: `../up` is not a skill's folder name"),
+        "{found:?}"
+    );
+    skill(&project.root, "alpha");
+    let file = path(&project.root, "slicer");
+    let found = project_problems(&project.root, &file, &profile);
+    assert_eq!(
+        found,
+        [format!(
+            "{}: skills beta: no such skill in .claude/skills (the project's: alpha)",
+            file.display()
+        )]
+    );
+    nirvana_seat::set_test_world(None);
+}
+
+#[test]
+fn p92_a_claude_worker_with_skills_gets_one_line_naming_them_and_none_without() {
+    let (_home, project) = project("p92-skills-line");
+    let run_dir = project.run_dir("r1");
+    let found = Ref {
+        name: "slicer".into(),
+        sha: "a".repeat(64),
+    };
+    let with = parsed(&SLICER.replace("effort: medium\n", "effort: medium\nskills: [alpha, beta]\n"));
+    let args = claude_args(&run_dir, &found, &with).unwrap();
+    let body = std::fs::read_to_string(&args[1]).unwrap();
+    assert!(
+        body.ends_with(
+            "owns: src/never.rs\n\nOf this project's skills, use only these: alpha, beta. Leave the others unused.\n"
+        ),
+        "{body}"
+    );
+    // An absent `skills` key changes nothing: the body alone, as before plan 45.
+    let without = Ref {
+        name: "plain".into(),
+        sha: "b".repeat(64),
+    };
+    let args = claude_args(&run_dir, &without, &parsed(SLICER)).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&args[1]).unwrap(),
+        "You drive Bambu Studio only through the bambu-studio-beta tools.\nowns: src/never.rs\n"
+    );
+    nirvana_seat::set_test_world(None);
+}
+
+/// The plan's L3 verifier: "an order seated with the profile has the server, one seated without has neither". The
+/// launch is `order_argv_seated` with what seating journaled, as `seat exec` calls it (`with_order_servers`).
+#[test]
+fn p92_a_profiles_own_servers_reach_its_order_pinned_by_the_run_copy() {
+    let (_home, project) = project("p92-own-servers");
+    // agy signed out: the claude path, whose config file is read here.
+    nirvana_seat::set_test_world(Some(BTreeMap::from([(
+        "agy".to_owned(),
+        "signed out".to_owned(),
+    )])));
+    let profile_mcp = folder_of(&project.root, "operator").join(SERVERS_FILE);
+    write_folder_profile(&project, "operator", OPERATOR, Some(OWN_SERVERS));
+    let loaded = load(&project.root, "operator").unwrap();
+    assert_eq!(loaded.profile.servers, ["fake-tool"]);
+    assert_eq!(
+        loaded.sha,
+        seated_sha(OPERATOR.as_bytes(), Some(OWN_SERVERS.as_bytes()))
+    );
+    let seat = rule_seat(&project, "sweep.mechanical", &loaded.profile);
+    std::fs::write(project.root.join("order.md"), "# Run the fake tool\n").unwrap();
+    let live = nirvana_worker::take_live(&project, "r1", "s1")
+        .unwrap()
+        .unwrap();
+    nirvana_worker::seat_order_with(
+        &project,
+        &request(&project, "s1", &seat.seat),
+        Some("operator"),
+    )
+    .unwrap();
+    drop(live);
+    let seated = seated_of(&project, "s1");
+    let run_dir = project.run_dir("r1");
+    assert!(seated.needs.is_empty(), "no needs line: {:?}", seated.needs);
+    assert_eq!(
+        std::fs::read(servers_copy_path(&run_dir, "operator", &loaded.sha)).unwrap(),
+        OWN_SERVERS.as_bytes()
+    );
+    let brief = std::fs::read_to_string(&seated.order_file).unwrap();
+    assert!(
+        brief.contains(crate::nirvana_gui_tools::DEVICE_LINE),
+        "{brief}"
+    );
+    let launch = |seated: &Seated| {
+        crate::nirvana_gui_tools::order_argv_seated(
+            vec!["claude".into(), "-p".into()],
+            &project.root,
+            Path::new(&seated.cwd),
+            &run_dir,
+            &seated.order,
+            &seated.needs,
+            &crate::nirvana_bladebro::Seat::default(),
+            Ok(vec!["code"]),
+            &mut Vec::new(),
+        )
+    };
+    let command_of = |argv: &[String]| {
+        let at = argv
+            .iter()
+            .position(|arg| arg == "--mcp-config")
+            .unwrap_or_else(|| panic!("--mcp-config: {argv:?}"));
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&argv[at + 1]).unwrap()).unwrap();
+        let servers: Vec<String> = config["mcpServers"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(servers, ["fake-tool"], "{config}");
+        assert_eq!(argv[at + 2..], ["--allowedTools", "mcp__fake-tool__*"]);
+        config["mcpServers"]["fake-tool"]["command"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned()
+    };
+    let argv = launch(&seated).unwrap();
+    assert_eq!(command_of(&argv), "fake-mcp-not-real");
+    // The owner edits the profile's mcp.json mid-run: the running order keeps the copy it was seated with.
+    std::fs::write(&profile_mcp, OWN_SERVERS.replace("fake-mcp-not-real", "edited-fake")).unwrap();
+    let argv = launch(&seated).unwrap();
+    assert_eq!(command_of(&argv), "fake-mcp-not-real");
+    // The run's servers copy changed since seating: the order does not start.
+    std::fs::write(
+        servers_copy_path(&run_dir, "operator", &loaded.sha),
+        OWN_SERVERS.replace("fake-mcp-not-real", "tampered-fake"),
+    )
+    .unwrap();
+    let why = launch(&seated).unwrap_err();
+    assert!(
+        why.starts_with("s1 was seated with a profile's own MCP servers and cannot get them: the profile copy ")
+            && why.contains(" has sha256 "),
+        "{why}"
+    );
+    // An order seated without the profile gets neither the server nor the line.
+    let table = nirvana_seat::table_for(&project.root).unwrap();
+    let plain_seat = nirvana_seat::pick(
+        &table,
+        &nirvana_seat::live_world(&table),
+        &Request::new("sweep.mechanical"),
+    )
+    .unwrap();
+    std::fs::write(project.root.join("order.md"), "# Run it plainly\n").unwrap();
+    let mut plain_request = request(&project, "s2", &plain_seat.seat);
+    plain_request.class = Some("sweep.mechanical".into());
+    let live = nirvana_worker::take_live(&project, "r1", "s2")
+        .unwrap()
+        .unwrap();
+    nirvana_worker::seat_order_with(&project, &plain_request, None).unwrap();
+    drop(live);
+    let plain = seated_of(&project, "s2");
+    let brief = std::fs::read_to_string(&plain.order_file).unwrap();
+    assert!(
+        !brief.contains(crate::nirvana_gui_tools::DEVICE_LINE),
+        "{brief}"
+    );
+    assert_eq!(launch(&plain).unwrap(), ["claude", "-p"]);
+    nirvana_seat::set_test_world(None);
+}
+
+#[test]
+fn p92_a_profile_server_the_project_defines_is_refused_and_agys_limits_hold() {
+    let (_home, project) = project("p92-server-rules");
+    let clash = r#"{"mcpServers": {"bambu-studio-beta": {"command": "fake-mcp-not-real"}}}"#;
+    let file = write_folder_profile(&project, "clash", OPERATOR, Some(clash));
+    let found = project_problems(
+        &project.root,
+        &file,
+        &parse(&file, "clash", OPERATOR).unwrap(),
+    );
+    assert!(
+        found.len() == 1
+            && found[0].contains("server bambu-studio-beta is in the project's .mcp.json too"),
+        "{found:?}"
+    );
+    let why = load(&project.root, "clash").unwrap_err();
+    assert!(
+        why.contains("server bambu-studio-beta is in the project's .mcp.json too"),
+        "{why}"
+    );
+    // A definition agy cannot take keeps every order of the profile on claude, as a `needs` server's does.
+    let remote = r#"{"mcpServers": {"fake-remote": {"command": "fake-mcp-not-real", "args": ["${HOME}"]}}}"#;
+    write_folder_profile(&project, "remote", OPERATOR, Some(remote));
+    let loaded = load(&project.root, "remote").unwrap();
+    let mut pick = Request::new("sweep.mechanical");
+    narrow(&mut pick, &loaded.profile);
+    assert!(
+        pick.claude_only.as_deref().is_some_and(|why| why
+            .starts_with("profile remote's own server: only a claude worker can take fake-remote: fake-remote uses")),
+        "{:?}",
+        pick.claude_only
+    );
+    // Its Debug names the servers, never a definition: a definition can hold a token.
+    let shown = format!("{loaded:?}");
+    assert!(shown.contains("fake-remote") && !shown.contains("HOME"), "{shown}");
+    // A `needs` naming the profile's own server is refused: it is granted with no needs line.
+    let needing = OPERATOR.replace(
+        "class: sweep.mechanical\n",
+        "class: sweep.mechanical\nneeds: [fake-tool]\n",
+    );
+    let file = write_folder_profile(&project, "needing", &needing, Some(OWN_SERVERS));
+    let found = project_problems(
+        &project.root,
+        &file,
+        &parse(&file, "needing", &needing).unwrap(),
+    );
+    assert!(
+        found.len() == 1 && found[0].ends_with("take it out of needs"),
+        "{found:?}"
+    );
+    nirvana_seat::set_test_world(None);
+}
+
+#[test]
+fn p92_every_shape_writes_the_folder_form_and_passes_check() {
+    let (_home, project) = project("p92-shapes");
+    let root = &project.root;
+    let table = nirvana_seat::table_for(root);
+    assert!(table.is_ok(), "the default seat table");
+    let servers = crate::nirvana_gui_tools::project_servers(root).unwrap();
+    for shape_name in SHAPES {
+        let name = format!("my-{shape_name}");
+        let file = new_profile_shape(root, &name, shape_name).unwrap();
+        assert_eq!(file, folder_of(root, &name).join(PROFILE_FILE));
+        let (_, listed, parsed) = list(root)
+            .into_iter()
+            .find(|(listed, _, _)| *listed == name)
+            .expect("listed");
+        let problems = check_one(root, &name, &listed, &parsed, &table, &servers);
+        assert!(problems.is_empty(), "{shape_name}: {problems:?}");
+        let offer = crate::nirvana_knowledge::offer_uncounted(root, root, &name);
+        assert!(
+            !offer.slugs.is_empty(),
+            "{shape_name}: the starter cards are offered"
+        );
+        let again = new_profile_shape(root, &name, shape_name).unwrap_err();
+        assert!(again.contains("is already there"), "{again}");
+    }
+    let reviewer = std::fs::read_to_string(folder_of(root, "my-reviewer").join(PROFILE_FILE)).unwrap();
+    for line in [
+        "TODO(owner): name what this reviewer judges",
+        "1. Open every file you judge yourself. Never judge from a file name",
+        "The worst defect sets the ceiling.",
+        "your Work Report's `sources` lists every file you opened and every card you read",
+        "7. Never edit, re-render, download or upload anything.",
+    ] {
+        assert!(reviewer.contains(line), "{line}: {reviewer}");
+    }
+    // The visual pins are suggestions, commented: they narrow the seats to the ones that read video natively.
+    let parsed = parse(&file("my-reviewer"), "my-reviewer", &reviewer).unwrap();
+    assert_eq!((parsed.class, parsed.needs.len()), (None, 0), "{reviewer}");
+    assert_eq!(
+        std::fs::read_to_string(folder_of(root, "my-researcher").join(PROFILE_FILE)).unwrap(),
+        WEB_RESEARCHER
+    );
+    assert!(new_profile_shape(root, "x", "critic")
+        .unwrap_err()
+        .starts_with("no shape \"critic\""));
+    nirvana_seat::set_test_world(None);
 }

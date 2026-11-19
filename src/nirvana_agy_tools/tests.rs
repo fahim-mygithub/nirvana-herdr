@@ -722,3 +722,104 @@ fn p35b_the_leftover_orders_are_read_from_both_folders() {
     std::fs::write(run_dir.join("blade").join("notes.txt"), "x").unwrap();
     assert_eq!(leftover_orders(&run_dir), words(&["a1", "a2", "b1", "c1"]));
 }
+
+// ---- plan 45 P45c: a profile's `skills` ----
+
+fn skill_folder(root: &Path, name: &str) {
+    let dir = root.join(".claude").join("skills").join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: the {name} skill.\n---\nbody\n"),
+    )
+    .unwrap();
+}
+
+/// An order file in `root` naming the one-file profile `name` (written from `text`), with its copy in `run_dir`, as
+/// `seat run --profile` leaves them.
+fn profiled_order(root: &Path, run_dir: &Path, name: &str, text: &str, order: &str) -> String {
+    let dir = crate::nirvana_profiles::folder(root);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(crate::nirvana_profiles::path(root, name), text).unwrap();
+    let loaded = crate::nirvana_profiles::load(root, name).unwrap();
+    crate::nirvana_profiles::copy_into_run(run_dir, &loaded).unwrap();
+    let file = root.join(format!("{order}.md"));
+    let lines = crate::nirvana_profiles::order_lines(&crate::nirvana_profiles::Ref {
+        name: name.into(),
+        sha: loaded.sha,
+    });
+    std::fs::write(&file, format!("{lines}\n# Do it\n")).unwrap();
+    file.display().to_string()
+}
+
+fn copied_skills(run_dir: &Path, order: &str) -> Vec<String> {
+    let mut names: Vec<String> =
+        std::fs::read_dir(tools_dir(run_dir, order).join(".agents").join("skills"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect();
+    names.sort();
+    names
+}
+
+/// Plan 45 §5: an agy order seated with a profile gets only the skills its `skills` names; a profile with no `skills`,
+/// or no profile, gets every skill, as before.
+#[test]
+fn p92_an_agy_order_gets_only_its_profiles_skills_and_all_without_the_key() {
+    let (_home, root, run_dir) = project("p92-agy-skills");
+    for name in ["notes", "probe", "seat"] {
+        skill_folder(&root, name);
+    }
+    assert_eq!(project_skills(&root), words(&["notes", "probe", "seat"]));
+    let run = |file: &str, order: &str| {
+        let mut out = Vec::new();
+        with_tools(
+            agy_argv(file),
+            &Order {
+                root: &root,
+                cwd: &root,
+                run_dir: &run_dir,
+                order,
+                order_file: file,
+                deny: Vec::new(),
+            },
+            &mut out,
+        )
+        .unwrap();
+        String::from_utf8(out).unwrap()
+    };
+    let named = profiled_order(
+        &root,
+        &run_dir,
+        "picky",
+        "---\ndescription: Uses two skills.\nskills: [seat, ghost]\n---\nWork.\n",
+        "a1",
+    );
+    let view = run(&named, "a1");
+    assert_eq!(copied_skills(&run_dir, "a1"), words(&["seat"]));
+    assert!(
+        view.contains("the profile names the skill ghost, which herdr has no copy of here"),
+        "{view}"
+    );
+    let unnamed = profiled_order(
+        &root,
+        &run_dir,
+        "open",
+        "---\ndescription: Names no skill.\n---\nWork.\n",
+        "a2",
+    );
+    run(&unnamed, "a2");
+    assert_eq!(
+        copied_skills(&run_dir, "a2"),
+        words(&["notes", "probe", "seat"])
+    );
+    let plain = root.join("plain.md");
+    std::fs::write(&plain, "# Do it\n").unwrap();
+    run(&plain.display().to_string(), "a3");
+    assert_eq!(
+        copied_skills(&run_dir, "a3"),
+        words(&["notes", "probe", "seat"])
+    );
+}
