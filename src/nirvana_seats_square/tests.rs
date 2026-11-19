@@ -749,6 +749,7 @@ fn p97_the_square_reads_the_calibration_and_names_what_differs() {
             median: 0.37,
             factor: Some(0.37),
             clamped: false,
+            held: false,
         }],
         ..Calibration::default()
     };
@@ -771,7 +772,26 @@ fn p97_the_square_reads_the_calibration_and_names_what_differs() {
     for cell in measured {
         assert_eq!((cell.seat.as_deref(), cell.effort), (Some("hydrogen"), Some(Effort::Low)));
         assert_eq!(cell.measured.as_deref(), Some("measured x0.37 over 7 orders"));
+        assert!(!cell.held, "the default holds opus high only");
     }
+    // Held: the same figure, marked held, for the page to say so.
+    let holding = nirvana_seat::DEFAULT
+        .replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1)
+        .replacen("calibration_hold = [\"opus:high\"]", "calibration_hold = [\"hydrogen:low\"]", 1);
+    std::fs::write(home.join(nirvana_seat::SEATS_FILE), holding).unwrap();
+    let held = read(&root, &home, &mut Replays::new(), NOW);
+    let cells: Vec<&MatrixCell> = held
+        .matrix
+        .as_ref()
+        .unwrap()
+        .rows
+        .iter()
+        .flat_map(|row| &row.cells)
+        .filter(|cell| cell.measured.is_some())
+        .collect();
+    assert!(!cells.is_empty() && cells.iter().all(|c| c.held), "held cells");
+    let carried = nirvana_seat::DEFAULT.replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1);
+    std::fs::write(home.join(nirvana_seat::SEATS_FILE), carried).unwrap();
     assert_eq!(read(&root, &home, &mut Replays::new(), NOW), view, "the same inputs, the same view");
     // No file: the matrix still draws, unchecked; a refused table has none.
     std::fs::remove_file(calib::path(&home)).unwrap();

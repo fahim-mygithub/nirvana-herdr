@@ -652,6 +652,7 @@ fn p97_the_record_line_and_the_journals_carry_the_first_verdict() {
     );
     assert!(journals.merged.contains(&("r1".into(), "o1".into())));
     assert!(journals.merging.contains("r1"));
+    assert_eq!(journals.files, 1, "one journal file read");
     assert_eq!(journals.first.len(), 5);
     let cal = calibrate(&v18(), std::slice::from_ref(&bare), &journals, NOW);
     let row = &cal.cells[0];
@@ -729,6 +730,67 @@ fn p97_the_idle_tick_checks_the_table_with_no_seat_and_no_review() {
     assert!(!path(&dir).exists());
     assert_eq!(idle::read_global().calibration, Some((now, cal.summary)));
     drop(home);
+}
+
+/// The owner's hold (2026-11-18): a held pair's figure is recorded and marked, counted apart in the summary, and
+/// said so by `seat calibrate`; `--picks` puts no move on Balanced plan as held.
+#[test]
+fn p97_held_pairs_are_measured_and_marked() {
+    let table = parse(nirvana_seat::DEFAULT).unwrap();
+    let cal = calibrate(&table, &fixture(), &Journals::default(), NOW);
+    let opus = pooled(&cal, "opus", Effort::High);
+    assert!(opus.held && opus.factor.is_some(), "{opus:?}");
+    assert!(!pooled(&cal, "hydrogen", Effort::Low).held);
+    // Against the default, hydrogen low's refit puts its fixture orders near 1: argon high is the one pooled booking.
+    assert!(cal.summary.starts_with("1 cost booked as measured, 1 more by a project's own orders, 2 held by calibration_hold"),
+        "{}", cal.summary);
+    let checked = Checked {
+        calibration: cal.clone(),
+        ledger: Vec::new(),
+        written: true,
+        journals: 0,
+        millis: 0,
+    };
+    let said = text(&checked, Path::new("record.jsonl"));
+    assert!(
+        said.contains(
+            "\n  opus high: median 2.10, n 11, held at the table's booking (measured x2.10)\n"
+        ),
+        "{said}"
+    );
+    let held = moved_picks(&table, &cal, None, NOW);
+    assert!(
+        held.iter().all(|m| !m.starts_with("balanced plan:")),
+        "{held:?}"
+    );
+    // A booking four times dearer on every effort of hydrogen moves picks off it, and `--picks` names them.
+    let mut dear = Calibration::default();
+    for effort in [Effort::Low, Effort::Medium, Effort::High] {
+        dear.cost.push(CostRow {
+            seat: "hydrogen".into(),
+            effort,
+            project: None,
+            n: 9,
+            median: 4.0,
+            factor: Some(4.0),
+            clamped: false,
+            held: false,
+        });
+    }
+    let moved = moved_picks(&table, &dear, None, NOW);
+    assert!(
+        !moved.is_empty() && moved.iter().all(|m| m.contains(": hydrogen ")),
+        "{moved:?}"
+    );
+    let shown = picks_text(&table, &dear, NOW);
+    assert!(
+        shown.starts_with(&format!(
+            "picks that move, as held, pooled: {}
+",
+            moved.len()
+        )),
+        "{shown}"
+    );
 }
 
 /// The cached world (the Seats square, the idle tick, the launch) carries the file's pooled factors, so their picks

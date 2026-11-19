@@ -18,6 +18,10 @@ use_record = false
 # outside 0.5 to 2.0 times this table's cell (the rule of nirvana/seat_fit.py). Costs only: scores never move from it.
 # On here; a table without the line reads it as false, so a table that never took this default books as before.
 calibration = true
+# Seat and effort pairs whose measured cost is recorded and shown but never booked ("seat:effort"). Opus high: the
+# owner's call 2026-11-18: the record's figure is run ia1's SOTA work mix, and with it Balanced seated plan on Fable
+# (the seats refresh left Opus high unrefit for that reason). `[]` holds nothing; keep the line, an upgrade carries it.
+calibration_hold = ["opus:high"]
 
 [constants]
 # A pool window at or under this share left skips its seats. Old Nirvana's ASK_BUDGET_FLOOR (measured

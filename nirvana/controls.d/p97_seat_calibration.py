@@ -32,6 +32,12 @@ T_DEFAULT = _S + "p97_the_default_turns_calibration_on_and_refits_hydrogen_low"
 _Q = "nirvana_seats_square::tests::"
 T_MATRIX = _Q + "p97_every_cell_is_the_pick_on_the_same_table_and_readings"
 T_SQUARE = _Q + "p97_the_square_reads_the_calibration_and_names_what_differs"
+# The follow-up (the hold, the live world's factors, the comment edit, `--picks`).
+T_HELD = _S + "p97_a_held_pair_books_as_the_table"
+T_KEEPS_PLAN = _S + "p97_the_default_holds_opus_high_and_keeps_balanced_plan"
+T_HOLD_LINE = _S + "p97_the_hold_line_carries_and_names_a_seat"
+T_LIVE = _S + "p97_the_live_worlds_factors_follow_the_switch"
+T_CALIB_HELD = _C + "p97_held_pairs_are_measured_and_marked"
 
 CONTROLS = (
     # ---- the cost fit, seat_fit.py's section 1 ----
@@ -163,7 +169,7 @@ CONTROLS = (
             "    if false {\n        return None;\n    }\n    let at", T_ALONE, "rust"),
     Control("p97_carry_unparsed", SEAT, "        parse(&upgraded).ok()?;", "        let _ = parse(&upgraded);",
             T_ALONE, "rust"),
-    Control("p97_current_rewritten", SEAT, "    if nearest.1 == current {\n        return None;\n    }\n",
+    Control("p97_current_rewritten", SEAT, "    if nearest.1 == without_hold(&current).0 {\n        return None;\n    }\n",
             "", T_ALONE, "rust"),
     Control("p97_v18_not_historical", SEAT, '    include_str!("nirvana_seats_v18.toml"),\n', "", T_V18, "rust"),
     Control("p97_v17_dropped", SEAT, '    include_str!("nirvana_seats_v17.toml"),\n', "", T_V18, "rust"),
@@ -197,6 +203,47 @@ CONTROLS = (
             "        view.matrix = None;", T_SQUARE, "rust"),
     Control("p97_square_no_differs_line", SQUARE, "    view.differs_line = differs_line;\n",
             "    view.differs_line = None;\n", T_SQUARE, "rust"),
-    Control("p97_square_measured_unread", SQUARE, '                .and_then(|basis| basis.split_once("; measured x"))',
-            '                .and_then(|basis| basis.split_once("; nothing x"))', T_SQUARE, "rust"),
+    Control("p97_square_measured_unread", SQUARE,
+            "            .filter(|_| table.calibration)\n            .map(|applied| (applied.words(),",
+            "            .filter(|_| false)\n            .map(|applied| (applied.words(),", T_SQUARE, "rust"),
+    # ---- the follow-up: the owner's hold on Opus high ----
+    Control("p97_hold_ignored", SEAT, "    let held = found.filter(|_| table.held(&seat.id, effort));",
+            "    let held = found.filter(|_| false);", T_HELD, "rust"),
+    Control("p97_held_basis_silent", SEAT, '                    "{basis}; held: {}, not booked (calibration_hold)",',
+            '                    "{basis}; {}",', T_HELD, "rust"),
+    Control("p97_held_matches_nothing", SEAT, '            .any(|pair| pair.trim() == format!("{seat}:{}", effort.word()))',
+            '            .any(|pair| pair.trim() == format!("{seat}{}", effort.word()))', T_KEEPS_PLAN, "rust"),
+    Control("p97_default_holds_nothing", TABLE, 'calibration_hold = ["opus:high"]\n', "calibration_hold = []\n",
+            T_KEEPS_PLAN, "rust"),
+    Control("p97_hold_unchecked", SEAT,
+            "            if named.is_none_or(|(seat, effort)| !seat.efforts.contains(&effort)) {",
+            "            if named.is_none() && false {", T_HOLD_LINE, "rust"),
+    Control("p97_hold_line_not_carried", SEAT,
+            "        carried.lines.push((None, HOLD_KEY.to_owned(), line, value));",
+            "        let _ = (line, value);", T_HOLD_LINE, "rust"),
+    Control("p97_hold_not_taken_out", SEAT, "    let (installed, hold) = without_hold(installed);",
+            "    let hold: Option<String> = None;", T_HOLD_LINE, "rust"),
+    Control("p97_arrays_not_plain", SEAT, "        toml::Value::Array(items) => items.iter().all(scalar),",
+            "        toml::Value::Array(_) => false,", T_HOLD_LINE, "rust"),
+    Control("p97_calib_held_unmarked", CALIB, "            held: table.held(seat, effort),", "            held: false,",
+            T_CALIB_HELD, "rust"),
+    Control("p97_summary_counts_held_booked", CALIB,
+            "        .filter(|row| row.project.is_none() && row.factor.is_some() && !row.held)",
+            "        .filter(|row| row.project.is_none() && row.factor.is_some())", T_CALIB_HELD, "rust"),
+    Control("p97_text_held_silent", CALIB,
+            '                Some(f) if row.held => format!("held at the table\'s booking (measured x{f:.2})"),\n'
+            "                Some(f) if row.clamped =>",
+            "                Some(f) if row.clamped =>", T_CALIB_HELD, "rust"),
+    Control("p97_picks_compare_off_with_off", CALIB, "    on.calibration = true;", "    on.calibration = false;",
+            T_CALIB_HELD, "rust"),
+    Control("p97_journal_files_uncounted", CALIB, "        journals.files += 1;\n", "", T_RECORD, "rust"),
+    Control("p97_matrix_never_held", SQUARE, "            held: found(&pick).is_some_and(|(_, held)| held),",
+            "            held: false,", T_SQUARE, "rust"),
+    # ---- the follow-up: the two lines named uncovered ----
+    Control("p97_comment_reads_as_plain", SEAT, "    let (key, value) = entries.next()?;",
+            "    let Some((key, value)) = entries.next() else {\n"
+            '        return Some(("#".to_owned(), toml::Value::Boolean(true)));\n    };', T_ALONE, "rust"),
+    Control("p97_live_world_always_reads", SEAT,
+            "    if table.calibration {\n        crate::nirvana_seat_calib::Factors::for_this_project(dir)",
+            "    if true {\n        crate::nirvana_seat_calib::Factors::for_this_project(dir)", T_LIVE, "rust"),
 )

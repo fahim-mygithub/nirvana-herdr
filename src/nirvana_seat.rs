@@ -230,6 +230,9 @@ pub struct Table {
     /// without the line reads false, so an installed table that never took the 0.87 default books exactly as before.
     #[serde(default)]
     pub calibration: bool,
+    /// Plan 46: "seat:effort" pairs measured and shown but never booked (the owner's call on Opus high, 2026-11-18).
+    #[serde(default)]
+    pub calibration_hold: Vec<String>,
     pub constants: Constants,
     pub size: Sizes,
     #[serde(rename = "pool")]
@@ -639,6 +642,13 @@ impl Table {
         }
     }
 
+    /// Plan 46: the pair is in `calibration_hold`: its measured cost is shown, never booked.
+    pub fn held(&self, seat: &str, effort: Effort) -> bool {
+        self.calibration_hold
+            .iter()
+            .any(|pair| pair.trim() == format!("{seat}:{}", effort.word()))
+    }
+
     pub fn bars(&self, class: &Class) -> Bars {
         class.bars.unwrap_or_else(|| default_bars(class.blast))
     }
@@ -795,6 +805,17 @@ impl Table {
                         class.id, entry.seat
                     ));
                 }
+            }
+        }
+        // Plan 46: a hold that names no seat and effort would hold nothing, silently.
+        for pair in &self.calibration_hold {
+            let named = pair.trim().split_once(':').and_then(|(seat, effort)| {
+                Some((self.seat(seat)?, Effort::parse(effort)?))
+            });
+            if named.is_none_or(|(seat, effort)| !seat.efforts.contains(&effort)) {
+                problems.push(format!(
+                    "calibration_hold: {pair:?} is not a seat and an effort it offers (\"opus:high\")"
+                ));
             }
         }
         problems
@@ -1171,11 +1192,39 @@ fn plain_assignment(line: &str) -> Option<(String, toml::Value)> {
     if entries.next().is_some() {
         return None;
     }
-    matches!(
-        value,
-        toml::Value::String(_) | toml::Value::Integer(_) | toml::Value::Float(_) | toml::Value::Boolean(_)
-    )
-    .then_some((key, value))
+    let scalar = |value: &toml::Value| {
+        matches!(
+            value,
+            toml::Value::String(_) | toml::Value::Integer(_) | toml::Value::Float(_) | toml::Value::Boolean(_)
+        )
+    };
+    // Plan 46: an array of plain values is one too (`calibration_hold = ["opus:high"]`).
+    let plain = match &value {
+        toml::Value::Array(items) => items.iter().all(scalar),
+        other => scalar(other),
+    };
+    plain.then_some((key, value))
+}
+
+/// Plan 46: the hold line is the owner's to add to a kept default that predates it: its top-level line is taken out
+/// before the comparison and carried as the owner wrote it.
+const HOLD_KEY: &str = "calibration_hold";
+
+/// The text without its top-level `calibration_hold` line, and that line.
+fn without_hold(text: &str) -> (String, Option<String>) {
+    let lines: Vec<&str> = text.lines().collect();
+    let at = sections(&lines);
+    let mut hold = None;
+    let mut rest = String::with_capacity(text.len());
+    for (line, section) in lines.iter().zip(&at) {
+        if section.is_none() && plain_assignment(line).is_some_and(|(key, _)| key == HOLD_KEY) {
+            hold = Some((*line).to_owned());
+            continue;
+        }
+        rest.push_str(line);
+        rest.push('\n');
+    }
+    (rest, hold)
 }
 
 /// The section each line sits in: `None` at the top level, else its header's text (`constants`, `[seat]`).
@@ -1245,21 +1294,29 @@ pub fn carried_edits(installed: &str, kept: &str) -> Option<Carried> {
 /// when that nearest default is the current one (nothing to upgrade), or the difference is not plain values only.
 fn carried_from_kept(installed: &str) -> Option<Carried> {
     let current = canonical(DEFAULT);
+    let (installed, hold) = without_hold(installed);
+    let installed = installed.as_str();
     // A default of another length is never carried from (`carried_edits` refuses an added or removed line), so the
     // count over the shorter text is enough to find the nearest.
     let nearest = std::iter::once(DEFAULT)
         .chain(HISTORICAL_DEFAULTS.iter().copied())
         .map(canonical)
+        .map(|kept| without_hold(&kept).0)
         .map(|kept| {
             let differ = installed.lines().zip(kept.lines()).filter(|(a, b)| a != b).count();
             (differ, kept)
         })
         // The first of the fewest: the current default wins a tie, so an edited current table is never rewritten.
         .min_by_key(|(differ, _)| *differ)?;
-    if nearest.1 == current {
+    if nearest.1 == without_hold(&current).0 {
         return None;
     }
-    carried_edits(installed, &nearest.1).filter(|carried| !carried.lines.is_empty())
+    let mut carried = carried_edits(installed, &nearest.1)?;
+    if let Some(line) = hold {
+        let value = plain_assignment(&line).map(|(_, value)| value)?;
+        carried.lines.push((None, HOLD_KEY.to_owned(), line, value));
+    }
+    Some(carried).filter(|carried| !carried.lines.is_empty())
 }
 
 /// `default` with each carried key set to the owner's line, in the same section; the keys the default no longer has.
@@ -2544,14 +2601,23 @@ fn populate_windows(
     let cell = seat.use_cell(effort);
     // Plan 46: where 5 or more medium orders measured the cell outside 0.5 to 2.0, the booking is what they spent. A
     // factor scales the booked use only: the score, the bar and every filter but the windows' arithmetic are untouched.
-    let measured = cell
+    let found = cell
         .filter(|_| table.calibration)
         .and_then(|_| world.calibration.for_cell(&seat.id, effort));
+    // The owner's hold (`calibration_hold`): the figure is said, the booking is the table's.
+    let held = found.filter(|_| table.held(&seat.id, effort));
+    let measured = found.filter(|_| held.is_none());
     cand.use_basis = cell.map(|cell| {
         let basis = format!("{} at {}: {}", seat.id, cell.effort.word(), cell.basis);
         match measured {
             Some(applied) => format!("{basis}; {}", applied.words()),
-            None => basis,
+            None => match held {
+                Some(applied) => format!(
+                    "{basis}; held: {}, not booked (calibration_hold)",
+                    applied.words()
+                ),
+                None => basis,
+            },
         }
     });
     let scale = cell
@@ -4878,11 +4944,16 @@ pub fn live_world(table: &Table) -> World {
         overrides_used: 0,
         // Plan 46: read only when the table books by it; the project (a `git` call outside a run) only when the file
         // holds a project's own factor.
-        calibration: if table.calibration {
-            crate::nirvana_seat_calib::Factors::for_this_project(&dir())
-        } else {
-            crate::nirvana_seat_calib::Factors::default()
-        },
+        calibration: world_factors(table, &dir()),
+    }
+}
+
+/// Plan 46: `live_world`'s factors: the file's, for this process's project, when the table books by them; else none.
+pub fn world_factors(table: &Table, dir: &Path) -> crate::nirvana_seat_calib::Factors {
+    if table.calibration {
+        crate::nirvana_seat_calib::Factors::for_this_project(dir)
+    } else {
+        crate::nirvana_seat_calib::Factors::default()
     }
 }
 
@@ -10251,6 +10322,7 @@ worker_autocompact_tokens = 300000\n";
                 median: factor,
                 factor: Some(factor),
                 clamped: false,
+                held: false,
             }],
             ..Default::default()
         };
@@ -10460,6 +10532,153 @@ worker_autocompact_tokens = 300000\n";
         // Every other line is v18's: the refit, the calibration line and their comments are the whole change.
         let changed: Vec<&str> = DEFAULT.lines().filter(|line| !P97_V18.lines().any(|old| old == *line)).collect();
         assert!(changed.iter().all(|line| line.starts_with('#') || line.starts_with("calibration = ")
-            || line.contains("refit x0.37")), "{changed:#?}");
+            || line.starts_with("calibration_hold = ") || line.contains("refit x0.37")), "{changed:#?}");
+    }
+
+    // ---- plan 46 follow-up: the owner's hold on Opus high ----
+
+    const P97_FIXTURE: &str = include_str!("nirvana_seat_calib/record_fixture.jsonl");
+    const P97_HOLD: &str = "calibration_hold = [\"opus:high\"]";
+
+    fn p97_with_hold(hold: &str) -> Table {
+        assert_eq!(DEFAULT.matches(P97_HOLD).count(), 1, "the default's hold line");
+        parse(&DEFAULT.replacen(P97_HOLD, &format!("calibration_hold = {hold}"), 1)).expect("the hold parses")
+    }
+
+    /// The answers without their `use_basis`, which says "held": the booking, byte for byte.
+    fn p97_booked(answers: Vec<(String, serde_json::Value)>) -> Vec<(String, serde_json::Value)> {
+        answers
+            .into_iter()
+            .map(|(key, mut answer)| {
+                if let Some(object) = answer.as_object_mut() {
+                    object.remove("use_basis");
+                }
+                (key, answer)
+            })
+            .collect()
+    }
+
+    /// The owner's call 2026-11-18, held: a pair in `calibration_hold` books as the table says for the pooled figure and
+    /// for a project's own alike, and says the figure in `use_basis`; taking the hold away applies it.
+    #[test]
+    fn p97_a_held_pair_books_as_the_table() {
+        let (held, unheld) = (p97_with_hold("[\"hydrogen:low\"]"), p97_with_hold("[]"));
+        let empty = crate::nirvana_seat_calib::Factors::default();
+        let pooled = p97_factors("hydrogen", Effort::Low, 0.37, 7);
+        let own = crate::nirvana_seat_calib::Factors::from_calibration(
+            &crate::nirvana_seat_calib::Calibration {
+                version: crate::nirvana_seat_calib::VERSION,
+                cost: vec![crate::nirvana_seat_calib::CostRow {
+                    seat: "hydrogen".into(),
+                    effort: Effort::Low,
+                    project: Some("c:/p".into()),
+                    n: 7,
+                    median: 0.37,
+                    factor: Some(0.37),
+                    clamped: false,
+                    held: false,
+                }],
+                ..Default::default()
+            },
+            Some("c:/p".into()),
+        );
+        let base = p97_answers(&held, &empty);
+        assert_eq!(p97_booked(p97_answers(&held, &pooled)), p97_booked(base.clone()), "pooled, held");
+        assert_eq!(p97_booked(p97_answers(&held, &own)), p97_booked(base.clone()), "the project's own, held");
+        let said = p97_answers(&held, &pooled);
+        let basis = said
+            .iter()
+            .filter_map(|(_, a)| a.get("use_basis").and_then(|b| b.as_str()))
+            .find(|b| b.starts_with("hydrogen at low"))
+            .expect("a pick at hydrogen low");
+        assert!(basis.ends_with("; held: measured x0.37 over 7 orders, not booked (calibration_hold)"), "{basis}");
+        assert_ne!(p97_booked(p97_answers(&unheld, &pooled)), p97_booked(p97_answers(&unheld, &empty)), "no hold applies it");
+        assert_ne!(p97_booked(p97_answers(&unheld, &own)), p97_booked(p97_answers(&unheld, &empty)));
+    }
+
+    /// The default holds Opus high, and on the fixture record (Opus high at x2.10 over 11 orders) Balanced `plan` keeps
+    /// the seat it has with no calibration; with no hold the factor reaches it.
+    #[test]
+    fn p97_the_default_holds_opus_high_and_keeps_balanced_plan() {
+        let table = table();
+        assert_eq!(table.calibration_hold, ["opus:high"]);
+        assert!(table.held("opus", Effort::High) && !table.held("opus", Effort::Medium));
+        let lines: Vec<RecordLine> = P97_FIXTURE.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let cal = crate::nirvana_seat_calib::calibrate(
+            &table,
+            &lines,
+            &crate::nirvana_seat_calib::Journals::default(),
+            1_795_000_000,
+        );
+        let opus = cal
+            .cost
+            .iter()
+            .find(|r| r.project.is_none() && r.seat == "opus" && r.effort == Effort::High)
+            .unwrap();
+        assert!(opus.held && opus.factor.is_some(), "{opus:?}");
+        let factors = crate::nirvana_seat_calib::Factors::from_calibration(&cal, None);
+        let mut cool = cool_world(&table, &World { now: NOW, ..World::default() });
+        let mut plan = request("plan");
+        plan.mode = Mode::Balanced;
+        let plain = chosen(&table, &cool, &plan);
+        cool.calibration = factors;
+        let got = chosen(&table, &cool, &plan);
+        assert_eq!((&got.seat, got.effort, &got.windows), (&plain.seat, plain.effort, &plain.windows));
+        let unheld = p97_with_hold("[]");
+        let moved = chosen(&unheld, &cool, &plan);
+        println!("p97 balanced plan: {} {} held, {} {} with no hold", got.seat, got.effort.word(), moved.seat, moved.effort.word());
+        assert!(moved.windows != plain.windows || moved.seat != plain.seat, "no hold: the factor reaches plan");
+    }
+
+    /// The hold line is the owner's to add to a kept default that predates it, or to change: the upgrade carries it.
+    /// A hold that names no seat and effort is refused.
+    #[test]
+    fn p97_the_hold_line_carries_and_names_a_seat() {
+        let dir = temp_dir("p97-hold");
+        let path = dir.join(SEATS_FILE);
+        let installed = P97_V18.replacen("\nuse_record = false\n", "\nuse_record = false\ncalibration_hold = []\n", 1);
+        assert_ne!(installed, P97_V18);
+        std::fs::write(&path, &installed).unwrap();
+        let want = DEFAULT.replacen(P97_HOLD, "calibration_hold = []", 1);
+        assert_eq!(read_or_create(&path), want);
+        assert_eq!(p97_backups(&dir), [installed]);
+        assert_eq!(
+            differs_line(&want).as_deref(),
+            Some("seats.toml keeps your calibration_hold = []; the rest is herdr's default.")
+        );
+        let more = DEFAULT.replacen(P97_HOLD, "calibration_hold = [\"opus:high\", \"sonnet:high\"]", 1);
+        assert!(differs_line(&more).unwrap().starts_with("seats.toml keeps your calibration_hold = ["), "{more:?}");
+        for bad in ["[\"ghost:high\"]", "[\"opus\"]", "[\"opus:max\"]"] {
+            let text = DEFAULT.replacen(P97_HOLD, &format!("calibration_hold = {bad}"), 1);
+            let refused = parse(&text).err().unwrap_or_default();
+            assert!(refused.contains("calibration_hold"), "{bad}: {refused}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `live_world`'s factors: the file's when the table books by them, none when it does not.
+    #[test]
+    fn p97_the_live_worlds_factors_follow_the_switch() {
+        let dir = temp_dir("p97-live");
+        let cal = crate::nirvana_seat_calib::Calibration {
+            version: crate::nirvana_seat_calib::VERSION,
+            cost: vec![crate::nirvana_seat_calib::CostRow {
+                seat: "hydrogen".into(),
+                effort: Effort::Low,
+                project: None,
+                n: 7,
+                median: 0.37,
+                factor: Some(0.37),
+                clamped: false,
+                held: false,
+            }],
+            ..Default::default()
+        };
+        std::fs::write(crate::nirvana_seat_calib::path(&dir), serde_json::to_string(&cal).unwrap()).unwrap();
+        let on = world_factors(&table(), &dir);
+        assert_eq!(on.for_cell("hydrogen", Effort::Low).map(|a| a.n), Some(7));
+        let off = parse(&DEFAULT.replacen("\ncalibration = true\n", "\ncalibration = false\n", 1)).unwrap();
+        assert_eq!(world_factors(&off, &dir), crate::nirvana_seat_calib::Factors::default());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -113,6 +113,9 @@ pub struct CostRow {
     /// The median was outside `CLAMP`, so the factor is the clamp's edge: a gap larger than one step.
     #[serde(default)]
     pub clamped: bool,
+    /// The table's `calibration_hold` names the pair: the figure is recorded and shown, never booked.
+    #[serde(default)]
+    pub held: bool,
 }
 
 /// The score rule's answer for one group.
@@ -228,6 +231,8 @@ pub struct Journals {
     pub merged: BTreeSet<(String, String)>,
     /// Runs whose journal was read and that merged at least one order.
     pub merging: BTreeSet<String>,
+    /// Journal files read.
+    pub files: usize,
 }
 
 // ---- the arithmetic ----
@@ -429,6 +434,7 @@ pub fn calibrate(
             median,
             factor,
             clamped,
+            held: table.held(seat, effort),
         }
     };
     let mut cost: Vec<CostRow> = pooled
@@ -606,18 +612,26 @@ pub fn summary(calibration: &Calibration) -> String {
     let pooled = calibration
         .cost
         .iter()
-        .filter(|row| row.project.is_none() && row.factor.is_some())
+        .filter(|row| row.project.is_none() && row.factor.is_some() && !row.held)
         .count();
     let projects = calibration
         .cost
         .iter()
-        .filter(|row| row.project.is_some() && row.factor.is_some())
+        .filter(|row| row.project.is_some() && row.factor.is_some() && !row.held)
+        .count();
+    let held = calibration
+        .cost
+        .iter()
+        .filter(|row| row.factor.is_some() && row.held)
         .count();
     let flagged = calibration.cost.iter().filter(|row| row.clamped).count();
     let findings = calibration.findings.iter().filter(|f| f.moves()).count();
     let mut out = format!("{} booked as measured", plural(pooled, "cost", "costs"));
     if projects > 0 {
         out.push_str(&format!(", {projects} more by a project's own orders"));
+    }
+    if held > 0 {
+        out.push_str(&format!(", {held} held by calibration_hold"));
     }
     if flagged > 0 {
         out.push_str(&format!(
@@ -858,6 +872,7 @@ pub fn read_journals(lines: &[RecordLine], now: u64) -> Journals {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
+        journals.files += 1;
         let state = crate::nirvana_run::replay(&crate::nirvana_run::parse_lines(&text).0);
         for order in &state.orders {
             let key = (run.clone(), order.id().to_owned());
@@ -897,11 +912,15 @@ pub struct Checked {
     pub calibration: Calibration,
     pub ledger: Vec<LedgerRow>,
     pub written: bool,
+    /// Journal files the check replayed, and its wall time with them.
+    pub journals: usize,
+    pub millis: u128,
 }
 
 /// Computes from the record in `dir` and, when `write`, writes the file (atomic) and appends the ledger. A record or
 /// file that does not read is an `Err`, and nothing is written.
 pub fn check(dir: &Path, table: &Table, now: u64, write: bool) -> Result<Checked, String> {
+    let started = std::time::Instant::now();
     let record = read_record(&dir.join(nirvana_seat::RECORD_FILE))?;
     let journals = read_journals(&record.lines, now);
     let mut calibration = calibrate(table, &record.lines, &journals, now);
@@ -939,6 +958,8 @@ pub fn check(dir: &Path, table: &Table, now: u64, write: bool) -> Result<Checked
         calibration,
         ledger,
         written: write,
+        journals: journals.files,
+        millis: started.elapsed().as_millis(),
     })
 }
 
@@ -955,10 +976,12 @@ pub fn tick(dir: &Path, table: &Table, now: u64) -> Option<String> {
 
 // ---- the CLI ----
 
-const USAGE: &str = "usage: herdr seat calibrate [--json] [--dry-run]
+const USAGE: &str = "usage: herdr seat calibrate [--json] [--dry-run] [--picks]
 The record's medium orders against each seat's booked cost (nirvana/seat_fit.py's rule: a factor at 5 or more orders
 outside 0.5-2.0, clamped to 0.25-4.0), and the score rule's findings (never applied). Writes
-<home>/nirvana/seat-calibration.json and a ledger row per booking that changed; --dry-run prints what would change.";
+<home>/nirvana/seat-calibration.json and a ledger row per booking that changed; --dry-run prints what would change.
+--picks also prints every class and mode whose pick on a cool world differs with calibration off and on, as the table
+holds pairs and with no hold, pooled and for each project with its own figure.";
 
 fn ledger_words(row: &LedgerRow) -> String {
     let what = |f: Option<f64>| f.map_or("the table's".to_owned(), |f| format!("x{f:.2}"));
@@ -1002,6 +1025,7 @@ pub fn text(checked: &Checked, record: &Path) -> String {
             row.median,
             row.n,
             match row.factor {
+                Some(f) if row.held => format!("held at the table's booking (measured x{f:.2})"),
                 Some(f) if row.clamped =>
                     format!("booked x{f:.2}, clamped: a gap larger than one step"),
                 Some(f) => format!("booked x{f:.2}"),
@@ -1021,8 +1045,11 @@ pub fn text(checked: &Checked, record: &Path) -> String {
             row.project.as_deref().unwrap_or(""),
             row.median,
             row.n,
-            row.factor
-                .map_or("as the table".to_owned(), |f| format!("booked x{f:.2}"))
+            match row.factor {
+                Some(f) if row.held => format!("held at the table's booking (measured x{f:.2})"),
+                Some(f) => format!("booked x{f:.2}"),
+                None => "as the table".to_owned(),
+            }
         ));
     }
     let verb = if checked.written {
@@ -1043,15 +1070,89 @@ pub fn text(checked: &Checked, record: &Path) -> String {
         out.push_str(&format!("  {}\n", finding.text));
     }
     out.push_str(&format!("{}\n", cal.summary));
+    out.push_str(&format!(
+        "checked in {} ms, {} journal files read\n",
+        checked.millis, checked.journals
+    ));
+    out
+}
+
+/// Plan 46: each class and mode whose pick on a cool world (every window read now at 0%) differs between calibration
+/// off and on, `table` as given, the factors `calibration`'s for `project`: "balanced plan: opus high -> fable high".
+pub fn moved_picks(
+    table: &Table,
+    calibration: &Calibration,
+    project: Option<String>,
+    now: u64,
+) -> Vec<String> {
+    let mut world = nirvana_seat::cool_world(
+        table,
+        &nirvana_seat::World {
+            now,
+            ..nirvana_seat::World::default()
+        },
+    );
+    world.calibration = Factors::from_calibration(calibration, project);
+    let mut on = table.clone();
+    on.calibration = true;
+    let mut off = table.clone();
+    off.calibration = false;
+    let mut moved = Vec::new();
+    for class in &table.classes {
+        for mode in [
+            nirvana_seat::Mode::Efficient,
+            nirvana_seat::Mode::Balanced,
+            nirvana_seat::Mode::Sota,
+        ] {
+            let mut request = nirvana_seat::Request::new(&class.id);
+            request.mode = mode;
+            let seat = |table: &Table| match nirvana_seat::pick(table, &world, &request) {
+                Ok(pick) => format!("{} {}", pick.seat, pick.effort.word()),
+                Err(_) => "no seat".to_owned(),
+            };
+            let (a, b) = (seat(&off), seat(&on));
+            if a != b {
+                moved.push(format!("{} {}: {a} -> {b}", mode.word(), class.id));
+            }
+        }
+    }
+    moved
+}
+
+/// `--picks`' text: the moves as the table holds pairs and with no hold, pooled and per project.
+fn picks_text(table: &Table, calibration: &Calibration, now: u64) -> String {
+    let mut unheld = table.clone();
+    unheld.calibration_hold.clear();
+    let mut projects: Vec<Option<String>> = vec![None];
+    for row in &calibration.cost {
+        if row.n >= MIN_N && row.factor.is_some() && !projects.contains(&row.project) {
+            projects.push(row.project.clone());
+        }
+    }
+    let mut out = String::new();
+    for (label, table) in [("as held", table), ("with no hold", &unheld)] {
+        for project in &projects {
+            let moved = moved_picks(table, calibration, project.clone(), now);
+            out.push_str(&format!(
+                "picks that move, {label}, {}: {}\n",
+                project.as_deref().unwrap_or("pooled"),
+                moved.len()
+            ));
+            for line in moved {
+                out.push_str(&format!("  {line}\n"));
+            }
+        }
+    }
     out
 }
 
 pub fn cli(args: &[String]) -> std::io::Result<()> {
-    let (mut json, mut dry) = (false, false);
+    let (mut json, mut dry, mut picks) = (false, false, false);
     for arg in args {
         match arg.as_str() {
             "--json" => json = true,
             "--dry-run" => dry = true,
+            "--picks" => picks = true,
             _ => {
                 eprintln!("{USAGE}");
                 std::process::exit(2);
@@ -1078,10 +1179,18 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             "calibration": checked.calibration,
             "ledger": checked.ledger,
             "written": checked.written,
+            "journals": checked.journals,
+            "millis": checked.millis,
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
         print!("{}", text(&checked, &dir.join(nirvana_seat::RECORD_FILE)));
+    }
+    if picks {
+        print!(
+            "{}",
+            picks_text(&table, &checked.calibration, crate::nirvana_run::now())
+        );
     }
     Ok(())
 }

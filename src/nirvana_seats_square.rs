@@ -159,8 +159,11 @@ pub struct MatrixCell {
     pub unread: bool,
     /// `NoSeat::reason` when there is no seat.
     pub none: Option<String>,
-    /// The booking's measured factor in words ("measured x0.37 over 7 orders") when calibration moved it.
+    /// The record's measured factor for the picked seat and effort, in words ("measured x0.37 over 7 orders"), when
+    /// the table books by calibration and the file has one: booked, or shown only when `held`.
     pub measured: Option<String>,
+    /// The table's `calibration_hold` names the pair: `measured` is shown, the booking is the table's.
+    pub held: bool,
 }
 
 /// One seat a class lists, and its record in that class.
@@ -204,19 +207,22 @@ fn cell(table: &Table, live: &World, cool: &World, request: &nirvana_seat::Reque
         Ok(pick) => words(&pick.seat, pick.effort),
         Err(no) => format!("no seat: {}", no.reason),
     });
+    let found = |pick: &nirvana_seat::Pick| {
+        live.calibration
+            .for_cell(&pick.seat, pick.effort)
+            .filter(|_| table.calibration)
+            .map(|applied| (applied.words(), table.held(&pick.seat, pick.effort)))
+    };
     match now {
         Ok(pick) => MatrixCell {
+            held: found(&pick).is_some_and(|(_, held)| held),
+            measured: found(&pick).map(|(words, _)| words),
             mode: request.mode,
             next: pick
                 .contenders
                 .get(1)
                 .map(|next| (next.seat.clone(), next.effort)),
             unread: !pick.unknown.is_empty(),
-            measured: pick
-                .use_basis
-                .as_deref()
-                .and_then(|basis| basis.split_once("; measured x"))
-                .map(|(_, rest)| format!("measured x{rest}")),
             seat: Some(pick.seat),
             model: Some(pick.model),
             effort: Some(pick.effort),
@@ -235,6 +241,7 @@ fn cell(table: &Table, live: &World, cool: &World, request: &nirvana_seat::Reque
             unread: false,
             none: Some(no.reason),
             measured: None,
+            held: false,
         },
     }
 }
@@ -266,6 +273,7 @@ pub fn matrix(table: &Table, live: &World, calibration: Option<&Calibration>) ->
                 unread: false,
                 none: None,
                 measured: None,
+                held: false,
             }
         })
         .collect();
