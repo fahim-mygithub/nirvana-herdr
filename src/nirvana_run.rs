@@ -442,16 +442,16 @@ pub enum Kind {
         #[serde(default)]
         from: Option<String>,
     },
-    /// Plan 90: one attempt's advisor (Claude Code's `--advisor`): its consults, tokens and cost, or why the seat's
-    /// advisor was not used. A row of its own beside `usage`, not a field of it: `usage` is built in files this
-    /// package does not own, and a herdr before this one reads the line as `Unknown`.
+    /// The advisor (owner, 2026-11-18): one attempt's advisor (Claude Code's `--advisor`): its consults, tokens and
+    /// cost, or why the seat's advisor was not used. A row of its own beside `usage`, not a field of it: `usage` is
+    /// built in files this package does not own, and a herdr before this one reads the line as `Unknown`.
     Advisor {
         order: String,
         #[serde(default)]
         attempt: u32,
         advisor: crate::nirvana_seat::AdvisorUse,
     },
-    /// Plan 90 (plan 43 B1): Claude Code compacted a worker's context (its stream's `compact_boundary`).
+    /// Plan 43 B1 (ruling R1): Claude Code compacted a worker's context (its stream's `compact_boundary`).
     Compacted {
         order: String,
         #[serde(default)]
@@ -462,6 +462,15 @@ pub enum Kind {
         pre_tokens: Option<u64>,
         #[serde(default)]
         post_tokens: Option<u64>,
+    },
+    /// Fix round A3 (2026-11-18): a flag herdr would have given a worker and did not, because the installed CLI does
+    /// not offer it (`--autocompact` missing from `claude --help`). It moves no order.
+    FlagDropped {
+        order: String,
+        #[serde(default)]
+        attempt: u32,
+        flag: String,
+        why: String,
     },
     /// A kind a later herdr wrote: kept in the file, skipped by this replay.
     #[serde(other)]
@@ -484,6 +493,7 @@ impl Kind {
             | Self::JevWatch { order, .. }
             | Self::Advisor { order, .. }
             | Self::Compacted { order, .. }
+            | Self::FlagDropped { order, .. }
             | Self::LiveDoubt { order, .. }
             | Self::Interrupted { order, .. } => Some(order),
             Self::Usage { order, .. } | Self::Asked { order, .. } | Self::Ended { order, .. } => {
@@ -673,9 +683,9 @@ pub struct OrderState {
     pub session: Option<String>,
     /// Per attempt, the last cumulative usage.
     pub usage: BTreeMap<u32, Tokens>,
-    /// Plan 90: per attempt, its advisor row.
+    /// The advisor (owner, 2026-11-18): per attempt, its advisor row.
     pub advisor: BTreeMap<u32, crate::nirvana_seat::AdvisorUse>,
-    /// Plan 90: compactions the worker's stream showed, all attempts.
+    /// Plan 43 B1 (ruling R1): compactions the worker's stream showed, all attempts.
     pub compactions: u32,
     pub pane: Option<String>,
     pub tab: Option<String>,
@@ -729,7 +739,7 @@ impl OrderState {
         Some(sum)
     }
 
-    /// Plan 90: the order's advisor over its attempts, `None` when no attempt had one.
+    /// The advisor (owner, 2026-11-18): the order's advisor over its attempts, `None` when no attempt had one.
     pub fn advisor_use(&self) -> Option<crate::nirvana_seat::AdvisorUse> {
         crate::nirvana_seat::AdvisorUse::sum(self.advisor.values())
     }
@@ -1203,7 +1213,8 @@ pub fn replay(events: &[Event]) -> RunState {
                     }
                 }
             },
-            // Plan 90: an attempt's advisor row and a worker's compaction; neither moves the order.
+            // The advisor (owner, 2026-11-18) and plan 43 B1 (ruling R1): an attempt's advisor row and a worker's
+            // compaction; neither moves the order.
             Kind::Advisor {
                 order,
                 attempt,
@@ -1231,6 +1242,7 @@ pub fn replay(events: &[Event]) -> RunState {
             Kind::JevWatch { .. }
             | Kind::Fresh { .. }
             | Kind::WakeQueued { .. }
+            | Kind::FlagDropped { .. }
             | Kind::Unknown => {}
         }
         // Plan 33 review B2: a lesson review's delivery and question are herdr's to settle (`seat exec` gates it), so
@@ -2407,8 +2419,8 @@ pub fn record_line(run: &str, order: &OrderState, journal: Option<String>) -> Re
         use_basis: seated.use_basis.clone(),
         expected: (!seated.expected.is_empty()).then(|| seated.expected.clone()),
         herdr: Some(crate::nirvana::VERSION.to_owned()),
-        journal,
         advisor: order.advisor_use(),
+        journal,
         extra: serde_json::Map::new(),
     }
 }

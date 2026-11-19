@@ -128,6 +128,57 @@ fn a_running_order_shows_its_seat_model_effort_pool_state_time_use_reason_and_pa
     assert_eq!(use_text(Some(use_)), format!("{window} {}", percent(share)));
 }
 
+/// The advisor (owner, 2026-11-18), fix round A5: a Claude order's use adds its advisor's tokens at the advisor seat's
+/// price, once; with no main tokens yet the advisor's share alone is spent, not the booking.
+#[test]
+fn p90_an_orders_use_adds_its_advisors_share() {
+    let seats = table();
+    let mut state = state(RUNNING);
+    let order = &mut state.orders[0];
+    order.seated.seat = "sonnet".into();
+    let advisor = nirvana_seat::AdvisorUse {
+        model: "claude-opus-5-5".into(),
+        consults: 1,
+        tokens: nirvana_seat::Tokens {
+            input: 26_791,
+            output: 614,
+            ..nirvana_seat::Tokens::default()
+        },
+        ..nirvana_seat::AdvisorUse::default()
+    };
+    order.advisor.insert(1, advisor.clone());
+    let at = order.seated_at;
+    let own = nirvana_seat::computed_use(&seats, seats.seat("sonnet").unwrap(), &order.tokens().unwrap(), at)
+        .unwrap();
+    let share = nirvana_seat::advisor_use(&seats, &advisor, at).unwrap();
+    let (window, want) = own
+        .iter()
+        .map(|(window, own)| (window.clone(), own + share.get(window).copied().unwrap_or(0.0)))
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .unwrap();
+    let got = order_use(Some(&seats), order).expect("a use");
+    assert_eq!(got.basis, UseBasis::Spent);
+    assert_eq!(got.window, window);
+    assert!((got.share - want).abs() <= want * 1e-5, "{} against {want}", got.share);
+    // No main tokens: the advisor's share alone, spent.
+    order.usage.clear();
+    let alone = order_use(Some(&seats), order).expect("a use");
+    let (window, want) = share.iter().max_by(|a, b| a.1.total_cmp(b.1)).unwrap();
+    assert_eq!((alone.basis, alone.window.as_str()), (UseBasis::Spent, window.as_str()));
+    assert!((alone.share - want).abs() <= want * 1e-5);
+    // No advisor: as before.
+    order.advisor.clear();
+    order.usage.insert(1, advisor.tokens);
+    assert_eq!(
+        order_use(Some(&seats), order).map(|u| u.share),
+        largest(
+            nirvana_seat::computed_use(&seats, seats.seat("sonnet").unwrap(), &advisor.tokens, at).unwrap(),
+            UseBasis::Spent
+        )
+        .map(|u| u.share)
+    );
+}
+
 #[test]
 fn a_lease_no_worker_took_is_a_booked_row_with_its_picks_reason_and_expected_use() {
     let view = view_of(state(RUNNING), &leases(), NOW);

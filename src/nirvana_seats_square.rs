@@ -128,10 +128,25 @@ fn largest(shares: impl IntoIterator<Item = (String, f32)>, basis: UseBasis) -> 
 }
 
 /// An order's use: spent when it streamed tokens and its seat has a price, else what it booked.
+///
+/// The advisor (owner, 2026-11-18): its consults are spent too, at its own seat's price, as the record counts them
+/// (`nirvana_seat::complete`); an order whose only tokens so far are its advisor's shows that share, not its booking.
 fn order_use(table: Option<&Table>, order: &nirvana_run::OrderState) -> Option<OrderUse> {
-    let spent = table.zip(order.tokens()).and_then(|(table, tokens)| {
+    let spent = table.and_then(|table| {
         let seat = table.seat(&order.seated.seat)?;
-        nirvana_seat::computed_use(table, seat, &tokens, order.seated_at)
+        let mut spent = order
+            .tokens()
+            .and_then(|tokens| nirvana_seat::computed_use(table, seat, &tokens, order.seated_at));
+        if let Some(shares) = order
+            .advisor_use()
+            .and_then(|advisor| nirvana_seat::advisor_use(table, &advisor, order.seated_at))
+        {
+            let spent = spent.get_or_insert_with(BTreeMap::new);
+            for (window, share) in shares {
+                *spent.entry(window).or_insert(0.0) += share;
+            }
+        }
+        spent
     });
     match spent {
         Some(spent) => largest(spent, UseBasis::Spent),
