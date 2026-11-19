@@ -36,9 +36,10 @@
 //!   `seated_sha` over the profile and the pin, so the check before every start covers the servers too and an edit
 //!   mid-run never reaches a running order. A profile with no `mcp.json` keeps the sha of its file alone. P45c fix
 //!   round (review F1-F3): a teach order and a lesson review get none of them (`takes_no_profile_servers`); the
-//!   definitions copy goes when the order ends (`remove_servers_copy`), the pin stays; `profiles/.gitignore`, written
-//!   only when missing (`ensure_ignore`), ignores `*/mcp.json`, and `check` and `show` note a literal under a
-//!   secret-looking key (`secret_notes`) and say when no ignore rule covers the file.
+//!   definitions copy goes when no order of the run that still wants a worker was seated with it
+//!   (`nirvana_gui_tools::release_servers_copies`, review2 B1), the pin stays; `profiles/.gitignore`, written only
+//!   when missing and only for a profile with an `mcp.json` (`ensure_ignore`), ignores `*/mcp.json`, and `check` and
+//!   `show` note a literal under a secret-looking key (`secret_notes`) and say when no ignore rule covers the file.
 //! - **`skills: []`** names none (P45c review F6); without the key every skill stays, as before.
 //! - **A new profile's name** is never a Windows device name (`valid_new_name`); one already on disk still loads.
 //! - **Shapes**: `herdr profile new <name> --shape reviewer|operator|builder|researcher` writes the folder form with a
@@ -135,8 +136,8 @@ pub struct ServerFile {
 }
 
 /// P45c fix round (review F3): what the run keeps of a profile's own servers after its orders end. The definitions
-/// copy (`servers_copy_path`) can hold a token, so `nirvana_gui_tools::remove_order_config` takes it out when the order
-/// ends; this pin stays beside the profile copy, `<name>-<sha16>.servers.json`, and holds the servers' names, why only
+/// copy (`servers_copy_path`) can hold a token, so `nirvana_gui_tools::release_servers_copies` takes it out when the
+/// orders seated with it end; this pin stays beside the profile copy, `<name>-<sha16>.servers.json`, and holds the servers' names, why only
 /// claude can take them, and the sha256 of the `mcp.json` bytes. The order's `Profile sha256:` is `seated_sha` over the
 /// profile copy and this pin, so it is as strict as before: an edit to the pin fails the sha, and definitions whose
 /// sha256 is not the pin's are never granted. A reader after the order ended (a send-back's seating, the rows) needs
@@ -410,18 +411,45 @@ pub fn ensure_ignore(root: &Path) -> std::io::Result<bool> {
 /// Whether an ignore rule covers every profile's `mcp.json`: a line of `profiles/.gitignore` (`*/mcp.json`,
 /// `/*/mcp.json`, `**/mcp.json` or `mcp.json`) or of `.nirvana/.gitignore` (`profiles/*/mcp.json`, with or without
 /// a leading `/`, or `profiles/**/mcp.json`). A reading of those two files' lines, not of git's every source.
+///
+/// P45c review2 D1: read as git reads them. In each file the last line that speaks of a profile's `mcp.json` wins, so
+/// a later `!*/mcp.json` (any `!` line ending in `mcp.json`, one profile's included) takes the cover back; and
+/// `profiles/.gitignore`, the deeper file, wins over `.nirvana/.gitignore` when it says anything at all.
 pub fn ignore_covers(root: &Path) -> bool {
-    let has = |file: PathBuf, rules: &[&str]| {
-        std::fs::read_to_string(file)
-            .is_ok_and(|text| text.lines().any(|line| rules.contains(&line.trim())))
+    let said = |file: PathBuf, rules: &[&str]| {
+        let text = std::fs::read_to_string(file).ok()?;
+        text.lines()
+            .map(str::trim)
+            .filter_map(|line| match line.strip_prefix('!') {
+                Some(negated) => negated.ends_with("mcp.json").then_some(false),
+                None => rules.contains(&line).then_some(true),
+            })
+            .last()
     };
-    has(
+    said(
         folder(root).join(IGNORE_FILE),
         &["*/mcp.json", "/*/mcp.json", "**/mcp.json", "mcp.json"],
-    ) || has(
-        root.join(crate::nirvana_run::DIR).join(".gitignore"),
-        &["profiles/*/mcp.json", "/profiles/*/mcp.json", "profiles/**/mcp.json"],
     )
+    .or_else(|| {
+        said(
+            root.join(crate::nirvana_run::DIR).join(".gitignore"),
+            &["profiles/*/mcp.json", "/profiles/*/mcp.json", "profiles/**/mcp.json"],
+        )
+    })
+    .unwrap_or(false)
+}
+
+/// P45c review2 D1: `ensure_ignore`, only when some profile here has its own `mcp.json`, so `herdr profile check` on a
+/// project whose profiles have none writes nothing. `Ok(true)` when it wrote the file.
+pub fn ensure_ignore_for_servers(root: &Path) -> std::io::Result<bool> {
+    let any = list(root)
+        .iter()
+        .any(|(name, _, _)| servers_path(root, name).is_some_and(|file| file.is_file()));
+    if any {
+        ensure_ignore(root)
+    } else {
+        Ok(false)
+    }
 }
 
 /// The words of a key that holds a secret (P45c review F3), matched case-insensitively anywhere in the key.
@@ -757,6 +785,26 @@ pub fn servers_copy_path(run_dir: &Path, name: &str, sha: &str) -> PathBuf {
     copy_path(run_dir, name, sha).with_extension("mcp.json")
 }
 
+/// P45c review2 B1: every definitions copy the run holds, `servers_copy_path`'s `*.mcp.json` in its `profiles/`.
+pub fn servers_copies(run_dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(run_dir.join(DIR)) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".mcp.json") && !name.starts_with('.'))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
 /// P45c fix round (review F3): where the run keeps the `ServersPin` of that copy, which outlives it.
 pub fn pin_path(run_dir: &Path, name: &str, sha: &str) -> PathBuf {
     copy_path(run_dir, name, sha).with_extension("servers.json")
@@ -773,8 +821,9 @@ fn copies(run_dir: &Path, name: &str, sha: &str) -> Option<(Vec<u8>, Option<Vec<
 
 /// §2.2: "The profile file is copied, with its sha256, into the run folder at seating." The bytes `load` read, so the
 /// copy is what was parsed; a copy already there with the same sha is kept. Plan 45: a profile's own `mcp.json` is
-/// copied beside it, the owner's alone where `std` can say so (`write_private`), since a definition can hold a token,
-/// with its `ServersPin`. The definitions copy is written again when an earlier order's end took it out.
+/// copied beside it, the owner's alone where `std` can say so, since a definition can hold a token, with its
+/// `ServersPin`. The definitions copy is written again when an earlier order's end took it out. P45c review2 B2: by a
+/// rename (`write_private_atomic`), so an order starting meanwhile reads the whole copy or none, never a torn one.
 pub fn copy_into_run(run_dir: &Path, loaded: &Loaded) -> Result<PathBuf, String> {
     let name = &loaded.profile.name;
     let file = copy_path(run_dir, name, &loaded.sha);
@@ -784,7 +833,7 @@ pub fn copy_into_run(run_dir: &Path, loaded: &Loaded) -> Result<PathBuf, String>
     if let Some(servers) = &loaded.servers {
         let to = servers_copy_path(run_dir, name, &loaded.sha);
         if std::fs::read(&to).ok().as_deref() != Some(servers.bytes.as_slice()) {
-            crate::nirvana_gui_tools::write_private(&to, &servers.bytes)
+            crate::nirvana_gui_tools::write_private_atomic(&to, &servers.bytes)
                 .map_err(|err| format!("cannot write {}: {err}", to.display()))?;
         }
     }
@@ -799,19 +848,6 @@ pub fn copy_into_run(run_dir: &Path, loaded: &Loaded) -> Result<PathBuf, String>
     nirvana_seat::write_atomic(&file, &loaded.bytes)
         .map_err(|err| format!("cannot write {}: {err}", file.display()))?;
     Ok(file)
-}
-
-/// P45c fix round (review F3): takes the run's definitions copy of the profile an order was seated with out, when the
-/// order ends (`nirvana_gui_tools::remove_order_config`), so a token in a profile's `mcp.json` does not stay in
-/// `runs/` for good. The pin stays. Another order of the run seated with the same copy gets the definitions again at
-/// its next start from the profile's `mcp.json`, checked against the pin (`run_servers`). `Ok(false)` when there was
-/// none.
-pub fn remove_servers_copy(run_dir: &Path, profile: &Ref) -> std::io::Result<bool> {
-    match std::fs::remove_file(servers_copy_path(run_dir, &profile.name, &profile.sha)) {
-        Ok(()) => Ok(true),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(err) => Err(err),
-    }
 }
 
 /// The profile an order copy names, from its two lines at line start; `None` when it names none, an error when the
@@ -849,9 +885,11 @@ pub fn from_run(run_dir: &Path, profile: &Ref) -> Result<Profile, String> {
 /// Plan 45 §5: the definitions of the profile's own servers an order was seated with, checked as `from_run` checks the
 /// copy; empty for a profile with no `mcp.json`. The launch merges them into the order's config.
 ///
-/// P45c fix round (review F3): the definitions are the run's copy, or, when an earlier order's end took that out
-/// (`remove_servers_copy`), the profile's `mcp.json` in `root` now; either way their sha256 must be the pin's, so an
-/// edit since seating fails the order (it never reaches it), as an edit to the copy always did.
+/// P45c fix round (review F3): the definitions are the run's copy, or, when the copy went with the last order of the
+/// run that wanted a worker on it (`nirvana_gui_tools::release_servers_copies`), the profile's `mcp.json` in `root`
+/// now; either way their sha256 must be the pin's, so an edit since seating never reaches the order. Review2 B1: the
+/// copy lives while any order seated with it may still start, so the live file is read only by a child or a sibling
+/// seated with the same reference after the copy went; when that file changed, the refusal says so and what to do.
 pub fn run_servers(
     root: &Path,
     run_dir: &Path,
@@ -865,20 +903,35 @@ pub fn run_servers(
     let (file, bytes) = match std::fs::read(&copy) {
         Ok(bytes) => (copy, bytes),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let gone = format!(
+                "the run's copy of profile {}'s mcp.json went when the last order seated with it ended",
+                profile.name
+            );
             let live = servers_path(root, &profile.name).ok_or_else(|| {
                 format!(
-                    "{} was taken out when an earlier order ended, and profile {} is no folder profile now",
-                    copy.display(),
-                    profile.name
+                    "{gone}, and profile {} is no folder profile now: seat the order again with `--profile {}`",
+                    profile.name, profile.name
                 )
             })?;
             let bytes = std::fs::read(&live).map_err(|err| {
                 format!(
-                    "{} was taken out when an earlier order ended, and {} cannot be read: {err}",
-                    copy.display(),
-                    live.display()
+                    "{gone}, and {} cannot be read ({err}): restore it, or seat the order again with `--profile {}`",
+                    live.display(),
+                    profile.name
                 )
             })?;
+            // Review2 B1: the owner's words for the one case left, an edit since seating with no seated copy to fall
+            // back on.
+            let sha = sha256_hex(&bytes);
+            if sha != pin.sha256 {
+                return Err(format!(
+                    "the profile's mcp.json changed since this order was seated ({} has sha256 {sha}, the order was \
+                     seated with {}), and {gone}: restore it, or seat the order again with `--profile {}`",
+                    live.display(),
+                    pin.sha256,
+                    profile.name
+                ));
+            }
             (live, bytes)
         }
         Err(err) => return Err(format!("cannot read {}: {err}", copy.display())),
@@ -1032,8 +1085,17 @@ pub fn order_text(text: &str, profile: &Ref, parsed: &Profile, cli: &str) -> Str
 /// review's `DENIED` hold no `mcp__*` rule, so a server granted to either could be driven by what it reads. Decided by
 /// the class the order was journaled with, never by the brief: a review is safe today only because its brief has the
 /// subject's `Profile:` lines taken out (`nirvana_review::quoted_order`), and a teach brief keeps them.
+///
+/// P45c review2 C1: by rule, not by a list of review classes: herdr's teach class, every class `nirvana_run::reviews`
+/// names, and every class of the `review` or `acceptance` family (the part before the first `.`). The gate's
+/// `review.adversary` brief quotes the subject's order with its `Profile:` lines (`nirvana_gate::review_brief`), and
+/// the held-out author's (`acceptance.author`) quotes the order it writes a check for. A new `review.*` or
+/// `acceptance.*` class is covered with no change here; a reviewing class outside those families is not.
 pub fn takes_no_profile_servers(class: &str) -> bool {
-    class == crate::nirvana_knowledge::TEACH_CLASS || class == crate::nirvana_review::CLASS
+    let family = class.split('.').next().unwrap_or(class);
+    class == crate::nirvana_knowledge::TEACH_CLASS
+        || crate::nirvana_run::reviews(class)
+        || (class.contains('.') && matches!(family, "review" | "acceptance"))
 }
 
 /// §2.2: the order's needs, then the profile's not already among them, before plan 29's server routing.
@@ -1820,11 +1882,10 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
                 println!("seats.toml is refused, so only the files are checked: {why}");
             }
             let servers = crate::nirvana_gui_tools::project_servers(&root).unwrap_or_default();
-            // P45c review F3: check is what an owner runs after writing an mcp.json by hand.
-            if folder(&root).is_dir() {
-                if let Err(err) = ensure_ignore(&root) {
-                    println!("cannot write {}: {err}", folder(&root).join(IGNORE_FILE).display());
-                }
+            // P45c review F3: check is what an owner runs after writing an mcp.json by hand. Review2 D1: only when a
+            // profile here has one.
+            if let Err(err) = ensure_ignore_for_servers(&root) {
+                println!("cannot write {}: {err}", folder(&root).join(IGNORE_FILE).display());
             }
             let chosen: Vec<_> = list(&root)
                 .into_iter()

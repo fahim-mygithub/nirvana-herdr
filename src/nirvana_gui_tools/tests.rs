@@ -1650,9 +1650,13 @@ fn p92_a_teach_or_review_order_gets_no_profile_server_by_its_class() {
             out,
         )
     };
+    // P45c review2 C1: the gate's reviewer and held-out author too, and a review class not built yet, by the rule.
     for (order, class) in [
         ("t1", crate::nirvana_knowledge::TEACH_CLASS),
         ("v1", crate::nirvana_review::CLASS),
+        ("v2", "review.adversary"),
+        ("v3", "acceptance.author"),
+        ("v4", "review.future-kind"),
     ] {
         profiled_as(&root, &run_dir, "op", servers, order, class);
         let brief = std::fs::read_to_string(order_copy_path(&root, order)).unwrap();
@@ -1676,6 +1680,92 @@ fn p92_a_teach_or_review_order_gets_no_profile_server_by_its_class() {
     std::fs::write(&file, std::fs::read_to_string(order_copy_path(&root, "b1")).unwrap()).unwrap();
     let why = launch("n1", &claude_argv(), &mut Vec::new()).unwrap_err();
     assert!(why.contains("holds no seated record of n1"), "{why}");
+}
+
+/// P45c review2 A1: a profile with no `mcp.json` (no pin) grants nothing and reads no journal, so an order of it with no
+/// seated record launches with its argv unchanged, as before plan 45 §5; with a pin, the refusal says why in words that
+/// fit.
+#[test]
+fn p92_a_plain_profiled_order_launches_without_its_journal_record() {
+    let home = crate::nirvana::with_test_home("p92-plain-no-record");
+    let root = project(&home.path, Some(MCP_JSON));
+    let run_dir = root.join(".nirvana").join("runs").join("r1");
+    let dir = crate::nirvana_profiles::folder_of(&root, "plain");
+    std::fs::create_dir_all(dir.join("knowledge")).unwrap();
+    std::fs::write(dir.join("profile.md"), "---\ndescription: Plain work.\n---\nWork.\n").unwrap();
+    let loaded = crate::nirvana_profiles::load(&root, "plain").unwrap();
+    crate::nirvana_profiles::copy_into_run(&run_dir, &loaded).unwrap();
+    let file = order_copy_path(&root, "p1");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let lines = crate::nirvana_profiles::order_lines(&crate::nirvana_profiles::Ref {
+        name: "plain".into(),
+        sha: loaded.sha,
+    });
+    std::fs::write(&file, format!("{lines}\n# Do it\n")).unwrap();
+    assert!(!run_dir.join(crate::nirvana_run::JOURNAL).exists());
+    let launch = |order: &str| {
+        order_argv_seated(
+            claude_argv(),
+            &root,
+            &root,
+            &run_dir,
+            order,
+            &[],
+            &crate::nirvana_bladebro::Seat::default(),
+            Ok(vec!["code", "tools"]),
+            &mut Vec::new(),
+        )
+    };
+    assert_eq!(launch("p1").unwrap(), claude_argv());
+    assert!(!run_dir.join(crate::nirvana_run::JOURNAL).exists());
+    // A profile with its own servers and no record is still refused, and says it is refused rather than granted.
+    profiled(&root, &run_dir, "op", r#"{"mcpServers": {"fake-tool": {"command": "fake"}}}"#, "b1");
+    let file = order_copy_path(&root, "n1");
+    std::fs::write(&file, std::fs::read_to_string(order_copy_path(&root, "b1")).unwrap()).unwrap();
+    let why = launch("n1").unwrap_err();
+    assert!(
+        why.contains("holds no seated record of n1") && why.contains("refused rather than granted them"),
+        "{why}"
+    );
+}
+
+/// P45c review2 B2: the definitions copy is written by a rename, so a reader never sees a torn file, and the
+/// temporary file is gone after.
+#[test]
+fn p92_the_servers_copy_is_written_whole_by_a_rename() {
+    let home = crate::nirvana::with_test_home("p92-atomic-copy");
+    let dir = home.path.join("copies");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("op-0123456789abcdef.mcp.json");
+    let big = "x".repeat(4 << 20);
+    write_private_atomic(&file, big.as_bytes()).unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader = {
+        let (file, stop) = (file.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut torn = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(bytes) = std::fs::read(&file) {
+                    if bytes.len() != 4 << 20 {
+                        torn += 1;
+                    }
+                }
+            }
+            torn
+        })
+    };
+    for round in 0..20 {
+        let body = if round % 2 == 0 { "y" } else { "x" }.repeat(4 << 20);
+        write_private_atomic(&file, body.as_bytes()).unwrap();
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(reader.join().unwrap(), 0, "a reader saw a torn copy");
+    let left: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, ["op-0123456789abcdef.mcp.json"]);
 }
 
 #[test]

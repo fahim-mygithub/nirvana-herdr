@@ -471,16 +471,14 @@ pub fn project_skills(root: &Path) -> Vec<String> {
 /// (`nirvana_profiles::takes_no_profile_servers`). Neither is the profile's own work, so the profile neither narrows nor
 /// widens its skills; before, a review kept every skill only because its brief has the `Profile:` lines taken out. An
 /// order with no seated record takes the profile's selection, the narrower side.
+///
+/// P45c review2 A1: the journal is read only for a profile that names its skills, the one case the class changes; an
+/// order with no profile, or one whose profile keeps every skill, launches reading no journal here.
 pub fn profile_skills(
     run_dir: &Path,
     order: &str,
     order_file: &str,
 ) -> Result<Option<Vec<String>>, String> {
-    if crate::nirvana_gui_tools::seated_record(run_dir, order)
-        .is_some_and(|seated| crate::nirvana_profiles::takes_no_profile_servers(&seated.class))
-    {
-        return Ok(None);
-    }
     let Ok(text) = std::fs::read_to_string(order_file) else {
         return Ok(None);
     };
@@ -488,6 +486,12 @@ pub fn profile_skills(
         return Ok(None);
     };
     let parsed = crate::nirvana_profiles::from_run(run_dir, &found)?;
+    if parsed.skills.is_some()
+        && crate::nirvana_gui_tools::seated_record(run_dir, order)
+            .is_some_and(|seated| crate::nirvana_profiles::takes_no_profile_servers(&seated.class))
+    {
+        return Ok(None);
+    }
     Ok(parsed.skills)
 }
 

@@ -790,9 +790,11 @@ pub fn was_dismissed(root: &Path, kind: Kind, profile: &str, key: &str) -> Optio
 #[allow(dead_code)]
 pub fn write(root: &Path, draft: &Draft) -> Result<String, Refusal> {
     let _lock = lock(root).map_err(|why| Refusal(vec![why]))?;
-    // P45c review F5: the key too, and every check below reads what lands on disk.
+    // P45c review F5: the key too, and every check below reads what lands on disk. Review2 E1: lowercased first, as
+    // `key_sha` does, so the named patterns (`sk-` is case-sensitive in `nirvana_lessons::redact`) see an `SK-...`
+    // run as `sk-...` and it never lands in the clear, and the key on disk and its `key_sha` are one identity.
     let draft = Draft {
-        key: redact_key(&draft.key),
+        key: redact_key(&draft.key.to_lowercase()),
         evidence: nirvana_lessons::redact(&draft.evidence),
         body: nirvana_lessons::redact(&draft.body),
         ..draft.clone()

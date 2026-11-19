@@ -42,6 +42,14 @@ T_LEGACY = ("nirvana_profile_proposals::tests::"
             "p92_a_patch_of_a_legacy_one_file_profile_rolls_back_to_the_exact_bytes")
 T_FRONT = "nirvana_profile_proposals::tests::p92_hand_edited_front_matter_at_accept_and_no_mcp_json"
 T_PP_DEVICE = "nirvana_profile_proposals::tests::p92_a_proposal_for_a_windows_device_name_is_refused"
+# P45c second fix round: the second review's findings and its section 5, one test each
+T_EXEC = "nirvana_profiles::tests::p92_seat_exec_starts_with_the_seated_servers_and_its_end_takes_the_copy"
+T_SIBLING = "nirvana_profiles::tests::p92_the_servers_copy_lives_while_any_order_seated_with_it_may_start"
+T_C2 = "nirvana_profiles::tests::p92_a_profile_whose_own_class_reviews_joins_no_need"
+T_D1 = "nirvana_profiles::tests::p92_the_ignore_is_written_only_for_servers_and_a_negation_uncovers"
+T_PLAIN = "nirvana_gui_tools::tests::p92_a_plain_profiled_order_launches_without_its_journal_record"
+T_ATOMIC = "nirvana_gui_tools::tests::p92_the_servers_copy_is_written_whole_by_a_rename"
+T_E1 = "nirvana_profile_proposals::tests::p92_an_upper_case_sk_key_is_redacted_and_keeps_its_identity"
 
 _RUN_SERVERS = "        Some(_) => crate::nirvana_profiles::run_servers(root, run_dir, &found),"
 _SKILLS_LINE = "    if let Some(skills) = &parsed.skills {\n        if !prompt.is_empty() {"
@@ -79,8 +87,9 @@ CONTROLS = (
             "    Ok(parsed.skills.filter(|skills| !skills.is_empty()))\n}", T_AGY_SKILLS, "rust"),
     # Fix round F1: a review or a teacher keeps every skill (red: v1's profile_skills is Some([seat, ghost]))
     Control("p92_agy_review_skills_narrowed", AGY,
-            "    if crate::nirvana_gui_tools::seated_record(run_dir, order)\n"
-            "        .is_some_and(|seated| crate::nirvana_profiles::takes_no_profile_servers(&seated.class))\n    {",
+            "    if parsed.skills.is_some()\n        && crate::nirvana_gui_tools::seated_record(run_dir, order)\n"
+            "            .is_some_and(|seated| crate::nirvana_profiles::takes_no_profile_servers(&seated.class))\n"
+            "    {",
             "    if order.is_empty() {", T_AGY_SKILLS, "rust"),
     Control("p92_agy_missing_skill_silent", AGY, "        if !skills.iter().any(|(have, _)| have == name) {",
             "        if false {", T_AGY_SKILLS, "rust"),
@@ -106,11 +115,43 @@ CONTROLS = (
             '.join(&found.name).join("mcp.json")).unwrap_or_default()),', T_OWN, "rust"),
     # Fix round F3: the definitions' sha is the pin's, from the run copy or the profile's file after the copy went
     # (red: the tampered copy starts)
-    Control("p92_servers_sha_unchecked", PROFILES, "    if sha != pin.sha256 {", "    if false {", T_OWN, "rust"),
-    # The order's end takes the definitions copy out (red: the copy is still there after remove_order_config)
-    Control("p92_servers_copy_kept", GUI,
-            "        if let Err(err) = crate::nirvana_profiles::remove_servers_copy(run_dir, &profile) {",
-            "        if let Err(err) = Ok::<bool, std::io::Error>(profile.name.is_empty()) {", T_OWN, "rust"),
+    # (Second fix round: the find names the outer check alone; the live-file branch has one of its own.)
+    Control("p92_servers_sha_unchecked", PROFILES, "    let sha = sha256_hex(&bytes);\n    if sha != pin.sha256 {",
+            "    let sha = sha256_hex(&bytes);\n    if false {", T_OWN, "rust"),
+    # Second fix round, review2 B1: the start of an attempt leaves the copy (red: T_EXEC's start reads the edited live
+    # file and refuses, so the stand-in never keeps a config and its command is Null)
+    Control("p92_copy_taken_at_attempt_start", GUI,
+            "    crate::nirvana_bladebro::remove_home(run_dir, order, out);\n    let file = order_config_path",
+            "    crate::nirvana_bladebro::remove_home(run_dir, order, out);\n"
+            "    for copy in crate::nirvana_profiles::servers_copies(run_dir) {\n"
+            "        let _ = std::fs::remove_file(copy);\n    }\n    let file = order_config_path", T_EXEC, "rust"),
+    # ...a release keeps a copy an order still wanting a worker holds (red: s2's copy is gone after s1's end)
+    Control("p92_release_ignores_holders", GUI, "    for copy in copies.iter().filter(|copy| !held.contains(copy)) {",
+            "    for copy in copies.iter().filter(|_| true) {", T_SIBLING, "rust"),
+    # ...and takes it once the order ended (red: the copy is still there after s1 ended and the release ran)
+    Control("p92_release_keeps_ended", GUI,
+            "    for known in state.orders.iter().filter(|known| known.phase.wants_worker()) {",
+            "    for known in state.orders.iter() {", T_OWN, "rust"),
+    # ...when `seat exec` ends, on every way out (red: the copy is still there after the failed attempt)
+    Control("p92_exec_end_keeps_copy", WORKER,
+            "    crate::nirvana_gui_tools::release_servers_copies(&project.run_dir(run), out);\n    code\n",
+            "    code\n", T_EXEC, "rust"),
+    # ...and for every run when a supervisor starts (red: the copy is still there after sweep_leftovers)
+    Control("p92_sweep_keeps_copy", WORKER,
+            "        crate::nirvana_gui_tools::release_servers_copies(&run_dir, out);\n        let leftovers",
+            "        let leftovers", T_SIBLING, "rust"),
+    # ...a changed live file with no copy left says what happened and what to do (red: (d)'s words are missing)
+    Control("p92_fallback_message_unsaid", PROFILES,
+            "the profile's mcp.json changed since this order was seated (", "the profile's servers changed (",
+            T_OWN, "rust"),
+    # Review2 B2: the copy is written by a rename (red: a reader sees a short file while it is rewritten in place)
+    Control("p92_copy_written_torn", GUI, "    write_private(&temp, body)?;\n",
+            "    if !body.is_empty() {\n        return write_private(file, body);\n    }\n"
+            "    write_private(&temp, body)?;\n", T_ATOMIC, "rust"),
+    # Review2 A1: a profile with no pin reads no journal (red: p1 with no record is refused)
+    Control("p92_plain_profile_reads_journal", GUI,
+            "    if !crate::nirvana_profiles::pin_path(run_dir, &found.name, &found.sha).is_file() {\n"
+            "        return Ok(Map::new());\n    }\n", "", T_PLAIN, "rust"),
     # A reader after the end has the names from the pin (red: from_run's servers are empty)
     Control("p92_pin_names_dropped", PROFILES, "    parsed.servers = pin.names.clone();",
             "    parsed.servers = Vec::new();", T_OWN, "rust"),
@@ -120,16 +161,24 @@ CONTROLS = (
             "        Some(seated) if crate::nirvana_profiles::takes_no_profile_servers(&seated.class) => {",
             "        Some(seated) if seated.class.is_empty() => {", T_CLASS, "rust"),
     # The review class is in the guard (red: v1's argv gains --mcp-config)
-    Control("p92_review_class_unguarded", PROFILES,
-            "    class == crate::nirvana_knowledge::TEACH_CLASS || class == crate::nirvana_review::CLASS",
-            "    class == crate::nirvana_knowledge::TEACH_CLASS", T_CLASS, "rust"),
+    Control("p92_review_class_unguarded", PROFILES, "        || crate::nirvana_run::reviews(class)\n",
+            "        || class == \"review.adversary\"\n", T_CLASS, "rust"),
+    # Review2 C1: the review and acceptance families by rule (red: v3, acceptance.author, gains --mcp-config)
+    Control("p92_review_family_unguarded", PROFILES,
+            "        || (class.contains('.') && matches!(family, \"review\" | \"acceptance\"))",
+            "        || (class.contains('.') && matches!(family, \"lesson\"))", T_CLASS, "rust"),
     # No seated record is refused, never granted (red: n1 starts with the server)
     Control("p92_no_record_granted", GUI, "        None => Err(no_record(run_dir, order)),",
             "        None => crate::nirvana_profiles::run_servers(root, run_dir, &found),", T_CLASS, "rust"),
     # The real teach path: the class guard holds there (red: the teacher's argv gains --mcp-config for fake-own)
     Control("p92_teach_own_servers_granted", PROFILES,
-            "    class == crate::nirvana_knowledge::TEACH_CLASS || class == crate::nirvana_review::CLASS",
-            "    class == crate::nirvana_review::CLASS", T_TEACH_SRV, "rust"),
+            "    class == crate::nirvana_knowledge::TEACH_CLASS\n        || crate::nirvana_run::reviews(class)",
+            "    crate::nirvana_run::reviews(class)", T_TEACH_SRV, "rust"),
+    # Review2 C2: the profile's class default comes before the guard (red: q1's seated.needs is [bambu-studio-beta])
+    Control("p92_class_default_after_guard", WORKER,
+            "            if request.class.is_none() {\n                request.class = loaded.profile.class.clone();\n"
+            "            }\n            // P45c fix round (review F2)",
+            "            // P45c fix round (review F2)", T_C2, "rust"),
     # Fix round F2: no profile need joins a teacher's request (red: seated.needs is [fake-server])
     Control("p92_teach_joins_needs", WORKER,
             "            if !request\n                .class\n                .as_deref()\n"
@@ -160,6 +209,13 @@ CONTROLS = (
     # The note says when no rule covers the file (red: two notes, not three, before the file is written)
     Control("p92_ignore_uncovered_unsaid", PROFILES, "    if !notes.is_empty() && !ignore_covers(root) {",
             "    if false {", T_NOTES, "rust"),
+    # Review2 D1: check writes the file only when a profile has servers (red: written with only `plain` there)
+    Control("p92_ignore_written_without_servers", PROFILES, "    if any {\n        ensure_ignore(root)",
+            "    if true {\n        ensure_ignore(root)", T_D1, "rust"),
+    # ...and a later negation takes the cover back (red: the `!*/mcp.json` row reads covered)
+    Control("p92_ignore_negation_read", PROFILES,
+            "                Some(negated) => negated.ends_with(\"mcp.json\").then_some(false),",
+            "                Some(_) => None,", T_D1, "rust"),
     Control("p92_unprofiled_order_reads_other_copy", GUI,
             "    let Ok(text) = std::fs::read_to_string(order_copy_path(cwd, order)) else {",
             '    let Ok(text) = std::fs::read_to_string(order_copy_path(cwd, "s1")) else {', T_OWN, "rust"),
@@ -285,7 +341,10 @@ CONTROLS = (
             "            Err(err) => bad.push((at + 1, line.to_owned(), err.to_string())),",
             "            Err(_) => {}", T_TORN, "rust"),
     # Fix round F5: the key is redacted on disk (red: the fake GitHub token is in the proposal file)
-    Control("p92_pp_key_unredacted", PP, "        key: redact_key(&draft.key),\n", "", T_REDACT, "rust"),
+    Control("p92_pp_key_unredacted", PP, "        key: redact_key(&draft.key.to_lowercase()),\n", "", T_REDACT, "rust"),
+    # Review2 E1: lowercased before redaction (red: the SK-FAKE... key lands on disk)
+    Control("p92_pp_key_case_kept_on_disk", PP, "        key: redact_key(&draft.key.to_lowercase()),\n",
+            "        key: redact_key(&draft.key),\n", T_E1, "rust"),
     # ...keeping its identity (red: two paragraph shas collapse into one key, the second write is refused)
     Control("p92_pp_key_identity_lost", PP,
             '            format!(\n                "h:{}",\n                &nirvana_lessons::sha256(&found.to_lowercase())[..16]\n'

@@ -328,8 +328,8 @@ pub(crate) fn seated_record(run_dir: &Path, order: &str) -> Option<crate::nirvan
 
 fn no_record(run_dir: &Path, order: &str) -> String {
     format!(
-        "{} holds no seated record of {order}, so its class (a teacher and a lesson review get no profile server) \
-         cannot be read",
+        "{} holds no seated record of {order}, so whether its class may take the profile's own servers (a teacher \
+         and a reviewer get none) cannot be read; the order is refused rather than granted them",
         run_dir.join(crate::nirvana_run::JOURNAL).display()
     )
 }
@@ -353,6 +353,12 @@ fn profile_servers(
     let Some(Ok(found)) = crate::nirvana_profiles::in_order(&text) else {
         return Ok(Map::new());
     };
+    // P45c review2 A1: a profile with no `mcp.json` has no pin, and grants nothing here, so its launch reads no journal
+    // and is as it was before plan 45 §5. A pin taken out since seating is no way round this: the profile copy's sha
+    // covers the pin, so `with_profile` refuses that order before it starts.
+    if !crate::nirvana_profiles::pin_path(run_dir, &found.name, &found.sha).is_file() {
+        return Ok(Map::new());
+    }
     match seated_record(run_dir, order) {
         Some(seated) if crate::nirvana_profiles::takes_no_profile_servers(&seated.class) => {
             Ok(Map::new())
@@ -432,9 +438,78 @@ pub(crate) fn write_private(file: &Path, body: &[u8]) -> std::io::Result<()> {
     options.open(file)?.write_all(body)
 }
 
+/// P45c review2 B2: `write_private` to a temporary file beside `file`, then a rename over it, so a reader sees the old
+/// bytes, the new bytes or no file, never a torn write. The temporary name carries the process id and a counter, so
+/// two threads or two processes writing the same copy at once never share one.
+pub(crate) fn write_private_atomic(file: &Path, body: &[u8]) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let dir = file.parent().unwrap_or_else(|| Path::new("."));
+    let name = file
+        .file_name()
+        .map_or_else(|| "file".into(), |name| name.to_string_lossy());
+    let temp = dir.join(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    write_private(&temp, body)?;
+    std::fs::rename(&temp, file).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp);
+    })
+}
+
+/// P45c review2 B1: takes out each definitions copy of a profile's own `mcp.json` in the run
+/// (`nirvana_profiles::servers_copies`) that no order of the run still wanting a worker (seated, running or deferred)
+/// was seated with. So the copy an order was seated with lives until that order ends (delivered, failed, stopped,
+/// interrupted, reseated, given up after a crash loop), and while a sibling or child of the same profile version may
+/// still start: a restart, a crash re-launch or a deferred start reads the bytes checked at seating, whatever the
+/// owner did to the live `mcp.json` since. Called when a supervisor ends (`nirvana_worker::exec`) and, for every run,
+/// when one starts (`nirvana_worker::sweep_leftovers`), so a supervisor killed before its end leaves the copy only
+/// until the next one starts. A run with no copy reads no journal. An order still wanting a worker whose brief cannot
+/// be read keeps every copy of the run: which one it holds cannot be told, and a copy kept a while longer is better
+/// than an order that cannot start. A remove that fails says so in one line.
+pub fn release_servers_copies(run_dir: &Path, out: &mut dyn Write) {
+    let copies = crate::nirvana_profiles::servers_copies(run_dir);
+    if copies.is_empty() {
+        return;
+    }
+    let journal = crate::nirvana_run::Journal::new(run_dir.join(crate::nirvana_run::JOURNAL));
+    let state = crate::nirvana_run::replay(&journal.read().0);
+    let mut held = Vec::new();
+    for known in state.orders.iter().filter(|known| known.phase.wants_worker()) {
+        let Ok(text) = std::fs::read_to_string(&known.seated.order_file) else {
+            return;
+        };
+        if let Some(Ok(found)) = crate::nirvana_profiles::in_order(&text) {
+            held.push(crate::nirvana_profiles::servers_copy_path(
+                run_dir,
+                &found.name,
+                &found.sha,
+            ));
+        }
+    }
+    for copy in copies.iter().filter(|copy| !held.contains(copy)) {
+        // Written apart from `remove_order_config`'s match: control p29_remove_silent finds that one's arm.
+        if let Err(err) = std::fs::remove_file(copy) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                let _ = writeln!(
+                    out,
+                    "the run's copy of a profile's servers stays at {}: {err}",
+                    copy.display()
+                );
+            }
+        }
+    }
+}
+
 /// Review F2: the order's config goes when its worker process ends, whatever the outcome; a restart or a reseat
 /// writes it again. A remove that fails says so in one line of the worker's view. Plan 35 §3.2: an agy order's tools
 /// folder and deny file go with it, and P35c item 4: its bladebro home.
+///
+/// P45c review2 B1: the run's copy of the order's profile's own `mcp.json` is not removed here. This runs at the start
+/// of every attempt too, and the copy must outlive the order's attempts; `release_servers_copies` takes it out when no
+/// order still wanting a worker holds it.
 pub fn remove_order_config(run_dir: &Path, order: &str, out: &mut dyn Write) {
     crate::nirvana_agy_tools::remove(run_dir, order, out);
     crate::nirvana_bladebro::remove_home(run_dir, order, out);
@@ -448,23 +523,6 @@ pub fn remove_order_config(run_dir: &Path, order: &str, out: &mut dyn Write) {
             );
         }
         _ => {}
-    }
-    // P45c fix round (review F3): the run's copy of the order's profile's own `mcp.json` goes too, since a definition
-    // can hold a token; its pin stays, so a send-back's seating and the rows still have the names, and the next start
-    // of that copy takes the profile's file only when its sha is the pin's (`nirvana_profiles::run_servers`).
-    let profile = seated_record(run_dir, order)
-        .and_then(|seated| std::fs::read_to_string(&seated.order_file).ok())
-        .and_then(|text| crate::nirvana_profiles::in_order(&text))
-        .and_then(Result::ok);
-    if let Some(profile) = profile {
-        if let Err(err) = crate::nirvana_profiles::remove_servers_copy(run_dir, &profile) {
-            let _ = writeln!(
-                out,
-                "the run's copy of profile {}'s servers stays at {}: {err}",
-                profile.name,
-                crate::nirvana_profiles::servers_copy_path(run_dir, &profile.name, &profile.sha).display()
-            );
-        }
     }
 }
 

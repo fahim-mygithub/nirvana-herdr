@@ -432,6 +432,26 @@ fn p92_the_key_and_an_accepted_body_are_redacted() {
     );
 }
 
+/// P45c review2 E1: an upper-case `SK-...` key is redacted on disk (the `sk-` pattern is case-sensitive, so the key is
+/// lowercased first, as `key_sha` does), and the raw key and the key on disk stay one identity.
+#[test]
+fn p92_an_upper_case_sk_key_is_redacted_and_keeps_its_identity() {
+    let (_home, root) = project("p92-pp-upper-sk");
+    let token = "SK-FAKEFAKEFAKEFAKEFAKE12";
+    let mut secret = draft(Kind::New, "render-judge", NEW, None);
+    secret.key = format!("header:{token}");
+    let id = write(&root, &secret).unwrap();
+    let text = std::fs::read_to_string(path(&root, &id)).unwrap();
+    assert!(
+        !text.to_lowercase().contains(&token.to_lowercase()),
+        "the token is on disk: {text}"
+    );
+    let on_disk = get(&root, &id).unwrap().key;
+    assert_eq!(key_sha(&on_disk), key_sha(&secret.key), "{on_disk}");
+    dismiss(&root, &id, None).unwrap();
+    assert!(was_dismissed(&root, Kind::New, "render-judge", &secret.key).is_some());
+}
+
 /// Review section 5: a patch of a legacy one-file profile, `<name>.md` with CRLF line ends, is accepted into that
 /// file and rolled back to its exact bytes.
 #[test]

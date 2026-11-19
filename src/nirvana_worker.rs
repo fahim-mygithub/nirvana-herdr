@@ -1976,6 +1976,8 @@ fn print_timeout_s(seated: &Seated) -> u64 {
 pub fn sweep_leftovers(project: &Project, run: &str, order: &str, out: &mut dyn Write) {
     for other in project.runs() {
         let run_dir = project.run_dir(&other);
+        // P45c review2 B1, B3: a profile servers copy no order wanting a worker holds, a killed supervisor's included.
+        crate::nirvana_gui_tools::release_servers_copies(&run_dir, out);
         let leftovers = crate::nirvana_agy_tools::leftover_orders(&run_dir);
         if leftovers.is_empty() {
             continue;
@@ -2032,6 +2034,20 @@ fn ensure_sources_line(seated: &Seated, out: &mut dyn Write) {
 }
 
 pub fn exec(
+    project: &Project,
+    run: &str,
+    order: &str,
+    pane: Option<&str>,
+    out: &mut dyn Write,
+) -> std::io::Result<i32> {
+    let code = exec_attempts(project, run, order, pane, out);
+    // P45c review2 B1: on every way out, once the journal has the order's end, its profile servers copy goes unless an
+    // order still wanting a worker holds it.
+    crate::nirvana_gui_tools::release_servers_copies(&project.run_dir(run), out);
+    code
+}
+
+fn exec_attempts(
     project: &Project,
     run: &str,
     order: &str,
@@ -4384,6 +4400,11 @@ pub fn seat_order_with(
     let request = &match &loaded {
         Some(loaded) => {
             let mut request = request.clone();
+            // P45c review2 C2: the class default first, so a profile whose own `class:` is a teach or review class is
+            // guarded below too.
+            if request.class.is_none() {
+                request.class = loaded.profile.class.clone();
+            }
             // P45c fix round (review F2): a teacher reads an untrusted page, so none of the profile's `needs` joins its
             // request: not the seat pick, not the servers granted at launch, not the journaled `seated.needs`. Needs
             // the caller names stay (`herdr profile teach` names none today).
@@ -4394,9 +4415,6 @@ pub fn seat_order_with(
             {
                 // One line: control p33a_needs_not_joined finds it.
                 request.needs = crate::nirvana_profiles::joined_needs(&request.needs, &loaded.profile);
-            }
-            if request.class.is_none() {
-                request.class = loaded.profile.class.clone();
             }
             request
         }

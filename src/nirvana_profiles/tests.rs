@@ -93,6 +93,24 @@ fn seated_of(project: &Project, order: &str) -> Seated {
         .clone()
 }
 
+/// Journals `order`'s end as a failed attempt does (`nirvana_worker::end_failed`).
+fn end_order(project: &Project, order: &str) {
+    project
+        .journal("r1")
+        .append(
+            crate::nirvana_run::now(),
+            Kind::Ended {
+                order: Some(order.into()),
+                outcome: "failed".into(),
+                why: Some("a test ended it".into()),
+                exit: Some(3),
+                pools: Vec::new(),
+                pools_basis: None,
+            },
+        )
+        .unwrap();
+}
+
 // ---- the file ----
 
 #[test]
@@ -1257,9 +1275,19 @@ fn p92_a_profiles_own_servers_reach_its_order_pinned_by_the_run_copy() {
         "{why}"
     );
     std::fs::write(&pin_file, &pinned).unwrap();
-    // P45c review F3: the order's end takes the definitions copy out; the pin, with no definition, stays.
     std::fs::write(servers_copy_path(&run_dir, "operator", &loaded.sha), OWN_SERVERS).unwrap();
+    // P45c review2 B1 (e): the start of an attempt (a restart, a crash re-launch) takes the order's config out, and
+    // leaves the copy; (a) so the same open order launches with the seated definitions, the owner's edit of the live
+    // file (above, still in place) notwithstanding.
     crate::nirvana_gui_tools::remove_order_config(&run_dir, "s1", &mut Vec::new());
+    assert!(servers_copy_path(&run_dir, "operator", &loaded.sha).exists());
+    assert_eq!(command_of(&launch(&seated).unwrap()), "fake-mcp-not-real");
+    // While the order still wants a worker, a release keeps its copy.
+    crate::nirvana_gui_tools::release_servers_copies(&run_dir, &mut Vec::new());
+    assert!(servers_copy_path(&run_dir, "operator", &loaded.sha).exists());
+    // (b) The order ends: the release takes the definitions copy out; the pin, with no definition, stays.
+    end_order(&project, "s1");
+    crate::nirvana_gui_tools::release_servers_copies(&run_dir, &mut Vec::new());
     assert!(!servers_copy_path(&run_dir, "operator", &loaded.sha).exists());
     assert!(!String::from_utf8(std::fs::read(&pin_file).unwrap())
         .unwrap()
@@ -1274,10 +1302,15 @@ fn p92_a_profiles_own_servers_reach_its_order_pinned_by_the_run_copy() {
     )
     .unwrap();
     assert_eq!(after.servers, ["fake-tool"]);
-    // A later start (a restart, a send-back on the same copy) takes the profile's file, only at the pinned sha: the
-    // owner's edit above fails it, and the file put back starts it.
+    // (d) A later start with the copy gone (a child seated with this reference after the order ended) takes the
+    // profile's file, only at the pinned sha: the owner's edit above fails it, in words that say what to do; (c) the
+    // file put back starts it.
     let why = launch(&seated).unwrap_err();
-    assert!(why.contains(" have sha256 ") && why.contains("mcp.json"), "{why}");
+    assert!(
+        why.contains("the profile's mcp.json changed since this order was seated")
+            && why.contains("restore it, or seat the order again with `--profile operator`"),
+        "{why}"
+    );
     std::fs::write(&profile_mcp, OWN_SERVERS).unwrap();
     assert_eq!(command_of(&launch(&seated).unwrap()), "fake-mcp-not-real");
     assert!(
@@ -1539,5 +1572,242 @@ fn p92_profiles_gitignore_keeps_a_profiles_servers_out_of_git_and_is_never_rewri
     assert!(!ensure_ignore(&project.root).unwrap());
     assert_eq!(std::fs::read_to_string(&ignore).unwrap(), "");
     assert!(!ignore_covers(&project.root));
+    nirvana_seat::set_test_world(None);
+}
+
+/// Seats `order` with the operator profile on the rule's seat, as `herdr seat run --profile operator` does.
+fn seat_operator(project: &Project, order: &str) -> Seated {
+    let loaded = load(&project.root, "operator").unwrap();
+    let seat = rule_seat(project, "sweep.mechanical", &loaded.profile);
+    std::fs::write(project.root.join("order.md"), "# Run the fake tool\n").unwrap();
+    let live = nirvana_worker::take_live(project, "r1", order)
+        .unwrap()
+        .unwrap();
+    nirvana_worker::seat_order_with(project, &request(project, order, &seat.seat), Some("operator"))
+        .unwrap();
+    drop(live);
+    seated_of(project, order)
+}
+
+fn launch_of(project: &Project, seated: &Seated) -> Result<Vec<String>, String> {
+    crate::nirvana_gui_tools::order_argv_seated(
+        vec!["claude".into(), "-p".into()],
+        &project.root,
+        Path::new(&seated.cwd),
+        &project.run_dir("r1"),
+        &seated.order,
+        &seated.needs,
+        &crate::nirvana_bladebro::Seat::default(),
+        Ok(vec!["code"]),
+        &mut Vec::new(),
+    )
+}
+
+/// The `command` of the profile's server in the per-order config the argv names.
+fn own_command(argv: &[String]) -> String {
+    let at = argv
+        .iter()
+        .position(|arg| arg == "--mcp-config")
+        .unwrap_or_else(|| panic!("--mcp-config: {argv:?}"));
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&argv[at + 1]).unwrap()).unwrap();
+    config["mcpServers"]["fake-tool"]["command"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned()
+}
+
+/// P45c review2 B1, the sibling: two open orders seated with the same profile version share one copy. The first one's
+/// end leaves it while the second may still start, and the second launches with the seated definitions after the
+/// owner edits the live file; once both have ended, a supervisor's start (`sweep_leftovers`) takes it out.
+#[test]
+fn p92_the_servers_copy_lives_while_any_order_seated_with_it_may_start() {
+    let (_home, project) = project("p92-copy-sibling");
+    nirvana_seat::set_test_world(Some(BTreeMap::from([(
+        "agy".to_owned(),
+        "signed out".to_owned(),
+    )])));
+    let profile_mcp = folder_of(&project.root, "operator").join(SERVERS_FILE);
+    write_folder_profile(&project, "operator", OPERATOR, Some(OWN_SERVERS));
+    let first = seat_operator(&project, "s1");
+    let run_dir = project.run_dir("r1");
+    let found = in_order(&std::fs::read_to_string(&first.order_file).unwrap())
+        .unwrap()
+        .unwrap();
+    let copy = servers_copy_path(&run_dir, &found.name, &found.sha);
+    // The sibling: the same brief, so the same reference and the same copy (as a send-back child keeps its parent's).
+    let mut second = first.clone();
+    second.order = "s2".into();
+    let brief = crate::nirvana_gui_tools::order_copy_path(Path::new(&first.cwd), "s2");
+    std::fs::copy(&first.order_file, &brief).unwrap();
+    second.order_file = brief.display().to_string();
+    project
+        .journal("r1")
+        .append(crate::nirvana_run::now(), Kind::Seated(Box::new(second.clone())))
+        .unwrap();
+    end_order(&project, "s1");
+    crate::nirvana_gui_tools::release_servers_copies(&run_dir, &mut Vec::new());
+    assert!(copy.exists(), "s2 still wants a worker and holds the copy");
+    std::fs::write(&profile_mcp, OWN_SERVERS.replace("fake-mcp-not-real", "edited-fake")).unwrap();
+    assert_eq!(own_command(&launch_of(&project, &second).unwrap()), "fake-mcp-not-real");
+    end_order(&project, "s2");
+    let mut out = Vec::new();
+    nirvana_worker::sweep_leftovers(&project, "r1", "none", &mut out);
+    assert!(!copy.exists(), "{}", String::from_utf8_lossy(&out));
+    assert!(pin_path(&run_dir, &found.name, &found.sha).exists());
+    nirvana_seat::set_test_world(None);
+}
+
+/// P45c review2 B1, end to end through `seat exec`: the owner edits the live `mcp.json` after seating; the order's
+/// start (whose start-of-attempt clean-up used to take the copy, so it read the edited file and refused) launches with
+/// the seated definitions, and when the attempt fails and the order ends, its copy goes and its pin stays.
+#[cfg(windows)]
+#[test]
+fn p92_seat_exec_starts_with_the_seated_servers_and_its_end_takes_the_copy() {
+    let (_home, project) = project("p92-copy-exec");
+    nirvana_seat::set_test_world(Some(BTreeMap::from([(
+        "agy".to_owned(),
+        "signed out".to_owned(),
+    )])));
+    let profile_mcp = folder_of(&project.root, "operator").join(SERVERS_FILE);
+    write_folder_profile(&project, "operator", OPERATOR, Some(OWN_SERVERS));
+    let seated = seat_operator(&project, "s1");
+    let run_dir = project.run_dir("r1");
+    let found = in_order(&std::fs::read_to_string(&seated.order_file).unwrap())
+        .unwrap()
+        .unwrap();
+    let copy = servers_copy_path(&run_dir, &found.name, &found.sha);
+    assert!(copy.exists());
+    std::fs::write(&profile_mcp, OWN_SERVERS.replace("fake-mcp-not-real", "edited-fake")).unwrap();
+    // The stand-in worker keeps the config it was started with, then fails with no report.
+    let config = crate::nirvana_gui_tools::order_config_path(&run_dir, "s1");
+    let kept = project.root.join("kept-config.json");
+    // One argument each: `Command` would escape quotes inside one as `\"`, which cmd does not read.
+    let windows = |path: &Path| path.display().to_string().replace('/', "\\");
+    crate::nirvana_worker::TEST_COMMAND.with_borrow_mut(|slot| {
+        *slot = Some(
+            ["cmd.exe", "/c", "copy", "/y"]
+                .into_iter()
+                .map(str::to_owned)
+                .chain([windows(&config), windows(&kept)])
+                .chain([">nul", "&", "exit", "3"].into_iter().map(str::to_owned))
+                .collect(),
+        );
+    });
+    let mut out = Vec::new();
+    let code = nirvana_worker::exec(&project, "r1", "s1", None, &mut out);
+    crate::nirvana_worker::TEST_COMMAND.with_borrow_mut(|slot| *slot = None);
+    let view = String::from_utf8_lossy(&out).into_owned();
+    assert_eq!(code.unwrap(), 1, "{view}");
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&kept).unwrap_or_default()).unwrap_or_default();
+    assert_eq!(
+        config["mcpServers"]["fake-tool"]["command"], "fake-mcp-not-real",
+        "the worker got the seated definitions: {view}"
+    );
+    let phase = replay(&project.journal("r1").read().0)
+        .order("s1")
+        .map(|known| known.phase);
+    assert_eq!(phase, Some(crate::nirvana_run::Phase::Failed));
+    assert!(!copy.exists(), "the order ended, so its copy went: {view}");
+    assert!(pin_path(&run_dir, &found.name, &found.sha).exists());
+    nirvana_seat::set_test_world(None);
+}
+
+/// P45c review2 C2: a profile whose own `class:` is a review class (here the gate's `review.adversary`) joins none of
+/// its `needs`, though the caller names no class: the class default is applied before the guard.
+#[test]
+fn p92_a_profile_whose_own_class_reviews_joins_no_need() {
+    let (_home, project) = project("p92-review-class-needs");
+    let text = "---\ndescription: Reviews prints in the beta Bambu Studio.\nclass: review.adversary\n\
+needs: [bambu-studio-beta]\n---\nYou review.\n";
+    write_profile(&project, "odd", text);
+    let mut plain = parsed(text);
+    plain.needs.clear();
+    let seat = rule_seat(&project, "review.adversary", &plain);
+    std::fs::write(project.root.join("order.md"), "# Review it\n").unwrap();
+    let live = nirvana_worker::take_live(&project, "r1", "q1")
+        .unwrap()
+        .unwrap();
+    let seated =
+        nirvana_worker::seat_order_with(&project, &request(&project, "q1", &seat.seat), Some("odd"));
+    drop(live);
+    seated.unwrap_or_else(|(code, why)| panic!("refused ({code}): {why}"));
+    let seated = seated_of(&project, "q1");
+    assert_eq!(seated.class, "review.adversary");
+    assert!(seated.needs.is_empty(), "no profile need is joined: {:?}", seated.needs);
+    nirvana_seat::set_test_world(None);
+}
+
+/// P45c review2 C1: the rule, by class family, so a review class not built yet is covered.
+#[test]
+fn p92_no_review_teach_or_acceptance_class_takes_a_profiles_servers() {
+    for class in [
+        crate::nirvana_knowledge::TEACH_CLASS,
+        crate::nirvana_review::CLASS,
+        "review.adversary",
+        "review.some-later-kind",
+        "acceptance.author",
+    ] {
+        assert!(takes_no_profile_servers(class), "{class}");
+    }
+    for class in [
+        "build.bounded",
+        "sweep.mechanical",
+        "judge.visual",
+        "research.web",
+        "review",
+        "reviewer.x",
+    ] {
+        assert!(!takes_no_profile_servers(class), "{class}");
+    }
+}
+
+/// P45c review2 D1: `profile check` writes `profiles/.gitignore` only when some profile has an `mcp.json`, and a later
+/// negation line takes the cover back, as git reads it.
+#[test]
+fn p92_the_ignore_is_written_only_for_servers_and_a_negation_uncovers() {
+    let (_home, project) = project("p92-ignore-negation");
+    let ignore = folder(&project.root).join(IGNORE_FILE);
+    write_profile(&project, "plain", SLICER);
+    assert!(!ensure_ignore_for_servers(&project.root).unwrap());
+    assert!(!ignore.exists(), "no profile has servers: nothing is written");
+    write_folder_profile(&project, "operator", OPERATOR, Some(OWN_SERVERS));
+    assert!(ensure_ignore_for_servers(&project.root).unwrap());
+    assert!(ignore_covers(&project.root));
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&project.root)
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q"]).status.success());
+    let ignored = || {
+        git(&["check-ignore", "-q", ".nirvana/profiles/operator/mcp.json"])
+            .status
+            .code()
+            == Some(0)
+    };
+    for (text, covered) in [
+        (format!("{IGNORE_TEXT}!*/mcp.json\n"), false),
+        (format!("{IGNORE_TEXT}!operator/mcp.json\n"), false),
+        (format!("{IGNORE_TEXT}!/*/mcp.json\n*/mcp.json\n"), true),
+        (format!("{IGNORE_TEXT}!**/mcp.json\n"), false),
+    ] {
+        std::fs::write(&ignore, &text).unwrap();
+        assert_eq!(ignore_covers(&project.root), covered, "{text}");
+        assert_eq!(ignored(), covered, "git reads it so too: {text}");
+    }
+    // The deeper file wins over `.nirvana/.gitignore` when it speaks; when it says nothing, the outer rule covers.
+    let outer = project.dir().join(".gitignore");
+    let owners = std::fs::read_to_string(&outer).unwrap();
+    std::fs::write(&outer, format!("{owners}profiles/*/mcp.json\n")).unwrap();
+    std::fs::write(&ignore, "!*/mcp.json\n").unwrap();
+    assert!(!ignore_covers(&project.root));
+    assert!(!ignored());
+    std::fs::write(&ignore, "").unwrap();
+    assert!(ignore_covers(&project.root));
+    assert!(ignored());
     nirvana_seat::set_test_world(None);
 }
