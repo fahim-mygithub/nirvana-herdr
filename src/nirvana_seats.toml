@@ -69,6 +69,11 @@ subagent_default = "sonnet"
 # most. Claude Code already compacts far below the 967K the docs give, so a 400K cap changed nothing and is off. The
 # knob stays for a cap under 200K. fresh_above starts a fresh session between runs; this would compact inside one.
 autocompact_tokens = 0
+# Plan 43 B1 (ruling R1, the owner's "1. yes"): a Claude worker's `--autocompact <tokens>` in Efficient and
+# Balanced; SOTA is left alone; 0 passes no flag. Probed 2026-11-18: a headless Haiku worker at 100000 compacted five
+# times, `pre_tokens` 62k to 87k. 300000 is R1's "near 300k", a hypothesis: run ia1's Claude workers peaked at 148k
+# median and 902k at most, and made 0 compactions (plan 43 T1).
+worker_autocompact_tokens = 300000
 
 # Plan 40a (review M5): Nirvana Claude's own seat by mode, a seat and an effort each. The seat must be on and offer the
 # effort, else the nearest effort it offers below. `balanced` is the cool climb, `balanced_hot` the climb at t >= 0.5,
@@ -185,6 +190,10 @@ pool = "max"
 efforts = ["low", "medium", "high"]
 capabilities = ["code", "tools", "image", "pdf", "browser"]
 enabled = true
+# The advisor: Claude Code's --advisor for this seat's workers, by mode. The owner, 2026-11-18: "Go ahead and
+# build in the consulting it might be cheaper in the long run for balanced runs". Opus advises in Balanced only; a
+# consult re-reads the whole conversation uncached (smoke test: 26,791 tokens, $0.12, at a 25k context). A hypothesis.
+advisor = { balanced = "opus" }
 prices = [
   { from = "2026-10-17", input = 2.0, output = 10.0, cache_read = 0.20, cache_write = 2.5, basis = "claude-api skill price table, cached 2026-10-06; cache write at 1.25x input" },
   { from = "2026-11-09", input = 2.0, output = 10.0, cache_read = 0.10, cache_write = 2.5, basis = "Claude docs pricing, read 2026-11-09: cache read 0.10, not the 0.20 the old table had (review M4)" },

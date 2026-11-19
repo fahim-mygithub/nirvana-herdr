@@ -77,6 +77,9 @@ pub const HISTORICAL_DEFAULTS: &[&str] = &[
     // The Neon seat (2026-11-18): the default before Gemini 4 Neon took a seat (300e4603, alpha 0.79.0), copied before
     // the edit so an installed copy upgrades.
     include_str!("nirvana_seats_v16.toml"),
+    // The advisor default (2026-11-18): the default before Sonnet took an Opus advisor in Balanced and the table stated
+    // `worker_autocompact_tokens` (0cdef448, alpha 0.85.0), copied before the edit so an installed copy upgrades.
+    include_str!("nirvana_seats_v17.toml"),
 ];
 pub const DIR: &str = "nirvana";
 pub const SEATS_FILE: &str = "seats.toml";
@@ -8435,7 +8438,7 @@ pub(crate) mod tests {
         }
         assert_eq!(
             HISTORICAL_DEFAULTS.last().copied(),
-            Some(include_str!("nirvana_seats_v16.toml"))
+            Some(include_str!("nirvana_seats_v17.toml"))
         );
         // Plan 71: v14 went after v13, which stays historical (control p70_v13_not_historical).
         assert!(HISTORICAL_DEFAULTS.contains(&include_str!("nirvana_seats_v13.toml")));
@@ -8443,6 +8446,8 @@ pub(crate) mod tests {
         assert!(HISTORICAL_DEFAULTS.contains(&include_str!("nirvana_seats_v14.toml")));
         // The Neon seat: v16 went after v15, which stays historical (control p83_v15_not_historical).
         assert!(HISTORICAL_DEFAULTS.contains(&include_str!("nirvana_seats_v15.toml")));
+        // The advisor default: v17 went after v16, which stays historical (control p89_v16_not_last).
+        assert!(HISTORICAL_DEFAULTS.contains(&include_str!("nirvana_seats_v16.toml")));
         assert!(!differs_from_default(DEFAULT));
         assert!(!differs_from_default(&replace_mode_line(
             DEFAULT,
@@ -9120,10 +9125,15 @@ worker_autocompact_tokens = 300000\n";
         parse(&p90_default()).expect("the default with the advisor and ceiling rows parses")
     }
 
-    /// An edited copy of today's table with one advisor line on `seat`, to check the load rules one at a time.
+    /// An edited copy of today's table with one advisor line on `seat`, to check the load rules one at a time. The
+    /// default's own advisor rows are taken out first: since the advisor default (p91) sonnet carries one, and a second
+    /// `advisor` key on it is a TOML error, which would read every sonnet row below as refused whatever its pair.
     fn p90_with(seat: &str, line: &str) -> Result<Table, String> {
+        assert_eq!(DEFAULT.matches(P90_ADVISOR_LINES).count(), 1, "the default's advisor rows");
+        let without = DEFAULT.replacen(P90_ADVISOR_LINES, "", 1);
+        assert!(!without.contains("\nadvisor ="), "no other advisor line in the default");
         let anchor = format!("id = \"{seat}\"\n");
-        let text = DEFAULT.replacen(&anchor, &format!("{anchor}{line}\n"), 1);
+        let text = without.replacen(&anchor, &format!("{anchor}{line}\n"), 1);
         parse(&text)
     }
 
@@ -9144,8 +9154,14 @@ worker_autocompact_tokens = 300000\n";
         );
         assert!(table.advisor_of("sonnet", Mode::Sota).is_none());
         assert!(table.advisor_of("opus", Mode::Balanced).is_none());
-        // Today's default, before the hunk: no seat has an advisor.
-        assert!(table_from_default().seats.iter().all(|s| s.advisor == Advisors::default()));
+        // The default before the hunk (0.85.0's, kept as v17): no seat has an advisor. Since the advisor default the
+        // shipped table is the hunk's, seat for seat (test p91_the_default_gives_sonnet_an_opus_advisor_in_balanced_only).
+        let before = parse(include_str!("nirvana_seats_v17.toml")).expect("v17 parses");
+        assert!(before.seats.iter().all(|s| s.advisor == Advisors::default()));
+        assert!(table_from_default()
+            .seats
+            .iter()
+            .all(|s| Some(&s.advisor) == table.seat(&s.id).map(|t| &t.advisor)));
     }
 
     fn table_from_default() -> Table {
@@ -9333,7 +9349,13 @@ worker_autocompact_tokens = 300000\n";
     #[test]
     fn p90_the_worker_ceiling_defaults_to_300k_and_is_checked() {
         assert_eq!(table_from_default().constants.worker_autocompact_tokens, 300_000);
-        // The hunk's own line says the same, and a table without the line (today's default) reads it from serde.
+        // The hunk's own line says the same (the default's own since the advisor default), and a table without the line
+        // (0.85.0's default and every edited copy of an older one) reads it from serde.
+        assert!(!include_str!("nirvana_seats_v17.toml").contains("worker_autocompact_tokens"));
+        assert_eq!(
+            parse(include_str!("nirvana_seats_v17.toml")).unwrap().constants.worker_autocompact_tokens,
+            300_000
+        );
         assert_eq!(p90_table().constants.worker_autocompact_tokens, 300_000);
         let without: String = p90_default()
             .lines()
@@ -9355,6 +9377,103 @@ worker_autocompact_tokens = 300000\n";
         assert!(with("worker_autocompact_tokens = 50000")
             .unwrap_err()
             .contains("worker_autocompact_tokens 50000 is not 0 or between 100000 and 1000000"));
+    }
+
+    // ---- the advisor default (owner, 2026-11-18) and the stated ceiling (plan 43 R1) ----
+
+    /// 0.85.0's default, the last before the advisor default: kept as v17.
+    const P91_V17: &str = include_str!("nirvana_seats_v17.toml");
+
+    /// D1, the owner, 2026-11-18: "Go ahead and build in the consulting it might be cheaper in the long run for
+    /// balanced runs". The shipped table itself, not a copy with the hunk: sonnet has an Opus advisor in Balanced and
+    /// none in Efficient or SOTA, no other seat has one, and the hunk the tests build from is the table's own text.
+    #[test]
+    fn p91_the_default_gives_sonnet_an_opus_advisor_in_balanced_only() {
+        let table = table();
+        let sonnet = table.seat("sonnet").expect("sonnet");
+        assert_eq!(sonnet.advisor.at(Mode::Balanced), Some("opus"));
+        assert_eq!(sonnet.advisor.at(Mode::Efficient), None);
+        assert_eq!(sonnet.advisor.at(Mode::Sota), None, "SOTA is left as it is");
+        for seat in table.seats.iter().filter(|seat| seat.id != "sonnet") {
+            assert_eq!(seat.advisor, Advisors::default(), "{}", seat.id);
+        }
+        // The advisor the table resolves is the opus seat, on, with its own model id.
+        let opus = table.seat("opus").expect("opus");
+        let got = table.advisor_of("sonnet", Mode::Balanced).expect("an advisor").expect("on");
+        assert_eq!((got.id.as_str(), &got.model), ("opus", &opus.model));
+        assert!(got.enabled);
+        for mode in [Mode::Efficient, Mode::Sota] {
+            assert!(table.advisor_of("sonnet", mode).is_none(), "{mode:?}");
+        }
+        for seat in &table.seats {
+            for mode in [Mode::Efficient, Mode::Balanced, Mode::Sota] {
+                if (seat.id.as_str(), mode) != ("sonnet", Mode::Balanced) {
+                    assert!(table.advisor_of(&seat.id, mode).is_none(), "{} {mode:?}", seat.id);
+                }
+            }
+        }
+        assert!(table.problems().is_empty(), "{:?}", table.problems());
+        // Last, so a sabotage of a row above is caught by its own assertion: the p90 tests' hunk is this table's text.
+        assert_eq!(DEFAULT.matches(P90_ADVISOR_LINES).count(), 1, "the advisor rows, once");
+        assert_eq!(p90_default(), DEFAULT, "p90_default takes its early return");
+    }
+
+    /// D2, plan 43 R1, the owner's "1. yes": the default states the worker ceiling in [constants], 300000, where 0.85.0
+    /// had only the serde default.
+    #[test]
+    fn p91_the_default_states_the_worker_ceiling() {
+        assert_eq!(DEFAULT.matches("\nworker_autocompact_tokens = 300000\n").count(), 1);
+        let constants = DEFAULT.split("\n[constants]\n").nth(1).expect("[constants]");
+        let constants = constants.split("\n[").next().unwrap();
+        assert!(constants.contains("\nworker_autocompact_tokens = 300000\n"), "in [constants]");
+        assert_eq!(table().constants.worker_autocompact_tokens, 300_000);
+        assert!(!P91_V17.contains("worker_autocompact_tokens"), "0.85.0 had none");
+        assert_eq!(DEFAULT.matches(P90_CEILING_LINES).count(), 1, "the ceiling rows, once");
+    }
+
+    /// The upgrade path: 0.85.0's default is the last historical one, 0.79.0's (v16) stays historical, and an installed
+    /// unedited v17 upgrades to the advisor default with its mode kept.
+    #[test]
+    fn p91_v17_is_last_and_v16_still_historical() {
+        assert_eq!(HISTORICAL_DEFAULTS.last().copied(), Some(P91_V17));
+        assert!(HISTORICAL_DEFAULTS.contains(&include_str!("nirvana_seats_v16.toml")));
+        assert_ne!(canonical(P91_V17), canonical(DEFAULT));
+        assert!(!differs_from_default(P91_V17));
+        let dir = temp_dir("p91-upgrade-v17");
+        let path = dir.join(SEATS_FILE);
+        let installed = replace_mode_line(P91_V17, "mode = \"efficient\"");
+        std::fs::write(&path, &installed).unwrap();
+        assert_eq!(read_or_create(&path), replace_mode_line(DEFAULT, "mode = \"efficient\""));
+        assert_eq!(std::fs::read_to_string(dir.join("backup").join(SEATS_FILE)).unwrap(), installed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Step 4 of the brief, read from `pick`: the advisor is not in the cost cell, so no pick moves, in any class at any
+    /// mode, and the pick's whole answer (seat, effort, windows, expected use, reason) is the same as on 0.85.0's table.
+    #[test]
+    fn p91_the_advisor_moves_no_pick_and_no_expected_use() {
+        let (old, new) = (parse(P91_V17).expect("v17"), table());
+        let mut hot = world();
+        set(&mut hot, "max", "5h", 0.6);
+        let mut seen = 0;
+        for world in [world(), hot] {
+            for class in &new.classes {
+                for mode in [Mode::Efficient, Mode::Balanced, Mode::Sota] {
+                    let mut request = request(&class.id);
+                    request.mode = mode;
+                    request.needs = class.needs.clone();
+                    let answer = |table: &Table| match pick(table, &world, &request) {
+                        Ok(pick) => serde_json::to_value(&pick).unwrap(),
+                        Err(no) => serde_json::json!({ "none": format!("{no:?}") }),
+                    };
+                    let (a, b) = (answer(&old), answer(&new));
+                    assert_eq!(a, b, "{} {}", mode.word(), class.id);
+                    seen += usize::from(b.get("seat").and_then(|s| s.as_str()) == Some("sonnet"));
+                }
+            }
+        }
+        // Hollow if no pick ever seats sonnet: the comparison must cover the seat that gained the advisor.
+        assert!(seen > 0, "no pick seated sonnet");
     }
 
     // ---- plan 71 ----
@@ -9699,11 +9818,9 @@ worker_autocompact_tokens = 300000\n";
                 );
             }
         }
-        // The upgrade path: 0.79.0's default is the last historical one, it has no Neon, and it upgrades.
-        assert_eq!(
-            HISTORICAL_DEFAULTS.last().copied(),
-            Some(include_str!("nirvana_seats_v16.toml"))
-        );
+        // The upgrade path: 0.79.0's default is historical, it has no Neon, and it upgrades. It was the last one until
+        // the advisor default put 0.85.0's after it (v17, test p91_v17_is_last_and_v16_still_historical).
+        assert!(HISTORICAL_DEFAULTS.contains(&include_str!("nirvana_seats_v16.toml")));
         assert!(before_neon().seat("neon").is_none());
         assert!(!differs_from_default(include_str!(
             "nirvana_seats_v16.toml"
