@@ -25,7 +25,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::nirvana_run::{self, Kind, Phase, Project, RunState};
-use crate::nirvana_seat::{self, Effort, Leases, Mode, ModeSource, Table};
+use crate::nirvana_seat::{self, Effort, Leases, Mode, ModeSource, Table, World};
+use crate::nirvana_seat_calib::{self as calib, Calibration, CellRow};
 
 /// How often the window's copy is read again; Running's transcript is read as often (feature 6).
 pub const REREAD: Duration = Duration::from_secs(2);
@@ -106,6 +107,215 @@ pub struct View {
     pub orchestrator: Option<OrchestratorRow>,
     /// Review M2: the installed `seats.toml` is neither herdr's default nor an old one the next read upgrades.
     pub differs: bool,
+    /// Plan 46: the line to show when `differs`: which values the table keeps when those are all that differ ("seats.toml
+    /// keeps your overrides_per_run = 5; the rest is herdr's default."), else `nirvana_seat::DIFFERS_LINE`.
+    pub differs_line: Option<String>,
+    /// Plan 46: the Table page, `None` when the table is refused.
+    pub matrix: Option<Matrix>,
+}
+
+/// Plan 46 (L1, L2): the seat each class gets now in each mode, and what the record says of each seat it lists. The
+/// owner, 2026-11-19: "I would like to see the seating table with the task and model type."
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Matrix {
+    /// Nirvana Claude's row first (`ORCHESTRATOR_ROW`), then one per class in the table's order.
+    pub rows: Vec<MatrixRow>,
+    /// When `seat-calibration.json` was computed, and its summary; `None` before the first check.
+    pub checked_at: Option<u64>,
+    pub summary: Option<String>,
+}
+
+/// The id of Nirvana Claude's row in `Matrix::rows`.
+pub const ORCHESTRATOR_ROW: &str = "Nirvana Claude";
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MatrixRow {
+    /// The class id, or `ORCHESTRATOR_ROW`.
+    pub id: String,
+    pub orchestrator: bool,
+    /// One per mode: Efficient, Balanced, SOTA (`MODES`).
+    pub cells: Vec<MatrixCell>,
+    /// Every seat the class lists, in its order; empty on Nirvana Claude's row.
+    pub detail: Vec<DetailRow>,
+}
+
+/// The modes in the order of `MatrixRow::cells`.
+pub const MODES: [Mode; 3] = [Mode::Efficient, Mode::Balanced, Mode::Sota];
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatrixCell {
+    pub mode: Mode,
+    /// The pick on the live readings; all three `None` when there is no seat, with why in `none`.
+    pub seat: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<Effort>,
+    /// The next seat that cleared the bar (`Pick::contenders`), when another did.
+    pub next: Option<(String, Effort)>,
+    /// Live usage moved the pick: the pick on a cool world (every pool window read now at 0% used) differs.
+    pub forced: bool,
+    /// The cool world's pick when `forced`: "sonnet medium", or "no seat: <why>".
+    pub cool: Option<String>,
+    /// A window the live pick spends was not read, so the pick stood in the unread tier (`Pick::unknown`).
+    pub unread: bool,
+    /// `NoSeat::reason` when there is no seat.
+    pub none: Option<String>,
+    /// The booking's measured factor in words ("measured x0.37 over 7 orders") when calibration moved it.
+    pub measured: Option<String>,
+}
+
+/// One seat a class lists, and its record in that class.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetailRow {
+    pub seat: String,
+    pub score: f32,
+    /// The seat is on in the table.
+    pub enabled: bool,
+    /// The record's rows for this class and seat, one per effort, from `seat-calibration.json`; empty reads
+    /// `nirvana_seat_calib::NO_RECORD`, under `THIN` orders `CellRow::status` reads "thin".
+    pub record: Vec<CellRow>,
+}
+
+/// "checked 2 h ago: 1 cost booked as measured, 2 score findings", or why nothing is checked yet. Read by the Table
+/// page (P46b).
+#[allow(dead_code)]
+pub fn checked_line(matrix: &Matrix, now: u64) -> String {
+    match (matrix.checked_at, &matrix.summary) {
+        (Some(at), Some(summary)) => format!(
+            "checked {} ago: {summary}",
+            crate::nirvana_running::elapsed(now.saturating_sub(at))
+        ),
+        _ => "not checked against the record yet: herdr seat calibrate".to_owned(),
+    }
+}
+
+fn words(seat: &str, effort: Effort) -> String {
+    format!("{seat} {}", effort.word())
+}
+
+/// One cell: the live pick, and the cool one when they differ.
+fn cell(table: &Table, live: &World, cool: &World, request: &nirvana_seat::Request) -> MatrixCell {
+    let answer = |world: &World| nirvana_seat::pick(table, world, request);
+    let (now, then) = (answer(live), answer(cool));
+    let key = |got: &Result<nirvana_seat::Pick, nirvana_seat::NoSeat>| {
+        got.as_ref().ok().map(|pick| (pick.seat.clone(), pick.effort))
+    };
+    let forced = key(&now) != key(&then);
+    let cool_words = forced.then(|| match &then {
+        Ok(pick) => words(&pick.seat, pick.effort),
+        Err(no) => format!("no seat: {}", no.reason),
+    });
+    match now {
+        Ok(pick) => MatrixCell {
+            mode: request.mode,
+            next: pick
+                .contenders
+                .get(1)
+                .map(|next| (next.seat.clone(), next.effort)),
+            unread: !pick.unknown.is_empty(),
+            measured: pick
+                .use_basis
+                .as_deref()
+                .and_then(|basis| basis.split_once("; measured x"))
+                .map(|(_, rest)| format!("measured x{rest}")),
+            seat: Some(pick.seat),
+            model: Some(pick.model),
+            effort: Some(pick.effort),
+            forced,
+            cool: cool_words,
+            none: None,
+        },
+        Err(no) => MatrixCell {
+            mode: request.mode,
+            seat: None,
+            model: None,
+            effort: None,
+            next: None,
+            forced,
+            cool: cool_words,
+            unread: false,
+            none: Some(no.reason),
+            measured: None,
+        },
+    }
+}
+
+/// Plan 46: the Table page's matrix, from the table, the live world and the calibration file's rows. Pure: 6 calls of
+/// `orchestrator_seat` and two `pick`s per class and mode (live and cool), about 140 in all (timed in
+/// `p97_the_matrix_is_cheap`).
+pub fn matrix(table: &Table, live: &World, calibration: Option<&Calibration>) -> Matrix {
+    let cool = nirvana_seat::cool_world(table, live);
+    let mut rows = Vec::with_capacity(table.classes.len() + 1);
+    let orchestrator = MODES
+        .iter()
+        .map(|mode| {
+            let mut at = table.clone();
+            at.mode = *mode;
+            let (now, then) = (
+                nirvana_seat::orchestrator_seat(&at, live),
+                nirvana_seat::orchestrator_seat(&at, &cool),
+            );
+            let forced = (&now.seat, now.effort) != (&then.seat, then.effort);
+            MatrixCell {
+                mode: *mode,
+                seat: Some(now.seat),
+                model: Some(now.model),
+                effort: Some(now.effort),
+                next: None,
+                forced,
+                cool: forced.then(|| words(&then.seat, then.effort)),
+                unread: false,
+                none: None,
+                measured: None,
+            }
+        })
+        .collect();
+    rows.push(MatrixRow {
+        id: ORCHESTRATOR_ROW.to_owned(),
+        orchestrator: true,
+        cells: orchestrator,
+        detail: Vec::new(),
+    });
+    for class in &table.classes {
+        let cells = MODES
+            .iter()
+            .map(|mode| {
+                let mut request = nirvana_seat::Request::new(&class.id);
+                request.mode = *mode;
+                // The class's own needs, as `p91_the_advisor_moves_no_pick_and_no_expected_use` asks.
+                request.needs = class.needs.clone();
+                cell(table, live, &cool, &request)
+            })
+            .collect();
+        let detail = class
+            .seats
+            .iter()
+            .map(|entry| DetailRow {
+                seat: entry.seat.clone(),
+                score: entry.score,
+                enabled: table.seat(&entry.seat).is_some_and(|seat| seat.enabled),
+                record: calibration
+                    .map(|cal| {
+                        cal.cells
+                            .iter()
+                            .filter(|row| row.class == class.id && row.seat == entry.seat)
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            })
+            .collect();
+        rows.push(MatrixRow {
+            id: class.id.clone(),
+            orchestrator: false,
+            cells,
+            detail,
+        });
+    }
+    Matrix {
+        rows,
+        checked_at: calibration.map(|cal| cal.computed_at),
+        summary: calibration.map(|cal| cal.summary.clone()),
+    }
 }
 
 impl View {
@@ -302,11 +512,18 @@ fn signature(path: &Path) -> Signature {
 /// The table and why it is not used. A missing `seats.toml` reads as herdr's default, which is what the
 /// next `seat pick` writes; this read never writes it.
 fn read_table(seats_dir: &Path) -> (Option<Table>, Option<String>, bool) {
+    let (table, note, differs, _) = read_table_line(seats_dir);
+    (table, note, differs)
+}
+
+/// `read_table` and the differs line (plan 46: it names carried values).
+fn read_table_line(seats_dir: &Path) -> (Option<Table>, Option<String>, bool, Option<String>) {
     let path = seats_dir.join(nirvana_seat::SEATS_FILE);
     let text = std::fs::read_to_string(&path).unwrap_or_else(|_| nirvana_seat::DEFAULT.to_owned());
     let differs = nirvana_seat::differs_from_default(&text);
+    let line = nirvana_seat::differs_line(&text);
     match nirvana_seat::parse(&text) {
-        Ok(table) => (Some(table), None, differs),
+        Ok(table) => (Some(table), None, differs, line),
         Err(_) => (
             None,
             Some(format!(
@@ -314,6 +531,7 @@ fn read_table(seats_dir: &Path) -> (Option<Table>, Option<String>, bool) {
                 nirvana_seat::SEATS_FILE
             )),
             differs,
+            line,
         ),
     }
 }
@@ -365,7 +583,7 @@ fn read(root: &Path, seats_dir: &Path, replays: &mut Replays, now: u64) -> View 
         };
         runs.push((run, state));
     }
-    let (mut table, mut note, differs) = read_table(seats_dir);
+    let (mut table, mut note, differs, differs_line) = read_table_line(seats_dir);
     let mut mode_source = None;
     if let Some(t) = table.as_mut() {
         match nirvana_seat::project_mode(root, t) {
@@ -394,10 +612,19 @@ fn read(root: &Path, seats_dir: &Path, replays: &mut Replays, now: u64) -> View 
     let mut view = compose(table.as_ref(), note, &runs, &leases, now);
     view.mode_source = mode_source;
     view.differs = differs;
+    view.differs_line = differs_line;
     if let Some(table) = table.as_ref() {
+        // Plan 46: the calibration file read once, here, never computed: a check reads every journal and runs in the
+        // idle tick. Its factors are this project's.
+        let calibration = calib::read(seats_dir);
+        let factors = calibration.as_ref().map_or_else(Default::default, |cal| {
+            calib::Factors::from_calibration(cal, Some(calib::root_key(root)))
+        });
         // The cache alone, never a CLI read from the square (nirvana_seat::cached_world).
         let mut world = nirvana_seat::cached_world(seats_dir, now);
         world.leases = leases.leases.clone();
+        world.calibration = factors;
+        view.matrix = Some(matrix(table, &world, calibration.as_ref()));
         let rule = nirvana_seat::orchestrator_seat(table, &world);
         let running = running_seat_for(root, seats_dir);
         let restart_to_switch = running

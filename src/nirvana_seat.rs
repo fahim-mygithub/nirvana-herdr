@@ -80,6 +80,9 @@ pub const HISTORICAL_DEFAULTS: &[&str] = &[
     // The advisor default (2026-11-18): the default before Sonnet took an Opus advisor in Balanced and the table stated
     // `worker_autocompact_tokens` (0cdef448, alpha 0.85.0), copied before the edit so an installed copy upgrades.
     include_str!("nirvana_seats_v17.toml"),
+    // Plan 46: the default before `calibration = true` and Hydrogen low's refit (15822b68), copied before the edit so an
+    // installed copy upgrades.
+    include_str!("nirvana_seats_v18.toml"),
 ];
 pub const DIR: &str = "nirvana";
 pub const SEATS_FILE: &str = "seats.toml";
@@ -223,6 +226,10 @@ pub struct Table {
     pub version: u32,
     pub mode: Mode,
     pub use_record: bool,
+    /// Plan 46: book a seat and effort at its measured cost from `seat-calibration.json` (`nirvana_seat_calib`). A table
+    /// without the line reads false, so an installed table that never took the 0.87 default books exactly as before.
+    #[serde(default)]
+    pub calibration: bool,
     pub constants: Constants,
     pub size: Sizes,
     #[serde(rename = "pool")]
@@ -1091,17 +1098,193 @@ fn maybe_upgrade(path: &Path) -> Option<()> {
     let is_historical = HISTORICAL_DEFAULTS
         .iter()
         .any(|hist| canonical == hist.replace("\r\n", "\n"));
-    if !is_historical {
-        return None;
-    }
+    // Plan 46: a kept default with plain values edited takes the new default with those values carried. The owner's
+    // table, 2026-11-19, was 0.78.2's default (v15) with `overrides_per_run = 5`, and took none of the three defaults
+    // after it because only a whole-text match upgraded.
+    let (current_canonical, carried) = if is_historical {
+        (current_canonical, None)
+    } else {
+        let carried = carried_from_kept(&canonical)?;
+        let (upgraded, dropped) = with_carried(&current_canonical, &carried.lines);
+        // The carried values must still parse in the new default, or the file is left as it is.
+        parse(&upgraded).ok()?;
+        (upgraded, Some((carried, dropped)))
+    };
     let dir = path.parent()?;
     let backup_dir = dir.join("backup");
     let _ = std::fs::create_dir_all(&backup_dir);
-    let _ = std::fs::copy(path, backup_dir.join(SEATS_FILE));
+    // Plan 46: a dated name, so a later upgrade never writes over an earlier backup (it was one `seats.toml`).
+    let backup = backup_name(&backup_dir, now());
+    let _ = std::fs::copy(path, &backup);
+
+    if let Some((carried, dropped)) = carried {
+        let note = format!(
+            "{} seats.toml took herdr's default, keeping your {}{}; the file before is {}\n",
+            crate::nirvana_run::utc(now()),
+            carried.words(),
+            if dropped.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; dropped, no longer in the default: {}",
+                    dropped.join(", ")
+                )
+            },
+            backup.display()
+        );
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(backup_dir.join(UPGRADE_LOG))
+            .and_then(|mut file| file.write_all(note.as_bytes()));
+    }
 
     let upgraded = replace_mode_line(&current_canonical, mode_line);
     let _ = write_atomic(path, upgraded.as_bytes());
     Some(())
+}
+
+/// Plan 46: beside the backups, one line per upgrade that carried the owner's values, with any it dropped.
+pub const UPGRADE_LOG: &str = "seats-upgrades.log";
+
+/// `<backup>/seats-<UTC>.toml`, with `-2`, `-3` on when that name is taken (two upgrades in one second).
+fn backup_name(backup_dir: &Path, at: u64) -> PathBuf {
+    let stamp: String = crate::nirvana_run::utc(at)
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect();
+    let mut name = backup_dir.join(format!("seats-{stamp}.toml"));
+    let mut n = 2;
+    while name.exists() {
+        name = backup_dir.join(format!("seats-{stamp}-{n}.toml"));
+        n += 1;
+    }
+    name
+}
+
+/// Plan 46: one line of a table, read as a plain assignment: the key and its scalar value (a string, number or bool;
+/// never an array, an inline table or a date). A comment or a header is none.
+fn plain_assignment(line: &str) -> Option<(String, toml::Value)> {
+    let parsed: toml::Table = toml::from_str(line).ok()?;
+    let mut entries = parsed.into_iter();
+    let (key, value) = entries.next()?;
+    if entries.next().is_some() {
+        return None;
+    }
+    matches!(
+        value,
+        toml::Value::String(_) | toml::Value::Integer(_) | toml::Value::Float(_) | toml::Value::Boolean(_)
+    )
+    .then_some((key, value))
+}
+
+/// The section each line sits in: `None` at the top level, else its header's text (`constants`, `[seat]`).
+fn sections(lines: &[&str]) -> Vec<Option<String>> {
+    let mut section = None;
+    lines
+        .iter()
+        .map(|line| {
+            let trimmed = line.trim();
+            if let Some(header) = trimmed.strip_prefix('[') {
+                section = Some(header.trim_end_matches(']').trim().to_owned());
+            }
+            section.clone()
+        })
+        .collect()
+}
+
+/// Plan 46: the owner's lines that differ from a kept default only in a plain value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Carried {
+    /// (section, key, the owner's line, the kept default's value).
+    pub lines: Vec<(Option<String>, String, String, toml::Value)>,
+}
+
+impl Carried {
+    /// "overrides_per_run = 5", or several joined by "; ".
+    pub fn words(&self) -> String {
+        self.lines
+            .iter()
+            .map(|(_, key, line, _)| {
+                let value = plain_assignment(line).map_or_else(String::new, |(_, value)| value.to_string());
+                format!("{key} = {value}")
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
+/// Plan 46: how `installed` differs from `kept` (both canonical) when every differing line is a changed plain value of
+/// the same key at the top level or in `[constants]`; `None` for any other difference (a seat, a class, a price, a
+/// cell, a comment, an added or removed line). An empty list is no difference.
+pub fn carried_edits(installed: &str, kept: &str) -> Option<Carried> {
+    let (a, b): (Vec<&str>, Vec<&str>) = (installed.lines().collect(), kept.lines().collect());
+    if a.len() != b.len() {
+        return None;
+    }
+    let at = sections(&b);
+    let mut lines = Vec::new();
+    for (index, (mine, theirs)) in a.iter().zip(&b).enumerate() {
+        if mine == theirs {
+            continue;
+        }
+        let section = &at[index];
+        if !matches!(section.as_deref(), None | Some("constants")) {
+            return None;
+        }
+        let ((key, _), (their_key, value)) = (plain_assignment(mine)?, plain_assignment(theirs)?);
+        if key != their_key {
+            return None;
+        }
+        lines.push((section.clone(), key, (*mine).to_owned(), value));
+    }
+    Some(Carried { lines })
+}
+
+/// Plan 46: what `installed` (canonical) carries from the kept default it is nearest to, by lines that differ; `None`
+/// when that nearest default is the current one (nothing to upgrade), or the difference is not plain values only.
+fn carried_from_kept(installed: &str) -> Option<Carried> {
+    let current = canonical(DEFAULT);
+    // A default of another length is never carried from (`carried_edits` refuses an added or removed line), so the
+    // count over the shorter text is enough to find the nearest.
+    let nearest = std::iter::once(DEFAULT)
+        .chain(HISTORICAL_DEFAULTS.iter().copied())
+        .map(canonical)
+        .map(|kept| {
+            let differ = installed.lines().zip(kept.lines()).filter(|(a, b)| a != b).count();
+            (differ, kept)
+        })
+        // The first of the fewest: the current default wins a tie, so an edited current table is never rewritten.
+        .min_by_key(|(differ, _)| *differ)?;
+    if nearest.1 == current {
+        return None;
+    }
+    carried_edits(installed, &nearest.1).filter(|carried| !carried.lines.is_empty())
+}
+
+/// `default` with each carried key set to the owner's line, in the same section; the keys the default no longer has.
+fn with_carried(
+    default: &str,
+    carried: &[(Option<String>, String, String, toml::Value)],
+) -> (String, Vec<String>) {
+    let lines: Vec<&str> = default.lines().collect();
+    let at = sections(&lines);
+    let mut out: Vec<String> = lines.iter().map(|line| (*line).to_owned()).collect();
+    let mut dropped = Vec::new();
+    for (section, key, mine, _) in carried {
+        let found = (0..lines.len()).find(|&i| {
+            at[i] == *section && plain_assignment(lines[i]).is_some_and(|(k, _)| k == *key)
+        });
+        match found {
+            Some(i) => out[i] = mine.clone(),
+            None => dropped.push(key.clone()),
+        }
+    }
+    let mut text = out.join("\n");
+    if default.ends_with('\n') {
+        text.push('\n');
+    }
+    (text, dropped)
 }
 
 /// The text as `maybe_upgrade` compares it: LF line ends and the top-level mode line fixed.
@@ -1121,6 +1304,26 @@ pub fn differs_from_default(text: &str) -> bool {
 pub const DIFFERS_LINE: &str =
     "seats.toml differs from herdr's default. herdr seat diff shows how.";
 
+/// Plan 46: the line for a table that differs from the default only in plain values, which every upgrade carries:
+/// "seats.toml keeps your overrides_per_run = 5; the rest is herdr's default." Any other difference is `DIFFERS_LINE`;
+/// no difference, `None`.
+pub fn differs_line(text: &str) -> Option<String> {
+    if !differs_from_default(text) {
+        return None;
+    }
+    Some(
+        match carried_edits(&canonical(text), &canonical(DEFAULT))
+            .filter(|carried| !carried.lines.is_empty())
+        {
+            Some(carried) => format!(
+                "seats.toml keeps your {}; the rest is herdr's default.",
+                carried.words()
+            ),
+            None => DIFFERS_LINE.to_owned(),
+        },
+    )
+}
+
 /// `herdr seat diff`: a unified difference from the owner's `seats.toml` to herdr's default with the owner's mode line,
 /// three lines of context, so the mode they chose never shows as a change.
 pub fn diff_to_default(installed: &str, label: &str) -> String {
@@ -1133,7 +1336,11 @@ pub fn diff_to_default(installed: &str, label: &str) -> String {
     if body.is_empty() {
         return "seats.toml is herdr's default.\n".to_owned();
     }
-    format!("--- {label}\n+++ herdr's default\n{body}")
+    // Plan 46: after an upgrade that carried the owner's values, the difference is those values alone, and it says so.
+    let note = differs_line(&installed)
+        .filter(|line| line != DIFFERS_LINE)
+        .map_or_else(String::new, |line| format!("{line} Each upgrade keeps it.\n"));
+    format!("--- {label}\n+++ herdr's default\n{body}{note}")
 }
 
 /// A line diff by longest common subsequence: `seats.toml` is under a thousand lines, so the table is small.
@@ -1272,6 +1479,9 @@ pub struct World {
     pub record: BTreeMap<RecordKey, Tally>,
     /// Overrides already accepted in the request's run.
     pub overrides_used: u32,
+    /// Plan 46: the measured cost factors from `seat-calibration.json`, and the project they are read for. Used only
+    /// when the table says `calibration = true`; empty, every pick is the table's own.
+    pub calibration: crate::nirvana_seat_calib::Factors,
 }
 
 #[derive(Debug, Clone)]
@@ -2332,13 +2542,24 @@ fn populate_windows(
     };
     cand.windows.clear();
     let cell = seat.use_cell(effort);
-    cand.use_basis =
-        cell.map(|cell| format!("{} at {}: {}", seat.id, cell.effort.word(), cell.basis));
+    // Plan 46: where 5 or more medium orders measured the cell outside 0.5 to 2.0, the booking is what they spent. A
+    // factor scales the booked use only: the score, the bar and every filter but the windows' arithmetic are untouched.
+    let measured = cell
+        .filter(|_| table.calibration)
+        .and_then(|_| world.calibration.for_cell(&seat.id, effort));
+    cand.use_basis = cell.map(|cell| {
+        let basis = format!("{} at {}: {}", seat.id, cell.effort.word(), cell.basis);
+        match measured {
+            Some(applied) => format!("{basis}; {}", applied.words()),
+            None => basis,
+        }
+    });
     let scale = cell
         .and_then(|cell| date(&cell.at))
         .map_or(1.0, |at| seat.price_scale(at, world.now))
         * class.weight
-        * size.use_factor;
+        * size.use_factor
+        * measured.map_or(1.0, |applied| applied.factor as f32);
     let fallback = cell.map_or(0.0, |cell| {
         cell.windows.values().copied().fold(0.0, f32::max)
     });
@@ -3536,6 +3757,17 @@ pub struct RecordLine {
     /// order's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advisor: Option<AdvisorUse>,
+    /// Plan 46: the order's FIRST gate verdict, as its first `gated` event wrote it. `outcome` is the last word on the
+    /// order; the first is what a seat's first-pass share reads (`nirvana/seat_refresh.py classes`), which until now only
+    /// the journals held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_verdict: Option<String>,
+    /// Plan 46: whether every failing axis of that first verdict was the brief's or the gate's (alpha 0.83.0's fault),
+    /// so no worker could have fixed it. `None` when the gate said no fault (a pass, or axes from before 0.83.0, which
+    /// read as the worker's). On 2026-11-19 Opus in build.load_bearing read 8 first passes of 21, and 8 of 10 without
+    /// the refusals for an unowned file or a rebase (plan 46 §3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_no_worker_fault: Option<bool>,
     /// Keys this herdr does not know, kept on a round trip (O2 review S5: a later field must not be dropped).
     #[serde(flatten, default)]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -4146,6 +4378,7 @@ const USAGE: &str = "usage: herdr seat list [--json]
        herdr seat record --json '<line>'
        herdr seat orchestrator [--json]
        herdr seat diff   (how your seats.toml differs from herdr's default)
+       herdr seat calibrate [--json] [--dry-run]   (the table against the record: measured costs and score findings)
        herdr seat mode [efficient|balanced|sota]   (prints the mode, or sets seats.toml's; plan 12 O8a)
        herdr seat run|exec|status|read|stop|cleanup ...   (plan 12 O3; `herdr seat run` alone prints its usage)
 --size defaults to medium (seats.toml's [size.medium]); --mode to seats.toml's mode.
@@ -4552,6 +4785,9 @@ fn leases_or_exit(path: &Path) -> Leases {
 /// test with no cache ran the real CLIs on the owner's sign-in (review of the p20 build, 2026-10-20). A stale
 /// reading here is stale, which the rule turns into opus medium.
 pub fn cached_world(dir: &Path, now: u64) -> World {
+    // Plan 46: the measured cost factors too, with no project (no `git` here): the pooled factor for every cell. The
+    // Seats square sets its own project's (`nirvana_seats_square::read`).
+    let calibration = crate::nirvana_seat_calib::Factors::from_file(dir, None);
     let cache = nirvana_usage::read_cache(&dir.join(nirvana_usage::CACHE_FILE));
     World {
         now,
@@ -4563,7 +4799,45 @@ pub fn cached_world(dir: &Path, now: u64) -> World {
         leases: load_leases(&dir.join(LEASES_FILE))
             .unwrap_or_default()
             .leases,
+        calibration,
         ..World::default()
+    }
+}
+
+/// Plan 46: the world the table's own choice is read on: `live` with every pool window, a seat's own (`week.fable`)
+/// included, read now at 0% used with its whole length to its reset, and no booking. The CLIs, the record and the
+/// factors stay `live`'s, so only usage differs. No readings at all is not this world: that is the unread tier, which
+/// ranks seats otherwise (§3), and would mark every cell as moved.
+pub fn cool_world(table: &Table, live: &World) -> World {
+    let mut readings: Vec<Reading> = Vec::new();
+    for pool in &table.pools {
+        let mut windows = pool.windows.clone();
+        for seat in table.seats.iter().filter(|seat| seat.pool == pool.id) {
+            for window in &seat.extra_windows {
+                if !windows.contains(window) {
+                    windows.push(window.clone());
+                }
+            }
+        }
+        for window in windows {
+            let length = nirvana_usage::window_length(&window).unwrap_or(7 * 86_400);
+            readings.push(Reading {
+                pool: pool.id.clone(),
+                window,
+                used: Some(0.0),
+                resets_at: Some(live.now + length),
+                resets_text: None,
+                read_at: live.now,
+                source: "cool world (plan 46)".into(),
+            });
+        }
+    }
+    World {
+        now: live.now,
+        readings,
+        leases: Vec::new(),
+        overrides_used: 0,
+        ..live.clone()
     }
 }
 
@@ -4602,6 +4876,13 @@ pub fn live_world(table: &Table) -> World {
             BTreeMap::new()
         },
         overrides_used: 0,
+        // Plan 46: read only when the table books by it; the project (a `git` call outside a run) only when the file
+        // holds a project's own factor.
+        calibration: if table.calibration {
+            crate::nirvana_seat_calib::Factors::for_this_project(&dir())
+        } else {
+            crate::nirvana_seat_calib::Factors::default()
+        },
     }
 }
 
@@ -4613,6 +4894,8 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         Some("record") => record_cli(&args[1..]),
         Some("orchestrator") => orchestrator_cli(&args[1..]),
         Some("diff") => diff_cli(&args[1..]),
+        // Plan 46: the table checked against the record.
+        Some("calibrate") => crate::nirvana_seat_calib::cli(&args[1..]),
         // Plan 12 O8a: the mode the Seats square shows and changes.
         Some("mode") => crate::nirvana_seats_square::mode_cli(&args[1..]),
         // Plan 12 O3: the runner's verbs live in `nirvana_worker`.
@@ -4678,15 +4961,17 @@ fn list_cli(args: &[String]) -> std::io::Result<()> {
     let dir = dir();
     world.leases = leases_or_exit(&dir.join(LEASES_FILE)).leases;
     let mut view = list_view(&table, &world);
-    let differs =
-        std::fs::read_to_string(dir.join(SEATS_FILE)).is_ok_and(|text| differs_from_default(&text));
-    view["differs_from_default"] = differs.into();
+    let differs = std::fs::read_to_string(dir.join(SEATS_FILE))
+        .ok()
+        .and_then(|text| differs_line(&text));
+    view["differs_from_default"] = differs.is_some().into();
+    view["differs_line"] = differs.clone().into();
     if json {
         println!("{}", serde_json::to_string_pretty(&view)?);
     } else {
         let mut text = list_text(&table, &world, &dir);
-        if differs {
-            text.push_str(DIFFERS_LINE);
+        if let Some(line) = &differs {
+            text.push_str(line);
             text.push('\n');
         }
         print!("{text}");
@@ -5438,6 +5723,19 @@ pub(crate) mod tests {
         dir
     }
 
+    /// Plan 46: the backup an upgrade wrote is `backup/seats-<UTC>.toml`, no longer one `backup/seats.toml`; the one
+    /// file there, which the tests that read `backup/seats.toml` now read.
+    fn one_backup(dir: &Path) -> PathBuf {
+        let found: Vec<PathBuf> = std::fs::read_dir(dir.join("backup"))
+            .expect("a backup folder")
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .collect();
+        assert_eq!(found.len(), 1, "one backup: {found:?}");
+        found[0].clone()
+    }
+
     #[test]
     fn the_default_table_is_written_once_parses_and_holds_the_plans_seats_and_classes() {
         let dir = temp_dir("default");
@@ -5647,7 +5945,6 @@ pub(crate) mod tests {
     fn unedited_seats_toml_upgrades_itself_preserving_mode_and_backs_up_old_default() {
         let dir = temp_dir("upgrade-seats");
         let path = dir.join(SEATS_FILE);
-        let backup = dir.join("backup").join(SEATS_FILE);
 
         // 1. Install historical default v1 (from 0.13.0, 80ec1044), with CRLF and mode = "efficient"
         let v1_with_mode = replace_mode_line(HISTORICAL_DEFAULTS[0], "mode = \"efficient\"");
@@ -5677,7 +5974,7 @@ pub(crate) mod tests {
             "on-disk file is upgraded"
         );
         assert_eq!(
-            std::fs::read_to_string(&backup).unwrap(),
+            std::fs::read_to_string(one_backup(&dir)).unwrap(),
             v1_crlf,
             "backup holds the exact old installed file"
         );
@@ -5803,7 +6100,6 @@ pub(crate) mod tests {
     fn section10_v3_upgrade_keeps_efficient_mode_and_edited_does_not() {
         let dir = temp_dir("upgrade-v3");
         let path = dir.join(SEATS_FILE);
-        let backup = dir.join("backup").join(SEATS_FILE);
 
         let v3_with_mode = replace_mode_line(HISTORICAL_DEFAULTS[2], "mode = \"efficient\"");
         std::fs::write(&path, &v3_with_mode).unwrap();
@@ -5814,7 +6110,7 @@ pub(crate) mod tests {
         let current_efficient = replace_mode_line(DEFAULT, "mode = \"efficient\"");
         assert_eq!(text, current_efficient);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), current_efficient);
-        assert_eq!(std::fs::read_to_string(&backup).unwrap(), v3_with_mode);
+        assert_eq!(std::fs::read_to_string(one_backup(&dir)).unwrap(), v3_with_mode);
 
         // An edited file is never upgraded
         let edited = current_efficient.replace("floor = 0.05", "floor = 0.08");
@@ -8412,7 +8708,7 @@ pub(crate) mod tests {
                 "v{n}"
             );
             assert_eq!(
-                std::fs::read_to_string(dir.join("backup").join(SEATS_FILE)).unwrap(),
+                std::fs::read_to_string(one_backup(&dir)).unwrap(),
                 installed
             );
             let _ = std::fs::remove_dir_all(&dir);
@@ -8438,8 +8734,10 @@ pub(crate) mod tests {
         }
         assert_eq!(
             HISTORICAL_DEFAULTS.last().copied(),
-            Some(include_str!("nirvana_seats_v17.toml"))
+            Some(include_str!("nirvana_seats_v18.toml"))
         );
+        // Plan 46: v18 went after v17, which stays historical (control p97_v17_not_historical).
+        assert!(HISTORICAL_DEFAULTS.contains(&include_str!("nirvana_seats_v17.toml")));
         // Plan 71: v14 went after v13, which stays historical (control p70_v13_not_historical).
         assert!(HISTORICAL_DEFAULTS.contains(&include_str!("nirvana_seats_v13.toml")));
         // The seats refresh: v15 went after v14, which stays historical (control p71_v14_not_historical).
@@ -9435,7 +9733,8 @@ worker_autocompact_tokens = 300000\n";
     /// unedited v17 upgrades to the advisor default with its mode kept.
     #[test]
     fn p91_v17_is_last_and_v16_still_historical() {
-        assert_eq!(HISTORICAL_DEFAULTS.last().copied(), Some(P91_V17));
+        // Plan 46: v18 went after v17; v17 stays historical (p97_v18_is_last_and_an_exact_old_default_upgrades_with_its_mode).
+        assert!(HISTORICAL_DEFAULTS.contains(&P91_V17));
         assert!(HISTORICAL_DEFAULTS.contains(&include_str!("nirvana_seats_v16.toml")));
         assert_ne!(canonical(P91_V17), canonical(DEFAULT));
         assert!(!differs_from_default(P91_V17));
@@ -9444,7 +9743,7 @@ worker_autocompact_tokens = 300000\n";
         let installed = replace_mode_line(P91_V17, "mode = \"efficient\"");
         std::fs::write(&path, &installed).unwrap();
         assert_eq!(read_or_create(&path), replace_mode_line(DEFAULT, "mode = \"efficient\""));
-        assert_eq!(std::fs::read_to_string(dir.join("backup").join(SEATS_FILE)).unwrap(), installed);
+        assert_eq!(std::fs::read_to_string(one_backup(&dir)).unwrap(), installed);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -9452,7 +9751,8 @@ worker_autocompact_tokens = 300000\n";
     /// mode, and the pick's whole answer (seat, effort, windows, expected use, reason) is the same as on 0.85.0's table.
     #[test]
     fn p91_the_advisor_moves_no_pick_and_no_expected_use() {
-        let (old, new) = (parse(P91_V17).expect("v17"), table());
+        // Plan 46: against the advisor default as it shipped (v18); today's also refits Hydrogen low, not the advisor's.
+        let (old, new) = (parse(P91_V17).expect("v17"), parse(include_str!("nirvana_seats_v18.toml")).expect("v18"));
         let mut hot = world();
         set(&mut hot, "max", "5h", 0.6);
         let mut seen = 0;
@@ -9531,7 +9831,8 @@ worker_autocompact_tokens = 300000\n";
                 .clone()
         };
         for (effort, ratio) in [
-            (Effort::Low, 1.43),
+            // Plan 46: low carries its own orders' refit too (seat_fit.py, n 7).
+            (Effort::Low, 1.43 * 0.37),
             (Effort::Medium, 1.39 * 0.41),
             (Effort::High, 1.12 * 2.25),
         ] {
@@ -9914,5 +10215,251 @@ worker_autocompact_tokens = 300000\n";
             ["balanced build.load_bearing: carbon high -> neon high"],
             "the owner's calls"
         );
+    }
+
+    // ---- plan 46 (P46a): the calibration in the pick, the upgrade that carries plain edits, the default ----
+
+    const P97_V15: &str = include_str!("nirvana_seats_v15.toml");
+    const P97_V17: &str = include_str!("nirvana_seats_v17.toml");
+    const P97_V18: &str = include_str!("nirvana_seats_v18.toml");
+
+    /// Every backup the upgrade wrote, read whole, in name order.
+    fn p97_backups(dir: &Path) -> Vec<String> {
+        let mut names: Vec<PathBuf> = std::fs::read_dir(dir.join("backup"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .collect();
+        names.sort();
+        names
+            .iter()
+            .map(|path| std::fs::read_to_string(path).unwrap())
+            .collect()
+    }
+
+    /// A calibration holding one pooled factor, as `seat-calibration.json` would.
+    fn p97_factors(seat: &str, effort: Effort, factor: f64, n: usize) -> crate::nirvana_seat_calib::Factors {
+        let cal = crate::nirvana_seat_calib::Calibration {
+            version: crate::nirvana_seat_calib::VERSION,
+            cost: vec![crate::nirvana_seat_calib::CostRow {
+                seat: seat.into(),
+                effort,
+                project: None,
+                n,
+                median: factor,
+                factor: Some(factor),
+                clamped: false,
+            }],
+            ..Default::default()
+        };
+        crate::nirvana_seat_calib::Factors::from_calibration(&cal, None)
+    }
+
+    /// Every class at every mode on a cool and a hot world, as the p91 test reads it: the whole answer.
+    fn p97_answers(table: &Table, factors: &crate::nirvana_seat_calib::Factors) -> Vec<(String, serde_json::Value)> {
+        let mut hot = world();
+        set(&mut hot, "max", "5h", 0.6);
+        let mut out = Vec::new();
+        for mut world in [world(), hot] {
+            world.calibration = factors.clone();
+            for class in &table.classes {
+                for mode in [Mode::Efficient, Mode::Balanced, Mode::Sota] {
+                    let mut request = request(&class.id);
+                    request.mode = mode;
+                    request.needs = class.needs.clone();
+                    let answer = match pick(table, &world, &request) {
+                        Ok(pick) => serde_json::to_value(&pick).unwrap(),
+                        Err(no) => serde_json::json!({ "none": format!("{no:?}") }),
+                    };
+                    out.push((format!("{} {}", mode.word(), class.id), answer));
+                }
+            }
+        }
+        out
+    }
+
+    /// §4 "Applied in the pick": with no factor every pick is the table's own, byte for byte; `calibration = false`
+    /// ignores a factor; and a table without the line (an installed v18) reads it as false.
+    #[test]
+    fn p97_an_empty_calibration_or_off_moves_no_pick() {
+        let empty = crate::nirvana_seat_calib::Factors::default();
+        let on = table();
+        assert!(on.calibration, "the default books by it");
+        let off = parse(&DEFAULT.replacen("\ncalibration = true\n", "\ncalibration = false\n", 1))
+            .expect("off parses");
+        assert!(!off.calibration);
+        // Hydrogen low is seated somewhere on these worlds, so a factor on it is a real difference.
+        let factors = p97_factors("hydrogen", Effort::Low, 0.37, 7);
+        let base = p97_answers(&off, &empty);
+        assert!(
+            base.iter().any(|(_, a)| a.get("seat").and_then(|s| s.as_str()) == Some("hydrogen")
+                && a.get("effort").and_then(|s| s.as_str()) == Some("low")),
+            "no pick seated hydrogen low: the comparison would be hollow"
+        );
+        assert_eq!(p97_answers(&on, &empty), base, "on, with no factor");
+        assert_eq!(p97_answers(&off, &factors), base, "off, with a factor");
+        assert_ne!(p97_answers(&on, &factors), base, "on, with a factor, it books otherwise");
+        // An un-upgraded table has no line: false, so the factor is ignored there too.
+        let installed = parse(P97_V18).expect("v18");
+        assert!(!installed.calibration, "absent reads false");
+        assert_eq!(p97_answers(&installed, &factors), p97_answers(&installed, &empty));
+    }
+
+    /// A factor multiplies the booked use of that seat and effort and nothing else; `use_basis` says so in words.
+    #[test]
+    fn p97_a_factor_scales_only_the_booked_use() {
+        let table = table();
+        let mut request = request("research.web");
+        request.mode = Mode::Efficient;
+        let plain = chosen(&table, &world(), &request);
+        assert_eq!((plain.seat.as_str(), plain.effort), ("hydrogen", Effort::Low), "{}", plain.reason);
+        let mut measured = world();
+        measured.calibration = p97_factors("hydrogen", Effort::Low, 0.37, 7);
+        let got = chosen(&table, &measured, &request);
+        assert_eq!((got.seat.as_str(), got.effort), ("hydrogen", Effort::Low));
+        assert_eq!((got.score, got.bar, got.bar_dropped), (plain.score, plain.bar, plain.bar_dropped));
+        for (a, b) in plain.windows.iter().zip(&got.windows) {
+            assert_eq!(a.window, b.window);
+            assert!((b.expected - a.expected * 0.37).abs() <= a.expected * 1e-5, "{}: {} against {}", a.window, b.expected, a.expected);
+            assert_eq!((a.used, a.headroom), (b.used, b.headroom));
+        }
+        let basis = got.use_basis.as_deref().unwrap();
+        assert!(basis.ends_with("; measured x0.37 over 7 orders"), "{basis}");
+        assert_eq!(basis.strip_suffix("; measured x0.37 over 7 orders"), plain.use_basis.as_deref());
+        // The lease books what the pick expects (to six places, as `lease_for` rounds it).
+        let lease = lease_for(&table, &got, "o1", None, NOW);
+        let week = got.windows.iter().find(|w| w.window == "week").unwrap();
+        assert!((lease.expected["week"] - week.expected).abs() < 1e-6, "{:?}", lease.expected);
+        assert!(lease.expected["week"] < lease_for(&table, &plain, "o1", None, NOW).expected["week"]);
+        // Another effort of the seat is not moved.
+        let mut high = request.clone();
+        high.effort = Some(Effort::High);
+        high.override_seat = Some(("hydrogen:high".into(), "x".into()));
+        let (a, b) = (chosen(&table, &world(), &high), chosen(&table, &measured, &high));
+        assert_eq!(a.windows, b.windows);
+    }
+
+    /// Incident: the owner's installed table, 2026-11-19, is 0.78.2's default (v15) with `overrides_per_run = 5`, and
+    /// took none of the defaults after it. It upgrades now, keeps 5, keeps its mode, and backs up under a dated name.
+    #[test]
+    fn p97_the_owners_table_upgrades_and_keeps_overrides_per_run() {
+        let dir = temp_dir("p97-owner");
+        let path = dir.join(SEATS_FILE);
+        let owners = replace_mode_line(P97_V15, "mode = \"sota\"")
+            .replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1);
+        assert_ne!(owners, replace_mode_line(P97_V15, "mode = \"sota\""));
+        std::fs::write(&path, owners.replace('\n', "\r\n")).unwrap();
+        let text = read_or_create(&path);
+        let want = replace_mode_line(DEFAULT, "mode = \"sota\"")
+            .replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1);
+        assert_eq!(text, want);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), want);
+        let table = parse(&text).unwrap();
+        assert_eq!((table.constants.overrides_per_run, table.mode), (5, Mode::Sota));
+        assert!(table.calibration, "it took the new default");
+        assert_eq!(p97_backups(&dir), [owners.replace('\n', "\r\n")]);
+        let log = std::fs::read_to_string(dir.join("backup").join(UPGRADE_LOG)).unwrap();
+        assert!(log.contains("keeping your overrides_per_run = 5; the file before is "), "{log}");
+        // It still differs, and says only how.
+        assert!(differs_from_default(&text));
+        assert_eq!(
+            differs_line(&text).as_deref(),
+            Some("seats.toml keeps your overrides_per_run = 5; the rest is herdr's default.")
+        );
+        let diff = diff_to_default(&text, "seats.toml");
+        assert!(diff.contains("\n-overrides_per_run = 5\n+overrides_per_run = 3\n"), "{diff}");
+        assert!(
+            diff.ends_with("seats.toml keeps your overrides_per_run = 5; the rest is herdr's default. Each upgrade keeps it.\n"),
+            "{diff}"
+        );
+        // A second read is a no-op; a later upgrade writes a second backup, never over the first.
+        assert_eq!(read_or_create(&path), want);
+        assert_eq!(p97_backups(&dir).len(), 1);
+        std::fs::write(&path, replace_mode_line(P97_V17, "mode = \"sota\"")).unwrap();
+        assert_eq!(read_or_create(&path), replace_mode_line(DEFAULT, "mode = \"sota\""));
+        assert_eq!(p97_backups(&dir).len(), 2, "two upgrades, two backups");
+        assert!(p97_backups(&dir).contains(&owners.replace('\n', "\r\n")), "the first is kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Any edit but a plain top-level or `[constants]` value leaves the file exactly as it is: an edited score, an added
+    /// line, a comment, a value inside a seat; so does a value the new default cannot parse. An edited current default
+    /// is left alone too.
+    #[test]
+    fn p97_other_edits_leave_the_table_alone() {
+        let v15 = P97_V15.to_owned();
+        let score = v15.find("score = ").expect("a score");
+        let cases = [
+            ("an edited score", format!("{}score = 1{}", &v15[..score], &v15[score + "score = ".len() + 2..])),
+            ("an added line", v15.replacen("\nfloor = 0.05\n", "\nfloor = 0.05\nfloor_note = 1\n", 1)),
+            ("a removed line", v15.replacen("\ndefer_min = 30\n", "\n", 1)),
+            ("a comment edit", v15.replacen("# Overrides the orchestrator", "# Overrides that the orchestrator", 1)),
+            ("a seat's value", v15.replacen("\nenabled = false\n", "\nenabled = true\n", 1)),
+            ("a value of another type", v15.replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = \"five\"\n", 1)),
+            ("a renamed key", v15.replacen("\ndefer_min = 30\n", "\ndefer_mins = 30\n", 1)),
+            (
+                "a plain edit and a line added at the end",
+                format!("{}extra = 1\n", v15.replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1)),
+            ),
+        ];
+        for (what, text) in cases {
+            assert_ne!(text, v15, "{what}: the case edits something");
+            let dir = temp_dir(&format!("p97-alone-{}", what.replace(' ', "-")));
+            let path = dir.join(SEATS_FILE);
+            std::fs::write(&path, &text).unwrap();
+            assert_eq!(read_or_create(&path), text, "{what}");
+            assert!(p97_backups(&dir).is_empty(), "{what}: no backup");
+            assert_eq!(differs_line(&text).as_deref(), Some(DIFFERS_LINE), "{what}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        // The current default with a plain edit is the owner's, and current: never rewritten.
+        let dir = temp_dir("p97-alone-current");
+        let path = dir.join(SEATS_FILE);
+        let edited = DEFAULT.replacen("\nfloor = 0.05\n", "\nfloor = 0.08\n", 1);
+        std::fs::write(&path, &edited).unwrap();
+        assert_eq!(read_or_create(&path), edited);
+        assert!(p97_backups(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The kept defaults: v18 is today's before plan 46 and the last kept; an exact old default still upgrades with its
+    /// mode, as before.
+    #[test]
+    fn p97_v18_is_last_and_an_exact_old_default_upgrades_with_its_mode() {
+        assert_eq!(HISTORICAL_DEFAULTS.last().copied(), Some(P97_V18));
+        assert!(HISTORICAL_DEFAULTS.contains(&P97_V17));
+        assert!(!differs_from_default(P97_V18));
+        assert_eq!(differs_line(P97_V18), None);
+        let dir = temp_dir("p97-exact");
+        let path = dir.join(SEATS_FILE);
+        let installed = replace_mode_line(P97_V18, "mode = \"efficient\"");
+        std::fs::write(&path, &installed).unwrap();
+        assert_eq!(read_or_create(&path), replace_mode_line(DEFAULT, "mode = \"efficient\""));
+        assert_eq!(p97_backups(&dir), [installed]);
+        assert!(!dir.join("backup").join(UPGRADE_LOG).exists(), "nothing carried, no note");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The default: `calibration = true`, and one refit, Hydrogen low's cells times 0.37 (seat_fit.py on the record
+    /// 2026-11-19, n 7), the rest of the table as v18 had it.
+    #[test]
+    fn p97_the_default_turns_calibration_on_and_refits_hydrogen_low() {
+        let (new, old) = (table(), parse(P97_V18).unwrap());
+        assert!(new.calibration && !old.calibration);
+        let cells = |table: &Table, effort: Effort| table.seat("hydrogen").unwrap().use_cell(effort).unwrap().clone();
+        let (a, b) = (cells(&old, Effort::Low), cells(&new, Effort::Low));
+        for window in ["5h", "week"] {
+            assert!((b.windows[window] / (a.windows[window] * 0.37) - 1.0).abs() < 1e-3, "{window}: {:?}", b.windows);
+        }
+        assert!(b.basis.contains("refit x0.37 to hydrogen low's own orders (seat_fit.py, n 7"), "{}", b.basis);
+        for effort in [Effort::Medium, Effort::High, Effort::Xhigh] {
+            assert_eq!(cells(&old, effort).windows, cells(&new, effort).windows, "{effort:?}");
+        }
+        // Every other line is v18's: the refit, the calibration line and their comments are the whole change.
+        let changed: Vec<&str> = DEFAULT.lines().filter(|line| !P97_V18.lines().any(|old| old == *line)).collect();
+        assert!(changed.iter().all(|line| line.starts_with('#') || line.starts_with("calibration = ")
+            || line.contains("refit x0.37")), "{changed:#?}");
     }
 }

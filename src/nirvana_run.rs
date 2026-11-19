@@ -717,6 +717,31 @@ pub struct OrderState {
     /// written, two servers, the every-minute pass) neither repeats the line nor wakes the orchestrator for it.
     #[serde(skip)]
     pub last_doubt: Option<String>,
+    /// Plan 46: the order's first gate verdict and whether its failing axes were all the brief's or the gate's
+    /// (`first_fault`), for the record line. Kept out of `status --json`, which shows the last verdict.
+    #[serde(skip)]
+    pub first_verdict: Option<String>,
+    #[serde(skip)]
+    pub first_no_worker_fault: Option<bool>,
+}
+
+/// Plan 46: whether a verdict's failing axes were all a non-worker's fault. `amend` is that by definition (alpha 0.83.0
+/// writes it only then); otherwise `Some` only when an axis carries a fault the gate wrote, since an axis written before
+/// 0.83.0 carries none and reads as the worker's (`nirvana_gate::fault_of`). A pass has no failing axis: `None`.
+pub fn first_fault(verdict: &str, axes: &[Value]) -> Option<bool> {
+    use crate::nirvana_gate::{self, Axis, Outcome};
+    if verdict == Outcome::Amend.word() {
+        return Some(true);
+    }
+    let axes: Vec<Axis> = axes
+        .iter()
+        .filter_map(|axis| serde_json::from_value(axis.clone()).ok())
+        .collect();
+    let said = axes.iter().any(|axis| axis.fault.is_some());
+    let failing = axes
+        .iter()
+        .any(|axis| axis.mark == nirvana_gate::Mark::Fail);
+    (said && failing).then(|| nirvana_gate::no_worker_fault(&axes))
 }
 
 impl OrderState {
@@ -1009,6 +1034,8 @@ pub fn replay(events: &[Event]) -> RunState {
                         last_rate_limit: None,
                         worker: None,
                         last_doubt: None,
+                        first_verdict: None,
+                        first_no_worker_fault: None,
                     });
                 }
             }
@@ -1112,9 +1139,13 @@ pub fn replay(events: &[Event]) -> RunState {
                 order,
                 verdict,
                 reason,
-                ..
+                axes,
             } => {
                 if let Some(known) = state.order_mut(order) {
+                    if known.first_verdict.is_none() {
+                        known.first_verdict = Some(verdict.clone());
+                        known.first_no_worker_fault = first_fault(verdict, axes);
+                    }
                     known.verdict = Some(verdict.clone());
                     if reason.is_some() {
                         known.why = reason.clone();
@@ -2420,6 +2451,8 @@ pub fn record_line(run: &str, order: &OrderState, journal: Option<String>) -> Re
         expected: (!seated.expected.is_empty()).then(|| seated.expected.clone()),
         herdr: Some(crate::nirvana::VERSION.to_owned()),
         advisor: order.advisor_use(),
+        first_verdict: order.first_verdict.clone(),
+        first_no_worker_fault: order.first_no_worker_fault,
         journal,
         extra: serde_json::Map::new(),
     }

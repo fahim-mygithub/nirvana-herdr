@@ -46,7 +46,7 @@ CONTROLS = (
     # The cells: Flash's times the measured ratio, xhigh a prior from high
     # The seats refresh moved each cell to its own price (and medium and high to their record's refit); each sabotage
     # puts back plan 71's value at Flash's price in one window.
-    Control("p71_cell_low", TABLE, 'windows = { "5h" = 0.0002235, week = 0.0001118 }',
+    Control("p71_cell_low", TABLE, 'windows = { "5h" = 8.27e-05, week = 4.135e-05 }',
             'windows = { "5h" = 0.0001157, week = 5.783e-05 }', T_HYDROGEN, "rust"),
     Control("p71_cell_medium", TABLE, 'windows = { "5h" = 0.0002588, week = 0.0001294 }',
             'windows = { "5h" = 0.0002588, week = 0.0001612 }', T_HYDROGEN, "rust"),

@@ -578,3 +578,208 @@ fn percent_keeps_two_figures_for_small_shares() {
     assert_eq!(percent(0.015), "1.5%");
     assert_eq!(percent(0.38), "38%");
 }
+
+// ---- plan 46 (P46a): the Table page's matrix ----
+
+/// The world the matrix tests read: every pool window read now at 0% (the cool world), then max's 5 h at 90% used, so
+/// some cells are pushed off their cool choice.
+fn p97_live(table: &Table) -> World {
+    let mut live = nirvana_seat::cool_world(
+        table,
+        &World {
+            now: NOW,
+            ..World::default()
+        },
+    );
+    for reading in live.readings.iter_mut().filter(|r| r.pool == "max" && r.window == "5h") {
+        reading.used = Some(0.9);
+    }
+    live
+}
+
+fn p97_request(class: &nirvana_seat::Class, mode: Mode) -> nirvana_seat::Request {
+    let mut request = nirvana_seat::Request::new(&class.id);
+    request.mode = mode;
+    request.needs = class.needs.clone();
+    request
+}
+
+/// L2's verifier: "each cell equals `pick` on the same table and readings", Nirvana Claude's row `orchestrator_seat`;
+/// a cell live usage moved names its cool choice; a class with no seat says why; the detail lists every seat the class
+/// lists with its score, whether it is on, and its record rows.
+#[test]
+fn p97_every_cell_is_the_pick_on_the_same_table_and_readings() {
+    let mut table = table();
+    // One class with no seat: both of look.image's seats off.
+    for seat in table.seats.iter_mut().filter(|s| s.id == "haiku") {
+        seat.enabled = false;
+    }
+    let live = p97_live(&table);
+    let cool = nirvana_seat::cool_world(&table, &live);
+    let calibration = Calibration {
+        version: calib::VERSION,
+        computed_at: NOW - 7_200,
+        summary: "1 cost booked as measured, 0 score findings".into(),
+        cells: vec![CellRow {
+            class: "build.bounded".into(),
+            seat: "sonnet".into(),
+            effort: Some(Effort::Medium),
+            orders: 3,
+            ..CellRow::default()
+        }],
+        ..Calibration::default()
+    };
+    let matrix = matrix(&table, &live, Some(&calibration));
+    assert_eq!(matrix.rows.len(), table.classes.len() + 1);
+    let head = &matrix.rows[0];
+    assert!(head.orchestrator && head.id == ORCHESTRATOR_ROW && head.detail.is_empty());
+    for (cell, mode) in head.cells.iter().zip(MODES) {
+        let mut at = table.clone();
+        at.mode = mode;
+        let want = nirvana_seat::orchestrator_seat(&at, &live);
+        assert_eq!((cell.mode, cell.seat.as_deref(), cell.effort), (mode, Some(want.seat.as_str()), Some(want.effort)));
+    }
+    let (mut forced, mut nexts, mut none) = (0, 0, 0);
+    for (row, class) in matrix.rows[1..].iter().zip(&table.classes) {
+        assert_eq!(row.id, class.id, "table order");
+        assert_eq!(row.cells.len(), 3);
+        for (cell, mode) in row.cells.iter().zip(MODES) {
+            let request = p97_request(class, mode);
+            let (now, then) = (
+                nirvana_seat::pick(&table, &live, &request),
+                nirvana_seat::pick(&table, &cool, &request),
+            );
+            let key = |got: &Result<nirvana_seat::Pick, nirvana_seat::NoSeat>| {
+                got.as_ref().ok().map(|p| (p.seat.clone(), p.effort))
+            };
+            assert_eq!(cell.mode, mode);
+            match &now {
+                Ok(pick) => {
+                    assert_eq!(
+                        (cell.seat.as_deref(), cell.model.as_deref(), cell.effort),
+                        (Some(pick.seat.as_str()), Some(pick.model.as_str()), Some(pick.effort)),
+                        "{} {mode:?}",
+                        class.id
+                    );
+                    let next = pick.contenders.get(1).map(|c| (c.seat.clone(), c.effort));
+                    assert_eq!(cell.next, next, "{} {mode:?}", class.id);
+                    nexts += usize::from(next.is_some());
+                }
+                Err(no) => {
+                    assert_eq!(cell.none.as_deref(), Some(no.reason.as_str()), "{}", class.id);
+                    assert!(cell.seat.is_none() && cell.effort.is_none());
+                    none += 1;
+                }
+            }
+            assert_eq!(cell.forced, key(&now) != key(&then), "{} {mode:?}", class.id);
+            if cell.forced {
+                forced += 1;
+                let want = match &then {
+                    Ok(pick) => format!("{} {}", pick.seat, pick.effort.word()),
+                    Err(no) => format!("no seat: {}", no.reason),
+                };
+                assert_eq!(cell.cool.as_deref(), Some(want.as_str()), "{} {mode:?}", class.id);
+            } else {
+                assert_eq!(cell.cool, None);
+            }
+        }
+        let seats: Vec<(&str, f32, bool)> = row
+            .detail
+            .iter()
+            .map(|d| (d.seat.as_str(), d.score, d.enabled))
+            .collect();
+        let want: Vec<(&str, f32, bool)> = class
+            .seats
+            .iter()
+            .map(|e| (e.seat.as_str(), e.score, table.seat(&e.seat).unwrap().enabled))
+            .collect();
+        assert_eq!(seats, want, "{}", class.id);
+        for detail in &row.detail {
+            let wanted = class.id == "build.bounded" && detail.seat == "sonnet";
+            assert_eq!(detail.record.len(), usize::from(wanted), "{} {}", class.id, detail.seat);
+        }
+    }
+    // Hollow without each kind: a cell live usage moved, a runner-up, and a class with no seat.
+    assert!(forced > 0 && nexts > 0 && none > 0, "forced {forced}, next {nexts}, none {none}");
+    assert_eq!(matrix.checked_at, Some(NOW - 7_200));
+    assert_eq!(
+        checked_line(&matrix, NOW),
+        "checked 2h 0m ago: 1 cost booked as measured, 0 score findings"
+    );
+    let unchecked = super::matrix(&table, &live, None);
+    assert_eq!(checked_line(&unchecked, NOW), "not checked against the record yet: herdr seat calibrate");
+    // The cool world is fresh readings at 0%, never no readings (the unread tier).
+    assert!(cool.readings.iter().all(|r| r.used == Some(0.0) && r.read_at == NOW));
+    assert!(cool.readings.iter().any(|r| r.window == "week.fable"));
+    assert!(super::matrix(&table, &cool, None).rows.iter().all(|row| row.cells.iter().all(|c| !c.forced)));
+}
+
+/// Plan 46 §5 asks the matrix only where it is cheap: about 140 pure picks per 2-second read. Timed here; the number
+/// is in the builder's report.
+#[test]
+fn p97_the_matrix_is_cheap() {
+    let table = table();
+    let live = p97_live(&table);
+    let rounds = 10;
+    let started = std::time::Instant::now();
+    for _ in 0..rounds {
+        std::hint::black_box(matrix(&table, &live, None));
+    }
+    let each = started.elapsed() / rounds;
+    println!("p97 matrix: {each:?} per read ({} classes)", table.classes.len());
+    assert!(each < std::time::Duration::from_millis(500), "{each:?} per read");
+}
+
+/// The square's read: the matrix from the calibration file (its factors this project's, its rows the page's), the
+/// differs line naming a carried value, and the same view twice so repaint-on-change holds.
+#[test]
+fn p97_the_square_reads_the_calibration_and_names_what_differs() {
+    let (root, home) = project("p97", None);
+    let carried = nirvana_seat::DEFAULT.replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1);
+    std::fs::write(home.join(nirvana_seat::SEATS_FILE), carried).unwrap();
+    let calibration = Calibration {
+        version: calib::VERSION,
+        computed_at: NOW - 60,
+        summary: "checked".into(),
+        cost: vec![calib::CostRow {
+            seat: "hydrogen".into(),
+            effort: Effort::Low,
+            project: None,
+            n: 7,
+            median: 0.37,
+            factor: Some(0.37),
+            clamped: false,
+        }],
+        ..Calibration::default()
+    };
+    std::fs::write(calib::path(&home), serde_json::to_string(&calibration).unwrap()).unwrap();
+    let view = read(&root, &home, &mut Replays::new(), NOW);
+    assert!(view.differs);
+    assert_eq!(
+        view.differs_line.as_deref(),
+        Some("seats.toml keeps your overrides_per_run = 5; the rest is herdr's default.")
+    );
+    let matrix = view.matrix.as_ref().expect("a matrix");
+    assert_eq!(matrix.checked_at, Some(NOW - 60));
+    let measured: Vec<&MatrixCell> = matrix
+        .rows
+        .iter()
+        .flat_map(|row| &row.cells)
+        .filter(|cell| cell.measured.is_some())
+        .collect();
+    assert!(!measured.is_empty(), "some cell seats hydrogen low");
+    for cell in measured {
+        assert_eq!((cell.seat.as_deref(), cell.effort), (Some("hydrogen"), Some(Effort::Low)));
+        assert_eq!(cell.measured.as_deref(), Some("measured x0.37 over 7 orders"));
+    }
+    assert_eq!(read(&root, &home, &mut Replays::new(), NOW), view, "the same inputs, the same view");
+    // No file: the matrix still draws, unchecked; a refused table has none.
+    std::fs::remove_file(calib::path(&home)).unwrap();
+    let plain = read(&root, &home, &mut Replays::new(), NOW);
+    assert_eq!(plain.matrix.as_ref().unwrap().checked_at, None);
+    assert!(plain.matrix.unwrap().rows.iter().flat_map(|r| &r.cells).all(|c| c.measured.is_none()));
+    std::fs::write(home.join(nirvana_seat::SEATS_FILE), "version = 2\n").unwrap();
+    assert_eq!(read(&root, &home, &mut Replays::new(), NOW).matrix, None);
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&home);
+}

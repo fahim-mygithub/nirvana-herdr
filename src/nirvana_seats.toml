@@ -13,6 +13,11 @@ mode = "balanced"
 # Blend each seat's score with its record in record.jsonl (decision 0029's formula). Off in the first
 # version: priors stay static and every finished order is logged for offline tuning (plan 12 §4).
 use_record = false
+# Plan 46 (2026-11-19, the owner: "Use the latest logs to update the table as refrencses"): book a seat and effort at
+# the cost its own medium orders measured, from <home>/nirvana/seat-calibration.json, where 5 or more of them sit
+# outside 0.5 to 2.0 times this table's cell (the rule of nirvana/seat_fit.py). Costs only: scores never move from it.
+# On here; a table without the line reads it as false, so a table that never took this default books as before.
+calibration = true
 
 [constants]
 # A pool window at or under this share left skips its seats. Old Nirvana's ASK_BUDGET_FLOOR (measured
@@ -406,8 +411,10 @@ prices = [
 # is Flash's cell times Hydrogen's cost per order over Flash's by tokens, each at its own price (the seats refresh,
 # nirvana/seat_refresh.py): low 1.43 (n 2 each), medium 1.39 (n 2 each), high 1.12 (n 1 each). At Flash's price they
 # were 0.74, 0.71 and 0.57. Hydrogen read ~10.6k of ~26k input from cache; Flash read none.
+# Plan 46 (2026-11-19): low carries its own orders' refit, x0.37 (seat_fit.py on the record, n 7 medium orders in two
+# projects, Megajam 4 and groove-coach 3), the one pair under 0.5 with orders in more than one project.
 use = [
-  { effort = "low", windows = { "5h" = 0.0002235, week = 0.0001118 }, at = "2026-11-12", basis = "derived: flash low's cell x1.43, plan 71 tokens each at its own price (n 2 each); carries flash's fit x8.97" },
+  { effort = "low", windows = { "5h" = 8.27e-05, week = 4.135e-05 }, at = "2026-11-12", basis = "derived: flash low's cell x1.43, plan 71 tokens each at its own price (n 2 each); carries flash's fit x8.97, refit x0.37 to hydrogen low's own orders (seat_fit.py, n 7, plan 46)" },
   { effort = "medium", windows = { "5h" = 0.0002588, week = 0.0001294 }, at = "2026-11-12", basis = "derived: flash medium's cell x1.39 (plan 71 tokens each at its own price, n 2 each), refit x0.41 to hydrogen medium's own orders (seat_fit.py, n 13)" },
   { effort = "high", windows = { "5h" = 0.0006786, week = 0.0003393 }, at = "2026-11-12", basis = "derived: flash high's cell x1.12 (plan 71 tokens each at its own price, n 1 each), refit x2.25 to hydrogen high's own orders (seat_fit.py, n 25)" },
   { effort = "xhigh", windows = { "5h" = 0.001086, week = 0.0005429 }, at = "2026-11-12", basis = "prior: high x 1.6" },

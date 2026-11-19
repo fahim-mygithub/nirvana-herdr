@@ -89,7 +89,7 @@ CONTROLS = (
     Control(
         "p13d_seats_backup",
         SEAT,
-        "let _ = std::fs::copy(path, backup_dir.join(SEATS_FILE));",
+        "let _ = std::fs::copy(path, &backup);",
         "// backup skipped\n    let _ = ();",
         "unedited_seats_toml_upgrades_itself_preserving_mode_and_backs_up_old_default",
         "rust",

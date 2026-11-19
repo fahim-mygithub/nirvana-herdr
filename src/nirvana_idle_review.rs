@@ -376,6 +376,10 @@ pub struct Global {
     /// Review round S5: per pool, the 5 h readings of the last `SAMPLES_KEPT_S`.
     #[serde(default)]
     pub samples: BTreeMap<String, Vec<Sample>>,
+    /// Plan 46: the seat table's last check against the record (`nirvana_seat_calib::tick`), and its summary. The
+    /// machine's, not a space's: the record and the table are the machine's.
+    #[serde(default)]
+    pub calibration: Option<(u64, String)>,
 }
 
 pub fn space_path(root: &Path) -> PathBuf {
@@ -1094,11 +1098,17 @@ pub fn tick_with(
             ));
         }
     }
+    // Plan 46: the seat table checked against the record when it grew by 20 lines or a day passed. No model, no seat
+    // and no spare usage, so none of the review's gates; not a review, so no count. A read that fails writes nothing.
+    let calibrated = crate::nirvana_seat_calib::tick(&nirvana_seat::dir(), table, now);
     // S5: this tick's readings join the history before it is read.
     let mut doubt = doubt;
     // Review B5: a global file that does not read is a doubt, never its default (`off` false, caps zero).
     let global = match change_global(|global| {
         record_samples(global, world);
+        if let Some(summary) = &calibrated {
+            global.calibration = Some((now, summary.clone()));
+        }
         global.clone()
     }) {
         Ok(global) => global,
@@ -1601,14 +1611,18 @@ pub struct IdleView {
     pub on: bool,
     pub last: Option<Last>,
     pub check: Option<(u64, String)>,
+    /// Plan 46: the machine's last seat table check (`Global::calibration`).
+    pub calibration: Option<(u64, String)>,
 }
 
 pub fn view(root: &Path) -> IdleView {
     let state = read_space(root);
+    let global = read_global();
     IdleView {
-        on: !read_global().off,
+        on: !global.off,
         last: state.last,
         check: state.check,
+        calibration: global.calibration,
     }
 }
 
@@ -1653,6 +1667,9 @@ pub fn lines(view: &IdleView, now: u64) -> Vec<String> {
     }
     if let Some((at, said)) = &view.check {
         out.push(format!("checked {}: {said}", ago(*at)));
+    }
+    if let Some((at, said)) = &view.calibration {
+        out.push(format!("seat table checked {}: {said}", ago(*at)));
     }
     out
 }
