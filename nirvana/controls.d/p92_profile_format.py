@@ -27,35 +27,66 @@ T_PP_DISMISS = ("nirvana_profile_proposals::tests::"
                 "p92_a_dismissed_proposal_is_not_made_again_until_the_dismissal_is_rolled_back")
 T_PP_CLI = ("nirvana_profile_proposals::tests::"
             "p92_the_cli_lists_shows_accepts_dismisses_and_takes_only_proposal_ids")
+# P45c fix round: the reviewer's section 5, one test each
+RUN = "src/nirvana_run.rs"
+WORKER = "src/nirvana_worker.rs"
+KNOW = "src/nirvana_knowledge.rs"
+T_TEACH_SRV = "nirvana_knowledge::tests::p92_a_teacher_gets_no_server_of_the_taught_profile"
+T_CLASS = "nirvana_gui_tools::tests::p92_a_teach_or_review_order_gets_no_profile_server_by_its_class"
+T_NOTES = "nirvana_profiles::tests::p92_a_literal_token_in_a_profiles_servers_is_noted_by_key_never_by_value"
+T_DEVICE = "nirvana_profiles::tests::p92_a_new_profile_never_takes_a_windows_device_name"
+T_IGNORE = "nirvana_profiles::tests::p92_the_project_ignore_covers_a_profiles_servers_in_new_and_old_projects"
+T_TORN = "nirvana_profile_proposals::tests::p92_a_torn_ledger_line_loses_no_later_row_and_its_op_is_not_reused"
+T_REDACT = "nirvana_profile_proposals::tests::p92_the_key_and_an_accepted_body_are_redacted"
+T_LEGACY = ("nirvana_profile_proposals::tests::"
+            "p92_a_patch_of_a_legacy_one_file_profile_rolls_back_to_the_exact_bytes")
+T_FRONT = "nirvana_profile_proposals::tests::p92_hand_edited_front_matter_at_accept_and_no_mcp_json"
+T_PP_DEVICE = "nirvana_profile_proposals::tests::p92_a_proposal_for_a_windows_device_name_is_refused"
 
-_RUN_SERVERS = "        Some(Ok(found)) => crate::nirvana_profiles::run_servers(run_dir, &found),"
-_SKILLS_LINE = "    if !parsed.skills.is_empty() {\n        if !prompt.is_empty() {"
+_RUN_SERVERS = "        Some(_) => crate::nirvana_profiles::run_servers(root, run_dir, &found),"
+_SKILLS_LINE = "    if let Some(skills) = &parsed.skills {\n        if !prompt.is_empty() {"
+_KEY_SHA = "nirvana_lessons::sha256(&redact_key(&nirvana_lessons::one_line(key).to_lowercase()))"
 
 CONTROLS = (
     # Item 1, skills: the key parses, `..` is no folder name, check refuses a skill the project lacks
-    Control("p92_skills_dropped", PROFILES, "None => profile.skills = items,", "None => profile.skills = Vec::new(),",
-            T_SKILLS, "rust"),
+    Control("p92_skills_dropped", PROFILES, "(None, None) => profile.skills = Some(items),",
+            "(None, None) => profile.skills = Some(Vec::new()),", T_SKILLS, "rust"),
+    # Fix round F6: a name twice is refused (red: T_SKILLS's `twice` assertion, the list parses)
+    Control("p92_skills_twice_allowed", PROFILES, '(None, Some((_, item))) => bad(format!("`{item}` is named twice")),',
+            "(None, Some(_)) => profile.skills = Some(items.clone()),", T_SKILLS, "rust"),
     Control("p92_skill_dotdot", PROFILES, "        && !value.starts_with('.')\n", "        && true\n", T_SKILLS, "rust"),
     Control("p92_skill_unchecked", PROFILES, "        if !skills.contains(skill) {", "        if false {", T_SKILLS,
             "rust"),
     # The claude worker: one line naming the skills, and nothing without the key
     Control("p92_skills_line_dropped", PROFILES, _SKILLS_LINE,
-            "    if false {\n        if !prompt.is_empty() {", T_LINE, "rust"),
+            "    if let Some(skills) = &None::<Vec<String>> {\n        if !prompt.is_empty() {", T_LINE, "rust"),
+    # Red: the profile with no `skills` key gets a "Use none" line, so its body file is not the body alone
     Control("p92_skills_line_always", PROFILES, _SKILLS_LINE,
-            "    if true {\n        if !prompt.is_empty() {", T_LINE, "rust"),
+            "    if let Some(skills) = &Some(parsed.skills.clone().unwrap_or_default()) {\n"
+            "        if !prompt.is_empty() {", T_LINE, "rust"),
+    # Fix round F6: `skills: []` asks for none (red: the line reads "use only these: ." instead)
+    Control("p92_skills_line_empty_lists_nothing", PROFILES,
+            "    if skills.is_empty() {\n        return \"Use none of this project's skills.\".to_owned();\n    }\n",
+            "", T_LINE, "rust"),
     # The agy worker: only the named skills, all without the key or without a profile, a missing one said
     Control("p92_agy_skills_unselected", AGY,
             "&selected_skills(claude_skills(order.cwd, order.root, out), named.as_deref(), out),",
             "&selected_skills(claude_skills(order.cwd, order.root, out), None, out),", T_AGY_SKILLS, "rust"),
     Control("p92_agy_skills_none_without_key", AGY, "    let Some(named) = named else {",
             "    let Some(named) = named.or(Some(&[][..])) else {", T_AGY_SKILLS, "rust"),
-    Control("p92_agy_empty_skills_selects", AGY, "    Ok(Some(parsed.skills).filter(|skills| !skills.is_empty()))",
-            "    Ok(Some(parsed.skills))", T_AGY_SKILLS, "rust"),
+    # Fix round F6: `skills: []` copies none (red: order a4 gets all three skills)
+    Control("p92_agy_empty_skills_selects", AGY, "    Ok(parsed.skills)\n}",
+            "    Ok(parsed.skills.filter(|skills| !skills.is_empty()))\n}", T_AGY_SKILLS, "rust"),
+    # Fix round F1: a review or a teacher keeps every skill (red: v1's profile_skills is Some([seat, ghost]))
+    Control("p92_agy_review_skills_narrowed", AGY,
+            "    if crate::nirvana_gui_tools::seated_record(run_dir, order)\n"
+            "        .is_some_and(|seated| crate::nirvana_profiles::takes_no_profile_servers(&seated.class))\n    {",
+            "    if order.is_empty() {", T_AGY_SKILLS, "rust"),
     Control("p92_agy_missing_skill_silent", AGY, "        if !skills.iter().any(|(have, _)| have == name) {",
             "        if false {", T_AGY_SKILLS, "rust"),
     # Item 2, a profile's own servers: the seated sha covers mcp.json, the run copies it, the brief gets the device line
     Control("p92_sha_without_servers", PROFILES,
-            "sha: seated_sha(&bytes, servers.as_ref().map(|found| found.bytes.as_slice())),",
+            "sha: seated_sha(&bytes, servers.as_ref().map(|found| found.pin.as_slice())),",
             "sha: seated_sha(&bytes, None),", T_OWN, "rust"),
     Control("p92_servers_not_copied", PROFILES,
             "    if let Some(servers) = &loaded.servers {\n        let to = servers_copy_path",
@@ -65,14 +96,66 @@ CONTROLS = (
     # The launch: the copy's servers in the claude config with no needs line, the copy checked by its sha, the live
     # file never read, and an order seated without the profile granted nothing
     Control("p92_copy_sha_unchecked", PROFILES, "    if sha != profile.sha {", "    if false {", T_OWN, "rust"),
-    Control("p92_own_servers_not_read", GUI, _RUN_SERVERS, "        Some(Ok(_)) => Ok(Map::new()),", T_OWN, "rust"),
+    Control("p92_own_servers_not_read", GUI, _RUN_SERVERS, "        Some(_) => Ok(Map::new()),", T_OWN, "rust"),
     Control("p92_own_servers_need_needs", GUI, "    if needs.is_empty() && own.is_empty() {",
             "    if needs.is_empty() {", T_OWN, "rust"),
     Control("p92_claude_config_lacks_own", GUI, '        config["mcpServers"][name] = definition.clone();',
             "        let _ = definition;", T_OWN, "rust"),
     Control("p92_launch_reads_live_file", GUI, _RUN_SERVERS,
-            '        Some(Ok(found)) => definitions(&std::fs::read_to_string(cwd.join(".nirvana/profiles")'
+            '        Some(_) => definitions(&std::fs::read_to_string(cwd.join(".nirvana/profiles")'
             '.join(&found.name).join("mcp.json")).unwrap_or_default()),', T_OWN, "rust"),
+    # Fix round F3: the definitions' sha is the pin's, from the run copy or the profile's file after the copy went
+    # (red: the tampered copy starts)
+    Control("p92_servers_sha_unchecked", PROFILES, "    if sha != pin.sha256 {", "    if false {", T_OWN, "rust"),
+    # The order's end takes the definitions copy out (red: the copy is still there after remove_order_config)
+    Control("p92_servers_copy_kept", GUI,
+            "        if let Err(err) = crate::nirvana_profiles::remove_servers_copy(run_dir, &profile) {",
+            "        if let Err(err) = Ok::<bool, std::io::Error>(profile.name.is_empty()) {", T_OWN, "rust"),
+    # A reader after the end has the names from the pin (red: from_run's servers are empty)
+    Control("p92_pin_names_dropped", PROFILES, "    parsed.servers = pin.names.clone();",
+            "    parsed.servers = Vec::new();", T_OWN, "rust"),
+    # Fix round F1: a teacher and a lesson review get no own server, by the journaled class, on claude and agy
+    # (red: t1's claude argv gains --mcp-config)
+    Control("p92_teach_review_servers_granted", GUI,
+            "        Some(seated) if crate::nirvana_profiles::takes_no_profile_servers(&seated.class) => {",
+            "        Some(seated) if seated.class.is_empty() => {", T_CLASS, "rust"),
+    # The review class is in the guard (red: v1's argv gains --mcp-config)
+    Control("p92_review_class_unguarded", PROFILES,
+            "    class == crate::nirvana_knowledge::TEACH_CLASS || class == crate::nirvana_review::CLASS",
+            "    class == crate::nirvana_knowledge::TEACH_CLASS", T_CLASS, "rust"),
+    # No seated record is refused, never granted (red: n1 starts with the server)
+    Control("p92_no_record_granted", GUI, "        None => Err(no_record(run_dir, order)),",
+            "        None => crate::nirvana_profiles::run_servers(root, run_dir, &found),", T_CLASS, "rust"),
+    # The real teach path: the class guard holds there (red: the teacher's argv gains --mcp-config for fake-own)
+    Control("p92_teach_own_servers_granted", PROFILES,
+            "    class == crate::nirvana_knowledge::TEACH_CLASS || class == crate::nirvana_review::CLASS",
+            "    class == crate::nirvana_review::CLASS", T_TEACH_SRV, "rust"),
+    # Fix round F2: no profile need joins a teacher's request (red: seated.needs is [fake-server])
+    Control("p92_teach_joins_needs", WORKER,
+            "            if !request\n                .class\n                .as_deref()\n"
+            "                .is_some_and(crate::nirvana_profiles::takes_no_profile_servers)\n            {",
+            "            if true {", T_TEACH_SRV, "rust"),
+    # Fix round F3: the notes (red: API_TOKEN, upper case, is not noted)
+    Control("p92_secret_note_case_kept", PROFILES,
+            "                if !SECRET_WORDS.iter().any(|word| lower.contains(word)) {",
+            "                if !SECRET_WORDS.iter().any(|word| key.contains(word)) {", T_NOTES, "rust"),
+    # A `${VAR}` value is no literal (red: Secret_Ref and Authorization are noted too)
+    Control("p92_secret_var_noted", PROFILES,
+            "                            && !text.split(\"${\").skip(1).any(|rest| rest.contains('}'))",
+            "                            && true", T_NOTES, "rust"),
+    # The note never holds the value (red: the notes differ from the expected text, and hold FAKE-TOKEN-123)
+    Control("p92_secret_note_prints_value", PROFILES, "{field} {key} is written out,",
+            "{field} {key} {value} is written out,", T_NOTES, "rust"),
+    # The ignore: the rule is in a new project's file (red: no `profiles/*/mcp.json` line)
+    Control("p92_ignore_rule_missing", RUN, "profiles/*/mcp.json\\n\";", "profiles/*/mcp.jsonx\\n\";",
+            T_IGNORE, "rust"),
+    # ...reaches a project whose file was written before (red: the old file is left as it was)
+    Control("p92_ignore_not_appended", RUN, "        if !text.lines().any(|line| line.trim_end() == marker) {",
+            "        if false {", T_IGNORE, "rust"),
+    # ...on a line of its own (red: glued onto the old last line, then appended again)
+    Control("p92_ignore_glued", RUN,
+            "            let gap = if text.is_empty() || text.ends_with('\\n') { \"\" } else { \"\\n\" };",
+            "            let gap = \"\";", T_IGNORE, "rust"),
     Control("p92_unprofiled_order_reads_other_copy", GUI,
             "    let Ok(text) = std::fs::read_to_string(order_copy_path(cwd, order)) else {",
             '    let Ok(text) = std::fs::read_to_string(order_copy_path(cwd, "s1")) else {', T_OWN, "rust"),
@@ -116,6 +199,19 @@ CONTROLS = (
     Control("p92_reviewer_pins_live", PROFILES, "# class: media.video\\n", "class: media.video\\n", T_SHAPES, "rust"),
     Control("p92_researcher_not_web_researcher", PROFILES, "            profile: WEB_RESEARCHER.to_owned(),",
             '            profile: WEB_RESEARCHER.replace("You research", "You look up"),', T_SHAPES, "rust"),
+    # Fix round F7: a new profile never takes a device name (red: `con` is a valid new name)
+    Control("p92_device_name_allowed", PROFILES,
+            "    valid_name(name) && !crate::nirvana_knowledge::windows_device(name)", "    valid_name(name)",
+            T_DEVICE, "rust"),
+    # ...in any case (red: CON.md is not seen as the console)
+    Control("p92_device_case_kept", KNOW,
+            "    let stem = name.split('.').next().unwrap_or(name).to_ascii_lowercase();",
+            "    let stem = name.split('.').next().unwrap_or(name).to_owned();", T_DEVICE, "rust"),
+    # ...nor a proposal of one (red: the `con` draft is written)
+    Control("p92_pp_device_allowed", PP,
+            "    if kind == Kind::New {\n        if let Some(why) = nirvana_profiles::new_name_problem(name) {",
+            "    if false {\n        if let Some(why) = nirvana_profiles::new_name_problem(name) {", T_PP_DEVICE,
+            "rust"),
     # Item 5, teach: none of the taught profile's family, needs or effort (Megajam, 2026-11-16)
     Control("p92_teach_keeps_family", PROFILES, "family: profile.family.clone().filter(|_| !teach),",
             "family: profile.family.clone(),", T_TEACH, "rust"),
@@ -172,8 +268,52 @@ CONTROLS = (
     Control("p92_pp_dismissal_forgotten", PP,
             "    if let Some(date) = was_dismissed(root, draft.kind, &draft.profile, &draft.key) {",
             "    if let Some(date) = None::<String> {", T_PP_DISMISS, "rust"),
-    Control("p92_pp_key_case_kept", PP, "nirvana_lessons::sha256(&nirvana_lessons::one_line(key).to_lowercase())",
-            "nirvana_lessons::sha256(&nirvana_lessons::one_line(key))", T_PP_DISMISS, "rust"),
+    Control("p92_pp_key_case_kept", PP, _KEY_SHA,
+            "nirvana_lessons::sha256(&redact_key(&nirvana_lessons::one_line(key)))", T_PP_DISMISS, "rust"),
+    # Fix round F4: a torn line (red: the next row is glued onto it and lost, so op-10 is never seen)
+    Control("p92_pp_torn_glued", PP, "        if last[0] != b'\\n' {", "        if false {", T_TORN, "rust"),
+    # ...its op number is not used again (red: the next op is op-3)
+    Control("p92_pp_torn_op_reused", PP,
+            "                .flat_map(|(_, line, _)| numbers_in(line, \"\\\"op-\")),",
+            "                .flat_map(|_| None::<u64>),", T_TORN, "rust"),
+    # ...and it is reported (red: broken() is empty)
+    Control("p92_pp_torn_unreported", PP,
+            "            Err(err) => bad.push((at + 1, line.to_owned(), err.to_string())),",
+            "            Err(_) => {}", T_TORN, "rust"),
+    # Fix round F5: the key is redacted on disk (red: the fake GitHub token is in the proposal file)
+    Control("p92_pp_key_unredacted", PP, "        key: redact_key(&draft.key),\n", "", T_REDACT, "rust"),
+    # ...keeping its identity (red: two paragraph shas collapse into one key, the second write is refused)
+    Control("p92_pp_key_identity_lost", PP,
+            '            format!(\n                "h:{}",\n                &nirvana_lessons::sha256(&found.to_lowercase())[..16]\n'
+            '            )',
+            '            "[redacted]".to_owned()', T_REDACT, "rust"),
+    # ...one identity raw and on disk (red: was_dismissed with the raw key finds no dismissal)
+    Control("p92_pp_key_sha_unredacted", PP, _KEY_SHA,
+            "nirvana_lessons::sha256(&nirvana_lessons::one_line(key).to_lowercase())", T_REDACT, "rust"),
+    # accept redacts the body it writes (red: sk-FAKE... lands in profile.md)
+    Control("p92_pp_accept_unredacted", PP, "    proposal.body = nirvana_lessons::redact(&proposal.body);\n", "",
+            T_REDACT, "rust"),
+    # Review section 5: a legacy one-file profile rolls back to its exact bytes (red: the CRLF bytes come back LF)
+    Control("p92_pp_legacy_rollback_lf", PP,
+            "            (Kind::Patch, Some(before)) => {\n"
+            "                crate::nirvana_seat::write_atomic(&file, before.as_bytes())",
+            "            (Kind::Patch, Some(before)) => {\n"
+            "                crate::nirvana_seat::write_atomic(&file, before.replace(\"\\r\\n\", \"\\n\").as_bytes())",
+            T_LEGACY, "rust"),
+    # Hand-edited front matter at accept is checked again (red: ` model:` is accepted)
+    Control("p92_pp_front_unchecked", PP,
+            '    if !problems.is_empty() {\n        return Err(format!("{id} is refused: {}", problems.join("; ")));',
+            '    if false {\n        return Err(format!("{id} is refused: {}", problems.join("; ")));',
+            T_FRONT, "rust"),
+    # A proposal's own key twice is refused (red: the duplicate `key` proposal is accepted)
+    Control("p92_pp_duplicate_key_read", PP, "        if values.iter().any(|(seen, _)| seen == known) {",
+            "        if false {", T_FRONT, "rust"),
+    # Accept writes no mcp.json (red: one is written beside profile.md, so the profile has own servers)
+    Control("p92_pp_accept_writes_servers", PP,
+            '                format!("cannot create {}: {err}", dir.display())\n            })?;\n',
+            '                format!("cannot create {}: {err}", dir.display())\n            })?;\n'
+            '            let _ = std::fs::write(dir.join(nirvana_profiles::SERVERS_FILE), "{\\"mcpServers\\": {}}");\n',
+            T_FRONT, "rust"),
     Control("p92_pp_rollback_keeps_dismissal", PP, "                && !undone.contains(&row.op.as_str())\n", "",
             T_PP_DISMISS, "rust"),
     Control("p92_pp_duplicate_allowed", PP,
