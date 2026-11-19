@@ -1603,14 +1603,17 @@ mod tests {
     fn p96_a_close_in_an_even_tab_grows_the_survivors_back() {
         let area = Rect::new(0, 0, 200, 50);
         let (mut layout, ids) = p96_chain(6);
+        // Focus on the newest, so the first closes take `close_pane`'s unfocused path and the last `close_focused`.
+        layout.focus_pane(ids[5]);
         layout.tile_even(area);
         assert!(layout.close_pane(ids[0]));
         assert!(layout.close_pane(ids[1]));
         assert_eq!(p96_widths(&layout, area), vec![100, 100, 100, 100]);
-        assert!(layout.close_pane(ids[2]));
-        assert_eq!(p96_widths(&layout, area), vec![67, 67, 66]);
-        layout.focus_pane(ids[3]);
+        // From the 2x2 grid, a close with no re-tile would leave [200, 100, 100].
+        layout.focus_pane(ids[2]);
         assert!(layout.close_focused());
+        assert_eq!(p96_widths(&layout, area), vec![67, 67, 66]);
+        assert!(layout.close_pane(ids[3]));
         assert_eq!(p96_widths(&layout, area), vec![100, 100]);
     }
 

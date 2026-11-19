@@ -967,9 +967,10 @@ fn p96_a_passed_jobs_pane_closes_after_the_hold() {
         p96_job_pane("wP:pP", "wP:tJ", "build", &home.0),
         p96_job_pane("wP:pQ", "wP:tJ", "other", &home.0),
     ]);
-    herdr.sweep(&home.0, ENDED + JOB_PASSED_GRACE_S - 1);
+    // The hold is 30 s, written here as the number the fix chose (a sweep a minute closes it 30 s to 90 s after).
+    herdr.sweep(&home.0, ENDED + 29);
     assert!(herdr.closed().is_empty(), "inside the hold the pane stays");
-    herdr.sweep(&home.0, ENDED + JOB_PASSED_GRACE_S);
+    herdr.sweep(&home.0, ENDED + 30);
     assert_eq!(herdr.closed(), vec!["wP:pP".to_owned()]);
 }
 
