@@ -53,17 +53,27 @@ pub(super) const TABLE_WIDTH: u16 = 160;
 /// The task column: as wide as the longest id ("build.load_bearing" is 18), within these.
 const TASK_MIN: usize = 10;
 const TASK_MAX: usize = 20;
-/// A cell's mark slot: usage (`!` hot usage moved it, `?` usage unread), then calibration (`=` held, `~` measured).
-const MARKS: usize = 2;
+/// A cell's mark slot: `!` the live pick is not the cool pick, `?` usage unread, then calibration (`=` held, `~`
+/// measured). P46b fix round (review finding 2): `forced` and `unread` are separate facts and both can hold, so each
+/// has its own place; one shared place hid the `!` and the detail then said "not hot", which the data never says.
+const MARKS: usize = 3;
 /// Table rows the panel keeps before the detail block takes any room.
 const TABLE_MIN_ROWS: usize = 6;
+/// P46b fix round (review finding 4): the detail block's most lines below its blank. Its height is set by the panel's
+/// size and this cap, never by the selected row, so moving the selection never changes how many table rows show.
+/// Twelve holds a class's heading, its three modes and two seats with their records; a longer detail is cut and ends
+/// with ` …`. The number is a choice, not a measurement.
+const DETAIL_LINES: usize = 12;
+/// P46b fix round (review finding 1): the fewest cells of the folder a title keeps when the page words take room
+/// beside it. Under this the page words are not drawn and the title is the one the panel had before them.
+const FOLDER_MIN: usize = 8;
 /// Rows PageUp and PageDown move, as the Preload panel's do.
 const TABLE_PAGE: usize = 10;
 /// Rows a wheel notch moves, as the Preload panel's does.
 const WHEEL_STEP: usize = 3;
 /// The legend under the table: the marks read without colour.
 pub(super) const TABLE_LEGEND: &str =
-    "! hot usage moved it \u{b7} ? usage unread \u{b7} = held \u{b7} ~ cost as measured";
+    "! not the cool pick \u{b7} ? usage unread \u{b7} = held \u{b7} ~ cost as measured";
 /// The Table page when the View has no matrix.
 pub(super) const TABLE_REFUSED: &str = "No seat table: seats.toml is refused, so no pick is shown";
 
@@ -262,6 +272,31 @@ pub(crate) struct SeatsPanel {
     /// An index into the matrix's rows, and the first table row shown.
     pub(super) table_selected: usize,
     pub(super) table_scroll: usize,
+    /// P46b fix round (review finding 3): the selected row's id. A re-read that reorders or drops classes keeps the
+    /// same class selected; when it is gone, the index stays, held to the rows there are.
+    pub(super) table_selected_id: Option<String>,
+}
+
+impl SeatsPanel {
+    /// Puts the selection back on its class in `ids` (the matrix's row ids, in order), else holds its index to them.
+    pub(super) fn follow_table_row(&mut self, ids: &[String]) {
+        if let Some(at) = self
+            .table_selected_id
+            .as_ref()
+            .and_then(|id| ids.iter().position(|known| known == id))
+        {
+            self.table_selected = at;
+        }
+        self.table_selected = self.table_selected.min(ids.len().saturating_sub(1));
+        self.table_selected_id = ids.get(self.table_selected).cloned();
+    }
+
+    /// Selects the row at `index` in `ids` and remembers its id. The callers hold `index` to the rows; this does not,
+    /// so each bound stays where its key is (and its control can find it).
+    pub(super) fn select_table_row(&mut self, index: usize, ids: &[String]) {
+        self.table_selected = index;
+        self.table_selected_id = ids.get(index).cloned();
+    }
 }
 
 /// Where the Seats panel drew its parts, for the mouse.
@@ -304,6 +339,12 @@ pub(super) enum Tone {
 fn column(text: &str, width: usize) -> String {
     let text = fit(text, width);
     let pad = width.saturating_sub(unicode_width::UnicodeWidthStr::width(text.as_str()));
+    format!("{text}{}", " ".repeat(pad))
+}
+
+/// `text` padded to `width` cells by display width, as `column` pads, but never cut.
+fn pad(text: &str, width: usize) -> String {
+    let pad = width.saturating_sub(unicode_width::UnicodeWidthStr::width(text));
     format!("{text}{}", " ".repeat(pad))
 }
 
@@ -657,14 +698,12 @@ fn seats_frame(
     pages: &mut Vec<(Rect, Page)>,
 ) -> Rect {
     let base = Style::default().fg(palette.text).bg(palette.panel_bg);
-    let title = match shown.mode {
-        Some(mode) => format!(
-            " Seats \u{b7} {} \u{b7} {} ",
-            folder_name(&panel.root),
-            mode.title()
-        ),
-        None => format!(" Seats \u{b7} {} ", folder_name(&panel.root)),
+    let folder = folder_name(&panel.root);
+    let titled = |folder: &str| match shown.mode {
+        Some(mode) => format!(" Seats \u{b7} {folder} \u{b7} {} ", mode.title()),
+        None => format!(" Seats \u{b7} {folder} "),
     };
+    let title = titled(&folder);
     // " [Orders]  Table " with the page shown in brackets, so it reads without colour too.
     let words: Vec<(Page, String)> = [Page::Orders, Page::Table]
         .into_iter()
@@ -685,7 +724,17 @@ fn seats_frame(
     // The close button takes the last five cells; the strip ends one before it.
     let strip_x = rect.right().saturating_sub(5 + strip_width);
     let title_room = usize::from(strip_x.saturating_sub(rect.x + 3));
-    let close = draw_frame(buffer, rect, &fit(&title, title_room), palette);
+    // P46b fix round (review finding 1): the page words take room from the title only when the title keeps its mode
+    // word and at least `FOLDER_MIN` cells of its folder; only the folder is cut for them. Otherwise no words are drawn
+    // and `draw_frame` cuts the title to its own room, as it did before the Table page (2419bec8).
+    let width = |text: &str| unicode_width::UnicodeWidthStr::width(text);
+    let beside_words = if width(&title) <= title_room {
+        Some(title.clone())
+    } else {
+        let folder_room = title_room.saturating_sub(width(&titled("")));
+        (folder_room >= FOLDER_MIN).then(|| titled(&fit(&folder, folder_room)))
+    };
+    let close = draw_frame(buffer, rect, beside_words.as_deref().unwrap_or(&title), palette);
     if shown.mode == Some(Mode::Sota) {
         let top = rect.y;
         for col in rect.x..rect.right().saturating_sub(3) {
@@ -702,8 +751,8 @@ fn seats_frame(
             }
         }
     }
-    // A frame too narrow for a title and the strip draws no strip; `t` still switches.
-    if title_room < 12 {
+    // A frame too narrow for the title and the strip draws no strip; `t` still switches and the footer names it.
+    if beside_words.is_none() {
         return close;
     }
     let mut at = strip_x + 1;
@@ -788,16 +837,12 @@ fn effort_short(effort: Effort) -> &'static str {
     }
 }
 
-/// A cell's two marks: usage, then calibration. `?` wins over `!`: a pick moved while a window it spends is unread
-/// was not moved by hot usage, and the detail says which.
+/// A cell's three marks: `!` when the live pick is not the cool pick (`forced`), `?` when a window the pick spends
+/// was not read (`unread`), then calibration. Both usage marks show when both hold: an unread window does not say
+/// whether hot usage moved the pick, so neither mark hides the other.
 pub(super) fn cell_marks(cell: &MatrixCell) -> String {
-    let usage = if cell.unread {
-        '?'
-    } else if cell.forced {
-        '!'
-    } else {
-        ' '
-    };
+    let forced = if cell.forced { '!' } else { ' ' };
+    let unread = if cell.unread { '?' } else { ' ' };
     let calibration = if cell.held {
         '='
     } else if cell.measured.is_some() {
@@ -805,7 +850,7 @@ pub(super) fn cell_marks(cell: &MatrixCell) -> String {
     } else {
         ' '
     };
-    format!("{usage}{calibration}")
+    format!("{forced}{unread}{calibration}")
 }
 
 /// A cell's words in `room` cells: "sonnet medium · claude-sonnet-5-5"; without the model when it does not fit whole;
@@ -850,14 +895,15 @@ pub(super) fn table_widths(matrix: &Matrix, inner: usize) -> (usize, usize) {
 }
 
 /// The header line: "task", then each mode over its cells' seat words, the project's own in brackets (its `[` sits in
-/// the mark slot).
+/// the mark slot's last place).
 pub(super) fn header_line(live: Option<Mode>, task: usize, cell: usize) -> String {
     let mut line = column("task", task);
+    let lead = " ".repeat(MARKS - 1);
     for mode in MODES {
         let word = if live == Some(mode) {
-            format!(" [{}]", mode.title())
+            format!("{lead}[{}]", mode.title())
         } else {
-            format!("  {}", mode.title())
+            format!("{lead} {}", mode.title())
         };
         line.push(' ');
         line.push_str(&column(&word, cell));
@@ -886,9 +932,10 @@ pub(super) fn table_line(row: &MatrixRow, task: usize, cell: usize) -> String {
 /// What a cell's detail line says beyond its seat: the cool pick, unread usage, the next seat, no seat, the record.
 fn cell_facts(cell: &MatrixCell, orchestrator: bool) -> Vec<String> {
     let mut facts = Vec::new();
+    // `unread` with `forced` says only that a window was unread and the cool pick differs, not why it moved.
     match (cell.forced, cell.unread) {
         (true, true) => facts.push(format!(
-            "usage unread, not hot: cool pick {}",
+            "usage unread; the cool pick is {}",
             cell.cool.as_deref().unwrap_or("not given")
         )),
         (true, false) => facts.push(format!(
@@ -908,9 +955,10 @@ fn cell_facts(cell: &MatrixCell, orchestrator: bool) -> Vec<String> {
         facts.push(format!("next {seat} {}", effort.word()));
     }
     if let Some(measured) = &cell.measured {
-        // A held pair books as the table; the measured figure is shown beside it, never as the booking.
+        // A held pair books as the table; the measured figure is shown after the booking is named, never as it
+        // (review finding 5).
         facts.push(if cell.held {
-            format!("held \u{b7} {measured}")
+            format!("held: booked at the table's cost; {measured}")
         } else {
             format!("cost booked as {measured}")
         });
@@ -1007,7 +1055,8 @@ pub(super) fn detail_lines(row: &MatrixRow, live: Option<Mode>, room: usize) -> 
         lines.push((format!("  none listed \u{b7} {}", crate::nirvana_seat_calib::NO_RECORD), Tone::Muted));
     }
     for seat in &row.detail {
-        let mut head = format!("  {:<10} score {:>3.0}", seat.seat, seat.score);
+        // Padded by display width: `{:<10}` counts characters, so a wide seat name pushed its score out of line.
+        let mut head = format!("  {} score {:>3.0}", pad(&seat.seat, 10), seat.score);
         if !seat.enabled {
             head.push_str(" \u{b7} off");
         }
@@ -1024,7 +1073,9 @@ pub(super) fn detail_lines(row: &MatrixRow, live: Option<Mode>, room: usize) -> 
 
 /// Where the Table page's parts go in `avail` body lines: the header first, then up to `TABLE_MIN_ROWS` rows, then
 /// the check line and the legend, then the other notes, then the detail, and what is left to more rows. The detail
-/// shrinks before the table loses a row of its first `TABLE_MIN_ROWS`, and the header goes last.
+/// shrinks before the table loses a row of its first `TABLE_MIN_ROWS`, and the header goes last. The detail's height
+/// (its blank included) comes from the room and `DETAIL_LINES` only, not from the selected row's lines, so the rows
+/// shown stay put as the selection moves (review finding 4); a shorter detail leaves its slot's foot blank.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct TableFit {
     pub(super) rows: usize,
@@ -1032,15 +1083,15 @@ pub(super) struct TableFit {
     pub(super) detail: usize,
 }
 
-pub(super) fn table_fit(avail: usize, rows: usize, notes: usize, detail: usize) -> TableFit {
+pub(super) fn table_fit(avail: usize, rows: usize, notes: usize) -> TableFit {
     let mut left = avail.saturating_sub(1);
     let first = rows.min(TABLE_MIN_ROWS).min(left);
     left -= first;
     let notes = notes.min(left);
     left -= notes;
     // The detail takes a blank line above it, and needs its heading and one more to say anything.
-    let detail = if detail > 0 && left >= 3 {
-        (detail + 1).min(left)
+    let detail = if rows > 0 && left >= 3 {
+        left.min(DETAIL_LINES + 1)
     } else {
         0
     };
@@ -1051,6 +1102,11 @@ pub(super) fn table_fit(avail: usize, rows: usize, notes: usize, detail: usize) 
         notes,
         detail,
     }
+}
+
+/// The matrix's row ids in order; none when the table is refused.
+fn table_ids(matrix: Option<&Matrix>) -> Vec<String> {
+    matrix.map_or_else(Vec::new, |matrix| matrix.rows.iter().map(|row| row.id.clone()).collect())
 }
 
 /// Draws the Table page: the seat each task class gets now in each mode, and the detail of the selected row.
@@ -1080,8 +1136,9 @@ fn render_table_page(
     let empty = SeatsView::default();
     let shown = view.unwrap_or(&empty);
     let matrix = shown.matrix.as_ref();
-    let count = matrix.map_or(0, |matrix| matrix.rows.len());
-    panel.table_selected = panel.table_selected.min(count.saturating_sub(1));
+    let ids = table_ids(matrix);
+    let count = ids.len();
+    panel.follow_table_row(&ids);
 
     // The notes under the table, in the order they go when room is short: the check line, the legend, the differs
     // line, the View's note.
@@ -1105,10 +1162,9 @@ fn render_table_page(
         .map(|row| detail_lines(row, shown.mode, inner))
         .unwrap_or_default();
     let header = usize::from(matrix.is_some());
-    let want = header + count + notes.len() + if detail.is_empty() { 0 } else { detail.len() + 1 };
     let avail = usize::from(area.height.saturating_sub(1).saturating_sub(4));
     let fit_ = if matrix.is_some() {
-        table_fit(avail, count, notes.len(), detail.len())
+        table_fit(avail, count, notes.len())
     } else {
         TableFit {
             rows: 0,
@@ -1117,7 +1173,7 @@ fn render_table_page(
         }
     };
     let used = header + fit_.rows + fit_.notes + fit_.detail;
-    let height = (want.min(used) as u16 + 4).min(area.height.saturating_sub(1));
+    let height = (used as u16 + 4).min(area.height.saturating_sub(1));
     let rect = Rect::new(area.x + 1, area.y + 1, panel_width, height);
     hits.area = rect;
     hits.close = seats_frame(buffer, rect, panel, shown, palette, &mut hits.pages);
@@ -1131,7 +1187,7 @@ fn render_table_page(
         put_text(buffer, x, y, width, &fit(&header_line(shown.mode, task, cell), inner), muted);
         if let Some(live) = shown.mode {
             if let Some(place) = MODES.iter().position(|mode| *mode == live) {
-                let at = x + (task + 2 + place * (cell + 1)) as u16;
+                let at = x + (task + MARKS + place * (cell + 1)) as u16;
                 let word = format!("[{}]", live.title());
                 let color = if live == Mode::Sota {
                     palette.red
@@ -1169,6 +1225,9 @@ fn render_table_page(
             if index == panel.table_selected {
                 style = style.bg(palette.selection_bg);
                 buffer.set_style(row_rect, Style::default().bg(palette.selection_bg));
+                // Review finding 6: the selected row reads without colour too. `▸` sits in the cell between the left
+                // border and the body, so the columns keep their places at every width.
+                put_text(buffer, x - 1, y, 1, "\u{25b8}", heading);
             }
             put_text(buffer, x, y, width, &fit(&table_line(row, task, cell), inner), style);
             // The marks and a cell with no seat in colour; the marks read without it.
@@ -1262,6 +1321,7 @@ impl ClientShellState {
             page: Page::Orders,
             table_selected: 0,
             table_scroll: 0,
+            table_selected_id: None,
         });
     }
 
@@ -1405,23 +1465,24 @@ impl ClientShellState {
         self.seats_view().map_or(0, |view| view.rows.len())
     }
 
-    /// The Table page's rows: Nirvana Claude's and one per class; none when the table is refused.
-    fn seats_table_count(&self) -> usize {
-        self.seats_view()
-            .and_then(|view| view.matrix)
-            .map_or(0, |matrix| matrix.rows.len())
+    /// The Table page's row ids: Nirvana Claude's and one per class; none when the table is refused.
+    fn seats_table_ids(&self) -> Vec<String> {
+        table_ids(self.seats_view().and_then(|view| view.matrix).as_ref())
     }
 
     /// Plan 46 P46b: the Table page's own keys, the row moves, and whether `code` was one. Enter is taken and does
     /// nothing: it focuses an order's pane on the Orders page, and a table row has no pane. Every other key (`m`, `r`,
     /// Esc) means what it means on the Orders page.
     fn route_table_key(&mut self, code: KeyCode) -> bool {
-        let last = self.seats_table_count().saturating_sub(1);
+        let ids = self.seats_table_ids();
+        let last = ids.len().saturating_sub(1);
         let Some(panel) = self.nirvana_seats.as_mut() else {
             return false;
         };
-        let selected = panel.table_selected.min(last);
-        panel.table_selected = match code {
+        // From the selected class as the view reads now, which a re-read may have moved.
+        panel.follow_table_row(&ids);
+        let selected = panel.table_selected;
+        let next = match code {
             KeyCode::Up | KeyCode::Char('k') => selected.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => (selected + 1).min(last),
             KeyCode::PageUp => selected.saturating_sub(TABLE_PAGE),
@@ -1431,6 +1492,7 @@ impl ClientShellState {
             KeyCode::Enter => selected,
             _ => return false,
         };
+        panel.select_table_row(next, &ids);
         true
     }
 
@@ -1507,17 +1569,20 @@ impl ClientShellState {
             mouse.kind,
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
         ) {
-            let last = self.seats_table_count().saturating_sub(1);
+            let ids = self.seats_table_ids();
+            let last = ids.len().saturating_sub(1);
             if let Some(panel) = self
                 .nirvana_seats
                 .as_mut()
                 .filter(|panel| panel.page == Page::Table)
             {
-                panel.table_selected = if mouse.kind == MouseEventKind::ScrollUp {
+                panel.follow_table_row(&ids);
+                let next = if mouse.kind == MouseEventKind::ScrollUp {
                     panel.table_selected.saturating_sub(WHEEL_STEP)
                 } else {
                     (panel.table_selected + WHEEL_STEP).min(last)
                 };
+                panel.select_table_row(next, &ids);
                 outcome.repaint = true;
             }
             return true;
@@ -1539,9 +1604,14 @@ impl ClientShellState {
                 outcome.repaint = true;
                 return true;
             }
+            let ids = if table_row.is_some() {
+                self.seats_table_ids()
+            } else {
+                Vec::new()
+            };
             if let (Some(panel), Some(index)) = (self.nirvana_seats.as_mut(), table_row) {
                 panel.message = None;
-                panel.table_selected = index;
+                panel.select_table_row(index, &ids);
                 outcome.repaint = true;
                 return true;
             }
