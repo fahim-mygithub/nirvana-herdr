@@ -698,12 +698,18 @@ fn seats_frame(
     pages: &mut Vec<(Rect, Page)>,
 ) -> Rect {
     let base = Style::default().fg(palette.text).bg(palette.panel_bg);
-    let folder = folder_name(&panel.root);
-    let titled = |folder: &str| match shown.mode {
-        Some(mode) => format!(" Seats \u{b7} {folder} \u{b7} {} ", mode.title()),
-        None => format!(" Seats \u{b7} {folder} "),
+    let title = match shown.mode {
+        Some(mode) => format!(
+            " Seats \u{b7} {} \u{b7} {} ",
+            folder_name(&panel.root),
+            mode.title()
+        ),
+        None => format!(" Seats \u{b7} {} ", folder_name(&panel.root)),
     };
-    let title = titled(&folder);
+    // The folder is the title's first word after "Seats · ", so a cut form replaces that one place.
+    let folder = folder_name(&panel.root);
+    let lead = " Seats \u{b7} ".len();
+    let titled = |cut: &str| format!("{}{cut}{}", &title[..lead], &title[lead + folder.len()..]);
     // " [Orders]  Table " with the page shown in brackets, so it reads without colour too.
     let words: Vec<(Page, String)> = [Page::Orders, Page::Table]
         .into_iter()
