@@ -1062,12 +1062,14 @@ pub fn agy_rate_limit(exit: Option<i32>, stderr: &str, pool: &str) -> Option<Rat
             }
         }
         if quota {
+            let detail = format!("AGY_ERROR: {value}");
             return Some(RateLimit {
                 signal: "agy_exit_3".into(),
                 pool: Some(pool.to_owned()),
                 window: None,
-                resets_at: None,
-                detail: format!("AGY_ERROR: {value}"),
+                // Plan 43 A7: agy names its own reset only in text ("Resets in 79h6m53s", run ia1).
+                resets_at: nirvana_run::resets_in(&detail, now()),
+                detail,
             });
         }
     }
@@ -1561,9 +1563,14 @@ pub fn write_diff(
             .filter(|out| out.status.success())
             .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
     };
+    // Plan 43 fix round F5: reading a worktree whose worker may still run (the restart check judges before it re-checks
+    // under the journal's lock, and `resume` reads a stopped one) must never take its `index.lock`. `status` with
+    // `--no-optional-locks` leaves the index alone; porcelain `git diff HEAD` rewrote a stat-dirty index even with the
+    // flag (git 2.50.1, measured in a scratch repository and in the test), so the diff is the plumbing `diff-index`,
+    // which never writes the index: the same patch, `-M` for porcelain's default rename detection.
     let (Some(status), Some(diff)) = (
-        git(&["status", "--porcelain=v1"]),
-        git(&["diff", "HEAD", "--no-color"]),
+        git(&["--no-optional-locks", "status", "--porcelain=v1"]),
+        git(&["--no-optional-locks", "diff-index", "-p", "-M", "--no-color", "HEAD"]),
     ) else {
         return (None, None);
     };
@@ -2353,17 +2360,10 @@ pub(crate) fn rate_limited(
                     limit.signal
                 )
             };
+            // Plan 43 A7: the parent's `ended` (outcome reseated) goes in the same transaction.
             journal.transact(now(), |_| {
                 Ok((
-                    vec![
-                        Kind::Seated(Box::new(child_seated.clone())),
-                        Kind::Reseated {
-                            order: order.clone(),
-                            child: child.clone(),
-                            seat: seat.clone(),
-                            why: why.clone(),
-                        },
-                    ],
+                    nirvana_run::reseat_events(child_seated.clone(), order, &seat, &why),
                     (),
                 ))
             })?;

@@ -383,6 +383,14 @@ pub enum Kind {
         order: String,
         why: String,
     },
+    /// Plan 43 A6: the restart check found an order listed as running whose supervisor's lock is free but whose worker
+    /// it could not prove dead (its pid still names a process that started before it, or could not be read). The order
+    /// stays running: interrupting a live worker loses its work. Moves no order; the orchestrator hears each reason
+    /// once, until the order's worker starts again (fix round F2).
+    LiveDoubt {
+        order: String,
+        why: String,
+    },
     /// Plan 12 O8b (§9 role 2): Jev read a pane worker's screen. `answer` is yes, no, unsure or failed; only a
     /// yes with `acted` set (the setting is `on`) wakes the orchestrator.
     JevWatch {
@@ -450,6 +458,7 @@ impl Kind {
             | Self::Merged { order, .. }
             | Self::Stalled { order, .. }
             | Self::JevWatch { order, .. }
+            | Self::LiveDoubt { order, .. }
             | Self::Interrupted { order, .. } => Some(order),
             Self::Usage { order, .. } | Self::Asked { order, .. } | Self::Ended { order, .. } => {
                 order.as_deref()
@@ -659,6 +668,15 @@ pub struct OrderState {
     pub answers: Option<String>,
     pub last_checkpoint: Option<String>,
     pub last_rate_limit: Option<(Option<String>, Option<String>, Option<u64>)>,
+    /// Plan 43 A6: the last attempt's worker, as its `started` event recorded it: its pid and the second the event
+    /// was written, just after the spawn. The restart check reads both, so a pid the OS gave to a later process is not
+    /// taken for the worker (`worker_liveness`).
+    pub worker: Option<(u32, u64)>,
+    /// Plan 43 fix round F2: the reason of the order's latest `live_doubt`, cleared by a later `started`. The restart
+    /// check writes no second doubt with the same reason, so a check that runs again (a mark that could not be
+    /// written, two servers, the every-minute pass) neither repeats the line nor wakes the orchestrator for it.
+    #[serde(skip)]
+    pub last_doubt: Option<String>,
 }
 
 impl OrderState {
@@ -785,7 +803,19 @@ fn queue_line(kind: &Kind) -> Option<String> {
             next,
             ..
         } => format!("{order} stalled ({silent_s} s silent): {next}"),
+        // Plan 43 A6: an order a dead worker left running names its checkpoint and the way on, whole: on 2026-11-14
+        // l05-beats sat "a bare shell prompt" listed as running until the owner typed that Nirvana restarted.
+        Kind::Interrupted { order, why } if why.starts_with(WORKER_DIED) => format!(
+            "{order} interrupted: {}; continue it from its checkpoint (the handoff skill, then `herdr seat run`), \
+             redo it, or ask",
+            short(why, 160)
+        ),
         Kind::Interrupted { order, why } => format!("{order} interrupted: {}", short(why, 90)),
+        Kind::LiveDoubt { order, why } => format!(
+            "{order}: herdr found no supervisor for it but could not prove its worker dead ({}); it stays running: \
+             `herdr seat read {order}`, and `herdr seat stop {order}` if it is dead",
+            short(why, 90)
+        ),
         Kind::JevWatch {
             order,
             answer,
@@ -805,12 +835,13 @@ fn queue_line(kind: &Kind) -> Option<String> {
         Kind::Deferred { order, until, why } => {
             format!("{order} deferred to {}: {}", utc(*until), short(why, 80))
         }
+        // Plan 43 A7: a reseat's `ended` follows its `reseated`, whose line already tells the orchestrator.
         Kind::Ended {
             order: Some(order),
             outcome,
             why,
             ..
-        } if outcome != "delivered" => match why {
+        } if outcome != "delivered" && outcome != RESEATED => match why {
             Some(why) => format!("{order} ended {outcome}: {}", short(why, 90)),
             None => format!("{order} ended {outcome}"),
         },
@@ -923,12 +954,15 @@ pub fn replay(events: &[Event]) -> RunState {
                         .then(|| open_questions.remove(0)),
                         last_checkpoint: None,
                         last_rate_limit: None,
+                        worker: None,
+                        last_doubt: None,
                     });
                 }
             }
             Kind::Started {
                 order,
                 attempt,
+                pid,
                 pane,
                 tab,
                 resume,
@@ -936,6 +970,8 @@ pub fn replay(events: &[Event]) -> RunState {
             } => {
                 if let Some(known) = state.order_mut(order) {
                     known.attempts = known.attempts.max(*attempt);
+                    known.worker = pid.map(|pid| (pid, event.at));
+                    known.last_doubt = None;
                     if !known.phase.terminal() {
                         known.phase = Phase::Running;
                     }
@@ -1127,6 +1163,13 @@ pub fn replay(events: &[Event]) -> RunState {
             // Shadow or on, it moves no order: the line below is all a yes does, and only when it acted.
             // Plan 25: a fresh session moves no order; the receipt was written at the end, before it.
             // Plan 31 §2.3: a queued wake is a record of why, and moves no order.
+            // Plan 43 A6: a doubt is a line for the orchestrator; the order stays as it was, and keeps the reason so the
+            // same doubt is not written twice (fix round F2).
+            Kind::LiveDoubt { order, why } => {
+                if let Some(known) = state.order_mut(order) {
+                    known.last_doubt = Some(why.clone());
+                }
+            }
             Kind::JevWatch { .. }
             | Kind::Fresh { .. }
             | Kind::WakeQueued { .. }
@@ -1234,13 +1277,19 @@ pub enum RateDecision {
     Ask { why: String },
 }
 
+/// Plan 43 fix round F4: the longest wait auto mode takes on its own; a later reset is asked. The orchestrator's
+/// choice, not a measurement, and the owner's to change: a 5 h window's reset is worth waiting for, a weekly one is
+/// not. Since agy's "Resets in 79h6m53s" fills `resets_at` (A7), an auto-mode order with no other seat having room
+/// would otherwise sit 79 h with only an orchestrator line, where before this branch it was asked.
+pub const AUTO_DEFER_CAP_S: u64 = 6 * 3600;
+
 /// The re-seat pick, as the decision needs it: a seat, or none with the soonest reset among the skipped.
 pub type ReseatPick = Result<String, Option<u64>>;
 
 /// §5.6 steps 2 to 5, in order:
 /// 2. defer when the spent window resets within `defer_within_s` (old Nirvana's `MAX_DEFER_S`, 30 min);
 /// 3. else re-seat on what the rule picks with the spent pool marked spent;
-/// 4. else, in auto mode, defer to the earliest reset known plus one minute;
+/// 4. else, in auto mode, defer to the earliest reset known plus one minute, when it is within `AUTO_DEFER_CAP_S`;
 /// 5. else ask the owner. Nothing is dropped silently.
 pub fn rate_decision(
     now: u64,
@@ -1266,6 +1315,13 @@ pub fn rate_decision(
         Err(earliest) => [*earliest, resets_at].into_iter().flatten().min(),
     };
     match (auto, earliest) {
+        (true, Some(at)) if at.saturating_sub(now) > AUTO_DEFER_CAP_S => RateDecision::Ask {
+            why: format!(
+                "no other seat has room and the earliest reset, {}, is more than {} h away",
+                utc(at),
+                AUTO_DEFER_CAP_S / 3600
+            ),
+        },
         (true, Some(at)) => RateDecision::Defer {
             until: at.max(now) + RESET_MARGIN_S,
             why: format!(
@@ -3345,6 +3401,595 @@ fn tick_cli(project: &Project, args: &[String]) -> std::io::Result<()> {
         println!("{run}: {verdict}");
     }
     Ok(())
+}
+
+// ---- plan 43 A6: orders a dead worker left listed as running ----
+//
+// Measured in run ia1 on Megajam (nirvana/plans/2026-11-18-43-megajam-audit.md C9): 7 workers died in herdr restarts
+// after 481 worker-minutes, one after 315 minutes, and each stayed `running` until the owner typed that Nirvana had
+// restarted; at 14:21Z on 11-14 l05-beats was "a bare shell prompt, and herdr still lists it as running".
+// ia0-pathprobe sat 626 minutes with no `stalled` event: its stall detector runs inside its supervisor, its last
+// stream line (11-12 20:12Z, an open Bash call) was followed by no event of its own until a `seat stop` at 06:37Z that
+// wrote no last turn, the path `seat stop` takes when no supervisor holds the lock. Its supervisor had died, and
+// nothing outside it looked.
+//
+// The check runs in the server's dead-pane sweep child (`nirvana_dead::cli`): over every recent open run once per
+// server start, and at every pass over the runs that hold a stale pane marker (a supervisor that exits cleanly
+// removes its `<order>.pane`, one that dies leaves it). Dead means both: no supervisor holds the order's lock, which
+// the OS releases however the process ends, and the worker pid its `started` recorded names no process, or a process
+// created after that `started`, so a reused pid is not taken for the worker. Every other answer leaves it running.
+
+/// The opening of the `interrupted` reason this check writes; the queue line and the sweep's pane rule read it.
+pub const WORKER_DIED: &str = "its worker died with no end record";
+
+/// A process created this long after its order's `started` event is not that worker. `started` is written just after
+/// the spawn, so the worker's creation time is at or before it; two seconds absorb the clocks' rounding.
+pub const PID_SLACK_S: u64 = 2;
+
+/// A Seated order with no supervisor is left alone this long after its last event: `seat run` opens a pane and
+/// types `seat exec`, which takes the lock within `nirvana_dead::SEAT_GRACE_S`; five times that is a margin, not a
+/// measurement.
+pub const SEATED_GRACE_S: u64 = 300;
+
+/// Only a run whose journal was written this recently is read: a hypothesis, unmeasured. An abandoned run from weeks
+/// ago keeps its record as it is and wakes no one; a PC off for a weekend is inside it.
+pub const RESTART_LOOKBACK_S: u64 = 3 * 86_400;
+
+/// The file under the Nirvana home's `nirvana/` folder holding the server start the full check last ran for.
+pub const RESTART_MARK: &str = "restart-check";
+
+/// The marker a supervisor writes beside its lock (`nirvana_worker::PANE_EXT`) and removes as it exits.
+const PANE_MARK_EXT: &str = "pane";
+
+/// What the OS says of a pid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PidSeen {
+    /// No process has the pid, or the one that had it has exited.
+    Gone,
+    /// A running process has it, created at this unix second.
+    Since(u64),
+    /// It could not be read (access denied, or no way to read it on this platform).
+    Unknown,
+}
+
+/// The restart check's verdict on one order listed as running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Liveness {
+    Dead(String),
+    Live(String),
+    /// Not proven dead: it stays running, and the orchestrator is told.
+    Doubt(String),
+}
+
+/// Whether an order Seated or Running still has a worker; `None` for any other phase. `lock_live` is the supervisor's
+/// lock (`nirvana_worker::live`, where a doubt reads live). Pure but for `pid_seen`.
+pub fn worker_liveness(
+    order: &OrderState,
+    lock_live: bool,
+    pid_seen: &dyn Fn(u32) -> PidSeen,
+    now: u64,
+) -> Option<Liveness> {
+    if !matches!(order.phase, Phase::Seated | Phase::Running) {
+        return None;
+    }
+    if lock_live {
+        return Some(Liveness::Live(
+            "its supervisor holds the order's lock".into(),
+        ));
+    }
+    if order.phase == Phase::Seated {
+        let since = now.saturating_sub(order.last_at);
+        return Some(if since < SEATED_GRACE_S {
+            Liveness::Live(format!(
+                "seated {since} s ago; its supervisor may be starting"
+            ))
+        } else {
+            Liveness::Dead(format!(
+                "seated at {} and no supervisor took it",
+                utc(order.last_at)
+            ))
+        });
+    }
+    let Some((pid, started)) = order.worker else {
+        return Some(Liveness::Doubt(
+            "no supervisor holds its lock, and its `started` recorded no pid".into(),
+        ));
+    };
+    Some(match pid_seen(pid) {
+        PidSeen::Gone => Liveness::Dead(format!(
+            "no supervisor holds its lock and worker pid {pid} is gone"
+        )),
+        PidSeen::Since(created) if created > started + PID_SLACK_S => Liveness::Dead(format!(
+            "no supervisor holds its lock and pid {pid} is now a process created at {}, after the worker's start",
+            utc(created)
+        )),
+        PidSeen::Since(created) => Liveness::Doubt(format!(
+            "no supervisor holds its lock, but worker pid {pid} still runs (created {})",
+            utc(created)
+        )),
+        PidSeen::Unknown => Liveness::Doubt(format!(
+            "no supervisor holds its lock, and worker pid {pid} could not be read"
+        )),
+    })
+}
+
+/// What the OS says of `pid` now.
+#[cfg(windows)]
+pub fn pid_seen(pid: u32) -> PidSeen {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, FILETIME, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: OpenProcess returns null on failure, which is checked; the handle is closed once below.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        // ERROR_INVALID_PARAMETER is "no such process"; access denied and the rest are a doubt.
+        // SAFETY: reads the calling thread's last error.
+        return if unsafe { GetLastError() } == ERROR_INVALID_PARAMETER {
+            PidSeen::Gone
+        } else {
+            PidSeen::Unknown
+        };
+    }
+    let mut code = 0u32;
+    // SAFETY: the handle is valid until CloseHandle; the out pointers are to locals.
+    let exited =
+        unsafe { GetExitCodeProcess(handle, &mut code) } != 0 && code != STILL_ACTIVE as u32;
+    let zero = || FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let (mut created, mut exit, mut kernel, mut user) = (zero(), zero(), zero(), zero());
+    // SAFETY: as above.
+    let timed =
+        unsafe { GetProcessTimes(handle, &mut created, &mut exit, &mut kernel, &mut user) } != 0;
+    // SAFETY: the handle came from OpenProcess and is closed once.
+    unsafe { CloseHandle(handle) };
+    if exited {
+        // A process object outlives its process while any handle to it is open.
+        return PidSeen::Gone;
+    }
+    if !timed {
+        return PidSeen::Unknown;
+    }
+    let ticks = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+    PidSeen::Since(crate::nirvana_subagents::filetime_ticks_to_unix_secs(ticks))
+}
+
+/// On Linux (not built or measured there): a pid with no `/proc` entry is gone; any other is a doubt. A `/proc` that is
+/// not mounted (some containers) proves nothing, so then every pid is a doubt.
+#[cfg(target_os = "linux")]
+pub fn pid_seen(pid: u32) -> PidSeen {
+    if !proc_mounted() || Path::new(&format!("/proc/{pid}")).exists() {
+        PidSeen::Unknown
+    } else {
+        PidSeen::Gone
+    }
+}
+
+/// Plan 43 fix round F1: macOS and the BSDs have no `/proc`, so a missing entry there proves nothing; every pid is a
+/// doubt, and every order the check reads stays running with one `live_doubt`.
+#[cfg(all(not(windows), not(target_os = "linux")))]
+pub fn pid_seen(_pid: u32) -> PidSeen {
+    PidSeen::Unknown
+}
+
+#[cfg(target_os = "linux")]
+fn proc_mounted() -> bool {
+    Path::new("/proc/self").exists()
+}
+
+/// Plan 43 fix round F1: whether `nirvana_worker::live` reading free proves no supervisor runs. On Windows the lock is
+/// an exclusive open the OS releases at exit. Off Windows `live` reads the pid in the lock file against `/proc/<pid>`:
+/// on Linux with `/proc` mounted that holds; on macOS there is no `/proc`, so `live` reads every lock free, a live
+/// supervisor's too, and a free lock there must never make an order dead.
+pub fn lock_reads_free() -> bool {
+    #[cfg(windows)]
+    {
+        true
+    }
+    #[cfg(target_os = "linux")]
+    {
+        proc_mounted()
+    }
+    #[cfg(all(not(windows), not(target_os = "linux")))]
+    {
+        false
+    }
+}
+
+/// How one check reads the world, so a test needs no live process and no herdr.
+pub struct Liveliness<'a> {
+    /// The supervisor's lock of an order in a run (`nirvana_worker::live`).
+    pub lock_live: &'a dyn Fn(&Project, &str, &str) -> bool,
+    /// Whether a free lock proves no supervisor runs (`lock_reads_free`). When it does not, nothing reads dead and no
+    /// pane marker reads stale (fix round F1).
+    pub lock_proves_free: bool,
+    pub pid_seen: &'a dyn Fn(u32) -> PidSeen,
+    /// Wakes the run's orchestrator (`wake`), after events were written.
+    pub wake: &'a dyn Fn(&Project, &str),
+}
+
+/// What the check did to one run.
+#[derive(Debug, Default)]
+pub struct RunChecked {
+    /// A line per order interrupted, doubted for the first time, or that could not be written.
+    pub lines: Vec<String>,
+    /// An event was written (and the orchestrator woken).
+    pub wrote: bool,
+    /// An order's events could not be written: the server start's full check has not finished and runs again.
+    pub failed: bool,
+}
+
+/// `worker_liveness` in `world`: where a free lock proves nothing, a death is a doubt.
+fn judged(order: &OrderState, lock_live: bool, world: &Liveliness, now: u64) -> Option<Liveness> {
+    match worker_liveness(order, lock_live, world.pid_seen, now)? {
+        Liveness::Dead(cause) if !world.lock_proves_free => Some(Liveness::Doubt(format!(
+            "{cause}, but on this platform a free lock does not prove its supervisor gone"
+        ))),
+        verdict => Some(verdict),
+    }
+}
+
+/// One run: every order `worker_liveness` reads dead is checkpointed (the worktree's diff, as `herdr run resume`
+/// writes it) and interrupted; each one not proven dead gets a `live_doubt`, unless its latest doubt says the same and
+/// no `started` came since (fix round F2: a check that runs again tells nothing twice). `only` limits it to those
+/// orders. Each order is judged again under the journal's lock before anything is written, so a worker that came back
+/// meanwhile is not cut, and the checkpoint written for it is removed. One order's failure is a line and the next
+/// order is still judged (fix round F2).
+pub fn interrupt_dead(
+    project: &Project,
+    run: &str,
+    only: Option<&[String]>,
+    dry_run: bool,
+    world: &Liveliness,
+    now: u64,
+) -> RunChecked {
+    let journal = project.journal(run);
+    let state = replay(&journal.read().0);
+    let mut checked = RunChecked::default();
+    if state.ended.is_some() {
+        return checked;
+    }
+    let lock_live = |order: &str| (world.lock_live)(project, run, order);
+    for order in &state.orders {
+        let id = order.id().to_owned();
+        if only.is_some_and(|only| !only.contains(&id)) {
+            continue;
+        }
+        let Some(verdict) = judged(order, lock_live(&id), world, now) else {
+            continue;
+        };
+        match verdict {
+            Liveness::Live(_) => {}
+            Liveness::Doubt(why) => {
+                if order.last_doubt.as_deref() == Some(why.as_str()) {
+                    continue;
+                }
+                let line = format!("{run}: {id} not proven dead, left running: {why}");
+                if dry_run {
+                    checked.lines.push(line);
+                    continue;
+                }
+                match journal.append(
+                    now,
+                    Kind::LiveDoubt {
+                        order: id.clone(),
+                        why,
+                    },
+                ) {
+                    Ok(_) => {
+                        checked.lines.push(line);
+                        checked.wrote = true;
+                    }
+                    Err(err) => {
+                        checked.failed = true;
+                        checked
+                            .lines
+                            .push(format!("{run}: {id}'s doubt could not be written: {err}"));
+                    }
+                }
+            }
+            Liveness::Dead(cause) => {
+                if dry_run {
+                    checked.lines.push(format!("{run}: {id} interrupted: {cause}"));
+                    continue;
+                }
+                let (diff, bytes) = crate::nirvana_worker::write_diff(
+                    &journal.dir(),
+                    &id,
+                    "restart",
+                    Path::new(&order.seated.cwd),
+                );
+                let why = format!(
+                    "{WORKER_DIED} ({cause}); its diff is in {}",
+                    diff.as_deref()
+                        .unwrap_or("no checkpoint (the folder's diff could not be read)")
+                );
+                let written = journal.transact(now, |events| {
+                    let fresh = replay(events);
+                    let still = fresh
+                        .order(&id)
+                        .and_then(|known| judged(known, lock_live(&id), world, now));
+                    if !matches!(still, Some(Liveness::Dead(_))) {
+                        return Ok((Vec::new(), ()));
+                    }
+                    Ok((
+                        vec![
+                            Kind::Checkpoint {
+                                order: id.clone(),
+                                why: "interrupted".into(),
+                                report: None,
+                                last_turn: None,
+                                diff: diff.clone(),
+                                diff_bytes: bytes,
+                            },
+                            Kind::Interrupted {
+                                order: id.clone(),
+                                why: why.clone(),
+                            },
+                        ],
+                        (),
+                    ))
+                });
+                let recorded = match written {
+                    Ok((events, ())) if !events.is_empty() => {
+                        checked.lines.push(format!("{run}: {id} interrupted: {cause}"));
+                        checked.wrote = true;
+                        true
+                    }
+                    Ok(_) => false,
+                    Err(err) => {
+                        checked.failed = true;
+                        checked
+                            .lines
+                            .push(format!("{run}: {id} could not be interrupted: {err}"));
+                        false
+                    }
+                };
+                // Fix round F5: a checkpoint no event names is not left behind.
+                if let (false, Some(diff)) = (recorded, &diff) {
+                    let _ = std::fs::remove_file(journal.dir().join(diff));
+                }
+            }
+        }
+    }
+    if checked.wrote {
+        (world.wake)(project, run);
+    }
+    checked
+}
+
+/// The orders of a run whose supervisor left its pane marker with its lock free: it died without its exit. None where
+/// a free lock proves nothing (fix round F1).
+fn stale_pane_marks(project: &Project, run: &str, world: &Liveliness) -> Vec<String> {
+    if !world.lock_proves_free {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(project.run_dir(run).join("live")) else {
+        return Vec::new();
+    };
+    let mut orders: Vec<String> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some(PANE_MARK_EXT))
+        .filter_map(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_owned)
+        })
+        .filter(|order| valid_id(order) && !(world.lock_live)(project, run, order))
+        .collect();
+    orders.sort();
+    orders
+}
+
+/// Whether the run's journal was written within `RESTART_LOOKBACK_S` of `now`; no time read reads recent.
+fn recent_run(project: &Project, run: &str, now: u64) -> bool {
+    let modified = std::fs::metadata(project.journal(run).path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|at| at.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|at| at.as_secs());
+    modified.is_none_or(|at| now.saturating_sub(at) <= RESTART_LOOKBACK_S)
+}
+
+/// Fix round F2: the folder under `home` holding one empty file per server start whose full check finished, named
+/// by that start. Each start has its own file, so two servers (or sessions) on one machine never overwrite each
+/// other's mark: before, one shared value flipped between their starts and each pass of either ran the full check.
+fn restart_marks(home: &Path) -> PathBuf {
+    home.join(nirvana_seat::DIR).join(RESTART_MARK)
+}
+
+/// Whether the full check for the server start `at` has finished under `home`.
+pub fn restart_marked(home: &Path, at: u64) -> bool {
+    restart_marks(home).join(at.to_string()).is_file()
+}
+
+/// Marks `at`'s full check finished, and lets go of the marks of starts older than the lookback, whose runs the check
+/// would not read again anyway.
+fn mark_restart(home: &Path, at: u64, now: u64) -> std::io::Result<()> {
+    let dir = restart_marks(home);
+    // A mark from before the fix round was one file of this name.
+    if dir.is_file() {
+        std::fs::remove_file(&dir)?;
+    }
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join(at.to_string()), "")?;
+    for entry in std::fs::read_dir(&dir)?.flatten() {
+        let old = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u64>().ok())
+            .is_some_and(|start| now.saturating_sub(start) > RESTART_LOOKBACK_S);
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    Ok(())
+}
+
+/// The sweep's restart check over `projects`. `server_started` is the server's start when the server started the
+/// sweep: until a pass after that start has checked every recent open run with no failure (`restart_marked`), each
+/// pass does; every pass reads the runs with a stale pane marker. Returns a line per order judged dead, doubted for
+/// the first time, or not written. A failure leaves the start unmarked, so the next pass tries again.
+pub fn restart_check(
+    home: &Path,
+    projects: &[PathBuf],
+    server_started: Option<u64>,
+    dry_run: bool,
+    world: &Liveliness,
+    now: u64,
+) -> Vec<String> {
+    let full = server_started.is_some_and(|at| !restart_marked(home, at));
+    let mut lines = Vec::new();
+    let mut failed = false;
+    for root in projects {
+        let project = Project::at(root.clone());
+        for run in project.runs() {
+            if !recent_run(&project, &run, now) {
+                continue;
+            }
+            let stale = stale_pane_marks(&project, &run, world);
+            let only = (!full).then_some(stale.as_slice());
+            if only.is_some_and(<[String]>::is_empty) {
+                continue;
+            }
+            let checked = interrupt_dead(&project, &run, only, dry_run, world, now);
+            failed |= checked.failed;
+            lines.extend(checked.lines);
+            if dry_run {
+                continue;
+            }
+            // A marker whose order no longer runs is what a clean exit would have removed; one left would keep every
+            // pass reading this run's journal.
+            let state = replay(&project.journal(&run).read().0);
+            for order in &stale {
+                let done = state
+                    .order(order)
+                    .is_none_or(|known| !matches!(known.phase, Phase::Seated | Phase::Running));
+                if done && !(world.lock_live)(&project, &run, order) {
+                    let _ = std::fs::remove_file(
+                        project
+                            .run_dir(&run)
+                            .join("live")
+                            .join(format!("{order}.{PANE_MARK_EXT}")),
+                    );
+                }
+            }
+        }
+    }
+    if let (true, false, false, Some(at)) = (full, dry_run, failed, server_started) {
+        if let Err(err) = mark_restart(home, at, now) {
+            lines.push(format!(
+                "the restart check's mark could not be written ({err}); the next pass checks again"
+            ));
+        }
+    }
+    lines
+}
+
+/// `restart_check` in the world as it is: the supervisors' locks, the OS's pids, and `wake`.
+pub fn restart_check_live(
+    home: &Path,
+    projects: &[PathBuf],
+    server_started: Option<u64>,
+    dry_run: bool,
+) -> Vec<String> {
+    let lock_live = |project: &Project, run: &str, order: &str| {
+        crate::nirvana_worker::live(project, run, order)
+    };
+    let wake_run = |project: &Project, run: &str| {
+        let _ = wake(project, run, false);
+    };
+    let world = Liveliness {
+        lock_live: &lock_live,
+        lock_proves_free: lock_reads_free(),
+        pid_seen: &pid_seen,
+        wake: &wake_run,
+    };
+    restart_check(home, projects, server_started, dry_run, &world, now())
+}
+
+// ---- plan 43 A7: the records a reseat and a quota error leave ----
+
+/// The `ended` outcome a reseat writes for its parent. Measured in run ia1: 5 reseated parents had no `ended` event,
+/// so a reader counting ends by `ended` undercounted them (audit C10).
+pub const RESEATED: &str = "reseated";
+
+/// The events a reseat writes in one transaction: the child's `seated`, the parent's `reseated`, and the parent's
+/// `ended` with outcome `reseated`, so every order that stops running has an end.
+pub fn reseat_events(child: Seated, order: &str, seat: &str, why: &str) -> Vec<Kind> {
+    let child_id = child.order.clone();
+    vec![
+        Kind::Seated(Box::new(child)),
+        Kind::Reseated {
+            order: order.to_owned(),
+            child: child_id.clone(),
+            seat: seat.to_owned(),
+            why: why.to_owned(),
+        },
+        Kind::Ended {
+            order: Some(order.to_owned()),
+            outcome: RESEATED.into(),
+            // Fix round F6: the end keeps why the parent stopped ("<seat> <effort> ran out (<signal>)"), which the
+            // `reseated` arm wrote into the order's `why`, and adds where it went.
+            why: Some(format!("{why}; re-seated as {child_id} on {seat}")),
+            exit: None,
+            pools: Vec::new(),
+            pools_basis: None,
+        },
+    ]
+}
+
+/// The reset a quota error's own text names: "Resets in 79h6m53s" read at `now` is `now` plus 79 h 6 min 53 s. agy's
+/// 429 carries it only in `short_error` (run ia1, 2026-11-13 22:09Z: "RESOURCE_EXHAUSTED (code 429): Individual quota
+/// reached. ... Resets in 79h6m53s."); herdr recorded `resets_at: null`, deferred the two orders to another pool's
+/// reset, started them again on the spent seat at 22:40Z and met the same 429. `None` when the text names no duration.
+/// Units d, h, m and s, each at most once and in that order; only h, m and s have been seen.
+pub fn resets_in(text: &str, now: u64) -> Option<u64> {
+    const MARK: &str = "resets in ";
+    let lower = text.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(found) = lower[from..].find(MARK) {
+        let start = from + found + MARK.len();
+        from = start;
+        let mut total = 0u64;
+        let mut units = 0;
+        let mut digits = String::new();
+        let mut last_rank = None;
+        for ch in lower[start..].chars() {
+            if ch.is_ascii_digit() {
+                digits.push(ch);
+                continue;
+            }
+            let (rank, scale) = match ch {
+                'd' => (0, 86_400),
+                'h' => (1, 3_600),
+                'm' => (2, 60),
+                's' => (3, 1),
+                _ => break,
+            };
+            if digits.is_empty() || last_rank.is_some_and(|last| rank <= last) {
+                units = 0;
+                break;
+            }
+            let Ok(n) = digits.parse::<u64>() else {
+                units = 0;
+                break;
+            };
+            total = total.saturating_add(n.saturating_mul(scale));
+            digits.clear();
+            last_rank = Some(rank);
+            units += 1;
+        }
+        if units > 0 && digits.is_empty() {
+            return Some(now.saturating_add(total));
+        }
+    }
+    None
 }
 
 // ---- the owner's last key, from the server (§7.2, Argon's review F7) ----

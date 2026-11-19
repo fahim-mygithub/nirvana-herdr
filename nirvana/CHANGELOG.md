@@ -3,6 +3,33 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.81.0: a worker a restart killed is found, checkpointed and reported
+
+- **Changed:** herdr's sweep checks every open run of the last 3 days once per server start, and every minute checks
+  runs that hold a stale `<order>.pane` marker. An order reads dead only when no supervisor holds its lock and its
+  worker pid is gone or now names a process created more than 2 s after `started`. A dead order gets a checkpoint of
+  its real diff, an `interrupted` event and a wake that names the checkpoint and the way on; the decision is made again
+  under the journal's lock before anything is written. An order herdr cannot prove dead stays running, with one
+  `live_doubt` line until its worker starts again. Off Windows and Linux a free lock proves nothing, so every order
+  there reads as a doubt. One mark file per server start, so two servers do not undo each other, and a start whose run
+  failed to write is not marked. A rate-limit reseat writes the parent's `ended` with outcome `reseated` and keeps why
+  it stopped. agy's "Resets in 79h6m53s" fills `resets_at`. In auto mode a reset more than 6 hours away asks instead
+  of deferring. The checkpoint reads the worktree with `status --no-optional-locks` and `diff-index`. Plan 43 A6, A7.
+- **Because:** run ia1 (plan 43, C9 to C11). 7 workers died in restarts after 481 worker-minutes and stayed listed as
+  running until the owner said Nirvana had restarted. ia0-pathprobe sat 626 minutes with its supervisor dead, and the
+  stall detector lives inside the supervisor. 5 reseated parents had no end. An agy 429 named a 79 h reset and herdr
+  recorded none. The review of the first build: on macOS every running order would have read dead; one shared mark
+  thrashed between two servers; and with the reset now read, an auto order could have been parked 79 h in silence.
+- **Measured:** 25 restart tests pass, one with a real process holding a real lock: the order reads live and nothing
+  is written, and after the process is killed the next pass interrupts it with a real diff. The 60 `p86_` controls
+  each turned their test red. `nirvana_dead` 32 of 32 and `nirvana_worker` 85 of 85. Porcelain `git diff HEAD` rewrote
+  a stat-dirty index even with `--no-optional-locks` (git 2.50.1), hence `diff-index`. Hypotheses, not measured: the
+  72 h lookback, the 300 s grace for a seated order, and the 6 h cap, which is the orchestrator's choice for the owner
+  to change. Not done: nothing was compiled off Windows; no live restart was run; a deferred order still relaunches
+  on its spent seat when it wakes at another pool's earlier reset, as in ia1.
+- **If you remove this:** a restart leaves dead orders listed as running until someone says so, a supervisor that
+  dies with its pane goes unseen for hours, and a long agy reset parks an order for days without asking anyone.
+
 ## alpha 0.80.0: in auto mode the orchestrator files its question, it does not stop on a modal
 
 - **Changed:** a new PreToolUse hook, `herdr nirvana guard-ask`, runs on `AskUserQuestion` and on agy's

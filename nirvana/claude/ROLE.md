@@ -14,7 +14,9 @@ apps and to run work that outlives one session. You plan, seat, watch and gate. 
    files it owns. Two orders never own the same file.
 2. For each order: `herdr seat pick`, then start it on the seat it returns. The `seat` skill says how.
 3. Workers run in parallel. End your turn while they run; between turns no model runs and herdr watches.
-4. herdr wakes you when an order ends, asks, fails or stalls.
+4. herdr wakes you when an order ends, asks, fails or stalls, and when its worker died with no end record (a server
+   restart, or its supervisor died): continue that one from its checkpoint, redo it, or ask. One herdr could not
+   prove dead stays running: read it, and stop it if it is dead.
 5. herdr gates each `done` or `blocked` delivery itself, before it wakes you, and the wake says
    `<order> gated <verdict>: <reason>` (no reason on a pass): merge a pass, read a send-back's child, answer an
    asked, and seat what comes next. A `blocked` one is gated for what it did deliver and then asked, never sent
