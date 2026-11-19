@@ -13,6 +13,9 @@
 //!   each answering "Matches user-configured deny rule". A tool with no row is refused on agy, never guessed.
 //! - An order with none of these gets no `--add-dir`, no `--settings` and today's prompt: its argv is byte for byte
 //!   what it was before plan 35.
+//! - Plan 45 P45c (§5): an order seated with a profile whose `skills` names some gets only those copied
+//!   (`selected_skills`); a profile without the key, or no profile, changes nothing. A skill a workspace's own
+//!   `.agents/skills/` holds is loaded by agy whatever herdr copies, so the selection cannot take it away.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -440,6 +443,83 @@ pub fn claude_skills(cwd: &Path, root: &Path, out: &mut dyn Write) -> Vec<(Strin
     skills
 }
 
+/// Plan 45 §5: the project's skills a profile's `skills` may name, `<root>/.claude/skills/<name>/SKILL.md`, by name,
+/// links left out as `claude_skills` leaves them. `herdr profile check` and a proposal read against this.
+pub fn project_skills(root: &Path) -> Vec<String> {
+    let skills = root.join(".claude").join("skills");
+    if is_link(&skills) {
+        return Vec::new();
+    }
+    let mut names: Vec<String> = std::fs::read_dir(&skills)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_dir()) && entry.path().join("SKILL.md").is_file()
+        })
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Plan 45 §5: the skills the order's profile names, from the run's copy the order was seated with; `None` when the
+/// order copy names no profile, or one with no `skills` key (every skill is copied, as before). `skills: []` is
+/// `Some([])`, none copied (P45c review F6). A copy that fails its sha is an error here as it is in `with_profile`.
+///
+/// P45c fix round (review F1): `None` for a teach order or a lesson review, by the class the order was journaled with
+/// (`nirvana_profiles::takes_no_profile_servers`). Neither is the profile's own work, so the profile neither narrows nor
+/// widens its skills; before, a review kept every skill only because its brief has the `Profile:` lines taken out. An
+/// order with no seated record takes the profile's selection, the narrower side.
+///
+/// P45c review2 A1: the journal is read only for a profile that names its skills, the one case the class changes; an
+/// order with no profile, or one whose profile keeps every skill, launches reading no journal here.
+pub fn profile_skills(
+    run_dir: &Path,
+    order: &str,
+    order_file: &str,
+) -> Result<Option<Vec<String>>, String> {
+    let Ok(text) = std::fs::read_to_string(order_file) else {
+        return Ok(None);
+    };
+    let Some(Ok(found)) = crate::nirvana_profiles::in_order(&text) else {
+        return Ok(None);
+    };
+    let parsed = crate::nirvana_profiles::from_run(run_dir, &found)?;
+    if parsed.skills.is_some()
+        && crate::nirvana_gui_tools::seated_record(run_dir, order)
+            .is_some_and(|seated| crate::nirvana_profiles::takes_no_profile_servers(&seated.class))
+    {
+        return Ok(None);
+    }
+    Ok(parsed.skills)
+}
+
+/// `skills` narrowed to the names a profile gives, in the project's order; each named one that is not there says so
+/// in one line. `None` keeps them all.
+pub fn selected_skills(
+    skills: Vec<(String, PathBuf)>,
+    named: Option<&[String]>,
+    out: &mut dyn Write,
+) -> Vec<(String, PathBuf)> {
+    let Some(named) = named else {
+        return skills;
+    };
+    for name in named {
+        if !skills.iter().any(|(have, _)| have == name) {
+            let _ = writeln!(
+                out,
+                "the profile names the skill {name}, which herdr has no copy of here (not in .claude/skills, or \
+                 the workspace's own .agents/skills holds it)"
+            );
+        }
+    }
+    skills
+        .into_iter()
+        .filter(|(name, _)| named.contains(name))
+        .collect()
+}
+
 /// Copies `skills` into `<to>/<name>/`, in order, leaving out with one line each a skill past `per_skill` bytes or one
 /// that would take the copy past `total`.
 pub fn copy_skills(
@@ -559,8 +639,10 @@ pub fn with_tools(
         }
         write_file(&tools.join("AGENTS.md"), text.as_bytes(), false)?;
     }
+    // Plan 45 §5: a profile's `skills` selects; read from the run's copy, as `with_profile` reads its body.
+    let named = profile_skills(order.run_dir, order.order, order.order_file)?;
     copy_skills(
-        &claude_skills(order.cwd, order.root, out),
+        &selected_skills(claude_skills(order.cwd, order.root, out), named.as_deref(), out),
         &tools.join(".agents").join("skills"),
         SKILL_MAX_BYTES,
         SKILLS_MAX_BYTES,

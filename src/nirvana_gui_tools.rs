@@ -25,6 +25,14 @@
 //! - A `.mcp.json` that does not parse refuses the order that names a server, saying so, not as an unknown need.
 //! - Two servers whose tool names flatten alike (`a.b`, `a_b`) refuse the order: the grant for one is a grant for both.
 //! - Every order granted a server is told never to start a print, a laser job or a send.
+//!
+//! Plan 45 P45c (§5): a folder profile's own servers, `<profile>/mcp.json`, reach every order seated with it with no
+//! `needs` line, merged into the same per-order config (claude) or tools folder (agy), each under the same rules: a
+//! desktop server or a definition agy cannot take keeps the order on claude, a name the project's `.mcp.json` defines
+//! too refuses the start (no silent override), and the definitions come from the run's copy, checked by its sha
+//! (`nirvana_profiles::run_servers`), never from the project's file as it stands at launch. P45c fix round: a teach
+//! order and a lesson review get none (review F1), and the run's definitions copy goes with the order's config when
+//! it ends (review F3); a later start of the same copy takes the profile's file only when its sha is the pin's.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -101,6 +109,12 @@ pub struct SendOk {
 /// The server names a `.mcp.json` text defines, in its order.
 pub fn server_names(text: &str) -> Result<Vec<String>, String> {
     Ok(defined(text)?.keys().cloned().collect())
+}
+
+/// The server definitions a `.mcp.json`-shaped text holds, by name. Plan 45: a profile's own `mcp.json` is read the
+/// same way.
+pub fn definitions(text: &str) -> Result<Map<String, Value>, String> {
+    defined(text)
 }
 
 fn defined(text: &str) -> Result<Map<String, Value>, String> {
@@ -295,6 +309,65 @@ pub fn with_servers(mut argv: Vec<String>, file: &Path, servers: &[String]) -> V
     argv
 }
 
+/// The order copy a worker of `order` reads in `cwd`: `nirvana_worker::write_order`'s `<cwd>/.nirvana/orders/<order>.md`
+/// (a test pins the two together). The launch reads it for the profile the order was seated with.
+pub fn order_copy_path(cwd: &Path, order: &str) -> PathBuf {
+    cwd.join(crate::nirvana_run::DIR)
+        .join("orders")
+        .join(format!("{order}.md"))
+}
+
+/// The order's `seated` record in the run's journal, as `replay` reads it (the first for its id); `None` when the journal
+/// holds none.
+pub(crate) fn seated_record(run_dir: &Path, order: &str) -> Option<crate::nirvana_run::Seated> {
+    let journal = crate::nirvana_run::Journal::new(run_dir.join(crate::nirvana_run::JOURNAL));
+    crate::nirvana_run::replay(&journal.read().0)
+        .order(order)
+        .map(|known| known.seated.clone())
+}
+
+fn no_record(run_dir: &Path, order: &str) -> String {
+    format!(
+        "{} holds no seated record of {order}, so whether its class may take the profile's own servers (a teacher \
+         and a reviewer get none) cannot be read; the order is refused rather than granted them",
+        run_dir.join(crate::nirvana_run::JOURNAL).display()
+    )
+}
+
+/// Plan 45 §5: the definitions of the servers in the own `mcp.json` of the profile the order copy names, checked by
+/// the run's pin (`nirvana_profiles::run_servers`). None when the copy cannot be read or names no profile; a line that
+/// is not herdr's fails the order in `with_profile` before it starts.
+///
+/// P45c fix round (review F1): none for a teach order or a lesson review, by the class the order was journaled with
+/// (`nirvana_profiles::takes_no_profile_servers`), on claude and agy alike, whatever its brief says. An order whose
+/// copy names a profile and whose class cannot be read from the journal is refused, never granted on a guess.
+fn profile_servers(
+    root: &Path,
+    cwd: &Path,
+    run_dir: &Path,
+    order: &str,
+) -> Result<Map<String, Value>, String> {
+    let Ok(text) = std::fs::read_to_string(order_copy_path(cwd, order)) else {
+        return Ok(Map::new());
+    };
+    let Some(Ok(found)) = crate::nirvana_profiles::in_order(&text) else {
+        return Ok(Map::new());
+    };
+    // P45c review2 A1: a profile with no `mcp.json` has no pin, and grants nothing here, so its launch reads no journal
+    // and is as it was before plan 45 §5. A pin taken out since seating is no way round this: the profile copy's sha
+    // covers the pin, so `with_profile` refuses that order before it starts.
+    if !crate::nirvana_profiles::pin_path(run_dir, &found.name, &found.sha).is_file() {
+        return Ok(Map::new());
+    }
+    match seated_record(run_dir, order) {
+        Some(seated) if crate::nirvana_profiles::takes_no_profile_servers(&seated.class) => {
+            Ok(Map::new())
+        }
+        Some(_) => crate::nirvana_profiles::run_servers(root, run_dir, &found),
+        None => Err(no_record(run_dir, order)),
+    }
+}
+
 /// Where an order's config is written: `<run_dir>/mcp/<order>.json`.
 pub fn order_config_path(run_dir: &Path, order: &str) -> PathBuf {
     run_dir.join("mcp").join(format!("{order}.json"))
@@ -365,9 +438,78 @@ pub(crate) fn write_private(file: &Path, body: &[u8]) -> std::io::Result<()> {
     options.open(file)?.write_all(body)
 }
 
+/// P45c review2 B2: `write_private` to a temporary file beside `file`, then a rename over it, so a reader sees the old
+/// bytes, the new bytes or no file, never a torn write. The temporary name carries the process id and a counter, so
+/// two threads or two processes writing the same copy at once never share one.
+pub(crate) fn write_private_atomic(file: &Path, body: &[u8]) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let dir = file.parent().unwrap_or_else(|| Path::new("."));
+    let name = file
+        .file_name()
+        .map_or_else(|| "file".into(), |name| name.to_string_lossy());
+    let temp = dir.join(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    write_private(&temp, body)?;
+    std::fs::rename(&temp, file).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp);
+    })
+}
+
+/// P45c review2 B1: takes out each definitions copy of a profile's own `mcp.json` in the run
+/// (`nirvana_profiles::servers_copies`) that no order of the run still wanting a worker (seated, running or deferred)
+/// was seated with. So the copy an order was seated with lives until that order ends (delivered, failed, stopped,
+/// interrupted, reseated, given up after a crash loop), and while a sibling or child of the same profile version may
+/// still start: a restart, a crash re-launch or a deferred start reads the bytes checked at seating, whatever the
+/// owner did to the live `mcp.json` since. Called when a supervisor ends (`nirvana_worker::exec`) and, for every run,
+/// when one starts (`nirvana_worker::sweep_leftovers`), so a supervisor killed before its end leaves the copy only
+/// until the next one starts. A run with no copy reads no journal. An order still wanting a worker whose brief cannot
+/// be read keeps every copy of the run: which one it holds cannot be told, and a copy kept a while longer is better
+/// than an order that cannot start. A remove that fails says so in one line.
+pub fn release_servers_copies(run_dir: &Path, out: &mut dyn Write) {
+    let copies = crate::nirvana_profiles::servers_copies(run_dir);
+    if copies.is_empty() {
+        return;
+    }
+    let journal = crate::nirvana_run::Journal::new(run_dir.join(crate::nirvana_run::JOURNAL));
+    let state = crate::nirvana_run::replay(&journal.read().0);
+    let mut held = Vec::new();
+    for known in state.orders.iter().filter(|known| known.phase.wants_worker()) {
+        let Ok(text) = std::fs::read_to_string(&known.seated.order_file) else {
+            return;
+        };
+        if let Some(Ok(found)) = crate::nirvana_profiles::in_order(&text) {
+            held.push(crate::nirvana_profiles::servers_copy_path(
+                run_dir,
+                &found.name,
+                &found.sha,
+            ));
+        }
+    }
+    for copy in copies.iter().filter(|copy| !held.contains(copy)) {
+        // Written apart from `remove_order_config`'s match: control p29_remove_silent finds that one's arm.
+        if let Err(err) = std::fs::remove_file(copy) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                let _ = writeln!(
+                    out,
+                    "the run's copy of a profile's servers stays at {}: {err}",
+                    copy.display()
+                );
+            }
+        }
+    }
+}
+
 /// Review F2: the order's config goes when its worker process ends, whatever the outcome; a restart or a reseat
 /// writes it again. A remove that fails says so in one line of the worker's view. Plan 35 §3.2: an agy order's tools
 /// folder and deny file go with it, and P35c item 4: its bladebro home.
+///
+/// P45c review2 B1: the run's copy of the order's profile's own `mcp.json` is not removed here. This runs at the start
+/// of every attempt too, and the copy must outlive the order's attempts; `release_servers_copies` takes it out when no
+/// order still wanting a worker holds it.
 pub fn remove_order_config(run_dir: &Path, order: &str, out: &mut dyn Write) {
     crate::nirvana_agy_tools::remove(run_dir, order, out);
     crate::nirvana_bladebro::remove_home(run_dir, order, out);
@@ -409,7 +551,14 @@ pub fn order_argv_seated(
     out: &mut dyn Write,
 ) -> Result<Vec<String>, String> {
     let cli = argv.first().map(String::as_str);
-    if needs.is_empty() || !matches!(cli, Some("claude" | "agy")) {
+    if !matches!(cli, Some("claude" | "agy")) {
+        return Ok(argv);
+    }
+    // Plan 45 §5: the profile's own servers need no `needs` line, so an order with no needs may still have some.
+    let own = profile_servers(root, cwd, run_dir, order).map_err(|why| {
+        format!("{order} was seated with a profile's own MCP servers and cannot get them: {why}")
+    })?;
+    if needs.is_empty() && own.is_empty() {
         return Ok(argv);
     }
     let agy = cli == Some("agy");
@@ -430,15 +579,32 @@ pub fn order_argv_seated(
     let grant = crate::nirvana_bladebro::grant(cli.unwrap_or_default(), needs, &seat.denied, cwd);
     let blade = crate::nirvana_bladebro::at_launch(grant, seat.told, cwd, out)
         .then(|| crate::nirvana_bladebro::home(run_dir, order));
-    if servers.is_empty() && blade.is_none() {
+    if servers.is_empty() && blade.is_none() && own.is_empty() {
         return Ok(argv);
     }
+    let own_names: Vec<String> = own.keys().cloned().collect();
+    let wanted: Vec<String> = servers.iter().chain(&own_names).cloned().collect();
     let cannot = |why: String| {
         format!(
             "{order} was seated for MCP server {} and cannot get it: {why}",
-            servers.join(", ")
+            wanted.join(", ")
         )
     };
+    // Plan 45 §5: `profile check` refused a name in both files, but the project's file may have gained it since; a
+    // definition in both is refused here too, never overridden in silence, and so is a doubt about the project file.
+    if !own.is_empty() {
+        let project = project_servers(root).map_err(cannot)?;
+        if let Some(name) = own_names.iter().find(|name| project.contains(name)) {
+            return Err(cannot(format!(
+                "{name} is in the profile's own mcp.json and in {MCP_FILE}; a profile never overrides a project server"
+            )));
+        }
+        let mut all = project;
+        all.extend(own_names.iter().cloned());
+        if let Some(why) = key_clash(&own_names, &all) {
+            return Err(cannot(why));
+        }
+    }
     let no_bladebro =
         |why: String| format!("{order} was granted bladebro and cannot get it: {why}");
     let bladebro = match &blade {
@@ -465,12 +631,16 @@ pub fn order_argv_seated(
                 .filter_map(|server| Some((server.clone(), all.get(server)?.clone())))
                 .collect();
         }
+        if let Some(why) = claude_only(&own_names, &own) {
+            return Err(cannot(why));
+        }
+        chosen.extend(own.clone());
         if let Some(definition) = bladebro {
             chosen.insert(crate::nirvana_bladebro::SERVER.to_owned(), definition);
         }
         let written = crate::nirvana_agy_tools::write_servers(&chosen, cwd, run_dir, order, out)
             .map_err(|why| match &blade {
-                Some(_) if servers.is_empty() => no_bladebro(why),
+                Some(_) if wanted.is_empty() => no_bladebro(why),
                 _ => cannot(why),
             })?;
         if !written.is_empty() {
@@ -483,8 +653,12 @@ pub fn order_argv_seated(
     } else {
         seated_config(root, &servers).map_err(cannot)?
     };
-    let alone = servers.is_empty();
+    let alone = wanted.is_empty();
     let mut granted = servers.clone();
+    for (name, definition) in &own {
+        config["mcpServers"][name] = definition.clone();
+        granted.push(name.clone());
+    }
     if let Some(definition) = bladebro {
         config["mcpServers"][crate::nirvana_bladebro::SERVER] = definition;
         granted.push(crate::nirvana_bladebro::SERVER.to_owned());
@@ -515,6 +689,27 @@ pub fn with_server_lines(mut text: String, servers: &[String]) -> String {
         .any(|server| DESKTOP_SERVERS.contains(&server.as_str()))
     {
         text.push('\n');
+        text.push_str(BRIEF_LINE);
+    }
+    text
+}
+
+/// Plan 45 §5: the lines of `with_server_lines` for a profile's own servers, added only where the brief lacks them: a
+/// brief that already holds `DEVICE_LINE` (a `needs` server) or `SEND_LINE` (an approved Send) keeps its own, and a
+/// reseat's copy, which has them, is left byte for byte. A desktop server among them adds `BRIEF_LINE` when neither it
+/// nor `DESKTOP_SEND_LINE` is there.
+pub fn with_granted_lines(mut text: String, servers: &[String]) -> String {
+    let [_, ..] = servers else {
+        return text;
+    };
+    if !text.contains(DEVICE_LINE) && !text.contains(SEND_LINE) {
+        return with_server_lines(text, servers);
+    }
+    let desktop = servers
+        .iter()
+        .any(|server| DESKTOP_SERVERS.contains(&server.as_str()));
+    if desktop && !text.contains(BRIEF_LINE) && !text.contains(DESKTOP_SEND_LINE) {
+        text.push_str("\n\n");
         text.push_str(BRIEF_LINE);
     }
     text

@@ -67,8 +67,11 @@ pub fn teacher_cwd(project: &Project, run: &str, id: &str) -> PathBuf {
 }
 
 /// Review B2: what a claude teacher may not use, plan 33's reviewer's `DENIED` with `WebFetch` and `WebSearch` given
-/// back (it must read its source). The profile's own MCP tools stay; its `disallowed_tools` denies the ones that
-/// write.
+/// back (it must read its source), and the profile's `disallowed_tools` joined to it. P45c fix round (review F1, F2):
+/// plans 33/34 let the profile's MCP tools stay; a teacher now gets no MCP server from the profile at all, neither the
+/// servers its `needs` names (`nirvana_worker::seat_order_with` joins none for this class) nor its own `mcp.json`
+/// (`nirvana_profiles::takes_no_profile_servers`), since a prompt-injected page could drive any tool of one. The
+/// owner may reverse this; it is a narrowing, recorded in the fix round's report.
 pub fn teach_denied() -> String {
     crate::nirvana_review::DENIED
         .split(',')
@@ -82,6 +85,13 @@ const RESERVED: [&str; 22] = [
     "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
     "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
 ];
+
+/// Whether Windows opens `name` as a device: its stem before the first `.`, in any case, is one of `RESERVED`
+/// (`CON`, `nul.md`, `Com1.txt`). P45c review F7: a profile named `con` was accepted, and `con.md` is the console.
+pub(crate) fn windows_device(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_lowercase();
+    RESERVED.contains(&stem.as_str())
+}
 
 /// §2.2: `keep | reject | dead-end`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

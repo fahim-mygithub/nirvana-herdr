@@ -1534,3 +1534,310 @@ fn p35c_a_brief_without_the_line_gets_no_grant_at_launch() {
     assert_eq!(got.last().map(String::as_str), Some("mcp__bladebro__*"));
     assert!(crate::nirvana_bladebro::home(&run_dir, "c2").is_dir());
 }
+
+// ---- plan 45 P45c: a profile's own servers ----
+
+/// The launch finds the order copy by `order_copy_path`; this pins it to the path `write_order` writes.
+#[test]
+fn p92_the_order_copy_path_is_the_one_write_order_writes() {
+    let home = crate::nirvana::with_test_home("p92-order-copy");
+    let project = crate::nirvana_run::Project::at(home.path.join("project"));
+    project.ensure().unwrap();
+    let written =
+        crate::nirvana_worker::write_order(&project, &project.root, "o1", "# x\n").unwrap();
+    assert_eq!(PathBuf::from(written), order_copy_path(&project.root, "o1"));
+}
+
+#[test]
+fn p92_granted_lines_are_added_once_and_only_where_missing() {
+    let text = with_granted_lines("# x".into(), &words(&["fake-tool"]));
+    assert_eq!(text, format!("# x\n\n{DEVICE_LINE}"));
+    assert_eq!(
+        with_granted_lines(text.clone(), &words(&["fake-tool"])),
+        text
+    );
+    assert_eq!(
+        with_granted_lines(text.clone(), &words(&["xtool"])),
+        format!("{text}\n\n{BRIEF_LINE}")
+    );
+    assert_eq!(with_granted_lines("# x".into(), &[]), "# x");
+}
+
+/// A folder profile `name` with its own servers `servers`, its copy in `run_dir`, and the order copy of `order` in
+/// `root` naming it, as `seat run --profile` leaves them.
+fn profiled(root: &Path, run_dir: &Path, name: &str, servers: &str, order: &str) {
+    profiled_as(root, run_dir, name, servers, order, "build.bounded");
+}
+
+/// `profiled`, the order journaled as `class`.
+fn profiled_as(root: &Path, run_dir: &Path, name: &str, servers: &str, order: &str, class: &str) {
+    let dir = crate::nirvana_profiles::folder_of(root, name);
+    std::fs::create_dir_all(dir.join("knowledge")).unwrap();
+    std::fs::write(
+        dir.join("profile.md"),
+        "---\ndescription: Drives a fake tool.\n---\nWork.\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join(crate::nirvana_profiles::SERVERS_FILE), servers).unwrap();
+    let loaded = crate::nirvana_profiles::load(root, name).unwrap();
+    crate::nirvana_profiles::copy_into_run(run_dir, &loaded).unwrap();
+    let file = order_copy_path(root, order);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let lines = crate::nirvana_profiles::order_lines(&crate::nirvana_profiles::Ref {
+        name: name.into(),
+        sha: loaded.sha,
+    });
+    std::fs::write(&file, format!("{lines}\n# Do it\n")).unwrap();
+    journal_seated(run_dir, order, class, &file);
+}
+
+/// The `seated` record `seat run` journals for `order` of `class`, whose brief is `order_file`: the launch reads the
+/// class from it (P45c fix round F1).
+fn journal_seated(run_dir: &Path, order: &str, class: &str, order_file: &Path) {
+    let seated = crate::nirvana_run::Seated {
+        order: order.into(),
+        seat: "sonnet".into(),
+        cli: "claude".into(),
+        model: "claude-sonnet-5-5".into(),
+        effort: Effort::Medium,
+        pool: "max".into(),
+        class: class.into(),
+        chain: None,
+        size: crate::nirvana_seat::SizeName::Small,
+        mode: crate::nirvana_seat::Mode::Balanced,
+        needs: Vec::new(),
+        not_family: Vec::new(),
+        reason: "r".into(),
+        override_reason: None,
+        order_file: order_file.display().to_string(),
+        cwd: "C:/p".into(),
+        worktree: None,
+        branch: None,
+        parent: None,
+        why: None,
+        rule_pick: None,
+        bar_dropped: None,
+        step_down: None,
+        use_basis: None,
+        expected: std::collections::BTreeMap::new(),
+        jev_pick: None,
+        send_ok: None,
+    };
+    crate::nirvana_run::Journal::new(run_dir.join(crate::nirvana_run::JOURNAL))
+        .append(1, crate::nirvana_run::Kind::Seated(Box::new(seated)))
+        .unwrap();
+}
+
+/// P45c fix round (review F1): a teach order and a lesson review get none of a profile's own servers, on claude and on
+/// agy, by the class journaled, though the brief names the profile; an order whose class cannot be read is refused.
+#[test]
+fn p92_a_teach_or_review_order_gets_no_profile_server_by_its_class() {
+    let home = crate::nirvana::with_test_home("p92-own-class");
+    let root = project(&home.path, Some(MCP_JSON));
+    let run_dir = root.join(".nirvana").join("runs").join("r1");
+    let servers = r#"{"mcpServers": {"fake-tool": {"command": "fake-mcp-not-real"}}}"#;
+    let agy = vec!["agy".to_owned(), "--print=x".to_owned()];
+    let launch = |order: &str, argv: &[String], out: &mut Vec<u8>| {
+        order_argv_seated(
+            argv.to_vec(),
+            &root,
+            &root,
+            &run_dir,
+            order,
+            &[],
+            &crate::nirvana_bladebro::Seat::default(),
+            Ok(vec!["code", "tools"]),
+            out,
+        )
+    };
+    // P45c review2 C1: the gate's reviewer and held-out author too, and a review class not built yet, by the rule.
+    for (order, class) in [
+        ("t1", crate::nirvana_knowledge::TEACH_CLASS),
+        ("v1", crate::nirvana_review::CLASS),
+        ("v2", "review.adversary"),
+        ("v3", "acceptance.author"),
+        ("v4", "review.future-kind"),
+    ] {
+        profiled_as(&root, &run_dir, "op", servers, order, class);
+        let brief = std::fs::read_to_string(order_copy_path(&root, order)).unwrap();
+        assert!(brief.starts_with(crate::nirvana_profiles::LINE), "{brief}");
+        assert_eq!(launch(order, &claude_argv(), &mut Vec::new()).unwrap(), claude_argv(), "{class}");
+        assert!(!order_config_path(&run_dir, order).exists(), "{class}");
+        assert_eq!(launch(order, &agy, &mut Vec::new()).unwrap(), agy, "{class}");
+        assert!(
+            !crate::nirvana_agy_tools::tools_dir(&run_dir, order)
+                .join(".agents")
+                .exists(),
+            "{class}"
+        );
+    }
+    // The same profile on a build order gets its server, so the classes above are what withheld it.
+    profiled(&root, &run_dir, "op", servers, "b1");
+    let got = launch("b1", &claude_argv(), &mut Vec::new()).unwrap();
+    assert!(got.contains(&"mcp__fake-tool__*".to_owned()), "{got:?}");
+    // No seated record: never granted on a guess.
+    let file = order_copy_path(&root, "n1");
+    std::fs::write(&file, std::fs::read_to_string(order_copy_path(&root, "b1")).unwrap()).unwrap();
+    let why = launch("n1", &claude_argv(), &mut Vec::new()).unwrap_err();
+    assert!(why.contains("holds no seated record of n1"), "{why}");
+}
+
+/// P45c review2 A1: a profile with no `mcp.json` (no pin) grants nothing and reads no journal, so an order of it with no
+/// seated record launches with its argv unchanged, as before plan 45 §5; with a pin, the refusal says why in words that
+/// fit.
+#[test]
+fn p92_a_plain_profiled_order_launches_without_its_journal_record() {
+    let home = crate::nirvana::with_test_home("p92-plain-no-record");
+    let root = project(&home.path, Some(MCP_JSON));
+    let run_dir = root.join(".nirvana").join("runs").join("r1");
+    let dir = crate::nirvana_profiles::folder_of(&root, "plain");
+    std::fs::create_dir_all(dir.join("knowledge")).unwrap();
+    std::fs::write(dir.join("profile.md"), "---\ndescription: Plain work.\n---\nWork.\n").unwrap();
+    let loaded = crate::nirvana_profiles::load(&root, "plain").unwrap();
+    crate::nirvana_profiles::copy_into_run(&run_dir, &loaded).unwrap();
+    let file = order_copy_path(&root, "p1");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let lines = crate::nirvana_profiles::order_lines(&crate::nirvana_profiles::Ref {
+        name: "plain".into(),
+        sha: loaded.sha,
+    });
+    std::fs::write(&file, format!("{lines}\n# Do it\n")).unwrap();
+    assert!(!run_dir.join(crate::nirvana_run::JOURNAL).exists());
+    let launch = |order: &str| {
+        order_argv_seated(
+            claude_argv(),
+            &root,
+            &root,
+            &run_dir,
+            order,
+            &[],
+            &crate::nirvana_bladebro::Seat::default(),
+            Ok(vec!["code", "tools"]),
+            &mut Vec::new(),
+        )
+    };
+    assert_eq!(launch("p1").unwrap(), claude_argv());
+    assert!(!run_dir.join(crate::nirvana_run::JOURNAL).exists());
+    // A profile with its own servers and no record is still refused, and says it is refused rather than granted.
+    profiled(&root, &run_dir, "op", r#"{"mcpServers": {"fake-tool": {"command": "fake"}}}"#, "b1");
+    let file = order_copy_path(&root, "n1");
+    std::fs::write(&file, std::fs::read_to_string(order_copy_path(&root, "b1")).unwrap()).unwrap();
+    let why = launch("n1").unwrap_err();
+    assert!(
+        why.contains("holds no seated record of n1") && why.contains("refused rather than granted them"),
+        "{why}"
+    );
+}
+
+/// P45c review2 B2: the definitions copy is written by a rename, so a reader never sees a torn file, and the
+/// temporary file is gone after.
+#[test]
+fn p92_the_servers_copy_is_written_whole_by_a_rename() {
+    let home = crate::nirvana::with_test_home("p92-atomic-copy");
+    let dir = home.path.join("copies");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("op-0123456789abcdef.mcp.json");
+    let big = "x".repeat(4 << 20);
+    write_private_atomic(&file, big.as_bytes()).unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader = {
+        let (file, stop) = (file.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut torn = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(bytes) = std::fs::read(&file) {
+                    if bytes.len() != 4 << 20 {
+                        torn += 1;
+                    }
+                }
+            }
+            torn
+        })
+    };
+    for round in 0..20 {
+        let body = if round % 2 == 0 { "y" } else { "x" }.repeat(4 << 20);
+        write_private_atomic(&file, body.as_bytes()).unwrap();
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(reader.join().unwrap(), 0, "a reader saw a torn copy");
+    let left: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, ["op-0123456789abcdef.mcp.json"]);
+}
+
+#[test]
+fn p92_an_agy_order_gets_its_profiles_own_servers_under_agys_limits_and_no_override() {
+    let home = crate::nirvana::with_test_home("p92-own-agy");
+    let root = project(&home.path, Some(MCP_JSON));
+    let run_dir = root.join(".nirvana").join("runs").join("r1");
+    let agy = vec!["agy".to_owned(), "--print=x".to_owned()];
+    profiled(
+        &root,
+        &run_dir,
+        "op",
+        r#"{"mcpServers": {"fake-tool": {"command": "fake-mcp-not-real"}}}"#,
+        "a1",
+    );
+    let launch = |order: &str, argv: &[String], out: &mut Vec<u8>| {
+        order_argv_seated(
+            argv.to_vec(),
+            &root,
+            &root,
+            &run_dir,
+            order,
+            &[],
+            &crate::nirvana_bladebro::Seat::default(),
+            Ok(vec!["code", "tools"]),
+            out,
+        )
+    };
+    let mut out = Vec::new();
+    assert_eq!(launch("a1", &agy, &mut out).unwrap(), agy);
+    let written: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            crate::nirvana_agy_tools::tools_dir(&run_dir, "a1").join(".agents/mcp_config.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        written["mcpServers"]["fake-tool"]["command"], "fake-mcp-not-real",
+        "{written}"
+    );
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "MCP servers for this order: fake-tool\n"
+    );
+    // A definition agy cannot take fails the agy order, as a `needs` server's does.
+    profiled(
+        &root,
+        &run_dir,
+        "remote",
+        r#"{"mcpServers": {"fake-remote": {"command": "fake-mcp-not-real", "args": ["${HOME}"]}}}"#,
+        "a2",
+    );
+    let why = launch("a2", &agy, &mut Vec::new()).unwrap_err();
+    assert!(
+        why.starts_with(
+            "a2 was seated for MCP server fake-remote and cannot get it: only a claude worker"
+        ),
+        "{why}"
+    );
+    assert!(!crate::nirvana_agy_tools::tools_dir(&run_dir, "a2")
+        .join(".agents")
+        .exists());
+    // The project's .mcp.json gained the profile's server name since seating: the start is refused, not overridden.
+    std::fs::write(
+        root.join(MCP_FILE),
+        r#"{"mcpServers": {"fake-tool": {"command": "another-fake"}}}"#,
+    )
+    .unwrap();
+    let why = launch("a1", &claude_argv(), &mut Vec::new()).unwrap_err();
+    assert!(
+        why.contains("fake-tool is in the profile's own mcp.json and in .mcp.json"),
+        "{why}"
+    );
+}

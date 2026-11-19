@@ -1986,3 +1986,114 @@ fn an_uncounted_card_offer_counts_only_when_seated() {
     assert_eq!(offered(&dir), vec![1, 1, 1]);
     nirvana_seat::set_test_world(None);
 }
+
+/// Plan 45 §5 (M6), the Megajam incident of 2026-11-16: `herdr profile teach aaa-anim-reviewer` was refused because
+/// the profile pins `family: google` and `needs: [video]`, and the orchestrator commented them out with `sed` to teach.
+/// A teacher reads a source and writes cards; the profile's own seat pins are for its own work. It still gets the
+/// profile body as its system prompt (the order copy names the profile), and a claude seat.
+#[test]
+fn p92_teach_takes_no_seat_pin_of_the_taught_profile() {
+    let (_home, project) = project("p92-teach-pins");
+    let pinned = "---\ndescription: Reviews animation renders.\nclass: media.video\nfamily: google\neffort: high\n\
+needs: [video]\n---\nYou review animation renders.\n";
+    folder_profile(&project.root, "anim-reviewer", pinned, &[]);
+    nirvana_seat::set_test_world(Some(BTreeMap::from([(
+        "agy".to_owned(),
+        "signed out".to_owned(),
+    )])));
+    let id = "teach-anim-reviewer-1";
+    let live = nirvana_worker::take_live(&project, "r1", id)
+        .unwrap()
+        .unwrap();
+    let out = teach(
+        &project,
+        "r1",
+        &Teach {
+            profile: "anim-reviewer",
+            from: "https://example.test/timing",
+            note: None,
+            asked: "The owner asked for this at a terminal.".into(),
+        },
+    );
+    drop(live);
+    let out = out.unwrap_or_else(|(code, why)| panic!("teach refused ({code}): {why}"));
+    assert_eq!(out["order"], id, "{out}");
+    let state = replay(&project.journal("r1").read().0);
+    let seated = &state.order(id).expect("seated").seated;
+    assert_eq!(seated.cli, "claude", "{seated:?}");
+    assert_eq!(seated.class, TEACH_CLASS);
+    assert_eq!(
+        nirvana_profiles::from_reason(&seated.reason).as_deref(),
+        Some("anim-reviewer"),
+        "the profile is applied: {}",
+        seated.reason
+    );
+    // The class's effort (medium in Balanced), not the profile's `high`.
+    assert_ne!(seated.effort, nirvana_seat::Effort::High, "{seated:?}");
+    nirvana_seat::set_test_world(None);
+}
+
+/// P45c fix round (review F1, F2): a teacher reads an untrusted page, so it is granted no MCP server of the profile's:
+/// not a project server its `needs` names (journaled nowhere, configured nowhere) and not its own `mcp.json`'s. The
+/// brief keeps its `Profile:` lines, so the guard is the class, not their absence.
+#[test]
+fn p92_a_teacher_gets_no_server_of_the_taught_profile() {
+    let (_home, project) = project("p92-teach-servers");
+    std::fs::write(
+        project.root.join(".mcp.json"),
+        r#"{"mcpServers": {"fake-server": {"command": "fake-mcp-not-real"}}}"#,
+    )
+    .unwrap();
+    let operator = "---\ndescription: Drives the fake tools.\nneeds: [fake-server]\n---\nYou drive the fake tools.\n";
+    let dir = folder_profile(&project.root, "operator", operator, &[]);
+    std::fs::write(
+        dir.join(nirvana_profiles::SERVERS_FILE),
+        r#"{"mcpServers": {"fake-own": {"command": "fake-own-not-real"}}}"#,
+    )
+    .unwrap();
+    nirvana_seat::set_test_world(Some(BTreeMap::from([(
+        "agy".to_owned(),
+        "signed out".to_owned(),
+    )])));
+    let id = "teach-operator-1";
+    let live = nirvana_worker::take_live(&project, "r1", id)
+        .unwrap()
+        .unwrap();
+    let out = teach(
+        &project,
+        "r1",
+        &Teach {
+            profile: "operator",
+            from: "https://example.test/manual",
+            note: None,
+            asked: "The owner asked for this at a terminal.".into(),
+        },
+    );
+    drop(live);
+    out.unwrap_or_else(|(code, why)| panic!("teach refused ({code}): {why}"));
+    let state = replay(&project.journal("r1").read().0);
+    let seated = state.order(id).expect("seated").seated.clone();
+    assert!(seated.needs.is_empty(), "no profile need is journaled: {:?}", seated.needs);
+    let brief = std::fs::read_to_string(&seated.order_file).unwrap();
+    assert!(
+        matches!(nirvana_profiles::in_order(&brief), Some(Ok(found)) if found.name == "operator"),
+        "the brief still names the profile: {brief}"
+    );
+    let run_dir = project.run_dir("r1");
+    let mut view = Vec::new();
+    let argv = crate::nirvana_gui_tools::order_argv_seated(
+        vec!["claude".into(), "-p".into()],
+        &project.root,
+        Path::new(&seated.cwd),
+        &run_dir,
+        id,
+        &seated.needs,
+        &crate::nirvana_bladebro::Seat::read(&run_dir, &seated.class, Path::new(&seated.order_file)),
+        Ok(vec!["code"]),
+        &mut view,
+    )
+    .unwrap();
+    assert_eq!(argv, ["claude", "-p"], "{}", String::from_utf8_lossy(&view));
+    assert!(!crate::nirvana_gui_tools::order_config_path(&run_dir, id).exists());
+    nirvana_seat::set_test_world(None);
+}

@@ -1,6 +1,6 @@
 # Plan 45: agent profiles from the sidebar, and lessons that propose them
 
-Status: RULED 2026-11-19 (§7). Building starts with P45c.
+Status: RULED 2026-11-19 (§7). P45c LANDED as alpha 0.87.0; P45a, P45b and P45d follow.
 
 ## 1. The ask
 
@@ -149,6 +149,17 @@ just build only one pieces of it".
 P45c lands first: P45a's New and Suggested list and P45b's drafts all go through its format and its store. P45a,
 P45b and P45d then build side by side on disjoint files. P45d shares files with plan 43's `seat run`
 package, so the two are built one after the other, not together.
+
+### What P45c changed from this plan
+
+- §3's "Seven keys" is eight with `skills`. `skills: []` means none.
+- A teach order, a lesson review and any `review.*` or `acceptance.*` order get no server from a profile. This narrows
+  plans 33 and 34 and is the orchestrator's call; the owner may reverse it.
+- A profile's own `mcp.json` is kept out of git by `.nirvana/profiles/.gitignore`, which herdr writes once and never
+  rewrites. The run's copy of it goes when the last open order seated with it ends.
+- The proposals store's `was_dismissed` takes kind, profile and key. A patch's `base_sha` is the whole `profile.md`.
+- For P45d, from reading only: `review_brief` and `author_brief` in `nirvana_gate.rs` pass the subject's `Profile:`
+  lines through, so a review of a profiled order may be refused at seating.
 
 ## 9. Live checks owed after building
 

@@ -3,6 +3,47 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.87.0: a profile names its skills and brings its own servers; four shapes; a proposals store
+
+- **Changed:** plan 45's first package, the format the panel and the lesson reviews will write.
+  - A profile takes `skills: [a, b]`: an agy worker gets only those project skills copied, a claude worker gets one
+    line naming them, which is an instruction and not a lock. `skills: []` is none; no key is all, as before.
+  - A folder profile may hold its own `mcp.json`. Its servers are granted to that profile's orders with no `needs`
+    line, for claude and agy. The definitions are copied into the run at seating and removed when the last open order
+    seated with them ends; a names-only pin stays, and the order's `Profile sha256:` covers the profile and the pin.
+    A later start with no copy reads the live file only at the pinned sha, and says to restore the file or seat again
+    when it differs. A name the project's `.mcp.json` also defines, and `bladebro`, are refused.
+  - herdr writes `.nirvana/profiles/.gitignore` holding `*/mcp.json`, only when a profile has an `mcp.json` and the
+    file is absent, and never rewrites it. `profile check` and `profile show` print a note for a written-out value
+    under a secret-looking key, naming the server and key, never the value. `.nirvana/.gitignore` is not touched.
+  - `herdr profile new <name> --shape reviewer|operator|builder|researcher` writes a folder profile with starter
+    cards. `researcher` is `web-researcher` byte for byte. A new profile may not take a Windows device name.
+  - A proposals store, `.nirvana/profile-proposals/`: one file per proposal, a new profile or one change to one,
+    with its evidence, and a ledger. `herdr profile proposals|accept|dismiss|rollback`. A proposal may not carry a
+    `model` or `family` pin, a skill the project lacks, a `needs` the project does not define, or a server
+    definition, at write and again at accept; accept never writes an `mcp.json`. A dismissal is remembered.
+    Nothing writes proposals yet.
+  - A teach order is seated without the profile's model, family, effort and needs.
+  - Narrowed, and the owner may reverse it: a teach order, a lesson review and any `review.*` or `acceptance.*`
+    order get no server from a profile, neither its `needs` servers nor its own. Plans 33 and 34 let a teacher keep
+    the profile's tools; a teacher reads pages nobody has checked.
+- **Because:** the owner, 2026-11-18: "specialized in h olding tools, mcp and most importantly context on how to
+  process a task". Ruled 2026-11-19: "1. yes, 2, go with reocmendation, 3, Idk if I want to retire it but let it ask
+  if they can just build only one pieces of it". In run ia1 `profile teach` refused a profile's own pins, and they
+  were commented out with `sed` to get a card taught.
+- **Measured:** scoped tests pass: `nirvana_profiles` 34, `nirvana_profile_proposals` 12, `nirvana_gui_tools` 39,
+  `nirvana_agy_tools` 17, `nirvana_knowledge` 24, `nirvana_worker` 99, `nirvana_run` 75. The teach refusal was
+  reproduced red before its fix. The p92 controls each turned their test red. Built on Opus high; two Sonnet reviews
+  and two fix rounds. The first review found that a teacher was granted the profile's own servers; the second found,
+  by running it, that the first fix removed the run's copy at the start of each attempt, so an edited live file
+  stopped the order. Not seen on a live seat: the claude skills line, a worker using a profile's own server, a real
+  `profile teach`. Known gaps: an order left seated in an abandoned run keeps its copy; seating writes the copy
+  before its journal line, so a release in that gap sends that order to the live file; the review rule is by class
+  name. From reading only: the gate's review brief carries the subject's `Profile:` lines, so a review of a profiled
+  order may be refused at seating; that is for the package that owns the gate.
+- **If you remove this:** a profile is a body and seat pins again, its servers must be the project's, and the panel
+  and the lesson reviews have nowhere to put a proposal.
+
 ## alpha 0.86.1: the Jobs tab tiles evenly, and a passed job's pane closes
 
 - **Changed:** `herdr job run` and a job's tail pane no longer leave the Jobs tab as a chain of halves.

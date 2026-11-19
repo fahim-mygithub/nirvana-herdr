@@ -722,3 +722,172 @@ fn p35b_the_leftover_orders_are_read_from_both_folders() {
     std::fs::write(run_dir.join("blade").join("notes.txt"), "x").unwrap();
     assert_eq!(leftover_orders(&run_dir), words(&["a1", "a2", "b1", "c1"]));
 }
+
+// ---- plan 45 P45c: a profile's `skills` ----
+
+fn skill_folder(root: &Path, name: &str) {
+    let dir = root.join(".claude").join("skills").join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: the {name} skill.\n---\nbody\n"),
+    )
+    .unwrap();
+}
+
+/// An order file in `root` naming the one-file profile `name` (written from `text`), with its copy in `run_dir`, as
+/// `seat run --profile` leaves them.
+fn profiled_order(root: &Path, run_dir: &Path, name: &str, text: &str, order: &str) -> String {
+    let dir = crate::nirvana_profiles::folder(root);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(crate::nirvana_profiles::path(root, name), text).unwrap();
+    let loaded = crate::nirvana_profiles::load(root, name).unwrap();
+    crate::nirvana_profiles::copy_into_run(run_dir, &loaded).unwrap();
+    let file = root.join(format!("{order}.md"));
+    let lines = crate::nirvana_profiles::order_lines(&crate::nirvana_profiles::Ref {
+        name: name.into(),
+        sha: loaded.sha,
+    });
+    std::fs::write(&file, format!("{lines}\n# Do it\n")).unwrap();
+    file.display().to_string()
+}
+
+fn copied_skills(run_dir: &Path, order: &str) -> Vec<String> {
+    let mut names: Vec<String> =
+        std::fs::read_dir(tools_dir(run_dir, order).join(".agents").join("skills"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect();
+    names.sort();
+    names
+}
+
+/// Plan 45 §5: an agy order seated with a profile gets only the skills its `skills` names; a profile with no `skills`,
+/// or no profile, gets every skill, as before.
+#[test]
+fn p92_an_agy_order_gets_only_its_profiles_skills_and_all_without_the_key() {
+    let (_home, root, run_dir) = project("p92-agy-skills");
+    for name in ["notes", "probe", "seat"] {
+        skill_folder(&root, name);
+    }
+    assert_eq!(project_skills(&root), words(&["notes", "probe", "seat"]));
+    let run = |file: &str, order: &str| {
+        let mut out = Vec::new();
+        with_tools(
+            agy_argv(file),
+            &Order {
+                root: &root,
+                cwd: &root,
+                run_dir: &run_dir,
+                order,
+                order_file: file,
+                deny: Vec::new(),
+            },
+            &mut out,
+        )
+        .unwrap();
+        String::from_utf8(out).unwrap()
+    };
+    let named = profiled_order(
+        &root,
+        &run_dir,
+        "picky",
+        "---\ndescription: Uses two skills.\nskills: [seat, ghost]\n---\nWork.\n",
+        "a1",
+    );
+    let view = run(&named, "a1");
+    assert_eq!(copied_skills(&run_dir, "a1"), words(&["seat"]));
+    assert!(
+        view.contains("the profile names the skill ghost, which herdr has no copy of here"),
+        "{view}"
+    );
+    let unnamed = profiled_order(
+        &root,
+        &run_dir,
+        "open",
+        "---\ndescription: Names no skill.\n---\nWork.\n",
+        "a2",
+    );
+    run(&unnamed, "a2");
+    assert_eq!(
+        copied_skills(&run_dir, "a2"),
+        words(&["notes", "probe", "seat"])
+    );
+    let plain = root.join("plain.md");
+    std::fs::write(&plain, "# Do it\n").unwrap();
+    run(&plain.display().to_string(), "a3");
+    assert_eq!(
+        copied_skills(&run_dir, "a3"),
+        words(&["notes", "probe", "seat"])
+    );
+    // P45c review F6: `skills: []` copies none (the key absent, above, copies all).
+    let bare = profiled_order(
+        &root,
+        &run_dir,
+        "bare",
+        "---\ndescription: Uses no skill.\nskills: []\n---\nWork.\n",
+        "a4",
+    );
+    run(&bare, "a4");
+    assert_eq!(copied_skills(&run_dir, "a4"), Vec::<String>::new());
+    // P45c fix round (review F1): a lesson review or a teacher is not the profile's work, so its profile neither
+    // narrows nor widens the skills, read from the class journaled, whatever the brief names.
+    for (order, class) in [
+        ("v1", crate::nirvana_review::CLASS),
+        ("t1", crate::nirvana_knowledge::TEACH_CLASS),
+    ] {
+        let file = profiled_order(
+            &root,
+            &run_dir,
+            "picky",
+            "---\ndescription: Uses two skills.\nskills: [seat, ghost]\n---\nWork.\n",
+            order,
+        );
+        journal_class(&run_dir, order, class, &file);
+        assert_eq!(profile_skills(&run_dir, order, &file).unwrap(), None, "{class}");
+        run(&file, order);
+        assert_eq!(
+            copied_skills(&run_dir, order),
+            words(&["notes", "probe", "seat"]),
+            "{class}"
+        );
+    }
+}
+
+/// The `seated` record of `order` with `class` and brief `file`, as seating journals it.
+fn journal_class(run_dir: &Path, order: &str, class: &str, file: &str) {
+    let seated = crate::nirvana_run::Seated {
+        order: order.into(),
+        seat: "flash".into(),
+        cli: "agy".into(),
+        model: "gemini-3.8-flash-low".into(),
+        effort: Effort::Low,
+        pool: "google".into(),
+        class: class.into(),
+        chain: None,
+        size: crate::nirvana_seat::SizeName::Small,
+        mode: crate::nirvana_seat::Mode::Balanced,
+        needs: Vec::new(),
+        not_family: Vec::new(),
+        reason: "r".into(),
+        override_reason: None,
+        order_file: file.into(),
+        cwd: "C:/p".into(),
+        worktree: None,
+        branch: None,
+        parent: None,
+        why: None,
+        rule_pick: None,
+        bar_dropped: None,
+        step_down: None,
+        use_basis: None,
+        expected: std::collections::BTreeMap::new(),
+        jev_pick: None,
+        send_ok: None,
+    };
+    crate::nirvana_run::Journal::new(run_dir.join(crate::nirvana_run::JOURNAL))
+        .append(1, crate::nirvana_run::Kind::Seated(Box::new(seated)))
+        .unwrap();
+}
