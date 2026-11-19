@@ -709,7 +709,8 @@ fn c40a_the_square_shows_sotas_fallback_and_an_edited_table() {
     assert!(!rows
         .iter()
         .any(|row| row.contains("differs from herdr's default")));
-    // An edited table: one line says so.
+    // An edited table: one line says so. Plan 46 P46b: it is the View's `differs_line`, which names a plain value the
+    // upgrade carries, where the panel printed the fixed `DIFFERS_LINE` before.
     std::fs::write(
         home.join("seats.toml"),
         crate::nirvana_seat::DEFAULT
@@ -721,7 +722,7 @@ fn c40a_the_square_shows_sotas_fallback_and_an_edited_table() {
     let rows = rows_of(&mut state, 200, 40);
     let _ = line(
         &rows,
-        "seats.toml differs from herdr's default. herdr seat diff shows how.",
+        "seats.toml keeps your floor = 0.06; the rest is herdr's default.",
     );
     let orch = line(&rows, "Nirvana Claude");
     assert!(
@@ -1112,4 +1113,987 @@ fn p87_a_narrow_window_draws_no_button_where_the_words_do_not_fit() {
         let _ = rows_of(&mut state, width, 40);
     }
     done(root, home);
+}
+
+// ---- Plan 46 P46b: the Table page ----
+
+use crate::nirvana_seat::{Effort, Mode, ModeSource};
+use crate::nirvana_seat_calib::CellRow;
+use crate::nirvana_seats_square::{
+    DetailRow, Matrix, MatrixCell, MatrixRow, OrchestratorRow, Row as SeatRow, RunLine,
+    View as SeatsView, MODES, ORCHESTRATOR_ROW,
+};
+
+/// 2026-11-19 12:00:00Z, the time the panels below are drawn at.
+const AT: u64 = 1_795_089_600;
+
+fn pick(mode: Mode, seat: &str, effort: Effort, model: &str) -> MatrixCell {
+    MatrixCell {
+        mode,
+        seat: Some(seat.into()),
+        model: Some(model.into()),
+        effort: Some(effort),
+        next: None,
+        forced: false,
+        cool: None,
+        unread: false,
+        none: None,
+        measured: None,
+        held: false,
+    }
+}
+
+fn record(class: &str, seat: &str, effort: Effort, orders: usize) -> CellRow {
+    CellRow {
+        class: class.into(),
+        seat: seat.into(),
+        effort: Some(effort),
+        orders,
+        gated: orders,
+        first_pass: orders.saturating_sub(2),
+        merged: 0,
+        merge_orders: 0,
+        median_minutes: Some(14.0),
+        median_cost: Some(1.28),
+        costed: orders,
+        recent: 3,
+    }
+}
+
+/// The matrix the Table page tests draw: Nirvana Claude, then a plain class, a forced one, an unread one, one with
+/// no seat in SOTA, a held one, a measured one, and `extra` filler classes for the scroll.
+fn sample_matrix(extra: usize) -> Matrix {
+    use Effort::*;
+    use Mode::*;
+    let mut orchestrator = MatrixRow {
+        id: ORCHESTRATOR_ROW.into(),
+        orchestrator: true,
+        cells: vec![
+            pick(Efficient, "sonnet", High, "claude-sonnet-5-5"),
+            pick(Balanced, "opus", High, "claude-opus-5-5"),
+            pick(Sota, "fable", High, "claude-fable-5-2"),
+        ],
+        detail: Vec::new(),
+    };
+    orchestrator.cells[1].forced = true;
+    orchestrator.cells[1].cool = Some("fable high".into());
+    let mut plan = MatrixRow {
+        id: "plan".into(),
+        orchestrator: false,
+        cells: vec![
+            pick(Efficient, "sonnet", Medium, "claude-sonnet-5-5"),
+            pick(Balanced, "opus", High, "claude-opus-5-5"),
+            pick(Sota, "fable", Max, "claude-fable-5-2"),
+        ],
+        detail: vec![
+            DetailRow {
+                seat: "opus".into(),
+                score: 95.0,
+                enabled: true,
+                record: vec![
+                    record("plan", "opus", High, 21),
+                    record("plan", "opus", Medium, 3),
+                ],
+            },
+            DetailRow {
+                seat: "neon".into(),
+                score: 80.0,
+                enabled: false,
+                record: Vec::new(),
+            },
+        ],
+    };
+    plan.cells[1].next = Some(("sonnet".into(), High));
+    let mut forced = MatrixRow {
+        id: "build.load_bearing".into(),
+        orchestrator: false,
+        cells: vec![
+            pick(Efficient, "hydrogen", Medium, "gemini-4-hydrogen-medium"),
+            pick(Balanced, "sonnet", Medium, "claude-sonnet-5-5"),
+            pick(Sota, "opus", Xhigh, "claude-opus-5-5"),
+        ],
+        detail: vec![DetailRow {
+            seat: "opus".into(),
+            score: 95.0,
+            enabled: true,
+            record: vec![record("build.load_bearing", "opus", Xhigh, 8)],
+        }],
+    };
+    forced.cells[1].forced = true;
+    forced.cells[1].cool = Some("opus high".into());
+    let mut unread = MatrixRow {
+        id: "research.web".into(),
+        orchestrator: false,
+        cells: vec![
+            pick(Efficient, "flash", Low, "gemini-3.8-flash-low"),
+            pick(Balanced, "carbon", Medium, "gemini-4-carbon-medium"),
+            pick(Sota, "argon", High, "gemini-4-argon-high"),
+        ],
+        detail: vec![DetailRow {
+            seat: "carbon".into(),
+            score: 70.0,
+            enabled: true,
+            record: vec![record("research.web", "carbon", Medium, 2)],
+        }],
+    };
+    unread.cells[1].unread = true;
+    let mut none = MatrixRow {
+        id: "media.video".into(),
+        orchestrator: false,
+        cells: vec![
+            pick(Efficient, "flash", Medium, "gemini-3.8-flash-medium"),
+            pick(Balanced, "carbon", Medium, "gemini-4-carbon-medium"),
+            pick(Sota, "carbon", High, "gemini-4-carbon-high"),
+        ],
+        detail: Vec::new(),
+    };
+    none.cells[2] = MatrixCell {
+        mode: Sota,
+        seat: None,
+        model: None,
+        effort: None,
+        next: None,
+        forced: false,
+        cool: None,
+        unread: false,
+        none: Some("every seat is off or over its window".into()),
+        measured: None,
+        held: false,
+    };
+    let mut held = MatrixRow {
+        id: "review.adversary".into(),
+        orchestrator: false,
+        cells: vec![
+            pick(Efficient, "sonnet", High, "claude-sonnet-5-5"),
+            pick(Balanced, "opus", High, "claude-opus-5-5"),
+            pick(Sota, "fable", High, "claude-fable-5-2"),
+        ],
+        detail: vec![DetailRow {
+            seat: "opus".into(),
+            score: 92.0,
+            enabled: true,
+            record: vec![record("review.adversary", "opus", High, 64)],
+        }],
+    };
+    held.cells[1].held = true;
+    held.cells[1].measured = Some("measured x2.25 over 64 orders".into());
+    let mut measured = MatrixRow {
+        id: "sweep.mechanical".into(),
+        orchestrator: false,
+        cells: vec![
+            pick(Efficient, "hydrogen", Low, "gemini-4-hydrogen-low"),
+            pick(Balanced, "flash", Low, "gemini-3.8-flash-low"),
+            pick(Sota, "sonnet", Low, "claude-sonnet-5-5"),
+        ],
+        detail: vec![DetailRow {
+            seat: "hydrogen".into(),
+            score: 75.0,
+            enabled: true,
+            record: vec![record("sweep.mechanical", "hydrogen", Low, 7)],
+        }],
+    };
+    measured.cells[0].measured = Some("measured x0.37 over 7 orders".into());
+    let mut rows = vec![orchestrator, plan, forced, unread, none, held, measured];
+    for n in 0..extra {
+        rows.push(MatrixRow {
+            id: format!("filler.{n:02}"),
+            orchestrator: false,
+            cells: vec![
+                pick(Efficient, "haiku", Low, "claude-haiku-5-5"),
+                pick(Balanced, "sonnet", Low, "claude-sonnet-5-5"),
+                pick(Sota, "opus", Low, "claude-opus-5-5"),
+            ],
+            detail: Vec::new(),
+        });
+    }
+    Matrix {
+        rows,
+        checked_at: Some(AT - 7_200),
+        summary: Some("1 cost booked as measured, 2 score findings".into()),
+    }
+}
+
+/// A View with two orders in one run, Nirvana Claude, the differs flag and, when asked, the matrix.
+fn sample_view(matrix: Option<Matrix>) -> SeatsView {
+    let order = |order: &str, seat: &str, effort: Effort, model: &str, state: &str| SeatRow {
+        run: "r1".into(),
+        order: order.into(),
+        class: "build.bounded".into(),
+        seat: seat.into(),
+        model: model.into(),
+        effort,
+        pool: "max".into(),
+        state: state.into(),
+        attention: false,
+        since: AT - 90,
+        deferred_until: None,
+        use_: None,
+        reason: format!("build.bounded \u{2192} {seat} {}", effort.word()),
+        override_reason: None,
+        mode: Some(Mode::Balanced),
+        pane: None,
+    };
+    SeatsView {
+        mode: Some(Mode::Balanced),
+        mode_source: Some(ModeSource::Machine),
+        note: None,
+        runs: vec![RunLine {
+            run: "r1".into(),
+            orders: 2,
+            classes: [("build.bounded".to_owned(), 2)].into_iter().collect(),
+            overrides: 0,
+            mode_changed: None,
+        }],
+        rows: vec![
+            order("o1", "sonnet", Effort::Medium, "claude-sonnet-5-5", "running"),
+            order("o2", "opus", Effort::High, "claude-opus-5-5", "booked"),
+        ],
+        orchestrator: Some(OrchestratorRow {
+            seat: "opus".into(),
+            effort: Effort::High,
+            detail: "the mode's seat".into(),
+            restart_to_switch: false,
+        }),
+        differs: true,
+        differs_line: None,
+        matrix,
+    }
+}
+
+fn blank_panel() -> crate::client::shell::nirvana_seats::SeatsPanel {
+    crate::client::shell::nirvana_seats::SeatsPanel {
+        root: std::path::PathBuf::from("C:/work/moto"),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_1".into(),
+        pane_id: "pane_1".into(),
+        restart_armed: None,
+        restarting: None,
+        selected: 0,
+        scroll: 0,
+        message: None,
+        page: crate::client::shell::nirvana_seats::Page::Orders,
+        table_selected: 0,
+        table_scroll: 0,
+    }
+}
+
+/// The panel drawn alone into a `width` by `height` buffer, as text rows with their trailing blanks cut.
+fn draw(
+    panel: &mut crate::client::shell::nirvana_seats::SeatsPanel,
+    view: Option<&SeatsView>,
+    width: u16,
+    height: u16,
+) -> (Vec<String>, crate::client::shell::nirvana_seats::SeatsHits) {
+    let palette = ClientShellConfig::from_config(&Config::default()).palette;
+    let area = Rect::new(0, 0, width, height);
+    let mut buffer = Buffer::empty(area);
+    let hits = crate::client::shell::nirvana_seats::render_seats_panel(
+        &mut buffer,
+        area,
+        panel,
+        view,
+        AT,
+        &palette,
+    );
+    let rows = (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| buffer[(x, y)].symbol().to_owned())
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        })
+        .collect();
+    (rows, hits)
+}
+
+/// Drawn at 2419bec8, before the Table page: `sample_view(None)` at 80 by 30.
+const ORDERS_NONE_80: &[&str] = &[
+    "",
+    " ╭─ Seats · moto · Balanced ────────────────────────────────────────────── ✕ ─╮",
+    " │ Mode   Efficient  [Balanced]  SOTA  · machine                 m changes it │",
+    " │ seats.toml differs from herdr's default. herdr seat diff shows how.        │",
+    " │ Nirvana Claude · opus high · the mode's seat                               │",
+    " │                                                                            │",
+    " │ run r1 · 2 orders · build.bounded 2                                        │",
+    " │ o1 · running 1m 30s                                                        │",
+    " │   sonnet medium · claude-sonnet-5-5 · max · use not known                  │",
+    " │   ↳ build.bounded → sonnet medium                                          │",
+    " │ o2 · booked 1m 30s                                                         │",
+    " │   opus high · claude-opus-5-5 · max · use not known                        │",
+    " │   ↳ build.bounded → opus high                                              │",
+    " │                                                                            │",
+    " │ ↑/↓ choose · enter focus its pane · m mode · esc close                     │",
+    " ╰────────────────────────────────────────────────────────────────────────────╯",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+];
+
+/// Drawn at 2419bec8, before the Table page: `sample_view(None)` at 140 by 30.
+const ORDERS_NONE_140: &[&str] = &[
+    "",
+    " ╭─ Seats · moto · Balanced ────────────────────────────────────────────────────────────────────────────── ✕ ─╮",
+    " │ Mode   Efficient  [Balanced]  SOTA  · machine                                                 m changes it │",
+    " │ seats.toml differs from herdr's default. herdr seat diff shows how.                                        │",
+    " │ Nirvana Claude · opus high · the mode's seat                                                               │",
+    " │                                                                                                            │",
+    " │ run r1 · 2 orders · build.bounded 2                                                                        │",
+    " │ order        seat effort      model                    pool     state       time         use               │",
+    " │ o1           sonnet medium    claude-sonnet-5-5        max      running     1m 30s       use not known     │",
+    " │   ↳ build.bounded → sonnet medium                                                                          │",
+    " │ o2           opus high        claude-opus-5-5          max      booked      1m 30s       use not known     │",
+    " │   ↳ build.bounded → opus high                                                                              │",
+    " │                                                                                                            │",
+    " │ ↑/↓ choose · enter focus its pane · m mode · esc close                                                     │",
+    " ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+];
+
+/// Drawn at 2419bec8, before the Table page: `sample_view(Some(sample_matrix(0)))` at 80 by 30.
+const ORDERS_MATRIX_80: &[&str] = &[
+    "",
+    " ╭─ Seats · moto · Balanced ────────────────────────────────────────────── ✕ ─╮",
+    " │ Mode   Efficient  [Balanced]  SOTA  · machine                 m changes it │",
+    " │ seats.toml differs from herdr's default. herdr seat diff shows how.        │",
+    " │ Nirvana Claude · opus high · the mode's seat                               │",
+    " │                                                                            │",
+    " │ run r1 · 2 orders · build.bounded 2                                        │",
+    " │ o1 · running 1m 30s                                                        │",
+    " │   sonnet medium · claude-sonnet-5-5 · max · use not known                  │",
+    " │   ↳ build.bounded → sonnet medium                                          │",
+    " │ o2 · booked 1m 30s                                                         │",
+    " │   opus high · claude-opus-5-5 · max · use not known                        │",
+    " │   ↳ build.bounded → opus high                                              │",
+    " │                                                                            │",
+    " │ ↑/↓ choose · enter focus its pane · m mode · esc close                     │",
+    " ╰────────────────────────────────────────────────────────────────────────────╯",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+];
+
+/// Drawn at 2419bec8, before the Table page: `sample_view(Some(sample_matrix(0)))` at 140 by 30.
+const ORDERS_MATRIX_140: &[&str] = &[
+    "",
+    " ╭─ Seats · moto · Balanced ────────────────────────────────────────────────────────────────────────────── ✕ ─╮",
+    " │ Mode   Efficient  [Balanced]  SOTA  · machine                                                 m changes it │",
+    " │ seats.toml differs from herdr's default. herdr seat diff shows how.                                        │",
+    " │ Nirvana Claude · opus high · the mode's seat                                                               │",
+    " │                                                                                                            │",
+    " │ run r1 · 2 orders · build.bounded 2                                                                        │",
+    " │ order        seat effort      model                    pool     state       time         use               │",
+    " │ o1           sonnet medium    claude-sonnet-5-5        max      running     1m 30s       use not known     │",
+    " │   ↳ build.bounded → sonnet medium                                                                          │",
+    " │ o2           opus high        claude-opus-5-5          max      booked      1m 30s       use not known     │",
+    " │   ↳ build.bounded → opus high                                                                              │",
+    " │                                                                                                            │",
+    " │ ↑/↓ choose · enter focus its pane · m mode · esc close                                                     │",
+    " ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+];
+
+use crate::client::shell::nirvana_seats::{
+    cell_marks, cell_words, detail_lines, header_line, record_line, table_fit, table_line,
+    table_widths, Page, SeatsPanel, TABLE_LEGEND, TABLE_REFUSED,
+};
+
+fn table_panel(selected: usize) -> SeatsPanel {
+    let mut panel = blank_panel();
+    panel.page = Page::Table;
+    panel.table_selected = selected;
+    panel
+}
+
+/// The detail block's text for one row of the sample matrix, live at Balanced, in `room` cells.
+fn detail_of(index: usize, room: usize) -> Vec<String> {
+    let matrix = sample_matrix(0);
+    detail_lines(&matrix.rows[index], Some(Mode::Balanced), room)
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect()
+}
+
+/// The panel's rows from its top border to its bottom border.
+fn framed(rows: &[String]) -> (usize, usize) {
+    let top = rows.iter().position(|row| row.contains('\u{256D}')).expect("top border");
+    let bottom = rows.iter().position(|row| row.contains('\u{2570}')).expect("bottom border");
+    (top, bottom)
+}
+
+/// Opens the panel on the recorded project at 200 by 40, then goes to the Table page with `t`.
+fn open_table(test: &str) -> (ClientShellState, std::path::PathBuf, std::path::PathBuf) {
+    let (mut state, root, home) = state_for(test, "nirvana");
+    let _ = open(&mut state, 200);
+    let _ = key(&mut state, KeyCode::Char('t'));
+    let _ = rows_of(&mut state, 200, 40);
+    (state, root, home)
+}
+
+fn page_of(state: &ClientShellState) -> Page {
+    state.nirvana_seats.as_ref().expect("the panel is open").page
+}
+
+fn table_selected(state: &ClientShellState) -> usize {
+    state.nirvana_seats.as_ref().expect("the panel is open").table_selected
+}
+
+#[test]
+fn p98_the_page_strip_names_both_pages_and_brackets_the_one_shown() {
+    let view = sample_view(Some(sample_matrix(0)));
+    let (rows, hits) = draw(&mut blank_panel(), Some(&view), 100, 30);
+    let (top, _) = framed(&rows);
+    assert!(rows[top].contains("[Orders]  Table "), "{:?}", rows[top]);
+    assert_eq!(hits.pages.len(), 2, "{:?}", hits.pages);
+    let (rows, hits) = draw(&mut table_panel(0), Some(&view), 100, 30);
+    let (top, _) = framed(&rows);
+    assert!(rows[top].contains(" Orders  [Table]"), "{:?}", rows[top]);
+    assert!(rows[top].contains("Seats \u{b7} moto \u{b7} Balanced"), "{:?}", rows[top]);
+    let words: Vec<Page> = hits.pages.iter().map(|(_, page)| *page).collect();
+    assert_eq!(words, vec![Page::Orders, Page::Table]);
+}
+
+#[test]
+fn p98_t_tab_and_a_click_on_a_page_word_switch_pages() {
+    let (mut state, root, home) = state_for("p98-switch", "nirvana");
+    let _ = open(&mut state, 200);
+    assert_eq!(page_of(&state), Page::Orders, "the panel opens on Orders");
+    let outcome = key(&mut state, KeyCode::Char('t'));
+    assert!(outcome.requests.is_empty(), "the key stays out of the pane");
+    assert_eq!(page_of(&state), Page::Table);
+    // The page survives the panel's re-read: each compose reads the view again under test.
+    let rows = rows_of(&mut state, 200, 40);
+    assert_eq!(page_of(&state), Page::Table);
+    assert!(line(&rows, "task").contains("[Balanced]"), "{}", rows.join("\n"));
+    let _ = key(&mut state, KeyCode::Tab);
+    assert_eq!(page_of(&state), Page::Orders);
+    let _ = key(&mut state, KeyCode::BackTab);
+    assert_eq!(page_of(&state), Page::Table);
+    let _ = rows_of(&mut state, 200, 40);
+    let word = |state: &ClientShellState, page: Page| {
+        state
+            .hits
+            .nirvana_seats_panel
+            .pages
+            .iter()
+            .find(|(_, at)| *at == page)
+            .map(|(rect, _)| *rect)
+            .expect("a page word")
+    };
+    let orders = word(&state, Page::Orders);
+    let _ = click(&mut state, orders.x + 1, orders.y);
+    assert_eq!(page_of(&state), Page::Orders, "a click on Orders");
+    assert!(state.nirvana_seats.is_some(), "a click on a page word keeps the panel open");
+    let _ = rows_of(&mut state, 200, 40);
+    let table = word(&state, Page::Table);
+    let _ = click(&mut state, table.x + 1, table.y);
+    assert_eq!(page_of(&state), Page::Table, "a click on Table");
+    done(root, home);
+}
+
+#[test]
+fn p98_three_mode_columns_with_the_projects_mode_marked() {
+    let header = header_line(Some(Mode::Balanced), 18, 30);
+    let at = |word: &str| header.find(word).unwrap_or_else(|| panic!("{word:?} in {header:?}"));
+    assert!(header.starts_with("task"), "{header:?}");
+    assert!(at("Efficient") < at("[Balanced]") && at("[Balanced]") < at("SOTA"), "{header:?}");
+    assert!(!header.contains("[SOTA]") && !header.contains("[Efficient]"), "{header:?}");
+    let sota = header_line(Some(Mode::Sota), 18, 30);
+    assert!(sota.contains("[SOTA]") && !sota.contains("[Balanced]"), "{sota:?}");
+    // Drawn, at the View's mode.
+    let mut view = sample_view(Some(sample_matrix(0)));
+    view.mode = Some(Mode::Efficient);
+    let (rows, _) = draw(&mut table_panel(0), Some(&view), 140, 40);
+    let drawn = line(&rows, "task");
+    assert!(drawn.contains("[Efficient]") && !drawn.contains("[Balanced]"), "{drawn:?}");
+}
+
+#[test]
+fn p98_each_cell_is_the_matrix_cell_given() {
+    let matrix = sample_matrix(0);
+    for width in [80u16, 100, 140] {
+        let inner = usize::from(width - 2 - 4);
+        let (task, cell) = table_widths(&matrix, inner);
+        let (rows, _) = draw(&mut table_panel(0), Some(&sample_view(Some(matrix.clone()))), width, 40);
+        for row in &matrix.rows {
+            let drawn = line(&rows, &format!("\u{2502} {}", row.id));
+            let body: Vec<char> = drawn.chars().skip(3).collect();
+            for (place, mode) in MODES.iter().enumerate() {
+                let found = row.cells.iter().find(|c| c.mode == *mode).unwrap();
+                let start = task + 1 + place * (cell + 1);
+                let text: String = body[start..(start + cell).min(body.len())].iter().collect();
+                let want = format!("{}{}", cell_marks(found), cell_words(found, cell - 2));
+                assert_eq!(text.trim_end(), want.trim_end(), "{} {mode:?} at {width}", row.id);
+                if let (Some(seat), Some(effort)) = (&found.seat, found.effort) {
+                    assert!(text.contains(seat.as_str()), "{text:?}");
+                    let short = &effort.word()[..3.min(effort.word().len())];
+                    assert!(text.contains(short), "{text:?} has its effort");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn p98_the_forced_unread_none_held_and_measured_marks() {
+    let matrix = sample_matrix(0);
+    let cell = |row: usize, place: usize| &matrix.rows[row].cells[place];
+    assert_eq!(cell_marks(cell(1, 0)), "  ", "a plain cell");
+    assert_eq!(cell_marks(cell(2, 1)), "! ", "forced");
+    assert_eq!(cell_marks(cell(3, 1)), "? ", "unread");
+    assert_eq!(cell_marks(cell(5, 1)), " =", "held");
+    assert_eq!(cell_marks(cell(6, 0)), " ~", "measured, not held");
+    let mut both = cell(2, 1).clone();
+    both.unread = true;
+    assert_eq!(cell_marks(&both), "? ", "forced while unread is unread, not hot");
+    assert_eq!(cell_words(cell(4, 2), 20), "no seat");
+    let (rows, _) = draw(&mut table_panel(0), Some(&sample_view(Some(matrix.clone()))), 140, 40);
+    assert!(line(&rows, "build.load_bearing").contains("! sonnet medium"), "{}", rows.join("\n"));
+    assert!(line(&rows, "research.web").contains("? carbon medium"), "{}", rows.join("\n"));
+    assert!(line(&rows, "media.video").contains("no seat"), "{}", rows.join("\n"));
+    assert!(line(&rows, "review.adversary").contains(" =opus high"), "{}", rows.join("\n"));
+    assert!(line(&rows, "sweep.mechanical").contains(" ~hydrogen low"), "{}", rows.join("\n"));
+    assert!(rows.iter().any(|row| row.contains(TABLE_LEGEND)), "the legend: {}", rows.join("\n"));
+    // The words stay in the detail, not the cell.
+    assert!(!line(&rows, "review.adversary").contains("held"), "{}", rows.join("\n"));
+    assert!(!line(&rows, "sweep.mechanical").contains("measured"), "{}", rows.join("\n"));
+    // Forced and hot, forced while unread, and unread alone read differently in the detail.
+    let hot = detail_of(2, 140).join("\n");
+    assert!(hot.contains("hot usage moved it: cool pick opus high"), "{hot}");
+    let unread = detail_of(3, 140).join("\n");
+    assert!(unread.contains("usage unread: a window it spends was not read"), "{unread}");
+    assert!(!unread.contains("hot usage"), "{unread}");
+    let mut moved = sample_matrix(0);
+    moved.rows[3].cells[1].forced = true;
+    moved.rows[3].cells[1].cool = Some("flash low".into());
+    let text: Vec<String> = detail_lines(&moved.rows[3], Some(Mode::Balanced), 140)
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect();
+    assert!(
+        text.join("\n").contains("usage unread, not hot: cool pick flash low"),
+        "{text:?}"
+    );
+}
+
+#[test]
+fn p98_selection_moves_with_the_keys_and_stops_at_both_ends() {
+    let (mut state, root, home) = open_table("p98-select");
+    let count = crate::nirvana_seats_square::cached(&root)
+        .and_then(|view| view.matrix)
+        .map(|matrix| matrix.rows.len())
+        .expect("the recorded project's matrix");
+    assert!(count > 12, "Nirvana Claude and every class of the default table: {count}");
+    let last = count - 1;
+    let _ = key(&mut state, KeyCode::Up);
+    assert_eq!(table_selected(&state), 0, "up at the top stays");
+    let _ = key(&mut state, KeyCode::Down);
+    assert_eq!(table_selected(&state), 1);
+    let _ = key(&mut state, KeyCode::Char('j'));
+    assert_eq!(table_selected(&state), 2);
+    let _ = key(&mut state, KeyCode::Char('k'));
+    assert_eq!(table_selected(&state), 1);
+    let _ = key(&mut state, KeyCode::PageDown);
+    assert_eq!(table_selected(&state), 11);
+    let _ = key(&mut state, KeyCode::End);
+    assert_eq!(table_selected(&state), last);
+    let _ = key(&mut state, KeyCode::Down);
+    assert_eq!(table_selected(&state), last, "down at the bottom stays");
+    let _ = key(&mut state, KeyCode::PageDown);
+    assert_eq!(table_selected(&state), last);
+    let _ = key(&mut state, KeyCode::PageUp);
+    assert_eq!(table_selected(&state), last - 10);
+    let _ = key(&mut state, KeyCode::Home);
+    assert_eq!(table_selected(&state), 0);
+    let _ = key(&mut state, KeyCode::PageUp);
+    assert_eq!(table_selected(&state), 0);
+    // The Orders page keeps its own selection.
+    assert_eq!(state.nirvana_seats.as_ref().unwrap().selected, 0);
+    // Enter focuses no pane on the Table page, and the panel stays.
+    let outcome = key(&mut state, KeyCode::Enter);
+    assert!(focused(&outcome).is_empty(), "{:?}", outcome.actions);
+    assert!(state.nirvana_seats.is_some());
+    done(root, home);
+}
+
+#[test]
+fn p98_a_click_selects_a_table_row_and_the_wheel_moves_it() {
+    let (mut state, root, home) = open_table("p98-click");
+    let rows = state.hits.nirvana_seats_panel.table_rows.clone();
+    assert!(rows.len() > 3, "{rows:?}");
+    let (rect, index) = rows[3];
+    let outcome = click(&mut state, rect.x + 2, rect.y);
+    assert_eq!(table_selected(&state), index);
+    assert!(focused(&outcome).is_empty(), "a table row has no pane");
+    assert!(state.nirvana_seats.is_some());
+    let wheel = |state: &mut ClientShellState, kind: MouseEventKind| {
+        state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+            kind,
+            column: rect.x + 2,
+            row: rect.y,
+            modifiers: KeyModifiers::empty(),
+        })])
+    };
+    let _ = wheel(&mut state, MouseEventKind::ScrollDown);
+    assert_eq!(table_selected(&state), index + 3);
+    let _ = wheel(&mut state, MouseEventKind::ScrollUp);
+    let _ = wheel(&mut state, MouseEventKind::ScrollUp);
+    assert_eq!(table_selected(&state), 0);
+    done(root, home);
+}
+
+#[test]
+fn p98_a_long_matrix_scrolls_and_keeps_its_header() {
+    let matrix = sample_matrix(40);
+    let last = matrix.rows.len() - 1;
+    let view = sample_view(Some(matrix));
+    let mut panel = table_panel(last);
+    let (rows, hits) = draw(&mut panel, Some(&view), 80, 30);
+    let text = rows.join("\n");
+    let header = rows.iter().position(|row| row.contains("[Balanced]")).expect("the header");
+    let (top, _) = framed(&rows);
+    assert_eq!(header, top + 1, "the header is the first body line: {text}");
+    assert!(text.contains("filler.39"), "the selected last row is shown: {text}");
+    assert!(!text.contains("Nirvana Claude"), "the first rows scrolled off: {text}");
+    assert!(panel.table_scroll > 0);
+    assert_eq!(hits.table_rows.last().map(|(_, index)| *index), Some(last));
+    // Back to the top.
+    panel.table_selected = 0;
+    let (rows, _) = draw(&mut panel, Some(&view), 80, 30);
+    assert_eq!(panel.table_scroll, 0);
+    assert!(rows.join("\n").contains("Nirvana Claude"));
+}
+
+#[test]
+fn p98_the_detail_of_a_plain_row() {
+    let text = detail_of(1, 140);
+    assert_eq!(text[0], "plan");
+    let all = text.join("\n");
+    assert!(all.contains("Efficient   sonnet medium \u{b7} claude-sonnet-5-5"), "{all}");
+    assert!(all.contains("\u{25b8} Balanced    opus high \u{b7} claude-opus-5-5 \u{b7} next sonnet high"), "{all}");
+    assert!(all.contains("seats this task lists"), "{all}");
+    assert!(all.contains("opus       score  95"), "{all}");
+    assert!(
+        all.contains("high   measured \u{b7} 21 orders \u{b7} 19 of 21 first gate \u{b7} cost x1.28 \u{b7} 14 min \u{b7} 3 in 14 d"),
+        "{all}"
+    );
+    assert!(all.contains("medium thin \u{b7} 3 orders"), "under five orders reads thin: {all}");
+    assert!(all.contains("neon       score  80 \u{b7} off \u{b7} no record"), "{all}");
+}
+
+#[test]
+fn p98_the_detail_of_a_forced_row_names_the_cool_pick() {
+    let all = detail_of(2, 140).join("\n");
+    assert!(
+        all.contains("Balanced  ! sonnet medium \u{b7} claude-sonnet-5-5 \u{b7} hot usage moved it: cool pick opus high"),
+        "{all}"
+    );
+    // Narrow, the facts go on a line of their own under the seat.
+    let narrow = detail_of(2, 60);
+    let at = narrow.iter().position(|line| line.contains("! sonnet medium")).unwrap();
+    assert!(narrow[at + 1].trim_start().starts_with("hot usage moved it"), "{narrow:?}");
+}
+
+#[test]
+fn p98_the_detail_of_a_held_row_never_reads_as_the_booking() {
+    let all = detail_of(5, 140).join("\n");
+    assert!(all.contains("held \u{b7} measured x2.25 over 64 orders"), "{all}");
+    assert!(!all.contains("cost booked as measured x2.25"), "{all}");
+    let measured = detail_of(6, 140).join("\n");
+    assert!(measured.contains("cost booked as measured x0.37 over 7 orders"), "{measured}");
+    assert!(!measured.contains("held"), "{measured}");
+}
+
+#[test]
+fn p98_the_detail_of_a_row_with_no_seat_and_no_record() {
+    let all = detail_of(4, 140).join("\n");
+    assert!(all.contains("SOTA        no seat \u{b7} no seat fits: every seat is off or over its window"), "{all}");
+    assert!(all.contains("none listed \u{b7} no record"), "{all}");
+    let thin = detail_of(3, 140).join("\n");
+    assert!(thin.contains("medium thin \u{b7} 2 orders"), "{thin}");
+}
+
+#[test]
+fn p98_the_detail_of_the_orchestrator_row() {
+    let text = detail_of(0, 140);
+    assert!(text[0].starts_with("Nirvana Claude"), "{text:?}");
+    let all = text.join("\n");
+    assert!(all.contains("hot usage moved it: cool pick fable high"), "{all}");
+    assert!(!all.contains("seats this task lists"), "{all}");
+    assert!(!all.contains("next "), "{all}");
+    assert_eq!(text.len(), 4, "its heading and one line a mode: {text:?}");
+}
+
+#[test]
+fn p98_the_record_line_shortens_to_fit() {
+    let row = record("plan", "opus", Effort::High, 21);
+    let long = record_line(&row, 140);
+    assert!(long.contains("21 orders \u{b7} 19 of 21 first gate"), "{long:?}");
+    let short = record_line(&row, 70);
+    assert!(short.contains("21 ord \u{b7} 19/21 gate \u{b7} x1.28 \u{b7} 14m \u{b7} 3/14d"), "{short:?}");
+    assert!(unicode_width::UnicodeWidthStr::width(short.as_str()) <= 70, "{short:?}");
+}
+
+#[test]
+fn p98_the_check_line_is_checked_line() {
+    let matrix = sample_matrix(0);
+    let want = crate::nirvana_seats_square::checked_line(&matrix, AT);
+    assert_eq!(want, "checked 2h 0m ago: 1 cost booked as measured, 2 score findings");
+    let (rows, _) = draw(&mut table_panel(0), Some(&sample_view(Some(matrix))), 140, 40);
+    assert!(rows.iter().any(|row| row.contains(&want)), "{}", rows.join("\n"));
+    let mut unchecked = sample_matrix(0);
+    unchecked.checked_at = None;
+    let (rows, _) = draw(&mut table_panel(0), Some(&sample_view(Some(unchecked))), 140, 40);
+    assert!(
+        rows.iter().any(|row| row.contains("not checked against the record yet")),
+        "{}",
+        rows.join("\n")
+    );
+}
+
+#[test]
+fn p98_no_matrix_says_so_in_one_line_and_never_panics() {
+    let mut view = sample_view(None);
+    view.note = Some("seats.toml line 3: expected a table".into());
+    let (rows, hits) = draw(&mut table_panel(4), Some(&view), 100, 30);
+    let text = rows.join("\n");
+    assert_eq!(rows.iter().filter(|row| row.contains(TABLE_REFUSED)).count(), 1, "{text}");
+    assert!(text.contains("seats.toml line 3: expected a table"), "{text}");
+    assert!(text.contains(crate::nirvana_seat::DIFFERS_LINE), "{text}");
+    assert!(!text.contains("task "), "no header: {text}");
+    assert!(hits.table_rows.is_empty());
+    // Not read yet.
+    let (rows, _) = draw(&mut table_panel(0), None, 100, 30);
+    assert!(rows.join("\n").contains("reading this project's runs"));
+    // An empty matrix and a short row.
+    let mut empty = sample_view(Some(Matrix::default()));
+    empty.differs = false;
+    let mut panel = table_panel(9);
+    let (rows, _) = draw(&mut panel, Some(&empty), 100, 30);
+    assert!(rows.join("\n").contains("not checked against the record yet"));
+    assert_eq!(panel.table_selected, 0, "the selection is held to the rows there are");
+    let mut short = sample_matrix(0);
+    short.rows[1].cells.truncate(1);
+    short.rows[2].cells.clear();
+    let (rows, _) = draw(&mut table_panel(2), Some(&sample_view(Some(short))), 100, 30);
+    assert!(line(&rows, "\u{2502} plan").contains("sonnet medium"), "{}", rows.join("\n"));
+    // Keys and the wheel on an empty table stay at 0.
+    let (mut state, root, home) = state_for("p98-empty", "nirvana");
+    std::fs::write(home.join("seats.toml"), "not a table [").expect("seats.toml");
+    let _ = open(&mut state, 200);
+    let _ = key(&mut state, KeyCode::Char('t'));
+    for code in [KeyCode::Down, KeyCode::End, KeyCode::PageDown] {
+        let _ = key(&mut state, code);
+        assert_eq!(table_selected(&state), 0, "{code:?}");
+    }
+    let rows = rows_of(&mut state, 200, 40);
+    assert!(rows.iter().any(|row| row.contains(TABLE_REFUSED)), "{}", rows.join("\n"));
+    done(root, home);
+}
+
+#[test]
+fn p98_80_100_and_140_columns() {
+    let view = sample_view(Some(sample_matrix(16)));
+    for width in [80u16, 100, 140] {
+        let (rows, _) = draw(&mut table_panel(2), Some(&view), width, 40);
+        let text = rows.join("\n");
+        for row in &rows {
+            assert!(
+                unicode_width::UnicodeWidthStr::width(row.as_str()) <= usize::from(width),
+                "{width}: {row:?}"
+            );
+        }
+        let (top, bottom) = framed(&rows);
+        let footer = bottom - 1;
+        assert!(rows[footer].contains("t/tab orders"), "{width}: {text}");
+        // The table, its notes, a blank, then the detail; nothing overlaps.
+        let last_row = rows.iter().rposition(|row| row.contains("filler.")).unwrap();
+        let detail = rows
+            .iter()
+            .rposition(|row| row.starts_with(" \u{2502} build.load_bearing"))
+            .unwrap();
+        assert!(top + 1 < last_row && last_row < detail && detail < footer, "{width}: {text}");
+        let row = line(&rows, "\u{2502} build.load_bearing");
+        match width {
+            80 | 100 => {
+                // The model drops first: every cell keeps its seat and its whole effort word.
+                assert!(!row.contains("claude-"), "{width}: {row:?}");
+                assert!(row.contains("hydrogen medium"), "{width}: {row:?}");
+            }
+            _ => {
+                assert!(row.contains("sonnet medium \u{b7} claude-sonnet-5-5"), "{row:?}");
+                assert!(row.contains("opus xhigh \u{b7} claude-opus-5-5"), "{row:?}");
+            }
+        }
+        // The detail always names the model of the row's cells.
+        assert!(text.contains("hydrogen medium \u{b7} gemini-4-hydrogen-medium"), "{width}: {text}");
+    }
+    // Then the effort shortens.
+    let matrix = sample_matrix(0);
+    let cell = &matrix.rows[2].cells[0];
+    assert_eq!(cell_words(cell, 15), "hydrogen medium");
+    assert_eq!(cell_words(cell, 14), "hydrogen med");
+    assert_eq!(cell_words(cell, 41), "hydrogen medium", "the model shows only whole");
+    assert_eq!(cell_words(cell, 42), "hydrogen medium \u{b7} gemini-4-hydrogen-medium");
+}
+
+#[test]
+fn p98_a_short_panel_shrinks_the_detail_before_the_table() {
+    assert_eq!(
+        table_fit(40, 23, 3, 12),
+        crate::client::shell::nirvana_seats::TableFit { rows: 23, notes: 3, detail: 13 }
+    );
+    let short = table_fit(20, 23, 3, 12);
+    assert_eq!(short.rows, 6, "the first rows hold: {short:?}");
+    assert_eq!(short.notes, 3);
+    assert_eq!(short.detail, 10, "the detail takes the rest: {short:?}");
+    let tiny = table_fit(8, 23, 3, 12);
+    assert_eq!((tiny.rows, tiny.detail), (6, 0), "{tiny:?}");
+    assert_eq!(table_fit(1, 23, 3, 12).rows, 0, "the header is the last line kept");
+    // Drawn at 80 by 20: the header, rows and the notes, then a cut detail, and the footer below it.
+    let view = sample_view(Some(sample_matrix(16)));
+    let (rows, _) = draw(&mut table_panel(1), Some(&view), 80, 20);
+    let text = rows.join("\n");
+    let (top, bottom) = framed(&rows);
+    assert!(rows[top + 1].contains("[Balanced]"), "{text}");
+    assert!(rows[bottom - 1].contains("t/tab orders"), "{text}");
+    let cut = rows[bottom - 3].trim_end_matches([' ', '\u{2502}']);
+    assert!(cut.ends_with(" \u{2026}"), "a cut detail says so: {text}");
+}
+
+#[test]
+fn p98_the_orders_page_is_drawn_as_before() {
+    for (matrix, width, golden) in [
+        (None, 80u16, ORDERS_NONE_80),
+        (None, 140, ORDERS_NONE_140),
+        (Some(sample_matrix(0)), 80, ORDERS_MATRIX_80),
+        (Some(sample_matrix(0)), 140, ORDERS_MATRIX_140),
+    ] {
+        let (rows, _) = draw(&mut blank_panel(), Some(&sample_view(matrix)), width, 30);
+        assert_eq!(rows.len(), golden.len());
+        let (top, bottom) = framed(&rows);
+        for (at, (now, then)) in rows.iter().zip(golden.iter()).enumerate() {
+            if at == top {
+                // The page words sit in the border before the close button; the title is as it was.
+                assert!(now.starts_with(" \u{256D}\u{2500} Seats \u{b7} moto \u{b7} Balanced \u{2500}"), "{now:?}");
+                assert!(now.ends_with("[Orders]  Table   \u{2715} \u{2500}\u{256E}"), "{now:?}");
+            } else if at == bottom - 1 {
+                assert_eq!(
+                    now.replacen("t/tab table \u{b7} ", "", 1).trim_end_matches([' ', '\u{2502}']),
+                    then.trim_end_matches([' ', '\u{2502}']),
+                    "the footer gains the page key"
+                );
+            } else {
+                assert_eq!(now, then, "{width} line {at}");
+            }
+        }
+    }
+}
+
+#[test]
+fn p98_the_differs_line_is_the_views_on_both_pages() {
+    let kept = "seats.toml keeps your overrides_per_run = 5; the rest is herdr's default.";
+    let mut view = sample_view(Some(sample_matrix(0)));
+    view.differs_line = Some(kept.into());
+    for page in [Page::Orders, Page::Table] {
+        let mut panel = blank_panel();
+        panel.page = page;
+        let (rows, _) = draw(&mut panel, Some(&view), 140, 40);
+        let text = rows.join("\n");
+        assert!(text.contains(kept), "{page:?}: {text}");
+        assert!(!text.contains(crate::nirvana_seat::DIFFERS_LINE), "{page:?}: {text}");
+    }
+    view.differs = false;
+    let (rows, _) = draw(&mut table_panel(0), Some(&view), 140, 40);
+    assert!(!rows.join("\n").contains(kept), "no line when the table does not differ");
+}
+
+#[test]
+fn p98_the_footer_names_the_page_keys_on_both_pages() {
+    let view = sample_view(Some(sample_matrix(0)));
+    let (rows, _) = draw(&mut blank_panel(), Some(&view), 140, 40);
+    let (_, bottom) = framed(&rows);
+    assert!(rows[bottom - 1].contains("t/tab table"), "{:?}", rows[bottom - 1]);
+    let (rows, _) = draw(&mut table_panel(0), Some(&view), 140, 40);
+    let (_, bottom) = framed(&rows);
+    assert!(rows[bottom - 1].contains("t/tab orders"), "{:?}", rows[bottom - 1]);
+    assert!(rows[bottom - 1].contains("pgup/pgdn"), "{:?}", rows[bottom - 1]);
+}
+
+/// Not a check: writes the Table page at 80 and 140 columns to `P98_TABLE`, for the eye.
+#[test]
+fn p98_dump_the_table_page() {
+    let Ok(out) = std::env::var("P98_TABLE") else {
+        return;
+    };
+    let mut text = String::new();
+    for width in [80u16, 140] {
+        let (rows, _) = draw(&mut table_panel(2), Some(&sample_view(Some(sample_matrix(16)))), width, 40);
+        text.push_str(&format!("=== {width} by 40, build.load_bearing selected\n"));
+        for row in rows {
+            text.push_str(&row);
+            text.push('\n');
+        }
+    }
+    std::fs::write(out, text).expect("the dump");
+}
+
+#[test]
+fn p98_each_table_line_is_the_task_then_three_cells() {
+    let matrix = sample_matrix(0);
+    let (task, cell) = table_widths(&matrix, 74);
+    assert_eq!((task, cell), (18, 17));
+    let row = table_line(&matrix.rows[1], task, cell);
+    assert!(row.starts_with("plan               "), "{row:?}");
+    assert_eq!(unicode_width::UnicodeWidthStr::width(row.as_str()), task + 3 * (cell + 1));
 }
