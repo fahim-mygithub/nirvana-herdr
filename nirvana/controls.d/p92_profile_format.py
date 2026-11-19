@@ -28,14 +28,14 @@ T_PP_DISMISS = ("nirvana_profile_proposals::tests::"
 T_PP_CLI = ("nirvana_profile_proposals::tests::"
             "p92_the_cli_lists_shows_accepts_dismisses_and_takes_only_proposal_ids")
 # P45c fix round: the reviewer's section 5, one test each
-RUN = "src/nirvana_run.rs"
 WORKER = "src/nirvana_worker.rs"
 KNOW = "src/nirvana_knowledge.rs"
 T_TEACH_SRV = "nirvana_knowledge::tests::p92_a_teacher_gets_no_server_of_the_taught_profile"
 T_CLASS = "nirvana_gui_tools::tests::p92_a_teach_or_review_order_gets_no_profile_server_by_its_class"
 T_NOTES = "nirvana_profiles::tests::p92_a_literal_token_in_a_profiles_servers_is_noted_by_key_never_by_value"
 T_DEVICE = "nirvana_profiles::tests::p92_a_new_profile_never_takes_a_windows_device_name"
-T_IGNORE = "nirvana_profiles::tests::p92_the_project_ignore_covers_a_profiles_servers_in_new_and_old_projects"
+T_IGNORE = ("nirvana_profiles::tests::"
+            "p92_profiles_gitignore_keeps_a_profiles_servers_out_of_git_and_is_never_rewritten")
 T_TORN = "nirvana_profile_proposals::tests::p92_a_torn_ledger_line_loses_no_later_row_and_its_op_is_not_reused"
 T_REDACT = "nirvana_profile_proposals::tests::p92_the_key_and_an_accepted_body_are_redacted"
 T_LEGACY = ("nirvana_profile_proposals::tests::"
@@ -146,16 +146,20 @@ CONTROLS = (
     # The note never holds the value (red: the notes differ from the expected text, and hold FAKE-TOKEN-123)
     Control("p92_secret_note_prints_value", PROFILES, "{field} {key} is written out,",
             "{field} {key} {value} is written out,", T_NOTES, "rust"),
-    # The ignore: the rule is in a new project's file (red: no `profiles/*/mcp.json` line)
-    Control("p92_ignore_rule_missing", RUN, "profiles/*/mcp.json\\n\";", "profiles/*/mcp.jsonx\\n\";",
+    # The ignore, the lead's ruling: profiles/.gitignore holds `*/mcp.json` (red: git does not ignore operator/mcp.json)
+    Control("p92_ignore_rule_missing", PROFILES, "*/mcp.json\\n\";", "*/mcp.jsonx\\n\";", T_IGNORE, "rust"),
+    # ...written when a profile with its own servers is loaded for seating (red: no file after load)
+    Control("p92_ignore_not_written_at_load", PROFILES, "        let _ = ensure_ignore(root);\n", "", T_IGNORE, "rust"),
+    # ...never over a file that is there (red: the emptied file is written again)
+    Control("p92_ignore_rewritten", PROFILES, "        .create_new(true)", "        .create(true)\n        .truncate(true)",
             T_IGNORE, "rust"),
-    # ...reaches a project whose file was written before (red: the old file is left as it was)
-    Control("p92_ignore_not_appended", RUN, "        if !text.lines().any(|line| line.trim_end() == marker) {",
-            "        if false {", T_IGNORE, "rust"),
-    # ...on a line of its own (red: glued onto the old last line, then appended again)
-    Control("p92_ignore_glued", RUN,
-            "            let gap = if text.is_empty() || text.ends_with('\\n') { \"\" } else { \"\\n\" };",
-            "            let gap = \"\";", T_IGNORE, "rust"),
+    # `list` never takes .gitignore for a profile (red: a profile named ".gitignore" is listed)
+    Control("p92_list_reads_gitignore", PROFILES,
+            '            } else if entry.is_file() && entry.extension().is_some_and(|ext| ext == "md") {',
+            "            } else if entry.is_file() {", T_IGNORE, "rust"),
+    # The note says when no rule covers the file (red: two notes, not three, before the file is written)
+    Control("p92_ignore_uncovered_unsaid", PROFILES, "    if !notes.is_empty() && !ignore_covers(root) {",
+            "    if false {", T_NOTES, "rust"),
     Control("p92_unprofiled_order_reads_other_copy", GUI,
             "    let Ok(text) = std::fs::read_to_string(order_copy_path(cwd, order)) else {",
             '    let Ok(text) = std::fs::read_to_string(order_copy_path(cwd, "s1")) else {', T_OWN, "rust"),

@@ -1422,8 +1422,25 @@ fn p92_a_literal_token_in_a_profiles_servers_is_noted_by_key_never_by_value() {
         "env": {"API_TOKEN": "FAKE-TOKEN-123", "MODE": "fast", "Secret_Ref": "${FAKE_SECRET}", "PASSWORD": ""},
         "headers": {"Authorization": "Bearer ${FAKE_BEARER}", "X-Cookie": "FAKE-COOKIE-456"}}}}"#;
     let file = write_folder_profile(&project, "operator", OPERATOR, Some(servers));
-    let found = notes(&project.root, "operator");
     let mcp = folder_of(&project.root, "operator").join(SERVERS_FILE);
+    // No `profiles/.gitignore` yet: the notes end with one saying no rule covers the file.
+    let uncovered = notes(&project.root, "operator");
+    assert_eq!(
+        uncovered.last().map(String::as_str),
+        Some(
+            format!(
+                "note: {}: no ignore rule covers it ({} is missing or has no `*/mcp.json` line), so a `git add` of \
+                 the project would track the values above",
+                mcp.display(),
+                folder(&project.root).join(IGNORE_FILE).display()
+            )
+            .as_str()
+        ),
+        "{uncovered:?}"
+    );
+    assert_eq!(uncovered.len(), 3, "{uncovered:?}");
+    assert!(ensure_ignore(&project.root).unwrap());
+    let found = notes(&project.root, "operator");
     assert_eq!(
         found,
         [
@@ -1471,22 +1488,30 @@ fn p92_a_new_profile_never_takes_a_windows_device_name() {
     nirvana_seat::set_test_world(None);
 }
 
-/// Review F3: `.nirvana/.gitignore` ignores a profile's own `mcp.json`, in a new project and in one whose file was
-/// written before (it is never rewritten, so the rule is appended once); an owner who takes the rule out and keeps its
-/// comment is not overridden. git itself is asked.
+/// Review F3, the lead's ruling: `.nirvana/.gitignore` is the owner's byte for byte; herdr writes
+/// `profiles/.gitignore` (`*/mcp.json`) when it is missing, at the load that seats a profile with its own servers
+/// (and `profile check`), never over a file that is there, an emptied one included. git itself is asked what it
+/// ignores, and `list` never takes the file for a profile.
 #[test]
-fn p92_the_project_ignore_covers_a_profiles_servers_in_new_and_old_projects() {
+fn p92_profiles_gitignore_keeps_a_profiles_servers_out_of_git_and_is_never_rewritten() {
     let (_home, project) = project("p92-ignore");
-    let ignore = project.dir().join(".gitignore");
-    let fresh = std::fs::read_to_string(&ignore).unwrap();
-    assert!(fresh.lines().any(|line| line == "profiles/*/mcp.json"), "{fresh}");
-    // A project made before: the file as herdr wrote it then, with no newline at its end.
-    let old = crate::nirvana_run::GITIGNORE.trim_end();
-    std::fs::write(&ignore, old).unwrap();
-    project.ensure().unwrap();
-    project.ensure().unwrap();
-    let now = std::fs::read_to_string(&ignore).unwrap();
-    assert_eq!(now, format!("{old}\n{}", crate::nirvana_run::GITIGNORE_PROFILE_SERVERS));
+    let owners = std::fs::read_to_string(project.dir().join(".gitignore")).unwrap();
+    let ignore = folder(&project.root).join(IGNORE_FILE);
+    write_folder_profile(&project, "operator", OPERATOR, Some(OWN_SERVERS));
+    write_profile(&project, "plain", SLICER);
+    // A profile with no mcp.json writes nothing.
+    load(&project.root, "plain").unwrap();
+    assert!(!ignore.exists());
+    assert!(!ignore_covers(&project.root));
+    // Seating loads the profile: the file is written, as herdr's text.
+    load(&project.root, "operator").unwrap();
+    assert_eq!(std::fs::read_to_string(&ignore).unwrap(), IGNORE_TEXT);
+    assert!(ignore_covers(&project.root));
+    assert_eq!(
+        std::fs::read_to_string(project.dir().join(".gitignore")).unwrap(),
+        owners,
+        "the project's .nirvana/.gitignore is untouched"
+    );
     let git = |args: &[&str]| {
         std::process::Command::new("git")
             .args(args)
@@ -1495,15 +1520,24 @@ fn p92_the_project_ignore_covers_a_profiles_servers_in_new_and_old_projects() {
             .unwrap()
     };
     assert!(git(&["init", "-q"]).status.success());
-    write_folder_profile(&project, "operator", OPERATOR, Some(OWN_SERVERS));
     let checked = git(&["check-ignore", "-q", ".nirvana/profiles/operator/mcp.json"]);
     assert_eq!(checked.status.code(), Some(0), "mcp.json is ignored");
-    let checked = git(&["check-ignore", "-q", ".nirvana/profiles/operator/profile.md"]);
-    assert_eq!(checked.status.code(), Some(1), "profile.md is tracked");
-    // The owner takes the rule out and keeps the comment: it stays out.
-    let edited = now.replace("profiles/*/mcp.json\n", "");
-    std::fs::write(&ignore, &edited).unwrap();
-    project.ensure().unwrap();
-    assert_eq!(std::fs::read_to_string(&ignore).unwrap(), edited);
+    for tracked in [
+        ".nirvana/profiles/operator/profile.md",
+        ".nirvana/profiles/plain.md",
+        ".nirvana/profiles/.gitignore",
+    ] {
+        let checked = git(&["check-ignore", "-q", tracked]);
+        assert_eq!(checked.status.code(), Some(1), "{tracked} is tracked");
+    }
+    // `list` (and so the panel, check and the digest) never reads the file as a profile.
+    let names: Vec<String> = list(&project.root).into_iter().map(|(name, _, _)| name).collect();
+    assert_eq!(names, ["operator", "plain"]);
+    // The owner empties it to track the servers: no later load or ensure writes it again.
+    std::fs::write(&ignore, "").unwrap();
+    load(&project.root, "operator").unwrap();
+    assert!(!ensure_ignore(&project.root).unwrap());
+    assert_eq!(std::fs::read_to_string(&ignore).unwrap(), "");
+    assert!(!ignore_covers(&project.root));
     nirvana_seat::set_test_world(None);
 }

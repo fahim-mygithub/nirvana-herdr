@@ -36,8 +36,9 @@
 //!   `seated_sha` over the profile and the pin, so the check before every start covers the servers too and an edit
 //!   mid-run never reaches a running order. A profile with no `mcp.json` keeps the sha of its file alone. P45c fix
 //!   round (review F1-F3): a teach order and a lesson review get none of them (`takes_no_profile_servers`); the
-//!   definitions copy goes when the order ends (`remove_servers_copy`), the pin stays; `.nirvana/.gitignore` ignores
-//!   `profiles/*/mcp.json`, and `check` and `show` note a literal under a secret-looking key (`secret_notes`).
+//!   definitions copy goes when the order ends (`remove_servers_copy`), the pin stays; `profiles/.gitignore`, written
+//!   only when missing (`ensure_ignore`), ignores `*/mcp.json`, and `check` and `show` note a literal under a
+//!   secret-looking key (`secret_notes`) and say when no ignore rule covers the file.
 //! - **`skills: []`** names none (P45c review F6); without the key every skill stays, as before.
 //! - **A new profile's name** is never a Windows device name (`valid_new_name`); one already on disk still loads.
 //! - **Shapes**: `herdr profile new <name> --shape reviewer|operator|builder|researcher` writes the folder form with a
@@ -360,13 +361,67 @@ pub fn read_servers(root: &Path, name: &str) -> Result<Option<ServerFile>, Vec<S
         claude_only: claude_only.clone(),
     }
     .bytes();
+    let mut notes = secret_notes(&file, &defined);
+    if !notes.is_empty() && !ignore_covers(root) {
+        notes.push(format!(
+            "note: {}: no ignore rule covers it ({} is missing or has no `*/mcp.json` line), so a `git add` of the \
+             project would track the values above",
+            file.display(),
+            folder(root).join(IGNORE_FILE).display()
+        ));
+    }
     Ok(Some(ServerFile {
-        notes: secret_notes(&file, &defined),
+        notes,
         bytes,
         names,
         claude_only,
         pin,
     }))
+}
+
+/// P45c review F3: the ignore file herdr writes in `profiles/`, so a profile's own `mcp.json` (which can hold a token)
+/// stays out of git while `profile.md` and `knowledge/` are tracked. The project's `.nirvana/.gitignore` is the owner's
+/// byte for byte and herdr never adds to it; this file is written only when absent (`ensure_ignore`), so an owner who
+/// wants the servers tracked edits or empties it and it stays that way.
+pub const IGNORE_FILE: &str = ".gitignore";
+pub const IGNORE_TEXT: &str = "# Written by herdr (plan 45 P45c) only when this file is missing; it never rewrites it.\n\
+# A profile's own servers, <name>/mcp.json, can hold a token, and profiles/ is tracked with the project.\n\
+# Edit or empty this file to track them.\n\
+*/mcp.json\n";
+
+/// Writes `profiles/.gitignore` when it is not there; `Ok(true)` when it wrote it. Never over a file that exists, an
+/// empty one included (`create_new`, so two writers cannot both write it). Called when a profile with its own
+/// `mcp.json` is loaded (seating, `profile show`), and by `herdr profile check`: the places a hand-made `mcp.json`
+/// passes through before its first order.
+pub fn ensure_ignore(root: &Path) -> std::io::Result<bool> {
+    use std::io::Write;
+    std::fs::create_dir_all(folder(root))?;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(folder(root).join(IGNORE_FILE))
+    {
+        Ok(mut file) => file.write_all(IGNORE_TEXT.as_bytes()).map(|()| true),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
+/// Whether an ignore rule covers every profile's `mcp.json`: a line of `profiles/.gitignore` (`*/mcp.json`,
+/// `/*/mcp.json`, `**/mcp.json` or `mcp.json`) or of `.nirvana/.gitignore` (`profiles/*/mcp.json`, with or without
+/// a leading `/`, or `profiles/**/mcp.json`). A reading of those two files' lines, not of git's every source.
+pub fn ignore_covers(root: &Path) -> bool {
+    let has = |file: PathBuf, rules: &[&str]| {
+        std::fs::read_to_string(file)
+            .is_ok_and(|text| text.lines().any(|line| rules.contains(&line.trim())))
+    };
+    has(
+        folder(root).join(IGNORE_FILE),
+        &["*/mcp.json", "/*/mcp.json", "**/mcp.json", "mcp.json"],
+    ) || has(
+        root.join(crate::nirvana_run::DIR).join(".gitignore"),
+        &["profiles/*/mcp.json", "/profiles/*/mcp.json", "profiles/**/mcp.json"],
+    )
 }
 
 /// The words of a key that holds a secret (P45c review F3), matched case-insensitively anywhere in the key.
@@ -382,9 +437,10 @@ pub const SECRET_WORDS: [&str; 7] = [
 
 /// P45c review F3: one note for each `env` or `headers` entry of a profile's servers whose key looks like a secret's
 /// and whose value is written out rather than taken from the environment (`${VAR}`, or a value that holds one, such as
-/// `Bearer ${TOKEN}`). `profile.md` and `mcp.json` sit in a tracked folder; `.nirvana/.gitignore` ignores
-/// `profiles/*/mcp.json`, but a literal still lands in every run copy. A note, not a refusal: the owner may mean it.
-/// Each note names the file, the server and the key, never the value.
+/// `Bearer ${TOKEN}`). `profile.md` and `mcp.json` sit in a tracked folder; `profiles/.gitignore` ignores
+/// `*/mcp.json` (`ensure_ignore`), but a literal still lands in every run copy, and `read_servers` adds a note when no
+/// rule covers the file. A note, not a refusal: the owner may mean it. Each note names the file, the server and the
+/// key, never the value.
 pub fn secret_notes(file: &Path, defined: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
     let mut notes = Vec::new();
     for (server, definition) in defined {
@@ -665,6 +721,12 @@ pub fn load(root: &Path, name: &str) -> Result<Loaded, String> {
         )
     };
     let mut profile = parse(&file, name, text).map_err(refused)?;
+    // P45c review F3: a profile with its own servers is seated (or shown) through here, so `profiles/.gitignore` is
+    // written before its first order when it is missing. A write that fails leaves the note in `read_servers` to say
+    // no rule covers the file; it does not fail the seating.
+    if servers_path(root, name).is_some_and(|servers| servers.is_file()) {
+        let _ = ensure_ignore(root);
+    }
     // Plan 45 §5: read with the profile file, once, so the copy and its sha are of what was checked.
     let servers = read_servers(root, name).map_err(refused)?;
     if let Some(found) = &servers {
@@ -1636,7 +1698,8 @@ A profile is used by `herdr seat run <seat> --profile <name> ...` and `herdr sea
 In profile.md: `skills: [a, b]` names the project skills (.claude/skills) its worker uses; `skills: []` names
 none, and without the key it uses all. A folder profile's mcp.json, in .mcp.json's shape, holds its own servers:
 every order seated with it gets them, no needs line, except a teach order and a lesson review, which get none.
-.nirvana/.gitignore ignores profiles/*/mcp.json; write a token as ${VAR}, and check and show note one written out.";
+profiles/.gitignore (written when missing, never rewritten) ignores */mcp.json; write a token as ${VAR},
+and check and show note one written out, and say when no ignore rule covers the file.";
 
 fn usage_exit() -> ! {
     eprintln!("{USAGE}");
@@ -1757,6 +1820,12 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
                 println!("seats.toml is refused, so only the files are checked: {why}");
             }
             let servers = crate::nirvana_gui_tools::project_servers(&root).unwrap_or_default();
+            // P45c review F3: check is what an owner runs after writing an mcp.json by hand.
+            if folder(&root).is_dir() {
+                if let Err(err) = ensure_ignore(&root) {
+                    println!("cannot write {}: {err}", folder(&root).join(IGNORE_FILE).display());
+                }
+            }
             let chosen: Vec<_> = list(&root)
                 .into_iter()
                 .filter(|(name, _, _)| names.first().is_none_or(|wanted| wanted == name))
