@@ -281,8 +281,8 @@ pub fn matrix(table: &Table, live: &World, calibration: Option<&Calibration>) ->
             .map(|mode| {
                 let mut request = nirvana_seat::Request::new(&class.id);
                 request.mode = *mode;
-                // The class's own needs, as `p91_the_advisor_moves_no_pick_and_no_expected_use` asks.
-                request.needs = class.needs.clone();
+                // No `needs` here: `evaluate` adds the class's own to every request (copying them in, as the p91 loop
+                // does, changes no pick; its control could not go red).
                 cell(table, live, &cool, &request)
             })
             .collect();

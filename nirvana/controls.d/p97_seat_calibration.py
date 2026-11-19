@@ -182,8 +182,6 @@ CONTROLS = (
     Control("p97_matrix_wrong_next", SQUARE, "                .get(1)\n", "                .get(2)\n", T_MATRIX, "rust"),
     Control("p97_matrix_never_forced", SQUARE, "    let forced = key(&now) != key(&then);", "    let forced = false;",
             T_MATRIX, "rust"),
-    Control("p97_matrix_drops_needs", SQUARE, "                request.needs = class.needs.clone();\n                cell(",
-            "                cell(", T_MATRIX, "rust"),
     Control("p97_matrix_one_mode_for_nirvana_claude", SQUARE, "            at.mode = *mode;\n",
             "            at.mode = Mode::Balanced;\n", T_MATRIX, "rust"),
     Control("p97_matrix_all_enabled", SQUARE, "                enabled: table.seat(&entry.seat).is_some_and(|seat| seat.enabled),",
