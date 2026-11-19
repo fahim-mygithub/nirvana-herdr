@@ -3,7 +3,8 @@
 The usage audit (plans/2026-11-09-40-records/usage-audit.md, finding 3) found small orders booked at 4 to 27 times
 their prior and large ones at 0.14 to 0.38, with medium near 1. CLAUDE.md rule 4: the numbers live here, not in prose.
 
-For each record line with tokens, a seat, an effort, a size and a known class:
+For each order (the last record line of each order and run, as the herdr port reads it) with tokens, a seat, an effort,
+a size and a known class:
 
     actual   = the line's tokens x the seat's price row on the cell's `at` date x the pool's per_usd["week"]
     unit     = actual / (cell["week"] x the class's weight)      # the order in P4 units, before its size
@@ -49,10 +50,24 @@ TOKENS = ("input", "cache_write", "cache_read", "output")
 
 
 def price_at(seat: dict, day: str) -> dict | None:
-    """The latest price row whose date has come on `day`, else the first (as `Seat::price_at`)."""
+    """The latest price row whose date has come on `day`, else the first (as `Seat::price_at`). Until the P46a review
+    it returned the last row when none had come, where the Rust takes the first."""
     rows = sorted(seat.get("prices", []), key=lambda row: row["from"])
     came = [row for row in rows if row["from"] <= day]
-    return (came or rows or [None])[-1]
+    if came:
+        return came[-1]
+    return rows[0] if rows else None
+
+
+def last_per_order(lines: list[dict]) -> list[dict]:
+    """One line per order and run, the last, subagents left out: as `nirvana_seat::tally` and `nirvana_seat_calib`
+    read the record (the P46a review, finding 6: a corrected line repeating its order's tokens counted it twice)."""
+    last: dict[tuple, dict] = {}
+    for line in lines:
+        if line.get("chain") in SKIP_CHAINS:
+            continue
+        last[(line.get("run"), line.get("order"))] = line
+    return list(last.values())
 
 
 def usd(price: dict, tokens: dict) -> float:
@@ -79,7 +94,7 @@ def fit(table: dict, lines: list[dict]):
     sizes = table["size"]
     units = defaultdict(list)  # (seat, effort, size) -> [unit]
     minutes = defaultdict(list)  # size -> [minutes]
-    for line in lines:
+    for line in last_per_order(lines):
         seat = seats.get(line.get("seat"))
         size, effort, tokens = line.get("size"), line.get("effort"), line.get("tokens")
         if line.get("chain") in SKIP_CHAINS or not (seat and size in sizes and effort and tokens):
