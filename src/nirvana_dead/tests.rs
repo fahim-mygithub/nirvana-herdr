@@ -926,3 +926,178 @@ fn restart_projects_reads_the_record_and_climbs_the_panes_folders() {
     let roots = restart_projects(&record, &std::env::temp_dir(), &cwds[..1]);
     assert_eq!(roots, vec![b.0.clone()]);
 }
+
+// Jobs sizing fix (2026-11-19): four finished jobs' panes held 15/16 of the owner's Megajam Jobs tab. A passed job's
+// pane closes after `JOB_PASSED_GRACE_S`; a failed one stays, the newest `KEEP_FAILED_JOBS` per tab; a running one
+// never closes.
+
+fn p96_job(
+    home: &Path,
+    id: &str,
+    name: &str,
+    pane: &str,
+    end: Option<(u64, i32)>,
+    pid: Option<u32>,
+) {
+    let record = crate::nirvana_job::JobRecord {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        argv: vec!["cargo".into()],
+        cwd: String::new(),
+        space: Some("wP".into()),
+        pane: Some(pane.to_owned()),
+        started: ENDED - 50,
+        ended: end.map(|(at, _)| at),
+        exit: end.map(|(_, code)| code),
+        pid,
+    };
+    crate::nirvana_job::write_job(home, &record).unwrap();
+}
+
+fn p96_job_pane(id: &str, tab: &str, name: &str, home: &Path) -> Value {
+    pane(id, tab, Some(&format!("job\u{b7}{name}")), home)
+}
+
+#[test]
+fn p96_a_passed_jobs_pane_closes_after_the_hold() {
+    let home = Temp::new("home");
+    p96_job(&home.0, "job-p", "build", "wP:pP", Some((ENDED, 0)), None);
+    let herdr = FakeHerdr::new(vec![
+        agent_pane("wP:p1", "wP:t1"),
+        p96_job_pane("wP:pP", "wP:tJ", "build", &home.0),
+        p96_job_pane("wP:pQ", "wP:tJ", "other", &home.0),
+    ]);
+    herdr.sweep(&home.0, ENDED + JOB_PASSED_GRACE_S - 1);
+    assert!(herdr.closed().is_empty(), "inside the hold the pane stays");
+    herdr.sweep(&home.0, ENDED + JOB_PASSED_GRACE_S);
+    assert_eq!(herdr.closed(), vec!["wP:pP".to_owned()]);
+}
+
+#[test]
+fn p96_failed_jobs_keep_the_newest_two_per_tab() {
+    let home = Temp::new("home");
+    // Tab J: four failed (one of them lost: no exit, no end, no process), oldest first, and one passed.
+    p96_job(&home.0, "job-f1", "f1", "wP:pF1", Some((ENDED, 1)), None);
+    p96_job(&home.0, "job-f2", "f2", "wP:pF2", None, None);
+    p96_job(
+        &home.0,
+        "job-f3",
+        "f3",
+        "wP:pF3",
+        Some((ENDED + 20, 101)),
+        None,
+    );
+    p96_job(
+        &home.0,
+        "job-f4",
+        "f4",
+        "wP:pF4",
+        Some((ENDED + 30, 1)),
+        None,
+    );
+    p96_job(
+        &home.0,
+        "job-ok",
+        "ok",
+        "wP:pOK",
+        Some((ENDED + 40, 0)),
+        None,
+    );
+    // Tab K: two failed, both kept.
+    p96_job(&home.0, "job-k1", "k1", "wP:pK1", Some((ENDED, 1)), None);
+    p96_job(
+        &home.0,
+        "job-k2",
+        "k2",
+        "wP:pK2",
+        Some((ENDED + 5, 1)),
+        None,
+    );
+    let herdr = FakeHerdr::new(vec![
+        agent_pane("wP:p1", "wP:t1"),
+        p96_job_pane("wP:pF1", "wP:tJ", "f1", &home.0),
+        p96_job_pane("wP:pF2", "wP:tJ", "f2", &home.0),
+        p96_job_pane("wP:pF3", "wP:tJ", "f3", &home.0),
+        p96_job_pane("wP:pF4", "wP:tJ", "f4", &home.0),
+        p96_job_pane("wP:pOK", "wP:tJ", "ok", &home.0),
+        p96_job_pane("wP:pK1", "wP:tK", "k1", &home.0),
+        p96_job_pane("wP:pK2", "wP:tK", "k2", &home.0),
+    ]);
+    let lines = herdr.pass(
+        &home.0,
+        &Pass {
+            now: LATER + 60,
+            dry_run: true,
+            ..Pass::default()
+        },
+    );
+    assert!(
+        lines.contains(
+            &"keeps wP:pF4 (job\u{b7}f4): its job failed, one of its tab's newest failed jobs"
+                .to_owned()
+        ),
+        "{lines:?}"
+    );
+    herdr.sweep(&home.0, LATER + 60);
+    let mut closed = herdr.closed();
+    closed.sort();
+    assert_eq!(closed, vec!["wP:pF1", "wP:pF2", "wP:pOK"]);
+}
+
+#[test]
+fn p96_a_running_jobs_pane_is_never_closed() {
+    let home = Temp::new("home");
+    // This test's own process stands for the job's: alive, no end recorded.
+    p96_job(
+        &home.0,
+        "job-r",
+        "long",
+        "wP:pR",
+        None,
+        Some(std::process::id()),
+    );
+    let herdr = FakeHerdr::new(vec![
+        agent_pane("wP:p1", "wP:t1"),
+        p96_job_pane("wP:pR", "wP:tJ", "long", &home.0),
+        p96_job_pane("wP:pX", "wP:tJ", "x", &home.0),
+    ]);
+    herdr.sweep(&home.0, ENDED + 10 * STOPPED_GRACE_S);
+    assert!(herdr.closed().is_empty());
+}
+
+#[test]
+fn p96_failed_jobs_over_ranks_each_tab_by_end() {
+    let rows: Vec<(String, String, u64)> = [
+        ("t1", "a", 10),
+        ("t1", "b", 30),
+        ("t1", "c", 20),
+        ("t1", "d", 5),
+        ("t2", "e", 1),
+        ("t2", "f", 1),
+        ("t2", "g", 1),
+    ]
+    .iter()
+    .map(|(tab, pane, at)| ((*tab).to_owned(), (*pane).to_owned(), *at))
+    .collect();
+    let mut over: Vec<String> = failed_jobs_over(&rows).into_iter().collect();
+    over.sort();
+    // t1 keeps b and c (newest ends); t2's tie keeps the later panes f and g.
+    assert_eq!(over, vec!["a", "d", "e"]);
+}
+
+#[test]
+fn p96_a_lost_job_counts_as_failed() {
+    let home = Temp::new("home");
+    // No exit, no end and no live process: the job was lost (a restart killed it).
+    p96_job(&home.0, "job-l", "lost", "wP:pL", None, None);
+    let owner = Owner::Job {
+        name: "lost".into(),
+    };
+    assert_eq!(
+        ended_of(&home.0, "wP:pL", None, &owner, LATER),
+        Ended::JobFailed {
+            at: ENDED - 50,
+            kept: true
+        }
+    );
+}

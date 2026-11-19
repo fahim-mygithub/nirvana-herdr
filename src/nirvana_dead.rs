@@ -33,6 +33,16 @@ pub const SEAT_GRACE_S: u64 = 60;
 /// run's journal, streams and record outlive the pane, so the wait costs nothing that the owner needs.
 pub const CLOSE_GRACE_S: u64 = 120;
 
+/// Jobs sizing fix: a job that passed (exit 0) keeps its pane this long after its end, then the sweep closes it (a pass
+/// every minute, so 30 s to 90 s after). Its output stays in its log, its Jobs square row and `herdr job tail`; the
+/// pane at an idle prompt only took width from the running ones. On 2026-11-19 four finished jobs' panes held 15/16 of
+/// the owner's Megajam Jobs tab while the two running jobs wrapped one word a line.
+pub const JOB_PASSED_GRACE_S: u64 = 30;
+
+/// Jobs sizing fix: a failed job's pane stays for the owner to read, but only the newest this many per tab; an older
+/// failed job's pane closes as any ended pane does (`CLOSE_GRACE_S`).
+pub const KEEP_FAILED_JOBS: usize = 2;
+
 /// A pane whose order still wants a worker (Seated, Running, Deferred) but whose supervisor holds no lock stays this
 /// long, counted from the later of the order's last journal event and the server's start (review S4). That order did
 /// not end: its supervisor died with a crash, a reboot or a server restart, and `herdr run tick` restarts a Deferred
@@ -163,8 +173,13 @@ pub enum Ended {
     /// Its order still wants a worker but no supervisor holds the lock, since this unix second (the order's last
     /// journal event): a crash or a restart mid-run. Waits `STOPPED_GRACE_S`.
     Stopped(u64),
-    /// It ended at this unix second (the order's last journal event, the job's end).
+    /// It ended at this unix second (the order's last journal event).
     At(u64),
+    /// Its job passed (exit 0) at this unix second: closes after `JOB_PASSED_GRACE_S`.
+    JobPassed(u64),
+    /// Its job failed (a non-zero exit, or lost: no exit and no live process) at `at`. `kept` while it is one of its
+    /// tab's newest `KEEP_FAILED_JOBS` failed jobs (`failed_jobs_over`); an older one closes after `CLOSE_GRACE_S`.
+    JobFailed { at: u64, kept: bool },
 }
 
 /// The facts the close rule reads about one pane, its processes apart (`decide` asks for them last).
@@ -228,6 +243,18 @@ pub fn decide(
             CLOSE_GRACE_S,
             "its worker or job ended under the grace ago",
         ),
+        Ended::JobPassed(at) => (
+            at,
+            at,
+            JOB_PASSED_GRACE_S,
+            "its job passed under the hold ago",
+        ),
+        Ended::JobFailed { kept: true, .. } => {
+            return keep("its job failed, one of its tab's newest failed jobs")
+        }
+        Ended::JobFailed { at, kept: false } => {
+            (at, at, CLOSE_GRACE_S, "its job failed under the grace ago")
+        }
     };
     if now < since.saturating_add(grace) {
         return keep(why);
@@ -319,12 +346,40 @@ pub fn ended_of(home: &Path, pane: &str, cwd: Option<&str>, owner: &Owner, now: 
             if record.name != *name {
                 return Ended::Unknown;
             }
+            let at = record.ended.unwrap_or(record.started);
             match crate::nirvana_job::job_state(&record) {
                 crate::nirvana_job::JobState::Running => Ended::Running,
-                _ => Ended::At(record.ended.unwrap_or(record.started)),
+                crate::nirvana_job::JobState::Passed => Ended::JobPassed(at),
+                // Kept until the pass ranks it among its tab's failed jobs (`failed_jobs_over`).
+                crate::nirvana_job::JobState::Failed | crate::nirvana_job::JobState::Lost => {
+                    Ended::JobFailed { at, kept: true }
+                }
             }
         }
     }
+}
+
+/// Jobs sizing fix: the panes of failed jobs past each tab's newest `KEEP_FAILED_JOBS`, from `(tab, pane, ended at)`
+/// per failed job's pane. Newest by end, a tie by the later pane in the list (the later split).
+pub fn failed_jobs_over(failed: &[(String, String, u64)]) -> HashSet<String> {
+    let mut by_tab: HashMap<&str, Vec<(u64, usize, &str)>> = HashMap::new();
+    for (index, (tab, pane, at)) in failed.iter().enumerate() {
+        by_tab
+            .entry(tab.as_str())
+            .or_default()
+            .push((*at, index, pane.as_str()));
+    }
+    let mut over = HashSet::new();
+    for mut panes in by_tab.into_values() {
+        panes.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+        over.extend(
+            panes
+                .into_iter()
+                .skip(KEEP_FAILED_JOBS)
+                .map(|(_, _, pane)| pane.to_owned()),
+        );
+    }
+    over
 }
 
 /// Plan 43 A6: the order was interrupted by the restart check (`nirvana_run::interrupt_dead`), not ended by its worker.
@@ -482,6 +537,24 @@ pub fn sweep(
         }
     }
 
+    // Jobs sizing fix: each tab's newest `KEEP_FAILED_JOBS` failed jobs keep their panes; the older ones are found here,
+    // before any close, so the ranking sees the whole tab.
+    let failed: Vec<(String, String, u64)> = panes
+        .iter()
+        .filter_map(|pane| {
+            let id = str_at(pane, &["/pane_id"])?;
+            let owner @ Owner::Job { .. } = parse_label(str_at(pane, &["/label"]).unwrap_or(""))?
+            else {
+                return None;
+            };
+            match ended_of(home, id, str_at(pane, &["/cwd"]), &owner, now) {
+                Ended::JobFailed { at, .. } => Some((tab_of(pane), id.to_owned(), at)),
+                _ => None,
+            }
+        })
+        .collect();
+    let failed_over = failed_jobs_over(&failed);
+
     let mut lines = Vec::new();
     let mut tries = 0;
     for pane in &panes {
@@ -506,7 +579,12 @@ pub fn sweep(
             last_of_space: panes_in_tab.get(&tab).copied().unwrap_or(0) <= 1
                 && tabs_in_space.get(&space).copied().unwrap_or(0) <= 1,
             watched: watched.contains(&tab),
-            ended: ended_of(home, id, str_at(pane, &["/cwd"]), &owner, now),
+            ended: match ended_of(home, id, str_at(pane, &["/cwd"]), &owner, now) {
+                Ended::JobFailed { at, .. } if failed_over.contains(id) => {
+                    Ended::JobFailed { at, kept: false }
+                }
+                ended => ended,
+            },
             owner_key_at: nirvana_run::owner_key_in(home, id),
             owner: Some(owner),
         };
@@ -796,7 +874,9 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         .filter_map(|pane| str_at(pane, &["/cwd"]).map(str::to_owned))
         .collect();
     let projects = restart_projects(
-        &home.join(crate::nirvana_seat::DIR).join(crate::nirvana_seat::RECORD_FILE),
+        &home
+            .join(crate::nirvana_seat::DIR)
+            .join(crate::nirvana_seat::RECORD_FILE),
         &std::env::temp_dir(),
         &cwds,
     );
