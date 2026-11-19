@@ -193,7 +193,9 @@ CONTROLS = CONTROLS + (
             "        nanos(meta.modified()).max(nanos(meta.created())),\n", "        nanos(meta.modified()),\n",
             T_MTIME, "rust"),
     Control("p35a_owned_quoted_paths", GATE,
-            '            "--porcelain=v1",\n            "-z",\n', '            "--porcelain=v1",\n', T_MTIME, "rust"),
+            # Plan 43 fix round 2 (H1): `set_aside_harness` holds the same two lines; `uncommitted`'s next three do not.
+            '            "--porcelain=v1",\n            "-z",\n            "-uall",\n            "--",\n            ".",\n',
+            '            "--porcelain=v1",\n            "-uall",\n            "--",\n            ".",\n', T_MTIME, "rust"),
     Control("p35a_owned_no_note", GATE,
             '                owned.why = format!("{} ({note})", owned.why);\n', "", T_MTIME, "rust"),
     Control("p35a_owned_note_with_snapshot", GATE,

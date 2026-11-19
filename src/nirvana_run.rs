@@ -344,6 +344,9 @@ pub enum Kind {
         order: String,
         #[serde(default)]
         sha: Option<String>,
+        /// Plan 43 A7: the orchestrator's reason when it merged the order itself (`herdr gate merge --by-hand`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by_hand: Option<String>,
     },
     Asked {
         #[serde(default)]
@@ -852,6 +855,12 @@ fn queue_line(kind: &Kind) -> Option<String> {
             reason,
             ..
         } => match reason {
+            // Plan 43 fix round F3: an amend's reason opens with its `herdr gate amend` line, which two long paths
+            // carry past 90 characters; a cut line ends in `…` and the gate prints it whole.
+            Some(reason) if verdict == crate::nirvana_gate::Outcome::Amend.word() => format!(
+                "{order} gated {verdict}: {}; full line: herdr gate run {order}",
+                short(reason, 90)
+            ),
             Some(reason) => format!("{order} gated {verdict}: {}", short(reason, 90)),
             None => format!("{order} gated {verdict}"),
         },
@@ -1071,7 +1080,7 @@ pub fn replay(events: &[Event]) -> RunState {
                     }
                 }
             }
-            Kind::Merged { order, sha } => {
+            Kind::Merged { order, sha, .. } => {
                 if let Some(known) = state.order_mut(order) {
                     known.merged_sha = sha.clone();
                     known.phase = Phase::Merged;
@@ -2287,6 +2296,11 @@ pub fn outcome_word(order: &OrderState) -> String {
     // accepted order fell to its phase (`Gated`) and was recorded `failed`.
     if order.verdict.as_deref() == Some(Outcome::ACCEPTED) {
         return Outcome::ACCEPTED.into();
+    }
+    // Plan 43 fix round 2 (H3): an amend whose re-gate gave no verdict is recorded as the amend it was, which the tally
+    // does not count; `amending` is no `Outcome::parse` word, so it fell to `failed`, against the seat.
+    if order.verdict.as_deref() == Some(Outcome::AMENDING) {
+        return Outcome::Amend.word().into();
     }
     if let Some(verdict) = order.verdict.as_deref().and_then(Outcome::parse) {
         // Plan 37b review S1: asked on its own block, which the seat's tally does not count.

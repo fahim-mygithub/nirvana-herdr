@@ -122,14 +122,18 @@ CONTROLS = (
             "                files.push((*word).to_owned());\n",
             "                let _ = word;\n", T_OPENED, "rust"),
     Control("c40b_media_probed_url_dropped", GATE,
-            "            urls.extend(extract_url_tokens(word).iter().map(|token| normalize_url(token)));\n",
-            "", T_OPENED, "rust"),
+            # Plan 43 fix round 2 (H1): rustfmt split the call over five lines; the sabotage still drops it.
+            "            urls.extend(\n                extract_url_tokens(word)\n                    .iter()\n"
+            "                    .map(|token| normalize_url(token)),\n            );\n            if media_file(word) {\n",
+            "            if media_file(word) {\n", T_OPENED, "rust"),
     # Review round N1, N2, N4, S2.
     Control("c40b_check_prose_read_as_names", GATE,
             "        && (names.len() == 1 || rest.contains('`') || names.iter().all(|word| marked(word))))\n",
             "        && true)\n", T_PROSE, "rust"),
     Control("c40b_check_pins_first_naming_line", GATE,
-            "        let result = naming().find(|(_, line)| reports(line, check)).or_else(|| naming().next_back());\n",
+            # Plan 43 fix round 2 (H1): rustfmt split the chain over three lines.
+            "        let result = naming()\n            .find(|(_, line)| reports(line, check))\n"
+            "            .or_else(|| naming().next_back());\n",
             "        let result = naming().next();\n", T_PIN, "rust"),
     Control("c40b_correction_failure_unnoted", RUN,
             "            .open(dir.join(CORRECTION_LOG))\n",

@@ -3,6 +3,38 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.83.0: the gate sends a refusal no worker can fix to the orchestrator, not to a child
+
+- **Changed:** each failing gate axis carries whose fault it is: the worker's, the brief's or the gate's. When no
+  failing axis is the worker's, the gate seats no child: the verdict is `gated amend`, its reason opens with the exact
+  `herdr gate amend <order> [--owns g]... [--test c] [--send-back]` line, and the wake ends with `herdr gate run
+  <order>` for the full text. An amend is journaled as `gated amending` with the old and new values before the re-gate,
+  and an order that is asked, not yet gated, or whose child has gone on is refused. A new file outside `owns:` that no
+  live order of the run owns is a note, unless it is fenced: a dot-prefixed path, `nirvana/controls.d/`, `build.rs`,
+  `conftest.py`, test and build config (`pytest.ini`, `tox.ini`, `setup.cfg`, `pyproject.toml`, `Makefile`,
+  `justfile`, `rust-toolchain`), git hook names, key files, or a file named for a secret or credential. A fenced file
+  stays the worker's fail and its reason names both ways out. `owns:` ignores case on Windows. The sources axis counts
+  local files the worker read with a file tool or a shell read, scoped to the reading command's own arguments; a read
+  that errored counts for nothing; a local entry must exist or look like a path; research.read's local entries are
+  not checked; a cited web URL never fetched still fails in every class. herdr's own `.nirvana/` files are set aside
+  around the rebase per worktree and restored on every exit, never over newer edits. `herdr gate merge <order>
+  --by-hand "<reason>"` records a merge the orchestrator made itself. An order left amending is not counted against
+  its seat. 13 older gate controls that the change had hollowed are repaired. Plan 43 A1, A2, A3, A7.
+- **Because:** on Megajam run ia1, 46 of 91 gate refusals could not be fixed by a worker: 29 were the brief's fault and
+  17 the gate's. The send-back child was stopped at 0 minutes 35 times, research.read passed its first gate 0 of 6
+  times, and 43 orders landed by hand with no record. The owner's rulings R4 and R5, 2026-11-18: "4. Yes". Two reviews
+  of the build then found a worker's own syntax error read as the brief's, new runnable and secret files passing as
+  notes, the amend line cut at 90 characters, failed reads vouching, invented citations passing, and amends unjournaled.
+- **Measured:** 152 gate tests pass, and 99 controls each turned their test red. On ia1's real streams
+  a1-asset-wiring-audit, its -s1 and s2-sound-audit-s1 now pass, w7-size-audit fails only on the URLs it never
+  fetched, and r15 and r16 are notes. Hypotheses until a live run: that completion rises, and that the fence list and
+  the per-segment read rule are the right width; the fence is the orchestrator's reading of a safety line inside the
+  owner's ruling, and the owner can change it. Known loose ends: a Grep tool call on a folder vouches for every file
+  under it; a script that reads anything vouches for every path it quotes; amending a fenced file means stopping the
+  gate's lesson review first. No live run has gone through this gate.
+- **If you remove this:** brief faults again seat children that the orchestrator stops, local audits loop on "not
+  read", a worker's `.env` or CI file is judged like any other new file, and hand merges leave no record.
+
 ## alpha 0.82.0: Restart Claude from the Seats panel and from a space's menu
 
 - **Changed:** in the Seats panel the words `restart to switch` are a button, and `r` does the same while the row
