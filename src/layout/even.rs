@@ -417,16 +417,18 @@ mod tests {
         );
     }
 
-    /// Review section 5: a close that re-tiles leaves the focus where it was.
+    /// Review section 5: a close that re-tiles leaves the focus where it was. Six panes, so the close does rebuild:
+    /// closing the first of a 3+2 grid leaves the even 2+2 as it stands, and the control on this test stayed green on
+    /// that shape.
     #[test]
     fn p96_a_close_that_retiles_keeps_the_focus() {
         let area = p96_area(200, 50);
-        let (mut layout, ids) = p96_chain(5);
-        layout.focus_pane(ids[3]);
+        let (mut layout, ids) = p96_chain(6);
+        layout.focus_pane(ids[4]);
         layout.tile_even(area);
         assert!(layout.close_pane(ids[0]));
-        assert_eq!(p96_widths(&layout, area), vec![100, 100, 100, 100]);
-        assert_eq!(layout.focused(), ids[3]);
+        assert_eq!(p96_widths(&layout, area), vec![67, 67, 66, 100, 100]);
+        assert_eq!(layout.focused(), ids[4]);
     }
 
     #[test]

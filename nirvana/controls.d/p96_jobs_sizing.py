@@ -38,7 +38,7 @@ CONTROLS = (
     # The grid's width rules: at most three a row, none under the readable width
     Control("p96_columns_uncapped", EVEN, "count.clamp(1, EVEN_MAX_COLUMNS.min(fit))", "count.clamp(1, fit)",
             T_COLUMNS, "rust"),
-    Control("p96_columns_ignore_width", EVEN, "usize::from(width / EVEN_MIN_WIDTH).max(1)", "EVEN_MAX_COLUMNS",
+    Control("p96_columns_ignore_width", EVEN, "usize::from(area.width / EVEN_MIN_WIDTH).max(1)", "EVEN_MAX_COLUMNS",
             T_READABLE, "rust"),
     # Review F2: rows under the height floor take a column more; when no count keeps both floors the usual one
     # stands; an area of 0 (no view yet) is read as 80x24
