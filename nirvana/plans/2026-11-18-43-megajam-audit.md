@@ -1,7 +1,7 @@
 # Plan 43: what run `ia1` on Megajam says to fix
 
-Status: RULED 2026-11-18. An audit with proposed packages. The owner ruled R1 to R5 in §7. Building starts with A1 to
-A4, A6 and A7.
+Status: RULED 2026-11-18, round 1 LANDED the same day as alpha 0.80.0 to 0.86.0 (§8). The owner ruled R1 to R5 in §7.
+Round 2 is listed in §8 and not started.
 
 ## 1. The ask
 
@@ -38,6 +38,7 @@ own defect. So 46 of 91 refusals could not be fixed by a worker.
 | C9 | Restarts kill workers silently | 7 workers died in restarts after 481 worker-minutes. One had run 315 minutes. Recovery waited for the owner to say Nirvana restarted. One order hung silent for 626 minutes with no stalled event. | herdr does not check worker pids at server start. The hang's cause is not established. |
 | C10 | The record undercounts | 43 orders landed on the integration branch with no `merged` event. 9 `merged` events have a null sha. 5 reseated parents have no `ended` event. | A hand merge has no command. A reseat writes no end. |
 | C11 | A quota error was misread | An agy 429 said "Resets in 79h6m53s". herdr deferred two orders 31 minutes, got the same 429, then reseated. | `nirvana_run.rs` does not parse "Resets in". Checked on master. |
+|  | Corrected 2026-11-18 by the A7 build | The 31 minutes were a wait for another pool's reset: Max's 5 h `resetsAt` of 22:40Z is in 350 lines of the Claude streams, and both orders were reseated onto Sonnet at 22:40Z. Reading "Resets in" would not have shortened that wait. The incident was on 2026-11-13. What the parse changes: the record holds the reset, and the order is not relaunched blind. | journal run ia1, seq 3769 to 3796 |
 
 Per seat and effort, with lesson reviews left out:
 
@@ -156,3 +157,31 @@ are yes. R3 is no: B6 is dropped, and B3 waits for the owner's word, since it al
 - Not read: agy stream contents except for errors, the checkpoint diffs, and the claims inside the 16 reviews read.
 - The scripts are in the scratchpad folders `mjaudit/completion` and `mjaudit/tokens` of the session that wrote this
   plan, with both full reports. They are not tracked.
+
+## 8. Round 1 as built (2026-11-18)
+
+| Package | Landed as | What differs from the proposal |
+|---|---|---|
+| A4, no modal question in auto mode | alpha 0.80.0 | Fails open. A filed question shows only in the end-of-turn message and `herdr ask list` until P42b and P42d are built. |
+| A6, A7 restart check, `ended: reseated`, "Resets in" | alpha 0.81.0 | An order is dead only with a free supervisor lock and a gone or reused worker pid; doubt stays running. In auto mode a reset more than 6 h away asks: the orchestrator's choice, the owner may change it. Off Windows and Linux every order is a doubt. |
+| A1, A2, A3, A7 gate | alpha 0.83.0 | Three build rounds and two reviews. A new unowned file is a note unless fenced (dot paths, `nirvana/controls.d/`, build and test config, hooks, secret-looking names): the orchestrator's reading of a safety line inside R4, the owner may change it. |
+| B1 worker compaction ceiling | alpha 0.84.0, stated in the table in 0.86.0 | T1's assumption is now tested: a headless worker honours `--autocompact` (5 compactions at 100k). The ceiling goes to Anthropic Claude workers in Efficient and Balanced only. |
+
+Also landed that day, outside this plan: 0.78.3 (Jobs per space), 0.79.0 (seat refresh), 0.82.0 (Restart Claude from
+the Seats panel and a space's menu), 0.84.0 and 0.86.0 (the advisor), 0.85.0 (the Neon seat).
+
+Live checks owed: no real run has gone through the new gate, no real server restart has exercised the check beyond
+its first pass (which interrupted 5 never-started lesson reviews and no running order), and the restart button has not
+been seen in a window.
+
+Round 2, not started:
+- A8: delete Unreal build outputs on merge and on stop after a checkpoint; a disk floor. C: stood at 98% full.
+- The `seat run` package: A5, A2's default owns and path warning, A9, B7.
+- B2, B4, B5, A10, B8.
+- From round 1's reviews: a deferred order re-picks its seat when it wakes at another pool's earlier reset; the gate
+  detail in ROLE.md item 5 moves into the gate skill; the Grep-on-a-folder and script-heredoc read rules; an upgrade
+  that carries an owner's simple table edits forward (the owner's installed table has one, so it took none of the
+  day's table changes).
+- An A/B of Sonnet with an Opus advisor against Opus alone on real hard orders: 5 small orders made 0 unprompted
+  consults.
+- B3, the idle compact fix, waits for the owner's word. B6 is dropped.
