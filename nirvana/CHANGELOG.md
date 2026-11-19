@@ -3,6 +3,35 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.84.0: Claude workers can have an advisor, counted, and compact at 300k outside SOTA
+
+- **Changed:** a claude seat may name an advisor per mode (`advisor = { balanced = "opus" }`). Its workers launch
+  with Claude Code's `--advisor <model>` and, on a fresh session only, one line on when to consult. Allowed pairs:
+  Opus advising Sonnet or Haiku, Fable advising Opus or Sonnet; anything else refuses the table at load. A Fable
+  advisor passes the same money check as a Fable seat, and when it fails the order runs without the advisor and the
+  journal says why. Consults, the advisor's tokens and their cost at the advisor's own price row are journaled per
+  attempt (new `advisor` rows) and counted once in the order's record and in the Seats square. A row says when the
+  advisor was dropped, and when no consult and no advisor usage were seen, so herdr cannot tell whether it was on. A
+  claude that refuses `--advisor` gets that attempt started once more without it. Anthropic Claude workers in
+  Efficient and Balanced launch with `--autocompact 300000` (`worker_autocompact_tokens`; 0 passes no flag; SOTA is
+  left alone; the local seat gets none), only when `claude --help` offers the flag; each compaction is journaled. The
+  default table gives no seat an advisor yet: that line follows in the next table change.
+- **Because:** the owner, 2026-11-18: "Go ahead and build in the consulting it might be cheaper in the long run for
+  balanced runs". And plan 43 B1, the owner's ruling R1: "1. yes". On run ia1, 313 Claude worker sessions made 0
+  compactions, with contexts of 148k at the median and 902k at most (plan 43 T1). The review of the first build found
+  the ceiling going to the local qwen seat, no guard for a Claude Code without either flag, and a killed run recording
+  an advisor cost of 0.
+- **Measured:** one consult by an Opus advisor cost $0.119 (26,791 tokens in, 614 out) beside about $0.04 of Sonnet
+  work, and herdr counted none of it before. In 5 real order runs on Sonnet medium with an Opus advisor, with and
+  without the brief line, workers made 0 unprompted consults; the tasks were small and passed in 5 or 6 turns. So
+  whether an advisor is ever cheaper than a stronger seat is not shown. A headless Haiku worker at a 100k ceiling
+  compacted 5 times. Claude Code reports a 1M window for Haiku, Sonnet and Opus. Before the guard, a refused flag
+  failed every order on its seat once each (traced, not seen live). 98 worker, 129 seat and 17 Seats square tests
+  pass; the 25 `p90_` controls each turned their test red. Hypotheses: the 300k value, and that a worker consults on
+  a hard order. Not measured: which usage bucket a Fable advisor bills to; a rejected flag on a live Claude Code.
+- **If you remove this:** advisor spend goes uncounted, a seat can silently run without its advisor, a Claude Code
+  without either flag fails every worker at launch, and workers return to never compacting.
+
 ## alpha 0.83.0: the gate sends a refusal no worker can fix to the orchestrator, not to a child
 
 - **Changed:** each failing gate axis carries whose fault it is: the worker's, the brief's or the gate's. When no

@@ -148,6 +148,10 @@ of redoing it on the seat that invented it.
 - `herdr gate merge <order> --by-hand "<reason>" [--sha <sha>]`: records a merge you made yourself, with its commit.
   It takes none of `gate amend`'s flags and exits 2 on a refusal, as `gate amend` does.
 - `herdr gate status [<order>] --run <run>`.
+- An order whose seat has an advisor in its mode starts with Claude Code's `--advisor`, and `seat run` prints
+  `advisor <model>`. Its consults, tokens and dollars are the journal's `advisor` row and count in the order's use; a
+  row with `dropped` ran without one, and says why; a row with `unseen` had no consult and no advisor tokens, so herdr
+  cannot tell whether the advisor was on.
 
 The `gate` skill holds the axes and the send-back loop. When the plan is done and gated, `herdr run end <run>`
 writes the receipt; name its file in your answer.

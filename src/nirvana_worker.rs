@@ -317,6 +317,281 @@ pub fn with_preset_settings(mut argv: Vec<String>, settings: Option<&Path>) -> V
     argv
 }
 
+/// The advisor (owner, 2026-11-18): the advisor's server tool, as claude's stream names its `server_tool_use` block.
+pub const ADVISOR_TOOL: &str = "advisor";
+
+/// The advisor (owner, 2026-11-18): the one line a worker with an advisor gets, after its start line. Claude Code's own
+/// advisor section already says to call it before substantive work, when done and when stuck (its binary, 2.1.327);
+/// this line narrows that to the steps where a consult can pay for itself, since each one re-reads the whole
+/// conversation uncached (smoke test 2026-11-18: 26,791 input tokens, $0.12 on Opus, at a 25k context).
+pub const ADVISOR_LINE: &str = " You have an advisor: consult it before you commit to an approach on a hard or \
+load-bearing step, and when the same failure stops you twice; not for routine steps.";
+
+/// The advisor (owner, 2026-11-18): a claude worker's argv with `--advisor <model>`, and `ADVISOR_LINE` after its start
+/// line, always the two together. Only claude: agy has no advisor, and the table refuses one on an agy seat. The flag
+/// is on the command line because workers load project settings only (`--setting-sources project`): a user-level
+/// `advisorModel` never reaches them.
+///
+/// Fix round A4 (d): the line goes only on an attempt that starts a new session (`fresh`). A resumed session already
+/// holds it from the attempt that started it, so a resume prompt gets the flag alone.
+pub fn with_advisor(mut argv: Vec<String>, model: &str, fresh: bool) -> Vec<String> {
+    if argv.first().map(String::as_str) != Some("claude") {
+        return argv;
+    }
+    if fresh && argv.get(1).map(String::as_str) == Some("-p") {
+        if let Some(prompt) = argv.get_mut(2) {
+            prompt.push_str(ADVISOR_LINE);
+        }
+    }
+    argv.extend(["--advisor".to_owned(), model.to_owned()]);
+    argv
+}
+
+/// Fix round A3: `with_advisor` undone, flag and line, for the relaunch of an attempt whose claude rejected the flag.
+pub fn without_advisor(argv: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(argv.len());
+    let mut args = argv.iter().enumerate();
+    while let Some((at, arg)) = args.next() {
+        if at > 0 && arg == "--advisor" {
+            args.next();
+            continue;
+        }
+        let arg = match (at, argv.get(1).map(String::as_str)) {
+            (2, Some("-p")) => arg.strip_suffix(ADVISOR_LINE).unwrap_or(arg),
+            _ => arg,
+        };
+        out.push(arg.to_owned());
+    }
+    out
+}
+
+/// Fix round A3: the stderr line in which the installed claude refuses `--advisor` as an option it does not know
+/// (commander's "error: unknown option '--advisor'", the form 2.1.328's binary carries). `--advisor` is not in
+/// `claude --help` on 2.1.328, so it cannot be probed before the launch the way `--autocompact` is.
+pub fn advisor_flag_rejected(stderr: &str) -> Option<String> {
+    stderr
+        .lines()
+        .find(|line| {
+            let line = line.to_ascii_lowercase();
+            line.contains("--advisor")
+                && (line.contains("unknown option") || line.contains("unrecognized option"))
+        })
+        .map(|line| line.trim().to_owned())
+}
+
+/// Plan 43 B1 (ruling R1, the owner's "1. yes"): a claude worker's `--autocompact <tokens>` in Efficient and
+/// Balanced. SOTA is left alone: it lifts the cost rules (the owner, 2026-11-15). Probed 2026-11-18: a headless
+/// `claude -p` Haiku worker with `--autocompact 100000` compacted five times, each a `compact_boundary` with trigger
+/// `auto` and `pre_tokens` 62k to 87k, so the flag binds a headless worker.
+pub fn with_worker_compact(mut argv: Vec<String>, tokens: u64, mode: Mode) -> Vec<String> {
+    if argv.first().map(String::as_str) == Some("claude") && tokens > 0 && mode != Mode::Sota {
+        argv.extend(["--autocompact".to_owned(), tokens.to_string()]);
+    }
+    argv
+}
+
+/// Fix round A2: the ceiling a seat's worker gets, 0 for none. Only an Anthropic model on the claude CLI: the `local`
+/// seat runs a qwen model through the claude CLI, and the table tells it apart by its `family` ("qwen"), not by its id.
+/// And none when the seat's context window, as the table records it (`context_tokens`), is at or below the ceiling:
+/// a ceiling above the window was never measured. A seat with no window recorded gets the ceiling, as before the fix.
+pub fn worker_ceiling(table: &nirvana_seat::Table, seat_id: &str) -> u64 {
+    let ceiling = table.constants.worker_autocompact_tokens;
+    match table.seat(seat_id) {
+        Some(seat) if seat.cli == "claude" && seat.family == "anthropic" => {
+            if seat.context_tokens.is_some_and(|window| window <= ceiling) {
+                0
+            } else {
+                ceiling
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Fix round A3: whether a `--help` text offers `flag`, as an option word of its own (`--autocompact <auto|tokens>`).
+pub fn help_offers(help: &str, flag: &str) -> bool {
+    help.split(|c: char| c.is_whitespace() || c == ',' || c == '=')
+        .any(|word| word == flag)
+}
+
+/// Fix round A3: how long `claude --help` may take before the probe gives up on it.
+const HELP_WAIT: Duration = Duration::from_secs(20);
+
+/// Fix round A3: a `--help` text, read from `program` with no prompt and no paid turn, within `HELP_WAIT`.
+fn read_help(program: &[String]) -> Result<String, String> {
+    use std::io::Read;
+    let shown = program.join(" ");
+    let mut child = std::process::Command::new(&program[0])
+        .args(&program[1..])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|err| format!("`{shown}` did not start: {err}"))?;
+    let stdout = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(mut stdout) = stdout {
+            let _ = stdout.read_to_string(&mut text);
+        }
+        text
+    });
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() < HELP_WAIT => std::thread::sleep(Duration::from_millis(50)),
+            Ok(None) => {
+                // Our own child, started above: it alone is killed.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("`{shown}` gave no answer in {} s", HELP_WAIT.as_secs()));
+            }
+            Err(err) => return Err(format!("`{shown}`: {err}")),
+        }
+    }
+    reader
+        .join()
+        .map_err(|_| format!("`{shown}`: its output was not read"))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Fix round A3: a test's stand-in for `claude --help`. `None` reads as a claude that offers `--autocompact`, so a
+    /// test never starts the real CLI.
+    pub(crate) static TEST_HELP_COMMAND: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Fix round A3: whether the installed claude takes `--autocompact`, from its `--help`, read once per process and
+/// kept. An older claude without the flag exits at launch on it, and the order fails (`AttemptEnd::Exited` without a
+/// report ends the order failed, once, with no retry), so every Claude worker would fail. `Err`: the help could not
+/// be read, and the ceiling is left off, since a missing ceiling costs tokens and a rejected flag costs the order.
+pub fn claude_offers_autocompact() -> Result<bool, String> {
+    #[cfg(test)]
+    {
+        TEST_HELP_COMMAND.with_borrow(|command| match command {
+            Some(command) => read_help(command).map(|help| help_offers(&help, "--autocompact")),
+            None => Ok(true),
+        })
+    }
+    #[cfg(not(test))]
+    {
+        static OFFERS: std::sync::OnceLock<Result<bool, String>> = std::sync::OnceLock::new();
+        OFFERS
+            .get_or_init(|| {
+                read_help(&["claude".to_owned(), "--help".to_owned()])
+                    .map(|help| help_offers(&help, "--autocompact"))
+            })
+            .clone()
+    }
+}
+
+/// The advisor (owner, 2026-11-18): environment that turns Claude Code's advisor off.
+/// `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` is its own switch (2.1.327's binary); a session with `DISABLE_TELEMETRY` was
+/// measured without the feature in the smoke test (the feature's gate is never fetched). herdr sets neither and strips
+/// neither: the worker inherits the shell's, and the owner's telemetry choice is not this package's to change. A worker
+/// that would inherit one runs without its advisor, and the journal says so.
+pub const ADVISOR_OFF_ENV: [&str; 2] = ["CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "DISABLE_TELEMETRY"];
+
+/// The advisor (owner, 2026-11-18): why the inherited environment turns the advisor off, if it does.
+pub fn advisor_env_off(get: impl Fn(&str) -> Option<String>) -> Option<String> {
+    ADVISOR_OFF_ENV
+        .iter()
+        .find(|key| get(key).is_some_and(|value| !value.trim().is_empty()))
+        .map(|key| format!("the worker's environment sets {key}, which turns Claude Code's advisor off"))
+}
+
+/// The advisor (owner, 2026-11-18): what Claude Code 2.1.327 writes when it runs a worker without the advisor it was
+/// given (its binary's own messages): a weaker advisor is dropped with a warning and the run goes on, exit 0; the other
+/// three end the run.
+const ADVISOR_DROPPED: [&str; 4] = [
+    "cannot advise",
+    "advisor will not be used",
+    "cannot be used as an advisor",
+    "does not support the advisor tool",
+];
+
+/// The advisor (owner, 2026-11-18): the stderr line that says the advisor was dropped, if one does.
+pub fn advisor_dropped_in(stderr: &str) -> Option<String> {
+    stderr
+        .lines()
+        .find(|line| ADVISOR_DROPPED.iter().any(|mark| line.contains(mark)))
+        .map(|line| line.trim().to_owned())
+}
+
+/// The advisor (owner, 2026-11-18): one attempt's advisor row from its stream. The consults are the stream's
+/// `server_tool_use` blocks; the tokens are the advisor model's entry in the result's `modelUsage` (the per-message
+/// `usage` lines and the result's `usage` count the main model only, and `usage.iterations` holds the last request's
+/// alone). A stream cut before its result has consults and no tokens. A subagent on the advisor's own model would be
+/// counted in with it: workers start none unless the order allows it.
+pub fn advisor_row(
+    stream: &Stream,
+    launch: &nirvana_seat::AdvisorLaunch,
+    stderr: &str,
+) -> nirvana_seat::AdvisorUse {
+    let usage = stream
+        .result
+        .as_ref()
+        .and_then(|result| result.get("modelUsage"));
+    let entry = usage.and_then(|usage| {
+        usage.get(&launch.model).or_else(|| {
+            let family = nirvana_seat::claude_family(&launch.model)?;
+            usage
+                .as_object()?
+                .iter()
+                .find(|(model, _)| nirvana_seat::claude_family(model) == Some(family))
+                .map(|(_, entry)| entry)
+        })
+    });
+    let tokens = entry.map_or_else(Tokens::default, |entry| Tokens {
+        input: u64_of(entry, "inputTokens"),
+        cache_write: u64_of(entry, "cacheCreationInputTokens"),
+        cache_read: u64_of(entry, "cacheReadInputTokens"),
+        output: u64_of(entry, "outputTokens"),
+    });
+    let consults = u32::try_from(stream.advisor_calls.len()).unwrap_or(u32::MAX);
+    let dropped = advisor_dropped_in(stderr);
+    // Fix round A4 (b): no consult and no advisor entry is no proof the advisor was on; the row says so.
+    let unseen = (consults == 0 && entry.is_none() && dropped.is_none())
+        .then(|| nirvana_seat::ADVISOR_UNSEEN.to_owned());
+    nirvana_seat::AdvisorUse {
+        model: launch.model.clone(),
+        consults,
+        // Fix round A4 (a): a stream with no `modelUsage` (a killed attempt) gives no cost, not $0.
+        usd: usage
+            .and(launch.price.as_ref())
+            .map(|price| nirvana_seat::cost(price, &tokens)),
+        tokens,
+        dropped,
+        unseen,
+    }
+}
+
+/// The advisor (owner, 2026-11-18): the advisor this attempt launches with, or why the seat's advisor is not used
+/// (`Err`). `None`: the seat has none in the order's mode, or it is not a claude worker.
+fn attempt_advisor(
+    project: &Project,
+    seated: &Seated,
+) -> Option<Result<nirvana_seat::AdvisorLaunch, String>> {
+    if seated.cli != "claude" {
+        return None;
+    }
+    let decision = nirvana_seat::advisor_at_launch(
+        &project.root,
+        &seated.seat,
+        seated.mode,
+        seated.effort,
+        &seated.class,
+        seated.size,
+        &seated.order,
+    )?;
+    Some(decision.and_then(|launch| match advisor_env_off(|key| std::env::var(key).ok()) {
+        Some(why) => Err(format!("advisor {} not used: {why}", launch.model)),
+        None => Ok(launch),
+    }))
+}
+
 /// Plan 28 §3: the file `with_preset_settings` adds for this worker. On a Claude worker, whatever its model (the
 /// owner, 2026-11-04: "Everywhere"), it is the folder's preset with every superpowers plugin off, or those entries
 /// alone when the folder has no preset; on agy it is the preset, as before. An error keeps the preset and says so in
@@ -617,6 +892,20 @@ pub struct Stream {
     calls: BTreeMap<String, (String, String)>,
     /// The call shown last, so an answer right under it needs no label.
     last_call: Option<String>,
+    /// The advisor (owner, 2026-11-18): the ids of the advisor's consults (claude's `server_tool_use` blocks named
+    /// `advisor`); a set, since one message streams as several lines.
+    pub advisor_calls: std::collections::BTreeSet<String>,
+    /// Plan 43 B1 (ruling R1): the compactions the stream showed (`system`/`compact_boundary`), in order.
+    pub compactions: Vec<Compaction>,
+}
+
+/// Plan 43 B1 (ruling R1): one `compact_boundary` event's `compact_metadata`, as Claude Code 2.1.327 streams it
+/// headless.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Compaction {
+    pub trigger: Option<String>,
+    pub pre_tokens: Option<u64>,
+    pub post_tokens: Option<u64>,
 }
 
 fn claude_window(kind: &str) -> Option<String> {
@@ -769,6 +1058,12 @@ impl Stream {
                             let id = block["id"].as_str().unwrap_or("").to_owned();
                             notes.extend(self.call(id, name, &block["input"]));
                         }
+                        // The advisor (owner, 2026-11-18): a consult is a server tool, run by the API inside the
+                        // request: no `tool_result` follows in a user line, so it is never an open call (`tool_open`).
+                        Some("server_tool_use") if block["name"].as_str() == Some(ADVISOR_TOOL) => {
+                            let id = block["id"].as_str().unwrap_or("").to_owned();
+                            self.advisor_calls.insert(id);
+                        }
                         _ => {}
                     }
                 }
@@ -810,6 +1105,14 @@ impl Stream {
                         detail: format!("rate_limit_event status rejected: {info}"),
                     }));
                 }
+            }
+            ("system", "compact_boundary") => {
+                let meta = &value["compact_metadata"];
+                self.compactions.push(Compaction {
+                    trigger: meta.get("trigger").and_then(Value::as_str).map(str::to_owned),
+                    pre_tokens: meta.get("pre_tokens").and_then(Value::as_u64),
+                    post_tokens: meta.get("post_tokens").and_then(Value::as_u64),
+                });
             }
             ("system", "api_retry") => {
                 if value.get("error").and_then(Value::as_str) == Some("rate_limit") {
@@ -1361,6 +1664,7 @@ pub(crate) fn attempt_command(spawned: &[String], seated: &Seated, argv: &[Strin
 }
 
 /// Starts the worker in its job and reads its stream until it ends, stops, stalls or runs out.
+#[cfg(test)]
 fn run_attempt(
     journal: &Journal,
     stream_path: &Path,
@@ -1369,6 +1673,23 @@ fn run_attempt(
     argv: &[String],
     stop: &Path,
     pane: Option<&str>,
+    out: &mut dyn Write,
+) -> std::io::Result<(AttemptEnd, Stream)> {
+    run_attempt_with(journal, stream_path, seated, attempt, argv, stop, pane, None, out)
+}
+
+/// `run_attempt` with the advisor the argv was given (the advisor, owner 2026-11-18): its row is journaled when the
+/// attempt ends, from the stream and the CLI's stderr. Every compaction the stream shows is journaled as it comes.
+#[allow(clippy::too_many_arguments)]
+fn run_attempt_with(
+    journal: &Journal,
+    stream_path: &Path,
+    seated: &Seated,
+    attempt: u32,
+    argv: &[String],
+    stop: &Path,
+    pane: Option<&str>,
+    advisor: Option<&nirvana_seat::AdvisorLaunch>,
     out: &mut dyn Write,
 ) -> std::io::Result<(AttemptEnd, Stream)> {
     #[cfg(test)]
@@ -1429,6 +1750,22 @@ fn run_attempt(
     let mut last_line = Instant::now();
     let mut usage_at: Option<Instant> = None;
     let mut usage_dirty = false;
+    let mut compactions_written = 0;
+    let write_compactions = |stream: &Stream, from: usize| -> std::io::Result<usize> {
+        for compaction in &stream.compactions[from..] {
+            journal.append(
+                now(),
+                Kind::Compacted {
+                    order: seated.order.clone(),
+                    attempt,
+                    trigger: compaction.trigger.clone(),
+                    pre_tokens: compaction.pre_tokens,
+                    post_tokens: compaction.post_tokens,
+                },
+            )?;
+        }
+        Ok(stream.compactions.len())
+    };
     let write_usage = |stream: &Stream| {
         journal.append(
             now(),
@@ -1507,6 +1844,9 @@ fn run_attempt(
                         }
                     }
                 }
+                if stream.compactions.len() > compactions_written {
+                    compactions_written = write_compactions(&stream, compactions_written)?;
+                }
                 // At most one usage event in 10 s, and none before the first token: the journal stays small.
                 if usage_dirty
                     && stream.tokens != Tokens::default()
@@ -1541,6 +1881,20 @@ fn run_attempt(
     let _ = job::join_within(reader, Duration::from_secs(5));
     if usage_dirty || stream.lines > 0 {
         write_usage(&stream)?;
+    }
+    if let Some(launch) = advisor {
+        let stderr = stderr_text
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        journal.append(
+            now(),
+            Kind::Advisor {
+                order: seated.order.clone(),
+                attempt,
+                advisor: advisor_row(&stream, launch, &stderr),
+            },
+        )?;
     }
     Ok((end, stream))
 }
@@ -1782,6 +2136,65 @@ pub fn exec(
                 return Ok(1);
             }
         };
+        // Plan 43 B1 (ruling R1): the table's worker ceiling, outside SOTA, for an Anthropic model whose window is
+        // above it (`worker_ceiling`). A table that does not load passes none: `check_before_spend` above already
+        // read it.
+        let mut compact = nirvana_seat::table_for(&project.root)
+            .map_or(0, |table| worker_ceiling(&table, &seated.seat));
+        if seated.cli == "claude" && compact > 0 && seated.mode != Mode::Sota {
+            // Fix round A3: a claude without the flag would exit at launch on it; it gets none, and the journal says
+            // so.
+            let off = match claude_offers_autocompact() {
+                Ok(true) => None,
+                Ok(false) => Some("the installed claude's --help lists no --autocompact".to_owned()),
+                Err(why) => Some(format!("claude --help was not read ({why})")),
+            };
+            if let Some(why) = off {
+                compact = 0;
+                let why = format!("{why}; the worker starts without the ceiling");
+                writeln!(out, "no ceiling: {why}")?;
+                journal.append(
+                    now(),
+                    Kind::FlagDropped {
+                        order: seated.order.clone(),
+                        attempt,
+                        flag: "--autocompact".into(),
+                        why,
+                    },
+                )?;
+            }
+        }
+        let argv = with_worker_compact(argv, compact, seated.mode);
+        // The advisor (owner, 2026-11-18): the seat's advisor in the order's mode. A drop is journaled before the
+        // start, so a seat believed to have an advisor is never silently without one; the order runs on its own seat
+        // all the same.
+        let advisor = match attempt_advisor(project, &seated) {
+            Some(Ok(launch)) => {
+                writeln!(out, "advisor {} ({})", launch.model, launch.seat)?;
+                Some(launch)
+            }
+            Some(Err(why)) => {
+                writeln!(out, "no advisor: {why}")?;
+                journal.append(
+                    now(),
+                    Kind::Advisor {
+                        order: seated.order.clone(),
+                        attempt,
+                        advisor: nirvana_seat::AdvisorUse {
+                            dropped: Some(why),
+                            ..nirvana_seat::AdvisorUse::default()
+                        },
+                    },
+                )?;
+                None
+            }
+            None => None,
+        };
+        let fresh = spec.resume.is_none();
+        let argv = match &advisor {
+            Some(launch) => with_advisor(argv, &launch.model, fresh),
+            None => argv,
+        };
         writeln!(
             out,
             "{}",
@@ -1796,7 +2209,7 @@ pub fn exec(
             )
         )?;
         let attempt_started = Instant::now();
-        let attempt_end = run_attempt(
+        let mut attempt_end = run_attempt_with(
             &journal,
             &stream_path,
             &seated,
@@ -1804,8 +2217,48 @@ pub fn exec(
             &argv,
             &stop,
             pane,
+            advisor.as_ref(),
             out,
         );
+        // Fix round A3: a claude that does not know `--advisor` exits before its first stream line and names the
+        // option on stderr. That attempt starts once more without the flag and its line, and the advisor row says why;
+        // without this every worker of the seat would fail at launch.
+        let rejected = match (&advisor, &attempt_end) {
+            (Some(_), Ok((AttemptEnd::Exited { stderr, .. }, stream))) if stream.lines == 0 => {
+                advisor_flag_rejected(stderr)
+            }
+            _ => None,
+        };
+        if let (Some(line), Some(launch)) = (rejected, &advisor) {
+            let why = format!(
+                "advisor {} not used: this claude does not take --advisor ({line})",
+                launch.model
+            );
+            writeln!(out, "no advisor: {why}; starting again without it")?;
+            journal.append(
+                now(),
+                Kind::Advisor {
+                    order: seated.order.clone(),
+                    attempt,
+                    advisor: nirvana_seat::AdvisorUse {
+                        model: launch.model.clone(),
+                        dropped: Some(why),
+                        ..nirvana_seat::AdvisorUse::default()
+                    },
+                },
+            )?;
+            attempt_end = run_attempt_with(
+                &journal,
+                &stream_path,
+                &seated,
+                attempt,
+                &without_advisor(&argv),
+                &stop,
+                pane,
+                None,
+                out,
+            );
+        }
         // Plan 29 review F2: the order's server definitions, tokens and all, go when its worker process ends.
         crate::nirvana_gui_tools::remove_order_config(&run_dir, order, out);
         let (end, stream) = match attempt_end {
@@ -3539,6 +3992,11 @@ fn run_cli(args: &[String]) -> std::io::Result<()> {
                 if let Some(reason) = outcome["reason"].as_str() {
                     println!("{reason}");
                 }
+                // The advisor (owner, 2026-11-18): the seat's advisor in the order's mode, as the table gives it; the
+                // launch may still drop it, and the journal's advisor row says so.
+                if let Some(advisor) = outcome["advisor"].as_str() {
+                    println!("advisor {advisor}");
+                }
                 if let Some(profile) = outcome["profile"].as_object() {
                     let field = |key: &str| profile.get(key).and_then(Value::as_str).unwrap_or("");
                     println!(
@@ -4190,6 +4648,7 @@ pub fn seat_order_with(
         "journal": journal.path.display().to_string(),
         "events": written.len(),
         "worker": worker,
+        "advisor": planned_advisor(project, &seated),
         "warning": warning,
         "send_ok": seated.send_ok,
         "profile": profiled.map(|(found, copy)| serde_json::json!({
@@ -4198,6 +4657,16 @@ pub fn seat_order_with(
             "copy": copy.display().to_string(),
         })),
     }))
+}
+
+/// The advisor (owner, 2026-11-18): the advisor model the table gives this order's seat in its mode, for `seat run`'s
+/// answer. The money check and the environment are the launch's (`attempt_advisor`), not the pick's.
+fn planned_advisor(project: &Project, seated: &Seated) -> Option<String> {
+    let table = nirvana_seat::table_for(&project.root).ok()?;
+    match table.advisor_of(&seated.seat, seated.mode)? {
+        Ok(advisor) => Some(advisor.model.clone()),
+        Err(why) => Some(format!("none ({why})")),
+    }
 }
 
 /// The folder Nirvana Claude's session is recorded under (`nirvana_session_record`): the directory it started in,

@@ -3369,3 +3369,477 @@ fn p72_a_new_worktree_records_the_commit_it_began_at_beside_itself() {
     remove_worktree(&root, &path).expect("remove");
     assert!(!record.exists());
 }
+
+// ---- the advisor (owner, 2026-11-18) and the worker ceiling (plan 43 B1, ruling R1) ----
+
+/// The advisor's recorded streams (owner, 2026-11-18), 2026-11-18, scrubbed: Sonnet medium with an Opus advisor making
+/// one consult (the smoke test's s2), and Haiku low with `--autocompact 100000` compacting five times (the B1 probe,
+/// c1).
+const P90_CONSULT: &str = include_str!("fixtures/p90_advisor_consult.stream.jsonl");
+const P90_COMPACT: &str = include_str!("fixtures/p90_compact.stream.jsonl");
+
+fn opus_launch() -> nirvana_seat::AdvisorLaunch {
+    let table = nirvana_seat::parse(&nirvana_seat::tests::p90_default()).expect("table");
+    let opus = table.seat("opus").expect("opus");
+    nirvana_seat::AdvisorLaunch {
+        seat: "opus".into(),
+        model: opus.model.clone(),
+        price: opus.price_at(nirvana_run::now()).cloned(),
+    }
+}
+
+/// V1: `--advisor <model>` and its one line go on a claude worker's argv together, never on agy's.
+#[test]
+fn p90_a_claude_worker_gets_the_advisor_flag_and_line_and_agy_never() {
+    let plain = argv(&spec("claude", "claude-sonnet-5-5", None)).unwrap();
+    let with = with_advisor(plain.clone(), "claude-opus-5-5", true);
+    assert_eq!(after(&with, "--advisor"), Some("claude-opus-5-5"));
+    assert_eq!(with[2], format!("{}{ADVISOR_LINE}", plain[2]));
+    assert_eq!(with.len(), plain.len() + 2);
+    assert!(!plain.iter().any(|arg| arg.contains("advisor")));
+    let agy = argv(&spec("agy", "gemini-4-hydrogen-low", None)).unwrap();
+    assert_eq!(with_advisor(agy.clone(), "claude-opus-5-5", true), agy);
+}
+
+/// C1: a claude worker in Efficient and Balanced gets `--autocompact <tokens>`; SOTA, agy and 0 get none.
+#[test]
+fn p90_the_worker_ceiling_is_passed_outside_sota_only() {
+    let claude = argv(&spec("claude", "claude-sonnet-5-5", None)).unwrap();
+    for mode in [Mode::Efficient, Mode::Balanced] {
+        let got = with_worker_compact(claude.clone(), 300_000, mode);
+        assert_eq!(after(&got, "--autocompact"), Some("300000"), "{mode:?}");
+    }
+    assert_eq!(with_worker_compact(claude.clone(), 300_000, Mode::Sota), claude);
+    assert_eq!(with_worker_compact(claude.clone(), 0, Mode::Balanced), claude);
+    let agy = argv(&spec("agy", "gemini-4-hydrogen-low", None)).unwrap();
+    assert_eq!(with_worker_compact(agy.clone(), 300_000, Mode::Balanced), agy);
+}
+
+/// V3 on a real stream: one consult, the advisor's own tokens from `modelUsage`, priced at the Opus row to Claude
+/// Code's own `costUSD` (0.119444); the order's tokens stay the main model's alone.
+#[test]
+fn p90_a_real_stream_gives_its_consults_and_the_advisors_tokens() {
+    let (stream, _) = feed("claude", P90_CONSULT);
+    assert_eq!(stream.advisor_calls.len(), 1);
+    assert!(!stream.tool_open(), "a consult is no open call");
+    let row = advisor_row(&stream, &opus_launch(), "");
+    assert_eq!(row.consults, 1);
+    assert_eq!(
+        row.tokens,
+        Tokens {
+            input: 26_791,
+            output: 614,
+            ..Tokens::default()
+        }
+    );
+    assert!((row.usd.unwrap() - 0.119_444).abs() < 1e-9, "{row:?}");
+    assert_eq!(row.dropped, None);
+    assert_eq!(stream.tokens.output, 331, "the main model's, as before");
+    // A stream with no advisor, read as if it had one: no consult, no tokens.
+    let (live, _) = feed("claude", LIVE_HAIKU);
+    let none = advisor_row(&live, &opus_launch(), "");
+    assert_eq!((none.consults, none.tokens), (0, Tokens::default()));
+}
+
+/// Dropped advisors: Claude Code's warning on stderr, and an environment that turns the feature off.
+#[test]
+fn p90_a_dropped_advisor_is_named_from_stderr_or_the_environment() {
+    let warned = "Warning: \"haiku\" cannot advise \"claude-sonnet-5-5\" (the advisor must be at least as capable as \
+                  the main model). The advisor will not be used for the main model.\n";
+    let row = advisor_row(&feed("claude", P90_CONSULT).0, &opus_launch(), warned);
+    assert!(
+        row.dropped
+            .as_deref()
+            .is_some_and(|why| why.contains("cannot advise")),
+        "{row:?}"
+    );
+    assert_eq!(advisor_dropped_in("some other warning\n"), None);
+    assert!(advisor_dropped_in("Error: The model \"x\" cannot be used as an advisor.").is_some());
+    let env = |set: &'static str| move |key: &str| (key == set).then(|| "1".to_owned());
+    assert!(advisor_env_off(env("CLAUDE_CODE_DISABLE_ADVISOR_TOOL"))
+        .is_some_and(|why| why.contains("CLAUDE_CODE_DISABLE_ADVISOR_TOOL")));
+    assert!(advisor_env_off(env("DISABLE_TELEMETRY")).is_some());
+    assert_eq!(advisor_env_off(env("UNRELATED")), None);
+    assert_eq!(
+        advisor_env_off(|_| Some(String::new())),
+        None,
+        "an empty value sets nothing"
+    );
+}
+
+/// C1's journal half: the probe's five compactions are read from its stream.
+#[test]
+fn p90_a_real_stream_gives_its_compactions() {
+    let (stream, _) = feed("claude", P90_COMPACT);
+    let pre: Vec<Option<u64>> = stream.compactions.iter().map(|c| c.pre_tokens).collect();
+    assert_eq!(
+        pre,
+        [
+            Some(84_060),
+            Some(65_599),
+            Some(86_852),
+            Some(62_635),
+            Some(62_612)
+        ]
+    );
+    assert!(stream
+        .compactions
+        .iter()
+        .all(|c| c.trigger.as_deref() == Some("auto")));
+    assert_eq!(stream.compactions[0].post_tokens, Some(18_207));
+}
+
+/// V3 through the journal: the advisor and compaction rows replay into the order and reach its record line, and an
+/// old journal with neither still replays.
+#[test]
+fn p90_the_journal_carries_the_advisor_and_compaction_rows() {
+    let mut seated = seated("o1");
+    seated.seat = "sonnet".into();
+    seated.cli = "claude".into();
+    let advisor = nirvana_seat::AdvisorUse {
+        model: "claude-opus-5-5".into(),
+        consults: 2,
+        tokens: Tokens {
+            input: 50_000,
+            output: 1_000,
+            ..Tokens::default()
+        },
+        usd: Some(0.22),
+        dropped: None,
+        unseen: None,
+    };
+    let kinds = vec![
+        opened(),
+        Kind::Seated(Box::new(seated)),
+        Kind::Advisor {
+            order: "o1".into(),
+            attempt: 1,
+            advisor: advisor.clone(),
+        },
+        Kind::Compacted {
+            order: "o1".into(),
+            attempt: 1,
+            trigger: Some("auto".into()),
+            pre_tokens: Some(290_000),
+            post_tokens: Some(20_000),
+        },
+        Kind::Advisor {
+            order: "o1".into(),
+            attempt: 2,
+            advisor,
+        },
+    ];
+    let dir = temp_dir("p90-journal");
+    let journal = Journal {
+        path: dir.join("journal.jsonl"),
+    };
+    for (at, kind) in kinds.into_iter().enumerate() {
+        journal.append(at as u64 + 1, kind).unwrap();
+    }
+    let text = std::fs::read_to_string(&journal.path).unwrap();
+    let (back, bad) = nirvana_run::parse_lines(&text);
+    assert_eq!((back.len(), bad), (5, 0));
+    let state = replay(&back);
+    let order = state.order("o1").expect("o1");
+    assert_eq!(order.compactions, 1);
+    let sum = order.advisor_use().expect("advisor");
+    assert_eq!((sum.consults, sum.tokens.input), (4, 100_000));
+    assert!((sum.usd.unwrap() - 0.44).abs() < 1e-9);
+    let line = nirvana_run::record_line("r1", order, None);
+    assert_eq!(line.advisor.map(|a| a.consults), Some(4));
+    assert!(text.contains("\"event\":\"advisor\"") && text.contains("\"event\":\"compacted\""));
+    // An old journal: a usage row as 0.79.0 wrote it still replays, with no advisor.
+    let mut older: String = text.lines().take(2).map(|l| l.to_owned() + "\n").collect();
+    older.push_str(
+        "{\"v\":1,\"seq\":3,\"at\":3,\"event\":\"usage\",\"order\":\"o1\",\"attempt\":1,\"tokens\":{\"input\":1,\"output\":2}}\n",
+    );
+    let (back, bad) = nirvana_run::parse_lines(&older);
+    assert_eq!((back.len(), bad), (3, 0));
+    let state = replay(&back);
+    let order = state.order("o1").unwrap();
+    assert_eq!(order.tokens().map(|t| t.output), Some(2));
+    assert!(order.advisor_use().is_none() && order.compactions == 0);
+}
+
+/// V1 and C1 through `herdr seat exec`, with a stand-in for claude replaying the consult stream: a Sonnet order in
+/// Balanced starts with `--advisor claude-opus-5-5`, its line and `--autocompact 300000`, and its advisor row is
+/// journaled with the stream's consult; the same order in SOTA starts with neither.
+#[cfg(windows)]
+#[test]
+fn p90_exec_launches_the_seats_advisor_and_ceiling_by_mode() {
+    let (_home, project) = p29_project("p90-exec");
+    std::fs::write(
+        crate::nirvana_seat::dir().join(nirvana_seat::SEATS_FILE),
+        nirvana_seat::tests::p90_default(),
+    )
+    .unwrap();
+    std::fs::write(project.root.join("recorded.jsonl"), P90_CONSULT).unwrap();
+    let run = "r1";
+    let journal = project.journal(run);
+    journal.append(1, opened()).unwrap();
+    let start = |order: &str, mode: Mode| {
+        let mut seated = seated(order);
+        seated.seat = "sonnet".into();
+        seated.cli = "claude".into();
+        seated.model = "claude-sonnet-5-5".into();
+        seated.effort = Effort::Medium;
+        seated.pool = "max".into();
+        seated.class = "build.bounded".into();
+        seated.mode = mode;
+        seated.not_family = Vec::new();
+        seated.cwd = project.root.display().to_string();
+        seated.order_file = project.root.join("order.md").display().to_string();
+        std::fs::write(&seated.order_file, "# Fix the merge\n").unwrap();
+        journal.append(2, Kind::Seated(Box::new(seated))).unwrap();
+        TEST_COMMAND.with_borrow_mut(|slot| {
+            *slot = Some(vec![
+                "cmd.exe".into(),
+                "/c".into(),
+                "type recorded.jsonl".into(),
+            ]);
+        });
+        let mut out = Vec::new();
+        exec(&project, run, order, None, &mut out).unwrap();
+        TEST_COMMAND.with_borrow_mut(|slot| *slot = None);
+        let events = journal.read().0;
+        let argv = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                Kind::Started { order: o, argv, .. } if o == order => Some(argv.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let advisor = events.iter().find_map(|event| match &event.kind {
+            Kind::Advisor { order: o, advisor, .. } if o == order => Some(advisor.clone()),
+            _ => None,
+        });
+        (argv, advisor, String::from_utf8_lossy(&out).into_owned())
+    };
+    let (argv, advisor, out) = start("o1", Mode::Balanced);
+    assert_eq!(after(&argv, "--advisor"), Some("claude-opus-5-5"), "{out}");
+    assert!(argv[2].ends_with(ADVISOR_LINE), "{argv:?}");
+    assert_eq!(after(&argv, "--autocompact"), Some("300000"));
+    let advisor = advisor.expect("an advisor row");
+    assert_eq!((advisor.consults, advisor.tokens.input), (1, 26_791));
+    assert!(out.contains("advisor claude-opus-5-5 (opus)"), "{out}");
+    let (argv, advisor, out) = start("o2", Mode::Sota);
+    assert_eq!(after(&argv, "--advisor"), None, "{out}");
+    assert_eq!(after(&argv, "--autocompact"), None);
+    assert!(!argv[2].contains("advisor"));
+    assert_eq!(advisor, None);
+    nirvana_seat::set_test_world(None);
+}
+
+// ---- fix round, 2026-11-18: the advisor (owner, 2026-11-18) and the ceiling (plan 43 B1, ruling R1) ----
+
+/// A4 (d): a resumed attempt gets `--advisor` and no second line; `without_advisor` undoes both for the relaunch A3
+/// makes.
+#[test]
+fn p90_a_resumed_attempt_gets_the_flag_without_the_line() {
+    let resumed = argv(&spec("claude", "claude-sonnet-5-5", Some("s-1"))).unwrap();
+    let with = with_advisor(resumed.clone(), "claude-opus-5-5", false);
+    assert_eq!(after(&with, "--advisor"), Some("claude-opus-5-5"));
+    assert_eq!(with[2], resumed[2], "the resume prompt is unchanged");
+    assert!(!with.iter().any(|arg| arg.contains(ADVISOR_LINE.trim())));
+    let fresh = argv(&spec("claude", "claude-sonnet-5-5", None)).unwrap();
+    assert_eq!(without_advisor(&with_advisor(fresh.clone(), "claude-opus-5-5", true)), fresh);
+    assert_eq!(without_advisor(&with), resumed);
+}
+
+/// A2: the ceiling reaches a claude seat on an Anthropic model only, and not one whose recorded window is at or below
+/// it; a seat with no window recorded keeps it.
+#[test]
+fn p90_the_ceiling_reaches_anthropic_models_above_it_only() {
+    let table = nirvana_seat::parse(&nirvana_seat::tests::p90_default()).unwrap();
+    for seat in ["opus", "sonnet", "haiku", "fable"] {
+        assert_eq!(worker_ceiling(&table, seat), 300_000, "{seat}");
+    }
+    assert_eq!(table.seat("local").map(|s| s.cli.as_str()), Some("claude"));
+    assert_eq!(worker_ceiling(&table, "local"), 0, "qwen through the claude CLI");
+    assert_eq!(worker_ceiling(&table, "g-sonnet"), 0, "agy");
+    assert_eq!(worker_ceiling(&table, "no-such-seat"), 0);
+    let windowed = |window: u64| {
+        let text = nirvana_seat::tests::p90_default().replacen(
+            "id = \"haiku\"\n",
+            &format!("id = \"haiku\"\ncontext_tokens = {window}\n"),
+            1,
+        );
+        nirvana_seat::parse(&text).unwrap()
+    };
+    assert_eq!(worker_ceiling(&windowed(200_000), "haiku"), 0, "a window below the ceiling");
+    assert_eq!(worker_ceiling(&windowed(300_000), "haiku"), 0, "a window at the ceiling");
+    assert_eq!(worker_ceiling(&windowed(1_000_000), "haiku"), 300_000);
+    let off = nirvana_seat::tests::p90_default()
+        .replacen("worker_autocompact_tokens = 300000", "worker_autocompact_tokens = 0", 1);
+    assert_eq!(worker_ceiling(&nirvana_seat::parse(&off).unwrap(), "sonnet"), 0);
+    let zero = nirvana_seat::tests::p90_default().replacen(
+        "id = \"haiku\"\n",
+        "id = \"haiku\"\ncontext_tokens = 0\n",
+        1,
+    );
+    assert!(nirvana_seat::parse(&zero).is_err(), "a zero window is refused");
+}
+
+/// A3: `--help` is read for the flag as a word of its own, and `--advisor`'s refusal is found on stderr.
+#[test]
+fn p90_the_help_and_the_refusal_are_read() {
+    let help = "  --autocompact <auto|tokens>           Auto-compact window size\n  --model <model>  Model\n";
+    assert!(help_offers(help, "--autocompact"));
+    assert!(!help_offers(help, "--auto"));
+    assert!(!help_offers("  --autocompactx\n", "--autocompact"));
+    assert!(advisor_flag_rejected("error: unknown option '--advisor'\n").is_some());
+    assert_eq!(advisor_flag_rejected("error: unknown option '--frobnicate'\n"), None);
+    assert_eq!(advisor_flag_rejected("the advisor will not be used\n"), None);
+}
+
+/// A4 (a) and (b): a stream with no `modelUsage` gives no cost; a launch whose stream shows neither a consult nor the
+/// advisor's model says the advisor was not seen, and a consult or a drop is never "unseen".
+#[test]
+fn p90_advisor_rows_say_what_herdr_cannot_tell() {
+    let cut: String = P90_CONSULT
+        .lines()
+        .filter(|line| !line.contains("\"type\":\"result\""))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    assert_ne!(cut.len(), P90_CONSULT.len(), "the result line was cut");
+    let killed = advisor_row(&feed("claude", &cut).0, &opus_launch(), "");
+    assert_eq!((killed.consults, killed.usd, killed.unseen.as_deref()), (1, None, None));
+    let (live, _) = feed("claude", LIVE_HAIKU);
+    let quiet = advisor_row(&live, &opus_launch(), "");
+    assert_eq!(quiet.unseen.as_deref(), Some(nirvana_seat::ADVISOR_UNSEEN));
+    assert_eq!(quiet.usd, Some(0.0), "modelUsage was read: none of it is the advisor's");
+    let nothing = advisor_row(&feed("claude", "").0, &opus_launch(), "");
+    assert_eq!((nothing.usd, nothing.unseen.is_some()), (None, true));
+    let consulted = advisor_row(&feed("claude", P90_CONSULT).0, &opus_launch(), "");
+    assert_eq!(consulted.unseen, None);
+    let dropped = advisor_row(&live, &opus_launch(), "Warning: x cannot advise y\n");
+    assert!(dropped.dropped.is_some() && dropped.unseen.is_none());
+    // Summed over attempts: one that consulted makes the order's row seen.
+    let sum = nirvana_seat::AdvisorUse::sum([quiet.clone(), consulted].iter()).unwrap();
+    assert_eq!((sum.consults, sum.unseen), (1, None));
+    let sum = nirvana_seat::AdvisorUse::sum([quiet].iter()).unwrap();
+    assert!(sum.unseen.is_some());
+}
+
+/// The p90 `exec` scaffold: a Sonnet order in Balanced on the advisor table, with `program` standing in for claude
+/// and `help` for `claude --help`. Gives every attempt's argv, the advisor rows, the flag rows and `exec`'s output.
+#[cfg(windows)]
+fn p90_exec_with(
+    name: &str,
+    program: &str,
+    help: Option<&str>,
+) -> (
+    Vec<Vec<String>>,
+    Vec<nirvana_seat::AdvisorUse>,
+    Vec<(String, String)>,
+    String,
+) {
+    let (_home, project) = p29_project(name);
+    std::fs::write(
+        crate::nirvana_seat::dir().join(nirvana_seat::SEATS_FILE),
+        nirvana_seat::tests::p90_default(),
+    )
+    .unwrap();
+    std::fs::write(project.root.join("recorded.jsonl"), P90_CONSULT).unwrap();
+    let run = "r1";
+    let journal = project.journal(run);
+    journal.append(1, opened()).unwrap();
+    let mut seated = seated("o1");
+    seated.seat = "sonnet".into();
+    seated.cli = "claude".into();
+    seated.model = "claude-sonnet-5-5".into();
+    seated.effort = Effort::Medium;
+    seated.pool = "max".into();
+    seated.class = "build.bounded".into();
+    seated.mode = Mode::Balanced;
+    seated.not_family = Vec::new();
+    seated.cwd = project.root.display().to_string();
+    seated.order_file = project.root.join("order.md").display().to_string();
+    std::fs::write(&seated.order_file, "# Fix the merge\n").unwrap();
+    journal.append(2, Kind::Seated(Box::new(seated))).unwrap();
+    TEST_COMMAND.with_borrow_mut(|slot| {
+        *slot = Some(vec!["cmd.exe".into(), "/c".into(), program.into()]);
+    });
+    TEST_HELP_COMMAND.with_borrow_mut(|slot| {
+        *slot = help.map(|help| vec!["cmd.exe".into(), "/c".into(), help.into()]);
+    });
+    let mut out = Vec::new();
+    let done = exec(&project, run, "o1", None, &mut out);
+    TEST_COMMAND.with_borrow_mut(|slot| *slot = None);
+    TEST_HELP_COMMAND.with_borrow_mut(|slot| *slot = None);
+    nirvana_seat::set_test_world(None);
+    done.unwrap();
+    let events = journal.read().0;
+    let argvs = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            Kind::Started { argv, .. } => Some(argv.clone()),
+            _ => None,
+        })
+        .collect();
+    let advisors = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            Kind::Advisor { advisor, .. } => Some(advisor.clone()),
+            _ => None,
+        })
+        .collect();
+    let flags = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            Kind::FlagDropped { flag, why, .. } => Some((flag.clone(), why.clone())),
+            _ => None,
+        })
+        .collect();
+    (argvs, advisors, flags, String::from_utf8_lossy(&out).into_owned())
+}
+
+/// A3, the ceiling: a stand-in `claude --help` without `--autocompact` gives a worker without it and one journal row
+/// saying why; with the flag in the help, the worker gets it and no row is written.
+#[cfg(windows)]
+#[test]
+fn p90_exec_drops_the_ceiling_a_claude_without_the_flag_would_refuse() {
+    let (argvs, _, flags, out) =
+        p90_exec_with("p90-nohelp", "type recorded.jsonl", Some("echo   --model MODEL   Model"));
+    assert_eq!(argvs.len(), 1, "{out}");
+    assert_eq!(after(&argvs[0], "--autocompact"), None, "{out}");
+    assert_eq!(flags.len(), 1, "{out}");
+    assert_eq!(flags[0].0, "--autocompact");
+    assert!(flags[0].1.contains("lists no --autocompact"), "{flags:?}");
+    assert!(out.contains("no ceiling:"), "{out}");
+    let (argvs, _, flags, out) = p90_exec_with(
+        "p90-help",
+        "type recorded.jsonl",
+        Some("echo   --autocompact AUTO-OR-TOKENS   Auto-compact window size"),
+    );
+    assert_eq!(after(&argvs[0], "--autocompact"), Some("300000"), "{out}");
+    assert!(flags.is_empty(), "{flags:?}");
+}
+
+/// A3, the advisor: a stand-in claude that refuses `--advisor` before its first stream line is started once more
+/// without the flag and its line; its stream is read, and the advisor row says it was dropped and why.
+#[cfg(windows)]
+#[test]
+fn p90_exec_relaunches_once_without_an_advisor_the_claude_refuses() {
+    let refuse = "if exist tried.txt (type recorded.jsonl) else (echo tried> tried.txt & \
+                  echo error: unknown option '--advisor' 1>&2 & exit /b 1)";
+    let (argvs, advisors, _, out) = p90_exec_with("p90-refused", refuse, None);
+    assert_eq!(argvs.len(), 2, "{out}");
+    assert_eq!(after(&argvs[0], "--advisor"), Some("claude-opus-5-5"));
+    assert!(argvs[0][2].ends_with(ADVISOR_LINE));
+    assert_eq!(after(&argvs[1], "--advisor"), None, "{out}");
+    assert!(!argvs[1][2].contains(ADVISOR_LINE.trim()));
+    assert_eq!(after(&argvs[1], "--autocompact"), Some("300000"));
+    let last = advisors.last().expect("an advisor row");
+    assert!(
+        last.dropped
+            .as_deref()
+            .is_some_and(|why| why.contains("does not take --advisor")),
+        "{advisors:?}"
+    );
+    // The second start's stream was read (the recording is no Work Report, so the order then fails on that).
+    assert!(out.contains("331 out"), "{out}");
+    // A claude that fails for another reason is not started again.
+    let (argvs, _, _, out) = p90_exec_with("p90-other", "echo error: no such file 1>&2 & exit /b 1", None);
+    assert_eq!(argvs.len(), 1, "{out}");
+}
