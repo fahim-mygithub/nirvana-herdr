@@ -222,7 +222,7 @@ CONTROLS = (
             "        carried.lines.push((None, HOLD_KEY.to_owned(), line, value));",
             "        let _ = (line, value);", T_HOLD_LINE, "rust"),
     Control("p97_hold_not_taken_out", SEAT, "    let (installed, hold) = without_hold(installed);",
-            "    let hold: Option<String> = None;", T_HOLD_LINE, "rust"),
+            "    let (installed, hold) = (installed.to_owned(), None::<String>);", T_HOLD_LINE, "rust"),
     Control("p97_arrays_not_plain", SEAT, "        toml::Value::Array(items) => items.iter().all(scalar),",
             "        toml::Value::Array(_) => false,", T_HOLD_LINE, "rust"),
     Control("p97_calib_held_unmarked", CALIB, "            held: table.held(seat, effort),", "            held: false,",
