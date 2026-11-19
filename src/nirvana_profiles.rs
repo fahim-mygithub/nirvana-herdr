@@ -1756,6 +1756,8 @@ const USAGE: &str = "usage: herdr profile list
                                          the same proposal is never made again
        herdr profile proposals rollback <op>
                                          undoes one accept or dismiss from profile-proposals/ledger.jsonl
+       herdr profile detect [--json] [--write] [--run <id>]
+                                         what the detector finds in the orders, with no model, and would propose
 A profile is used by `herdr seat run <seat> --profile <name> ...` and `herdr seat pick --profile <name> ...`.
 In profile.md: `skills: [a, b]` names the project skills (.claude/skills) its worker uses; `skills: []` names
 none, and without the key it uses all. A folder profile's mcp.json, in .mcp.json's shape, holds its own servers:
@@ -1923,6 +1925,13 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             i32::from(refused > 0 || (chosen.is_empty() && !names.is_empty()))
         }
         (Some("teach"), rest) => crate::nirvana_knowledge::teach_cli(&root, rest),
+        // Plan 45 P45b: the detector; it writes nothing without `--write`.
+        (Some("detect"), rest) => crate::nirvana_profile_detect::cli_to(
+            &root,
+            rest,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        ),
         _ => usage_exit(),
     };
     std::process::exit(code);

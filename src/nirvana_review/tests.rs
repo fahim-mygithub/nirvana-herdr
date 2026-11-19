@@ -1464,3 +1464,299 @@ own code or method"
         "{six}"
     );
 }
+
+// ---- plan 45 P45b: profile ops ----
+
+/// A paragraph the detector found repeated, as a review's brief quotes it.
+const ROLE: &str = "Judge looks with herdr look on each packaged still; image judges run 1 to 2 points harsh, so score the \
+before frame first and compare after against before.";
+
+fn role_finding() -> crate::nirvana_profile_detect::Finding {
+    crate::nirvana_profile_detect::Finding::Repeated {
+        key: crate::nirvana_profile_detect::paragraph_key(ROLE),
+        text: ROLE.into(),
+        chars: ROLE.chars().count(),
+        orders: 7,
+        classes: BTreeMap::from([("build.bounded".to_owned(), 7)]),
+        profiles: BTreeMap::new(),
+        unprofiled: 7,
+        needs: Vec::new(),
+        sample: vec!["r0/a1".into()],
+    }
+}
+
+/// The detection kept as `herdr run end` keeps it, holding `findings`.
+fn keep_findings(root: &Path, findings: Vec<crate::nirvana_profile_detect::Finding>) {
+    let path = crate::nirvana_profile_detect::cache_path(root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let detection = crate::nirvana_profile_detect::Detection {
+        findings,
+        ..Default::default()
+    };
+    std::fs::write(path, serde_json::to_string(&detection).unwrap()).unwrap();
+}
+
+fn seats_in_home(home: &crate::nirvana::TestHomeGuard) {
+    let seats = home.path.join("nirvana").join(nirvana_seat::SEATS_FILE);
+    std::fs::create_dir_all(seats.parent().unwrap()).unwrap();
+    std::fs::write(&seats, nirvana_seat::DEFAULT).unwrap();
+}
+
+#[test]
+fn p94_profile_ops_are_parsed_validated_and_refused_with_a_reason() {
+    let home = crate::nirvana::with_test_home("p94-profile-ops");
+    seats_in_home(&home);
+    let root = home.path.join("project");
+    Project::at(&root).ensure().unwrap();
+    let key = crate::nirvana_profile_detect::paragraph_key(ROLE);
+    let evidence = format!("7 builders typed it: \"{}\"", &ROLE[..60]);
+    let good = serde_json::json!({"op":"propose","name":"frame-judge","description":"Judges packaged stills.",
+        "class":"build.bounded","effort":"high","body":ROLE,"evidence":evidence,"finding":key});
+    let mut pinned = good.clone();
+    pinned["model"] = serde_json::json!("claude-opus-5-5");
+    let mut bad_name = good.clone();
+    bad_name["name"] = serde_json::json!("Frame Judge");
+    let mut two_lines = good.clone();
+    two_lines["description"] = serde_json::json!("one\nmodel: claude-opus-5-5");
+    let mut unquoted = good.clone();
+    unquoted["evidence"] =
+        serde_json::json!("7 builders: \"a quote that is nowhere in the findings\"");
+    unquoted["name"] = serde_json::json!("other-judge");
+    let mut unknown_finding = good.clone();
+    unknown_finding["finding"] = serde_json::json!("paragraph:0000000000000000");
+    let mut no_class = good.clone();
+    no_class["name"] = serde_json::json!("third-judge");
+    no_class["class"] = serde_json::json!("no.such.class");
+    no_class.as_object_mut().unwrap().remove("finding");
+    let report = serde_json::json!({"profile_ops":[
+        good,
+        pinned,
+        bad_name,
+        two_lines,
+        {"op":"patch","profile":"frame-judge","base_sha":"123","body":"x","evidence":evidence},
+        {"op":"remove","profile":"frame-judge"},
+        unquoted,
+        unknown_finding,
+        no_class,
+        good,
+    ]});
+    let finding = role_finding();
+    let corpus = vec![finding.line(usize::MAX), ROLE.to_owned()];
+    let lines = apply_profile_ops(
+        &root,
+        parse_profile_ops(&report),
+        &corpus,
+        std::slice::from_ref(&key),
+        "b1-lr",
+        "r1",
+    );
+    let line = |n: usize| lines[n - 1].1.as_str();
+    assert!(
+        lines[0].0 && line(1).starts_with("pp-1: proposed the new profile frame-judge"),
+        "{lines:?}"
+    );
+    assert!(line(2).contains("never carries `model`"), "{}", line(2));
+    assert!(
+        line(3).contains("a proposal's name is 1 to 32"),
+        "{}",
+        line(3)
+    );
+    assert!(line(4).contains("description is one line"), "{}", line(4));
+    assert!(
+        line(5).contains("base_sha shown beside the profile"),
+        "{}",
+        line(5)
+    );
+    assert!(
+        line(6).contains("herdr never removes a profile"),
+        "{}",
+        line(6)
+    );
+    assert!(
+        line(7).contains("the evidence quotes nothing"),
+        "{}",
+        line(7)
+    );
+    assert!(
+        line(8).contains("is not a finding this review was given"),
+        "{}",
+        line(8)
+    );
+    assert!(
+        line(9).contains("class no.such.class: no such class"),
+        "{}",
+        line(9)
+    );
+    assert!(
+        line(10).contains("a new of frame-judge waits already as pp-1: one piece at a time"),
+        "{}",
+        line(10)
+    );
+    assert!(lines[1..].iter().all(|(kept, _)| !kept), "{lines:?}");
+    // The one written: herdr's front matter from the op's fields, inert in profile-proposals/.
+    let waiting = crate::nirvana_profile_proposals::list(&root);
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(
+        (waiting[0].by.as_str(), waiting[0].key.as_str()),
+        ("b1-lr", key.as_str())
+    );
+    let parsed =
+        crate::nirvana_profiles::parse(Path::new("p.md"), "frame-judge", &waiting[0].body).unwrap();
+    assert_eq!(
+        (
+            parsed.class.as_deref(),
+            parsed.effort.map(|e| e.word()),
+            parsed.model.is_none()
+        ),
+        (Some("build.bounded"), Some("high"), true)
+    );
+    assert!(
+        crate::nirvana_profiles::list(&root).is_empty(),
+        "never live by itself"
+    );
+    // The report's own check sets profile_ops aside as it does lesson_ops, and a list that is not one fails.
+    let plain = serde_json::json!({"status":"done","summary":"s","gotchas":[],"profile_ops":[]});
+    assert_eq!(report_axis(Some(&plain)).mark, Mark::Pass);
+    let axis = report_axis(Some(
+        &serde_json::json!({"status":"done","summary":"s","gotchas":[],"profile_ops":"x"}),
+    ));
+    assert_eq!(
+        (axis.mark, axis.why.as_str()),
+        (Mark::Fail, "profile_ops is not a list of objects")
+    );
+}
+
+#[test]
+fn p94_a_reviews_profile_ops_land_as_proposals_and_never_block_its_lesson_ops() {
+    let home = quiet("p94-review-gate");
+    seats_in_home(&home);
+    let root = repo("p94-review-gate");
+    let project = Project::at(&root);
+    keep_findings(&root, vec![role_finding()]);
+    delivered(
+        &root,
+        "r1",
+        "b1",
+        learned(),
+        "TOTAL 12 passed, stream only tail",
+        None,
+    );
+    nirvana_gate::gate(&project, "r1", "b1").expect("gate");
+    let review = state_of(&root, "r1")
+        .order("b1-lr")
+        .expect("review")
+        .seated
+        .clone();
+    let brief = std::fs::read_to_string(&review.order_file).unwrap();
+    assert!(
+        brief.contains("## Profile ops") && brief.contains(ROLE),
+        "{brief}"
+    );
+    let key = crate::nirvana_profile_detect::paragraph_key(ROLE);
+    let mut report = done("done");
+    report["lesson_ops"] = serde_json::json!([{"op":"new","name":"Read the suite total","class":"build.bounded",
+        "steps":"1. read TOTAL","evidence":"TOTAL 12 passed, stream only tail"}]);
+    report["profile_ops"] = serde_json::json!([
+        {"op":"propose","name":"frame-judge","description":"Judges packaged stills.","class":"build.bounded",
+         "family":"google","body":ROLE,"evidence":"7 orders: \"image judges run 1 to 2 points harsh\"","finding":key},
+        {"op":"propose","name":"frame-judge","description":"Judges packaged stills.","class":"build.bounded",
+         "body":ROLE,"evidence":"7 orders: \"image judges run 1 to 2 points harsh\"","finding":key},
+    ]);
+    project
+        .journal("r1")
+        .append(
+            9,
+            Kind::Delivered {
+                order: "b1-lr".into(),
+                report,
+            },
+        )
+        .unwrap();
+    let ruling = nirvana_gate::gate(&project, "r1", "b1-lr").expect("gate the review");
+    assert_eq!(ruling.verdict, "pass", "{ruling:?}");
+    assert!(
+        nirvana_lessons::read_index(&root)
+            .lessons
+            .contains_key("read-the-suite-total"),
+        "the lesson op held"
+    );
+    let axes: Vec<(Mark, String)> = ruling
+        .axes
+        .iter()
+        .filter(|axis| axis.axis == PROFILE_OP)
+        .map(|axis| (axis.mark, axis.why.clone()))
+        .collect();
+    assert_eq!(axes.len(), 2, "{axes:?}");
+    assert!(
+        axes[0].0 == Mark::Note && axes[0].1.contains("never carries `family`"),
+        "{axes:?}"
+    );
+    assert!(
+        axes[1].0 == Mark::Pass && axes[1].1.starts_with("pp-1: proposed"),
+        "{axes:?}"
+    );
+    assert!(!ruling.axes.iter().any(|axis| axis.why == "nothing to keep"));
+    assert_eq!(crate::nirvana_profile_proposals::list(&root)[0].run, "r1");
+    // A review with profile ops and no lesson op does not say it kept nothing.
+    delivered(&root, "r1", "b2", learned(), "TOTAL 3 passed", None);
+    nirvana_gate::gate(&project, "r1", "b2").expect("gate b2");
+    let mut report = done("done");
+    report["profile_ops"] = serde_json::json!([{"op":"remove","profile":"frame-judge"}]);
+    project
+        .journal("r1")
+        .append(
+            19,
+            Kind::Delivered {
+                order: "b2-lr".into(),
+                report,
+            },
+        )
+        .unwrap();
+    let ruling = nirvana_gate::gate(&project, "r1", "b2-lr").expect("gate b2's review");
+    assert!(
+        !ruling.axes.iter().any(|axis| axis.why == "nothing to keep"),
+        "{:?}",
+        ruling.axes
+    );
+    assert!(ruling
+        .axes
+        .iter()
+        .any(|axis| axis.axis == PROFILE_OP && axis.why.contains("herdr never removes a profile")));
+}
+
+#[test]
+fn p94_a_review_brief_with_no_findings_is_todays_byte_for_byte() {
+    let home = quiet("p94-review-bytes");
+    seats_in_home(&home);
+    let root = repo("p94-review-bytes");
+    let project = Project::at(&root);
+    // A detection that holds a finding about another class only: nothing in this brief.
+    let mut other = role_finding();
+    if let crate::nirvana_profile_detect::Finding::Repeated { classes, .. } = &mut other {
+        *classes = BTreeMap::from([("plan".to_owned(), 7)]);
+    }
+    keep_findings(&root, vec![other]);
+    delivered(&root, "r1", "b1", learned(), "TOTAL 12 passed", None);
+    nirvana_gate::gate(&project, "r1", "b1").expect("gate");
+    let state = state_of(&root, "r1");
+    let known = state.order("b1").unwrap();
+    let review = state.order("b1-lr").expect("review").seated.clone();
+    let brief = std::fs::read_to_string(&review.order_file).unwrap();
+    let expected = review_brief(
+        &root,
+        &Subject {
+            order: "b1",
+            class: "build.bounded",
+            profile: None,
+            order_text: &nirvana_gate::order_text(&known.seated),
+            report: known.report.as_ref(),
+            verdict: &Verdict::Pass,
+            stream: &review_cwd(&project, "r1", "b1-lr").join("stream.jsonl"),
+        },
+    );
+    assert_eq!(
+        brief,
+        format!("{expected}{}", crate::nirvana_worker::ORDER_FOOTER)
+    );
+    assert!(!crate::nirvana_profile_detect::given_path(&project, "r1", "b1-lr").exists());
+}

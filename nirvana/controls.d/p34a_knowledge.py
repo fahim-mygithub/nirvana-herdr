@@ -185,7 +185,9 @@ CONTROLS = (
             "        if let Err(why) = crate::nirvana_knowledge::write_snap(project, run, &id, profile) {",
             "        if let Err(why) = Ok::<(), String>(()).map(|()| profile) {", T_REVIEW_HELD, "rust"),
     Control("p34a_review_nothing_to_keep", REVIEW,
-            "                lines: if card_ops.is_empty() {", "                lines: if true {", T_REVIEW, "rust"),
+            # P45b moved the line: card ops and profile ops both keep "nothing to keep" away; the sabotage is the same.
+            "                lines: if card_ops.is_empty() && profile_ops.is_empty() {", "                lines: if true {",
+            T_REVIEW, "rust"),
     # §2.7: the panel. The count, K routed, the folder the edit tab starts in, the editor with no file.
     Control("p34a_panel_no_count", SHELL,
             '                Ok(profile) => format!("{}{}", profile.description, cards_note(cwd, &name)),',

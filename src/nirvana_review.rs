@@ -832,6 +832,16 @@ pub fn queue_review(
             stream: &stream,
         },
     );
+    // Plan 45 P45b: the kept detection's findings about this order's class and profile, and the `profile_ops` format;
+    // read from `.nirvana/runs/`, never a scan on the gate's path. None: the brief as before, byte for byte.
+    let brief = crate::nirvana_profile_detect::with_findings(
+        project,
+        run,
+        &id,
+        brief,
+        Some(&known.seated.class),
+        profile.as_deref(),
+    );
     // Plan 34 §2.6 and review B3: the profile's `knowledge/` as it stands now, which the review's gate compares.
     if let Some(profile) = &profile {
         if let Err(why) = crate::nirvana_knowledge::write_snap(project, run, &id, profile) {
@@ -1086,6 +1096,337 @@ pub fn apply_merge(
     Applied { lines }
 }
 
+// ---- profile ops (plan 45 P45b) ----
+
+/// The report key under which a lesson or idle review proposes profiles (plan 45 §5), and the gate's axis for each op.
+pub const PROFILE_OPS: &str = "profile_ops";
+pub const PROFILE_OP: &str = "profile_op";
+/// The keys a `propose` may hold, and a `patch`. Anything else is refused by its name, a `model`, `family`, `skills`
+/// or a server among them (plan 45 §6): herdr writes the profile's front matter from these alone.
+const PROPOSE_KEYS: [&str; 9] = [
+    "op",
+    "name",
+    "description",
+    "class",
+    "effort",
+    "needs",
+    "body",
+    "evidence",
+    "finding",
+];
+const PATCH_KEYS: [&str; 6] = ["op", "profile", "base_sha", "body", "evidence", "finding"];
+
+/// One `profile_ops` item: a new profile, or the whole new body of one that exists (R3: one piece).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfileOp {
+    Propose {
+        name: String,
+        description: String,
+        class: String,
+        effort: Option<String>,
+        needs: Vec<String>,
+        body: String,
+        evidence: String,
+        finding: Option<String>,
+    },
+    Patch {
+        profile: String,
+        base_sha: String,
+        body: String,
+        evidence: String,
+        finding: Option<String>,
+    },
+}
+
+impl ProfileOp {
+    fn kind(&self) -> crate::nirvana_profile_proposals::Kind {
+        match self {
+            Self::Propose { .. } => crate::nirvana_profile_proposals::Kind::New,
+            Self::Patch { .. } => crate::nirvana_profile_proposals::Kind::Patch,
+        }
+    }
+
+    fn name(&self) -> &str {
+        match self {
+            Self::Propose { name, .. } => name,
+            Self::Patch { profile, .. } => profile,
+        }
+    }
+
+    fn evidence(&self) -> &str {
+        match self {
+            Self::Propose { evidence, .. } | Self::Patch { evidence, .. } => evidence,
+        }
+    }
+
+    fn finding(&self) -> Option<&str> {
+        match self {
+            Self::Propose { finding, .. } | Self::Patch { finding, .. } => finding.as_deref(),
+        }
+    }
+}
+
+/// A class, an effort or a need as one word: what a front matter line can hold and nothing more.
+fn one_word(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 64
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// Each `profile_ops` item as an op, or why it is not one. Every field herdr writes into a front matter line is one
+/// line and one word where a word is meant, so no op can add a key of its own.
+pub fn parse_profile_ops(report: &Value) -> Vec<Result<ProfileOp, String>> {
+    let Some(items) = report.get(PROFILE_OPS).and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .map(|item| {
+            let Some(object) = item.as_object() else {
+                return Err("a profile op is an object".into());
+            };
+            let text = |key: &str| {
+                object
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_owned()
+            };
+            let op = text("op");
+            let allowed: &[&str] = match op.as_str() {
+                "propose" => &PROPOSE_KEYS,
+                "patch" => &PATCH_KEYS,
+                "" => return Err("a profile op with no `op`".into()),
+                other => {
+                    return Err(format!(
+                        "unknown profile op {other:?}: propose or patch (herdr never removes a profile)"
+                    ))
+                }
+            };
+            if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+                return Err(format!(
+                    "a {op} op never carries `{key}` (plan 45 §6: no model, family, skill or server; the keys are {})",
+                    allowed.join(", ")
+                ));
+            }
+            let (body, evidence) = (text("body"), text("evidence"));
+            if body.is_empty() || evidence.is_empty() {
+                return Err(format!("a {op} op names its body and its evidence"));
+            }
+            let finding = Some(text("finding")).filter(|finding| !finding.is_empty());
+            if op == "patch" {
+                let (profile, base_sha) = (text("profile"), text("base_sha"));
+                if !crate::nirvana_profiles::valid_name(&profile) {
+                    return Err(format!(
+                        "a patch names a profile, 1 to {} of [a-z0-9-]",
+                        crate::nirvana_profiles::NAME_MAX
+                    ));
+                }
+                if base_sha.len() != 64 || !base_sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err("a patch names the base_sha shown beside the profile, 64 hex".into());
+                }
+                return Ok(ProfileOp::Patch {
+                    profile,
+                    base_sha,
+                    body,
+                    evidence,
+                    finding,
+                });
+            }
+            let (name, description, class) = (text("name"), text("description"), text("class"));
+            if !crate::nirvana_profiles::valid_name(&name) {
+                return Err(format!(
+                    "a proposal's name is 1 to {} of [a-z0-9-]",
+                    crate::nirvana_profiles::NAME_MAX
+                ));
+            }
+            if description.is_empty() || description.contains(['\n', '\r']) {
+                return Err("a proposal's description is one line".into());
+            }
+            if !one_word(&class) {
+                return Err("a proposal names its class, one word".into());
+            }
+            let effort = match object.get("effort") {
+                None | Some(Value::Null) => None,
+                Some(value) => match value.as_str().and_then(nirvana_seat::Effort::parse) {
+                    Some(effort) => Some(effort.word().to_owned()),
+                    None => return Err(format!("effort {value} is not an effort word")),
+                },
+            };
+            let needs = match object.get("needs") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(items)) => {
+                    let needs: Vec<String> = items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(|need| need.trim().to_owned())
+                        .collect();
+                    if needs.len() != items.len() || !needs.iter().all(|need| one_word(need)) {
+                        return Err("needs is a list of server or capability names, one word each".into());
+                    }
+                    needs
+                }
+                Some(_) => return Err("needs is a list".into()),
+            };
+            Ok(ProfileOp::Propose {
+                name,
+                description,
+                class,
+                effort,
+                needs,
+                body,
+                evidence,
+                finding,
+            })
+        })
+        .collect()
+}
+
+/// A proposed profile's whole file, its front matter written by herdr from the op's checked fields alone.
+fn proposed_file(
+    description: &str,
+    class: &str,
+    effort: Option<&str>,
+    needs: &[String],
+    body: &str,
+) -> String {
+    let mut text = format!("---\ndescription: {description}\nclass: {class}\n");
+    if let Some(effort) = effort {
+        text.push_str(&format!("effort: {effort}\n"));
+    }
+    if !needs.is_empty() {
+        text.push_str(&format!("needs: [{}]\n", needs.join(", ")));
+    }
+    text.push_str("---\n");
+    text.push_str(body.replace("\r\n", "\n").trim());
+    text.push('\n');
+    text
+}
+
+/// A finding's own order text, for the evidence check: a repeated paragraph's.
+fn finding_text(finding: &crate::nirvana_profile_detect::Finding) -> String {
+    match finding {
+        crate::nirvana_profile_detect::Finding::Repeated { text, .. } => text.clone(),
+        _ => String::new(),
+    }
+}
+
+/// A review's profile ops, each written through the proposals store or refused with why. `corpus` is what an op may
+/// quote: the findings the review was given (as their lines and texts) and the reviewed worker's stream, or for an
+/// idle review the streams of the orders it read; `keys` the findings' keys. A refusal never stops another op.
+pub fn apply_profile_ops(
+    root: &Path,
+    ops: Vec<Result<ProfileOp, String>>,
+    corpus: &[String],
+    keys: &[String],
+    by: &str,
+    run: &str,
+) -> Vec<(bool, String)> {
+    // Whitespace read as one space on both sides: a finding's line is one line, a stream string is not.
+    let mut said: Vec<String> = Vec::new();
+    for text in corpus {
+        let strings = nirvana_lessons::stream_strings(text);
+        if strings.is_empty() {
+            said.push(nirvana_lessons::one_line(text));
+        } else {
+            said.extend(strings.iter().map(|text| nirvana_lessons::one_line(text)));
+        }
+    }
+    let mut lines = Vec::new();
+    for (n, op) in ops.into_iter().enumerate() {
+        let n = n + 1;
+        let done = op.and_then(|op| {
+            if let Some(finding) = op.finding().filter(|finding| !keys.iter().any(|key| key == finding)) {
+                return Err(format!("{finding} is not a finding this review was given"));
+            }
+            let found = op
+                .evidence()
+                .split('"')
+                .skip(1)
+                .step_by(2)
+                .map(nirvana_lessons::one_line)
+                .filter(|span| span.chars().count() >= nirvana_lessons::MIN_EVIDENCE)
+                .any(|span| said.iter().any(|text| text.contains(&span)));
+            if !found {
+                return Err(format!(
+                    "the evidence quotes nothing, between double quotes and {} characters or more, from the findings \
+                     this review was given or the worker's stream",
+                    nirvana_lessons::MIN_EVIDENCE
+                ));
+            }
+            let kind = op.kind();
+            let name = op.name().to_owned();
+            // R3, one piece at a time: the store refuses only the same proposal waiting; a second one for the same
+            // profile, under another key, would wait beside the first and one accept would stale the other.
+            if let Some(waiting) = crate::nirvana_profile_proposals::list(root)
+                .iter()
+                .find(|waiting| waiting.kind == kind && waiting.profile == name)
+            {
+                return Err(format!(
+                    "a {} of {name} waits already as {}: one piece at a time",
+                    kind.word(),
+                    waiting.id
+                ));
+            }
+            let (body, base_sha) = match &op {
+                ProfileOp::Propose {
+                    description,
+                    class,
+                    effort,
+                    needs,
+                    body,
+                    ..
+                } => (
+                    proposed_file(description, class, effort.as_deref(), needs, body),
+                    None,
+                ),
+                ProfileOp::Patch { base_sha, body, .. } => (body.clone(), Some(base_sha.clone())),
+            };
+            // The key a dismissal remembers: the finding's, or the op and its body's sha, so a different body for the
+            // same name is a different proposal and the same one is never made again.
+            let key = op.finding().map(str::to_owned).unwrap_or_else(|| {
+                format!(
+                    "review:{}:{name}:{}",
+                    kind.word(),
+                    &nirvana_lessons::sha256(&nirvana_lessons::one_line(&body).to_lowercase())[..16]
+                )
+            });
+            crate::nirvana_profile_proposals::write(
+                root,
+                &crate::nirvana_profile_proposals::Draft {
+                    kind,
+                    profile: name.clone(),
+                    by: by.to_owned(),
+                    run: run.to_owned(),
+                    evidence: op.evidence().to_owned(),
+                    key,
+                    body,
+                    base_sha,
+                },
+            )
+            .map(|id| {
+                format!(
+                    "{id}: proposed {} {name}; it waits for the owner's `herdr profile accept {id}`",
+                    if kind == crate::nirvana_profile_proposals::Kind::New {
+                        "the new profile"
+                    } else {
+                        "a new body of"
+                    }
+                )
+            })
+            .map_err(|refusal| refusal.to_string())
+        });
+        lines.push(match done {
+            Ok(line) => (true, line),
+            Err(why) => (false, format!("profile op {n} refused: {why}")),
+        });
+    }
+    lines
+}
+
 /// The Work Report's own check, with `lesson_ops` aside: the worker's schema learns the key from P33b's hunk. Plan 34's
 /// `card_ops` is in the schema's keys, so `check_report` checks it.
 pub(crate) fn report_axis(report: Option<&Value>) -> Axis {
@@ -1093,6 +1434,16 @@ pub(crate) fn report_axis(report: Option<&Value>) -> Axis {
         return Axis::new("report", Mark::Fail, "no Work Report was delivered");
     };
     let mut plain = report.clone();
+    // Plan 45 P45b: `profile_ops` aside as well, checked the same way, so a report carrying it is judged on the rest.
+    let profile_ops = plain
+        .as_object_mut()
+        .and_then(|object| object.remove(PROFILE_OPS));
+    if profile_ops.is_some_and(|ops| {
+        !ops.as_array()
+            .is_some_and(|items| items.iter().all(Value::is_object))
+    }) {
+        return Axis::new("report", Mark::Fail, "profile_ops is not a list of objects");
+    }
     let ops = plain
         .as_object_mut()
         .and_then(|object| object.remove("lesson_ops"));
@@ -1196,6 +1547,7 @@ pub fn gate_review(
     if axes[0].mark != Mark::Fail {
         let report = report.unwrap_or(Value::Null);
         let card_ops = crate::nirvana_knowledge::parse_card_ops(&report);
+        let profile_ops = parse_profile_ops(&report);
         let held = held_back(project, run, &root, &report);
         let ops = parse_ops(&report);
         let at = now();
@@ -1206,7 +1558,7 @@ pub fn gate_review(
             Applied { lines: Vec::new() }
         } else if ops.is_empty() {
             Applied {
-                lines: if card_ops.is_empty() {
+                lines: if card_ops.is_empty() && profile_ops.is_empty() {
                     vec![(true, "nothing to keep".into())]
                 } else {
                     Vec::new()
@@ -1286,6 +1638,33 @@ pub fn gate_review(
             for (kept, line) in lines {
                 axes.push(Axis::new(
                     "card_op",
+                    if kept { Mark::Pass } else { Mark::Note },
+                    line,
+                ));
+            }
+        }
+        // Plan 45 P45b: after the lesson and card ops, which a profile op never stops; each a proposal or a refusal.
+        if !held_any && !profile_ops.is_empty() {
+            let lines = if kind == MERGE {
+                vec![(false, "a merge order proposes no profile".to_owned())]
+            } else {
+                let given = crate::nirvana_profile_detect::given(project, run, &root);
+                let keys: Vec<String> = given.iter().map(|f| f.key().to_owned()).collect();
+                let mut corpus: Vec<String> = given
+                    .iter()
+                    .flat_map(|finding| [finding.line(usize::MAX), finding_text(finding)])
+                    .collect();
+                if subject == crate::nirvana_idle_review::SUBJECT {
+                    let streams = crate::nirvana_idle_review::given_streams(project, run, &root);
+                    corpus.extend(streams);
+                } else {
+                    corpus.push(nirvana_gate::stream_text(project, run, subject));
+                }
+                apply_profile_ops(&project.root, profile_ops, &corpus, &keys, &order, run)
+            };
+            for (kept, line) in lines {
+                axes.push(Axis::new(
+                    PROFILE_OP,
                     if kept { Mark::Pass } else { Mark::Note },
                     line,
                 ));

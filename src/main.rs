@@ -63,6 +63,7 @@ mod nirvana_media;
 mod nirvana_memory_trim;
 mod nirvana_preload;
 mod nirvana_preset;
+mod nirvana_profile_detect;
 mod nirvana_profile_proposals;
 mod nirvana_profiles;
 mod nirvana_questions;

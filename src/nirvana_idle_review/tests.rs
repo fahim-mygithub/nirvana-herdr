@@ -1548,3 +1548,57 @@ fn p73_a_tick_forces_a_review_whose_orders_waited_and_sweeps_lessons() {
     assert!(!index.lessons.contains_key("gone-quiet"));
     assert!(index.lessons.contains_key("kept-pinned"));
 }
+
+/// Plan 45 P45b: an idle review's profile ops count in its result line as its lesson ops do, so a proposal it made, or
+/// one refused, shows in the Learning square instead of "0 applied".
+#[test]
+fn p94_the_result_line_counts_profile_ops() {
+    let axes = vec![
+        Axis::new("report", Mark::Pass, "well formed"),
+        Axis::new("lesson_op", Mark::Pass, "nothing to keep"),
+        Axis::new(
+            review::PROFILE_OP,
+            Mark::Pass,
+            "pp-2: proposed the new profile frame-judge",
+        ),
+        Axis::new(
+            review::PROFILE_OP,
+            Mark::Note,
+            "profile op 2 refused: a propose op never carries `model`",
+        ),
+    ];
+    assert_eq!(
+        result_line("pass", &axes),
+        "pass · 1 applied (pp-2: proposed the new profile frame-judge) · 1 refused"
+    );
+}
+
+/// Plan 45 P45b: an idle review's profile ops may quote the streams of the orders it read, as its lesson ops do.
+#[test]
+fn p94_an_idle_reviews_given_streams_are_the_streams_of_the_orders_it_read() {
+    let _home = crate::nirvana::with_test_home("p94-given-streams");
+    let root = std::env::temp_dir().join(format!("herdr-p94-given-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let project = Project::at(&root);
+    project.ensure().unwrap();
+    let streams = project.run_dir("r1").join("streams");
+    std::fs::create_dir_all(&streams).unwrap();
+    std::fs::write(streams.join("a1.jsonl"), "{\"type\":\"user\",\"text\":\"TOTAL 12 passed\"}
+").unwrap();
+    std::fs::create_dir_all(nirvana_gate::gate_dir(&project, "idle-1")).unwrap();
+    write_json(
+        &given_path(&project, "idle-1", "idle-1-review"),
+        &Given {
+            orders: vec![
+                ("r1".into(), "a1".into(), "build.bounded".into(), None),
+                ("r1".into(), "gone".into(), "build.bounded".into(), None),
+            ],
+            shas: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let found = given_streams(&project, "idle-1", "idle-1-review");
+    assert_eq!(found.len(), 1, "a stream that is not there is left out: {found:?}");
+    assert!(found[0].contains("TOTAL 12 passed"));
+    let _ = std::fs::remove_dir_all(&root);
+}
