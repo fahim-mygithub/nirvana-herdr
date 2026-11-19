@@ -1,6 +1,6 @@
 # Plan 45: agent profiles from the sidebar, and lessons that propose them
 
-Status: PROPOSED 2026-11-18. Nothing is built. The owner rules R1 to R3 in §7 before building starts.
+Status: RULED 2026-11-19 (§7). Building starts with P45c.
 
 ## 1. The ask
 
@@ -120,7 +120,7 @@ cards, and `needs` that name servers the project already defines. It may not car
 entry that does not exist, `model` or `family` pins, or any text the profile parser refuses today, such as the send
 flag. It is inert until the owner accepts it.
 
-## 7. Rulings needed
+## 7. Rulings
 
 | # | Question | Recommendation |
 |---|---|---|
@@ -128,16 +128,26 @@ flag. It is inert until the owner accepts it.
 | R2 | When a profile fits and none was passed: a line, or seat with it? | A line and a count first. Seat with it by default only if the count shows the line is ignored. |
 | R3 | MotoProject: retire `reel-editor` as it stands and seed `reel-reviewer` and `post-builder` as the first use of this flow? | Yes. The reviewer's cinematography cards need sources: the owner's references, or a `profile teach` from links the owner picks. |
 
+The owner, 2026-11-19: "1. yes, 2, go with reocmendation, 3, Idk if I want to retire it but let it ask if they can
+just build only one pieces of it".
+
+- R1: a proposed profile waits for Accept.
+- R2: a line and a count at seating; no seating with a profile the caller did not pass.
+- R3, as the orchestrator reads it, to be confirmed by the owner: `reel-editor` is not retired and nothing is seeded
+  in MotoProject by hand. The flow asks: a proposal is one piece, a new profile or one change to a profile, and each
+  is accepted or dismissed by itself. An unused profile is shown as unused and is never removed by herdr.
+
 ## 8. Packages
 
 | Package | What | Files it owns |
 |---|---|---|
 | P45a | The `+`, the project menu line, the Profiles panel with use counts and New | `client/shell/agent_sidebar.rs`, `context_menu.rs`, `state.rs`, `mouse.rs`, a new `client/shell/nirvana_profile_panel.rs` |
-| P45b | The detector, `profile_ops`, the proposals folder, Accept and Dismiss, the Suggested list's data | a new `nirvana_profile_proposals.rs`, `nirvana_review.rs`, `nirvana_idle_review.rs` |
-| P45c | `skills`, a profile's own `mcp.json`, the shapes | `nirvana_profiles.rs`, `nirvana_gui_tools.rs`, `nirvana_agy_tools.rs` |
-| P45d | The fitting-profile line, the `profile` journal field, the four friction fixes | `nirvana_seat.rs`, `nirvana_worker.rs`, `nirvana_gate.rs`, `nirvana_run.rs` |
+| P45b | The detector and `profile_ops`, writing into P45c's store | a new `nirvana_profile_detect.rs`, `nirvana_review.rs`, `nirvana_idle_review.rs` |
+| P45c | `skills`, a profile's own `mcp.json`, the shapes; the proposals store with list, Accept, Dismiss and rollback; teach without the profile's seat pins | `nirvana_profiles.rs`, `nirvana_knowledge.rs`, `nirvana_gui_tools.rs`, `nirvana_agy_tools.rs`, a new `nirvana_profile_proposals.rs` |
+| P45d | The fitting-profile line, the `profile` journal field, the three other friction fixes | `nirvana_seat.rs`, `nirvana_worker.rs`, `nirvana_gate.rs`, `nirvana_run.rs`, `nirvana/claude/ROLE.md` |
 
-P45c lands first: P45a's New and P45b's drafts both write its format. P45d shares files with plan 43's `seat run`
+P45c lands first: P45a's New and Suggested list and P45b's drafts all go through its format and its store. P45a,
+P45b and P45d then build side by side on disjoint files. P45d shares files with plan 43's `seat run`
 package, so the two are built one after the other, not together.
 
 ## 9. Live checks owed after building
