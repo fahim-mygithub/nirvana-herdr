@@ -3,6 +3,37 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.86.1: the Jobs tab tiles evenly, and a passed job's pane closes
+
+- **Changed:** `herdr job run` and a job's tail pane no longer leave the Jobs tab as a chain of halves.
+  - After its split, a job evens the tab with a new `herdr pane tile` (API method `pane.tile`): a grid of at most 3
+    columns, no pane under 30 columns wide, fuller rows on top. Where 3 columns would make rows under 6 tall, it adds a
+    column while panes stay 30 wide. A tab tiled this way stays even through every close; the owner's own split or
+    resize there ends that until the next job. The grid's arithmetic is in `src/layout/even.rs`, and upstream's
+    `layout.rs` gains a field and five hooks.
+  - The sweep closes a passed job's pane 30 s after it ends. A failed or lost job's pane stays, the 2 newest per tab;
+    older ones close after the usual 120 s. A job whose record names its pane and has no pid yet is starting for 120 s:
+    kept, and not counted as failed.
+  - A job's record names its pane before the exec is typed, and the exec's own writes keep it. Before, an exec that
+    read the record first dropped the pane on its last write, and the sweep kept a pane no record named for ever.
+  - A failed tile, or a record that could not name the pane, prints one line; the job runs either way.
+  - Unchanged: a running job is never closed, and a tab on screen keeps all its panes.
+- **Because:** the owner, 2026-11-19, of the Jobs tab: "Can we fix the sizing?" Each job split the tab's last pane
+  to the right, so five jobs on 320 columns read 160, 80, 40, 20, 10, 10. Closing passed panes and keeping two failed
+  is the orchestrator's call inside that ask: plan 15 said a finished pane stays until the owner closes it, and the
+  0.59.0 sweep had already replaced that with a 120 s grace for passed and failed alike.
+- **Measured:** on a private server at 120x40, five jobs gave 40, 40, 40 over 60, 60, and 60, 60, 60, 60 after one
+  close; master's splits on that area work out to 60, 30, 15, 8, 7. By test: 7 jobs on 80x24 are 40 wide and 6 tall,
+  20 jobs on 120x40 are 30 wide and 8 tall, and 11 jobs on 80x24 are 4 tall, because a third column would be 26
+  wide. 24 `p96` tests pass, with `layout::` 38, `nirvana_dead` 39, `nirvana_job` 25, `api::schema` 51 and
+  `app::api::panes` 72. The 36 `p96_` controls each turned their test red; two were hollow on their first run and
+  their tests were fixed. A Sonnet review found the starting-job defect, which the fix round closed. Not checked:
+  why the owner's four finished panes stayed open, since the builder was refused the owner's job records; the
+  on-screen rule is the likeliest cause. Not seen on a real server: the two new one-line messages. A window resized
+  after a tile is not seen until the next job. From reading only, and older than this change: `herdr job run --wait`
+  may return at once when it reads the record before the exec writes its pid.
+- **If you remove this:** each new job halves the last pane again, and passed panes wait 120 s beside failed ones.
+
 ## alpha 0.86.0: by default Sonnet takes an Opus advisor in Balanced
 
 - **Changed:** the default seat table gives the Sonnet seat `advisor = { balanced = "opus" }`: nothing in Efficient,

@@ -7,6 +7,10 @@ use ratatui::{
     widgets::Borders,
 };
 
+// Nirvana fork, plan 15 sizing fix: the even grid's pure helpers live in `layout/even.rs`, so this upstream file
+// carries only the field, `tile_even` and its hooks (review F4, 2026-11-19: the fork merges upstream often).
+mod even;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct PaneId(u32);
 
@@ -89,6 +93,11 @@ pub struct TileLayout {
     /// (`split_pane`, `close_pane`, unfocused `insert_pane_near`) so internal
     /// focus excursions never corrupt it.
     prev_focus: Option<PaneId>,
+    /// Nirvana fork, plan 15 sizing fix: `Some(area)` while the tab keeps the even grid `tile_even` built for that
+    /// area (`even::even_columns`). A close rebuilds the grid for the survivors, so they grow back; a split, an insert
+    /// or a ratio change (the owner's own arrangement) ends it. Not saved: after a restore the next `tile_even` sets it
+    /// again.
+    even_area: Option<Rect>,
 }
 
 impl TileLayout {
@@ -101,6 +110,7 @@ impl TileLayout {
                 root: Node::Pane(root_id),
                 focus: root_id,
                 prev_focus: None,
+                even_area: None,
             },
             root_id,
         )
@@ -188,6 +198,7 @@ impl TileLayout {
         let node = find_pane_mut(&mut self.root, target)?;
         let new_id = PaneId::alloc();
         *node = split_node(target, direction, new_id, valid_split_ratio(ratio));
+        self.even_area = None;
         Some(new_id)
     }
 
@@ -213,6 +224,7 @@ impl TileLayout {
             return false;
         };
         *node = split_node(target, direction, moved, valid_split_ratio(ratio));
+        self.even_area = None;
         if focus {
             self.set_focus(moved);
         }
@@ -243,6 +255,7 @@ impl TileLayout {
             self.root = new_root;
             self.focus = new_focus;
             self.prev_focus = None;
+            self.retile_after_close();
             true
         } else {
             false
@@ -267,6 +280,7 @@ impl TileLayout {
         if self.prev_focus == Some(id) {
             self.prev_focus = None;
         }
+        self.retile_after_close();
         true
     }
 
@@ -292,7 +306,11 @@ impl TileLayout {
 
     /// Set the ratio of a split node at the given path.
     pub fn set_ratio_at(&mut self, path: &[bool], ratio: f32) -> bool {
-        set_ratio_at(&mut self.root, path, ratio.clamp(0.1, 0.9))
+        let changed = set_ratio_at(&mut self.root, path, ratio.clamp(0.1, 0.9));
+        if changed {
+            self.even_area = None;
+        }
+        changed
     }
 
     /// Adjust the nearest split in the given direction for the focused pane.
@@ -359,7 +377,42 @@ impl TileLayout {
             root,
             focus,
             prev_focus: None,
+            even_area: None,
         }
+    }
+
+    /// Nirvana fork, plan 15 sizing fix: rebuilds the tree as the even grid of its panes in their order for `area`
+    /// (`even::even_columns`) and keeps it even through later closes. Focus and its history are untouched. Returns
+    /// whether the shape changed.
+    pub fn tile_even(&mut self, area: Rect) -> bool {
+        self.even_area = Some(area);
+        self.retile()
+    }
+
+    /// Whether a close rebuilds the even grid (`tile_even` set it and nothing since ended it).
+    pub fn keeps_even(&self) -> bool {
+        self.even_area.is_some()
+    }
+
+    /// The column count comes from the panes there are now (review F3): eight survivors of a twenty-pane grid on
+    /// 120x40 take three columns of 40, not the four of 30 the twenty needed. The area is the tile's: a close is not
+    /// told the window's size, and widening `close_pane` for it would change upstream's callers.
+    fn retile(&mut self) -> bool {
+        let Some(area) = self.even_area else {
+            return false;
+        };
+        let ids = self.pane_ids();
+        let columns = even::even_columns(ids.len(), area);
+        let Some(tree) = even::regrid(&self.root, &ids, columns) else {
+            return false;
+        };
+        self.root = tree;
+        true
+    }
+
+    /// After a close: the even grid grows its survivors back.
+    fn retile_after_close(&mut self) {
+        self.retile();
     }
 }
 

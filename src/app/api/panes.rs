@@ -13,8 +13,8 @@ use crate::api::schema::{
     PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
     PaneScrollParams, PaneSelectionReadParams, PaneSendInputParams, PaneSendKeysParams,
     PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult,
-    PaneTarget, PaneTextPoint, PaneTextRange, PaneZoomMode, PaneZoomParams, PaneZoomReason,
-    PaneZoomResult, ResponseResult,
+    PaneTarget, PaneTextPoint, PaneTextRange, PaneTileParams, PaneTileResult, PaneZoomMode,
+    PaneZoomParams, PaneZoomReason, PaneZoomResult, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
@@ -765,6 +765,50 @@ impl App {
                     reason: (!changed).then_some(PaneResizeReason::Unchanged),
                     pane_id: pane_public_id,
                     focused_pane_id,
+                    layout,
+                },
+            },
+        )
+    }
+
+    /// Nirvana fork, plan 15 sizing fix: every pane of the pane's tab an even share, kept so through closes
+    /// (`TileLayout::tile_even`). One server-side step, so a job that adds its pane and a sweep that closes one never
+    /// race a chain of client-side resizes.
+    pub(super) fn handle_pane_tile(&mut self, id: String, params: PaneTileParams) -> String {
+        let Some((ws_idx, pane_id)) = self.resolve_optional_pane(params.pane_id.as_deref()) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        let Some(tab_idx) = self.state.workspaces[ws_idx].find_tab_index_for_pane(pane_id) else {
+            return pane_not_found(
+                id,
+                &self.public_pane_id(ws_idx, pane_id).unwrap_or_default(),
+            );
+        };
+        let Some(pane_public_id) = self.public_pane_id(ws_idx, pane_id) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        let area = self.state.view.terminal_area;
+        let changed = self
+            .state
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|ws| ws.tabs.get_mut(tab_idx))
+            .is_some_and(|tab| tab.layout.tile_even(area));
+        if changed {
+            self.schedule_session_save();
+        }
+        let Some(layout) = self.pane_layout_snapshot(ws_idx, tab_idx) else {
+            return encode_error(id, "pane_layout_unavailable", "pane layout unavailable");
+        };
+        if changed {
+            self.emit_layout_updated_snapshot(layout.clone());
+        }
+        encode_success(
+            id,
+            ResponseResult::PaneTile {
+                tile: PaneTileResult {
+                    changed,
+                    pane_id: pane_public_id,
                     layout,
                 },
             },
@@ -4348,6 +4392,94 @@ mod tests {
                 if layout.tab_id == app.public_tab_id(0, 0).unwrap()
                     && (layout.splits[0].ratio - 0.6).abs() < f32::EPSILON
         ));
+    }
+
+    /// Nirvana fork, plan 15 sizing fix: `pane.tile` evens the pane's tab in one server-side step, and a second call
+    /// finds it already even. The incident: six job panes at 1/2 to 1/32 of the width, 2026-11-19.
+    #[test]
+    fn p96_api_pane_tile_evens_the_tab_and_keeps_focus() {
+        let mut app = app_with_linked_worktree();
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let second = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        let third = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces[0].tabs[0].layout.focus_pane(second);
+        let area = ratatui::layout::Rect::new(0, 0, 300, 30);
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app.state,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            area,
+        );
+        let widths = |app: &App| -> Vec<u16> {
+            app.state.workspaces[0].tabs[0]
+                .layout
+                .panes(app.state.view.terminal_area)
+                .iter()
+                .map(|pane| pane.rect.width)
+                .collect()
+        };
+        let spread = |widths: Vec<u16>| widths.iter().max().unwrap() - widths.iter().min().unwrap();
+        let before = widths(&app);
+        assert!(spread(before.clone()) > 1, "the halving chain: {before:?}");
+        let root_public = app.public_pane_id(0, root).unwrap();
+        let tile = |app: &mut App| {
+            let response = app.handle_pane_tile(
+                "req".into(),
+                PaneTileParams {
+                    pane_id: Some(root_public.clone()),
+                },
+            );
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            let ResponseResult::PaneTile { tile } = success.result else {
+                panic!("expected pane tile response: {response}");
+            };
+            tile
+        };
+
+        let first = tile(&mut app);
+        assert!(first.changed);
+        assert_eq!(first.pane_id, root_public);
+        let after = widths(&app);
+        assert_eq!(after.len(), 3);
+        assert!(spread(after.clone()) <= 1, "even: {after:?}");
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(second));
+        assert!(app.state.workspaces[0].tabs[0].layout.keeps_even());
+        assert!(matches!(
+            &app.event_hub.events_after(0).last().expect("layout event").1.data,
+            EventData::LayoutUpdated { layout } if layout.tab_id == app.public_tab_id(0, 0).unwrap()
+        ));
+        assert!(!tile(&mut app).changed, "an even tab is unchanged");
+        let _ = third;
+    }
+
+    /// Review section 5: a tile on a zoomed tab leaves the zoom and the focus as they were; the zoom lives on the tab,
+    /// outside the layout tree the tile rebuilds.
+    #[test]
+    fn p96_api_pane_tile_on_a_zoomed_tab_keeps_zoom_and_focus() {
+        let mut app = app_with_linked_worktree();
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let second = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces[0].tabs[0].layout.focus_pane(second);
+        app.state.workspaces[0].tabs[0].zoomed = true;
+        let area = ratatui::layout::Rect::new(0, 0, 300, 30);
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app.state,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            area,
+        );
+        let response = app.handle_pane_tile(
+            "req".into(),
+            PaneTileParams {
+                pane_id: Some(app.public_pane_id(0, root).unwrap()),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneTile { tile } = success.result else {
+            panic!("expected pane tile response: {response}");
+        };
+        assert!(tile.changed, "the halving chain was evened");
+        assert!(app.state.workspaces[0].tabs[0].zoomed, "zoom kept");
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(second));
     }
 
     #[test]

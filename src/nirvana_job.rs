@@ -586,6 +586,7 @@ pub fn open_tail_pane(
             .to_owned()
     };
 
+    tile_jobs_tab(&pane_id);
     let _ = herdr_ok(&["pane", "rename", &pane_id, task_name]);
 
     // Wait for prompt and run tail
@@ -1010,6 +1011,7 @@ pub fn run_exec(home: &Path, id: &str) -> std::io::Result<i32> {
         let _ = writeln!(log_file, "{end_line}");
         record.ended = Some(now());
         record.exit = Some(0);
+        keep_placement(home, &mut record);
         write_job(home, &record)?;
         return Ok(0);
     }
@@ -1042,6 +1044,7 @@ pub fn run_exec(home: &Path, id: &str) -> std::io::Result<i32> {
             let _ = writeln!(log_file, "{end_line}");
             record.ended = Some(now());
             record.exit = Some(127);
+            keep_placement(home, &mut record);
             let _ = write_job(home, &record);
             return Ok(127);
         }
@@ -1049,6 +1052,7 @@ pub fn run_exec(home: &Path, id: &str) -> std::io::Result<i32> {
 
     let child_pid = child.id();
     record.pid = Some(child_pid);
+    keep_placement(home, &mut record);
     let _ = write_job(home, &record);
 
     #[cfg(windows)]
@@ -1146,9 +1150,23 @@ pub fn run_exec(home: &Path, id: &str) -> std::io::Result<i32> {
 
     record.ended = Some(now());
     record.exit = Some(exit_code);
+    keep_placement(home, &mut record);
     write_job(home, &record)?;
 
     Ok(exit_code)
+}
+
+/// Sizing fix: the pane and space another writer put in the record since `record` was read stay. `run_exec` holds one
+/// copy for the job's whole life; without this its last write dropped a pane named after its start.
+fn keep_placement(home: &Path, record: &mut JobRecord) {
+    if let Ok(on_disk) = read_job(home, &record.id) {
+        if record.pane.is_none() {
+            record.pane = on_disk.pane;
+        }
+        if record.space.is_none() {
+            record.space = on_disk.space;
+        }
+    }
 }
 
 fn exec_cli(args: &[String]) -> std::io::Result<()> {
@@ -1292,7 +1310,40 @@ fn pane_env() -> Vec<String> {
     env
 }
 
-fn open_job_pane(cwd: &str, name: &str, id: &str) -> Result<(Option<String>, String), String> {
+/// Nirvana fork, plan 15 sizing fix: every pane of the Jobs tab an even share (`pane.tile`, `TileLayout::tile_even`),
+/// kept so through closes. Each job split the tab's last pane in half: on 2026-11-19 the owner's Megajam Jobs tab held
+/// six panes at 1/2, 1/4, 1/8, 1/16, 1/32 and 1/32 of the width, the two running jobs about ten columns wide. A server
+/// older than the method answers an error; the pane then keeps the split's half, as before, and the job still runs.
+/// Review F5: that is no longer silent; one line on stderr, where the job's other start messages go, says why.
+fn tile_jobs_tab(pane_id: &str) {
+    if let Some(line) = untiled_note(pane_id, herdr_ok(&["pane", "tile", "--pane", pane_id])) {
+        eprintln!("{line}");
+    }
+}
+
+/// Review F6: the usage line's note on the Jobs tab's layout. Herdr keeps it even through each job and close; the
+/// owner's own split or resize in it ends that until the next job tiles it again (`TileLayout::tile_even`).
+const JOBS_TAB_NOTE: &str =
+    "each job opens a pane in the space's Jobs tab, which herdr keeps evenly tiled; \
+your own split or resize there ends that until the next job";
+
+/// The line `tile_jobs_tab` prints when `pane tile` failed, or `None` when it did not.
+fn untiled_note(pane_id: &str, tiled: Result<(), String>) -> Option<String> {
+    tiled.err().map(|why| {
+        format!("herdr job: the Jobs tab was not evened ({why}); {pane_id} keeps its split's half")
+    })
+}
+
+/// Opens the job's pane in the space's Jobs tab, names it and its space in the job's record, then types `herdr job
+/// exec` into it. The record is written before the exec starts (sizing fix): `run_exec` reads the record once at its
+/// start and writes that copy back with the pid and the end, so a pane written after the exec had read it was lost,
+/// and the sweep found no record naming the pane (`nirvana_dead::ended_of`: `Ended::Unknown`, kept for ever).
+fn open_job_pane(
+    home: &Path,
+    cwd: &str,
+    name: &str,
+    id: &str,
+) -> Result<(Option<String>, String), String> {
     let space_id = resolve_or_create_workspace().ok().flatten();
 
     let env = pane_env();
@@ -1393,7 +1444,20 @@ fn open_job_pane(cwd: &str, name: &str, id: &str) -> Result<(Option<String>, Str
             .to_owned()
     };
 
+    tile_jobs_tab(&pane_id);
     let _ = herdr_ok(&["pane", "rename", &pane_id, &format!("job·{name}")]);
+    // Review F5: a failed read or write leaves the pane unnamed in the record, and the dead-pane sweep then keeps it
+    // for ever (`nirvana_dead::ended_of`: `Ended::Unknown`); the job still runs, and one line says so.
+    let named = read_job(home, id).and_then(|mut rec| {
+        rec.space = space_id.clone();
+        rec.pane = Some(pane_id.clone());
+        write_job(home, &rec)
+    });
+    if let Err(err) = named {
+        eprintln!(
+            "herdr job: the record of {id} does not name its pane {pane_id} ({err}); the dead-pane sweep will keep that pane"
+        );
+    }
 
     // Wait for the shell prompt to be drawn
     let started = Instant::now();
@@ -1472,13 +1536,10 @@ pub fn run_job(
         None,
     )?;
 
-    match open_job_pane(&cwd, &parsed.name, &id) {
-        Ok((space_id, pane_id)) => {
-            if let Ok(mut rec) = read_job(home, &id) {
-                rec.space = space_id;
-                rec.pane = Some(pane_id);
-                let _ = write_job(home, &rec);
-            }
+    match open_job_pane(home, &cwd, &parsed.name, &id) {
+        Ok(_) => {
+            // The pane and space are in the record already (`open_job_pane`): a write here, after the exec started,
+            // could put back a copy without the exec's pid.
             println!("{id}");
         }
         Err(why) => {
@@ -1503,6 +1564,8 @@ fn run_cli(args: &[String]) -> std::io::Result<()> {
         Err(why) => {
             eprintln!("herdr job run: {why}");
             eprintln!("usage: herdr job run --name <name> [--cwd <dir>] [--wait] -- <command...>");
+            // Review F6: the Jobs tab's layout is herdr's, and the owner's own arrangement of it lasts until the next job.
+            eprintln!("  {JOBS_TAB_NOTE}");
             std::process::exit(2);
         }
     };
@@ -1519,6 +1582,47 @@ fn run_cli(args: &[String]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review F5: a failed `pane tile` says so in one line, naming the pane and the reason; a tile that worked is quiet.
+    #[test]
+    fn p96_a_failed_tile_says_why() {
+        assert_eq!(
+            untiled_note("w1:p4", Err("unknown method pane.tile".into())).as_deref(),
+            Some("herdr job: the Jobs tab was not evened (unknown method pane.tile); w1:p4 keeps its split's half")
+        );
+        assert_eq!(untiled_note("w1:p4", Ok(())), None);
+    }
+
+    /// Sizing fix: `run_exec` holds the record it read at its start; a pane and space written since stay in its later
+    /// writes, so the sweep still finds the record naming the pane.
+    #[test]
+    fn p96_an_exec_write_keeps_the_pane_named_since_it_read() {
+        let guard = crate::nirvana::with_test_home("p96_keep_placement");
+        let mut held = JobRecord {
+            id: "job-p96".into(),
+            name: "build".into(),
+            argv: vec!["cargo".into()],
+            cwd: String::new(),
+            space: None,
+            pane: None,
+            started: 1000,
+            ended: None,
+            exit: None,
+            pid: None,
+        };
+        write_job(&guard.path, &held).unwrap();
+        let mut placed = held.clone();
+        placed.space = Some("w1".into());
+        placed.pane = Some("w1:p7".into());
+        write_job(&guard.path, &placed).unwrap();
+        held.exit = Some(0);
+        keep_placement(&guard.path, &mut held);
+        write_job(&guard.path, &held).unwrap();
+        let on_disk = read_job(&guard.path, "job-p96").unwrap();
+        assert_eq!(on_disk.pane.as_deref(), Some("w1:p7"));
+        assert_eq!(on_disk.space.as_deref(), Some("w1"));
+        assert_eq!(on_disk.exit, Some(0));
+    }
 
     #[test]
     fn job_record_round_trips_json_with_spec_fields() {

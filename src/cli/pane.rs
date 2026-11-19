@@ -315,6 +315,13 @@ mod tests {
                 json!({"direction": "up"}),
             ),
             (
+                "tile",
+                vec!["--pane", "pane"],
+                "cli:pane:tile",
+                "pane.tile",
+                json!({"pane_id": "pane"}),
+            ),
+            (
                 "zoom",
                 vec![],
                 "cli:pane:zoom",
@@ -437,6 +444,18 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// Nirvana fork, plan 15 sizing fix: `herdr pane tile --pane X` sends `pane.tile` under its own id. The table test
+    /// above covers every leaf at once; this one names the tile leaf alone (review: a control on the table test
+    /// reddened a test every leaf shares).
+    #[test]
+    fn p96_pane_tile_leaf_sends_pane_tile() {
+        use serde_json::json;
+        assert_eq!(
+            serde_json::to_value(request("tile", &["--pane", "w1:p3"]).unwrap()).unwrap(),
+            json!({"id": "cli:pane:tile", "method": "pane.tile", "params": {"pane_id": "w1:p3"}})
+        );
     }
 
     #[test]
@@ -573,6 +592,7 @@ mod tests {
         for (name, default_caller) in [
             ("current", true),
             ("layout", false),
+            ("tile", false),
             ("process-info", false),
             ("edges", false),
         ] {

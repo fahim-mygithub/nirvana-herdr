@@ -563,6 +563,25 @@ pub(super) const LEAVES: &[Leaf] = &[
         PaneResizeProjection,
         PaneResize
     ),
+    // Nirvana fork, plan 15 sizing fix: `herdr pane tile [--pane ID]` evens the pane's tab (`pane.tile`).
+    Leaf {
+        name: "tile",
+        about: "Give every pane of the pane's tab an even share",
+        id: "cli:pane:tile",
+        output: Output::Json,
+        arguments: PaneTileProjection::arguments,
+        method: |matches| {
+            let mut params = PaneTileProjection::from_matches(matches)?;
+            params.pane_id = super::caller_target(
+                matches,
+                params.pane_id,
+                crate::cli::target::caller_pane_id().as_deref(),
+                false,
+                false,
+            )?;
+            Ok(Method::PaneTile(params))
+        },
+    },
     leaf!(
         "zoom",
         "Toggle or set pane zoom",

@@ -262,6 +262,16 @@ crate::cli::projection::cli_params! {
     }
 }
 
+// Nirvana fork, plan 15 sizing fix: `pane.tile` makes every pane of the pane's tab an even share (`TileLayout::tile_even`)
+// and keeps it so through closes. The incident: six job panes at 1/2 to 1/32 of the width, 2026-11-19.
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+    pub struct PaneTileParams => PaneTileProjection {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub pane_id: Option<String> => binding::target(false),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneScrollParams {
     pub pane_id: String,
@@ -731,6 +741,14 @@ pub struct PaneResizeResult {
 #[serde(rename_all = "snake_case")]
 pub enum PaneResizeReason {
     Unchanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneTileResult {
+    /// False when the tab was already even; it keeps even through closes either way.
+    pub changed: bool,
+    pub pane_id: String,
+    pub layout: PaneLayoutSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

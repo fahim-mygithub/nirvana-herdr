@@ -186,6 +186,7 @@ mod tests {
             "pane.zoom",
             "pane.focus_direction",
             "pane.resize",
+            "pane.tile",
             "pane.scroll",
             "pane.clear",
             "pane.edit_scrollback",
