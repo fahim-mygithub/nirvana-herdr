@@ -5,6 +5,8 @@
 TABLE = "src/nirvana_seats.toml"
 SEAT = "src/nirvana_seat.rs"
 REFRESH = "nirvana/seat_refresh.py"
+MEDIA = "src/nirvana_media.rs"
+SPACES = "src/nirvana_spaces.rs"
 
 T_NEON = "nirvana_seat::tests::p89_neon_takes_a_seat_at_googles_price"
 T_SCORES = "nirvana_seat::tests::p89_neon_scores_follow_the_rule_and_move_no_other_seat"
@@ -12,6 +14,10 @@ T_PICKS = "nirvana_seat::tests::p89_neon_moves_no_sota_pick_and_these_others"
 T_LISTED = "nirvana_seat::tests::p83_seats_refresh_models_prices_refits_and_scores"
 T_UPGRADE = "nirvana_seat::tests::c40a_the_shipped_default_is_new_and_every_old_one_upgrades"
 T_REFRESH = "nirvana.test_scripts.SeatRefreshTest.test_neons_cells_and_scores_are_the_probe_and_the_rule"
+T_MEDIA = "nirvana_media::tests::p89_neon_is_a_media_word_with_carbons_role_line"
+T_MEDIA_EVERY = "nirvana_media::tests::p89_every_agy_seat_a_media_class_lists_is_a_media_word"
+T_LABEL = "nirvana_spaces::tests::model_label_table_reads_every_id_right"
+T_ROWS = "nirvana_subagents::tests::labels_come_from_the_model_id_whatever_cli_runs_it"
 
 _CAPS = 'capabilities = ["code", "tools", "image", "pdf", "web", "browser", "video", "audio", "context_1m"]'
 _ON = _CAPS + "\nenabled = true"
@@ -90,4 +96,23 @@ CONTROLS = (
             T_REFRESH, "python"),
     Control("p89_refresh_probe", REFRESH, '    ("gemini-4-neon-high", 15494, 10424, 1147),',
             '    ("gemini-4-neon-high", 15494, 10424, 4147),', T_REFRESH, "python"),
+    # The fix round (the review's first finding): `herdr media prompt --seat neon` reads, names itself, gets carbon's
+    # role line, and every agy seat a media class lists is a word the command takes and its usage names
+    Control("p89_media_word", MEDIA, '            "neon" => Some(Self::Neon),\n', "", T_MEDIA, "rust"),
+    Control("p89_media_every_word", MEDIA, '            "neon" => Some(Self::Neon),\n', "", T_MEDIA_EVERY, "rust"),
+    Control("p89_media_name", MEDIA, '            Self::Neon => "neon",', '            Self::Neon => "carbon",',
+            T_MEDIA, "rust"),
+    Control("p89_media_role", MEDIA, '        MediaSeat::Neon => {\n            "watch the recording directly',
+            '        MediaSeat::Neon => {\n            "extract a timestamped transcript', T_MEDIA, "rust"),
+    Control("p89_media_usage", MEDIA, 'hydrogen|flash|neon]\n       herdr media doctor',
+            'hydrogen|flash]\n       herdr media doctor', T_MEDIA_EVERY, "rust"),
+    # Labels: the chip and the subagent row read "Neon", and a bare "Neon" is no local model
+    Control("p89_chip_line", SPACES, '        } else if has("neon") {\n', '        } else if false {\n', T_LABEL,
+            "rust"),
+    Control("p89_chip_word", SPACES, '        Family::Gemini(GeminiLine::Neon) => "Neon".to_string(),',
+            '        Family::Gemini(GeminiLine::Neon) => "Gemini".to_string(),', T_LABEL, "rust"),
+    Control("p89_chip_bare", SPACES, ' || has("hydrogen") || has("neon")\n    {', ' || has("hydrogen")\n    {',
+            T_LABEL, "rust"),
+    Control("p89_row_chip", SPACES, '        Family::Gemini(GeminiLine::Neon) => "Neon".to_string(),',
+            '        Family::Gemini(GeminiLine::Neon) => "Gemini".to_string(),', T_ROWS, "rust"),
 )

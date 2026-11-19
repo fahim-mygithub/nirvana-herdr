@@ -330,6 +330,12 @@ prices = [
 # high 0.63 (n 2 each). Carbon high thought for 6-7k output tokens and Neon high for about 1.1k. By the rule written before the
 # run, a cell under a lower effort's is raised to it, so high and xhigh sit at medium's. Every cell is a prior: no Neon
 # order is in the record.
+# What the ratios are (the review, 2026-11-18): low's 1.61 and medium's 1.55 are mostly Google's price, not tokens.
+# Neon's price is 1.5 times Carbon's on input and on output, and each order was about 15k input tokens, so tokens add
+# only about 5% on top of the price ratio; n 2 each, on one small order. Only high's 0.63 is token-driven (the 6-7k
+# against 1.1k output tokens above). Neon's price has no dated change and Carbon's doubles on 2026-11-30, so from that
+# day the same cells put Neon under Carbon at every effort, and media.video moves from carbon to neon (test
+# argons_price_doubles_on_2026_11_30_and_its_expected_use_with_it).
 use = [
   { effort = "low", windows = { "5h" = 0.002022, week = 0.0005065 }, at = "2026-11-18", basis = "prior: carbon low's cell x1.61, neon over carbon by tokens each at its own price (n 2 each, nirvana/seat_refresh.py neon); carries carbon low's refit x0.21, itself a prior: no neon order in the record" },
   { effort = "medium", windows = { "5h" = 0.002345, week = 0.0005868 }, at = "2026-11-18", basis = "prior: carbon medium's cell x1.55, neon over carbon by tokens each at its own price (n 2 each, nirvana/seat_refresh.py neon); carries carbon medium's refit x0.21, itself a prior: no neon order in the record" },

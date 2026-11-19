@@ -18,11 +18,12 @@
 //!   1280 px wide, at most 10 fps, and mono 48 kbps AAC audio, sizing the video bitrate from duration with a
 //!   safety margin and retrying once at a lower bitrate if pass 1 is still over the limit. Never overwrites
 //!   the input file.
-//! - `herdr media prompt <file> --ask "<question>" [--seat carbon|argon|hydrogen|flash]`: prints the single-line
+//! - `herdr media prompt <file> --ask "<question>" [--seat carbon|argon|hydrogen|flash|neon]`: prints the single-line
 //!   worker prompt with the full absolute path, the `view_file` instruction, and what to return. Plan 70: carbon is the
 //!   default, since it took argon's seat; it gets argon's role line, a prior (P2 measured video on argon only). Plan
 //!   71: hydrogen took flash's seat and gets flash's role line, on the owner's word that it does media work
-//!   (2026-11-12: "Hydrogen can do media level work replace flash"); not measured here.
+//!   (2026-11-12: "Hydrogen can do media level work replace flash"); not measured here. The Neon seat (2026-11-18):
+//!   neon gets carbon's role line, a prior; the router seats it for `media.video` once Carbon's price doubles.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -60,6 +61,9 @@ pub enum MediaSeat {
     /// Plan 71: Gemini 4 Hydrogen, the seat that took flash's place.
     Hydrogen,
     Flash,
+    /// The Neon seat (2026-11-18): Gemini 4 Neon. The router seats it for `media.video` once Carbon's price doubles
+    /// (2026-11-30), so a seat this command refused would end the order at exit 2.
+    Neon,
 }
 
 /// The seat `herdr media prompt` addresses without `--seat`. Plan 70: carbon, since it took argon's seat.
@@ -72,6 +76,7 @@ impl MediaSeat {
             Self::Argon => "argon",
             Self::Hydrogen => "hydrogen",
             Self::Flash => "flash",
+            Self::Neon => "neon",
         }
     }
 
@@ -81,6 +86,7 @@ impl MediaSeat {
             "argon" => Some(Self::Argon),
             "hydrogen" => Some(Self::Hydrogen),
             "flash" => Some(Self::Flash),
+            "neon" => Some(Self::Neon),
             _ => None,
         }
     }
@@ -430,8 +436,8 @@ pub fn shrink_argv(input: &Path, output: &Path, video_kbps: u64) -> Result<Vec<S
     ])
 }
 
-/// Builds the one-line prompt for an `agy` worker on `carbon`, `argon`, `hydrogen` or `flash` following probe P2's
-/// lesson: names the full absolute path, instructs the worker to open it with `view_file` (without `StartLine` or
+/// Builds the one-line prompt for an `agy` worker on `carbon`, `argon`, `hydrogen`, `flash` or `neon` following probe
+/// P2's lesson: names the full absolute path, instructs the worker to open it with `view_file` (without `StartLine` or
 /// `EndLine`), and asks for timestamps, what happens on screen, what the video shows that a transcript
 /// would lose, and findings for `ask`.
 pub fn prompt_line(path: &Path, ask: &str, seat: MediaSeat) -> Result<String, String> {
@@ -446,6 +452,13 @@ pub fn prompt_line(path: &Path, ask: &str, seat: MediaSeat) -> Result<String, St
         }
         MediaSeat::Hydrogen | MediaSeat::Flash => {
             "extract a complete timestamped transcript and visual event timeline."
+        }
+        // The Neon seat: carbon's line, a prior (neon was not in P2). Lines go by tier: the pro seats (argon, measured
+        // in P2; carbon, its successor) watch and cross-check, the fast seats (flash; hydrogen on the owner's word)
+        // transcribe. Neon is a pro seat: video, audio and PDF in on Google's page, scored at carbon + 2 where both
+        // are listed, and the seat that takes carbon's media.video pick. Its own arm, so carbon's arm keeps its text.
+        MediaSeat::Neon => {
+            "watch the recording directly and cross-check relevant source files if needed."
         }
     };
     Ok(format!(
@@ -785,7 +798,7 @@ fn doctor_cli(args: &[String]) -> std::io::Result<()> {
 
 const USAGE: &str = "usage: herdr media probe <file> [--json]
        herdr media shrink <file> [--out <path>] [--max-mb 95] [--max-px 1024] [--json]
-       herdr media prompt <file> --ask \"<question>\" [--seat carbon|argon|hydrogen|flash]
+       herdr media prompt <file> --ask \"<question>\" [--seat carbon|argon|hydrogen|flash|neon]
        herdr media doctor";
 
 fn usage_exit() -> ! {
@@ -1108,7 +1121,7 @@ fn prompt_cli(args: &[String]) -> std::io::Result<()> {
                 let raw = value();
                 seat = MediaSeat::parse(&raw).unwrap_or_else(|| {
                     eprintln!(
-                        "herdr media prompt: --seat must be carbon, argon, hydrogen or flash (got {raw:?})"
+                        "herdr media prompt: --seat must be carbon, argon, hydrogen, flash or neon (got {raw:?})"
                     );
                     std::process::exit(2);
                 });
@@ -1314,6 +1327,51 @@ mod tests {
         assert!(hydrogen_line.contains("timestamped transcript"));
 
         assert!(prompt_line(rel, "   \n\t  ", MediaSeat::Argon).is_err());
+    }
+
+    /// The Neon seat (2026-11-18): `--seat neon` reads, and neon gets carbon's role line (a prior; see `prompt_line`).
+    #[test]
+    fn p89_neon_is_a_media_word_with_carbons_role_line() {
+        assert_eq!(MediaSeat::parse("neon"), Some(MediaSeat::Neon));
+        assert_eq!(MediaSeat::Neon.word(), "neon");
+        let rel = Path::new("target/o6-media/bug.shrunk.mp4");
+        let line = prompt_line(rel, "What glitches?", MediaSeat::Neon).expect("neon prompt");
+        assert!(line.contains("Seat role (neon)"), "{line}");
+        assert!(line.contains("watch the recording directly"), "{line}");
+        assert!(
+            !line.contains("timestamped transcript and visual event"),
+            "{line}"
+        );
+    }
+
+    /// The Neon seat (2026-11-18): the table named neon for media.video and `herdr media prompt --seat neon` refused it
+    /// (the review's first finding). Every agy seat any `media.*` class of the shipped table lists, on or off, is a word
+    /// this command takes and names back, so the next seat added to the table cannot be forgotten here.
+    #[test]
+    fn p89_every_agy_seat_a_media_class_lists_is_a_media_word() {
+        let table = crate::nirvana_seat::parse(crate::nirvana_seat::DEFAULT).expect("table");
+        let mut checked = Vec::new();
+        for class in table.classes.iter().filter(|c| c.id.starts_with("media.")) {
+            for listed in &class.seats {
+                let seat = table
+                    .seat(&listed.seat)
+                    .expect("a listed seat is in the table");
+                if seat.cli != "agy" {
+                    continue;
+                }
+                let word = MediaSeat::parse(&seat.id).unwrap_or_else(|| {
+                    panic!(
+                        "{} lists agy seat {:?}, which --seat refuses",
+                        class.id, seat.id
+                    )
+                });
+                assert_eq!(word.word(), seat.id, "{} names itself back", seat.id);
+                assert!(USAGE.contains(seat.id.as_str()), "usage names {}", seat.id);
+                checked.push(seat.id.clone());
+            }
+        }
+        // The table's media classes do list agy seats, neon among them: an empty walk proves nothing.
+        assert!(checked.iter().any(|id| id == "neon"), "{checked:?}");
     }
 
     // ---- plan 40c ----

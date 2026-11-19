@@ -47,6 +47,7 @@ Choose the class that matches the work:
   Seats `carbon` (`medium`) first, falling back to `hydrogen` (`low`). Carbon took `argon`'s seat in plan 70 at the same cost; argon is off. Hydrogen took `flash`'s seat in plan 71; flash is off (at Google's prices Hydrogen costs about 1.4 times Flash per order until 2027-01-01). For visual UI work (`build.frontend` or `judge.visual`) that involves motion or a screen recording, pass `--needs video` so `herdr seat pick` routes to `carbon`.
   - Use **`carbon`** when the worker should watch the video *and* cross-check the repository's source files to diagnose a bug or verify a fix. A text transcript alone throws away spatial and temporal visual evidence.
   - Use **`hydrogen`** (`low`) when you only need a fast timestamped transcript and event extraction.
+  - From 2026-11-30, when Carbon's price doubles, the pick for this class is **`neon`**: pass `--seat neon` to `herdr media prompt`, which gives it Carbon's role line (a prior: Neon was not in P2).
 
 - **Audio recordings and voice notes (`media.audio`):**
   ```bash

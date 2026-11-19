@@ -69,7 +69,9 @@ CONTROLS = (
             T_LABEL, "rust"),
     Control("p71_chip_word", SPACES, '        Family::Gemini(GeminiLine::Hydrogen) => "Hydrogen".to_string(),',
             '        Family::Gemini(GeminiLine::Hydrogen) => "Gemini".to_string(),', T_LABEL, "rust"),
-    Control("p71_chip_bare", SPACES, ' || has("carbon") || has("hydrogen") {', ' || has("carbon") {', T_LABEL, "rust"),
+    # The Neon seat (2026-11-18) wrapped this line: its find text now ends at the brace on the next line.
+    Control("p71_chip_bare", SPACES, ' || has("carbon") || has("hydrogen") || has("neon")\n    {',
+            ' || has("carbon") || has("neon")\n    {', T_LABEL, "rust"),
     Control("p71_row_chip", SPACES, '        Family::Gemini(GeminiLine::Hydrogen) => "Hydrogen".to_string(),',
             '        Family::Gemini(GeminiLine::Hydrogen) => "Gemini".to_string(),', T_ROWS, "rust"),
     # Media: hydrogen is a word with flash's role line; the doctor names it for images
