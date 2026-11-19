@@ -3,6 +3,23 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.86.0: by default Sonnet takes an Opus advisor in Balanced
+
+- **Changed:** the default seat table gives the Sonnet seat `advisor = { balanced = "opus" }`: nothing in Efficient,
+  nothing in SOTA, and no other seat. It also states `worker_autocompact_tokens = 300000`, which until now was only a
+  built-in default no reader of the table could see. The 0.85.0 default is kept as `nirvana_seats_v17.toml`, so an
+  unedited installed table upgrades.
+- **Because:** the owner, 2026-11-18: "Go ahead and build in the consulting it might be cheaper in the long run for
+  balanced runs". Plan 43 ruling R1: "1. yes".
+- **Measured:** no pick and no expected use changes: the whole pick, for every class and mode on a cool and a hot
+  world, equals the 0.85.0 table's. A Balanced Sonnet order's argv on the default table ends `--autocompact 300000
+  --advisor claude-opus-5-5`; Sonnet in Efficient or SOTA, Opus in Balanced and an agy order get no `--advisor`. The
+  19 `p91_` controls each turned their test red. Carried from 0.84.0, and still the open question: 5 real order runs
+  made 0 unprompted consults, so whether an advisor is ever cheaper than a stronger seat is a hypothesis. A table the
+  owner has edited is not upgraded: on 2026-11-18 the owner's installed table differed from the 0.78.2 default by one
+  line (`overrides_per_run = 5`), so it took neither 0.79.0's refresh, nor Neon, nor this line.
+- **If you remove this:** Balanced Sonnet workers run without an advisor, and the ceiling is invisible in the table.
+
 ## alpha 0.85.0: a Neon seat: Gemini 4 Neon, released 2026-11-18
 
 - **Changed:** a `neon` seat: agy `gemini-4-neon-{effort}` at low, medium, high and xhigh, in the `gemini` pool, at

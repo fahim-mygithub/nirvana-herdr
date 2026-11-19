@@ -3843,3 +3843,79 @@ fn p90_exec_relaunches_once_without_an_advisor_the_claude_refuses() {
     let (argvs, _, _, out) = p90_exec_with("p90-other", "echo error: no such file 1>&2 & exit /b 1", None);
     assert_eq!(argvs.len(), 1, "{out}");
 }
+
+// ---- the advisor default (owner, 2026-11-18) ----
+
+/// D1 through `herdr seat exec` on the shipped default table, not a copy with the hunk: a Sonnet order in Balanced
+/// starts with `--advisor <opus seat's model>`; the same Sonnet order in Efficient or SOTA, an Opus order in Balanced
+/// and an agy order in Balanced start with none. The advisor's model is read from the table, not written here.
+#[cfg(windows)]
+#[test]
+fn p91_the_default_tables_worker_argv_has_the_advisor_for_balanced_sonnet_only() {
+    let (_home, project) = p29_project("p91-default");
+    std::fs::write(
+        crate::nirvana_seat::dir().join(nirvana_seat::SEATS_FILE),
+        nirvana_seat::DEFAULT,
+    )
+    .unwrap();
+    let table = nirvana_seat::parse(nirvana_seat::DEFAULT).expect("the default parses");
+    let opus = table
+        .advisor_of("sonnet", Mode::Balanced)
+        .expect("sonnet has an advisor in Balanced")
+        .expect("and it is on")
+        .model_for(Effort::Medium);
+    std::fs::write(project.root.join("recorded.jsonl"), P90_CONSULT).unwrap();
+    let run = "r1";
+    let journal = project.journal(run);
+    journal.append(1, opened()).unwrap();
+    let start = |order: &str, seat: (&str, &str, &str, &str), mode: Mode| {
+        let mut seated = seated(order);
+        seated.seat = seat.0.into();
+        seated.cli = seat.1.into();
+        seated.model = seat.2.into();
+        seated.pool = seat.3.into();
+        seated.effort = Effort::Medium;
+        seated.class = "build.bounded".into();
+        seated.mode = mode;
+        seated.not_family = Vec::new();
+        seated.cwd = project.root.display().to_string();
+        seated.order_file = project.root.join("order.md").display().to_string();
+        std::fs::write(&seated.order_file, "# Fix the merge\n").unwrap();
+        journal.append(2, Kind::Seated(Box::new(seated))).unwrap();
+        TEST_COMMAND.with_borrow_mut(|slot| {
+            *slot = Some(vec!["cmd.exe".into(), "/c".into(), "type recorded.jsonl".into()]);
+        });
+        let mut out = Vec::new();
+        // The recording is a claude stream, so an agy order may end in an error after its start; only the start's
+        // argv is read here.
+        let done = exec(&project, run, order, None, &mut out);
+        TEST_COMMAND.with_borrow_mut(|slot| *slot = None);
+        let out = format!("{done:?} {}", String::from_utf8_lossy(&out));
+        let argv = journal
+            .read()
+            .0
+            .iter()
+            .find_map(|event| match &event.kind {
+                Kind::Started { order: o, argv, .. } if o == order => Some(argv.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{order} started: {out}"));
+        (argv, out)
+    };
+    let sonnet = ("sonnet", "claude", "claude-sonnet-5-5", "max");
+    let (argv, out) = start("o1", sonnet, Mode::Balanced);
+    println!("p91 balanced sonnet argv: {argv:?}");
+    assert_eq!(after(&argv, "--advisor"), Some(opus.as_str()), "{out}");
+    assert!(argv[2].ends_with(ADVISOR_LINE), "{argv:?}");
+    for (order, seat, mode) in [
+        ("o2", sonnet, Mode::Efficient),
+        ("o3", sonnet, Mode::Sota),
+        ("o4", ("opus", "claude", "claude-opus-5-5", "max"), Mode::Balanced),
+        ("o5", ("hydrogen", "agy", "gemini-4-hydrogen-medium", "gemini"), Mode::Balanced),
+    ] {
+        let (argv, out) = start(order, seat, mode);
+        assert_eq!(after(&argv, "--advisor"), None, "{order} {} {mode:?}: {out}", seat.0);
+        assert!(!argv.iter().any(|arg| arg.contains(ADVISOR_LINE.trim())), "{order}: {argv:?}");
+    }
+    nirvana_seat::set_test_world(None);
+}
