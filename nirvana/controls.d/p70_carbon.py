@@ -58,8 +58,9 @@ CONTROLS = (
             T_LABEL, "rust"),
     Control("p70_chip_word", SPACES, '        Family::Gemini(GeminiLine::Carbon) => "Carbon".to_string(),',
             '        Family::Gemini(GeminiLine::Carbon) => "Gemini".to_string(),', T_LABEL, "rust"),
-    Control("p70_chip_bare", SPACES, ' || has("argon") || has("carbon") || has("hydrogen") {',
-            ' || has("argon") || has("hydrogen") {', T_LABEL, "rust"),
+    # The Neon seat (2026-11-18) wrapped this line: its find text now ends at the brace on the next line.
+    Control("p70_chip_bare", SPACES, ' || has("argon") || has("carbon") || has("hydrogen") || has("neon")\n    {',
+            ' || has("argon") || has("hydrogen") || has("neon")\n    {', T_LABEL, "rust"),
     Control("p70_row_chip", SPACES, '        Family::Gemini(GeminiLine::Carbon) => "Carbon".to_string(),',
             '        Family::Gemini(GeminiLine::Carbon) => "Gemini".to_string(),', T_ROWS, "rust"),
     # Media: carbon is a word, the default, and its own role name; the doctor names it for video

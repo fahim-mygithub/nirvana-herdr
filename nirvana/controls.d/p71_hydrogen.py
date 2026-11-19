@@ -30,8 +30,12 @@ CONTROLS = (
             T_HYDROGEN, "rust"),
     Control("p71_hydrogen_pool", TABLE, 'model = "gemini-4-hydrogen-{effort}"\nfamily = "google"\npool = "gemini"',
             'model = "gemini-4-hydrogen-{effort}"\nfamily = "google"\npool = "argon"', T_HYDROGEN, "rust"),
-    Control("p71_no_xhigh", TABLE, 'pool = "gemini"\nefforts = ["low", "medium", "high", "xhigh"]\ncapabilities',
-            'pool = "gemini"\nefforts = ["low", "medium", "high"]\ncapabilities', T_HYDROGEN, "rust"),
+    # The Neon seat (2026-11-18) has the same efforts line in the same pool, so the find names hydrogen's model too.
+    Control("p71_no_xhigh", TABLE,
+            'model = "gemini-4-hydrogen-{effort}"\nfamily = "google"\npool = "gemini"\n'
+            'efforts = ["low", "medium", "high", "xhigh"]\ncapabilities',
+            'model = "gemini-4-hydrogen-{effort}"\nfamily = "google"\npool = "gemini"\n'
+            'efforts = ["low", "medium", "high"]\ncapabilities', T_HYDROGEN, "rust"),
     Control("p71_no_video", TABLE, _HYDROGEN_ON, _HYDROGEN_ON.replace('"video", "audio", ', ""),
             T_HYDROGEN, "rust"),
     Control("p71_flash_on", TABLE, "every class still\n# lists it.\nenabled = false",
@@ -65,7 +69,9 @@ CONTROLS = (
             T_LABEL, "rust"),
     Control("p71_chip_word", SPACES, '        Family::Gemini(GeminiLine::Hydrogen) => "Hydrogen".to_string(),',
             '        Family::Gemini(GeminiLine::Hydrogen) => "Gemini".to_string(),', T_LABEL, "rust"),
-    Control("p71_chip_bare", SPACES, ' || has("carbon") || has("hydrogen") {', ' || has("carbon") {', T_LABEL, "rust"),
+    # The Neon seat (2026-11-18) wrapped this line: its find text now ends at the brace on the next line.
+    Control("p71_chip_bare", SPACES, ' || has("carbon") || has("hydrogen") || has("neon")\n    {',
+            ' || has("carbon") || has("neon")\n    {', T_LABEL, "rust"),
     Control("p71_row_chip", SPACES, '        Family::Gemini(GeminiLine::Hydrogen) => "Hydrogen".to_string(),',
             '        Family::Gemini(GeminiLine::Hydrogen) => "Gemini".to_string(),', T_ROWS, "rust"),
     # Media: hydrogen is a word with flash's role line; the doctor names it for images

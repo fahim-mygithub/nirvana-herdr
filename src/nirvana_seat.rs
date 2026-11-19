@@ -74,6 +74,9 @@ pub const HISTORICAL_DEFAULTS: &[&str] = &[
     // The seats refresh (2026-11-18): the default before Hydrogen's price, the record's refits and two scores moved
     // (ce8a2a08), copied before the edit so an installed copy upgrades.
     include_str!("nirvana_seats_v15.toml"),
+    // The Neon seat (2026-11-18): the default before Gemini 4 Neon took a seat (300e4603, alpha 0.79.0), copied before
+    // the edit so an installed copy upgrades.
+    include_str!("nirvana_seats_v16.toml"),
 ];
 pub const DIR: &str = "nirvana";
 pub const SEATS_FILE: &str = "seats.toml";
@@ -5441,8 +5444,8 @@ pub(crate) mod tests {
         let table = parse(&read_or_create(&path)).expect("parses");
         assert!(table.problems().is_empty(), "{:?}", table.problems());
         // Plan 12 §4: seven seats in the first version; plan 40a turned Fable 5.2 on; plan 70 put Carbon in Argon's
-        // place and turned Argon off; plan 71 put Hydrogen in Flash's place and turned Flash off; gpt-oss and local
-        // stay off.
+        // place and turned Argon off; plan 71 put Hydrogen in Flash's place and turned Flash off; the Neon seat
+        // (2026-11-18) went on before Carbon; gpt-oss and local stay off.
         let on: Vec<&str> = table
             .seats
             .iter()
@@ -5451,7 +5454,10 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(
             on,
-            ["opus", "sonnet", "haiku", "fable", "g-opus", "g-sonnet", "carbon", "hydrogen"]
+            [
+                "opus", "sonnet", "haiku", "fable", "g-opus", "g-sonnet", "neon", "carbon",
+                "hydrogen"
+            ]
         );
         let off: Vec<&str> = table
             .seats
@@ -5698,8 +5704,8 @@ pub(crate) mod tests {
             .map(|s| s.id.as_str())
             .collect();
         google_enabled.sort();
-        // Plan 70: Carbon took Argon's place. Plan 71: Hydrogen took Flash's.
-        assert_eq!(google_enabled, ["carbon", "hydrogen"]);
+        // Plan 70: Carbon took Argon's place. Plan 71: Hydrogen took Flash's. The Neon seat (2026-11-18) is a third.
+        assert_eq!(google_enabled, ["carbon", "hydrogen", "neon"]);
     }
 
     #[test]
@@ -7295,7 +7301,7 @@ pub(crate) mod tests {
 
     #[test]
     fn argons_price_doubles_on_2026_11_30_and_its_expected_use_with_it() {
-        let table = table();
+        let mut table = table();
         let argon = table.seat("argon").unwrap();
         assert!(close(
             argon.price_at(date("2026-11-29").unwrap()).unwrap().input as f32,
@@ -7331,6 +7337,15 @@ pub(crate) mod tests {
         };
         let mut video = request("media.video");
         video.needs = vec!["video".into()];
+        // The Neon seat: from carbon's doubling on, neon medium's cell is under carbon's, so neon takes this pick (the
+        // owner's call, test p89_neon_moves_no_sota_pick_and_these_others). The doubling is carbon's, so neon goes off.
+        assert_eq!(chosen(&table, &world, &video).seat, "neon");
+        table
+            .seats
+            .iter_mut()
+            .find(|s| s.id == "neon")
+            .unwrap()
+            .enabled = false;
         let got = chosen(&table, &world, &video);
         assert_eq!((got.seat.as_str(), got.effort), ("carbon", Effort::Medium));
         let week = got.windows.iter().find(|w| w.window == "week").unwrap();
@@ -7785,14 +7800,14 @@ pub(crate) mod tests {
         req_plan.mode = Mode::Sota;
 
         // Skip opus, carbon, sonnet (argon is off in the shipped table). Plan 81: SOTA lifts the reserve, so max's 5 h
-        // is used up instead; that skips Fable too.
+        // is used up instead; that skips Fable too. The Neon seat: neon (89) is the best gemini seat left, over hydrogen.
         set(&mut world_test, "max", "5h", 1.0);
         let pick_flash = chosen(&table, &world_test, &req_plan);
-        assert_eq!(pick_flash.seat, "hydrogen");
-        assert!(why(&pick_flash.runners_up, "g-opus").contains("fallback seat; hydrogen is not"));
+        assert_eq!(pick_flash.seat, "neon");
+        assert!(why(&pick_flash.runners_up, "g-opus").contains("fallback seat; neon is not"));
 
-        // Now also skip hydrogen (plan 71: it took flash's place):
-        set(&mut world_test, "gemini", "5h", 1.0); // skips hydrogen: used up
+        // Now also skip neon and hydrogen (plan 71: hydrogen took flash's place), one pool:
+        set(&mut world_test, "gemini", "5h", 1.0); // skips neon and hydrogen: used up
         let pick_g_opus = chosen(&table, &world_test, &req_plan);
         assert_eq!(pick_g_opus.seat, "g-opus");
         assert!(pick_g_opus.reason.contains("; fallback:"));
@@ -8289,11 +8304,12 @@ pub(crate) mod tests {
             Some("carbon")
         );
         assert_eq!(step_up(&table, "research.web", "carbon", NOW), None);
-        // From a lower score the nearest score above is taken (opus 82), not the top one (84); g-sonnet ties sonnet
-        // on score and price, so it is not above it.
+        // From a lower score the nearest score above is taken (82), not the top one (84); g-sonnet ties sonnet on score
+        // and price, so it is not above it. The Neon seat: neon and opus both score 82, and at the nearest score the
+        // cheaper output is taken, neon's $15 against opus's $20, so sonnet steps up to neon (the owner's call).
         assert_eq!(
             step_up(&table, "research.web", "sonnet", NOW).as_deref(),
-            Some("opus")
+            Some("neon")
         );
         assert_eq!(step_up(&table, "research.web", "haiku", NOW), None);
         assert_eq!(step_up(&table, "no.such.class", "flash", NOW), None);
@@ -8311,7 +8327,7 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(
             agy.iter().map(|seat| seat.id.as_str()).collect::<Vec<_>>(),
-            ["g-opus", "g-sonnet", "carbon", "hydrogen"]
+            ["g-opus", "g-sonnet", "neon", "carbon", "hydrogen"]
         );
         for seat in &agy {
             assert!(
@@ -8419,12 +8435,14 @@ pub(crate) mod tests {
         }
         assert_eq!(
             HISTORICAL_DEFAULTS.last().copied(),
-            Some(include_str!("nirvana_seats_v15.toml"))
+            Some(include_str!("nirvana_seats_v16.toml"))
         );
         // Plan 71: v14 went after v13, which stays historical (control p70_v13_not_historical).
         assert!(HISTORICAL_DEFAULTS.contains(&include_str!("nirvana_seats_v13.toml")));
         // The seats refresh: v15 went after v14, which stays historical (control p71_v14_not_historical).
         assert!(HISTORICAL_DEFAULTS.contains(&include_str!("nirvana_seats_v14.toml")));
+        // The Neon seat: v16 went after v15, which stays historical (control p83_v15_not_historical).
+        assert!(HISTORICAL_DEFAULTS.contains(&include_str!("nirvana_seats_v15.toml")));
         assert!(!differs_from_default(DEFAULT));
         assert!(!differs_from_default(&replace_mode_line(
             DEFAULT,
@@ -9448,10 +9466,15 @@ worker_autocompact_tokens = 300000\n";
 
     // ---- the seats refresh (2026-11-18) ----
 
-    /// `agy models` on agy 1.5.11, 2026-11-18, the ids only. No Gemini 4 Neon: `--model gemini-4-neon-low` answers
-    /// "not recognized as a known model". The two `gemini-pro-orchestrator` ids are agy's planner-and-worker pair, no
-    /// seat (the table's comment says why).
+    /// `agy models` on agy 1.5.11, 2026-11-18, the ids only. The morning's list had no Gemini 4 Neon (`--model
+    /// gemini-4-neon-low` answered "not recognized as a known model"); the evening's lists Neon's four ids and
+    /// `gemini-pro-orchestrator-neon` (the Neon seat). The three `gemini-pro-orchestrator` ids are agy's
+    /// planner-and-worker pair, no seat (the table's comment says why).
     const AGY_1_5_11_MODELS: &[&str] = &[
+        "gemini-4-neon-high",
+        "gemini-4-neon-xhigh",
+        "gemini-4-neon-medium",
+        "gemini-4-neon-low",
         "gemini-4-carbon-medium",
         "gemini-4-carbon-high",
         "gemini-4-carbon-low",
@@ -9462,6 +9485,7 @@ worker_autocompact_tokens = 300000\n";
         "gemini-4-hydrogen-xhigh",
         "gemini-4-hydrogen-medium",
         "gemini-4-hydrogen-low",
+        "gemini-pro-orchestrator-neon",
         "gemini-pro-orchestrator",
         "gemini-pro-orchestrator-argon",
         "gemini-3.8-flash-high",
@@ -9544,5 +9568,234 @@ worker_autocompact_tokens = 300000\n";
         assert!(sonnet < bars.at(Mode::Efficient), "sonnet {sonnet}");
         let (carbon, bars) = score("build.bounded", "carbon");
         assert!(carbon >= bars.at(Mode::Balanced), "carbon {carbon}");
+    }
+
+    // ---- the Neon seat (2026-11-18) ----
+
+    /// The table before the Neon seat: alpha 0.79.0's default, kept as v16.
+    fn before_neon() -> Table {
+        parse(include_str!("nirvana_seats_v16.toml")).expect("v16 parses")
+    }
+
+    /// The owner, 2026-11-18: "there might also be a new seat potentially called gemini 4 neon", and "you may need to
+    /// lookup its cost and capabilities". Neon is on in gemini's pool (agy's /usage lists it in "Gemini Models") at
+    /// low, medium, high and xhigh, each id one agy 1.5.11 lists; the Orchestrator (Neon) id gets no seat. Google's
+    /// price row; the capabilities are Google's model page (no image generation). The cells are Carbon's times Neon's
+    /// cost per order over Carbon's by tokens (nirvana/seat_refresh.py neon), raised so none falls as effort rises.
+    #[test]
+    fn p89_neon_takes_a_seat_at_googles_price() {
+        let table = table();
+        let neon = table.seat("neon").expect("a neon seat");
+        assert!(neon.enabled);
+        assert_eq!(
+            (
+                neon.cli.as_str(),
+                neon.model.as_str(),
+                neon.family.as_str(),
+                neon.pool.as_str()
+            ),
+            ("agy", "gemini-4-neon-{effort}", "google", "gemini")
+        );
+        assert_eq!(
+            neon.efforts,
+            [Effort::Low, Effort::Medium, Effort::High, Effort::Xhigh]
+        );
+        for effort in &neon.efforts {
+            let id = neon.model_for(*effort);
+            assert!(
+                AGY_1_5_11_MODELS.contains(&id.as_str()),
+                "{id} is not on agy's list"
+            );
+        }
+        // agy lists Orchestrator (Neon) too; it plans on one model and works on another, so no seat runs it.
+        assert!(AGY_1_5_11_MODELS.contains(&"gemini-pro-orchestrator-neon"));
+        assert!(table
+            .seats
+            .iter()
+            .all(|seat| !seat.model.contains("orchestrator")));
+        // Google's model page: text, image, video, audio and PDF in, a 1M context, no image generation.
+        for capability in ["image", "pdf", "video", "audio", "context_1m", "browser"] {
+            assert!(
+                neon.capabilities.iter().any(|c| c == capability),
+                "{capability}"
+            );
+        }
+        assert!(neon.capabilities.iter().all(|c| c != "image_gen"));
+        // Google's pricing page: $3 in, $15 out with thinking, $0.15 cache, no dated change.
+        let price = neon.price_at(date("2026-11-18").unwrap()).unwrap();
+        assert_eq!(
+            (
+                price.input,
+                price.output,
+                price.cache_read,
+                price.cache_write
+            ),
+            (3.0, 15.0, 0.15, 3.0)
+        );
+        assert!(
+            price
+                .basis
+                .contains("ai.google.dev/gemini-api/docs/pricing"),
+            "{}",
+            price.basis
+        );
+        assert_eq!(
+            neon.prices.len(),
+            1,
+            "no doubling row: Google's page names none"
+        );
+        // The cells: Carbon's times the measured ratio (n 2 each); high fell under medium and is raised to it, and
+        // xhigh with it. Every one a prior: no Neon order is in the record.
+        let cell = |seat: &str, effort: Effort| {
+            table
+                .seat(seat)
+                .unwrap()
+                .uses
+                .iter()
+                .find(|u| u.effort == effort)
+                .unwrap()
+                .clone()
+        };
+        let near = |a: f32, b: f32| (a / b - 1.0).abs() < 1e-3;
+        for window in ["5h", "week"] {
+            let carbon = |effort| cell("carbon", effort).windows[window];
+            let neon = |effort| cell("neon", effort).windows[window];
+            assert!(
+                near(neon(Effort::Low), carbon(Effort::Low) * 1.61),
+                "low {window}"
+            );
+            assert!(
+                near(neon(Effort::Medium), carbon(Effort::Medium) * 1.55),
+                "medium {window}"
+            );
+            assert!(
+                carbon(Effort::High) * 0.63 < neon(Effort::Medium),
+                "high's own product sits under medium"
+            );
+            assert!(
+                near(neon(Effort::High), neon(Effort::Medium)),
+                "high {window}"
+            );
+            assert!(
+                near(neon(Effort::Xhigh), neon(Effort::High)),
+                "xhigh {window}"
+            );
+        }
+        for effort in &neon.efforts {
+            let basis = &cell("neon", *effort).basis;
+            assert!(basis.starts_with("prior:"), "{effort:?}: {basis}");
+        }
+        // 0.79.0's monotonic rule, for Carbon and now Neon: no cell falls as the effort rises.
+        for seat in ["carbon", "neon"] {
+            let efforts = &table.seat(seat).unwrap().efforts;
+            for window in ["5h", "week"] {
+                let shares: Vec<f32> = efforts
+                    .iter()
+                    .map(|e| cell(seat, *e).windows[window])
+                    .collect();
+                assert!(
+                    shares.windows(2).all(|w| w[0] <= w[1]),
+                    "{seat} {window}: {shares:?}"
+                );
+            }
+        }
+        // The upgrade path: 0.79.0's default is the last historical one, it has no Neon, and it upgrades.
+        assert_eq!(
+            HISTORICAL_DEFAULTS.last().copied(),
+            Some(include_str!("nirvana_seats_v16.toml"))
+        );
+        assert!(before_neon().seat("neon").is_none());
+        assert!(!differs_from_default(include_str!(
+            "nirvana_seats_v16.toml"
+        )));
+    }
+
+    /// The Neon seat's scores, by the rule written before it was applied (nirvana/seat_refresh.py neon): in every
+    /// class that lists carbon, neon stands just before it at carbon's effort, at carbon's score plus 2, never above the
+    /// lower of opus and fable where the class lists either, else one under the best other enabled seat. No other
+    /// seat's score moves. The numbers are priors (decision 0012); the owner decides them.
+    #[test]
+    fn p89_neon_scores_follow_the_rule_and_move_no_other_seat() {
+        let (old, new) = (before_neon(), table());
+        let mut classes = 0;
+        for class in &new.classes {
+            let before = old.class(&class.id).expect("the same classes");
+            let others: Vec<(&str, f32)> = class
+                .seats
+                .iter()
+                .filter(|e| e.seat != "neon")
+                .map(|e| (e.seat.as_str(), e.score))
+                .collect();
+            let was: Vec<(&str, f32)> = before
+                .seats
+                .iter()
+                .map(|e| (e.seat.as_str(), e.score))
+                .collect();
+            assert_eq!(others, was, "{}: no other seat moves", class.id);
+            let Some(at) = class.seats.iter().position(|e| e.seat == "carbon") else {
+                assert!(class.seats.iter().all(|e| e.seat != "neon"), "{}", class.id);
+                continue;
+            };
+            classes += 1;
+            let (n, c) = (&class.seats[at - 1], &class.seats[at]);
+            assert_eq!(n.seat, "neon", "{}: neon just before carbon", class.id);
+            let claude: Vec<f32> = before
+                .seats
+                .iter()
+                .filter(|e| e.seat == "opus" || e.seat == "fable")
+                .map(|e| e.score)
+                .collect();
+            let cap = if claude.is_empty() {
+                before
+                    .seats
+                    .iter()
+                    .filter(|e| old.seat(&e.seat).is_some_and(|s| s.enabled))
+                    .map(|e| e.score)
+                    .fold(f32::MIN, f32::max)
+                    - 1.0
+            } else {
+                claude.into_iter().fold(f32::MAX, f32::min)
+            };
+            assert_eq!(
+                (n.score, n.effort, &n.only_with),
+                ((c.score + 2.0).min(cap), c.effort, &c.only_with),
+                "{}",
+                class.id
+            );
+        }
+        assert_eq!(classes, 14);
+    }
+
+    /// The picks the Neon seat moves on a cool world, every class at every mode, against 0.79.0's table: each one is
+    /// the owner's call. SOTA's moves in none, the score rule's cap.
+    #[test]
+    fn p89_neon_moves_no_sota_pick_and_these_others() {
+        let (old, new) = (before_neon(), table());
+        let mut moved = Vec::new();
+        for class in &old.classes {
+            for mode in [Mode::Efficient, Mode::Balanced, Mode::Sota] {
+                let mut request = request(&class.id);
+                request.mode = mode;
+                request.needs = class.needs.clone();
+                let seat = |table: &Table| match pick(table, &world(), &request) {
+                    Ok(pick) => format!("{} {}", pick.seat, pick.effort.word()),
+                    Err(_) => "no seat".to_owned(),
+                };
+                let (a, b) = (seat(&old), seat(&new));
+                if a != b {
+                    moved.push(format!("{} {}: {a} -> {b}", mode.word(), class.id));
+                }
+            }
+        }
+        println!("p89 moved picks: {moved:#?}");
+        assert!(moved.iter().all(|m| !m.starts_with("sota")), "{moved:#?}");
+        // Balanced build.load_bearing seats carbon high on this world, by cost under a bar the climb lowered: neon at 85
+        // still took it (the first p89 control run). Neon high's cell sits under carbon high's (0.002345 against
+        // 0.00242 of the 5 h), so neon takes it (control p89_balanced_pick_by_cost).
+        assert_eq!(
+            moved,
+            ["balanced build.load_bearing: carbon high -> neon high"],
+            "the owner's calls"
+        );
     }
 }

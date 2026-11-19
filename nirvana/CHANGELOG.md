@@ -3,6 +3,34 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.85.0: a Neon seat: Gemini 4 Neon, released 2026-11-18
+
+- **Changed:** a `neon` seat: agy `gemini-4-neon-{effort}` at low, medium, high and xhigh, in the `gemini` pool, at
+  Google's price ($3 in, $15 out, $0.15 cached) and capabilities (video, audio and PDF in, a 1M context, no image
+  generation). It stands just before Carbon in the 14 classes that list Carbon, at Carbon's score plus 2, capped at
+  the lower of Opus and Fable in the class, or at the best other seat's score minus 1 where neither is listed. Its
+  cells are Carbon's times the probe's cost ratios, raised so none falls as effort rises; all four are tagged prior.
+  The 0.79.0 default is kept as `nirvana_seats_v16.toml`, so an installed default upgrades. `herdr media prompt`
+  takes `--seat neon`, with Carbon's role line. The seat chip reads "Neon". New `seat_refresh.py neon`. agy's
+  Orchestrator (Neon) gets no seat, like the other Orchestrator ids.
+- **Because:** the owner, 2026-11-18: "there might also be a new seat potentially called gemini 4 neon", then "Did you
+  find the neon model its supposidly better then hydrogen but you may need to lookup its cost and capabilities", then
+  "Check again neon should be out and neon high sscores very well benchmark?". agy 1.5.11 refused every Neon id that
+  morning and listed all four that evening.
+- **Measured:** 14 probe orders, all answered right, $0.85 in total. Neon's cost over Carbon's per order: 1.61 at low,
+  1.55 at medium, 0.63 at high, n 2 each. The low and medium ratios are mostly Google's price ratio of 1.5 on a 15k
+  token order; only the high ratio is token-driven, where Carbon thought for 6.0k to 7.1k output tokens and Neon for
+  1.1k. Published: Vals Index 70.87%, rank 2; Artificial Analysis index 61 at xhigh, ahead of Carbon, with Fable 5.2
+  at 65; its coding agent index Neon xhigh 59, Fable xhigh 58; Neon high level with Carbon high at under half the
+  cost; Terminal-Bench 4.1 65.2% against Opus 5.5's 65.8% (Google's figure). Picks that change, the owner's calls:
+  Balanced build.load_bearing moves from Carbon high to Neon high; with the Max pool hot, SOTA's Gemini pick moves
+  from Carbon to Neon in 9 classes; a research.web step-up from Sonnet goes to Neon, not Opus (both score 82, Neon's
+  output price is lower); from Carbon's price doubling media.video goes to Neon. SOTA's first pick is unchanged.
+  The 44 `p89_` and chip controls each turned their test red. Scores are priors, and the plus 2 is generous at high,
+  where Artificial Analysis has Neon only level with Carbon. The quota per order could not be read: another run was
+  spending the same pool.
+- **If you remove this:** the router never seats Neon, which in this probe cost 0.63 times Carbon per order at high.
+
 ## alpha 0.84.0: Claude workers can have an advisor, counted, and compact at 300k outside SOTA
 
 - **Changed:** a claude seat may name an advisor per mode (`advisor = { balanced = "opus" }`). Its workers launch
