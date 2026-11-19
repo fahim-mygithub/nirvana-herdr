@@ -14,7 +14,9 @@ apps and to run work that outlives one session. You plan, seat, watch and gate. 
    files it owns. Two orders never own the same file.
 2. For each order: `herdr seat pick`, then start it on the seat it returns. The `seat` skill says how.
 3. Workers run in parallel. End your turn while they run; between turns no model runs and herdr watches.
-4. herdr wakes you when an order ends, asks, fails or stalls.
+4. herdr wakes you when an order ends, asks, fails or stalls, and when its worker died with no end record (a server
+   restart, or its supervisor died): continue that one from its checkpoint, redo it, or ask. One herdr could not
+   prove dead stays running: read it, and stop it if it is dead.
 5. herdr gates each `done` or `blocked` delivery itself, before it wakes you, and the wake says
    `<order> gated <verdict>: <reason>` (no reason on a pass): merge a pass, read a send-back's child, answer an
    asked, and seat what comes next. A `blocked` one is gated for what it did deliver and then asked, never sent
@@ -24,7 +26,18 @@ apps and to run work that outlives one session. You plan, seat, watch and gate. 
    `herdr gate run`, which names the next step. A gate by hand of an order sent back or asked gives its child or its
    question again; a gate that stopped is `the run asks: herdr's gate of <order> stopped`, and you run it by hand. A
    long `test:` delays the wake by as long. In MotoProject 1 of 26 deliveries was gated by hand in 8 days, and an
-   invented source went unread.
+   invented source went unread. A refusal no worker can fix (`owns:` too narrow with no live order holding the
+   files, a `test:` that does not parse, herdr's own files) seats no child: the wake says
+   `<order> gated amend: herdr gate amend <order> ...; <reason>; full line: herdr gate run <order>`. The wake cuts
+   the reason at 90 characters and marks the cut with `…`, so a cut amend line is never whole: run
+   `herdr gate run <order>` for it. Run that line, with the flags fixed if they are wrong, and it re-gates the same
+   branch; `--send-back` seats a worker instead. An order gated asked waits on the owner and cannot be amended. A
+   new file outside `owns:` that no live order owns is a note, not a fail, unless it is fenced (a dot-prefixed path
+   other than `.gitkeep`, `nirvana/controls.d/`, `build.rs`, `conftest.py`, test or build config such as
+   `pytest.ini`, `pyproject.toml` or `Makefile`, a git hook, or a credential-looking file name): that is the worker's
+   fail. If the brief truly needs that file, stop the child (`herdr seat stop <child>`) and run `herdr gate amend
+   <order> --owns <path>`. A parent whose child has delivered, been gated or merged is not amended; amend the child.
+   A merge you make yourself is recorded with `herdr gate merge <order> --by-hand "<reason>"`.
 6. The run ends when its plan is done and gated. Answer the owner in one message.
 
 Call herdr by the path the session digest names, or as the skills write it. A plain `herdr` on PATH may be
@@ -66,6 +79,9 @@ chore, can go to a `worker-*` subagent instead of a pane worker; the agent's nam
 - Every subagent you spawn names its model and its effort: a `worker-*` agent names both. One that names neither
   runs on your own seat at your own effort, and the `PreToolUse` hook refuses it.
 - A merge to `main` asks the owner, except in auto mode within its budgets (§12 R6).
+- In auto mode, ask the owner with `herdr ask add "<text>" [--option <a> --option <b> --recommended <a>] [--blocks
+  <order>]`, never `AskUserQuestion`: the `guard-ask` hook refuses it, since one modal held a run for 406 minutes.
+  Keep working on what does not need the answer, and name the question id in your end-of-turn message.
 - Some skills, MCP servers and plugins may be off in this folder by its Preload preset (`herdr preload why`). When
   you need one, say which, and the owner presses `p` in Preload or switches it on there (plan 13 §4).
 - An order that drives a desktop app names its `.mcp.json` server in `needs`: `--needs bambu-studio-beta` for Bambu

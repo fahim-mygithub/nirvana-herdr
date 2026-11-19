@@ -31,6 +31,10 @@ pub const DISALLOWED: [&str; 1] = ["ReportFindings"];
 /// §3.3: "It needs Bash, Read, Edit, Write, Grep, Glob, the Agent tool for the guarded spawn, `AskUserQuestion`,
 /// and the herdr skills." The herdr skills come through the `Skill` tool. `Task` is the Agent tool's other name (a
 /// `-p` session's tool list calls it that).
+///
+/// `AskUserQuestion` stays: plan 43 A4 refuses it only while a run is open in auto mode, and that is known only when
+/// the tool is called (`herdr nirvana guard-ask`, `nirvana_claude::guard_ask_decision`), not at launch. A run opens
+/// after the session starts, and with no run, or one not in auto mode, the owner is there to answer the modal.
 pub const NEEDED: [&str; 10] = [
     "Bash",
     "Read",

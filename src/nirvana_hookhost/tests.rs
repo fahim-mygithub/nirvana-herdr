@@ -105,6 +105,9 @@ fn agy_tool_names_map_to_the_claude_tools_the_guards_match() {
     assert_eq!(claude_tool("notebook_edit"), Some("NotebookEdit"));
     assert_eq!(claude_tool("edit_notebook"), Some("NotebookEdit"));
     assert_eq!(claude_tool("run_workflow"), Some("Agent"));
+    // Plan 43 A4: agy's modal question, from its tool list.
+    assert_eq!(claude_tool("ask_question"), Some("AskUserQuestion"));
+    assert_eq!(claude_tool("ask_permission"), None);
     assert_eq!(claude_tool("send_message"), None);
     assert_eq!(claude_tool("browser_subagent"), None);
 }
@@ -499,4 +502,27 @@ fn the_tool_table_is_the_shared_fixture() {
         AGY_TOOLS.iter().map(|(name, tool)| ((*name).to_owned(), (*tool).to_owned())).collect();
     have.sort();
     assert_eq!(have, want);
+}
+
+/// Plan 43 A4: agy's `ask_question` reaches `guard-ask` as Claude's `AskUserQuestion`, the guard's refusal is agy's
+/// deny, and no other verb runs for it. The payload is built on P41a's shape: no hook payload for `ask_question` was
+/// ever captured.
+#[test]
+fn p85_agys_ask_question_runs_the_ask_guard_and_its_refusal_is_a_deny() {
+    let state = Scratch::new("ask");
+    let mut raw = fixture("pre_tool_read_file");
+    raw["toolCall"] = json!({"name": "ask_question", "id": "call_1", "args": {"Question": "Ship it?"}});
+    let hin = agy("guard-ask", &raw, &state.0);
+    assert!(!hin.skip, "guard-ask runs for ask_question");
+    assert_eq!(hin.hook["tool_name"], "AskUserQuestion");
+    assert_eq!(hin.hook["tool_input"]["Question"], "Ship it?");
+    let refusal = json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+        "permissionDecisionReason": "Run r1 is in auto mode"}});
+    assert_eq!(
+        answer(&hin, &format!("{refusal}\n")),
+        json!({"decision": "deny", "reason": "Run r1 is in auto mode"})
+    );
+    assert_eq!(answer(&hin, ""), json!({"decision": "allow"}));
+    assert!(agy("guard-read", &raw, &state.0).skip);
+    assert!(agy("guard-ask", &fixture("pre_tool_read_file"), &state.0).skip);
 }

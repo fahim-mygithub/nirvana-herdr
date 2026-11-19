@@ -16,6 +16,8 @@
 //!   blocking forever (§7.2 "No dead end").
 //! - `herdr nirvana statusline`: each drawn pool's tightest window, its reset when the width allows, and the open
 //!   orders.
+//! - `herdr nirvana guard-ask`, the `PreToolUse` hook on `AskUserQuestion`: while a run is open in auto mode, refuses
+//!   the modal question and points to `herdr ask add` (plan 43 A4).
 //!
 //! Every hook stays quiet and fast when it has nothing to say, and never fails the turn: a problem prints nothing.
 
@@ -2830,9 +2832,87 @@ fn guard_read_cli() -> std::io::Result<()> {
     Ok(())
 }
 
+// ---- guard-ask (PreToolUse on AskUserQuestion): no modal question in auto mode (plan 43 A4) ----
+//
+// Plan 43 C4: on 2026-11-15 at 07:49Z, in the owner's autonomous night, the orchestrator called AskUserQuestion. The
+// modal held for 406 minutes; 9 passed orders waited 173 to 407 minutes to merge and nothing ran from 11:43Z to
+// 14:36Z. The owner's ruling R5 on 2026-11-18: "5.yes".
+//
+// "Auto mode" here is the run's own: the `auto` key of its journal's `opened` event, which the first `herdr seat run`
+// of a run writes (on unless `--no-auto`), and which `herdr run resume` prints as "auto mode: continue without
+// asking" (R6). It is not Claude Code's permission mode: Nirvana Claude's permission mode comes from its settings at
+// launch and says nothing of whether a run is meant to go on without the owner. The state is read when the hook
+// fires, so a run opened after the session began counts, and with no open run in auto mode the modal works as before.
+
+/// The open run in auto mode the project holds, the first in name order; `None` when there is none, or when no
+/// journal can be read (the guard fails open, as `guard-read` does).
+pub fn auto_run(project: &Project) -> Option<String> {
+    open_runs(project)
+        .into_iter()
+        .find(|(_, state)| state.auto())
+        .map(|(run, _)| run)
+}
+
+/// The refusal. It leads with why and then what to do, since the model reads it as the tool's result. Owner ruling
+/// R5 took three things: file it with `herdr ask add`, keep working on what does not depend on it, name the id in the
+/// end-of-turn message. Plan 42 P42a: `herdr ask add` prints `q<n> open`, and asking the same text again prints the
+/// answer once there is one. The Questions square (P42b) and the answer on the next prompt (P42d) are not built yet,
+/// so the end-of-turn message is where the owner sees the question.
+pub fn ask_refusal(run: &str) -> String {
+    format!(
+        "Run {run} is in auto mode, so do not ask with AskUserQuestion: a modal question stops the whole run until the \
+         owner comes back (on 2026-11-15 one held a run for 406 minutes). File the question instead: `herdr ask add \
+         \"<text>\" [--option <a> --option <b> --recommended <a>] [--blocks <order>]`. Then keep working on everything \
+         that does not depend on the answer, and name the question id it prints (such as q3) in your end-of-turn \
+         message. Asking the same text again later prints the answer once the owner has given one."
+    )
+}
+
+/// The `PreToolUse` answer for an `AskUserQuestion` call, or `None` to allow it. Only the orchestrator is guarded
+/// (`should_skip_orchestrator_hook`): a subagent, a worker in its worktree and every other Claude Code session are
+/// allowed. Workers are untouched in any case: they run `claude -p`, they ask through their `asked` order state, and
+/// `nirvana_worker::ENV_REMOVED` takes `NIRVANA_ORCHESTRATOR` out of their environment.
+pub fn guard_ask_decision(
+    hook: &Value,
+    cwd: Option<&Path>,
+    is_orchestrator: bool,
+    project: Option<&Project>,
+) -> Option<Value> {
+    if should_skip_orchestrator_hook(hook, cwd, is_orchestrator) {
+        return None;
+    }
+    let run = auto_run(project?)?;
+    Some(json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": ask_refusal(&run),
+        }
+    }))
+}
+
+fn guard_ask_cli() -> std::io::Result<()> {
+    let hin = hook_in("guard-ask");
+    let mut out = String::new();
+    if !hin.skip {
+        let cwd = hook_cwd(&hin.hook).or_else(|| std::env::current_dir().ok());
+        let project = project_at(cwd.as_deref());
+        if let Some(decision) = guard_ask_decision(
+            &hin.hook,
+            cwd.as_deref(),
+            is_orchestrator_env(),
+            project.as_ref(),
+        ) {
+            let _ = writeln!(out, "{decision}");
+        }
+    }
+    hin.answer(&out);
+    Ok(())
+}
+
 // ---- the CLI ----
 
-pub const SUBCOMMANDS: [&str; 10] = [
+pub const SUBCOMMANDS: [&str; 11] = [
     "digest",
     "guard-spawn",
     "subagent-stop",
@@ -2843,9 +2923,10 @@ pub const SUBCOMMANDS: [&str; 10] = [
     "guard-edit",
     "check-edit",
     "guard-read",
+    "guard-ask",
 ];
 
-/// `herdr nirvana <digest|guard-spawn|subagent-stop|stop|statusline|log-usage|prompt-baseline|guard-edit|check-edit|guard-read>`, each reading Claude Code's JSON on stdin.
+/// `herdr nirvana <digest|guard-spawn|subagent-stop|stop|statusline|log-usage|prompt-baseline|guard-edit|check-edit|guard-read|guard-ask>`, each reading Claude Code's JSON on stdin.
 /// `None` when `name` is not one of these.
 pub fn cli(name: &str) -> Option<std::io::Result<()>> {
     Some(match name {
@@ -2859,6 +2940,7 @@ pub fn cli(name: &str) -> Option<std::io::Result<()>> {
         "guard-edit" => guard_edit_cli(),
         "check-edit" => check_edit_cli(),
         "guard-read" => guard_read_cli(),
+        "guard-ask" => guard_ask_cli(),
         _ => return None,
     })
 }

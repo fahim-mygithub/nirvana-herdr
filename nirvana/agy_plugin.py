@@ -110,6 +110,10 @@ TOOLS = {
     "Read": ["read_file", "view_file"],
     "Bash": ["run_command"],
     "Agent": ["invoke_subagent", "define_subagent", "run_workflow"],
+    # Plan 43 A4: agy's modal question, from its tool list (every recorded init, and agy 1.5.11's binary). No hook
+    # payload for it was captured, so the name a hook sees is unmeasured. `MAIN_TOOLS` does not give it to the
+    # orchestrator agent, so this row is a second fence.
+    "AskUserQuestion": ["ask_question"],
 }
 
 # Claude agent -> what agy gets. Only the orchestrator maps. Each worker file fixes a Claude model and effort and

@@ -214,6 +214,24 @@ pub fn gaps(text: &str) -> Vec<Found> {
                     );
                 }
             }
+            // Plan 43 A1: a refusal no worker could fix; the brief's or the gate's gap, not the seat's.
+            Kind::Gated {
+                verdict, reason, ..
+            } if verdict == crate::nirvana_gate::Outcome::Amend.word() => {
+                let reason = reason.clone().unwrap_or_else(|| "no reason given".into());
+                let cause = reason
+                    .split_once("; ")
+                    .map_or(reason.as_str(), |(_, rest)| rest)
+                    .to_owned();
+                let axis = cause.split(':').next().map(str::trim).map(str::to_owned);
+                push(
+                    "brief_fault",
+                    format!("the gate found a {class} order's brief or itself at fault: {cause}"),
+                    false,
+                    axis,
+                    cause,
+                );
+            }
             Kind::RateLimited {
                 pool,
                 window,
@@ -724,7 +742,7 @@ pub fn draft(key: &str, rows: &[&Row], record: &[RecordLine]) -> Proposal {
     let effort = first.effort.clone().unwrap_or_else(|| "?".into());
     let tagged = rows.iter().any(|row| row.found.outcome_tagged);
     let (target, changed, remove) = match first.kind.as_str() {
-        "send_back" | "send_back_cap" => {
+        "send_back" | "send_back_cap" | "brief_fault" => {
             let axis = first.axis.clone().unwrap_or_default();
             (
                 "skills/seat/SKILL.md".to_owned(),

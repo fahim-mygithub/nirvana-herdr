@@ -868,3 +868,61 @@ fn the_sweep_does_not_follow_a_junction_at_the_dot_folder() {
     assert!(held.exists(), "the sweep went through the junction");
     let _ = std::fs::remove_dir(root.0.join(".nirvana"));
 }
+
+/// Plan 43 A6: an order the restart check interrupted keeps its pane the stopped hour, as it did while it read running;
+/// an order interrupted any other way closes at the ordinary grace.
+#[test]
+fn a_restart_interrupted_order_keeps_its_pane_the_stopped_hour() {
+    let (home, root) = (Temp::new("home"), Temp::new("proj"));
+    project_with(&root.0, "r", &[("died", "wP:pD"), ("cut", "wP:pC")], &["died", "cut"]);
+    let at = 1_000_050;
+    append(
+        &root.0,
+        "r",
+        json!({"v":1,"at":at,"event":"interrupted","order":"died",
+            "why":format!("{} (no supervisor holds its lock and worker pid 1 is gone)", nirvana_run::WORKER_DIED)}),
+    );
+    append(
+        &root.0,
+        "r",
+        json!({"v":1,"at":at,"event":"interrupted","order":"cut","why":"stopped by `herdr seat stop`"}),
+    );
+    let herdr = FakeHerdr::new(vec![
+        agent_pane("wP:p1", "wP:t1"),
+        pane("wP:pD", "wP:t2", Some(&worker("died")), &root.0),
+        pane("wP:pC", "wP:t2", Some(&worker("cut")), &root.0),
+    ]);
+    herdr.sweep(&home.0, at + CLOSE_GRACE_S + 60);
+    assert_eq!(herdr.closed(), vec!["wP:pC".to_owned()]);
+}
+
+/// Plan 43 A6: the restart check reads the projects the record names and the projects the panes' folders are in, each
+/// once.
+#[test]
+fn restart_projects_reads_the_record_and_climbs_the_panes_folders() {
+    let (a, b, scratch) = (Temp::new("proja"), Temp::new("projb"), Temp::new("rec"));
+    for root in [&a.0, &b.0] {
+        std::fs::create_dir_all(root.join(".nirvana").join("runs")).unwrap();
+    }
+    let record = scratch.0.join("record.jsonl");
+    let journal = a.0.join(".nirvana").join("runs").join("r").join("journal.jsonl");
+    std::fs::write(
+        &record,
+        format!("{}\n", json!({"order": "o", "journal": format!("{}#9", journal.display())})),
+    )
+    .unwrap();
+    let worktree = b.0.join(".nirvana").join("worktrees").join("o");
+    std::fs::create_dir_all(&worktree).unwrap();
+    // A temp folder no root is under, so the record's fixture root is kept here.
+    let elsewhere = scratch.0.join("no-temp");
+    let cwds = vec![
+        worktree.display().to_string(),
+        a.0.display().to_string(),
+        String::new(),
+    ];
+    let roots = restart_projects(&record, &elsewhere, &cwds);
+    assert_eq!(roots, vec![a.0.clone(), b.0.clone()]);
+    // The real temp folder: the record's root is a fixture there and is left out; the panes' folders still count.
+    let roots = restart_projects(&record, &std::env::temp_dir(), &cwds[..1]);
+    assert_eq!(roots, vec![b.0.clone()]);
+}

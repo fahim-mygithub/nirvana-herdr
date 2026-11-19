@@ -3,6 +3,104 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.83.0: the gate sends a refusal no worker can fix to the orchestrator, not to a child
+
+- **Changed:** each failing gate axis carries whose fault it is: the worker's, the brief's or the gate's. When no
+  failing axis is the worker's, the gate seats no child: the verdict is `gated amend`, its reason opens with the exact
+  `herdr gate amend <order> [--owns g]... [--test c] [--send-back]` line, and the wake ends with `herdr gate run
+  <order>` for the full text. An amend is journaled as `gated amending` with the old and new values before the re-gate,
+  and an order that is asked, not yet gated, or whose child has gone on is refused. A new file outside `owns:` that no
+  live order of the run owns is a note, unless it is fenced: a dot-prefixed path, `nirvana/controls.d/`, `build.rs`,
+  `conftest.py`, test and build config (`pytest.ini`, `tox.ini`, `setup.cfg`, `pyproject.toml`, `Makefile`,
+  `justfile`, `rust-toolchain`), git hook names, key files, or a file named for a secret or credential. A fenced file
+  stays the worker's fail and its reason names both ways out. `owns:` ignores case on Windows. The sources axis counts
+  local files the worker read with a file tool or a shell read, scoped to the reading command's own arguments; a read
+  that errored counts for nothing; a local entry must exist or look like a path; research.read's local entries are
+  not checked; a cited web URL never fetched still fails in every class. herdr's own `.nirvana/` files are set aside
+  around the rebase per worktree and restored on every exit, never over newer edits. `herdr gate merge <order>
+  --by-hand "<reason>"` records a merge the orchestrator made itself. An order left amending is not counted against
+  its seat. 13 older gate controls that the change had hollowed are repaired. Plan 43 A1, A2, A3, A7.
+- **Because:** on Megajam run ia1, 46 of 91 gate refusals could not be fixed by a worker: 29 were the brief's fault and
+  17 the gate's. The send-back child was stopped at 0 minutes 35 times, research.read passed its first gate 0 of 6
+  times, and 43 orders landed by hand with no record. The owner's rulings R4 and R5, 2026-11-18: "4. Yes". Two reviews
+  of the build then found a worker's own syntax error read as the brief's, new runnable and secret files passing as
+  notes, the amend line cut at 90 characters, failed reads vouching, invented citations passing, and amends unjournaled.
+- **Measured:** 152 gate tests pass, and 99 controls each turned their test red. On ia1's real streams
+  a1-asset-wiring-audit, its -s1 and s2-sound-audit-s1 now pass, w7-size-audit fails only on the URLs it never
+  fetched, and r15 and r16 are notes. Hypotheses until a live run: that completion rises, and that the fence list and
+  the per-segment read rule are the right width; the fence is the orchestrator's reading of a safety line inside the
+  owner's ruling, and the owner can change it. Known loose ends: a Grep tool call on a folder vouches for every file
+  under it; a script that reads anything vouches for every path it quotes; amending a fenced file means stopping the
+  gate's lesson review first. No live run has gone through this gate.
+- **If you remove this:** brief faults again seat children that the orchestrator stops, local audits loop on "not
+  read", a worker's `.env` or CI file is judged like any other new file, and hand merges leave no record.
+
+## alpha 0.82.0: Restart Claude from the Seats panel and from a space's menu
+
+- **Changed:** in the Seats panel the words `restart to switch` are a button, and `r` does the same while the row
+  asks for a restart. A space's right-click menu offers Restart Claude, labelled "to switch seat" when the running
+  seat differs from the mode's. Both restart only that space's Nirvana Claude pane: the server action takes a
+  `pane_id` and refuses a pane that is not in the tab. A Claude that is not idle or done needs a second press, which
+  lapses after 5 s and is cancelled by any other key, a click elsewhere, a right-click or the wheel. After a restart is
+  sent the words read `restarting…` and nothing restarts again until the seat flips, or for at most 15 s. With no
+  `pane_id` the tab menu behaves as before.
+- **Because:** the owner, 2026-11-18, with a screenshot: "We should be able to click restart in this modal or if your
+  right click the project an option appears to restart that specific project." The row asked for a restart that
+  nothing in the window could do. The review of the first build found that a second press restarted the fresh Claude
+  again, and that the existing action restarted every Claude in the tab, workers included.
+- **Measured:** 36 `nirvana_seats`, 13 `nirvana_restart` and 8 `chrome_context` tests pass. A test takes pane ids from
+  the real snapshot code and passes them through the server's own parse. The 44 controls, 2 of them repaired `p20_`
+  ones, each turned their test red. From the code: the SessionStart hook has no matcher, so a resumed session rewrites
+  its seat record and the hint clears. Not seen in a live window. Hypotheses: the 5 s and 15 s windows. Not proven:
+  that the pane filter spares a real worker process; the test proves which panes are handed to the stopper.
+- **If you remove this:** the row asks for a restart nothing can do, the only restart is the tab menu's, which stops
+  every Claude in the tab, and a double press restarts twice.
+
+## alpha 0.81.0: a worker a restart killed is found, checkpointed and reported
+
+- **Changed:** herdr's sweep checks every open run of the last 3 days once per server start, and every minute checks
+  runs that hold a stale `<order>.pane` marker. An order reads dead only when no supervisor holds its lock and its
+  worker pid is gone or now names a process created more than 2 s after `started`. A dead order gets a checkpoint of
+  its real diff, an `interrupted` event and a wake that names the checkpoint and the way on; the decision is made again
+  under the journal's lock before anything is written. An order herdr cannot prove dead stays running, with one
+  `live_doubt` line until its worker starts again. Off Windows and Linux a free lock proves nothing, so every order
+  there reads as a doubt. One mark file per server start, so two servers do not undo each other, and a start whose run
+  failed to write is not marked. A rate-limit reseat writes the parent's `ended` with outcome `reseated` and keeps why
+  it stopped. agy's "Resets in 79h6m53s" fills `resets_at`. In auto mode a reset more than 6 hours away asks instead
+  of deferring. The checkpoint reads the worktree with `status --no-optional-locks` and `diff-index`. Plan 43 A6, A7.
+- **Because:** run ia1 (plan 43, C9 to C11). 7 workers died in restarts after 481 worker-minutes and stayed listed as
+  running until the owner said Nirvana had restarted. ia0-pathprobe sat 626 minutes with its supervisor dead, and the
+  stall detector lives inside the supervisor. 5 reseated parents had no end. An agy 429 named a 79 h reset and herdr
+  recorded none. The review of the first build: on macOS every running order would have read dead; one shared mark
+  thrashed between two servers; and with the reset now read, an auto order could have been parked 79 h in silence.
+- **Measured:** 25 restart tests pass, one with a real process holding a real lock: the order reads live and nothing
+  is written, and after the process is killed the next pass interrupts it with a real diff. The 60 `p86_` controls
+  each turned their test red. `nirvana_dead` 32 of 32 and `nirvana_worker` 85 of 85. Porcelain `git diff HEAD` rewrote
+  a stat-dirty index even with `--no-optional-locks` (git 2.50.1), hence `diff-index`. Hypotheses, not measured: the
+  72 h lookback, the 300 s grace for a seated order, and the 6 h cap, which is the orchestrator's choice for the owner
+  to change. Not done: nothing was compiled off Windows; no live restart was run; a deferred order still relaunches
+  on its spent seat when it wakes at another pool's earlier reset, as in ia1.
+- **If you remove this:** a restart leaves dead orders listed as running until someone says so, a supervisor that
+  dies with its pane goes unseen for hours, and a long agy reset parks an order for days without asking anyone.
+
+## alpha 0.80.0: in auto mode the orchestrator files its question, it does not stop on a modal
+
+- **Changed:** a new PreToolUse hook, `herdr nirvana guard-ask`, runs on `AskUserQuestion` and on agy's
+  `ask_question`. While the project holds an open run whose `opened` event has `auto: true`, it refuses the
+  orchestrator's modal question and says to file it with `herdr ask add`, keep working on what does not depend on the
+  answer, and name the question id at the end of the turn. ROLE.md says the same in one sentence. Workers, subagents
+  and sessions outside the orchestrator are not touched, and with no open auto run the modal works as before. The hook
+  fails open: no project, no journal or a timeout allows the modal. Plan 43 A4.
+- **Because:** plan 43 C4. On 2026-11-15 at 07:49Z, run ia1's orchestrator called AskUserQuestion in the owner's
+  autonomous night. The modal held for 406 minutes, 9 passed orders waited 173 to 407 minutes to merge, and nothing ran
+  from 11:43Z to 14:36Z. The owner's ruling R5, 2026-11-18: "5.yes".
+- **Measured:** 7 new Rust tests and 27 plugin tests pass, and the 15 `p85_` controls each turned their test red. On a
+  copy of ia1's 11 MB journal the hook refuses in about 440 ms on a debug build, inside its 10 s timeout. Hypotheses,
+  not measured: that a live orchestrator files the question and keeps working after the refusal, and the name agy's
+  hook sees for `ask_question`. Known gap: the Questions square (P42b) and the answer on the next prompt (P42d) are not
+  built, so a filed question shows only in the end-of-turn message and in `herdr ask list`.
+- **If you remove this:** an auto run can again stop for hours on one modal question while the owner is away.
+
 ## alpha 0.79.0: the seat table refreshed: Hydrogen at Google's price, run ia1's record, agy 1.5.11
 
 - **Changed:** Hydrogen's price row is Google's own ($1.50 in, $7.50 out, $0.075 cache), not Flash 3.8's, and its

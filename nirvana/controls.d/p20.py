@@ -152,8 +152,8 @@ CONTROLS = (
     Control(
         'p20_seats_square_orchestrator_row',
         'src/client/shell/nirvana_seats.rs',
-        '        let mut text = format!(\n            "Nirvana Claude \\u{b7} {} {} \\u{b7} {}",\n',
-        '        let mut text = format!(\n            "Nirvana \\u{b7} {} {} \\u{b7} {}",\n',
+        '        let text = format!(\n            "Nirvana Claude \\u{b7} {} {} \\u{b7} {}",\n',
+        '        let text = format!(\n            "Nirvana \\u{b7} {} {} \\u{b7} {}",\n',
         'the_seats_square_shows_orchestrator_row_with_and_without_restart_to_switch',
         'rust',
     ),
@@ -161,8 +161,8 @@ CONTROLS = (
     Control(
         'p20_seats_square_restart_to_switch',
         'src/client/shell/nirvana_seats.rs',
-        '        if orch.restart_to_switch {\n            text.push_str(" \\u{b7} restart to switch");\n        }\n',
-        '        if false && orch.restart_to_switch {\n            text.push_str(" \\u{b7} restart to switch");\n        }\n',
+        '        lines.push(Line::Orchestrator(text, orch.restart_to_switch));\n',
+        '        lines.push(Line::Orchestrator(text, false && orch.restart_to_switch));\n',
         'the_seats_square_shows_orchestrator_row_with_and_without_restart_to_switch',
         'rust',
     ),
