@@ -446,6 +446,18 @@ mod tests {
         }
     }
 
+    /// Nirvana fork, plan 15 sizing fix: `herdr pane tile --pane X` sends `pane.tile` under its own id. The table test
+    /// above covers every leaf at once; this one names the tile leaf alone (review: a control on the table test
+    /// reddened a test every leaf shares).
+    #[test]
+    fn p96_pane_tile_leaf_sends_pane_tile() {
+        use serde_json::json;
+        assert_eq!(
+            serde_json::to_value(request("tile", &["--pane", "w1:p3"]).unwrap()).unwrap(),
+            json!({"id": "cli:pane:tile", "method": "pane.tile", "params": {"pane_id": "w1:p3"}})
+        );
+    }
+
     #[test]
     fn pane_projection_dash_leading_targets_and_empty_values() {
         let params = parse_pane_split_args(&["-literal", "--direction", "right"], None);

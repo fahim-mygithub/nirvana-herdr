@@ -4451,6 +4451,37 @@ mod tests {
         let _ = third;
     }
 
+    /// Review section 5: a tile on a zoomed tab leaves the zoom and the focus as they were; the zoom lives on the tab,
+    /// outside the layout tree the tile rebuilds.
+    #[test]
+    fn p96_api_pane_tile_on_a_zoomed_tab_keeps_zoom_and_focus() {
+        let mut app = app_with_linked_worktree();
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let second = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces[0].tabs[0].layout.focus_pane(second);
+        app.state.workspaces[0].tabs[0].zoomed = true;
+        let area = ratatui::layout::Rect::new(0, 0, 300, 30);
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app.state,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            area,
+        );
+        let response = app.handle_pane_tile(
+            "req".into(),
+            PaneTileParams {
+                pane_id: Some(app.public_pane_id(0, root).unwrap()),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneTile { tile } = success.result else {
+            panic!("expected pane tile response: {response}");
+        };
+        assert!(tile.changed, "the halving chain was evened");
+        assert!(app.state.workspaces[0].tabs[0].zoomed, "zoom kept");
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(second));
+    }
+
     #[test]
     fn api_pane_focus_direction_focuses_neighbor() {
         let mut app = app_with_linked_worktree();
