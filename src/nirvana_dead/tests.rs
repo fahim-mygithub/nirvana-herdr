@@ -1102,3 +1102,73 @@ fn p96_a_lost_job_counts_as_failed() {
         }
     );
 }
+
+/// Review F1: a job whose record names its pane but has no pid yet is starting (the exec not yet begun), not lost.
+/// Under `JOB_START_GRACE_S` it is kept and not ranked, so it does not push an older failed pane out of the kept two;
+/// past the window with still no pid it is lost and ranks as a failure.
+#[test]
+fn p96_a_starting_job_is_not_ranked_among_failed_jobs() {
+    let home = Temp::new("home");
+    p96_job(&home.0, "job-a", "a", "wP:pA", Some((ENDED, 1)), None);
+    p96_job(&home.0, "job-b", "b", "wP:pB", Some((ENDED + 10, 1)), None);
+    // C: its pane named at `LATER`, its exec not yet started.
+    let starting = crate::nirvana_job::JobRecord {
+        id: "job-c".into(),
+        name: "c".into(),
+        argv: vec!["cargo".into()],
+        cwd: String::new(),
+        space: Some("wP".into()),
+        pane: Some("wP:pC".into()),
+        started: LATER,
+        ended: None,
+        exit: None,
+        pid: None,
+    };
+    crate::nirvana_job::write_job(&home.0, &starting).unwrap();
+    let panes = || {
+        vec![
+            agent_pane("wP:p1", "wP:t1"),
+            p96_job_pane("wP:pA", "wP:tJ", "a", &home.0),
+            p96_job_pane("wP:pB", "wP:tJ", "b", &home.0),
+            p96_job_pane("wP:pC", "wP:tJ", "c", &home.0),
+        ]
+    };
+    // The window is the close grace, 120 s, written here as the number the fix chose.
+    let herdr = FakeHerdr::new(panes());
+    herdr.sweep(&home.0, LATER + 119);
+    assert!(
+        herdr.closed().is_empty(),
+        "A and B are the newest failed jobs, C is starting"
+    );
+    let herdr = FakeHerdr::new(panes());
+    herdr.sweep(&home.0, LATER + 120);
+    assert_eq!(
+        herdr.closed(),
+        vec!["wP:pA".to_owned()],
+        "C is lost now, the newest failure"
+    );
+}
+
+/// Review section 5: a failed job's pane ranked past the kept two still stays when the owner typed in it after its
+/// end; the ranking only lets the ordinary close rules apply.
+#[test]
+fn p96_a_third_failed_pane_the_owner_typed_in_is_kept() {
+    let home = Temp::new("home");
+    p96_job(&home.0, "job-t", "t", "wP:pT", Some((ENDED, 1)), None);
+    p96_job(&home.0, "job-u", "u", "wP:pU", Some((ENDED + 1, 1)), None);
+    p96_job(&home.0, "job-v", "v", "wP:pV", Some((ENDED + 10, 1)), None);
+    p96_job(&home.0, "job-w", "w", "wP:pW", Some((ENDED + 20, 1)), None);
+    let keys = home.0.join("nirvana").join("keys");
+    std::fs::create_dir_all(&keys).unwrap();
+    // U ranks third (W, V, U, T): the owner typed in it after its end. T ranks fourth, untouched.
+    std::fs::write(keys.join("wP_pU"), (ENDED + 5).to_string()).unwrap();
+    let herdr = FakeHerdr::new(vec![
+        agent_pane("wP:p1", "wP:t1"),
+        p96_job_pane("wP:pT", "wP:tJ", "t", &home.0),
+        p96_job_pane("wP:pU", "wP:tJ", "u", &home.0),
+        p96_job_pane("wP:pV", "wP:tJ", "v", &home.0),
+        p96_job_pane("wP:pW", "wP:tJ", "w", &home.0),
+    ]);
+    herdr.sweep(&home.0, LATER + 60);
+    assert_eq!(herdr.closed(), vec!["wP:pT".to_owned()]);
+}

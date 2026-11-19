@@ -43,6 +43,14 @@ pub const JOB_PASSED_GRACE_S: u64 = 30;
 /// failed job's pane closes as any ended pane does (`CLOSE_GRACE_S`).
 pub const KEEP_FAILED_JOBS: usize = 2;
 
+/// Jobs sizing fix, review F1: a job whose record names its pane but holds no pid, no end and no exit is starting, not
+/// lost, for this long from its `started`. `herdr job run` names the pane in the record before it types `herdr job
+/// exec` (so the exec's writes keep it), then waits up to 10 s for the pane's prompt (`open_job_pane`) before the exec
+/// writes its pid. Read as lost in that gap, the job ranked as its tab's newest failure and could push an older failed
+/// pane out of the kept two. The close grace, 120 s, is twelve times that wait; a job still pid-less past it is lost.
+/// A starting pane is kept, so too long a window only keeps a never-started job's pane two minutes more.
+pub const JOB_START_GRACE_S: u64 = CLOSE_GRACE_S;
+
 /// A pane whose order still wants a worker (Seated, Running, Deferred) but whose supervisor holds no lock stays this
 /// long, counted from the later of the order's last journal event and the server's start (review S4). That order did
 /// not end: its supervisor died with a crash, a reboot or a server restart, and `herdr run tick` restarts a Deferred
@@ -175,6 +183,9 @@ pub enum Ended {
     Stopped(u64),
     /// It ended at this unix second (the order's last journal event).
     At(u64),
+    /// Its job is starting: its record names the pane but the exec has not written its pid yet, under
+    /// `JOB_START_GRACE_S` from its start. Kept, and not ranked among the tab's failed jobs.
+    JobStarting,
     /// Its job passed (exit 0) at this unix second: closes after `JOB_PASSED_GRACE_S`.
     JobPassed(u64),
     /// Its job failed (a non-zero exit, or lost: no exit and no live process) at `at`. `kept` while it is one of its
@@ -231,6 +242,7 @@ pub fn decide(
         Ended::Unknown => return keep("no record names its worker or job"),
         Ended::Running => return keep("its worker or job still runs"),
         Ended::Seating => return keep("its run is starting a worker"),
+        Ended::JobStarting => return keep("its job is starting"),
         Ended::Stopped(at) => (
             at,
             at.max(server_started),
@@ -347,6 +359,10 @@ pub fn ended_of(home: &Path, pane: &str, cwd: Option<&str>, owner: &Owner, now: 
                 return Ended::Unknown;
             }
             let at = record.ended.unwrap_or(record.started);
+            let starting = record.pid.is_none() && record.ended.is_none() && record.exit.is_none();
+            if starting && now.saturating_sub(record.started) < JOB_START_GRACE_S {
+                return Ended::JobStarting;
+            }
             match crate::nirvana_job::job_state(&record) {
                 crate::nirvana_job::JobState::Running => Ended::Running,
                 crate::nirvana_job::JobState::Passed => Ended::JobPassed(at),
