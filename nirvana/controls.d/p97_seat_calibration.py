@@ -52,9 +52,11 @@ CONTROLS = (
     # ---- the cost fit, seat_fit.py's section 1 ----
     Control("p97_fit_no_class_weight", CALIB, "    Some(nirvana_seat::cost(price, &tokens) * per / (share * weight))",
             "    Some(nirvana_seat::cost(price, &tokens) * per / share)", T_FIT, "rust"),
+    # Fix round: the one subagent guard is the dedupe's now (cost, scores and rows); `unit`'s copy went.
     Control("p97_fit_keeps_subagents", CALIB,
-            "        return None;\n    }\n    let seat = table.seat(&line.seat)?;",
-            "    }\n    let seat = table.seat(&line.seat)?;", T_FIT, "rust"),
+            "        if line.chain.as_deref() == Some(crate::nirvana_claude::SUBAGENT_CHAIN) {\n"
+            "            continue;\n        }\n        last.insert(",
+            "        last.insert(", T_FIT, "rust"),
     Control("p97_fit_any_size", CALIB, "        if line.size != Some(SizeName::Medium) {",
             "        if line.size.is_none() {", T_FIT, "rust"),
     Control("p97_median_even_takes_upper", CALIB, "        (sorted[mid - 1] + sorted[mid]) / 2.0",

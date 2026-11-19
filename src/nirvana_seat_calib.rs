@@ -438,11 +438,10 @@ pub fn median(values: &[f64]) -> Option<f64> {
 /// with `actual` its tokens at the seat's price row on the cell's own `at` date times the pool's `per_usd[week]`
 /// ("Pricing at the cell's own date keeps a price change out of the fit"). `None` wherever the script skips the line.
 /// One departure: a line whose tokens are all zero is skipped, where the script keeps a non-empty dict of zeros; serde
-/// reads `{}` and `{"input": 0}` alike.
+/// reads `{}` and `{"input": 0}` alike. The script's subagent skip is the caller's: `calibrate` passes only the
+/// deduplicated orders, which leave subagents out (one guard, so its control can go red; with a second one here the
+/// fix round's `p97_fit_keeps_subagents` could not).
 pub fn unit(table: &Table, line: &RecordLine) -> Option<f64> {
-    if line.chain.as_deref() == Some(crate::nirvana_claude::SUBAGENT_CHAIN) {
-        return None;
-    }
     let seat = table.seat(&line.seat)?;
     line.size?;
     let tokens = line.tokens.filter(|tokens| *tokens != Tokens::default())?;
