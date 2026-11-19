@@ -477,8 +477,8 @@ pub fn profile_skills(run_dir: &Path, order_file: &str) -> Result<Option<Vec<Str
     Ok(Some(parsed.skills).filter(|skills| !skills.is_empty()))
 }
 
-/// `skills` narrowed to the names a profile gives, in their order; each named one that is not there says so in one
-/// line. `None` keeps them all.
+/// `skills` narrowed to the names a profile gives, in the project's order; each named one that is not there says so
+/// in one line. `None` keeps them all.
 pub fn selected_skills(
     skills: Vec<(String, PathBuf)>,
     named: Option<&[String]>,

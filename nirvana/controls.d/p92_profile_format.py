@@ -132,6 +132,8 @@ CONTROLS = (
             '                remove_new(&dir)\n                    .map_err(|err| format!("cannot remove {}: {err}", '
             'dir.display()))?;',
             "                let _ = &dir;", T_PP_NEW, "rust"),
+    Control("p92_pp_rollback_takes_taught_cards", PP, "                if holds_more(&dir) {",
+            "                if false {", T_PP_NEW, "rust"),
     Control("p92_pp_rollback_twice", PP, "    if rolled_back(&rows).contains(&op) {", "    if false {", T_PP_NEW,
             "rust"),
     # What a proposal may not carry (§6), at write and again at accept

@@ -94,6 +94,13 @@ fn p92_a_new_proposal_is_written_listed_accepted_and_rolled_back_exactly() {
         ),
         ("accept", None, Some(NEW))
     );
+    // A card taught into the new profile since: the rollback refuses rather than take it out with the folder.
+    let card = nirvana_profiles::folder_of(&root, "render-judge").join("knowledge/taught.md");
+    std::fs::write(&card, "a card\n").unwrap();
+    let why = rollback(&root, "op-1").unwrap_err();
+    assert!(why.contains("holds more than the profile op-1 accepted"), "{why}");
+    assert!(card.is_file());
+    std::fs::remove_file(&card).unwrap();
     let back = rollback(&root, "op-1").unwrap();
     assert!(back.starts_with("op-2: rolled back op-1"), "{back}");
     assert!(!nirvana_profiles::folder_of(&root, "render-judge").exists());
