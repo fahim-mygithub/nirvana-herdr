@@ -315,6 +315,13 @@ mod tests {
                 json!({"direction": "up"}),
             ),
             (
+                "tile",
+                vec!["--pane", "pane"],
+                "cli:pane:tile",
+                "pane.tile",
+                json!({"pane_id": "pane"}),
+            ),
+            (
                 "zoom",
                 vec![],
                 "cli:pane:zoom",
@@ -573,6 +580,7 @@ mod tests {
         for (name, default_caller) in [
             ("current", true),
             ("layout", false),
+            ("tile", false),
             ("process-info", false),
             ("edges", false),
         ] {

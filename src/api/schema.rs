@@ -103,6 +103,7 @@ operations::define_operations! {
     PaneEdges(PaneEdgesParams) => "pane.edges", false, false;
     PaneFocusDirection(PaneFocusDirectionParams) => "pane.focus_direction", true, true;
     PaneResize(PaneResizeParams) => "pane.resize", true, true;
+    PaneTile(PaneTileParams) => "pane.tile", true, true;
     PaneScroll(PaneScrollParams) => "pane.scroll", true, true;
     PaneClear(PaneTarget) => "pane.clear", true, true;
     PaneEditScrollback(PaneTarget) => "pane.edit_scrollback", true, true;

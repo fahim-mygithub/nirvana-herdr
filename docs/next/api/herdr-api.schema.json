@@ -3353,6 +3353,17 @@
           ],
           "type": "object"
         },
+        "PaneTileParams": {
+          "properties": {
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
         "PaneWaitForOutputParams": {
           "properties": {
             "lines": {
@@ -5645,6 +5656,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneResizeParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.tile",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneTileParams"
             }
           },
           "required": [
@@ -8542,6 +8569,26 @@
           ],
           "type": "object"
         },
+        "PaneTileResult": {
+          "properties": {
+            "changed": {
+              "description": "False when the tab was already even; it keeps even through closes either way.",
+              "type": "boolean"
+            },
+            "layout": {
+              "$ref": "#/schemas/success_response/$defs/PaneLayoutSnapshot"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "changed",
+            "pane_id",
+            "layout"
+          ],
+          "type": "object"
+        },
         "PaneZoomReason": {
           "enum": [
             "single_pane",
@@ -9791,6 +9838,22 @@
               "required": [
                 "type",
                 "resize"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "tile": {
+                  "$ref": "#/schemas/success_response/$defs/PaneTileResult"
+                },
+                "type": {
+                  "const": "pane_tile",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "tile"
               ],
               "type": "object"
             },

@@ -89,6 +89,104 @@ pub struct TileLayout {
     /// (`split_pane`, `close_pane`, unfocused `insert_pane_near`) so internal
     /// focus excursions never corrupt it.
     prev_focus: Option<PaneId>,
+    /// Nirvana fork, plan 15 sizing fix: `Some(columns)` while the tab keeps the even grid `tile_even` built, at most
+    /// `columns` panes a row. A close rebuilds the grid, so the survivors grow back; a split, an insert or a ratio
+    /// change (the owner's own arrangement) ends it. Not saved: after a restore the next `tile_even` sets it again.
+    even_columns: Option<usize>,
+}
+
+/// Nirvana fork, plan 15 sizing fix: the even grid's widest row. The owner's Megajam Jobs tab on 2026-11-19 held six
+/// job panes at 1/2, 1/4, 1/8, 1/16, 1/32 and 1/32 of the width, each job splitting the last pane in half; the two
+/// still running were about ten columns wide and wrapped their output one word a line. Three columns of a 200-column
+/// window are 66 wide; more panes stack into rows.
+pub const EVEN_MAX_COLUMNS: usize = 3;
+/// The narrowest pane the even grid makes, outer width with its border: an 80-column window takes two columns of 40,
+/// never three of 26.
+pub const EVEN_MIN_WIDTH: u16 = 30;
+
+/// How many panes a row of the even grid holds for `count` panes in an area `width` columns wide: at most
+/// `EVEN_MAX_COLUMNS`, and no more than keeps every pane `EVEN_MIN_WIDTH` wide. A width of 0 (no client has drawn yet)
+/// reads as wide.
+pub fn even_columns(count: usize, width: u16) -> usize {
+    let fit = if width == 0 {
+        EVEN_MAX_COLUMNS
+    } else {
+        usize::from(width / EVEN_MIN_WIDTH).max(1)
+    };
+    count.clamp(1, EVEN_MAX_COLUMNS.min(fit))
+}
+
+/// The panes in each row of the even grid, top to bottom: as few rows as `columns` allows, the counts at most one
+/// apart, the fuller rows first, so the newest panes (the last, at the bottom) are the wider ones.
+pub fn even_rows(count: usize, columns: usize) -> Vec<usize> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let columns = columns.max(1);
+    let rows = count.div_ceil(columns);
+    let (base, extra) = (count / rows, count % rows);
+    (0..rows)
+        .map(|row| base + usize::from(row < extra))
+        .collect()
+}
+
+/// `nodes` side by side (`Horizontal`) or stacked (`Vertical`) in equal shares, as a balanced tree: each split's
+/// ratio is its first half's share of the panes (1/2 or 1/3 at the deepest), so `valid_split_ratio`'s 0.1 floor is
+/// never reached, which a chain of 1/n splits would hit at eleven panes.
+fn balanced(mut nodes: Vec<Node>, direction: Direction) -> Option<Node> {
+    match nodes.len() {
+        0 => None,
+        1 => nodes.pop(),
+        len => {
+            let second = nodes.split_off(len / 2);
+            let ratio = (len / 2) as f32 / len as f32;
+            Some(Node::Split {
+                direction,
+                ratio,
+                first: Box::new(balanced(nodes, direction)?),
+                second: Box::new(balanced(second, direction)?),
+            })
+        }
+    }
+}
+
+/// The even grid of `ids` in their order, left to right then top to bottom, rows of `even_rows(ids.len(), columns)`.
+pub fn even_tree(ids: &[PaneId], columns: usize) -> Option<Node> {
+    let mut rest = ids;
+    let rows = even_rows(ids.len(), columns)
+        .into_iter()
+        .filter_map(|take| {
+            let (row, after) = rest.split_at(take);
+            rest = after;
+            balanced(
+                row.iter().map(|id| Node::Pane(*id)).collect(),
+                Direction::Horizontal,
+            )
+        })
+        .collect();
+    balanced(rows, Direction::Vertical)
+}
+
+/// Whether two trees have the same panes, splits and ratios.
+fn same_tree(a: &Node, b: &Node) -> bool {
+    match (a, b) {
+        (Node::Pane(x), Node::Pane(y)) => x == y,
+        (
+            Node::Split {
+                direction: da,
+                ratio: ra,
+                first: fa,
+                second: sa,
+            },
+            Node::Split {
+                direction: db,
+                ratio: rb,
+                first: fb,
+                second: sb,
+            },
+        ) => da == db && (ra - rb).abs() < f32::EPSILON && same_tree(fa, fb) && same_tree(sa, sb),
+        _ => false,
+    }
 }
 
 impl TileLayout {
@@ -101,6 +199,7 @@ impl TileLayout {
                 root: Node::Pane(root_id),
                 focus: root_id,
                 prev_focus: None,
+                even_columns: None,
             },
             root_id,
         )
@@ -188,6 +287,7 @@ impl TileLayout {
         let node = find_pane_mut(&mut self.root, target)?;
         let new_id = PaneId::alloc();
         *node = split_node(target, direction, new_id, valid_split_ratio(ratio));
+        self.even_columns = None;
         Some(new_id)
     }
 
@@ -213,6 +313,7 @@ impl TileLayout {
             return false;
         };
         *node = split_node(target, direction, moved, valid_split_ratio(ratio));
+        self.even_columns = None;
         if focus {
             self.set_focus(moved);
         }
@@ -243,6 +344,7 @@ impl TileLayout {
             self.root = new_root;
             self.focus = new_focus;
             self.prev_focus = None;
+            self.retile_after_close();
             true
         } else {
             false
@@ -267,6 +369,7 @@ impl TileLayout {
         if self.prev_focus == Some(id) {
             self.prev_focus = None;
         }
+        self.retile_after_close();
         true
     }
 
@@ -292,7 +395,11 @@ impl TileLayout {
 
     /// Set the ratio of a split node at the given path.
     pub fn set_ratio_at(&mut self, path: &[bool], ratio: f32) -> bool {
-        set_ratio_at(&mut self.root, path, ratio.clamp(0.1, 0.9))
+        let changed = set_ratio_at(&mut self.root, path, ratio.clamp(0.1, 0.9));
+        if changed {
+            self.even_columns = None;
+        }
+        changed
     }
 
     /// Adjust the nearest split in the given direction for the focused pane.
@@ -359,6 +466,40 @@ impl TileLayout {
             root,
             focus,
             prev_focus: None,
+            even_columns: None,
+        }
+    }
+
+    /// Nirvana fork, plan 15 sizing fix: rebuilds the tree as the even grid of its panes in their order
+    /// (`even_tree`, at most `even_columns(count, area.width)` a row) and keeps it even through later closes. Focus and
+    /// its history are untouched. Returns whether the shape changed.
+    pub fn tile_even(&mut self, area: Rect) -> bool {
+        let columns = even_columns(self.pane_count(), area.width);
+        self.even_columns = Some(columns);
+        self.retile(columns)
+    }
+
+    /// Whether a close rebuilds the even grid (`tile_even` set it and nothing since ended it).
+    pub fn keeps_even(&self) -> bool {
+        self.even_columns.is_some()
+    }
+
+    fn retile(&mut self, columns: usize) -> bool {
+        let ids = self.pane_ids();
+        let Some(tree) = even_tree(&ids, columns) else {
+            return false;
+        };
+        if same_tree(&tree, &self.root) {
+            return false;
+        }
+        self.root = tree;
+        true
+    }
+
+    /// After a close: the even grid grows its survivors back.
+    fn retile_after_close(&mut self) {
+        if let Some(columns) = self.even_columns {
+            self.retile(columns);
         }
     }
 }
@@ -1344,5 +1485,151 @@ mod tests {
         assert_eq!(layout.focused(), pane(4));
         assert!(layout.close_focused());
         assert_eq!(layout.focused(), pane(2));
+    }
+
+    // Nirvana fork, plan 15 sizing fix. The incident: the owner's Megajam Jobs tab on 2026-11-19 held six job panes at
+    // 1/2, 1/4, 1/8, 1/16, 1/32 and 1/32 of the width, each job splitting the tab's last pane in half.
+
+    /// A layout of `count` panes the way master's jobs built it: each new pane split off the last one to the right.
+    fn p96_chain(count: usize) -> (TileLayout, Vec<PaneId>) {
+        let (mut layout, root) = TileLayout::new();
+        let mut ids = vec![root];
+        for _ in 1..count {
+            let last = *ids.last().unwrap();
+            ids.push(layout.split_pane(last, Direction::Horizontal, 0.5).unwrap());
+        }
+        (layout, ids)
+    }
+
+    fn p96_widths(layout: &TileLayout, area: Rect) -> Vec<u16> {
+        layout.panes(area).iter().map(|p| p.rect.width).collect()
+    }
+
+    #[test]
+    fn p96_chained_splits_halve_each_pane_the_defect() {
+        let area = Rect::new(0, 0, 320, 40);
+        let (layout, _) = p96_chain(6);
+        assert_eq!(p96_widths(&layout, area), vec![160, 80, 40, 20, 10, 10]);
+    }
+
+    #[test]
+    fn p96_even_columns_cap_at_three_and_the_readable_width() {
+        for (count, width, columns) in [
+            (1, 200, 1),
+            (2, 200, 2),
+            (3, 200, 3),
+            (7, 200, 3),
+            (12, 200, 3),
+            (2, 80, 2),
+            (3, 80, 2),
+            (12, 80, 2),
+            (4, 50, 1),
+            (5, 0, 3),
+            (0, 200, 1),
+        ] {
+            assert_eq!(
+                even_columns(count, width),
+                columns,
+                "{count} panes in {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn p96_even_rows_fill_the_first_rows_and_differ_by_one() {
+        for (count, columns, rows) in [
+            (0, 3, vec![]),
+            (1, 3, vec![1]),
+            (3, 3, vec![3]),
+            (4, 3, vec![2, 2]),
+            (5, 3, vec![3, 2]),
+            (7, 3, vec![3, 2, 2]),
+            (12, 3, vec![3, 3, 3, 3]),
+            (5, 2, vec![2, 2, 1]),
+        ] {
+            assert_eq!(even_rows(count, columns), rows, "{count} in {columns}");
+        }
+    }
+
+    #[test]
+    fn p96_every_pane_is_readable_and_even_up_to_twelve() {
+        for area in [Rect::new(0, 0, 200, 50), Rect::new(0, 0, 80, 24)] {
+            for count in 1..=12 {
+                let (mut layout, ids) = p96_chain(count);
+                layout.tile_even(area);
+                let panes = layout.panes(area);
+                assert_eq!(
+                    panes.iter().map(|p| p.id).collect::<Vec<_>>(),
+                    ids,
+                    "order kept"
+                );
+                let columns = even_columns(count, area.width);
+                let mut at = 0;
+                for take in even_rows(count, columns) {
+                    let row = &panes[at..at + take];
+                    at += take;
+                    let widths: Vec<u16> = row.iter().map(|p| p.rect.width).collect();
+                    let (least, most) =
+                        (*widths.iter().min().unwrap(), *widths.iter().max().unwrap());
+                    assert!(
+                        least >= EVEN_MIN_WIDTH,
+                        "{count} panes in {area:?}: {widths:?}"
+                    );
+                    assert!(most - least <= 1, "{count} panes in {area:?}: {widths:?}");
+                    assert_eq!(widths.iter().sum::<u16>(), area.width);
+                }
+                let heights: Vec<u16> = panes.iter().map(|p| p.rect.height).collect();
+                let (least, most) = (
+                    *heights.iter().min().unwrap(),
+                    *heights.iter().max().unwrap(),
+                );
+                assert!(most - least <= 1, "{count} panes in {area:?}: {heights:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn p96_six_jobs_tile_as_two_rows_of_three() {
+        let area = Rect::new(0, 0, 200, 50);
+        let (mut layout, ids) = p96_chain(6);
+        layout.focus_pane(ids[5]);
+        assert!(layout.tile_even(area));
+        assert_eq!(p96_widths(&layout, area), vec![67, 67, 66, 67, 67, 66]);
+        assert_eq!(layout.focused(), ids[5], "focus kept");
+        assert!(!layout.tile_even(area), "an even tab is unchanged");
+    }
+
+    #[test]
+    fn p96_a_close_in_an_even_tab_grows_the_survivors_back() {
+        let area = Rect::new(0, 0, 200, 50);
+        let (mut layout, ids) = p96_chain(6);
+        layout.tile_even(area);
+        assert!(layout.close_pane(ids[0]));
+        assert!(layout.close_pane(ids[1]));
+        assert_eq!(p96_widths(&layout, area), vec![100, 100, 100, 100]);
+        assert!(layout.close_pane(ids[2]));
+        assert_eq!(p96_widths(&layout, area), vec![67, 67, 66]);
+        layout.focus_pane(ids[3]);
+        assert!(layout.close_focused());
+        assert_eq!(p96_widths(&layout, area), vec![100, 100]);
+    }
+
+    #[test]
+    fn p96_the_owners_own_split_or_resize_ends_the_even_grid() {
+        let area = Rect::new(0, 0, 200, 50);
+        let (mut layout, ids) = p96_chain(3);
+        layout.tile_even(area);
+        assert!(layout.keeps_even());
+        layout
+            .split_pane(ids[2], Direction::Horizontal, 0.5)
+            .unwrap();
+        assert!(!layout.keeps_even(), "a split ends it");
+        layout.tile_even(area);
+        assert!(layout.set_ratio_at(&[], 0.7));
+        assert!(!layout.keeps_even(), "a ratio change ends it");
+        let before = p96_widths(&layout, area);
+        assert!(layout.close_pane(ids[0]));
+        assert_ne!(p96_widths(&layout, area).len(), before.len());
+        assert!(!layout.keeps_even());
     }
 }
