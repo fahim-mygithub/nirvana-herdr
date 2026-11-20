@@ -3,6 +3,69 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.89.0: herdr proposes a profile when it sees a role retyped; lesson reviews may propose one too
+
+- **Changed:** plan 45's second package, the proposer. Nothing it writes changes a profile: a proposal waits in
+  `.nirvana/profile-proposals/` for `herdr profile accept`.
+  - A detector with no model, `herdr profile detect [--json] [--write] [--run <id>]`, and the same at every run end.
+    It reads a project's original orders, at most 60 runs and 2000 orders in 3 s, and finds three things: a
+    paragraph retyped in 5 or more orders, a class and its servers seated often with no profile, and a profile that
+    fits orders which do not carry it. A repeated role becomes one proposal: a new profile, or one change to the
+    profile those orders carry. A paragraph the owner dismissed is not proposed again, by either writer.
+  - A lesson review and an idle review are shown the findings for their order's class and may answer with
+    `profile_ops`: `propose` or `patch`, each with a quote of 20 or more characters that herdr finds in a finding
+    or in the worker's stream. Any other key is refused by name, so no model, family, skills or server reaches a
+    proposal. At most 3 proposals a review. A refused op never stops the lesson or card ops.
+  - The Work Report names `profile_ops`. On any other order the key is ignored.
+  - One waiting proposal per kind and profile.
+  - A waiting proposal is not tracked by git. herdr writes `.nirvana/profile-proposals/.gitignore`, a comment and
+    `*`, when that file is missing, and never rewrites it. A proposal quotes past orders, and those sit in the
+    ignored `orders/`. The one crossing into a tracked file is the owner's Accept, and `herdr profile accept` then
+    prints a line saying the profile is not ignored and to read its body before committing.
+  - A second layer under that: a paragraph that looks like it holds a secret is counted and its text replaced by a
+    line naming the shape, and the store refuses such a body or evidence at write and again at accept. This is a
+    list of patterns and it is not complete.
+  - `herdr profile accept`, `herdr profile dismiss` and `herdr profile proposals rollback` are refused inside a
+    worker seated by herdr. Every seated worker now carries `NIRVANA_ORDER` in its env. The owner's orchestrator
+    may accept on the owner's word; that is the orchestrator's call and the owner may change it.
+  - A proposed body keeps the line breaks, bullets and code of the newest order that carries the paragraph.
+  - `herdr profile new --help`, and `--help` on the other profile verbs, print help. Before, `profile new --help`
+    wrote a profile named `--help`. A profile name may not start with `-`.
+- **Because:** the owner, 2026-11-18: "Have lessons look for moments where it can consider building an agent like
+  we described for future runs." Ruled 2026-11-19: a proposal waits for the owner's Accept, and "let it ask if they
+  can just build only one pieces of it". In Megajam the judging sentence is retyped in 47 orders in two wordings,
+  and 105 lesson reviews proposed no profile because nothing asked them to.
+- **Measured:** scoped tests pass, by filter: `nirvana_profile` 81, `nirvana_review` 26, `nirvana_idle_review` 26,
+  `nirvana_retro` 9, `nirvana_knowledge` 24, `nirvana_learning` 27, `nirvana_lessons` 31, `nirvana_worker` 100,
+  `nirvana_gate` 152, `nirvana_run` 82, `nirvana_seat` 219, `nirvana_claude` 94, `nirvana_look` 27. Built on Opus
+  high, with two Sonnet reviews and two fix rounds. The first review ran the binary on a scratch project and found: a
+  repeated paragraph holding a fake AWS key id, a password, a 32-hex key and a Slack token written word for word into
+  `pp-1.md`, then a tracked file; `profile accept` applying a proposal from a plain shell; a body whose bullets and
+  code block came out as one line; a dismissal one writer did not see from the other. The first fix added a list of
+  secret shapes. The second review put 40 made-up shapes through that list and 20 reached `pp-1.md`, so the second fix
+  made the folder ignored and widened the list. Run again at the merge on the merged binary: the probe's 41 shapes,
+  each withheld by name, none written and none visible to `git status`; 12 further shapes the builder never saw, 8
+  past the list into a proposal file and 0 visible to git; 3 of 58 ordinary paragraphs withheld; in a fresh git
+  project a clean proposal and one holding an uncaught made-up secret both ignored, and the owner's
+  `.nirvana/.gitignore` unchanged; with `NIRVANA_ORDER` set, `accept`, `dismiss` and `proposals rollback` refused 3 of
+  3 with nothing changed, and without it `accept` worked and printed its note. The controls file `p94` holds 126
+  controls; each was run red in its branch, and 11 were run red again at the merge. An earlier control,
+  `p92_pp_key_case_kept`, was hollow since 0.87.0 and now goes red. The detector read 400 original orders in 217 ms on
+  an unoptimised build, by the builder's figure. Not seen on a live seat: a real lesson review answering with
+  `profile_ops`, the run end on a real run, a seated worker being refused. Known gaps: the secret list is not complete
+  and never will be, which is why the folder is ignored; the list withholds a paragraph holding a commit sha, any run
+  of 20 or more letters and digits holding both, `key = value` and `--sort-key=created_at`, which is the safe side;
+  the ledger is ignored with the folder, so the accept and dismiss history stays on this machine; a project whose
+  owner wrote their own ignore file in that folder without `*` keeps its proposals visible, because herdr never
+  rewrites that file; the worker marker is an env variable, so it stops an accept made by habit or by a planted line
+  and not a worker that unsets it; a rollback of a dismissal can leave two proposals for one profile waiting, and the
+  second accept is refused; the library `accept` the Profiles panel will call prints no note, so P45a must show it;
+  the lesson files have the redaction gap the proposals had, and that is for another package; the plan's fourth
+  finding, lessons that read as method, is left to the reviewer.
+- **If you remove this:** profiles are built only when the owner thinks of one, and the lesson reviews go on
+  seeing a retyped role without a way to say so. Remove only the ignore file and a secret in a retyped order can
+  be committed with the project.
+
 ## alpha 0.88.0: the seat table on screen in three modes, costs checked against real runs, an upgrade that keeps your edits
 
 - **Changed:** plan 46.

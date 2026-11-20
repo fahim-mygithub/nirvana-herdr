@@ -1034,6 +1034,9 @@ fn queue(
                 .map_err(|err| err.to_string())?;
         }
         let (brief, shas) = idle_brief(root, subjects, total, since, &digests);
+        // Plan 45 P45b: the kept detection's findings, all of them up to the brief's cap, never a scan before seating.
+        let brief =
+            crate::nirvana_profile_detect::with_findings(project, &run, &id, brief, None, None);
         std::fs::create_dir_all(nirvana_gate::gate_dir(project, &run))
             .map_err(|err| err.to_string())?;
         write_json(
@@ -1059,6 +1062,9 @@ fn queue(
     match made {
         Ok(line) => {
             said.push(line);
+            // Plan 45 P45b: after the review is seated, so no seat waits on it: the detector reads the orders again,
+            // keeps what it found for the next brief, and writes its own proposals.
+            said.extend(crate::nirvana_profile_detect::refresh(project, &run));
             Ok(said.join("; "))
         }
         Err(why) => {
@@ -1392,15 +1398,17 @@ fn record(project: &Project, run: &str, line: &str, at: u64) {
 
 /// What a gated idle review did, in one line: `pass · 2 applied (op-7: new x; ...) · 1 refused`.
 pub fn result_line(verdict: &str, axes: &[Axis]) -> String {
+    // Plan 45 P45b: a profile op is counted as a lesson op is, so a proposal made or refused shows in the square.
+    let counted = |axis: &Axis| axis.axis == "lesson_op" || axis.axis == review::PROFILE_OP;
     let applied: Vec<&str> = axes
         .iter()
-        .filter(|axis| axis.axis == "lesson_op" && axis.mark == Mark::Pass)
+        .filter(|axis| counted(axis) && axis.mark == Mark::Pass)
         .map(|axis| axis.why.as_str())
         .filter(|line| *line != "nothing to keep")
         .collect();
     let refused = axes
         .iter()
-        .filter(|axis| axis.axis == "lesson_op" && axis.mark == Mark::Note)
+        .filter(|axis| counted(axis) && axis.mark == Mark::Note)
         .count();
     let mut line = format!("{verdict} · {} applied", applied.len());
     if !applied.is_empty() {
@@ -1456,6 +1464,17 @@ fn parse(report: &Value) -> Vec<IdleOp> {
                 .unwrap_or_else(|| Err("an empty op".into()));
             IdleOp::Op(text("from"), op)
         })
+        .collect()
+}
+
+/// Plan 45 P45b: the streams of the orders an idle review read, which its profile ops may quote as its lesson ops do.
+pub(crate) fn given_streams(project: &Project, run: &str, root_id: &str) -> Vec<String> {
+    let given: Given = read_json(&given_path(project, run, root_id));
+    given
+        .orders
+        .iter()
+        .map(|(r, o, _, _)| nirvana_gate::stream_text(project, r, o))
+        .filter(|text| !text.is_empty())
         .collect()
 }
 

@@ -43,10 +43,10 @@ use crate::nirvana_usage::Reading;
 /// `lesson` is O5's: a worker's proposed lesson, which the gate checks before it is written.
 /// Plan 40 T3: `files` and `tests` are allowed and no longer required. The gate runs its own `test:` and reads its own
 /// diff, so a worker paid output tokens for two lists nothing read; the pane shows them when present.
-pub const REPORT_SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["status","summary","gotchas"],"properties":{"status":{"type":"string","enum":["done","blocked","needs_answer"]},"summary":{"type":"string","minLength":1},"question":{"type":"string"},"files":{"type":"array","items":{"type":"string"}},"tests":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["name","result"],"properties":{"name":{"type":"string"},"result":{"type":"string","enum":["pass","fail","not_run"]}}}},"gotchas":{"type":"array","items":{"type":"string"}},"lesson":{"type":"object","additionalProperties":false,"required":["name","class","steps","evidence"],"properties":{"name":{"type":"string","minLength":1},"class":{"type":"string","minLength":1},"steps":{"type":"string","minLength":1},"evidence":{"type":"string","minLength":1}}},"lesson_ops":{"type":"array","items":{"type":"object","required":["op"],"properties":{"op":{"type":"string","enum":["new","patch","merge","retire"]},"from":{"type":"string"},"slug":{"type":"string"},"base_sha":{"type":"string"},"name":{"type":"string"},"class":{"type":"string"},"steps":{"type":"string"},"evidence":{"type":"string"},"slugs":{"type":"array","items":{"type":"string"}}}}},"card_ops":{"type":"array","items":{"type":"object","required":["op"],"properties":{"op":{"type":"string","enum":["new","patch"]},"slug":{"type":"string"},"base_sha":{"type":"string"},"name":{"type":"string"},"when":{"type":"string"},"verdict":{"type":"string","enum":["keep","reject","dead-end"]},"effect":{"type":"string"},"source":{"type":"string"},"date":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"body":{"type":"string"},"evidence":{"type":"string"}}}},"sources":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["url","used_for"],"properties":{"url":{"type":"string","minLength":1},"used_for":{"type":"string","minLength":1}}}}}}"#;
+pub const REPORT_SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["status","summary","gotchas"],"properties":{"status":{"type":"string","enum":["done","blocked","needs_answer"]},"summary":{"type":"string","minLength":1},"question":{"type":"string"},"files":{"type":"array","items":{"type":"string"}},"tests":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["name","result"],"properties":{"name":{"type":"string"},"result":{"type":"string","enum":["pass","fail","not_run"]}}}},"gotchas":{"type":"array","items":{"type":"string"}},"lesson":{"type":"object","additionalProperties":false,"required":["name","class","steps","evidence"],"properties":{"name":{"type":"string","minLength":1},"class":{"type":"string","minLength":1},"steps":{"type":"string","minLength":1},"evidence":{"type":"string","minLength":1}}},"lesson_ops":{"type":"array","items":{"type":"object","required":["op"],"properties":{"op":{"type":"string","enum":["new","patch","merge","retire"]},"from":{"type":"string"},"slug":{"type":"string"},"base_sha":{"type":"string"},"name":{"type":"string"},"class":{"type":"string"},"steps":{"type":"string"},"evidence":{"type":"string"},"slugs":{"type":"array","items":{"type":"string"}}}}},"card_ops":{"type":"array","items":{"type":"object","required":["op"],"properties":{"op":{"type":"string","enum":["new","patch"]},"slug":{"type":"string"},"base_sha":{"type":"string"},"name":{"type":"string"},"when":{"type":"string"},"verdict":{"type":"string","enum":["keep","reject","dead-end"]},"effect":{"type":"string"},"source":{"type":"string"},"date":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"body":{"type":"string"},"evidence":{"type":"string"}}}},"profile_ops":{"type":"array","items":{"type":"object","required":["op"],"properties":{"op":{"type":"string","enum":["propose","patch"]},"name":{"type":"string"},"profile":{"type":"string"},"description":{"type":"string"},"class":{"type":"string"},"effort":{"type":"string"},"needs":{"type":"array","items":{"type":"string"}},"base_sha":{"type":"string"},"body":{"type":"string"},"evidence":{"type":"string"},"finding":{"type":"string"}}}},"sources":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["url","used_for"],"properties":{"url":{"type":"string","minLength":1},"used_for":{"type":"string","minLength":1}}}}}}"#;
 
 /// The schema's properties, which the check below allows and nothing else.
-pub const REPORT_KEYS: [&str; 10] = [
+pub const REPORT_KEYS: [&str; 11] = [
     "status",
     "summary",
     "question",
@@ -57,6 +57,8 @@ pub const REPORT_KEYS: [&str; 10] = [
     "sources",
     "lesson_ops",
     "card_ops",
+    // Plan 45 P45b: a lesson or idle review's profile proposals; the gate checks each op.
+    "profile_ops",
 ];
 
 /// The keys agy adds to its structured answer (P3: "the response is the object, plus agy's own `toolAction`
@@ -153,7 +155,7 @@ pub fn check_report(report: &Value) -> Result<(), String> {
         }
     }
     // Plan 33 §3.3: a lesson review's ops; plan 34 §2.5: a teacher's card ops. herdr checks each one at the gate.
-    for key in ["lesson_ops", "card_ops"] {
+    for key in ["lesson_ops", "card_ops", "profile_ops"] {
         if object.get(key).is_some_and(|ops| {
             !ops.as_array()
                 .is_some_and(|items| items.iter().all(Value::is_object))
@@ -1650,6 +1652,11 @@ pub(crate) fn attempt_command(spawned: &[String], seated: &Seated, argv: &[Strin
     for key in ENV_REMOVED {
         command.env_remove(key);
     }
+    // P45b review F2: every seat's worker names its order, so `herdr profile accept` and `proposals rollback` refuse
+    // inside it (`nirvana_profiles::seated_refusal`). The claude seat was known by `CLAUDE_ENV` only; agy by nothing.
+    // A marker in the env keeps a worker from accepting by habit or by a planted line; a worker that unsets it is
+    // not stopped, so this is no lock.
+    command.env(crate::nirvana_profiles::SEATED_ORDER_ENV, &seated.order);
     if seated.cli == "claude" {
         for (key, value) in CLAUDE_ENV {
             command.env(key, value);

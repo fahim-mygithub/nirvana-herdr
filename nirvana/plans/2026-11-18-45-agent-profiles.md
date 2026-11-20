@@ -1,6 +1,6 @@
 # Plan 45: agent profiles from the sidebar, and lessons that propose them
 
-Status: RULED 2026-11-19 (§7). P45c LANDED as alpha 0.87.0; P45a, P45b and P45d follow.
+Status: RULED 2026-11-19 (§7). P45c LANDED as alpha 0.87.0 and P45b as alpha 0.89.0; P45a and P45d follow.
 
 ## 1. The ask
 
@@ -160,6 +160,22 @@ package, so the two are built one after the other, not together.
 - The proposals store's `was_dismissed` takes kind, profile and key. A patch's `base_sha` is the whole `profile.md`.
 - For P45d, from reading only: `review_brief` and `author_brief` in `nirvana_gate.rs` pass the subject's `Profile:`
   lines through, so a review of a profiled order may be refused at seating.
+
+### What P45b changed from this plan
+
+- The detector has three findings, not four. Lessons that read as method and belong on a profile's cards are left
+  to the reviewer, by rule 4 of the rules a review is shown.
+- One waiting proposal per kind and profile, in the store itself.
+- A waiting proposal is not tracked: herdr writes `.nirvana/profile-proposals/.gitignore` when it is missing. The
+  ledger is ignored with it. The owner's Accept is the one crossing into a tracked file.
+- A paragraph that looks like it holds a secret is counted and never drafted, quoted or stored. The list of shapes
+  is a second layer and is not complete.
+- `herdr profile accept`, `dismiss` and `proposals rollback` are refused inside a seated worker, by the
+  `NIRVANA_ORDER` marker every seated worker now carries. This is the orchestrator's call; the owner's
+  orchestrator may still accept on the owner's word.
+- A review writes at most 3 proposals.
+- For P45a: `nirvana_profile_detect::usage(root)` gives each profile's carried and fit counts for the panel. The
+  library `accept` prints nothing, so the panel must show `nirvana_profile_proposals::ACCEPT_NOTE` after an Accept.
 
 ## 9. Live checks owed after building
 

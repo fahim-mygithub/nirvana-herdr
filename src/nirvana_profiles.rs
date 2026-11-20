@@ -192,6 +192,15 @@ pub fn valid_new_name(name: &str) -> bool {
 
 /// Why `name` may not be a new profile's, for a refusal; `None` when it may.
 pub fn new_name_problem(name: &str) -> Option<String> {
+    // P45b, the lead 2026-11-19: `herdr profile new --help` wrote `.nirvana/profiles/--help.md` (0.87.0, and every
+    // release since plan 33 made `new` in 0.45.0). A new name never starts with `-`, so a flag is never a name; one
+    // already on disk keeps loading by `valid_name`.
+    if name.starts_with('-') {
+        return Some(format!(
+            "{name:?}: a profile's name never starts with `-` (a flag is not a name; `herdr profile --help` prints \
+             the usage)"
+        ));
+    }
     if !valid_name(name) {
         Some(format!(
             "{name:?}: a profile's name is 1 to {NAME_MAX} of [a-z0-9-]"
@@ -1756,6 +1765,8 @@ const USAGE: &str = "usage: herdr profile list
                                          the same proposal is never made again
        herdr profile proposals rollback <op>
                                          undoes one accept or dismiss from profile-proposals/ledger.jsonl
+       herdr profile detect [--json] [--write] [--run <id>]
+                                         what the detector finds in the orders, with no model, and would propose
 A profile is used by `herdr seat run <seat> --profile <name> ...` and `herdr seat pick --profile <name> ...`.
 In profile.md: `skills: [a, b]` names the project skills (.claude/skills) its worker uses; `skills: []` names
 none, and without the key it uses all. A folder profile's mcp.json, in .mcp.json's shape, holds its own servers:
@@ -1768,7 +1779,112 @@ fn usage_exit() -> ! {
     std::process::exit(2);
 }
 
+/// P45b, the lead 2026-11-19: what `cli` answers before it reads or writes anything. `--help` or `-h` as the verb or
+/// as its first operand (or a `proposals` / `proposal` verb's second) is the usage, exit 0. A proposal id that is not
+/// `pp-<n>` or an op that is not `op-<n>` is refused here: `accept`, `dismiss` and `proposals rollback` take the
+/// proposals' lock first, which made `.nirvana/runs/` and the lock file for `herdr profile accept --help`. A `teach`
+/// profile that starts with `-` is the usage too. `None`: go on.
+pub fn cli_guard(args: &[String]) -> Option<(i32, String)> {
+    cli_guard_with(args, &|key| std::env::var(key).ok())
+}
+
+/// P45b review F2: the variable a seated worker's process carries, naming its order. herdr sets it in
+/// `nirvana_worker::attempt_command` for every seat (the first fix round's hunk 1, applied in the second).
+pub const SEATED_ORDER_ENV: &str = "NIRVANA_ORDER";
+
+/// P45b review F2: `herdr profile accept`, `dismiss` and `proposals rollback` from a worker seated by herdr are
+/// refused (`dismiss` since review2 F4: a dismissal is permanent, so a worker could silence a proposal). The
+/// review reproduced `profile accept pp-1 < /dev/null` applying a proposal, exit 0: a reviewer with a shell could
+/// propose and then accept its own proposal. The lead 2026-11-19: not a terminal check (the owner's orchestrator
+/// may accept on the owner's word), and in the CLI only, never in the library `accept`, which P45a's panel calls
+/// from the owner's own window. `env` reads a variable; the CLI passes the process's own.
+pub fn seated_refusal(args: &[String], env: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let word = |at: usize| args.get(at).map(String::as_str);
+    let verb = match (word(0), word(1)) {
+        (Some("accept"), _) => "accept",
+        (Some("dismiss"), _) => "dismiss",
+        (Some("proposals"), Some("rollback")) => "proposals rollback",
+        _ => return None,
+    };
+    let order = env(SEATED_ORDER_ENV).filter(|order| !order.trim().is_empty());
+    // The claude seat's own marker today: herdr starts every claude worker with `CLAUDE_ENV` and nothing else does.
+    let claude = crate::nirvana_worker::CLAUDE_ENV
+        .iter()
+        .all(|(key, value)| env(key).as_deref() == Some(*value));
+    let inside = match (order, claude) {
+        (Some(order), _) => format!("order {}", order.trim()),
+        (None, true) => format!(
+            "a claude worker herdr seated ({} is set; its order is not named in its env)",
+            crate::nirvana_worker::CLAUDE_ENV
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        (None, false) => return None,
+    };
+    Some(format!(
+        "herdr profile {verb}: refused inside {inside}, a worker seated by herdr. A proposal is the owner's to \
+         accept, dismiss or roll back: the owner, or the owner's orchestrator on the owner's word, runs it from the \
+         owner's own shell or the Profiles panel."
+    ))
+}
+
+/// `cli_guard` with the variables `env` reads, so a test sets them without touching the process's own.
+pub fn cli_guard_with(
+    args: &[String],
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Option<(i32, String)> {
+    let word = |at: usize| args.get(at).map(String::as_str);
+    let help = |at: usize| matches!(word(at), Some("--help" | "-h"));
+    let nested = matches!(word(0), Some("proposals" | "proposal"));
+    if help(0) || help(1) || (nested && help(2)) {
+        return Some((0, USAGE.to_owned()));
+    }
+    let id = match (word(0), word(1)) {
+        (Some("accept" | "dismiss"), Some(id)) => Some(id),
+        (Some("proposal"), Some("show")) => word(2),
+        _ => None,
+    };
+    if let Some(id) = id.filter(|id| !crate::nirvana_profile_proposals::valid_id(id)) {
+        return Some((
+            2,
+            format!("herdr profile: {id:?} is not a proposal id (pp-<n>)\n{USAGE}"),
+        ));
+    }
+    let op_ok = |op: &str| {
+        op.strip_prefix("op-")
+            .is_some_and(|n| !n.is_empty() && n.len() <= 9 && n.bytes().all(|b| b.is_ascii_digit()))
+    };
+    if let (Some("proposals"), Some("rollback"), Some(op)) = (word(0), word(1), word(2)) {
+        if !op_ok(op) {
+            return Some((
+                2,
+                format!("herdr profile proposals rollback: {op:?} is not an op (op-<n>)\n{USAGE}"),
+            ));
+        }
+    }
+    if let (Some("teach"), Some(profile)) = (word(0), word(1)) {
+        if profile.starts_with('-') {
+            return Some((2, USAGE.to_owned()));
+        }
+    }
+    // Before the proposals' lock, as the id checks above are.
+    if let Some(why) = seated_refusal(args, env) {
+        return Some((1, why));
+    }
+    None
+}
+
 pub fn cli(args: &[String]) -> std::io::Result<()> {
+    if let Some((code, text)) = cli_guard(args) {
+        if code == 0 {
+            println!("{text}");
+        } else {
+            eprintln!("{text}");
+        }
+        std::process::exit(code);
+    }
     let root = crate::nirvana_run::Project::from_env().root;
     let code = match (
         args.first().map(String::as_str),
@@ -1923,6 +2039,13 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             i32::from(refused > 0 || (chosen.is_empty() && !names.is_empty()))
         }
         (Some("teach"), rest) => crate::nirvana_knowledge::teach_cli(&root, rest),
+        // Plan 45 P45b: the detector; it writes nothing without `--write`.
+        (Some("detect"), rest) => crate::nirvana_profile_detect::cli_to(
+            &root,
+            rest,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        ),
         _ => usage_exit(),
     };
     std::process::exit(code);

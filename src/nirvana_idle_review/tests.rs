@@ -1548,3 +1548,134 @@ fn p73_a_tick_forces_a_review_whose_orders_waited_and_sweeps_lessons() {
     assert!(!index.lessons.contains_key("gone-quiet"));
     assert!(index.lessons.contains_key("kept-pinned"));
 }
+
+/// Plan 45 P45b: an idle review's profile ops count in its result line as its lesson ops do, so a proposal it made, or
+/// one refused, shows in the Learning square instead of "0 applied".
+#[test]
+fn p94_the_result_line_counts_profile_ops() {
+    let axes = vec![
+        Axis::new("report", Mark::Pass, "well formed"),
+        Axis::new("lesson_op", Mark::Pass, "nothing to keep"),
+        Axis::new(
+            review::PROFILE_OP,
+            Mark::Pass,
+            "pp-2: proposed the new profile frame-judge",
+        ),
+        Axis::new(
+            review::PROFILE_OP,
+            Mark::Note,
+            "profile op 2 refused: a propose op never carries `model`",
+        ),
+    ];
+    assert_eq!(
+        result_line("pass", &axes),
+        "pass · 1 applied (pp-2: proposed the new profile frame-judge) · 1 refused"
+    );
+}
+
+/// Plan 45 P45b: an idle review's profile ops may quote the streams of the orders it read, as its lesson ops do.
+#[test]
+fn p94_an_idle_reviews_given_streams_are_the_streams_of_the_orders_it_read() {
+    let _home = crate::nirvana::with_test_home("p94-given-streams");
+    let root = std::env::temp_dir().join(format!("herdr-p94-given-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let project = Project::at(&root);
+    project.ensure().unwrap();
+    let streams = project.run_dir("r1").join("streams");
+    std::fs::create_dir_all(&streams).unwrap();
+    std::fs::write(streams.join("a1.jsonl"), "{\"type\":\"user\",\"text\":\"TOTAL 12 passed\"}
+").unwrap();
+    std::fs::create_dir_all(nirvana_gate::gate_dir(&project, "idle-1")).unwrap();
+    write_json(
+        &given_path(&project, "idle-1", "idle-1-review"),
+        &Given {
+            orders: vec![
+                ("r1".into(), "a1".into(), "build.bounded".into(), None),
+                ("r1".into(), "gone".into(), "build.bounded".into(), None),
+            ],
+            shas: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let found = given_streams(&project, "idle-1", "idle-1-review");
+    assert_eq!(found.len(), 1, "a stream that is not there is left out: {found:?}");
+    assert!(found[0].contains("TOTAL 12 passed"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Plan 45 P45b, end to end: a tick queues an idle review whose brief carries the kept detection's findings; the
+/// reviewer delivers one valid and one refused profile op; the gate writes the one proposal through the store; the
+/// idle line counts both.
+#[test]
+fn p94_an_idle_review_carries_findings_and_its_profile_ops_become_a_proposal() {
+    use crate::nirvana_profile_detect as detect;
+    let _home = quiet("p94-idle-e2e");
+    let world = world(3_600, 10);
+    let root = ready_project("p94-idle-e2e", &world);
+    let project = Project::at(&root);
+    let role = "Judge looks with herdr look on each packaged still; image judges run 1 to 2 points harsh, so score \
+the before frame first and compare after against before.";
+    let key = detect::paragraph_key(role);
+    let kept = detect::Detection {
+        findings: vec![detect::Finding::Repeated {
+            key: key.clone(),
+            text: role.into(),
+            block: String::new(),
+            secret: None,
+            chars: role.chars().count(),
+            orders: 6,
+            classes: BTreeMap::from([("build.bounded".to_owned(), 6)]),
+            profiles: BTreeMap::new(),
+            unprofiled: 6,
+            needs: Vec::new(),
+            sample: vec!["r0/a1".into()],
+        }],
+        ..Default::default()
+    };
+    let cache = detect::cache_path(&root);
+    std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    std::fs::write(&cache, serde_json::to_string(&kept).unwrap()).unwrap();
+    seed_samples(&world);
+    let lines = tick_with(std::slice::from_ref(&root), &table(), &world, None);
+    assert!(lines.iter().any(|line| line.contains("queued:")), "{lines:?}");
+    let last = read_space(&root).last.expect("a last review");
+    let state = replay(&project.journal(&last.run).read().0);
+    let review = state.order(&last.order).expect("seated");
+    let brief = std::fs::read_to_string(&review.seated.order_file).expect("brief");
+    assert!(brief.contains("## Profile ops") && brief.contains(&key), "{brief}");
+    let mut delivered = report();
+    delivered["gotchas"] = serde_json::json!([]);
+    delivered["profile_ops"] = serde_json::json!([
+        {"op":"propose","name":"frame-judge","description":"Judges packaged stills.","class":"build.bounded",
+         "body":role,"evidence":"6 orders: \"image judges run 1 to 2 points harsh\"","finding":key},
+        {"op":"propose","name":"pinned-judge","description":"Judges.","class":"build.bounded","model":"claude-opus-5-5",
+         "body":role,"evidence":"6 orders: \"image judges run 1 to 2 points harsh\""}
+    ]);
+    // The worker's own check takes the delivery as it is.
+    assert!(crate::nirvana_worker::check_report(&delivered).is_ok());
+    project
+        .journal(&last.run)
+        .append(
+            world.now,
+            Kind::Delivered {
+                order: last.order.clone(),
+                report: delivered,
+            },
+        )
+        .expect("delivered");
+    let ruling = nirvana_gate::gate(&project, &last.run, &last.order).expect("gate");
+    assert_eq!(ruling.verdict, "pass", "{ruling:?}");
+    let waiting = crate::nirvana_profile_proposals::list(&root);
+    assert_eq!(waiting.len(), 1, "{:?}", ruling.axes);
+    assert_eq!(
+        (waiting[0].profile.as_str(), waiting[0].by.as_str(), waiting[0].run.as_str()),
+        ("frame-judge", last.order.as_str(), last.run.as_str())
+    );
+    assert!(waiting[0].file.is_file());
+    let result = read_space(&root).last.and_then(|l| l.result).expect("a result");
+    assert!(
+        result.starts_with("pass · 1 applied (pp-1: proposed the new profile frame-judge")
+            && result.ends_with("· 1 refused"),
+        "{result}"
+    );
+}

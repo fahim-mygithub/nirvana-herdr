@@ -137,6 +137,28 @@ fn an_attempt_starts_without_the_orchestrators_marker() {
     }
 }
 
+/// P45b review F2: a proposal waits for the owner's Accept, and the review ran `herdr profile accept` from a plain
+/// shell with exit 0. The command an attempt starts names its order for every CLI, which is what `profile accept`
+/// reads to refuse inside a seated worker; agy had no marker at all.
+#[test]
+fn p94_an_attempt_names_its_order_in_the_workers_env() {
+    for cli in ["agy", "claude"] {
+        let mut seat = seated("o-named");
+        seat.cli = cli.into();
+        let argv = vec![cli.to_owned(), "-p".to_owned()];
+        let command = attempt_command(&argv, &seat, &argv);
+        let named = command
+            .get_envs()
+            .find(|(key, _)| key.to_string_lossy() == crate::nirvana_profiles::SEATED_ORDER_ENV)
+            .and_then(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()));
+        assert_eq!(named.as_deref(), Some("o-named"), "{cli}: the worker's env names its order");
+        let said = crate::nirvana_profiles::seated_refusal(&["accept".to_owned(), "pp-1".to_owned()], &|key| {
+            (key == crate::nirvana_profiles::SEATED_ORDER_ENV).then(|| named.clone()).flatten()
+        });
+        assert!(said.is_some_and(|said| said.contains("o-named")), "{cli}: accept inside that env is refused by name");
+    }
+}
+
 // ---- the Work Report ----
 
 fn good_report() -> Value {

@@ -37,8 +37,13 @@
 //! neither a seat capability nor a server the project's `.mcp.json` names; a class the seat table does not have;
 //! anything `nirvana_profiles::parse` refuses (a Send, herdr's footer mark, a body over `BODY_MAX`). A `new` proposal
 //! for a name that exists is refused; a `patch` whose `base_sha` is not the profile's sha now is refused as stale.
-//! The evidence and the body are redacted as a lesson's evidence is (`nirvana_lessons::redact`): the folder is
-//! tracked with the project, and a worker's stream can hold a token.
+//! The evidence and the body are redacted as a lesson's evidence is (`nirvana_lessons::redact`), and then refused when
+//! still secret-shaped (`secret_shaped`): a worker's stream and an order can hold a token.
+//!
+//! **The folder is ignored by git** (P45b second fix round): herdr writes `profile-proposals/.gitignore`, `*`, when it
+//! is missing (`ensure_ignore`). `secret_shaped` is a pattern list and is not complete (the second review got 20 of
+//! 40 shapes past it into `pp-1.md`), so the ignore file is the guard and the list is the second layer. The one
+//! crossing into a tracked file is `accept`, and `herdr profile accept` says so in one line.
 //!
 //! **The ledger** is `<project>/.nirvana/profile-proposals/ledger.jsonl`, one `Row` a line: `accept` (the profile
 //! file before and after, and the proposal's text), `dismiss` (the proposal's identity and text, and the reason), and
@@ -181,6 +186,47 @@ pub fn folder(root: &Path) -> PathBuf {
     root.join(nirvana_run::DIR).join(DIR)
 }
 
+/// P45b second fix round: the ignore file herdr writes in the proposals folder. The second review put 40 secret
+/// shapes in a repeated order paragraph and 20 reached `pp-1.md` past `secret_shaped`, in a folder a project may
+/// commit; a pattern list is never complete. A waiting proposal quotes order text, which lives in the ignored
+/// `orders/`, so ignoring the folder makes a proposal no more exposed than what it quotes, and the one crossing into a
+/// tracked file is the owner's Accept. Written as `nirvana_profiles::ensure_ignore` writes `profiles/.gitignore`: only
+/// when absent, never rewritten, and `.nirvana/.gitignore` (the owner's) is never touched. The ledger is ignored with
+/// it, so its history stays on this machine.
+pub const IGNORE_TEXT: &str = "# Written by herdr (plan 45 P45b) only when this file is missing; it never rewrites it.\n\
+# A proposal quotes past orders, which can hold a secret, so it stays out of git until the owner accepts it.\n\
+*\n";
+
+/// Writes `profile-proposals/.gitignore` when it is not there; `Ok(true)` when it wrote it. Never over a file that
+/// exists, an empty one included (`create_new`, so two writers cannot both write it).
+pub fn ensure_ignore(root: &Path) -> std::io::Result<bool> {
+    use std::io::Write;
+    std::fs::create_dir_all(folder(root))?;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(folder(root).join(nirvana_profiles::IGNORE_FILE))
+    {
+        Ok(mut file) => file.write_all(IGNORE_TEXT.as_bytes()).map(|()| true),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
+/// The proposals folder, made when missing, with its ignore file. Every writer into the folder comes through here,
+/// so a folder made by an older build gets the file at the next write. A failure to write the ignore file is said in
+/// one line on stderr and the write goes on: the proposal is still the owner's to read, and a stopped write loses it.
+fn make_folder(root: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(folder(root))?;
+    if let Err(err) = ensure_ignore(root) {
+        eprintln!(
+            "herdr: cannot write {}: {err}; the proposals there are not ignored by git",
+            folder(root).join(nirvana_profiles::IGNORE_FILE).display()
+        );
+    }
+    Ok(())
+}
+
 /// `pp-<n>`, `n` a number: an id names a file, so nothing else is one.
 pub fn valid_id(id: &str) -> bool {
     id.strip_prefix("pp-")
@@ -227,6 +273,205 @@ pub fn redact_key(key: &str) -> String {
         }
     });
     nirvana_lessons::redact(&hashed)
+}
+
+/// P45b review F1: the shape a secret in `text` has, by name, or `None`. The name is what a refusal says; the value is
+/// never returned. The proposals folder was tracked with the project then (`.nirvana/.gitignore` ignores only
+/// `runs/`, `orders/` and `worktrees/`; the second fix round gave the folder its own ignore file), and the review
+/// reproduced an AWS key id, `password=...`, a 32-hex key, a Slack token
+/// and `sk_live_...` landing in `pp-1.md` twice through `nirvana_lessons::redact`, which knows only `Bearer`, `sk-`,
+/// GitHub tokens and long mixed runs. CLAUDE.md rule 12: no credential in any tracked file.
+///
+/// Here, not in the detector, so the detector (which calls this module) and the store share one list without a cycle.
+/// It is never run over herdr's own sha lines (`base_sha`, `Profile sha256:`), which are 64 hex by design: only over a
+/// proposal's body, description and evidence, and over order text.
+///
+/// **This list is not complete, and no pattern list is.** The second review put 40 secret shapes through it and 20
+/// reached `pp-1.md`; the second fix round added a rule for each (`second_layer`), and a shape nobody wrote down still
+/// passes. The guard is structural: the proposals folder holds a `.gitignore` of `*` (`ensure_ignore`), so a waiting
+/// proposal is no more exposed than the ignored order file it quotes, and the one crossing into a tracked file is the
+/// owner's Accept, which says so.
+pub fn secret_shaped(text: &str) -> Option<&'static str> {
+    use std::sync::OnceLock;
+    static SHAPES: OnceLock<Vec<(&'static str, regex::Regex)>> = OnceLock::new();
+    let shapes = SHAPES.get_or_init(|| {
+        [
+            ("PEM header", r"-----BEGIN [A-Z]"),
+            ("AWS access key id", r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+            ("Slack token", r"\bxox[a-z]-[A-Za-z0-9-]+"),
+            ("Stripe key", r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+"),
+            ("Google API key", r"\bAIza[0-9A-Za-z_-]{16,}"),
+            ("URL credentials", r"[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^@\s/]+@"),
+            (
+                "UUID after a key word",
+                r"(?i)\b[a-z0-9_.-]*(?:key|token|secret|password|auth)[\s=:'\x22]{0,4}[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+            ),
+            ("run of 32 or more hex characters", r"\b[0-9a-fA-F]{32,}\b"),
+        ]
+        .into_iter()
+        .map(|(name, pattern)| (name, regex::Regex::new(pattern).expect(name)))
+        .collect()
+    });
+    if let Some((name, _)) = shapes.iter().find(|(_, shape)| shape.is_match(text)) {
+        return Some(name);
+    }
+    // `Basic <base64>`: the run must look encoded (a digit, `+`, `/`, `=`, or a capital after its first letter), so
+    // "basic understanding" in prose is not one.
+    static BASIC: OnceLock<regex::Regex> = OnceLock::new();
+    let basic = BASIC.get_or_init(|| {
+        regex::Regex::new(r"(?i)\bbasic\s+([A-Za-z0-9+/]{8,}={0,2})").expect("basic")
+    });
+    if basic.captures_iter(text).any(|found| {
+        let run = &found[1];
+        run.bytes().any(|b| b.is_ascii_digit() || matches!(b, b'+' | b'/' | b'='))
+            || run.bytes().skip(1).any(|b| b.is_ascii_uppercase())
+    }) {
+        return Some("HTTP Basic credentials");
+    }
+    // A secret word (`key`, `secret`, `password`, `token`, `pwd`, and since the second fix round `passphrase`, `sig`,
+    // `signature`, `auth`, `authorization`, `credential(s)`, `api key`, `access key`, `client secret`), then `=` or
+    // `:`, then a value. After `=` any value of 3 or more: that is an assignment (review2: `key=ab1` landed). After `:`
+    // a value of 5 or more that is quoted or holds a digit, so "Key: read the log" in prose is not one and `token:
+    // "abcdef"` or `pwd: abc12` is; after `passphrase:` any value of 3 or more, since a passphrase is words. A quoted
+    // value is the whole quote, spaces and all (review2: `password="my pass phrase here"` landed, read as `my`).
+    static ASSIGNED: OnceLock<regex::Regex> = OnceLock::new();
+    let assigned = ASSIGNED.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?i)\b[a-z0-9_.-]*(passphrase|signature|sig|authorization|auth|credentials?|api[-_ ]?key|access[-_ ]?key|client[-_ ]?secret|key|secret|password|passwd|token|pwd)["']?\s*([=:])\s*(?:"([^"\n]+)"|'([^'\n]+)'|([^\s"',;)\]}]+))"#,
+        )
+        .expect("assigned")
+    });
+    if assigned.captures_iter(text).any(|found| {
+        let quoted = found.get(3).or_else(|| found.get(4));
+        let value = quoted.or_else(|| found.get(5)).map_or("", |value| value.as_str());
+        let count = value.chars().count();
+        match &found[2] {
+            "=" => count >= 3,
+            _ if found[1].eq_ignore_ascii_case("passphrase") => count >= 3,
+            _ => count >= 5 && (quoted.is_some() || value.bytes().any(|b| b.is_ascii_digit())),
+        }
+    }) {
+        return Some("credential assignment (key, secret, password or token)");
+    }
+    if nirvana_lessons::redact(text) != text {
+        return Some("token nirvana_lessons::redact knows (Bearer, sk-, GitHub, a long mixed run)");
+    }
+    second_layer(text)
+}
+
+/// P45b second fix round: the shapes the second review reproduced past the list above, 20 of its 40 landing in
+/// `pp-1.md`. Each rule here names one of them. They run after the first list, so a shape that list names keeps its
+/// name. This is still a pattern list and it is still not complete: the guard is the `.gitignore` in the proposals
+/// folder (`ensure_ignore`), and this list only keeps a secret out of the text the owner may later accept.
+fn second_layer(text: &str) -> Option<&'static str> {
+    use std::sync::OnceLock;
+    // A value after a flag, `is` or a scheme is a secret only when it looks like one (a digit, or long), so "pass
+    // --token with the id" and "the secret is patience" in prose stay. A value starting with `$`, `%` or `<` is a
+    // variable or a placeholder, never the secret itself.
+    fn looks_secret(value: &str, long: usize) -> bool {
+        let count = value.chars().count();
+        !value.starts_with(['$', '%', '<'])
+            && (count >= long || (count >= 4 && value.bytes().any(|b| b.is_ascii_digit())))
+    }
+    static RULES: OnceLock<Vec<(&'static str, regex::Regex, usize)>> = OnceLock::new();
+    let rules = RULES.get_or_init(|| {
+        [
+            // review2 `authorization: token abcdef1234567890xyz`.
+            (
+                "authorization header value",
+                r#"(?i)\bauthorization["']?\s*[:=]\s*["']?[A-Za-z][A-Za-z0-9_-]*\s+([A-Za-z0-9._~+/=-]+)"#,
+                20,
+            ),
+            // review2 `my password is hunter2`.
+            (
+                "secret word, then is and a value",
+                r#"(?i)\b(?:password|passphrase|passwd|pwd|secret|token|api[-_ ]?key|access[-_ ]?key|credentials?)\s+is\s+["']?([^\s"',;)]+)"#,
+                12,
+            ),
+            // review2 `--token <v>`.
+            (
+                "secret flag and its value",
+                r#"(?i)(?:^|\s)--(?:token|password|secret|api-key|passphrase)(?:=|\s+)["']?([^\s"']+)"#,
+                12,
+            ),
+            // review2 `sshpass -p <v>`: any value.
+            ("sshpass password", r#"(?i)\bsshpass\s+-p\s*["']?([^\s"']+)"#, 1),
+            // review2 `curl -u admin:<v>`: any value.
+            ("curl user and password", r#"(?i)\bcurl\b[^\n]*?\s-u\s*["']?[^\s:"']+:([^\s"']+)"#, 1),
+            // review2: a JWT of any length (the short one landed), and a Google OAuth access token.
+            ("JWT-shaped text (eyJ...)", r"\beyJ([A-Za-z0-9_-]{10,})", 1),
+            ("Google OAuth token (ya29.)", r"\bya29\.([A-Za-z0-9_-]{10,})", 1),
+        ]
+        .into_iter()
+        .map(|(name, pattern, long)| (name, regex::Regex::new(pattern).expect(name), long))
+        .collect()
+    });
+    for (name, rule, long) in rules {
+        if rule.captures_iter(text).any(|found| looks_secret(&found[1], *long)) {
+            return Some(name);
+        }
+    }
+    // review2: a 24-hex and a 25-alnum key, a 31-hex digest, a deploy token of 20, and base64 lines of 28 and 32.
+    // 20 or more letters and digits with no separator, at least one of each. It withholds some long identifiers
+    // (`Profile2LayoutBuilderTest`), which the lead accepted 2026-11-19.
+    static RUN: OnceLock<regex::Regex> = OnceLock::new();
+    let run = RUN.get_or_init(|| regex::Regex::new(r"[A-Za-z0-9]{20,}").expect("run"));
+    if run.find_iter(text).any(|found| {
+        let found = found.as_str();
+        found.bytes().any(|b| b.is_ascii_digit()) && found.bytes().any(|b| b.is_ascii_alphabetic())
+    }) {
+        return Some("run of 20 or more letters and digits");
+    }
+    // review2: an AWS id split by a line break and a 40-hex key wrapped across lines. The fixed shapes again, over
+    // the text with every whitespace taken out. No `\b` here, since the joined words around a value touch it; the hex
+    // run must hold a digit and a letter, so a joined column of numbers is not one.
+    let joined: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if joined.len() == text.len() {
+        return None;
+    }
+    static JOINED: OnceLock<Vec<(&'static str, regex::Regex)>> = OnceLock::new();
+    let shapes = JOINED.get_or_init(|| {
+        [
+            ("across whitespace: PEM header", r"-----BEGIN[A-Z]"),
+            ("across whitespace: AWS access key id", r"(?:AKIA|ASIA)[0-9A-Z]{16}"),
+            ("across whitespace: Slack token", r"xox[a-z]-[A-Za-z0-9-]{10,}"),
+            ("across whitespace: Stripe key", r"(?:^|[^A-Za-z])(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{8,}"),
+            ("across whitespace: Google API key", r"AIza[0-9A-Za-z_-]{16,}"),
+            ("across whitespace: GitHub token", r"github_pat_[A-Za-z0-9_]{16,}"),
+            // Two parts, each `eyJ`: a joined "they Just" is `eyJust`, never `eyJ...\.eyJ`.
+            ("across whitespace: JWT-shaped text", r"eyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{2,}"),
+        ]
+        .into_iter()
+        .map(|(name, pattern)| (name, regex::Regex::new(pattern).expect(name)))
+        .collect()
+    });
+    if let Some((name, _)) = shapes.iter().find(|(_, shape)| shape.is_match(&joined)) {
+        return Some(name);
+    }
+    static HEX: OnceLock<regex::Regex> = OnceLock::new();
+    let hex = HEX.get_or_init(|| regex::Regex::new(r"[0-9a-fA-F]{32,}").expect("hex"));
+    if hex.find_iter(&joined).any(|found| {
+        let found = found.as_str();
+        found.bytes().any(|b| b.is_ascii_alphabetic()) && found.bytes().any(|b| b.is_ascii_digit())
+    }) {
+        return Some("across whitespace: run of 32 or more hex characters");
+    }
+    None
+}
+
+/// The refusal for a field that is secret-shaped: the shape's name, never the value.
+fn secret_problems(body: &str, evidence: &str) -> Vec<String> {
+    [("body", body), ("evidence", evidence)]
+        .into_iter()
+        .filter_map(|(field, text)| {
+            secret_shaped(text).map(|shape| {
+                format!(
+                    "the {field} holds a secret-shaped text ({shape}): herdr never writes one into a proposal, \
+                     which an Accept makes a tracked profile"
+                )
+            })
+        })
+        .collect()
 }
 
 /// The sha a `patch` names in `base_sha`: of the profile's file (`<name>.md` or `<name>/profile.md`) as it stands,
@@ -624,7 +869,7 @@ fn next_op(root: &Path, rows: &[Row]) -> String {
 /// gets one first, so the row is never glued onto the torn line and lost with it.
 fn append(root: &Path, row: &Row) -> std::io::Result<()> {
     use std::io::{Read, Seek, SeekFrom, Write};
-    std::fs::create_dir_all(folder(root))?;
+    make_folder(root)?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -800,6 +1045,9 @@ pub fn write(root: &Path, draft: &Draft) -> Result<String, Refusal> {
         ..draft.clone()
     };
     let mut problems = field_problems(&draft.by, &draft.run, &draft.key, &draft.evidence);
+    // P45b review F1, the last guard: after the redaction above, whatever is still secret-shaped is refused, not
+    // written. The writers refuse it first; this holds for any writer, today's or a later one.
+    problems.extend(secret_problems(&draft.body, &draft.evidence));
     problems.extend(content_problems(
         root,
         draft.kind,
@@ -838,6 +1086,19 @@ pub fn write(root: &Path, draft: &Draft) -> Result<String, Refusal> {
             "the same proposal is waiting already as {}",
             waiting.id
         ));
+    } else if let Some(waiting) = list(root)
+        .iter()
+        .find(|waiting| waiting.kind == draft.kind && waiting.profile == draft.profile)
+    {
+        // P45b, R3 ("one piece at a time"): a second proposal for the same profile under another key would wait beside
+        // the first, and accepting one would stale the other. The writer proposes again once the owner has acted.
+        problems.push(format!(
+            "a {} proposal of {} is waiting already as {}: one piece at a time; accept or dismiss {} first",
+            draft.kind.word(),
+            draft.profile,
+            waiting.id,
+            waiting.id
+        ));
     }
     if !problems.is_empty() {
         return Err(Refusal(problems));
@@ -855,7 +1116,7 @@ pub fn write(root: &Path, draft: &Draft) -> Result<String, Refusal> {
         .unwrap_or(0);
     let id = format!("pp-{}", top + 1);
     let file = path(root, &id);
-    std::fs::create_dir_all(folder(root)).map_err(|err| {
+    make_folder(root).map_err(|err| {
         Refusal(vec![format!(
             "cannot create {}: {err}",
             folder(root).display()
@@ -875,6 +1136,8 @@ fn accept_problems(root: &Path, proposal: &Proposal) -> Vec<String> {
         &proposal.key,
         &proposal.evidence,
     );
+    // P45b review F1: a file edited by hand since `write` is checked again before it becomes a profile.
+    problems.extend(secret_problems(&proposal.body, &proposal.evidence));
     problems.extend(content_problems(
         root,
         proposal.kind,
@@ -1129,7 +1392,7 @@ pub fn rollback(root: &Path, op: &str) -> Result<String, String> {
         }
     }
     if let Some(text) = &row.text {
-        std::fs::create_dir_all(folder(root)).map_err(|err| err.to_string())?;
+        make_folder(root).map_err(|err| err.to_string())?;
         crate::nirvana_seat::write_atomic(&waiting, text.as_bytes())
             .map_err(|err| format!("cannot write {}: {err}", waiting.display()))?;
     }
@@ -1168,6 +1431,12 @@ const USAGE: &str = "usage: herdr profile proposals
        herdr profile accept <id>
        herdr profile dismiss <id> [--reason \"...\"]
        herdr profile proposals rollback <op>";
+
+/// P45b second fix round: the line after an accept's success line. The proposal sat in an ignored folder; the profile
+/// it became is not ignored, and the check that kept a secret out of it is a pattern list the second review got 20 of
+/// 40 shapes past. One line, so the owner reads it.
+pub const ACCEPT_NOTE: &str = "note: the profile file is not ignored by git, and herdr's secret check is a pattern \
+list: read its body before you commit it";
 
 /// The evidence as one line of a listing.
 fn short(text: &str) -> String {
@@ -1239,7 +1508,13 @@ pub fn cli_to(
                 1
             }
         },
-        ["accept", id] => said(accept(root, id), "accept", out, err),
+        ["accept", id] => {
+            let code = said(accept(root, id), "accept", out, err);
+            if code == 0 {
+                let _ = writeln!(out, "{ACCEPT_NOTE}");
+            }
+            code
+        }
         ["dismiss", id] => said(dismiss(root, id, None), "dismiss", out, err),
         ["dismiss", id, "--reason", reason] => {
             said(dismiss(root, id, Some(reason)), "dismiss", out, err)
