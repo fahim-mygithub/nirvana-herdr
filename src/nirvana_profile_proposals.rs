@@ -838,6 +838,19 @@ pub fn write(root: &Path, draft: &Draft) -> Result<String, Refusal> {
             "the same proposal is waiting already as {}",
             waiting.id
         ));
+    } else if let Some(waiting) = list(root)
+        .iter()
+        .find(|waiting| waiting.kind == draft.kind && waiting.profile == draft.profile)
+    {
+        // P45b, R3 ("one piece at a time"): a second proposal for the same profile under another key would wait beside
+        // the first, and accepting one would stale the other. The writer proposes again once the owner has acted.
+        problems.push(format!(
+            "a {} proposal of {} is waiting already as {}: one piece at a time; accept or dismiss {} first",
+            draft.kind.word(),
+            draft.profile,
+            waiting.id,
+            waiting.id
+        ));
     }
     if !problems.is_empty() {
         return Err(Refusal(problems));

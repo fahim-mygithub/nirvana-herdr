@@ -213,3 +213,14 @@ CONTROLS = CONTROLS + (
     Control("p94_partial_detection_kept", DETECT, "    let kept = if detection.skipped.budget {",
             "    let kept = if false {", T_END_SAFE, "rust"),
 )
+
+# The lead 2026-11-19: the store refuses a second waiting proposal of one kind and profile (P45b report, section 4).
+PP = "src/nirvana_profile_proposals.rs"
+T_STORE = ("nirvana_profile_detect::tests::"
+           "p94_the_store_refuses_a_second_waiting_proposal_for_one_profile_under_any_key")
+CONTROLS = CONTROLS + (
+    # Red: T_STORE's second write (written as pp-2 beside pp-1).
+    Control("p94_store_second_waiting_allowed", PP,
+            "        .find(|waiting| waiting.kind == draft.kind && waiting.profile == draft.profile)",
+            "        .find(|_| false)", T_STORE, "rust"),
+)

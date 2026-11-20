@@ -343,7 +343,8 @@ fn p92_the_cli_lists_shows_accepts_dismisses_and_takes_only_proposal_ids() {
 fn p92_a_torn_ledger_line_loses_no_later_row_and_its_op_is_not_reused() {
     let (_home, root) = project("p92-pp-torn");
     let first = write(&root, &draft(Kind::New, "render-judge", NEW, None)).unwrap();
-    let mut other = draft(Kind::New, "render-judge", NEW, None);
+    // P45b: one waiting proposal per profile, so the second is another profile's.
+    let mut other = draft(Kind::New, "render-judge-2", NEW, None);
     other.key = "paragraph:other".into();
     let second = write(&root, &other).unwrap();
     assert!(dismiss(&root, &first, None)
@@ -356,7 +357,7 @@ fn p92_a_torn_ledger_line_loses_no_later_row_and_its_op_is_not_reused() {
     let line = dismiss(&root, &second, None).unwrap();
     assert!(line.starts_with("op-10: dismissed pp-2"), "{line}");
     assert!(
-        was_dismissed(&root, Kind::New, "render-judge", "paragraph:other").is_some(),
+        was_dismissed(&root, Kind::New, "render-judge-2", "paragraph:other").is_some(),
         "the dismissal after the torn line is remembered"
     );
     assert_eq!(ledger(&root).len(), 2);
@@ -400,8 +401,11 @@ fn p92_the_key_and_an_accepted_body_are_redacted() {
     let shas = ["a".repeat(63) + "1", "b".repeat(63) + "2"];
     let ids: Vec<String> = shas
         .iter()
-        .map(|sha| {
-            let mut one = draft(Kind::New, "render-judge", NEW, None);
+        .enumerate()
+        .map(|(n, sha)| {
+            // P45b: one waiting proposal per profile, so the second is another profile's.
+            let name = if n == 0 { "render-judge" } else { "render-judge-b" };
+            let mut one = draft(Kind::New, name, NEW, None);
             one.key = format!("paragraph:{sha}");
             write(&root, &one).unwrap()
         })
@@ -559,7 +563,8 @@ fn p92_concurrent_writers_get_distinct_proposals() {
         .map(|n| {
             let root = root.clone();
             std::thread::spawn(move || {
-                let mut one = draft(Kind::New, "render-judge", NEW, None);
+                // P45b: one waiting proposal per profile, so each thread proposes its own.
+                let mut one = draft(Kind::New, &format!("render-judge-{n}"), NEW, None);
                 one.key = format!("paragraph:thread-{n}");
                 write(&root, &one).unwrap()
             })

@@ -1104,6 +1104,7 @@ pub fn propose(root: &Path, planned: &[Planned]) -> Vec<(Planned, Outcome)> {
                         if refusal.0.iter().all(|why| {
                             why.starts_with("the owner dismissed")
                                 || why.starts_with("the same proposal is waiting")
+                                || why.contains("is waiting already as")
                         }) =>
                     {
                         Outcome::Known(refusal.to_string())

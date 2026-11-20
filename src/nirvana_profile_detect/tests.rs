@@ -941,3 +941,31 @@ fn p94_a_spent_budget_or_a_detector_error_leaves_the_run_end_as_it_was() {
     );
     assert!(blocked.starts_with("retro run-1:"), "{blocked}");
 }
+
+/// The lead 2026-11-19: the store itself refuses a second waiting proposal of the same kind and profile under any key,
+/// naming the waiting one (R3, one piece at a time). A proposal for another profile, or of the other kind, is written.
+#[test]
+fn p94_the_store_refuses_a_second_waiting_proposal_for_one_profile_under_any_key() {
+    let (_home, root) = project("p94-store-one");
+    let body = |line: &str| format!("---\ndescription: Judges.\nclass: build.bounded\n---\n{line}\n");
+    let draft = |profile: &str, key: &str, line: &str| Draft {
+        kind: Kind::New,
+        profile: profile.into(),
+        by: proposals::DETECTOR.into(),
+        run: "run-1".into(),
+        evidence: "5 orders: \"score the before frame first and compare\"".into(),
+        key: key.into(),
+        body: body(line),
+        base_sha: None,
+    };
+    assert_eq!(proposals::write(&root, &draft("judge", "k1", "One.")).unwrap(), "pp-1");
+    let why = proposals::write(&root, &draft("judge", "k2", "Two.")).unwrap_err().to_string();
+    assert!(
+        why.contains("a new proposal of judge is waiting already as pp-1: one piece at a time"),
+        "{why}"
+    );
+    assert_eq!(proposals::write(&root, &draft("other", "k2", "Two.")).unwrap(), "pp-2");
+    // Dismissed, the place is free again.
+    proposals::dismiss(&root, "pp-1", None).unwrap();
+    assert!(proposals::write(&root, &draft("judge", "k2", "Two.")).is_ok());
+}
