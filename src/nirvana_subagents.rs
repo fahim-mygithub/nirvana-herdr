@@ -1050,9 +1050,10 @@ pub fn seated_profile(seated: &crate::nirvana_run::Seated) -> Option<String> {
 /// (`forget_unasked`), and each as fresh as its last read (2 s while a row runs). A project whose orchestrator no
 /// drawn panel lists, a collapsed sidebar or another space's, reads as none in use while its workers run.
 pub fn live_profiles(here: impl Fn(&Path) -> bool) -> BTreeMap<String, usize> {
-    // (folder, profile) of every Running row that carries one, copied under the lock. Only a seat order's row carries
-    // a profile (`seat_orders_and_panes`).
-    let rows: Vec<(PathBuf, String)> = {
+    // (folder, (run, order), profile) of every Running row that carries one, copied under the lock. Only a seat
+    // order's row carries a profile (`seat_orders_and_panes`).
+    type Row = (PathBuf, (Option<String>, String), String);
+    let rows: Vec<Row> = {
         let guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
         guard
             .iter()
@@ -1062,15 +1063,26 @@ pub fn live_profiles(here: impl Fn(&Path) -> bool) -> BTreeMap<String, usize> {
                 view.subagents
                     .iter()
                     .filter(|row| row.state == SubagentState::Running)
-                    .filter_map(move |row| Some((folder.clone(), row.profile.clone()?)))
+                    .filter_map(move |row| {
+                        let order = (row.run_id.clone(), row.id.clone());
+                        Some((folder.clone(), order, row.profile.clone()?))
+                    })
             })
             .collect()
     };
-    // Each run is listed under one orchestrator pane only (its current `orchestrator_pane`), so no order is counted
-    // twice.
+    // Fix round (review F3): a fresh read lists a run under its current orchestrator pane only, but a pane the run
+    // left keeps its cached view until it is read again (up to a minute when no panel draws it), so one order can
+    // sit under two panes. Each order of this project counts once, by its run and order id.
+    // Review E: `here` (a `.git` stat walk in the Profiles panel) is asked once per folder, not once per row: 28 ms a
+    // call at 1200 cached rows.
+    let mut accepted: HashMap<PathBuf, bool> = HashMap::new();
+    let mut counted: HashSet<(Option<String>, String)> = HashSet::new();
     let mut counts = BTreeMap::new();
-    for (folder, profile) in rows {
-        if here(&folder) {
+    for (folder, order, profile) in rows {
+        let ok = *accepted
+            .entry(folder)
+            .or_insert_with_key(|folder| here(folder));
+        if ok && counted.insert(order) {
             *counts.entry(profile).or_insert(0) += 1;
         }
     }
@@ -3544,5 +3556,86 @@ mod tests {
             BTreeMap::from([("builder".to_owned(), 2), ("scholar".to_owned(), 1)])
         );
         assert_eq!(other, BTreeMap::from([("builder".to_owned(), 1)]));
+    }
+
+    /// A Running seat order `id` of run `run` with `profile`, for the `live_profiles` tests of the fix round.
+    fn p96_row_fix_live(run: &str, id: &str, profile: &str) -> Subagent {
+        Subagent {
+            id: id.into(),
+            parent_id: None,
+            name: id.into(),
+            description: String::new(),
+            provider: SubagentProvider::Claude,
+            model: "Sonnet 5.5".into(),
+            state: SubagentState::Running,
+            elapsed_secs: 30,
+            tokens: None,
+            ended_at: None,
+            depth: 0,
+            target_pane_id: None,
+            run_id: Some(run.into()),
+            run_event_time: Some(1000),
+            waiting: false,
+            profile: Some(profile.into()),
+        }
+    }
+
+    fn p96_row_fix_view(subagents: Vec<Subagent>) -> SubagentsView {
+        SubagentsView {
+            total_count: subagents.len(),
+            subagents,
+            overflow: 0,
+        }
+    }
+
+    /// Plan 47 P47a fix round (review F3): the same order under two cached panes, the run's old orchestrator pane and
+    /// its new one, counts once. Another run's order of the same id still counts.
+    #[test]
+    fn p96_row_fix_live_profiles_count_an_order_once() {
+        let here = PathBuf::from("C:/p96-fix-once/project");
+        seed_folder_view_for_test(
+            "p96-fix-pane-old",
+            &here,
+            p96_row_fix_view(vec![p96_row_fix_live("p96-fix-run", "x1", "builder")]),
+        );
+        seed_folder_view_for_test(
+            "p96-fix-pane-new",
+            &here,
+            p96_row_fix_view(vec![
+                p96_row_fix_live("p96-fix-run", "x1", "builder"),
+                p96_row_fix_live("p96-fix-other", "x1", "builder"),
+            ]),
+        );
+        let counted = live_profiles(|folder| folder == here.as_path());
+        unseed_for_test("p96-fix-pane-old");
+        unseed_for_test("p96-fix-pane-new");
+        assert_eq!(counted, BTreeMap::from([("builder".to_owned(), 2)]));
+    }
+
+    /// Plan 47 P47a fix round (review E): `here` is asked once per distinct folder, not once per row. Three panes in
+    /// one folder hold six Running rows; the folder is asked once.
+    #[test]
+    fn p96_row_fix_live_profiles_ask_once_per_folder() {
+        let here = PathBuf::from("C:/p96-fix-ask/project");
+        for pane in 0..3 {
+            let rows = (0..2)
+                .map(|n| p96_row_fix_live("p96-fix-ask-run", &format!("o{pane}{n}"), "scholar"))
+                .collect();
+            seed_folder_view_for_test(&format!("p96-fix-ask-{pane}"), &here, p96_row_fix_view(rows));
+        }
+        let asked = std::cell::Cell::new(0usize);
+        let counted = live_profiles(|folder| {
+            if folder == here.as_path() {
+                asked.set(asked.get() + 1);
+                true
+            } else {
+                false
+            }
+        });
+        for pane in 0..3 {
+            unseed_for_test(&format!("p96-fix-ask-{pane}"));
+        }
+        assert_eq!(counted, BTreeMap::from([("scholar".to_owned(), 6)]));
+        assert_eq!(asked.get(), 1);
     }
 }
