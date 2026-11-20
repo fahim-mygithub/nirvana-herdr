@@ -3,6 +3,67 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.88.0: the seat table on screen in three modes, costs checked against real runs, an upgrade that keeps your edits
+
+- **Changed:** plan 46.
+  - The Seats panel has a second page, Table. `t` or Tab switches, so does a click on a page word, and the panel
+    reopens on the page it was closed on. One row per order class and one for the orchestrator; one column each for
+    Efficient, Balanced and SOTA, the project's mode in brackets; a cell names the seat's model and effort. Marks:
+    `!` not the cool pick, `?` usage unread, `=` held from calibration, `~` cost as measured. The selected row's
+    detail lists every seat for that class with its score and its record. The Orders page is drawn as before.
+  - `<home>/nirvana/seat-calibration.json`: for each seat and effort, the cost its medium orders measured against
+    the table's cell, from the last 60 days of journals. A factor is booked where 5 or more orders sit and their
+    median is outside 0.5 to 2.0, clamped to 0.25 to 4.0; a project's own figure applies at 5 or more of its own
+    orders. The file is bound to the table it was measured on, so a changed table books as written until the next
+    check. A row no check could have written is dropped when read. `herdr seat calibrate [--json] [--dry-run]
+    [--picks]`.
+  - The idle tick runs the check when the record grew by 20 lines or a day passed. It uses no model and no usage.
+    Reads are bounded: 32 MB a journal, 500 journals, 15 s. `herdr lessons idle` shows the last check.
+  - herdr applies a measured cost. It never changes a score: what the record says about scores is shown only.
+  - The default table gains `calibration = true` and `calibration_hold = ["opus:high"]`. A held pair is measured
+    and shown, never booked. Hydrogen low is refit by x0.37 from its own orders.
+  - The table upgrade carries plain edits and added plain lines from a table made from any kept default. One
+    attempt runs at a time across processes, under an OS lock on `seats.upgrade.lock`; a read that finds it held
+    does not wait and reads the table as it is. The attempt builds the new text, takes a dated backup under
+    `backup/` that it creates itself and reads back, writes a temp file, reads the table again, and renames. A
+    failure at any step leaves the owner's bytes, says so once, and holds further tries for 10 minutes. A backup
+    that holds the table as it was read is never removed. A carried edit the new default refuses is named. The
+    0.86.0 default is kept as `nirvana_seats_v18.toml`.
+  - A table that cannot be read is never replaced: herdr writes the default only where no file exists.
+  - The journal's order line records the first gate verdict and whether its failing axes were all the brief's or
+    the gate's, for the score findings.
+- **Because:** the owner, 2026-11-19: "In this modal I would like to see a submenu wher we have a table for the 3
+  different modes efficent balanced and SOTA. I would like to see the seating table with the task and model type.
+  Use the latest logs to update the table as refrencses. During the idle lesson learning runs have it check /
+  maintain the table using real runs as calibration / validation." The owner's installed table carries one edit,
+  `overrides_per_run = 5`, and for that reason had stopped upgrading.
+- **Measured:** scoped tests pass, by filter: `p98_the_panel_reopens` 1, `nirvana_seat` 219, `nirvana_idle_review` 23,
+  `nirvana_run` 82, `nirvana_claude` 94, `nirvana_fresh` 57, `nirvana_look` 27, `nirvana_worker` 99, `client::shell`
+  581, `nirvana_gate` 152, `nirvana_review` 18, `nirvana_retro` 9, `nirvana_learning` 27, `nirvana_profile` 46,
+  `nirvana_dead` 39, `nirvana_job` 25, `layout` 38, `nirvana_usage` 24, `cli::spec` 18. On a copy of the real record
+  (2457 lines, 116 journals, default table, one check about 1.5 s): Opus high x2.23 (n 65), held; Sonnet high x0.41 (n
+  6), booked; Opus medium x1.35 (n 14), Sonnet medium x0.92 (n 112) and Hydrogen low x1.04 (n 5) inside the band. With
+  the hold no pick moves. Without it 4 Balanced picks go from Opus high to Fable high: `plan`, `build.load_bearing`,
+  `build.frontend`, `judge.visual`. Score findings, shown only: Opus in `build.load_bearing` passed first time on 10
+  of 26 and would read 68 against the table's 95. Built on Opus high; P46a had three Sonnet reviews and three fix
+  rounds, P46b one review and one fix round. The reviews found, in order: a factor kept on a cell whose table cost had
+  changed; an overwrite after a failed backup; a failed final write that took a new backup on every read and logged
+  "took"; an unreadable table replaced by the default; and, by running three `herdr seat diff` at once on a scratch
+  home, the only copy of the owner's bytes lost in 5 of 60 rounds, because two attempts shared a backup name and an
+  undone attempt removed a backup another had reused. After the lock the same probe, run again at the merge on the
+  merged binary: 2 at once, 60 rounds, 0 lost; 3 at once, 60 rounds, 0 lost; 8 at once, 40 rounds, 0 lost; 4 at once,
+  40 rounds, 0 lost; rounds with a refused attempt: 0. A scratch copy of the owner's installed table, upgraded by the
+  merged binary, differs from the new default by `overrides_per_run = 5` alone, with its bytes from before in the
+  backup. Each control of p97 and p98 turned its test red in its branch; the three reopen controls, the two
+  page-switch controls beside them and the four moved older controls were run red at the merge. Not seen live: the
+  Table page in the owner's window, the idle check on the owner's machine, the upgrade of the owner's own table. Known
+  gaps: a save in the instant between the upgrade's last read and its rename can be lost, with the backup holding the
+  bytes from before; on Windows a rename can be refused while another process has the table open, and that attempt
+  then waits 10 minutes; a CRLF table comes out LF, its CRLF bytes in the backup; the empty `seats.upgrade.lock` stays
+  beside the table; an old calibration file names no table and reads as none until the first check rewrites it.
+- **If you remove this:** the panel shows orders only, the table's costs are the ones typed in, and an edited table
+  stays on the default it was made from.
+
 ## alpha 0.87.0: a profile names its skills and brings its own servers; four shapes; a proposals store
 
 - **Changed:** plan 45's first package, the format the panel and the lesson reviews will write.

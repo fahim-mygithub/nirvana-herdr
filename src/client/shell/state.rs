@@ -1058,6 +1058,8 @@ pub(crate) struct ClientShellState {
     pub(super) nirvana_accounts: Option<super::nirvana_accounts::AccountsPanel>,
     /// Plan 12 O8a: the Seats panel, while open.
     pub(super) nirvana_seats: Option<super::nirvana_seats::SeatsPanel>,
+    /// Plan 46 P46b: the Seats panel's last page, so closing and reopening it in this session shows that page again.
+    pub(super) nirvana_seats_page: super::nirvana_seats::Page,
     /// Nirvana fork, P87 fix round: the Restart Claude requests sent per Nirvana Claude pane id, so neither the Seats
     /// panel nor a space's menu sends a second one before the first has shown.
     pub(super) nirvana_restarting: std::collections::HashMap<String, ClientRestartSent>,
@@ -1242,6 +1244,7 @@ impl ClientShellState {
             nirvana_running: None,
             nirvana_memory: None,
             nirvana_seats: None,
+            nirvana_seats_page: super::nirvana_seats::Page::Orders,
             nirvana_restarting: std::collections::HashMap::new(),
             nirvana_jobs: None,
             nirvana_git: None,

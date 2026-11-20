@@ -1,6 +1,6 @@
 # Plan 46: the seat table on screen, checked against real runs
 
-Status: BUILDING 2026-11-19. Two calls in §6 are the orchestrator's, inside the owner's ask, and the owner may change them.
+Status: LANDED 2026-11-19 as alpha 0.88.0. Three calls in §6 are the orchestrator's, inside the owner's ask, and the owner may change them. The live checks of §7 are owed.
 
 ## 1. The ask
 
@@ -95,6 +95,16 @@ P46a first. Plan 45's P45d shares `nirvana_seat.rs` and `nirvana_run.rs` and is 
 |---|---|---|
 | D1 | Measured cost is applied by herdr; a score change is only shown | Cost is a measurement. A score decides who gets the work, and §3 shows today's pass rates would wrongly demote Opus. Revisit when journals carry the fault field. |
 | D2 | herdr writes a calibration file, not the owner's table | A table herdr edits stops matching any kept default and stops upgrading, which is the fault the owner's table has now. |
+| D3 | Opus high is measured and shown but not booked (`calibration_hold = ["opus:high"]`) | On the record Opus high reads x2.23 (n 65), mostly run ia1's SOTA work. Booked, it moves 4 Balanced picks (plan, build.load_bearing, build.frontend, judge.visual) from Opus to Fable. The owner left Opus high unrefit on 2026-11-18. Delete the pair from the line to book it. |
+
+### What the build changed from this plan
+
+- The calibration file is bound to the table by a fingerprint of the cells it measured. An older file reads as none.
+- One upgrade attempt runs at a time under an OS lock, a backup is created exclusively, and a complete backup is
+  never removed. Three reads at once had lost the owner's bytes in 5 of 60 rounds.
+- A failed upgrade leaves a note beside the table and waits 10 minutes before it tries again.
+- herdr no longer writes the default over a table it cannot read; it writes it only where no file exists.
+- The panel remembers its page for the session.
 
 ## 7. Live checks owed after building
 

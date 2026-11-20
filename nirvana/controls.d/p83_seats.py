@@ -63,8 +63,8 @@ CONTROLS = (
     # The upgrade path: the 0.78.2 default is historical
     Control("p83_v15_not_historical", SEAT, '    include_str!("nirvana_seats_v15.toml"),\n', "", T_UPGRADE, "rust"),
     # Hydrogen's cells are plan 71's probe at each model's own price (nirvana/seat_refresh.py)
-    Control("p83_hydrogen_low_reprice", TABLE, 'windows = { "5h" = 0.0002235, week = 0.0001118 }',
-            'windows = { "5h" = 0.0002235, week = 5.783e-05 }', T_REPRICE, "python"),
+    Control("p83_hydrogen_low_reprice", TABLE, 'windows = { "5h" = 8.27e-05, week = 4.135e-05 }',
+            'windows = { "5h" = 8.27e-05, week = 5.783e-05 }', T_REPRICE, "python"),
     # The fix round: load() skips and counts a line that is not an object or a seated row missing a key
     Control("p83_load_not_object", REFRESH, '        if not isinstance(e, dict):\n',
             '        if False:\n', T_LOAD, "python"),

@@ -72,6 +72,8 @@ mod nirvana_review;
 mod nirvana_run;
 mod nirvana_running;
 mod nirvana_seat;
+// Plan 46 P46a: the seat table checked against real runs.
+mod nirvana_seat_calib;
 mod nirvana_seats_square;
 mod nirvana_servers;
 mod nirvana_session_record;

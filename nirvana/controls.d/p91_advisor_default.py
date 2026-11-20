@@ -39,8 +39,8 @@ CONTROLS = (
     # The upgrade path: v17 last, v16 still historical, an installed v17 upgrades
     Control("p91_v17_not_historical", SEAT, '    include_str!("nirvana_seats_v17.toml"),\n', "", T_V17, "rust"),
     Control("p91_v16_dropped", SEAT, '    include_str!("nirvana_seats_v16.toml"),\n', "", T_V17, "rust"),
-    Control("p91_upgrade_writes_nothing", SEAT, "    let _ = write_atomic(path, upgraded.as_bytes());\n    Some(())",
-            "    let _ = upgraded;\n    Some(())", T_V17, "rust"),
+    Control("p91_upgrade_writes_nothing", SEAT, "    if let Err(err) = std::fs::rename(&temp, path) {",
+            "    if let Err(err) = std::fs::remove_file(&temp) {", T_V17, "rust"),
     # Step 4: the advisor is not in the cost cell; a sabotage that puts it there moves the pick's expected use
     Control("p91_advisor_in_cost", SEAT, "        * class.weight\n",
             "        * class.weight\n        * if seat.advisor.at(request.mode).is_some() { 2.0 } else { 1.0 }\n",

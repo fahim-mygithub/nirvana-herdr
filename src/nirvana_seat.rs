@@ -36,7 +36,7 @@
 //! the next pick reads it; the hypotheses are tagged there.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -80,6 +80,9 @@ pub const HISTORICAL_DEFAULTS: &[&str] = &[
     // The advisor default (2026-11-18): the default before Sonnet took an Opus advisor in Balanced and the table stated
     // `worker_autocompact_tokens` (0cdef448, alpha 0.85.0), copied before the edit so an installed copy upgrades.
     include_str!("nirvana_seats_v17.toml"),
+    // Plan 46: the default before `calibration = true` and Hydrogen low's refit (15822b68), copied before the edit so an
+    // installed copy upgrades.
+    include_str!("nirvana_seats_v18.toml"),
 ];
 pub const DIR: &str = "nirvana";
 pub const SEATS_FILE: &str = "seats.toml";
@@ -223,6 +226,13 @@ pub struct Table {
     pub version: u32,
     pub mode: Mode,
     pub use_record: bool,
+    /// Plan 46: book a seat and effort at its measured cost from `seat-calibration.json` (`nirvana_seat_calib`). A table
+    /// without the line reads false, so an installed table that never took the 0.87 default books exactly as before.
+    #[serde(default)]
+    pub calibration: bool,
+    /// Plan 46: "seat:effort" pairs measured and shown but never booked (the owner's call on Opus high, 2026-11-18).
+    #[serde(default)]
+    pub calibration_hold: Vec<String>,
     pub constants: Constants,
     pub size: Sizes,
     #[serde(rename = "pool")]
@@ -632,6 +642,13 @@ impl Table {
         }
     }
 
+    /// Plan 46: the pair is in `calibration_hold`: its measured cost is shown, never booked.
+    pub fn held(&self, seat: &str, effort: Effort) -> bool {
+        self.calibration_hold
+            .iter()
+            .any(|pair| pair.trim() == format!("{seat}:{}", effort.word()))
+    }
+
     pub fn bars(&self, class: &Class) -> Bars {
         class.bars.unwrap_or_else(|| default_bars(class.blast))
     }
@@ -788,6 +805,17 @@ impl Table {
                         class.id, entry.seat
                     ));
                 }
+            }
+        }
+        // Plan 46: a hold that names no seat and effort would hold nothing, silently.
+        for pair in &self.calibration_hold {
+            let named = pair.trim().split_once(':').and_then(|(seat, effort)| {
+                Some((self.seat(seat)?, Effort::parse(effort)?))
+            });
+            if named.is_none_or(|(seat, effort)| !seat.efforts.contains(&effort)) {
+                problems.push(format!(
+                    "calibration_hold: {pair:?} is not a seat and an effort it offers (\"opus:high\")"
+                ));
             }
         }
         problems
@@ -1005,6 +1033,10 @@ pub fn cost(price: &Price, tokens: &Tokens) -> f64 {
 
 /// Parses a table and refuses one with problems.
 pub fn parse(text: &str) -> Result<Table, String> {
+    // `read_or_create`'s unreadable table: its reason, which names the file and the cause (the P46a second review, F3).
+    if let Some(why) = text.strip_prefix(UNREADABLE) {
+        return Err(why.lines().next().unwrap_or_default().to_owned());
+    }
     let table: Table = toml::from_str(text).map_err(|err| err.to_string())?;
     let problems = table.problems();
     if problems.is_empty() {
@@ -1023,17 +1055,50 @@ pub fn dir() -> PathBuf {
 
 /// The table's text, written from `DEFAULT` when the file is missing, and the owner's from then on.
 /// An installed file that equals an old default upgrades itself after being copied to `<home>/nirvana/backup/`.
+///
+/// A table that exists and cannot be read reads as `UNREADABLE` and the reason, which `parse` refuses with that
+/// reason: the callers outside this file (`nirvana_claude`, `nirvana_fresh`, `nirvana_look`) all parse what this
+/// returns and already handle a refusal, so the signature stays. The callers here use `read_table`.
 pub fn read_or_create(path: &Path) -> String {
-    let _ = maybe_upgrade(path);
-    if let Ok(text) = std::fs::read_to_string(path) {
-        return text;
-    }
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(path, DEFAULT);
-    DEFAULT.to_owned()
+    read_table(path).unwrap_or_else(|why| format!("{UNREADABLE}{why}"))
 }
+
+/// `read_or_create`'s text, or why the table that is there cannot be read.
+///
+/// The P46a second review, F3: any read error fell through to writing `DEFAULT`, so a table with two bytes that are
+/// not UTF-8 (a UTF-16 save, a stray paste), or one read while an editor held it, was replaced by herdr's default with
+/// no backup. The default is written only when there is no file (`NotFound`), and then with `create_new`, so a save
+/// that lands between the read and the write is never written over either.
+pub fn read_table(path: &Path) -> Result<String, String> {
+    let _ = maybe_upgrade(path);
+    match std::fs::read(path) {
+        Ok(bytes) => String::from_utf8(bytes).map_err(|err| {
+            format!(
+                "{} cannot be read as UTF-8 text ({err}); herdr leaves it as it is: save it as UTF-8, or delete it to get herdr's default back",
+                path.display()
+            )
+        }),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .and_then(|mut file| file.write_all(DEFAULT.as_bytes()));
+            Ok(DEFAULT.to_owned())
+        }
+        Err(err) => Err(format!(
+            "{} cannot be read ({err}); herdr leaves it as it is",
+            path.display()
+        )),
+    }
+}
+
+/// What `read_or_create` returns ahead of the reason for a table it cannot read. A NUL never begins a table that
+/// parses (TOML refuses control characters), so no real file is mistaken for it.
+pub const UNREADABLE: &str = "\u{0}herdr: the seat table cannot be read\u{0}";
 
 fn extract_mode_line(text: &str) -> Option<&str> {
     let mut in_table = false;
@@ -1080,28 +1145,662 @@ fn replace_mode_line(text: &str, new_mode_line: &str) -> String {
 }
 
 fn maybe_upgrade(path: &Path) -> Option<()> {
-    let text = std::fs::read_to_string(path).ok()?;
+    maybe_upgrade_with(path, DEFAULT, HISTORICAL_DEFAULTS)
+}
+
+/// `maybe_upgrade` against `default` and the `kept` defaults before it: a parameter so a test can hold an older kept
+/// default with a key today's lacks (the dropped-key path; no real kept default has one on 2026-11-19).
+///
+/// The P46a third review: herdr processes read the table at once (hooks, `seat pick`), and the first read after a new
+/// binary is exactly when. Three `herdr seat diff` at once lost the only copy of the owner's bytes in 5 of 60 rounds
+/// (two attempts shared one backup name; an undone attempt removed a backup another had reused). One attempt runs at a
+/// time, across processes and threads, under the OS lock on `UPGRADE_LOCK`, from its read to its rename. A read that
+/// finds the lock held does not wait and does not try: it reads the table as it is, and says nothing (the holder is
+/// upgrading it). The common read, a table that is today's default, takes no lock and makes no file.
+fn maybe_upgrade_with(path: &Path, default: &str, kept: &[&str]) -> Option<()> {
+    let bytes = std::fs::read(path).ok()?;
+    if nothing_to_upgrade(&bytes, default) {
+        return None;
+    }
+    let _lock = match upgrade_lock(path.parent()?) {
+        UpgradeLock::Taken(file) => Some(file),
+        UpgradeLock::Held => return None,
+        // A lock file that cannot be made (a read-only folder): the attempt goes on as it did before the lock. In such
+        // a folder it ends refused, said once; a readable table never turns into an error here.
+        UpgradeLock::Unavailable => None,
+    };
+    // Read again, under the lock: the holder before this one may have upgraded it.
+    upgrade_attempt(path, default, kept)
+}
+
+/// The table needs no attempt: it is not UTF-8 (`read_table` says so), has no mode line, or is `default` with its mode.
+/// `upgrade_attempt`'s first checks, without the lock, so the common read takes none.
+fn nothing_to_upgrade(bytes: &[u8], default: &str) -> bool {
+    let body = bytes.strip_prefix(BOM).unwrap_or(bytes);
+    let Ok(text) = std::str::from_utf8(body) else {
+        return true;
+    };
+    let normalized = text.replace("\r\n", "\n");
+    extract_mode_line(&normalized).is_none()
+        || replace_mode_line(&normalized, "mode = \"balanced\"") == default.replace("\r\n", "\n")
+}
+
+/// What `upgrade_lock` found.
+enum UpgradeLock {
+    /// This attempt holds the lock until the file drops: at the attempt's end, at a panic's unwind, or by the OS when
+    /// the process dies. Nothing is left behind to time out.
+    Taken(std::fs::File),
+    /// Another reader, a thread or a process, holds it.
+    Held,
+    /// The lock file cannot be opened, or the OS refused the lock for another reason.
+    Unavailable,
+}
+
+/// A try for the OS lock on `UPGRADE_LOCK` in `dir`, never a wait. `File::try_lock`, as `Lock` takes `leases.lock`: a
+/// lock the OS lets go when the handle closes, never a `create_new` marker a crash would leave holding every later
+/// attempt off. The file itself stays; nothing deletes it.
+fn upgrade_lock(dir: &Path) -> UpgradeLock {
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(UPGRADE_LOCK))
+    else {
+        return UpgradeLock::Unavailable;
+    };
+    match file.try_lock() {
+        Ok(()) => UpgradeLock::Taken(file),
+        Err(std::fs::TryLockError::WouldBlock) => UpgradeLock::Held,
+        Err(std::fs::TryLockError::Error(_)) => UpgradeLock::Unavailable,
+    }
+}
+
+/// One upgrade attempt, under the lock when it could be had (`maybe_upgrade_with`).
+fn upgrade_attempt(path: &Path, default: &str, kept: &[&str]) -> Option<()> {
+    // The bytes, so the backup can be checked against exactly what was read.
+    let bytes = std::fs::read(path).ok()?;
+    // The P46a second review: a table saved with a byte order mark matched no default and was left alone without a
+    // word. It is still left alone (herdr would write it back without the mark), but when it would otherwise upgrade,
+    // one line says why.
+    let (body, bom) = match bytes.strip_prefix(BOM) {
+        Some(rest) => (rest, true),
+        None => (&bytes[..], false),
+    };
+    // Not UTF-8: `read_table` says so, and nothing here touches it (F3).
+    let text = std::str::from_utf8(body).ok()?;
     let normalized = text.replace("\r\n", "\n");
     let mode_line = extract_mode_line(&normalized)?;
     let canonical = replace_mode_line(&normalized, "mode = \"balanced\"");
-    let current_canonical = DEFAULT.replace("\r\n", "\n");
+    let current_canonical = default.replace("\r\n", "\n");
+    // The common read ends here: the table is today's default with its mode, read and compared, nothing more.
     if canonical == current_canonical {
         return None;
     }
-    let is_historical = HISTORICAL_DEFAULTS
-        .iter()
-        .any(|hist| canonical == hist.replace("\r\n", "\n"));
-    if !is_historical {
+    let dir = path.parent()?;
+    // The P46a second review, F1: everything past this point (the nearest-default ranking parses every top-level line
+    // of 19 defaults, then the new text is parsed whole) runs at every pick while an upgrade keeps failing. A refusal
+    // leaves a note keyed on what the attempt depends on, and a read that finds the same key skips it (`refused_lately`).
+    let key = attempt_key(path, &bytes, default);
+    if refused_lately(dir, &key, now()) {
         return None;
     }
-    let dir = path.parent()?;
-    let backup_dir = dir.join("backup");
-    let _ = std::fs::create_dir_all(&backup_dir);
-    let _ = std::fs::copy(path, backup_dir.join(SEATS_FILE));
-
+    let refuse = |why: &str| {
+        upgrade_note(
+            dir,
+            &format!("seats.toml was not upgraded and is left as it was: {why}"),
+        );
+        note_refusal(dir, &key, now());
+    };
+    let is_historical = kept
+        .iter()
+        .any(|hist| canonical == hist.replace("\r\n", "\n"));
+    // Plan 46: a kept default with plain values edited takes the new default with those values carried. The owner's
+    // table, 2026-11-19, was 0.78.2's default (v15) with `overrides_per_run = 5`, and took none of the three defaults
+    // after it because only a whole-text match upgraded.
+    let (current_canonical, carried) = if is_historical {
+        (current_canonical, None)
+    } else {
+        let carried = carried_from_kept(&canonical, default, kept)?;
+        let (upgraded, dropped) = with_carried(&current_canonical, &carried.lines);
+        // The carried values must still parse in the new default, or the file is left as it is. The P46a second
+        // review, F5: it was left without a word (`version = 1001` on v15); one line now names the refused key.
+        if let Err(problems) = parse(&upgraded) {
+            refuse(&refused_carry(&current_canonical, &carried, &problems));
+            return None;
+        }
+        (upgraded, Some((carried, dropped)))
+    };
+    if bom {
+        refuse(BOM_WORDS);
+        return None;
+    }
+    // F1: the whole new text is built before anything is written.
     let upgraded = replace_mode_line(&current_canonical, mode_line);
-    let _ = write_atomic(path, upgraded.as_bytes());
+    let note = carried
+        .filter(|(carried, _)| !carried.lines.is_empty())
+        .map(|(carried, dropped)| took_words(&carried, &dropped));
+
+    let backup_dir = dir.join("backup");
+    // The P46a review, finding 2: the table is never written over unless its backup was written and read back holding
+    // the bytes read above. With the backup folder blocked (a file where the folder goes), the carried path rewrote the
+    // table with no backup and no log, and the owner's layout and any dropped key were gone. Both paths: the whole-text
+    // path's old file is a kept default and so could be rebuilt, but nothing documents an upgrade without a backup.
+    // F1: a backup already holding these bytes is used again, so a retry never adds a file.
+    let backup = match existing_backup(&backup_dir, &bytes) {
+        Some(backup) => backup,
+        None => match take_backup(&bytes, &backup_dir) {
+            Ok(backup) => backup,
+            Err(why) => {
+                refuse(&why);
+                return None;
+            }
+        },
+    };
+    // What a failed or abandoned attempt takes back: its temp file, nothing more. The backup stays, made here or
+    // reused: it holds the table as it was read (`take_backup` read it back), and the P46a third review measured what
+    // removing it costs: under several readers it was the only copy of the owner's bytes (5 of 60 rounds with three).
+    // The next attempt reuses it (`existing_backup`), so a retry adds no file.
+    let temp = temp_beside(path);
+    let undo = || {
+        let _ = std::fs::remove_file(&temp);
+    };
+    if let Err(err) = std::fs::write(&temp, upgraded.as_bytes()) {
+        undo();
+        refuse(&format!(
+            "the new table cannot be written in {} ({err})",
+            dir.display()
+        ));
+        return None;
+    }
+    // The P46a second review, F4: the owner's save between the backup and the rename was replaced with no backup of it.
+    // The table is read again just before the rename; changed, the attempt is dropped without a word and the next read
+    // starts over from the new bytes. (A save inside the last few microseconds still races; the window was the whole
+    // backup and write.)
+    if let Some(Fault::TableChanges(owner)) = fault() {
+        let _ = std::fs::write(path, owner);
+    }
+    if std::fs::read(path).ok().as_deref() != Some(&bytes[..]) {
+        undo();
+        return None;
+    }
+    if let Err(err) = std::fs::rename(&temp, path) {
+        undo();
+        refuse(&format!("it cannot be replaced ({err})"));
+        return None;
+    }
+    let _ = std::fs::remove_file(dir.join(REFUSED_FILE));
+    // F1: "took herdr's default" only once the rename returned Ok. It said so before the write, at every read, while
+    // the write kept failing.
+    if let Some(words) = note {
+        upgrade_note(
+            dir,
+            &format!("{words}; the file before is {}", backup.display()),
+        );
+    }
     Some(())
+}
+
+/// The log line's words for an upgrade that carried the owner's values, before the backup's name.
+fn took_words(carried: &Carried, dropped: &[String]) -> String {
+    // Review of the dropped-key path (not run by the P46a review): a dropped key was named under "keeping your"
+    // as well as under "dropped". The kept words now name only what the new default took.
+    let kept_words = Carried {
+        lines: carried
+            .lines
+            .iter()
+            .filter(|(_, key, _, _)| !dropped.contains(key))
+            .cloned()
+            .collect(),
+    }
+    .words();
+    format!(
+        "seats.toml took herdr's default{}{}",
+        if kept_words.is_empty() {
+            String::new()
+        } else {
+            format!(", keeping your {kept_words}")
+        },
+        if dropped.is_empty() {
+            String::new()
+        } else {
+            format!("; dropped, no longer in the default: {}", dropped.join(", "))
+        },
+    )
+}
+
+/// F5's words: the carried values the new default refuses, each tried alone; all of them when none fails alone.
+fn refused_carry(current: &str, carried: &Carried, problems: &str) -> String {
+    let alone: Vec<String> = carried
+        .lines
+        .iter()
+        .filter(|line| parse(&with_carried(current, std::slice::from_ref(*line)).0).is_err())
+        .map(|line| Carried { lines: vec![line.clone()] }.words())
+        .collect();
+    let named = if alone.is_empty() {
+        carried.words()
+    } else {
+        alone.join("; ")
+    };
+    format!(
+        "herdr's default refuses your {named} ({})",
+        problems.lines().next().unwrap_or_default()
+    )
+}
+
+/// UTF-8's byte order mark.
+const BOM: &[u8] = b"\xEF\xBB\xBF";
+
+/// The refusal for a table that would upgrade but starts with `BOM`.
+const BOM_WORDS: &str = "it starts with a byte order mark, which herdr would not write back; save it as UTF-8 without one to take herdr's default";
+
+/// Beside `seats.toml`: the last refused attempt's key and when (`refused_lately`).
+pub const REFUSED_FILE: &str = "seats-upgrade.refused";
+
+/// How long a refusal stands while its key holds. A lock that clears (an editor, a scanner) changes no key; this is
+/// how soon its upgrade is tried again. The log is not written again either way (`upgrade_note`).
+pub const REFUSED_S: u64 = 600;
+
+/// What an upgrade attempt's outcome depends on: the table's bytes, the default this binary carries, whether the table
+/// is read-only, and what stands at `backup/`. Clearing a read-only attribute, or removing a file where the backup
+/// folder goes, changes the key, so the next read tries at once.
+fn attempt_key(path: &Path, bytes: &[u8], default: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let short = |data: &[u8]| -> String {
+        Sha256::digest(data)
+            .iter()
+            .take(8)
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    };
+    let readonly = std::fs::metadata(path).is_ok_and(|meta| meta.permissions().readonly());
+    // A folder and no folder are one state: the attempt makes the folder, and a key it changed itself made the next
+    // read try again (measured: two attempts where one was meant, in `p97_a_failed_write_keeps_the_table_and_says_so_once`).
+    let blocked = path
+        .parent()
+        .and_then(|dir| std::fs::metadata(dir.join("backup")).ok())
+        .is_some_and(|meta| !meta.is_dir());
+    format!(
+        "{} {} readonly={readonly} backup_blocked={blocked}",
+        short(bytes),
+        short(default.as_bytes())
+    )
+}
+
+/// The note beside the table holds `key`, written under `REFUSED_S` ago. A note dated after `now` (a clock moved back)
+/// is ignored rather than standing until that time.
+fn refused_lately(dir: &Path, key: &str, now: u64) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join(REFUSED_FILE)) else {
+        return false;
+    };
+    let Some((at, noted)) = text.trim_end().split_once(' ') else {
+        return false;
+    };
+    at.parse::<u64>()
+        .is_ok_and(|at| at <= now && now < at.saturating_add(REFUSED_S))
+        && noted == key
+}
+
+fn note_refusal(dir: &Path, key: &str, now: u64) {
+    let _ = std::fs::write(dir.join(REFUSED_FILE), format!("{now} {key}\n"));
+}
+
+/// A backup in `backup_dir` that already holds `bytes`: a refused or abandoned attempt that kept its backup, or an
+/// owner who put an old table back. Only `seats-*.toml` of the same length are read.
+fn existing_backup(backup_dir: &Path, bytes: &[u8]) -> Option<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(backup_dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("seats-") && name.ends_with(".toml"))
+        })
+        .filter(|path| std::fs::metadata(path).is_ok_and(|meta| meta.len() == bytes.len() as u64))
+        .collect();
+    found.sort();
+    found
+        .into_iter()
+        .find(|path| std::fs::read(path).is_ok_and(|copy| copy == bytes))
+}
+
+/// The backup of a table whose bytes are `bytes`: a new dated file in `backup_dir`, created by this call, written
+/// with `bytes`, read back and compared. `Err` says why there is none; a file it created that does not hold `bytes`
+/// (a half or wrong copy) is removed, and nothing else.
+///
+/// The P46a second review, F2: the reasons named the dated file, which changes each second, so `upgrade_note` never
+/// matched its last line and wrote one per second of picks; and a short copy or a copy that did not match stayed
+/// behind for the next attempt's `-2` name to sit beside. The reasons name the folder only.
+///
+/// The P46a third review: `backup_name` picks a name that is not there yet, and `std::fs::copy` then wrote over
+/// whatever landed there since. Two attempts in one second picked one name; the loser read back the winner's half
+/// copy and removed the shared file, the only copy of the owner's bytes. The file is created with `create_new`, so a
+/// name another attempt took first moves this one on to the next name, and the file is this attempt's own.
+fn take_backup(bytes: &[u8], backup_dir: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(backup_dir).map_err(|err| {
+        format!(
+            "the backup folder {} cannot be made ({err})",
+            backup_dir.display()
+        )
+    })?;
+    // Plan 46: a dated name, so a later upgrade never writes over an earlier backup (it was one `seats.toml`).
+    let mut backup = backup_name(backup_dir, now());
+    let mut taken = 0;
+    let opened = loop {
+        if let (Some(Fault::NameTaken(other)), 0) = (fault(), taken) {
+            let _ = std::fs::write(&backup, other);
+        }
+        let open = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup);
+        match open {
+            // Another attempt made this name between the pick and the create.
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && taken < 16 => {
+                taken += 1;
+                backup = backup_name(backup_dir, now());
+            }
+            open => break open,
+        }
+    };
+    let made = opened.is_ok();
+    let failed = |why: String| {
+        if made {
+            remove_unless_holding(&backup, bytes);
+        }
+        Err(why)
+    };
+    let copied = opened.and_then(|mut file| match fault() {
+        Some(Fault::CopyFails) => file
+            .write_all(&bytes[..bytes.len() / 2])
+            .and_then(|()| Err(std::io::Error::other("a copy that stopped half way"))),
+        _ => file.write_all(bytes),
+    });
+    if let Err(err) = copied {
+        return failed(format!(
+            "a backup cannot be written in {} ({err})",
+            backup_dir.display()
+        ));
+    }
+    if let Some(Fault::BackupWrong) = fault() {
+        let _ = std::fs::write(&backup, b"not the table");
+    }
+    match std::fs::read(&backup) {
+        Ok(copy) if copy == bytes => Ok(backup),
+        Ok(_) => failed(format!(
+            "a backup written in {} does not hold the table as it was read",
+            backup_dir.display()
+        )),
+        Err(err) => failed(format!(
+            "a backup written in {} cannot be read back ({err})",
+            backup_dir.display()
+        )),
+    }
+}
+
+/// Removes `path` only when it does not hold `bytes`: a half or wrong copy. A file that holds them, or that cannot be
+/// read (and so may), stays: a stray file is cheaper than the owner's lost bytes (the P46a third review).
+fn remove_unless_holding(path: &Path, bytes: &[u8]) {
+    if std::fs::read(path).is_ok_and(|copy| copy != bytes) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Faults a test puts into one upgrade attempt, on its own thread; none outside tests.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fault {
+    /// The copy writes half the table and fails.
+    CopyFails,
+    /// The copy lands, holding other bytes.
+    BackupWrong,
+    /// The owner saves these bytes between the backup and the rename.
+    TableChanges(&'static str),
+    /// Another attempt writes these bytes at the backup name this one picked, before it creates the file.
+    NameTaken(&'static str),
+}
+
+#[cfg(test)]
+thread_local! {
+    static UPGRADE_FAULT: std::cell::Cell<Option<Fault>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn fault() -> Option<Fault> {
+    UPGRADE_FAULT.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+fn fault() -> Option<Fault> {
+    None
+}
+
+/// One dated line in `backup/seats-upgrades.log`, where the upgrade reports. When that folder is what failed, the line
+/// goes to `seats-upgrades.log` beside `seats.toml` instead. A refusal repeats at every read of the table (every pick),
+/// so a line whose words equal the log's last line's is not written again.
+fn upgrade_note(dir: &Path, words: &str) {
+    let line = format!("{} {words}\n", crate::nirvana_run::utc(now()));
+    for log in [dir.join("backup").join(UPGRADE_LOG), dir.join(UPGRADE_LOG)] {
+        let said_last = std::fs::read_to_string(&log).is_ok_and(|text| {
+            text.lines()
+                .last()
+                .is_some_and(|last| last.ends_with(&format!("Z {words}")))
+        });
+        if said_last {
+            return;
+        }
+        let written = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .and_then(|mut file| file.write_all(line.as_bytes()));
+        if written.is_ok() {
+            return;
+        }
+    }
+}
+
+/// Plan 46: beside the backups, one line per upgrade that carried the owner's values, with any it dropped.
+pub const UPGRADE_LOG: &str = "seats-upgrades.log";
+
+/// Beside `seats.toml`: the OS lock one upgrade attempt holds from its read to its rename (`upgrade_lock`).
+pub const UPGRADE_LOCK: &str = "seats.upgrade.lock";
+
+/// `<backup>/seats-<UTC>.toml`, with `-2`, `-3` on when that name is taken (two upgrades in one second).
+fn backup_name(backup_dir: &Path, at: u64) -> PathBuf {
+    let stamp: String = crate::nirvana_run::utc(at)
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect();
+    let mut name = backup_dir.join(format!("seats-{stamp}.toml"));
+    let mut n = 2;
+    while name.exists() {
+        name = backup_dir.join(format!("seats-{stamp}-{n}.toml"));
+        n += 1;
+    }
+    name
+}
+
+/// Plan 46: one line of a table, read as a plain assignment: the key and its scalar value (a string, number or bool;
+/// never an array, an inline table or a date). A comment or a header is none.
+fn plain_assignment(line: &str) -> Option<(String, toml::Value)> {
+    let parsed: toml::Table = toml::from_str(line).ok()?;
+    let mut entries = parsed.into_iter();
+    let (key, value) = entries.next()?;
+    if entries.next().is_some() {
+        return None;
+    }
+    let scalar = |value: &toml::Value| {
+        matches!(
+            value,
+            toml::Value::String(_) | toml::Value::Integer(_) | toml::Value::Float(_) | toml::Value::Boolean(_)
+        )
+    };
+    // Plan 46: an array of plain values is one too (`calibration_hold = ["opus:high"]`).
+    let plain = match &value {
+        toml::Value::Array(items) => items.iter().all(scalar),
+        other => scalar(other),
+    };
+    plain.then_some((key, value))
+}
+
+/// The top-level plain assignments of a table's lines: each key and its line's index.
+fn top_level_plain(lines: &[&str]) -> BTreeMap<String, usize> {
+    let at = sections(lines);
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| at[*index].is_none())
+        .filter_map(|(index, line)| plain_assignment(line).map(|(key, _)| (key, index)))
+        .collect()
+}
+
+/// The section each line sits in: `None` at the top level, else its header's text (`constants`, `[seat]`).
+fn sections(lines: &[&str]) -> Vec<Option<String>> {
+    let mut section = None;
+    lines
+        .iter()
+        .map(|line| {
+            let trimmed = line.trim();
+            if let Some(header) = trimmed.strip_prefix('[') {
+                section = Some(header.trim_end_matches(']').trim().to_owned());
+            }
+            section.clone()
+        })
+        .collect()
+}
+
+/// Plan 46: the owner's lines that differ from a kept default only in a plain value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Carried {
+    /// (section, key, the owner's line, the kept default's value).
+    pub lines: Vec<(Option<String>, String, String, toml::Value)>,
+}
+
+impl Carried {
+    /// "overrides_per_run = 5", or several joined by "; ".
+    pub fn words(&self) -> String {
+        self.lines
+            .iter()
+            .map(|(_, key, line, _)| {
+                let value = plain_assignment(line).map_or_else(String::new, |(_, value)| value.to_string());
+                format!("{key} = {value}")
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
+/// Plan 46: how `installed` differs from `kept` (both canonical) when every differing line is a changed plain value of
+/// the same key at the top level or in `[constants]`; `None` for any other difference (a seat, a class, a price, a
+/// cell, a comment, an added or removed line). An empty list is no difference.
+pub fn carried_edits(installed: &str, kept: &str) -> Option<Carried> {
+    let (a, b): (Vec<&str>, Vec<&str>) = (installed.lines().collect(), kept.lines().collect());
+    if a.len() != b.len() {
+        return None;
+    }
+    let at = sections(&b);
+    let mut lines = Vec::new();
+    for (index, (mine, theirs)) in a.iter().zip(&b).enumerate() {
+        // The P46a review, finding 7: trailing whitespace is no edit (it logged "keeping your overrides_per_run = 3").
+        if mine.trim_end() == theirs.trim_end() {
+            continue;
+        }
+        let section = &at[index];
+        if !matches!(section.as_deref(), None | Some("constants")) {
+            return None;
+        }
+        let ((key, _), (their_key, value)) = (plain_assignment(mine)?, plain_assignment(theirs)?);
+        if key != their_key {
+            return None;
+        }
+        lines.push((section.clone(), key, (*mine).to_owned(), value));
+    }
+    Some(Carried { lines })
+}
+
+/// Plan 46: what `installed` (canonical) carries from the kept default it is nearest to, by lines that differ; `None`
+/// when that nearest default is `default` itself (nothing to upgrade), or the difference is not plain values only.
+/// An empty `Carried` is a kept default whose lines differ only by trailing whitespace: it upgrades, carrying nothing.
+///
+/// Added lines (the P46a review, finding 5): a top-level plain line whose key that kept default lacks and `default`
+/// has as a plain value is the owner's, added ahead of the default: it is set aside before the comparison and carried
+/// as written. This was a special case for `calibration_hold` only, so a kept default with `calibration = false` added
+/// was left alone and never upgraded again. A multi-line value, or a key `default` does not know, is still an added
+/// line the upgrade will not take: the table stays as it is.
+fn carried_from_kept(installed: &str, default: &str, kept: &[&str]) -> Option<Carried> {
+    let current = canonical(default);
+    let current_lines: Vec<&str> = current.lines().collect();
+    let known = top_level_plain(&current_lines);
+    let lines: Vec<&str> = installed.lines().collect();
+    let mine = top_level_plain(&lines);
+    let nearest = std::iter::once(default)
+        .chain(kept.iter().copied())
+        .map(canonical)
+        .map(|kept| {
+            let kept_lines: Vec<&str> = kept.lines().collect();
+            let theirs = top_level_plain(&kept_lines);
+            let added: BTreeSet<usize> = mine
+                .iter()
+                .filter(|(key, _)| !theirs.contains_key(*key) && known.contains_key(*key))
+                .map(|(_, index)| *index)
+                .collect();
+            let rest: Vec<&str> = lines
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !added.contains(index))
+                .map(|(_, line)| *line)
+                .collect();
+            // A default of another length is never carried from (`carried_edits` refuses an added or removed line):
+            // the lines that differ over the shorter text, and the difference in length.
+            let differ = rest
+                .iter()
+                .zip(&kept_lines)
+                .filter(|(a, b)| a.trim_end() != b.trim_end())
+                .count()
+                + rest.len().abs_diff(kept_lines.len());
+            let rest = rest.join("\n");
+            (differ, kept, rest, added)
+        })
+        // The first of the fewest: the current default wins a tie, so an edited current table is never rewritten.
+        .min_by_key(|(differ, ..)| *differ)?;
+    let (_, kept, rest, added) = nearest;
+    if kept == current {
+        return None;
+    }
+    let mut carried = carried_edits(&rest, &kept)?;
+    for index in added {
+        let (key, value) = plain_assignment(lines[index])?;
+        carried
+            .lines
+            .push((None, key, lines[index].to_owned(), value));
+    }
+    Some(carried)
+}
+
+/// `default` with each carried key set to the owner's line, in the same section; the keys the default no longer has.
+fn with_carried(
+    default: &str,
+    carried: &[(Option<String>, String, String, toml::Value)],
+) -> (String, Vec<String>) {
+    let lines: Vec<&str> = default.lines().collect();
+    let at = sections(&lines);
+    let mut out: Vec<String> = lines.iter().map(|line| (*line).to_owned()).collect();
+    let mut dropped = Vec::new();
+    for (section, key, mine, _) in carried {
+        let found = (0..lines.len()).find(|&i| {
+            at[i] == *section && plain_assignment(lines[i]).is_some_and(|(k, _)| k == *key)
+        });
+        match found {
+            Some(i) => out[i] = mine.clone(),
+            None => dropped.push(key.clone()),
+        }
+    }
+    let mut text = out.join("\n");
+    if default.ends_with('\n') {
+        text.push('\n');
+    }
+    (text, dropped)
 }
 
 /// The text as `maybe_upgrade` compares it: LF line ends and the top-level mode line fixed.
@@ -1121,6 +1820,28 @@ pub fn differs_from_default(text: &str) -> bool {
 pub const DIFFERS_LINE: &str =
     "seats.toml differs from herdr's default. herdr seat diff shows how.";
 
+/// Plan 46: the line for a table that differs from the default only in plain values, which every upgrade carries:
+/// "seats.toml keeps your overrides_per_run = 5; the rest is herdr's default." Any other difference is `DIFFERS_LINE`;
+/// no difference, `None`.
+pub fn differs_line(text: &str) -> Option<String> {
+    if !differs_from_default(text) {
+        return None;
+    }
+    Some(
+        // The P46a second review, F5: "keeps your …; the rest is herdr's default" only for a table that parses. A value
+        // the default refuses (`version = 1001`) is no table herdr keeps; the plain line is said instead.
+        match carried_edits(&canonical(text), &canonical(DEFAULT))
+            .filter(|carried| !carried.lines.is_empty() && parse(text).is_ok())
+        {
+            Some(carried) => format!(
+                "seats.toml keeps your {}; the rest is herdr's default.",
+                carried.words()
+            ),
+            None => DIFFERS_LINE.to_owned(),
+        },
+    )
+}
+
 /// `herdr seat diff`: a unified difference from the owner's `seats.toml` to herdr's default with the owner's mode line,
 /// three lines of context, so the mode they chose never shows as a change.
 pub fn diff_to_default(installed: &str, label: &str) -> String {
@@ -1133,7 +1854,11 @@ pub fn diff_to_default(installed: &str, label: &str) -> String {
     if body.is_empty() {
         return "seats.toml is herdr's default.\n".to_owned();
     }
-    format!("--- {label}\n+++ herdr's default\n{body}")
+    // Plan 46: after an upgrade that carried the owner's values, the difference is those values alone, and it says so.
+    let note = differs_line(&installed)
+        .filter(|line| line != DIFFERS_LINE)
+        .map_or_else(String::new, |line| format!("{line} Each upgrade keeps it.\n"));
+    format!("--- {label}\n+++ herdr's default\n{body}{note}")
 }
 
 /// A line diff by longest common subsequence: `seats.toml` is under a thousand lines, so the table is small.
@@ -1240,7 +1965,7 @@ pub fn with_mode(text: &str, mode: Mode) -> Result<String, String> {
 /// refused is not touched: the owner's own edit is never overwritten (O2's rule for this file).
 pub fn set_mode_in(dir: &Path, mode: Mode) -> Result<Mode, String> {
     let path = dir.join(SEATS_FILE);
-    let text = read_or_create(&path);
+    let text = read_table(&path)?;
     let previous = parse(&text)
         .map_err(|problems| format!("{} is refused, fix it first:\n{problems}", path.display()))?
         .mode;
@@ -1272,6 +1997,9 @@ pub struct World {
     pub record: BTreeMap<RecordKey, Tally>,
     /// Overrides already accepted in the request's run.
     pub overrides_used: u32,
+    /// Plan 46: the measured cost factors from `seat-calibration.json`, and the project they are read for. Used only
+    /// when the table says `calibration = true`; empty, every pick is the table's own.
+    pub calibration: crate::nirvana_seat_calib::Factors,
 }
 
 #[derive(Debug, Clone)]
@@ -2332,13 +3060,33 @@ fn populate_windows(
     };
     cand.windows.clear();
     let cell = seat.use_cell(effort);
-    cand.use_basis =
-        cell.map(|cell| format!("{} at {}: {}", seat.id, cell.effort.word(), cell.basis));
+    // Plan 46: where 5 or more medium orders measured the cell outside 0.5 to 2.0, the booking is what they spent. A
+    // factor scales the booked use only: the score, the bar and every filter but the windows' arithmetic are untouched.
+    let found = cell
+        .filter(|_| table.calibration)
+        .and_then(|_| world.calibration.for_cell(&seat.id, effort));
+    // The owner's hold (`calibration_hold`): the figure is said, the booking is the table's.
+    let held = found.filter(|_| table.held(&seat.id, effort));
+    let measured = found.filter(|_| held.is_none());
+    cand.use_basis = cell.map(|cell| {
+        let basis = format!("{} at {}: {}", seat.id, cell.effort.word(), cell.basis);
+        match measured {
+            Some(applied) => format!("{basis}; {}", applied.words()),
+            None => match held {
+                Some(applied) => format!(
+                    "{basis}; held: {}, not booked (calibration_hold)",
+                    applied.words()
+                ),
+                None => basis,
+            },
+        }
+    });
     let scale = cell
         .and_then(|cell| date(&cell.at))
         .map_or(1.0, |at| seat.price_scale(at, world.now))
         * class.weight
-        * size.use_factor;
+        * size.use_factor
+        * measured.map_or(1.0, |applied| applied.factor as f32);
     let fallback = cell.map_or(0.0, |cell| {
         cell.windows.values().copied().fold(0.0, f32::max)
     });
@@ -3320,14 +4068,25 @@ pub fn load_leases(path: &Path) -> Result<Leases, String> {
     }
 }
 
+/// A temp file beside `path` for one write: `.<name>.<pid>.<n>.tmp`, `n` counting this process's writes. The P46a
+/// third review, finding 2: the name was `.<name>.<pid>.tmp`, one per process, so two threads wrote one file and the
+/// second rename failed (`p97_writes_at_once_each_land_whole`: 4 of 20 rounds). Nothing reads a `.tmp` file as the
+/// table or as `leases.json`, and a crash's stray keeps a name no later write picks.
+fn temp_beside(path: &Path) -> PathBuf {
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .map_or_else(|| "file".into(), |name| name.to_string_lossy());
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    dir.join(format!(".{name}.{}.{n}.tmp", std::process::id()))
+}
+
 /// A temp file, then a rename, as `usage.json` is written (O1): a reader never sees half a file.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir)?;
-    let name = path
-        .file_name()
-        .map_or_else(|| "file".into(), |name| name.to_string_lossy());
-    let temp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    let temp = temp_beside(path);
     std::fs::write(&temp, bytes)?;
     std::fs::rename(&temp, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&temp);
@@ -3536,6 +4295,17 @@ pub struct RecordLine {
     /// order's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advisor: Option<AdvisorUse>,
+    /// Plan 46: the order's FIRST gate verdict, as its first `gated` event wrote it. `outcome` is the last word on the
+    /// order; the first is what a seat's first-pass share reads (`nirvana/seat_refresh.py classes`), which until now only
+    /// the journals held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_verdict: Option<String>,
+    /// Plan 46: whether every failing axis of that first verdict was the brief's or the gate's (alpha 0.83.0's fault),
+    /// so no worker could have fixed it. `None` when the gate said no fault (a pass, or axes from before 0.83.0, which
+    /// read as the worker's). On 2026-11-19 Opus in build.load_bearing read 8 first passes of 21, and 8 of 10 without
+    /// the refusals for an unowned file or a rebase (plan 46 §3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_no_worker_fault: Option<bool>,
     /// Keys this herdr does not know, kept on a round trip (O2 review S5: a later field must not be dropped).
     #[serde(flatten, default)]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -4146,6 +4916,7 @@ const USAGE: &str = "usage: herdr seat list [--json]
        herdr seat record --json '<line>'
        herdr seat orchestrator [--json]
        herdr seat diff   (how your seats.toml differs from herdr's default)
+       herdr seat calibrate [--json] [--dry-run]   (the table against the record: measured costs and score findings)
        herdr seat mode [efficient|balanced|sota]   (prints the mode, or sets seats.toml's; plan 12 O8a)
        herdr seat run|exec|status|read|stop|cleanup ...   (plan 12 O3; `herdr seat run` alone prints its usage)
 --size defaults to medium (seats.toml's [size.medium]); --mode to seats.toml's mode.
@@ -4165,7 +4936,8 @@ fn now() -> u64 {
 /// The owner's table, or why it is refused. O3's runner reads it so; the CLI exits on a refusal.
 pub fn table() -> Result<Table, String> {
     let path = dir().join(SEATS_FILE);
-    parse(&read_or_create(&path)).map_err(|problems| {
+    // F3: a table that cannot be read is not "refused, delete it": the reason names the file and the cause.
+    parse(&read_table(&path)?).map_err(|problems| {
         format!(
             "{} is refused (delete it to get herdr's default back):
 {problems}",
@@ -4373,7 +5145,11 @@ pub fn table_for(root: &Path) -> Result<Table, String> {
 
 fn load_table() -> Table {
     let path = dir().join(SEATS_FILE);
-    match parse(&read_or_create(&path)) {
+    let text = read_table(&path).unwrap_or_else(|why| {
+        eprintln!("herdr seat: {why}");
+        std::process::exit(2);
+    });
+    match parse(&text) {
         Ok(table) => table,
         Err(problems) => {
             eprintln!(
@@ -4552,6 +5328,11 @@ fn leases_or_exit(path: &Path) -> Leases {
 /// test with no cache ran the real CLIs on the owner's sign-in (review of the p20 build, 2026-10-20). A stale
 /// reading here is stale, which the rule turns into opus medium.
 pub fn cached_world(dir: &Path, now: u64) -> World {
+    // Plan 46: no measured cost factors here (the P46a review, finding 7: this read the file at every call, the prompt
+    // hook's included, with the table saying off). It has no table to say whether they are on, and of its callers only
+    // the idle review picks a worker's seat, which books by them: it sets them itself (`pooled_factors`). The prompt
+    // hook's `check_seat_notice` and the launch read `orchestrator_seat`, which books no use cell; the media doctor
+    // picks nothing; the Seats square sets its own project's factors.
     let cache = nirvana_usage::read_cache(&dir.join(nirvana_usage::CACHE_FILE));
     World {
         now,
@@ -4564,6 +5345,43 @@ pub fn cached_world(dir: &Path, now: u64) -> World {
             .unwrap_or_default()
             .leases,
         ..World::default()
+    }
+}
+
+/// Plan 46: the world the table's own choice is read on: `live` with every pool window, a seat's own (`week.fable`)
+/// included, read now at 0% used with its whole length to its reset, and no booking. The CLIs, the record and the
+/// factors stay `live`'s, so only usage differs. No readings at all is not this world: that is the unread tier, which
+/// ranks seats otherwise (§3), and would mark every cell as moved.
+pub fn cool_world(table: &Table, live: &World) -> World {
+    let mut readings: Vec<Reading> = Vec::new();
+    for pool in &table.pools {
+        let mut windows = pool.windows.clone();
+        for seat in table.seats.iter().filter(|seat| seat.pool == pool.id) {
+            for window in &seat.extra_windows {
+                if !windows.contains(window) {
+                    windows.push(window.clone());
+                }
+            }
+        }
+        for window in windows {
+            let length = nirvana_usage::window_length(&window).unwrap_or(7 * 86_400);
+            readings.push(Reading {
+                pool: pool.id.clone(),
+                window,
+                used: Some(0.0),
+                resets_at: Some(live.now + length),
+                resets_text: None,
+                read_at: live.now,
+                source: "cool world (plan 46)".into(),
+            });
+        }
+    }
+    World {
+        now: live.now,
+        readings,
+        leases: Vec::new(),
+        overrides_used: 0,
+        ..live.clone()
     }
 }
 
@@ -4602,6 +5420,28 @@ pub fn live_world(table: &Table) -> World {
             BTreeMap::new()
         },
         overrides_used: 0,
+        // Plan 46: read only when the table books by it; the project (a `git` call outside a run) only when the file
+        // holds a project's own factor.
+        calibration: world_factors(table, &dir()),
+    }
+}
+
+/// Plan 46: `live_world`'s factors: the file's, for this process's project, when the table books by them; else none.
+pub fn world_factors(table: &Table, dir: &Path) -> crate::nirvana_seat_calib::Factors {
+    if table.calibration {
+        crate::nirvana_seat_calib::Factors::for_this_project(dir, table)
+    } else {
+        crate::nirvana_seat_calib::Factors::default()
+    }
+}
+
+/// Plan 46: the pooled factors (no project, so no `git`) when the table books by them and the file was measured
+/// against it; else none. The idle review's pick reads these on the cached world.
+pub fn pooled_factors(table: &Table, dir: &Path) -> crate::nirvana_seat_calib::Factors {
+    if table.calibration {
+        crate::nirvana_seat_calib::Factors::from_file(dir, table, None)
+    } else {
+        crate::nirvana_seat_calib::Factors::default()
     }
 }
 
@@ -4613,6 +5453,8 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         Some("record") => record_cli(&args[1..]),
         Some("orchestrator") => orchestrator_cli(&args[1..]),
         Some("diff") => diff_cli(&args[1..]),
+        // Plan 46: the table checked against the record.
+        Some("calibrate") => crate::nirvana_seat_calib::cli(&args[1..]),
         // Plan 12 O8a: the mode the Seats square shows and changes.
         Some("mode") => crate::nirvana_seats_square::mode_cli(&args[1..]),
         // Plan 12 O3: the runner's verbs live in `nirvana_worker`.
@@ -4655,7 +5497,7 @@ fn diff_cli(args: &[String]) -> std::io::Result<()> {
         usage_exit();
     }
     let path = dir().join(SEATS_FILE);
-    let text = read_or_create(&path);
+    let text = read_table(&path).map_err(std::io::Error::other)?;
     print!("{}", diff_to_default(&text, &path.display().to_string()));
     std::io::stdout().flush()
 }
@@ -4678,15 +5520,17 @@ fn list_cli(args: &[String]) -> std::io::Result<()> {
     let dir = dir();
     world.leases = leases_or_exit(&dir.join(LEASES_FILE)).leases;
     let mut view = list_view(&table, &world);
-    let differs =
-        std::fs::read_to_string(dir.join(SEATS_FILE)).is_ok_and(|text| differs_from_default(&text));
-    view["differs_from_default"] = differs.into();
+    let differs = std::fs::read_to_string(dir.join(SEATS_FILE))
+        .ok()
+        .and_then(|text| differs_line(&text));
+    view["differs_from_default"] = differs.is_some().into();
+    view["differs_line"] = differs.clone().into();
     if json {
         println!("{}", serde_json::to_string_pretty(&view)?);
     } else {
         let mut text = list_text(&table, &world, &dir);
-        if differs {
-            text.push_str(DIFFERS_LINE);
+        if let Some(line) = &differs {
+            text.push_str(line);
             text.push('\n');
         }
         print!("{text}");
@@ -5438,6 +6282,19 @@ pub(crate) mod tests {
         dir
     }
 
+    /// Plan 46: the backup an upgrade wrote is `backup/seats-<UTC>.toml`, no longer one `backup/seats.toml`; the one
+    /// file there, which the tests that read `backup/seats.toml` now read.
+    fn one_backup(dir: &Path) -> PathBuf {
+        let found: Vec<PathBuf> = std::fs::read_dir(dir.join("backup"))
+            .expect("a backup folder")
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .collect();
+        assert_eq!(found.len(), 1, "one backup: {found:?}");
+        found[0].clone()
+    }
+
     #[test]
     fn the_default_table_is_written_once_parses_and_holds_the_plans_seats_and_classes() {
         let dir = temp_dir("default");
@@ -5647,7 +6504,6 @@ pub(crate) mod tests {
     fn unedited_seats_toml_upgrades_itself_preserving_mode_and_backs_up_old_default() {
         let dir = temp_dir("upgrade-seats");
         let path = dir.join(SEATS_FILE);
-        let backup = dir.join("backup").join(SEATS_FILE);
 
         // 1. Install historical default v1 (from 0.13.0, 80ec1044), with CRLF and mode = "efficient"
         let v1_with_mode = replace_mode_line(HISTORICAL_DEFAULTS[0], "mode = \"efficient\"");
@@ -5677,7 +6533,7 @@ pub(crate) mod tests {
             "on-disk file is upgraded"
         );
         assert_eq!(
-            std::fs::read_to_string(&backup).unwrap(),
+            std::fs::read_to_string(one_backup(&dir)).unwrap(),
             v1_crlf,
             "backup holds the exact old installed file"
         );
@@ -5803,7 +6659,6 @@ pub(crate) mod tests {
     fn section10_v3_upgrade_keeps_efficient_mode_and_edited_does_not() {
         let dir = temp_dir("upgrade-v3");
         let path = dir.join(SEATS_FILE);
-        let backup = dir.join("backup").join(SEATS_FILE);
 
         let v3_with_mode = replace_mode_line(HISTORICAL_DEFAULTS[2], "mode = \"efficient\"");
         std::fs::write(&path, &v3_with_mode).unwrap();
@@ -5814,7 +6669,7 @@ pub(crate) mod tests {
         let current_efficient = replace_mode_line(DEFAULT, "mode = \"efficient\"");
         assert_eq!(text, current_efficient);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), current_efficient);
-        assert_eq!(std::fs::read_to_string(&backup).unwrap(), v3_with_mode);
+        assert_eq!(std::fs::read_to_string(one_backup(&dir)).unwrap(), v3_with_mode);
 
         // An edited file is never upgraded
         let edited = current_efficient.replace("floor = 0.05", "floor = 0.08");
@@ -8412,7 +9267,7 @@ pub(crate) mod tests {
                 "v{n}"
             );
             assert_eq!(
-                std::fs::read_to_string(dir.join("backup").join(SEATS_FILE)).unwrap(),
+                std::fs::read_to_string(one_backup(&dir)).unwrap(),
                 installed
             );
             let _ = std::fs::remove_dir_all(&dir);
@@ -8438,8 +9293,10 @@ pub(crate) mod tests {
         }
         assert_eq!(
             HISTORICAL_DEFAULTS.last().copied(),
-            Some(include_str!("nirvana_seats_v17.toml"))
+            Some(include_str!("nirvana_seats_v18.toml"))
         );
+        // Plan 46: v18 went after v17, which stays historical (control p97_v17_not_historical).
+        assert!(HISTORICAL_DEFAULTS.contains(&include_str!("nirvana_seats_v17.toml")));
         // Plan 71: v14 went after v13, which stays historical (control p70_v13_not_historical).
         assert!(HISTORICAL_DEFAULTS.contains(&include_str!("nirvana_seats_v13.toml")));
         // The seats refresh: v15 went after v14, which stays historical (control p71_v14_not_historical).
@@ -9435,7 +10292,8 @@ worker_autocompact_tokens = 300000\n";
     /// unedited v17 upgrades to the advisor default with its mode kept.
     #[test]
     fn p91_v17_is_last_and_v16_still_historical() {
-        assert_eq!(HISTORICAL_DEFAULTS.last().copied(), Some(P91_V17));
+        // Plan 46: v18 went after v17; v17 stays historical (p97_v18_is_last_and_an_exact_old_default_upgrades_with_its_mode).
+        assert!(HISTORICAL_DEFAULTS.contains(&P91_V17));
         assert!(HISTORICAL_DEFAULTS.contains(&include_str!("nirvana_seats_v16.toml")));
         assert_ne!(canonical(P91_V17), canonical(DEFAULT));
         assert!(!differs_from_default(P91_V17));
@@ -9444,7 +10302,7 @@ worker_autocompact_tokens = 300000\n";
         let installed = replace_mode_line(P91_V17, "mode = \"efficient\"");
         std::fs::write(&path, &installed).unwrap();
         assert_eq!(read_or_create(&path), replace_mode_line(DEFAULT, "mode = \"efficient\""));
-        assert_eq!(std::fs::read_to_string(dir.join("backup").join(SEATS_FILE)).unwrap(), installed);
+        assert_eq!(std::fs::read_to_string(one_backup(&dir)).unwrap(), installed);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -9452,7 +10310,8 @@ worker_autocompact_tokens = 300000\n";
     /// mode, and the pick's whole answer (seat, effort, windows, expected use, reason) is the same as on 0.85.0's table.
     #[test]
     fn p91_the_advisor_moves_no_pick_and_no_expected_use() {
-        let (old, new) = (parse(P91_V17).expect("v17"), table());
+        // Plan 46: against the advisor default as it shipped (v18); today's also refits Hydrogen low, not the advisor's.
+        let (old, new) = (parse(P91_V17).expect("v17"), parse(include_str!("nirvana_seats_v18.toml")).expect("v18"));
         let mut hot = world();
         set(&mut hot, "max", "5h", 0.6);
         let mut seen = 0;
@@ -9531,7 +10390,8 @@ worker_autocompact_tokens = 300000\n";
                 .clone()
         };
         for (effort, ratio) in [
-            (Effort::Low, 1.43),
+            // Plan 46: low carries its own orders' refit too (seat_fit.py, n 7).
+            (Effort::Low, 1.43 * 0.37),
             (Effort::Medium, 1.39 * 0.41),
             (Effort::High, 1.12 * 2.25),
         ] {
@@ -9914,5 +10774,1100 @@ worker_autocompact_tokens = 300000\n";
             ["balanced build.load_bearing: carbon high -> neon high"],
             "the owner's calls"
         );
+    }
+
+    // ---- plan 46 (P46a): the calibration in the pick, the upgrade that carries plain edits, the default ----
+
+    const P97_V15: &str = include_str!("nirvana_seats_v15.toml");
+    const P97_V17: &str = include_str!("nirvana_seats_v17.toml");
+    const P97_V18: &str = include_str!("nirvana_seats_v18.toml");
+
+    /// Every backup the upgrade wrote, read whole, in name order.
+    fn p97_backups(dir: &Path) -> Vec<String> {
+        let mut names: Vec<PathBuf> = std::fs::read_dir(dir.join("backup"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .collect();
+        names.sort();
+        names
+            .iter()
+            .map(|path| std::fs::read_to_string(path).unwrap())
+            .collect()
+    }
+
+    /// A calibration holding one pooled factor, as `seat-calibration.json` would.
+    fn p97_factors(seat: &str, effort: Effort, factor: f64, n: usize) -> crate::nirvana_seat_calib::Factors {
+        let cal = crate::nirvana_seat_calib::Calibration {
+            version: crate::nirvana_seat_calib::VERSION,
+            cost: vec![crate::nirvana_seat_calib::CostRow {
+                seat: seat.into(),
+                effort,
+                project: None,
+                n,
+                median: factor,
+                factor: Some(factor),
+                clamped: false,
+                held: false,
+            }],
+            ..Default::default()
+        };
+        crate::nirvana_seat_calib::Factors::from_calibration(&cal, None)
+    }
+
+    /// Every class at every mode on a cool and a hot world, as the p91 test reads it: the whole answer.
+    fn p97_answers(table: &Table, factors: &crate::nirvana_seat_calib::Factors) -> Vec<(String, serde_json::Value)> {
+        let mut hot = world();
+        set(&mut hot, "max", "5h", 0.6);
+        let mut out = Vec::new();
+        for mut world in [world(), hot] {
+            world.calibration = factors.clone();
+            for class in &table.classes {
+                for mode in [Mode::Efficient, Mode::Balanced, Mode::Sota] {
+                    let mut request = request(&class.id);
+                    request.mode = mode;
+                    request.needs = class.needs.clone();
+                    let answer = match pick(table, &world, &request) {
+                        Ok(pick) => serde_json::to_value(&pick).unwrap(),
+                        Err(no) => serde_json::json!({ "none": format!("{no:?}") }),
+                    };
+                    out.push((format!("{} {}", mode.word(), class.id), answer));
+                }
+            }
+        }
+        out
+    }
+
+    /// §4 "Applied in the pick": with no factor every pick is the table's own, byte for byte; `calibration = false`
+    /// ignores a factor; and a table without the line (an installed v18) reads it as false.
+    #[test]
+    fn p97_an_empty_calibration_or_off_moves_no_pick() {
+        let empty = crate::nirvana_seat_calib::Factors::default();
+        let on = table();
+        assert!(on.calibration, "the default books by it");
+        let off = parse(&DEFAULT.replacen("\ncalibration = true\n", "\ncalibration = false\n", 1))
+            .expect("off parses");
+        assert!(!off.calibration);
+        // Hydrogen low is seated somewhere on these worlds, so a factor on it is a real difference.
+        let factors = p97_factors("hydrogen", Effort::Low, 0.37, 7);
+        let base = p97_answers(&off, &empty);
+        assert!(
+            base.iter().any(|(_, a)| a.get("seat").and_then(|s| s.as_str()) == Some("hydrogen")
+                && a.get("effort").and_then(|s| s.as_str()) == Some("low")),
+            "no pick seated hydrogen low: the comparison would be hollow"
+        );
+        assert_eq!(p97_answers(&on, &empty), base, "on, with no factor");
+        assert_eq!(p97_answers(&off, &factors), base, "off, with a factor");
+        assert_ne!(p97_answers(&on, &factors), base, "on, with a factor, it books otherwise");
+        // An un-upgraded table has no line: false, so the factor is ignored there too.
+        let installed = parse(P97_V18).expect("v18");
+        assert!(!installed.calibration, "absent reads false");
+        assert_eq!(p97_answers(&installed, &factors), p97_answers(&installed, &empty));
+    }
+
+    /// A factor multiplies the booked use of that seat and effort and nothing else; `use_basis` says so in words.
+    #[test]
+    fn p97_a_factor_scales_only_the_booked_use() {
+        let table = table();
+        let mut request = request("research.web");
+        request.mode = Mode::Efficient;
+        let plain = chosen(&table, &world(), &request);
+        assert_eq!((plain.seat.as_str(), plain.effort), ("hydrogen", Effort::Low), "{}", plain.reason);
+        let mut measured = world();
+        measured.calibration = p97_factors("hydrogen", Effort::Low, 0.37, 7);
+        let got = chosen(&table, &measured, &request);
+        assert_eq!((got.seat.as_str(), got.effort), ("hydrogen", Effort::Low));
+        assert_eq!((got.score, got.bar, got.bar_dropped), (plain.score, plain.bar, plain.bar_dropped));
+        for (a, b) in plain.windows.iter().zip(&got.windows) {
+            assert_eq!(a.window, b.window);
+            assert!((b.expected - a.expected * 0.37).abs() <= a.expected * 1e-5, "{}: {} against {}", a.window, b.expected, a.expected);
+            assert_eq!((a.used, a.headroom), (b.used, b.headroom));
+        }
+        let basis = got.use_basis.as_deref().unwrap();
+        assert!(basis.ends_with("; measured x0.37 over 7 orders"), "{basis}");
+        assert_eq!(basis.strip_suffix("; measured x0.37 over 7 orders"), plain.use_basis.as_deref());
+        // The lease books what the pick expects (to six places, as `lease_for` rounds it).
+        let lease = lease_for(&table, &got, "o1", None, NOW);
+        let week = got.windows.iter().find(|w| w.window == "week").unwrap();
+        assert!((lease.expected["week"] - week.expected).abs() < 1e-6, "{:?}", lease.expected);
+        assert!(lease.expected["week"] < lease_for(&table, &plain, "o1", None, NOW).expected["week"]);
+        // Another effort of the seat is not moved.
+        let mut high = request.clone();
+        high.effort = Some(Effort::High);
+        high.override_seat = Some(("hydrogen:high".into(), "x".into()));
+        let (a, b) = (chosen(&table, &world(), &high), chosen(&table, &measured, &high));
+        assert_eq!(a.windows, b.windows);
+    }
+
+    /// Incident: the owner's installed table, 2026-11-19, is 0.78.2's default (v15) with `overrides_per_run = 5`, and
+    /// took none of the defaults after it. It upgrades now, keeps 5, keeps its mode, and backs up under a dated name.
+    #[test]
+    fn p97_the_owners_table_upgrades_and_keeps_overrides_per_run() {
+        let dir = temp_dir("p97-owner");
+        let path = dir.join(SEATS_FILE);
+        let owners = replace_mode_line(P97_V15, "mode = \"sota\"")
+            .replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1);
+        assert_ne!(owners, replace_mode_line(P97_V15, "mode = \"sota\""));
+        std::fs::write(&path, owners.replace('\n', "\r\n")).unwrap();
+        let text = read_or_create(&path);
+        let want = replace_mode_line(DEFAULT, "mode = \"sota\"")
+            .replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1);
+        assert_eq!(text, want);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), want);
+        let table = parse(&text).unwrap();
+        assert_eq!((table.constants.overrides_per_run, table.mode), (5, Mode::Sota));
+        assert!(table.calibration, "it took the new default");
+        assert_eq!(p97_backups(&dir), [owners.replace('\n', "\r\n")]);
+        let log = std::fs::read_to_string(dir.join("backup").join(UPGRADE_LOG)).unwrap();
+        assert!(log.contains("keeping your overrides_per_run = 5; the file before is "), "{log}");
+        // It still differs, and says only how.
+        assert!(differs_from_default(&text));
+        assert_eq!(
+            differs_line(&text).as_deref(),
+            Some("seats.toml keeps your overrides_per_run = 5; the rest is herdr's default.")
+        );
+        let diff = diff_to_default(&text, "seats.toml");
+        assert!(diff.contains("\n-overrides_per_run = 5\n+overrides_per_run = 3\n"), "{diff}");
+        assert!(
+            diff.ends_with("seats.toml keeps your overrides_per_run = 5; the rest is herdr's default. Each upgrade keeps it.\n"),
+            "{diff}"
+        );
+        // A second read is a no-op; a later upgrade writes a second backup, never over the first.
+        assert_eq!(read_or_create(&path), want);
+        assert_eq!(p97_backups(&dir).len(), 1);
+        std::fs::write(&path, replace_mode_line(P97_V17, "mode = \"sota\"")).unwrap();
+        assert_eq!(read_or_create(&path), replace_mode_line(DEFAULT, "mode = \"sota\""));
+        assert_eq!(p97_backups(&dir).len(), 2, "two upgrades, two backups");
+        assert!(p97_backups(&dir).contains(&owners.replace('\n', "\r\n")), "the first is kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Any edit but a plain top-level or `[constants]` value leaves the file exactly as it is: an edited score, an added
+    /// line, a comment, a value inside a seat; so does a value the new default cannot parse. An edited current default
+    /// is left alone too.
+    #[test]
+    fn p97_other_edits_leave_the_table_alone() {
+        let v15 = P97_V15.to_owned();
+        let score = v15.find("score = ").expect("a score");
+        let cases = [
+            ("an edited score", format!("{}score = 1{}", &v15[..score], &v15[score + "score = ".len() + 2..])),
+            ("an added line", v15.replacen("\nfloor = 0.05\n", "\nfloor = 0.05\nfloor_note = 1\n", 1)),
+            ("a removed line", v15.replacen("\ndefer_min = 30\n", "\n", 1)),
+            ("a comment edit", v15.replacen("# Overrides the orchestrator", "# Overrides that the orchestrator", 1)),
+            ("a seat's value", v15.replacen("\nenabled = false\n", "\nenabled = true\n", 1)),
+            ("a value of another type", v15.replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = \"five\"\n", 1)),
+            ("a renamed key", v15.replacen("\ndefer_min = 30\n", "\ndefer_mins = 30\n", 1)),
+            (
+                "a plain edit and a line added at the end",
+                format!("{}extra = 1\n", v15.replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1)),
+            ),
+        ];
+        for (what, text) in cases {
+            assert_ne!(text, v15, "{what}: the case edits something");
+            let dir = temp_dir(&format!("p97-alone-{}", what.replace(' ', "-")));
+            let path = dir.join(SEATS_FILE);
+            std::fs::write(&path, &text).unwrap();
+            assert_eq!(read_or_create(&path), text, "{what}");
+            assert!(p97_backups(&dir).is_empty(), "{what}: no backup");
+            assert_eq!(differs_line(&text).as_deref(), Some(DIFFERS_LINE), "{what}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        // The current default with a plain edit is the owner's, and current: never rewritten.
+        let dir = temp_dir("p97-alone-current");
+        let path = dir.join(SEATS_FILE);
+        let edited = DEFAULT.replacen("\nfloor = 0.05\n", "\nfloor = 0.08\n", 1);
+        std::fs::write(&path, &edited).unwrap();
+        assert_eq!(read_or_create(&path), edited);
+        assert!(p97_backups(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The kept defaults: v18 is today's before plan 46 and the last kept; an exact old default still upgrades with its
+    /// mode, as before.
+    #[test]
+    fn p97_v18_is_last_and_an_exact_old_default_upgrades_with_its_mode() {
+        assert_eq!(HISTORICAL_DEFAULTS.last().copied(), Some(P97_V18));
+        assert!(HISTORICAL_DEFAULTS.contains(&P97_V17));
+        assert!(!differs_from_default(P97_V18));
+        assert_eq!(differs_line(P97_V18), None);
+        let dir = temp_dir("p97-exact");
+        let path = dir.join(SEATS_FILE);
+        let installed = replace_mode_line(P97_V18, "mode = \"efficient\"");
+        std::fs::write(&path, &installed).unwrap();
+        assert_eq!(read_or_create(&path), replace_mode_line(DEFAULT, "mode = \"efficient\""));
+        assert_eq!(p97_backups(&dir), [installed]);
+        assert!(!dir.join("backup").join(UPGRADE_LOG).exists(), "nothing carried, no note");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The default: `calibration = true`, and one refit, Hydrogen low's cells times 0.37 (seat_fit.py on the record
+    /// 2026-11-19, n 7), the rest of the table as v18 had it.
+    #[test]
+    fn p97_the_default_turns_calibration_on_and_refits_hydrogen_low() {
+        let (new, old) = (table(), parse(P97_V18).unwrap());
+        assert!(new.calibration && !old.calibration);
+        let cells = |table: &Table, effort: Effort| table.seat("hydrogen").unwrap().use_cell(effort).unwrap().clone();
+        let (a, b) = (cells(&old, Effort::Low), cells(&new, Effort::Low));
+        for window in ["5h", "week"] {
+            assert!((b.windows[window] / (a.windows[window] * 0.37) - 1.0).abs() < 1e-3, "{window}: {:?}", b.windows);
+        }
+        assert!(b.basis.contains("refit x0.37 to hydrogen low's own orders (seat_fit.py, n 7"), "{}", b.basis);
+        for effort in [Effort::Medium, Effort::High, Effort::Xhigh] {
+            assert_eq!(cells(&old, effort).windows, cells(&new, effort).windows, "{effort:?}");
+        }
+        // Every other line is v18's: the refit, the calibration line and their comments are the whole change.
+        let changed: Vec<&str> = DEFAULT.lines().filter(|line| !P97_V18.lines().any(|old| old == *line)).collect();
+        assert!(changed.iter().all(|line| line.starts_with('#') || line.starts_with("calibration = ")
+            || line.starts_with("calibration_hold = ") || line.contains("refit x0.37")), "{changed:#?}");
+    }
+
+    // ---- plan 46 follow-up: the owner's hold on Opus high ----
+
+    const P97_FIXTURE: &str = include_str!("nirvana_seat_calib/record_fixture.jsonl");
+    const P97_HOLD: &str = "calibration_hold = [\"opus:high\"]";
+
+    fn p97_with_hold(hold: &str) -> Table {
+        assert_eq!(DEFAULT.matches(P97_HOLD).count(), 1, "the default's hold line");
+        parse(&DEFAULT.replacen(P97_HOLD, &format!("calibration_hold = {hold}"), 1)).expect("the hold parses")
+    }
+
+    /// The answers without their `use_basis`, which says "held": the booking, byte for byte.
+    fn p97_booked(answers: Vec<(String, serde_json::Value)>) -> Vec<(String, serde_json::Value)> {
+        answers
+            .into_iter()
+            .map(|(key, mut answer)| {
+                if let Some(object) = answer.as_object_mut() {
+                    object.remove("use_basis");
+                }
+                (key, answer)
+            })
+            .collect()
+    }
+
+    /// The owner's call 2026-11-18, held: a pair in `calibration_hold` books as the table says for the pooled figure and
+    /// for a project's own alike, and says the figure in `use_basis`; taking the hold away applies it.
+    #[test]
+    fn p97_a_held_pair_books_as_the_table() {
+        let (held, unheld) = (p97_with_hold("[\"hydrogen:low\"]"), p97_with_hold("[]"));
+        let empty = crate::nirvana_seat_calib::Factors::default();
+        let pooled = p97_factors("hydrogen", Effort::Low, 0.37, 7);
+        let own = crate::nirvana_seat_calib::Factors::from_calibration(
+            &crate::nirvana_seat_calib::Calibration {
+                version: crate::nirvana_seat_calib::VERSION,
+                cost: vec![crate::nirvana_seat_calib::CostRow {
+                    seat: "hydrogen".into(),
+                    effort: Effort::Low,
+                    project: Some("c:/p".into()),
+                    n: 7,
+                    median: 0.37,
+                    factor: Some(0.37),
+                    clamped: false,
+                    held: false,
+                }],
+                ..Default::default()
+            },
+            Some("c:/p".into()),
+        );
+        let base = p97_answers(&held, &empty);
+        assert_eq!(p97_booked(p97_answers(&held, &pooled)), p97_booked(base.clone()), "pooled, held");
+        assert_eq!(p97_booked(p97_answers(&held, &own)), p97_booked(base.clone()), "the project's own, held");
+        let said = p97_answers(&held, &pooled);
+        let basis = said
+            .iter()
+            .filter_map(|(_, a)| a.get("use_basis").and_then(|b| b.as_str()))
+            .find(|b| b.starts_with("hydrogen at low"))
+            .expect("a pick at hydrogen low");
+        assert!(basis.ends_with("; held: measured x0.37 over 7 orders, not booked (calibration_hold)"), "{basis}");
+        assert_ne!(p97_booked(p97_answers(&unheld, &pooled)), p97_booked(p97_answers(&unheld, &empty)), "no hold applies it");
+        assert_ne!(p97_booked(p97_answers(&unheld, &own)), p97_booked(p97_answers(&unheld, &empty)));
+    }
+
+    /// The default holds Opus high, and on the fixture record (Opus high at x2.10 over 11 orders) Balanced `plan` keeps
+    /// the seat it has with no calibration; with no hold the factor reaches it.
+    #[test]
+    fn p97_the_default_holds_opus_high_and_keeps_balanced_plan() {
+        let table = table();
+        assert_eq!(table.calibration_hold, ["opus:high"]);
+        assert!(table.held("opus", Effort::High) && !table.held("opus", Effort::Medium));
+        let lines: Vec<RecordLine> = P97_FIXTURE.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let cal = crate::nirvana_seat_calib::calibrate(
+            &table,
+            &lines,
+            &crate::nirvana_seat_calib::Journals::default(),
+            1_795_000_000,
+        );
+        let opus = cal
+            .cost
+            .iter()
+            .find(|r| r.project.is_none() && r.seat == "opus" && r.effort == Effort::High)
+            .unwrap();
+        assert!(opus.held && opus.factor.is_some(), "{opus:?}");
+        let factors = crate::nirvana_seat_calib::Factors::from_calibration(&cal, None);
+        let mut cool = cool_world(&table, &World { now: NOW, ..World::default() });
+        let mut plan = request("plan");
+        plan.mode = Mode::Balanced;
+        let plain = chosen(&table, &cool, &plan);
+        cool.calibration = factors;
+        let got = chosen(&table, &cool, &plan);
+        assert_eq!((&got.seat, got.effort, &got.windows), (&plain.seat, plain.effort, &plain.windows));
+        let unheld = p97_with_hold("[]");
+        let moved = chosen(&unheld, &cool, &plan);
+        println!("p97 balanced plan: {} {} held, {} {} with no hold", got.seat, got.effort.word(), moved.seat, moved.effort.word());
+        assert!(moved.windows != plain.windows || moved.seat != plain.seat, "no hold: the factor reaches plan");
+    }
+
+    /// The hold line is the owner's to add to a kept default that predates it, or to change: the upgrade carries it.
+    /// A hold that names no seat and effort is refused.
+    #[test]
+    fn p97_the_hold_line_carries_and_names_a_seat() {
+        let dir = temp_dir("p97-hold");
+        let path = dir.join(SEATS_FILE);
+        let installed = P97_V18.replacen("\nuse_record = false\n", "\nuse_record = false\ncalibration_hold = []\n", 1);
+        assert_ne!(installed, P97_V18);
+        std::fs::write(&path, &installed).unwrap();
+        let want = DEFAULT.replacen(P97_HOLD, "calibration_hold = []", 1);
+        assert_eq!(read_or_create(&path), want);
+        assert_eq!(p97_backups(&dir), [installed]);
+        assert_eq!(
+            differs_line(&want).as_deref(),
+            Some("seats.toml keeps your calibration_hold = []; the rest is herdr's default.")
+        );
+        let more = DEFAULT.replacen(P97_HOLD, "calibration_hold = [\"opus:high\", \"sonnet:high\"]", 1);
+        assert!(differs_line(&more).unwrap().starts_with("seats.toml keeps your calibration_hold = ["), "{more:?}");
+        for bad in ["[\"ghost:high\"]", "[\"opus\"]", "[\"opus:max\"]"] {
+            let text = DEFAULT.replacen(P97_HOLD, &format!("calibration_hold = {bad}"), 1);
+            let refused = parse(&text).err().unwrap_or_default();
+            assert!(refused.contains("calibration_hold"), "{bad}: {refused}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `live_world`'s factors: the file's when the table books by them, none when it does not.
+    #[test]
+    fn p97_the_live_worlds_factors_follow_the_switch() {
+        let dir = temp_dir("p97-live");
+        let cal = crate::nirvana_seat_calib::Calibration {
+            version: crate::nirvana_seat_calib::VERSION,
+            cost: vec![crate::nirvana_seat_calib::CostRow {
+                seat: "hydrogen".into(),
+                effort: Effort::Low,
+                project: None,
+                n: 7,
+                median: 0.37,
+                factor: Some(0.37),
+                clamped: false,
+                held: false,
+            }],
+            // The P46a review, finding 1: measured against today's table, or no reader applies it.
+            table_fingerprint: crate::nirvana_seat_calib::fingerprint(&table()),
+            ..Default::default()
+        };
+        std::fs::write(crate::nirvana_seat_calib::path(&dir), serde_json::to_string(&cal).unwrap()).unwrap();
+        let on = world_factors(&table(), &dir);
+        assert_eq!(on.for_cell("hydrogen", Effort::Low).map(|a| a.n), Some(7));
+        let off = parse(&DEFAULT.replacen("\ncalibration = true\n", "\ncalibration = false\n", 1)).unwrap();
+        assert_eq!(world_factors(&off, &dir), crate::nirvana_seat_calib::Factors::default());
+        assert_eq!(pooled_factors(&off, &dir), crate::nirvana_seat_calib::Factors::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- the P46a review's fix round ----
+
+    /// v15 with the owner's `overrides_per_run = 5` and a mode: the carried path's input.
+    fn p97_owners_v15() -> String {
+        replace_mode_line(P97_V15, "mode = \"sota\"").replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1)
+    }
+
+    /// Finding 2: the upgrade never writes over the owner's table unless its backup was written and read back. With
+    /// the backup folder blocked (a file where it goes), the table stays byte for byte, one line says why beside it
+    /// (said once, not at every read), and with the folder free again it upgrades. Both paths: carried and whole-text.
+    #[test]
+    fn p97_no_upgrade_without_a_backup() {
+        for (what, installed) in [("carried", p97_owners_v15()), ("whole text", replace_mode_line(P97_V15, "mode = \"sota\""))] {
+            let dir = temp_dir(&format!("p97-nobackup-{}", what.replace(' ', "-")));
+            let path = dir.join(SEATS_FILE);
+            let bytes = installed.replace('\n', "\r\n");
+            std::fs::write(&path, &bytes).unwrap();
+            std::fs::write(dir.join("backup"), "a file where the backup folder goes").unwrap();
+            assert_eq!(read_or_create(&path), bytes, "{what}");
+            assert_eq!(std::fs::read(&path).unwrap(), bytes.as_bytes(), "{what}: byte for byte");
+            let log = std::fs::read_to_string(dir.join(UPGRADE_LOG)).expect("a line beside seats.toml");
+            assert_eq!(log.lines().count(), 1, "{log}");
+            assert!(
+                log.contains(" seats.toml was not upgraded and is left as it was: the backup folder "),
+                "{what}: {log}"
+            );
+            // Every read of the table (every pick) tries again: the same reason is not written again.
+            read_or_create(&path);
+            assert_eq!(std::fs::read_to_string(dir.join(UPGRADE_LOG)).unwrap(), log, "{what}");
+            std::fs::remove_file(dir.join("backup")).unwrap();
+            let want = replace_mode_line(DEFAULT, "mode = \"sota\"");
+            let want = if what == "carried" {
+                want.replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1)
+            } else {
+                want
+            };
+            assert_eq!(read_or_create(&path), want, "{what}: free again, it upgrades");
+            assert_eq!(p97_backups(&dir), [bytes], "{what}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Finding 5: an owner's ADDED top-level line is carried when the new default has that key as a plain value, as
+    /// the hold line was: `calibration = false` added to a kept default upgrades and keeps false. An added key the new
+    /// default does not know, or a multi-line value, leaves the table alone; so does a current table with its hold line
+    /// deleted (a removed line).
+    #[test]
+    fn p97_an_added_plain_line_carries() {
+        let cases = [
+            ("calibration = false", vec!["calibration = false"]),
+            ("both lines", vec!["calibration = false", "calibration_hold = []"]),
+        ];
+        for (what, added) in cases {
+            let dir = temp_dir(&format!("p97-added-{}", what.replace([' ', '='], "-")));
+            let path = dir.join(SEATS_FILE);
+            let installed = P97_V15.replacen(
+                "\nuse_record = false\n",
+                &format!("\nuse_record = false\n{}\n", added.join("\n")),
+                1,
+            );
+            std::fs::write(&path, &installed).unwrap();
+            let mut want = DEFAULT.replacen("\ncalibration = true\n", "\ncalibration = false\n", 1);
+            if added.len() == 2 {
+                want = want.replacen(P97_HOLD, "calibration_hold = []", 1);
+            }
+            assert_eq!(read_or_create(&path), want, "{what}");
+            let table = parse(&want).unwrap();
+            assert!(!table.calibration, "{what}: kept false");
+            assert_eq!(p97_backups(&dir), [installed], "{what}");
+            let log = std::fs::read_to_string(dir.join("backup").join(UPGRADE_LOG)).unwrap();
+            assert!(log.contains("keeping your calibration = false"), "{what}: {log}");
+            // Stable: a second read neither rewrites nor backs up.
+            assert_eq!(read_or_create(&path), want);
+            assert_eq!(p97_backups(&dir).len(), 1);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        let alone = [
+            ("an added key the default lacks", P97_V15.replacen("\nuse_record = false\n", "\nuse_record = false\nmystery = 1\n", 1)),
+            (
+                "a multi-line array at top level",
+                P97_V15.replacen(
+                    "\nuse_record = false\n",
+                    "\nuse_record = false\ncalibration_hold = [\n  \"opus:high\",\n]\n",
+                    1,
+                ),
+            ),
+            ("a current table with its hold deleted", DEFAULT.replacen(&format!("{P97_HOLD}\n"), "", 1)),
+        ];
+        for (what, text) in alone {
+            let dir = temp_dir(&format!("p97-added-alone-{}", what.len()));
+            let path = dir.join(SEATS_FILE);
+            std::fs::write(&path, &text).unwrap();
+            assert_eq!(read_or_create(&path), text, "{what}");
+            assert!(p97_backups(&dir).is_empty(), "{what}: no backup");
+            assert_eq!(differs_line(&text).as_deref(), Some(DIFFERS_LINE), "{what}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Finding 7: a line that differs from a kept default only by trailing whitespace is no edit: the table upgrades as
+    /// an unedited one does, with no "keeping your" line.
+    #[test]
+    fn p97_trailing_whitespace_is_no_edit() {
+        let dir = temp_dir("p97-trailing");
+        let path = dir.join(SEATS_FILE);
+        let installed = replace_mode_line(P97_V15, "mode = \"efficient\"")
+            .replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 3  \n", 1);
+        std::fs::write(&path, &installed).unwrap();
+        assert_eq!(read_or_create(&path), replace_mode_line(DEFAULT, "mode = \"efficient\""));
+        assert_eq!(p97_backups(&dir), [installed]);
+        assert!(!dir.join("backup").join(UPGRADE_LOG).exists(), "nothing carried, no line");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The dropped-key path, which the P46a review did not run (no real kept default has a key today's lacks): an older
+    /// kept default's edited key that the new default dropped is named as dropped, and not as kept, in the log line.
+    #[test]
+    fn p97_a_dropped_key_is_named_once() {
+        let old = P97_V18.replacen("\nuse_record = false\n", "\nuse_record = false\nretired_knob = 1\n", 1);
+        assert_ne!(old, P97_V18);
+        for (what, installed, kept) in [
+            ("dropped only", old.replacen("\nretired_knob = 1\n", "\nretired_knob = 2\n", 1), ""),
+            (
+                "dropped and kept",
+                old.replacen("\nretired_knob = 1\n", "\nretired_knob = 2\n", 1)
+                    .replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1),
+                ", keeping your overrides_per_run = 5",
+            ),
+        ] {
+            let dir = temp_dir(&format!("p97-dropped-{}", what.replace(' ', "-")));
+            let path = dir.join(SEATS_FILE);
+            let installed = replace_mode_line(&installed, "mode = \"efficient\"");
+            std::fs::write(&path, &installed).unwrap();
+            assert_eq!(maybe_upgrade_with(&path, DEFAULT, &[old.as_str()]), Some(()), "{what}");
+            let mut want = replace_mode_line(DEFAULT, "mode = \"efficient\"");
+            if !kept.is_empty() {
+                want = want.replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1);
+            }
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), want, "{what}");
+            assert_eq!(p97_backups(&dir), [installed.clone()], "{what}");
+            let log = std::fs::read_to_string(dir.join("backup").join(UPGRADE_LOG)).unwrap();
+            assert!(
+                log.contains(&format!(
+                    " seats.toml took herdr's default{kept}; dropped, no longer in the default: retired_knob; the file before is "
+                )),
+                "{what}: {log}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    // ---- the P46a second review's fix round ----
+
+    /// The table file read-only for the life of the guard; on drop (a passing test or a panicking one) it is writable
+    /// again and its temp folder is removed, so a failed run leaves no read-only file in the temp folder.
+    struct ReadOnly {
+        path: PathBuf,
+        dir: PathBuf,
+    }
+
+    impl ReadOnly {
+        fn set(path: &Path, on: bool) {
+            let mut perm = std::fs::metadata(path).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perm.set_readonly(on);
+            std::fs::set_permissions(path, perm).unwrap();
+        }
+
+        fn new(path: &Path, dir: &Path) -> Self {
+            Self::set(path, true);
+            Self { path: path.to_owned(), dir: dir.to_owned() }
+        }
+    }
+
+    impl Drop for ReadOnly {
+        fn drop(&mut self) {
+            if std::fs::metadata(&self.path).is_ok() {
+                Self::set(&self.path, false);
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// Every line of both upgrade logs.
+    fn p97_log_lines(dir: &Path) -> Vec<String> {
+        [dir.join("backup").join(UPGRADE_LOG), dir.join(UPGRADE_LOG)]
+            .iter()
+            .filter_map(|log| std::fs::read_to_string(log).ok())
+            .flat_map(|text| text.lines().map(str::to_owned).collect::<Vec<_>>())
+            .collect()
+    }
+
+    /// Runs `body` with `fault` in this thread's upgrade attempts, cleared after it (a panic included).
+    fn with_fault<T>(fault: Fault, body: impl FnOnce() -> T) -> T {
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                UPGRADE_FAULT.with(|cell| cell.set(None));
+            }
+        }
+        UPGRADE_FAULT.with(|cell| cell.set(Some(fault)));
+        let _clear = Clear;
+        body()
+    }
+
+    /// F1: an upgrade whose final write fails leaves the owner's table byte for byte, its complete backup (the third
+    /// review: no longer removed), and one log line that says it was not upgraded, however often the table is read;
+    /// "took herdr's default" is said only after the write. Made writable, the next read upgrades reusing that backup,
+    /// so there is exactly one, and the "took" line names it. Both paths: carried and whole-text.
+    #[test]
+    fn p97_a_failed_write_keeps_the_table_and_says_so_once() {
+        for (what, installed) in [("carried", p97_owners_v15()), ("whole text", replace_mode_line(P97_V15, "mode = \"sota\""))] {
+            let dir = temp_dir(&format!("p97-readonly-{}", what.replace(' ', "-")));
+            let path = dir.join(SEATS_FILE);
+            std::fs::write(&path, &installed).unwrap();
+            let guard = ReadOnly::new(&path, &dir);
+            let started = std::time::Instant::now();
+            assert_eq!(read_or_create(&path), installed, "{what}");
+            let first = started.elapsed();
+            // The four reads after the first skip the attempt: the note stays the first read's (aged here by a second,
+            // so a rewrite would show), where each attempt writes it afresh.
+            let note = std::fs::read_to_string(dir.join(REFUSED_FILE)).expect("a refusal note");
+            let aged = format!("{} {}", now() - 1, note.split_once(' ').unwrap().1);
+            std::fs::write(dir.join(REFUSED_FILE), &aged).unwrap();
+            let started = std::time::Instant::now();
+            for _ in 0..4 {
+                assert_eq!(read_or_create(&path), installed, "{what}");
+            }
+            println!("p97 {what}: a failing read took {first:?}, the next four {:?}", started.elapsed());
+            assert_eq!(std::fs::read_to_string(dir.join(REFUSED_FILE)).unwrap(), aged, "{what}: skipped, not tried");
+            assert_eq!(std::fs::read(&path).unwrap(), installed.as_bytes(), "{what}: byte for byte");
+            // The P46a third review: an undone attempt removed its backup, and under several processes that file was
+            // the only copy of the owner's bytes. A backup holding the table as read stays, and the next attempt
+            // reuses it (below: still one backup).
+            assert_eq!(p97_backups(&dir), [installed.clone()], "{what}: the complete backup stays");
+            assert!(p97_temp_files(&dir).is_empty(), "{what}: {:?}", p97_temp_files(&dir));
+            let log = p97_log_lines(&dir);
+            assert_eq!(log.len(), 1, "{what}: {log:?}");
+            assert!(
+                log[0].contains(" seats.toml was not upgraded and is left as it was: it cannot be replaced ("),
+                "{what}: {log:?}"
+            );
+            assert!(!log[0].contains("took"), "{what}: {log:?}");
+            ReadOnly::set(&path, false);
+            let want = replace_mode_line(DEFAULT, "mode = \"sota\"");
+            let want = if what == "carried" {
+                want.replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1)
+            } else {
+                want
+            };
+            assert_eq!(read_or_create(&path), want, "{what}: writable, it upgrades");
+            assert_eq!(p97_backups(&dir), [installed.clone()], "{what}: one backup");
+            assert!(!dir.join(REFUSED_FILE).exists(), "{what}: the note is cleared");
+            let log = p97_log_lines(&dir);
+            if what == "carried" {
+                assert_eq!(log.len(), 2, "{log:?}");
+                assert!(log[1].contains(" seats.toml took herdr's default, keeping your overrides_per_run = 5; the file before is "), "{log:?}");
+                assert_eq!(p97_named_backup(&log[1]).as_deref(), Some(installed.as_bytes()), "{log:?}");
+            } else {
+                assert_eq!(log.len(), 1, "{log:?}");
+            }
+            drop(guard);
+            assert!(!dir.exists(), "{what}: the guard removed its folder");
+        }
+    }
+
+    /// F1: the refusal note stands for `REFUSED_S` and only for its key; one dated after now (a clock moved back) or
+    /// older than that is tried again.
+    #[test]
+    fn p97_a_refusal_note_stands_only_for_its_key_and_time() {
+        let dir = temp_dir("p97-note");
+        let at = 1_795_000_000;
+        assert!(!refused_lately(&dir, "k", at), "no note");
+        note_refusal(&dir, "k", at);
+        assert!(refused_lately(&dir, "k", at + REFUSED_S - 1));
+        assert!(!refused_lately(&dir, "other", at + 1), "another key");
+        assert!(!refused_lately(&dir, "k", at + REFUSED_S), "stood its time");
+        assert!(!refused_lately(&dir, "k", at - 1), "dated after now");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F2: each refusal says the same words at every attempt (no dated file name), so a second attempt adds no line;
+    /// the table is byte for byte; a failed or mismatched backup file is removed, so nothing is left for a `-2` name to
+    /// sit beside. Kinds: the backup folder cannot be made, the copy fails half way, the copy holds other bytes.
+    #[test]
+    fn p97_every_refusal_is_said_once_and_leaves_no_file() {
+        let kinds: [(&str, Option<Fault>, &str); 3] = [
+            ("folder", None, "the backup folder "),
+            ("copy", Some(Fault::CopyFails), "a backup cannot be written in "),
+            ("wrong", Some(Fault::BackupWrong), "does not hold the table as it was read"),
+        ];
+        for (what, fault, words) in kinds {
+            let dir = temp_dir(&format!("p97-refusal-{what}"));
+            let path = dir.join(SEATS_FILE);
+            let installed = p97_owners_v15();
+            std::fs::write(&path, &installed).unwrap();
+            if fault.is_none() {
+                std::fs::write(dir.join("backup"), "a file where the backup folder goes").unwrap();
+            }
+            let attempt = || {
+                let text = match fault {
+                    Some(fault) => with_fault(fault, || read_or_create(&path)),
+                    None => read_or_create(&path),
+                };
+                assert_eq!(text, installed, "{what}");
+            };
+            attempt();
+            // A second attempt, past the note: the same words, so no second line.
+            std::fs::remove_file(dir.join(REFUSED_FILE)).expect("a refusal note");
+            std::thread::sleep(Duration::from_millis(1100));
+            attempt();
+            assert_eq!(std::fs::read(&path).unwrap(), installed.as_bytes(), "{what}: byte for byte");
+            let log = p97_log_lines(&dir);
+            assert_eq!(log.len(), 1, "{what}: {log:?}");
+            assert!(log[0].contains(" seats.toml was not upgraded and is left as it was: "), "{what}: {log:?}");
+            assert!(log[0].contains(words), "{what}: {log:?}");
+            assert!(!log[0].contains("seats-2"), "{what}: a dated name in {log:?}");
+            assert!(p97_backups(&dir).is_empty(), "{what}: a backup file left");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// F1: a backup that already holds the table's bytes is used again, not copied a second time.
+    #[test]
+    fn p97_a_backup_holding_the_table_is_used_again() {
+        let dir = temp_dir("p97-reuse");
+        let path = dir.join(SEATS_FILE);
+        let installed = p97_owners_v15();
+        std::fs::write(&path, &installed).unwrap();
+        std::fs::create_dir_all(dir.join("backup")).unwrap();
+        let earlier = dir.join("backup").join("seats-20261101T000000Z.toml");
+        std::fs::write(&earlier, &installed).unwrap();
+        std::fs::write(dir.join("backup").join("seats-20261102T000000Z.toml"), "another table").unwrap();
+        read_or_create(&path);
+        assert_eq!(p97_backups(&dir), [installed.clone(), "another table".to_owned()]);
+        let log = p97_log_lines(&dir);
+        assert!(log.len() == 1 && log[0].ends_with(&format!("the file before is {}", earlier.display())), "{log:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F3: only a missing table is written from the default. v15 with two bytes that are not UTF-8 is left byte for
+    /// byte with no backup, and a pick's parse is refused with a reason naming the file and the cause.
+    #[test]
+    fn p97_an_unreadable_table_is_left_and_named() {
+        let dir = temp_dir("p97-unreadable");
+        let path = dir.join(SEATS_FILE);
+        let bytes = [P97_V15.as_bytes(), &[0xff, 0xfe]].concat();
+        std::fs::write(&path, &bytes).unwrap();
+        for _ in 0..2 {
+            let text = read_or_create(&path);
+            assert!(text.starts_with(UNREADABLE), "{text:?}");
+            let refused = parse(&text).unwrap_err();
+            assert!(refused.contains(&path.display().to_string()) && refused.contains("UTF-8"), "{refused}");
+            assert!(read_table(&path).unwrap_err().contains("herdr leaves it as it is"));
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "byte for byte");
+        assert!(!dir.join("backup").exists(), "no backup");
+        assert!(p97_log_lines(&dir).is_empty());
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(read_or_create(&path), DEFAULT, "missing: created");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), DEFAULT);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F4: the owner's save between the backup and the rename is not written over. The attempt is dropped without a
+    /// word; its backup, which holds the table as it was read, stays (the third review: never removed); the next read
+    /// starts over from the owner's new bytes and backs those up beside it.
+    #[test]
+    fn p97_a_save_during_the_upgrade_is_kept() {
+        let dir = temp_dir("p97-race");
+        let path = dir.join(SEATS_FILE);
+        let installed = p97_owners_v15();
+        std::fs::write(&path, &installed).unwrap();
+        let saved: &'static str = Box::leak(
+            installed.replacen("\noverrides_per_run = 5\n", "\noverrides_per_run = 7\n", 1).into_boxed_str(),
+        );
+        assert_eq!(with_fault(Fault::TableChanges(saved), || read_or_create(&path)), saved);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved, "the owner's save stands");
+        assert_eq!(p97_backups(&dir), [installed.clone()], "the dropped attempt's complete backup stays");
+        assert!(p97_temp_files(&dir).is_empty(), "{:?}", p97_temp_files(&dir));
+        assert!(p97_log_lines(&dir).is_empty() && !dir.join(REFUSED_FILE).exists(), "said nothing");
+        let want = replace_mode_line(DEFAULT, "mode = \"sota\"").replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 7\n", 1);
+        assert_eq!(read_or_create(&path), want, "the next read starts over");
+        // Sorted by content: two backups in one second are `seats-<s>.toml` and `seats-<s>-2.toml`, and `-` sorts
+        // before `.`, so name order says nothing about which came first.
+        let mut backups = p97_backups(&dir);
+        backups.sort();
+        let mut both = [installed.clone(), saved.to_owned()];
+        both.sort();
+        assert_eq!(backups, both);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F5: a carried value the new default refuses (`version = 1001` on v15) leaves the table alone, and one line names
+    /// the key; the differs line promises nothing, for v15 or for today's default with the same edit.
+    #[test]
+    fn p97_a_refused_carry_is_named_once() {
+        let dir = temp_dir("p97-refused-carry");
+        let path = dir.join(SEATS_FILE);
+        assert_eq!(P97_V15.matches("\nversion = 1\n").count(), 1);
+        let installed = P97_V15.replacen("\nversion = 1\n", "\nversion = 1001\n", 1);
+        std::fs::write(&path, &installed).unwrap();
+        assert_eq!(read_or_create(&path), installed);
+        std::fs::remove_file(dir.join(REFUSED_FILE)).expect("a refusal note");
+        assert_eq!(read_or_create(&path), installed);
+        assert!(p97_backups(&dir).is_empty());
+        let log = p97_log_lines(&dir);
+        assert_eq!(log.len(), 1, "{log:?}");
+        assert!(
+            log[0].ends_with(" seats.toml was not upgraded and is left as it was: herdr's default refuses your version = 1001 (version 1001 is not 1)"),
+            "{log:?}"
+        );
+        assert_eq!(differs_line(&installed).as_deref(), Some(DIFFERS_LINE));
+        let current = DEFAULT.replacen("\nversion = 1\n", "\nversion = 1001\n", 1);
+        assert_eq!(differs_line(&current).as_deref(), Some(DIFFERS_LINE), "no 'keeps your' for a refused table");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A table saved with a byte order mark that would otherwise upgrade stays as it is and says why, once; one that
+    /// is today's default with a mark says nothing (nothing to upgrade).
+    #[test]
+    fn p97_a_table_with_a_bom_is_left_and_said_once() {
+        for (what, body, says) in [("v15", p97_owners_v15(), true), ("today's", DEFAULT.to_owned(), false)] {
+            let dir = temp_dir(&format!("p97-bom-{}", what.replace('\'', "")));
+            let path = dir.join(SEATS_FILE);
+            let bytes = [BOM, body.as_bytes()].concat();
+            std::fs::write(&path, &bytes).unwrap();
+            read_or_create(&path);
+            let _ = std::fs::remove_file(dir.join(REFUSED_FILE));
+            read_or_create(&path);
+            assert_eq!(std::fs::read(&path).unwrap(), bytes, "{what}: byte for byte");
+            assert!(p97_backups(&dir).is_empty(), "{what}");
+            let log = p97_log_lines(&dir);
+            if says {
+                assert_eq!(log.len(), 1, "{what}: {log:?}");
+                assert!(log[0].contains("byte order mark"), "{log:?}");
+            } else {
+                assert!(log.is_empty(), "{what}: {log:?}");
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// O8a's rule for `set_mode_in`, with no test of its own until now (the o8a control pointed at the square's
+    /// `change_mode`, which refuses before it calls `set_mode_in`, so it read "red line not seen"): a refused table and,
+    /// F3, one that is not UTF-8 are left byte for byte, and the reason names the file.
+    #[test]
+    fn p97_set_mode_leaves_a_refused_or_unreadable_table() {
+        let dir = temp_dir("p97-set-mode");
+        let path = dir.join(SEATS_FILE);
+        let unreadable = [P97_V15.as_bytes(), &[0xff, 0xfe]].concat();
+        for (what, bytes, words) in [
+            ("refused", b"version = 1\nmode = \"balanced\"\n".to_vec(), "is refused, fix it first"),
+            ("not UTF-8", unreadable, "cannot be read as UTF-8"),
+        ] {
+            std::fs::write(&path, &bytes).unwrap();
+            let why = set_mode_in(&dir, Mode::Sota).unwrap_err();
+            assert!(why.contains(&path.display().to_string()) && why.contains(words), "{what}: {why}");
+            assert_eq!(std::fs::read(&path).unwrap(), bytes, "{what}: byte for byte");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- the P46a third review: several readers at once ----
+
+    /// Temp files left beside the table (`.<name>.<pid>.<n>.tmp`, or the old `.<name>.<pid>.tmp`).
+    fn p97_temp_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect()
+    }
+
+    /// The bytes of the file a "took herdr's default" line names, if it is there.
+    fn p97_named_backup(line: &str) -> Option<Vec<u8>> {
+        let (_, named) = line.split_once("; the file before is ")?;
+        std::fs::read(named).ok()
+    }
+
+    /// The backups in `backup/` as files: their paths and bytes.
+    fn p97_backup_files(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut found: Vec<(PathBuf, Vec<u8>)> = std::fs::read_dir(dir.join("backup"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .map(|path| {
+                let bytes = std::fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// The P46a third review: herdr processes read the table at once (hooks, `seat pick`), and the first read after a
+    /// new binary is exactly when. Three `herdr seat diff` at once lost the only copy of the owner's bytes in 5 of 60
+    /// rounds: two attempts shared one dated backup name, and an undone attempt removed a backup another had reused.
+    /// Here 8 threads read one table at once, 40 rounds. Each round must end with the new default carrying
+    /// `overrides_per_run = 5`, exactly one backup and it the original bytes, exactly one "took" line naming that
+    /// file, no "was not upgraded" line, no temp file; and every reader got the table before or after, whole. On the
+    /// code before the lock, 30 of 40 rounds failed, 9 of them with no backup left at all.
+    #[test]
+    fn p97_many_reads_at_once_upgrade_once_and_keep_the_backup() {
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 40;
+        let installed = p97_owners_v15();
+        let want = replace_mode_line(DEFAULT, "mode = \"sota\"")
+            .replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1);
+        let mut failed = Vec::new();
+        for round in 0..ROUNDS {
+            let dir = temp_dir(&format!("p97-many-{round}"));
+            let path = dir.join(SEATS_FILE);
+            std::fs::write(&path, &installed).unwrap();
+            let start = std::sync::Barrier::new(THREADS);
+            let read: Vec<String> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..THREADS)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            start.wait();
+                            read_or_create(&path)
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|handle| handle.join().unwrap()).collect()
+            });
+            let mut problems = Vec::new();
+            if std::fs::read_to_string(&path).ok().as_deref() != Some(want.as_str()) {
+                problems.push("the table is not the new default with the edit carried".to_owned());
+            }
+            if read.iter().any(|text| *text != installed && *text != want) {
+                problems.push("a reader got neither table".to_owned());
+            }
+            let backups = p97_backup_files(&dir);
+            if backups.len() != 1 || backups[0].1 != installed.as_bytes() {
+                let sizes: Vec<usize> = backups.iter().map(|(_, bytes)| bytes.len()).collect();
+                problems.push(format!("backups {sizes:?}, want one of {}", installed.len()));
+            }
+            let log = p97_log_lines(&dir);
+            let took: Vec<&String> = log.iter().filter(|line| line.contains(" took herdr's default")).collect();
+            if took.len() != 1 {
+                problems.push(format!("{} took lines", took.len()));
+            }
+            if took.iter().any(|line| p97_named_backup(line).as_deref() != Some(installed.as_bytes())) {
+                problems.push("a took line names a file that is gone or holds other bytes".to_owned());
+            }
+            if log.iter().any(|line| line.contains("was not upgraded")) {
+                problems.push(format!("refused: {log:?}"));
+            }
+            if !p97_temp_files(&dir).is_empty() {
+                problems.push(format!("temp files {:?}", p97_temp_files(&dir)));
+            }
+            if !problems.is_empty() {
+                failed.push(format!("round {round}: {problems:?}"));
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        println!("p97 many reads: {} of {ROUNDS} rounds failed", failed.len());
+        assert!(failed.is_empty(), "{} of {ROUNDS} rounds failed: {failed:#?}", failed.len());
+    }
+
+    /// One attempt at a time: while another reader holds the upgrade lock, a read does not wait and does not try. It
+    /// returns the table as it is and writes nothing: no backup, no log line, no refusal note. Let go, the next read
+    /// upgrades.
+    #[test]
+    fn p97_a_held_upgrade_lock_skips_the_attempt_silently() {
+        let dir = temp_dir("p97-held-lock");
+        let path = dir.join(SEATS_FILE);
+        let installed = p97_owners_v15();
+        std::fs::write(&path, &installed).unwrap();
+        // Truncate before create: the control `seat_lock_stale_kept` finds the leases lock's `.create(true)` then
+        // `.truncate(false)` lines, and they must occur once in this file.
+        let held = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(false)
+            .create(true)
+            .open(dir.join(UPGRADE_LOCK))
+            .unwrap();
+        held.try_lock().unwrap();
+        let started = std::time::Instant::now();
+        for _ in 0..3 {
+            assert_eq!(read_or_create(&path), installed, "held: the table as it is");
+        }
+        assert!(started.elapsed() < Duration::from_secs(2), "it waited: {:?}", started.elapsed());
+        assert_eq!(std::fs::read(&path).unwrap(), installed.as_bytes(), "byte for byte");
+        assert!(!dir.join("backup").exists(), "no backup folder");
+        assert!(p97_log_lines(&dir).is_empty(), "{:?}", p97_log_lines(&dir));
+        assert!(!dir.join(REFUSED_FILE).exists(), "no refusal note");
+        drop(held);
+        let want = replace_mode_line(DEFAULT, "mode = \"sota\"")
+            .replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1);
+        assert_eq!(read_or_create(&path), want, "let go, the next read upgrades");
+        assert_eq!(p97_backups(&dir), [installed]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A lock file that cannot be made (here a folder stands where it goes; a read-only folder on Unix) does not turn
+    /// a readable table into an error or stop the attempt: it goes on as it did before the lock. A stray temp file in
+    /// the old per-pid name, as a crash would leave, is never read as the table.
+    #[test]
+    fn p97_no_lock_file_still_upgrades() {
+        let dir = temp_dir("p97-no-lock");
+        let path = dir.join(SEATS_FILE);
+        let installed = p97_owners_v15();
+        std::fs::write(&path, &installed).unwrap();
+        std::fs::create_dir_all(dir.join(UPGRADE_LOCK)).unwrap();
+        let stray = dir.join(format!(".{SEATS_FILE}.{}.tmp", std::process::id()));
+        std::fs::write(&stray, "a crash left this").unwrap();
+        let want = replace_mode_line(DEFAULT, "mode = \"sota\"")
+            .replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1);
+        assert_eq!(read_or_create(&path), want, "no lock file: the attempt goes on");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), want);
+        assert_eq!(p97_backups(&dir), [installed]);
+        assert_eq!(read_or_create(&path), want);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two attempts that would pick one backup name do not share a file. `NameTaken` writes another attempt's file at
+    /// the name `backup_name` picked, after the pick and before the create, as a second process did in the review's
+    /// probe. The backup moves on to the next name; the other file keeps its bytes; the "took" line names this
+    /// attempt's own file, which holds the table as it was.
+    #[test]
+    fn p97_two_attempts_never_share_a_backup_name() {
+        const OTHER: &str = "another attempt's half copy";
+        let dir = temp_dir("p97-name-taken");
+        let path = dir.join(SEATS_FILE);
+        let installed = p97_owners_v15();
+        std::fs::write(&path, &installed).unwrap();
+        let want = replace_mode_line(DEFAULT, "mode = \"sota\"")
+            .replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1);
+        assert_eq!(with_fault(Fault::NameTaken(OTHER), || read_or_create(&path)), want);
+        let files = p97_backup_files(&dir);
+        let other: Vec<&PathBuf> = files.iter().filter(|(_, bytes)| bytes == OTHER.as_bytes()).map(|(p, _)| p).collect();
+        assert_eq!(other.len(), 1, "the other attempt's file is not written over: {files:?}");
+        let mine: Vec<&PathBuf> = files.iter().filter(|(_, bytes)| bytes == installed.as_bytes()).map(|(p, _)| p).collect();
+        assert_eq!(mine.len(), 1, "{:?}", files.iter().map(|(p, b)| (p, b.len())).collect::<Vec<_>>());
+        assert_ne!(mine[0], other[0]);
+        let log = p97_log_lines(&dir);
+        assert_eq!(log.len(), 1, "{log:?}");
+        assert!(log[0].ends_with(&format!("; the file before is {}", mine[0].display())), "{log:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `write_atomic` (`set_mode_in`, the leases) from several threads at once: each temp file is its attempt's own,
+    /// so every write lands whole and none fails because another thread renamed its temp file away. The name was
+    /// `.<name>.<pid>.tmp`, one per process (the third review, finding 2): 4 of 20 rounds failed with "cannot find
+    /// the file" on that code.
+    #[test]
+    fn p97_writes_at_once_each_land_whole() {
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 60;
+        let mut failed = Vec::new();
+        for round in 0..ROUNDS {
+            let dir = temp_dir(&format!("p97-atomic-{round}"));
+            let path = dir.join("leases.json");
+            let start = std::sync::Barrier::new(THREADS);
+            let texts: Vec<String> = (0..THREADS).map(|i| format!("writer {i}\n").repeat(400)).collect();
+            let results: Vec<std::io::Result<()>> = std::thread::scope(|scope| {
+                let handles: Vec<_> = texts
+                    .iter()
+                    .map(|text| {
+                        let (start, path) = (&start, &path);
+                        scope.spawn(move || {
+                            start.wait();
+                            write_atomic(path, text.as_bytes())
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|handle| handle.join().unwrap()).collect()
+            });
+            // Only a temp file renamed away (`NotFound`) is this fault. Windows also refuses a rename onto a file that
+            // another rename is replacing that instant ("Access is denied", os error 5: measured once in 30 runs of
+            // the p97 tests together, never alone in 86 runs); unique temp names do not change that, and the failed
+            // write removes its temp file, which the check below still holds.
+            let errors: Vec<String> = results
+                .iter()
+                .filter_map(|result| result.as_ref().err())
+                .filter(|err| err.kind() == std::io::ErrorKind::NotFound)
+                .map(ToString::to_string)
+                .collect();
+            let now = std::fs::read_to_string(&path).unwrap_or_default();
+            if !errors.is_empty() || !texts.contains(&now) || !p97_temp_files(&dir).is_empty() {
+                failed.push(format!(
+                    "round {round}: errors {errors:?}, whole {}, temp {:?}",
+                    texts.contains(&now),
+                    p97_temp_files(&dir)
+                ));
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        println!("p97 writes at once: {} of {ROUNDS} rounds failed", failed.len());
+        assert!(failed.is_empty(), "{} of {ROUNDS} rounds failed: {failed:#?}", failed.len());
     }
 }

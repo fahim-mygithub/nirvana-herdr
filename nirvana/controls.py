@@ -815,12 +815,12 @@ CONTROLS: tuple[Control, ...] = (
     # Plan 12 O2: seats (plans/2026-10-17-12-nirvana-claude-orchestrator.md §16). Red line for each: its
     # nirvana_seat test prints FAIL.
     Control('seat_default_not_written', 'src/nirvana_seat.rs',
-            '    let _ = std::fs::write(path, DEFAULT);\n',
-            '\n',
+            '                .and_then(|mut file| file.write_all(DEFAULT.as_bytes()));\n',
+            '                .map(|_| ());\n',
             'the_default_table_is_written_once_parses_and_holds_the_plans_seats_and_classes', "rust"),
     Control('seat_default_owner_overwritten', 'src/nirvana_seat.rs',
-            '    if let Ok(text) = std::fs::read_to_string(path) {\n        return text;\n    }\n    if let Some(dir) = path.parent() {\n        let _ = std::fs::create_dir_all(dir);\n    }\n    let _ = std::fs::write(path, DEFAULT);',
-            '    if let Ok(text) = Err::<String, ()>(()) {\n        return text;\n    }\n    if let Some(dir) = path.parent() {\n        let _ = std::fs::create_dir_all(dir);\n    }\n    let _ = std::fs::write(path, DEFAULT);',
+            '        Ok(bytes) => String::from_utf8(bytes).map_err(|err| {',
+            '        Ok(_) if true => Ok(DEFAULT.to_owned()),\n        Ok(bytes) => String::from_utf8(bytes).map_err(|err| {',
             'the_default_table_is_written_once_parses_and_holds_the_plans_seats_and_classes', "rust"),
     Control('seat_problems_version', 'src/nirvana_seat.rs',
             '        if self.version != 1 {',
