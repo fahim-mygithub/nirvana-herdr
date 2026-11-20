@@ -1538,9 +1538,15 @@ fn p93_fix_accept_waits_for_a_drawn_detail_read_to_its_end() {
         Some(panel_mod::ACCEPT_NOT_DRAWN)
     );
     assert_eq!(proposals::list(&root).len(), 1);
-    // Drawn, not read to its end: the place, a mark while more is below, and the footer names no `a`.
+    // Drawn, not read to its end: the place, a mark while more is below, and the footer names no `a`. Home first,
+    // so the footer shows the keys, not the last key's answer.
+    key(&mut state, KeyCode::Home);
     let rows = shown(&mut state, 140);
     let text = rows.join("\n");
+    assert!(
+        text.contains("read to the end, then a accepts"),
+        "the footer's keys: {text}"
+    );
     let below = panel(&state).detail.as_ref().unwrap().below;
     assert!(below > 0, "{text}");
     assert!(text.contains("lines 1-"), "{text}");
