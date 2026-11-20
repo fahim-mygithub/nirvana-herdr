@@ -682,3 +682,84 @@ fn p94_the_store_refuses_a_secret_shaped_body_or_evidence_and_accept_checks_agai
     );
     assert!(!nirvana_profiles::folder_of(&root, "judge-d").exists());
 }
+
+// ---- the P45b second fix round ----
+
+/// Review2 A: 20 of 40 shapes reached `pp-1.md` past the first list. Each rule of `second_layer`, and each widening
+/// of the assignment rule, names the review's own shape (obviously fake values), and the prose beside each rule
+/// passes. The name is the rule's, so a rule taken out shows here even when another rule would catch the text.
+#[test]
+fn p94_the_second_layer_names_each_review2_shape_and_passes_prose() {
+    for (text, shape) in [
+        // The assignment rule, widened.
+        ("passphrase: correct horse battery staple opens it", "credential assignment"),
+        ("password=\"my pass phrase here\" for the db", "credential assignment"),
+        ("key=ab1 is used", "credential assignment"),
+        ("pwd: abc12 for the box", "credential assignment"),
+        ("fetch https://example.invalid/f?sig=Zk3pQ9vL2mX8aB for data", "credential assignment"),
+        ("credentials: s3cr3tvalue", "credential assignment"),
+        ("auth: abc12345", "credential assignment"),
+        // The second layer's rules.
+        ("send authorization: token abcdef1234567890xyz on the call", "authorization header value"),
+        ("my password is hunter2 for the login", "secret word, then is and a value"),
+        ("run tool --token Zk3pQ9vL2mX8aB4 now", "secret flag and its value"),
+        ("run tool --password hunter2hunter2 now", "secret flag and its value"),
+        ("run sshpass -p hunter2hunter2 ssh box now", "sshpass password"),
+        ("curl -u admin:hunter2hunter2 https://api.example.invalid", "curl user and password"),
+        ("cookie value eyJhbGciOiJub25lIn0.eyJhIjoxfQ.abc123sig is used", "JWT-shaped text (eyJ...)"),
+        ("oauth ya29.a0AfH6SMBxQ9vL2mXk3pZ7 is the access value", "Google OAuth token (ya29.)"),
+        ("use code Zk3pQ9vL2mX8aB4cD6eF7gH9j as the license", "run of 20 or more letters and digits"),
+        ("deploy id 5f4dcc3b5aa765d61d8327de is the key", "run of 20 or more letters and digits"),
+        ("the body is\nMIIEvQIBADANBgkqhkiG9w0BAQEF\nthen done", "run of 20 or more letters and digits"),
+        // The fixed shapes over the text with its whitespace taken out.
+        ("-----BEGIN\nRSA PRIVATE KEY-----", "across whitespace: PEM header"),
+        ("set the key id to AKIAIOSFODNN7\nEXAMPLE for the deploy", "across whitespace: AWS access key id"),
+        ("slack xo\nxb-123456789012-fakefake posts", "across whitespace: Slack token"),
+        // Its left guard sees `(`: a letter before `sk_` (the joined words) is not a key's start.
+        ("stripe (sk_li\nve_FAKEfake0000) charges", "across whitespace: Stripe key"),
+        ("google AIzaFAKE\nfakeFAKEfake0000 here", "across whitespace: Google API key"),
+        ("clone with github_pat_11ABC\nDEFG0123456789 now", "across whitespace: GitHub token"),
+        ("jwt eyJhbGci\nOiJIUzI1.eyJzdWIi here", "across whitespace: JWT-shaped text"),
+        ("mailer key d41d8cd98f00b204\ne9800998ecf8427e for sending", "across whitespace: run of 32 or more hex"),
+    ] {
+        let found = secret_shaped(text);
+        assert!(found.is_some_and(|name| name.starts_with(shape)), "{text}: {found:?}");
+    }
+    for prose in [
+        "Password: required for the admin page.",
+        "authorization: owner approval required before the merge",
+        "the secret is patience and a clear plan",
+        "the token is 3 levels deep in the tree",
+        "pass --token with the id from the vault",
+        "pass --token $DEPLOY_TOKEN_V2 from the env",
+        "author: the owner, design: the panel",
+        "curl the page and read it; sshpass is not installed",
+        "they Just went home and eyJ is no word",
+        "run fork_test_cases and more",
+        "Supercalifragilisticexpialidocious is a long word",
+        "the ids 1234 5678 9012 3456 7890 1234 5678 9012 3456 in a column",
+    ] {
+        assert_eq!(secret_shaped(prose), None, "{prose}");
+    }
+}
+
+/// Second fix round, item 2: an accept prints one line after its success line, saying the profile is tracked and
+/// the check is a pattern list. A refused accept does not.
+#[test]
+fn p94_accept_says_the_profile_is_not_ignored_and_the_check_is_a_list() {
+    let (_home, root) = project("p94-pp-accept-note");
+    write(&root, &draft(Kind::New, "render-judge", NEW, None)).unwrap();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = cli_to(&root, &["accept".to_owned(), "pp-1".to_owned()], &mut out, &mut err);
+    let out = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(lines.len(), 2, "{out}");
+    assert!(lines[0].starts_with("op-1: accepted pp-1"), "{out}");
+    assert_eq!(lines[1], ACCEPT_NOTE);
+    assert!(ACCEPT_NOTE.contains("not ignored by git") && ACCEPT_NOTE.contains("pattern list"));
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = cli_to(&root, &["accept".to_owned(), "pp-9".to_owned()], &mut out, &mut err);
+    assert_eq!(code, 1);
+    assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+}

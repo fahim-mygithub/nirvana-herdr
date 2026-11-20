@@ -299,8 +299,8 @@ CONTROLS = CONTROLS + (
             "    if false && assigned.captures_iter(text).any(|found| {", T_SHAPES, "rust"),
     # Red: T_SHAPES's prose "Key: remember the cook order." (a colon and any word read as a credential).
     Control("p94_shape_colon_prose", PP,
-            "            _ => count >= 6 && (!found[2].is_empty() || value.bytes().any(|b| b.is_ascii_digit())),",
-            "            _ => count >= 6,", T_SHAPES, "rust"),
+            "            _ => count >= 5 && (quoted.is_some() || value.bytes().any(|b| b.is_ascii_digit())),",
+            "            _ => count >= 5,", T_SHAPES, "rust"),
     Control("p94_shape_redact_gone", PP, "    if nirvana_lessons::redact(text) != text {", "    if false {",
             T_SHAPES, "rust"),
     # F1, the store. Red: T_STORE_SECRET's first refusal (the AWS key id is written to pp-1.md).
@@ -381,4 +381,118 @@ CONTROLS = CONTROLS + (
     Control("p94_worker_env_names_no_order", WORKER,
             "    command.env(crate::nirvana_profiles::SEATED_ORDER_ENV, &seated.order);\n", "",
             "nirvana_worker::tests::p94_an_attempt_names_its_order_in_the_workers_env", "rust"),
+)
+
+# The P45b second fix round (review2: 20 of 40 shapes reached pp-1.md). Each red line is written before the run.
+T_IGNORED = ("nirvana_profile_detect::tests::"
+             "p94_a_written_proposal_is_invisible_to_git_and_an_ignore_file_there_is_kept")
+T_NOTE = "nirvana_profile_proposals::tests::p94_accept_says_the_profile_is_not_ignored_and_the_check_is_a_list"
+T_OLD_CACHE = ("nirvana_profile_detect::tests::"
+               "p94_an_old_cache_holding_raw_secret_text_is_checked_again_before_a_brief")
+T_FENCE = "nirvana_profile_detect::tests::p94_a_block_with_an_odd_count_of_fence_lines_is_not_the_body"
+T_LAYER = "nirvana_profile_proposals::tests::p94_the_second_layer_names_each_review2_shape_and_passes_prose"
+NEVER_PREFIX = "NEVERxMATCH"
+CONTROLS = CONTROLS + (
+    # Item 1. Red: T_IGNORED's "git lists nothing under the folder" (pp-1.md shows as untracked).
+    Control("p94_ignore_unwritten", PP, "    if let Err(err) = ensure_ignore(root) {",
+            "    if let Err(err) = Ok::<bool, std::io::Error>(false) {", T_IGNORED, "rust"),
+    # Red: T_IGNORED's "git lists nothing under the folder" (the file holds only comments).
+    Control("p94_ignore_star_dropped", PP, '*\\n";\n', '\\n";\n', T_IGNORED, "rust"),
+    # Red: T_IGNORED's last assertion (the owner's own ignore file is rewritten with herdr's text).
+    Control("p94_ignore_overwritten", PP,
+            "        .create_new(true)\n        .open(folder(root).join(nirvana_profiles::IGNORE_FILE))",
+            "        .create(true)\n        .truncate(true)\n        .open(folder(root).join(nirvana_profiles::IGNORE_FILE))",
+            T_IGNORED, "rust"),
+    # Red: T_IGNORED's "git lists nothing under the folder" (write makes the folder without the file).
+    Control("p94_ignore_skipped_at_write", PP, "    make_folder(root).map_err(|err| {",
+            "    std::fs::create_dir_all(folder(root)).map_err(|err| {", T_IGNORED, "rust"),
+    # Red: T_IGNORED's read after the dismissal (the ledger's write does not put the removed file back).
+    Control("p94_ignore_skipped_at_ledger", PP, "    make_folder(root)?;",
+            "    std::fs::create_dir_all(folder(root))?;", T_IGNORED, "rust"),
+    # Item 2. Red: T_NOTE's "lines.len() == 2" (one line only).
+    Control("p94_accept_note_gone", PP, '                let _ = writeln!(out, "{ACCEPT_NOTE}");\n', "", T_NOTE,
+            "rust"),
+    # Item 4 (review2 F3). Red: T_OLD_CACHE's "no hunter2hunter2 in the brief".
+    Control("p94_old_cache_unchecked", DETECT, "    rechecked(&mut detection.findings);\n", "", T_OLD_CACHE, "rust"),
+    # Item 5 (review2 F4). Red: T_SEATED's dismiss case (dismiss inside order b1-lr goes on).
+    Control("p94_seated_dismiss_allowed", PROFILES, '        (Some("dismiss"), _) => "dismiss",\n', "", T_SEATED,
+            "rust"),
+    # Item 6 (review2 F6). Red: T_FENCE's first assertion (the cut block, its one fence, is kept as typed).
+    Control("p94_odd_fence_kept", DETECT,
+            "            let block = if fences % 2 == 0 && nirvana_lessons::one_line(&block) == line {",
+            "            let block = if fences % 2 < 2 && nirvana_lessons::one_line(&block) == line {", T_FENCE, "rust"),
+    # Item 3, the assignment rule widened. Red: T_LAYER at the named sample.
+    # `passphrase: correct horse battery staple`.
+    Control("p94_layer_passphrase", PP,
+            '            _ if found[1].eq_ignore_ascii_case("passphrase") => count >= 3,\n', "", T_LAYER, "rust"),
+    # `password="my pass phrase here"`.
+    Control("p94_layer_quoted", PP, "        let quoted = found.get(3).or_else(|| found.get(4));",
+            "        let quoted = None::<regex::Match>;", T_LAYER, "rust"),
+    # `key=ab1`.
+    Control("p94_layer_eq_three", PP, '            "=" => count >= 3,', '            "=" => count >= 4,', T_LAYER,
+            "rust"),
+    # `pwd: abc12`.
+    Control("p94_layer_colon_five", PP, "            _ => count >= 5 && (quoted.is_some()",
+            "            _ => count >= 6 && (quoted.is_some()", T_LAYER, "rust"),
+    # `?sig=...` (the first of the new words in T_LAYER's list).
+    Control("p94_layer_words", PP,
+            "(passphrase|signature|sig|authorization|auth|credentials?|api[-_ ]?key|access[-_ ]?key|client[-_ ]?secret"
+            "|key|secret|password|passwd|token|pwd)",
+            "(passphrase|key|secret|password|passwd|token|pwd)", T_LAYER, "rust"),
+    # The second layer's rules, each at its own sample.
+    Control("p94_layer_authz_gone", PP, '                r#"(?i)\\bauthorization["\']?',
+            '                r#"' + NEVER_PREFIX + '(?i)\\bauthorization["\']?', T_LAYER, "rust"),
+    Control("p94_layer_is_gone", PP, '                r#"(?i)\\b(?:password|passphrase|passwd|pwd|secret|token|api',
+            '                r#"' + NEVER_PREFIX + '(?i)\\b(?:password|passphrase|passwd|pwd|secret|token|api', T_LAYER,
+            "rust"),
+    Control("p94_layer_flag_gone", PP, '                r#"(?i)(?:^|\\s)--(?:token',
+            '                r#"' + NEVER_PREFIX + '(?i)(?:^|\\s)--(?:token', T_LAYER, "rust"),
+    Control("p94_layer_sshpass_gone", PP, '("sshpass password", r#"(?i)',
+            '("sshpass password", r#"' + NEVER_PREFIX + '(?i)', T_LAYER, "rust"),
+    Control("p94_layer_curl_gone", PP, '("curl user and password", r#"(?i)',
+            '("curl user and password", r#"' + NEVER_PREFIX + '(?i)', T_LAYER, "rust"),
+    Control("p94_layer_jwt_gone", PP, '("JWT-shaped text (eyJ...)", r"\\beyJ',
+            '("JWT-shaped text (eyJ...)", r"' + NEVER_PREFIX + '\\beyJ', T_LAYER, "rust"),
+    Control("p94_layer_ya29_gone", PP, '("Google OAuth token (ya29.)", r"\\bya29',
+            '("Google OAuth token (ya29.)", r"' + NEVER_PREFIX + '\\bya29', T_LAYER, "rust"),
+    Control("p94_layer_run_gone", PP, "    if run.find_iter(text).any(|found| {",
+            "    if false && run.find_iter(text).any(|found| {", T_LAYER, "rust"),
+    Control("p94_joined_pem_gone", PP, '("across whitespace: PEM header", r"',
+            '("across whitespace: PEM header", r"' + NEVER_PREFIX, T_LAYER, "rust"),
+    Control("p94_joined_aws_gone", PP, '("across whitespace: AWS access key id", r"',
+            '("across whitespace: AWS access key id", r"' + NEVER_PREFIX, T_LAYER, "rust"),
+    Control("p94_joined_slack_gone", PP, '("across whitespace: Slack token", r"',
+            '("across whitespace: Slack token", r"' + NEVER_PREFIX, T_LAYER, "rust"),
+    Control("p94_joined_stripe_gone", PP, '("across whitespace: Stripe key", r"',
+            '("across whitespace: Stripe key", r"' + NEVER_PREFIX, T_LAYER, "rust"),
+    Control("p94_joined_google_gone", PP, '("across whitespace: Google API key", r"',
+            '("across whitespace: Google API key", r"' + NEVER_PREFIX, T_LAYER, "rust"),
+    Control("p94_joined_github_gone", PP, '("across whitespace: GitHub token", r"',
+            '("across whitespace: GitHub token", r"' + NEVER_PREFIX, T_LAYER, "rust"),
+    Control("p94_joined_jwt_gone", PP, '("across whitespace: JWT-shaped text", r"',
+            '("across whitespace: JWT-shaped text", r"' + NEVER_PREFIX, T_LAYER, "rust"),
+    Control("p94_joined_hex_gone", PP, "    if hex.find_iter(&joined).any(|found| {",
+            "    if false && hex.find_iter(&joined).any(|found| {", T_LAYER, "rust"),
+    # The prose beside them. Red: T_LAYER's prose, at the line named.
+    # "authorization: owner approval required before the merge" (any value after a scheme read as a secret).
+    Control("p94_layer_looks_any", PP,
+            "        !value.starts_with(['$', '%', '<'])\n"
+            "            && (count >= long || (count >= 4 && value.bytes().any(|b| b.is_ascii_digit())))",
+            "        { let _ = (count, long); true }", T_LAYER, "rust"),
+    # "pass --token $DEPLOY_TOKEN_V2 from the env" (a variable read as the secret).
+    Control("p94_layer_placeholder", PP, "        !value.starts_with(['$', '%', '<'])\n            && ",
+            "        ", T_LAYER, "rust"),
+    # "Supercalifragilisticexpialidocious is a long word" (a run of letters alone).
+    Control("p94_layer_run_letters", PP,
+            "        found.bytes().any(|b| b.is_ascii_digit()) && found.bytes().any(|b| b.is_ascii_alphabetic())",
+            "        !found.is_empty()", T_LAYER, "rust"),
+    # "the ids 1234 5678 ... in a column" (joined digits alone).
+    Control("p94_joined_hex_digits", PP,
+            "        found.bytes().any(|b| b.is_ascii_alphabetic()) && found.bytes().any(|b| b.is_ascii_digit())",
+            "        !found.is_empty()", T_LAYER, "rust"),
+    # "they Just went home and eyJ is no word" (one `eyJ` part read as a JWT).
+    Control("p94_joined_jwt_one_part", PP, r'r"eyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{2,}"',
+            r'r"eyJ[A-Za-z0-9_-]{2,}"', T_LAYER, "rust"),
+    # "run fork_test_cases and more" (a letter before `rk_` read as a key's start).
+    Control("p94_joined_stripe_left", PP, 'r"(?:^|[^A-Za-z])(?:sk|rk)_', 'r"(?:sk|rk)_', T_LAYER, "rust"),
 )

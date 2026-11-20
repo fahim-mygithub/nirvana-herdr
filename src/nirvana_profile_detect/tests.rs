@@ -1321,12 +1321,18 @@ fn p94_a_brief_keeps_an_unprofiled_and_an_unused_finding_beside_many_repeated_on
 }
 
 /// P45b review F2: `accept` and `proposals rollback` from a worker seated by herdr are refused at the CLI's door,
-/// naming the order; the owner's own shell and every other verb go on.
+/// naming the order; the owner's own shell and every other verb go on. Review2 F4: `dismiss` too, with or without a
+/// reason, since a dismissal is permanent and a worker could silence a proposal with it.
 #[test]
 fn p94_accept_and_rollback_from_a_seated_worker_are_refused_naming_the_order() {
     let seated_env =
         |key: &str| (key == nirvana_profiles::SEATED_ORDER_ENV).then(|| "b1-lr".to_owned());
-    for words in [&["accept", "pp-1"][..], &["proposals", "rollback", "op-2"]] {
+    for words in [
+        &["accept", "pp-1"][..],
+        &["proposals", "rollback", "op-2"],
+        &["dismiss", "pp-1"],
+        &["dismiss", "pp-1", "--reason", "noise"],
+    ] {
         let said = nirvana_profiles::cli_guard_with(&args(words), &seated_env);
         assert!(
             said.as_ref().is_some_and(|(code, why)| *code == 1
@@ -1352,9 +1358,12 @@ fn p94_accept_and_rollback_from_a_seated_worker_are_refused_naming_the_order() {
         nirvana_profiles::cli_guard_with(&args(&["accept", "pp-1"]), &|_| None),
         None
     );
+    assert_eq!(
+        nirvana_profiles::cli_guard_with(&args(&["dismiss", "pp-1"]), &|_| None),
+        None
+    );
     for words in [
-        &["dismiss", "pp-1"][..],
-        &["proposals"],
+        &["proposals"][..],
         &["proposal", "show", "pp-1"],
         &["detect"],
     ] {
@@ -1367,4 +1376,132 @@ fn p94_accept_and_rollback_from_a_seated_worker_are_refused_naming_the_order() {
     // Help still answers inside a worker.
     let said = nirvana_profiles::cli_guard_with(&args(&["accept", "--help"]), &seated_env);
     assert!(said.is_some_and(|(code, _)| code == 0));
+}
+
+// ---- the P45b second fix round ----
+
+fn git(root: &Path, words: &[&str]) -> (i32, String) {
+    let out = std::process::Command::new("git")
+        .args(words)
+        .current_dir(root)
+        .output()
+        .expect("git runs");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
+/// Second fix round, item 1: review2 got 20 of 40 secret shapes into `pp-1.md`, a folder a project may commit. The
+/// folder now ignores itself: after the detector writes a proposal in a real git repository, git lists nothing under
+/// it and `check-ignore` agrees (the ledger too). The owner's `.nirvana/.gitignore` is not touched, and an ignore file
+/// already in the folder is kept byte for byte.
+#[test]
+fn p94_a_written_proposal_is_invisible_to_git_and_an_ignore_file_there_is_kept() {
+    let (home, root) = project("p94-ignored");
+    assert_eq!(git(&root, &["init", "-q"]).0, 0);
+    let owners = root.join(nirvana_run::DIR).join(".gitignore");
+    let before = std::fs::read(&owners).ok();
+    seat_all(&root, "run-1", &builders("g", 5, "build.bounded", &[JUDGE]));
+    refresh_with(&root, "run-1", &Limits::default());
+    assert_eq!(proposals::list(&root).len(), 1);
+    assert!(proposals::path(&root, "pp-1").is_file());
+    let (code, status) = git(&root, &["status", "--porcelain", "--untracked-files=all"]);
+    assert_eq!(code, 0);
+    assert!(status.contains(".mcp.json"), "git sees the project: {status}");
+    assert!(!status.contains("profile-proposals/"), "git lists nothing under the folder: {status}");
+    assert_eq!(git(&root, &["check-ignore", "-q", ".nirvana/profile-proposals/pp-1.md"]).0, 0);
+    let ignore = proposals::folder(&root).join(nirvana_profiles::IGNORE_FILE);
+    assert_eq!(std::fs::read_to_string(&ignore).unwrap(), proposals::IGNORE_TEXT);
+    assert_eq!(std::fs::read(&owners).ok(), before, "the owner's .nirvana/.gitignore is as it was");
+    // A folder without the file (an older build made it, or the owner removed it) gets it at the next write, here the
+    // ledger's.
+    std::fs::remove_file(&ignore).unwrap();
+    proposals::dismiss(&root, "pp-1", None).unwrap();
+    assert_eq!(std::fs::read_to_string(&ignore).unwrap(), proposals::IGNORE_TEXT);
+    assert_eq!(git(&root, &["check-ignore", "-q", ".nirvana/profile-proposals/ledger.jsonl"]).0, 0);
+    // An ignore file there already, with other content and a CRLF line: kept byte for byte.
+    let other = another(&home, "other");
+    assert_eq!(git(&other, &["init", "-q"]).0, 0);
+    let mine = b"# the owner's own rules\r\npp-*.md\n".to_vec();
+    std::fs::create_dir_all(proposals::folder(&other)).unwrap();
+    let theirs = proposals::folder(&other).join(nirvana_profiles::IGNORE_FILE);
+    std::fs::write(&theirs, &mine).unwrap();
+    seat_all(&other, "run-1", &builders("h", 5, "build.bounded", &[JUDGE]));
+    refresh_with(&other, "run-1", &Limits::default());
+    assert_eq!(proposals::list(&other).len(), 1);
+    assert_eq!(std::fs::read(&theirs).unwrap(), mine);
+}
+
+/// Review2 F3: a cache written before the first fix round holds a paragraph's raw text and no `secret` field. A brief
+/// and its given file get the withheld line, never the value, and nothing quotable holds it.
+#[test]
+fn p94_an_old_cache_holding_raw_secret_text_is_checked_again_before_a_brief() {
+    let (_home, root) = project("p94-old-cache");
+    let project = Project::at(&root);
+    let raw = "Release step for the shared build box: sign in with password=hunter2hunter2 before the upload, and \
+keep the session open until the cook ends.";
+    let old = serde_json::json!({
+        "at": 1,
+        "findings": [{
+            "kind": "repeated",
+            "key": paragraph_key(raw),
+            "text": raw,
+            "chars": raw.chars().count(),
+            "orders": 5,
+            "classes": {"build.bounded": 5},
+            "profiles": {},
+            "unprofiled": 5,
+            "needs": [],
+            "sample": ["run-1/b0"]
+        }],
+        "usage": [],
+        "runs": 1,
+        "orders": 5,
+        "originals": 5,
+        "skipped": {"runs": 0, "journals": 0, "orders": 0, "files": 0, "unreadable": 0, "budget": false},
+        "elapsed_ms": 1
+    });
+    std::fs::create_dir_all(cache_path(&root).parent().unwrap()).unwrap();
+    std::fs::write(cache_path(&root), old.to_string()).unwrap();
+    assert!(read_cache(&root).is_some(), "the old format still reads");
+    let brief = with_findings(
+        &project,
+        "run-1",
+        "x-lr",
+        "# Lesson review of x\n".into(),
+        Some("build.bounded"),
+        None,
+    );
+    assert!(brief.contains("## Profile ops"), "{brief}");
+    assert!(!brief.contains("hunter2hunter2"), "{brief}");
+    assert!(brief.contains("[withheld by herdr:"), "{brief}");
+    let given_text = std::fs::read_to_string(given_path(&project, "run-1", "x-lr")).unwrap();
+    assert!(!given_text.contains("hunter2hunter2"), "{given_text}");
+    let found = given(&project, "run-1", "x-lr");
+    assert!(
+        matches!(&found[..], [Finding::Repeated { secret: Some(_), block, .. }] if block.is_empty()),
+        "{found:?}"
+    );
+    assert!(crate::nirvana_review::quotable(&found)
+        .iter()
+        .all(|quote| !quote.contains("hunter2hunter2")));
+}
+
+/// Review2 F6: a fenced block with a blank line inside is cut at the blank line, so the piece holds an opening fence
+/// and no closing one. That block is not the body: the flattened text is, as for a herdr line.
+#[test]
+fn p94_a_block_with_an_odd_count_of_fence_lines_is_not_the_body() {
+    let (_home, root) = project("p94-fence");
+    let cut = "Judge rules for every still, in this order, and nothing else, then score both the before and the \
+after frame:\n```\nherdr look before.png --detail high";
+    let order = format!("{cut}\n\nherdr look after.png\n```");
+    seat_all(&root, "run-1", &builders("f", 5, "build.bounded", &[&order]));
+    let typed = blocks(&order);
+    assert_eq!(typed[0].1, nirvana_lessons::one_line(cut), "{typed:?}");
+    refresh_with(&root, "run-1", &Limits::default());
+    let waiting = proposals::list(&root);
+    assert_eq!(waiting.len(), 1);
+    assert!(!waiting[0].body.contains("```\nherdr look"), "{}", waiting[0].body);
+    assert!(waiting[0].body.contains(&nirvana_lessons::one_line(cut)), "{}", waiting[0].body);
 }

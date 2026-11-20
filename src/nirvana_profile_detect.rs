@@ -492,7 +492,14 @@ pub fn blocks(text: &str) -> Vec<(String, String)> {
                 piece.to_owned()
             };
             let block = block.trim().to_owned();
-            let block = if nirvana_lessons::one_line(&block) == line {
+            // P45b review2 F6: a fenced block with a blank line inside is cut at the blank line, so a piece can open a
+            // fence and never close it, and a body holding it would turn the rest of the profile into code. An odd
+            // count of fence lines is that cut: the flattened text stands in, as it does for a herdr line.
+            let fences = block
+                .lines()
+                .filter(|typed| typed.trim_start().starts_with("```"))
+                .count();
+            let block = if fences % 2 == 0 && nirvana_lessons::one_line(&block) == line {
                 block
             } else {
                 line.clone()
@@ -1539,6 +1546,34 @@ pub fn given(project: &Project, run: &str, id: &str) -> Vec<Finding> {
         .unwrap_or_default()
 }
 
+/// P45b review2 F3: a cached finding's text and block checked again before a brief or a given file holds them. A
+/// cache written before the first fix round holds a paragraph's raw text with no `secret` field, and this build's
+/// list is longer than the one that wrote a newer cache. A secret-shaped one becomes the withheld line, as the scan
+/// makes it.
+fn rechecked(findings: &mut [Finding]) {
+    for finding in findings {
+        if let Finding::Repeated {
+            text,
+            block,
+            secret,
+            chars,
+            ..
+        } = finding
+        {
+            let shape = secret.clone().or_else(|| {
+                proposals::secret_shaped(text)
+                    .or_else(|| proposals::secret_shaped(block))
+                    .map(str::to_owned)
+            });
+            if let Some(shape) = shape {
+                *text = withheld(&shape, *chars);
+                block.clear();
+                *secret = Some(shape);
+            }
+        }
+    }
+}
+
 /// `brief` with the findings that bear on review `id` (of an order of `class` and `profile`; `None` for the idle
 /// review's many), read from the last detection kept, never a scan. With none, `brief` as it is, byte for byte.
 pub fn with_findings(
@@ -1549,9 +1584,10 @@ pub fn with_findings(
     class: Option<&str>,
     profile: Option<&str>,
 ) -> String {
-    let Some(detection) = read_cache(&project.root) else {
+    let Some(mut detection) = read_cache(&project.root) else {
         return brief;
     };
+    rechecked(&mut detection.findings);
     let found = relevant(&detection.findings, class, profile);
     if found.is_empty() {
         return brief;

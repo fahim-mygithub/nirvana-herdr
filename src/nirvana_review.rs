@@ -1379,8 +1379,8 @@ pub fn apply_profile_ops(
             for (field, text) in [("body", body), ("description", description), ("evidence", op.evidence())] {
                 if let Some(shape) = crate::nirvana_profile_proposals::secret_shaped(text) {
                     return Err(format!(
-                        "its {field} holds a secret-shaped text ({shape}): herdr never writes one into the tracked \
-                         proposals folder"
+                        "its {field} holds a secret-shaped text ({shape}): herdr never writes one into a proposal, \
+                         which an Accept makes a tracked profile"
                     ));
                 }
             }

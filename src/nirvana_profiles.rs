@@ -1789,11 +1789,11 @@ pub fn cli_guard(args: &[String]) -> Option<(i32, String)> {
 }
 
 /// P45b review F2: the variable a seated worker's process carries, naming its order. herdr sets it in
-/// `nirvana_worker::attempt_command` for every seat (the hunk this fix round reports; until it lands, the claude seat
-/// is known by `CLAUDE_ENV` only).
+/// `nirvana_worker::attempt_command` for every seat (the first fix round's hunk 1, applied in the second).
 pub const SEATED_ORDER_ENV: &str = "NIRVANA_ORDER";
 
-/// P45b review F2: `herdr profile accept` and `proposals rollback` from a worker seated by herdr are refused. The
+/// P45b review F2: `herdr profile accept`, `dismiss` and `proposals rollback` from a worker seated by herdr are
+/// refused (`dismiss` since review2 F4: a dismissal is permanent, so a worker could silence a proposal). The
 /// review reproduced `profile accept pp-1 < /dev/null` applying a proposal, exit 0: a reviewer with a shell could
 /// propose and then accept its own proposal. The lead 2026-11-19: not a terminal check (the owner's orchestrator
 /// may accept on the owner's word), and in the CLI only, never in the library `accept`, which P45a's panel calls
@@ -1802,6 +1802,7 @@ pub fn seated_refusal(args: &[String], env: &dyn Fn(&str) -> Option<String>) -> 
     let word = |at: usize| args.get(at).map(String::as_str);
     let verb = match (word(0), word(1)) {
         (Some("accept"), _) => "accept",
+        (Some("dismiss"), _) => "dismiss",
         (Some("proposals"), Some("rollback")) => "proposals rollback",
         _ => return None,
     };
@@ -1824,8 +1825,8 @@ pub fn seated_refusal(args: &[String], env: &dyn Fn(&str) -> Option<String>) -> 
     };
     Some(format!(
         "herdr profile {verb}: refused inside {inside}, a worker seated by herdr. A proposal is the owner's to \
-         accept or roll back: the owner, or the owner's orchestrator on the owner's word, runs it from the owner's \
-         own shell or the Profiles panel."
+         accept, dismiss or roll back: the owner, or the owner's orchestrator on the owner's word, runs it from the \
+         owner's own shell or the Profiles panel."
     ))
 }
 
