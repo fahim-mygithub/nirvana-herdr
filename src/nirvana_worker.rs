@@ -1652,6 +1652,11 @@ pub(crate) fn attempt_command(spawned: &[String], seated: &Seated, argv: &[Strin
     for key in ENV_REMOVED {
         command.env_remove(key);
     }
+    // P45b review F2: every seat's worker names its order, so `herdr profile accept` and `proposals rollback` refuse
+    // inside it (`nirvana_profiles::seated_refusal`). The claude seat was known by `CLAUDE_ENV` only; agy by nothing.
+    // A marker in the env keeps a worker from accepting by habit or by a planted line; a worker that unsets it is
+    // not stopped, so this is no lock.
+    command.env(crate::nirvana_profiles::SEATED_ORDER_ENV, &seated.order);
     if seated.cli == "claude" {
         for (key, value) in CLAUDE_ENV {
             command.env(key, value);

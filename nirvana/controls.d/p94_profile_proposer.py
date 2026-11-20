@@ -376,4 +376,9 @@ CONTROLS = CONTROLS + (
     # Red: T_SEATED's rollback case.
     Control("p94_seated_rollback_allowed", PROFILES,
             '        (Some("proposals"), Some("rollback")) => "proposals rollback",\n', "", T_SEATED, "rust"),
+    # Applied at the merge (nirvana_worker.rs was nobody's file): every seat's worker names its order. Red: the env
+    # of the command an attempt starts holds no NIRVANA_ORDER.
+    Control("p94_worker_env_names_no_order", WORKER,
+            "    command.env(crate::nirvana_profiles::SEATED_ORDER_ENV, &seated.order);\n", "",
+            "nirvana_worker::tests::p94_an_attempt_names_its_order_in_the_workers_env", "rust"),
 )
