@@ -498,4 +498,16 @@ CONTROLS = CONTROLS + (
             r'r"eyJ[A-Za-z0-9_-]{2,}"', T_LAYER, "rust"),
     # "run fork_test_cases and more" (a letter before `rk_` read as a key's start).
     Control("p94_joined_stripe_left", PP, 'r"(?:^|[^A-Za-z])(?:sk|rk)_', 'r"(?:sk|rk)_', T_LAYER, "rust"),
+    # ---- P45a second fix round, review 2 F5 (a test only). The expected red, written before each run: ----
+    # a run end says each refusal with its code point (red: at_end true, "no line names media-video").
+    Control("p94_fix2_refusal_unsaid_at_end", DETECT,
+            "            Outcome::Refused(why) => {\n"
+            '                lines.push(format!("profiles: {} refused: {why}", planned.about))\n            }',
+            "            Outcome::Refused(_) => {}",
+            "nirvana_profile_detect::tests::p94_fix2_a_draft_the_store_refuses_is_said_and_the_rest_written", "rust"),
+    # ...and so does `herdr profile detect --write` (red: at_end false, the refused line holds no "U+FE0F").
+    Control("p94_fix2_refusal_unsaid_at_cli", DETECT,
+            '            (Some(Outcome::Refused(why)), _) => format!("refused {}: {why}", planned.about),',
+            '            (Some(Outcome::Refused(_)), _) => format!("refused {}", planned.about),',
+            "nirvana_profile_detect::tests::p94_fix2_a_draft_the_store_refuses_is_said_and_the_rest_written", "rust"),
 )

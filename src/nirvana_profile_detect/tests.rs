@@ -1739,3 +1739,59 @@ fn p45d_fix_fitting_never_names_a_profile_that_starts_with_a_dash() {
     );
     assert_eq!(fitting(&root, "media.video", &[]), ["judge"]);
 }
+
+/// P45a review 2 F5, a test only: a draft holding a character the store refuses (U+FE0F after a warning sign, U+200D
+/// inside an emoji) is refused by `write`. At `herdr profile detect --write` and at a run end (`refresh`) the
+/// detection still completes and is kept, the other proposal is still written, and each refusal is said, naming its
+/// code point.
+#[test]
+fn p94_fix2_a_draft_the_store_refuses_is_said_and_the_rest_written() {
+    let warn = "Warning \u{26a0}\u{fe0f}: never push the cook to the shared box before the owner has looked at the \
+frame it renders, even when the gate is green.";
+    let pair = "The pair \u{1f469}\u{200d}\u{1f4bb} reviews: the coder reads the diff line by line and the reviewer \
+reads the tests before a single line is merged.";
+    assert!(warn.chars().count() >= MIN_CHARS && pair.chars().count() >= MIN_CHARS);
+    for at_end in [false, true] {
+        let (_home, root) = project(if at_end {
+            "p94-fix2-refused-end"
+        } else {
+            "p94-fix2-refused-cli"
+        });
+        let mut orders = builders("b", 5, "build.bounded", &[JUDGE]);
+        orders.extend(builders("w", 5, "media.video", &[warn]));
+        orders.extend(builders("z", 5, "research.web", &[pair]));
+        seat_all(&root, "run-1", &orders);
+        let said = if at_end {
+            refresh(&Project::at(&root), "run-1").join("\n")
+        } else {
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let code = cli_to(
+                &root,
+                &args(&["--write", "--run", "run-1"]),
+                &mut out,
+                &mut err,
+            );
+            assert_eq!(code, 0);
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out),
+                String::from_utf8_lossy(&err)
+            )
+        };
+        eprintln!("P94 FIX2 at_end={at_end}:\n{said}");
+        let waiting = proposals::list(&root);
+        assert_eq!(waiting.len(), 1, "the clean one is written: {said}");
+        assert_eq!(waiting[0].profile, "build-bounded", "{said}");
+        assert!(cache_path(&root).exists(), "the detection is kept: {said}");
+        for (profile, point) in [("media-video", "U+FE0F"), ("research-web", "U+200D")] {
+            let line = said
+                .lines()
+                .find(|line| line.contains(profile))
+                .unwrap_or_else(|| panic!("no line names {profile}: {said}"));
+            assert!(
+                line.contains("refused") && line.contains(point),
+                "at_end {at_end}: {line}"
+            );
+        }
+    }
+}

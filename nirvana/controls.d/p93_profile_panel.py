@@ -70,7 +70,7 @@ CONTROLS = (
     Control("p93_row_no_cards", PANEL,
             '        parts.push(format!("{cards} card{}", if cards == 1 { "" } else { "s" }));\n', "", T_ROWS, "rust"),
     Control("p93_row_refused_no_hint", PANEL,
-            '            let refused = format!("refused: herdr profile check {}", row.name);',
+            '            let refused = format!("refused: herdr profile check {name}");',
             '            let refused = String::from("refused");', T_ROWS, "rust"),
     # ---- the use ----
     Control("p93_use_nothing_as_a_count", PANEL, "        (Some((0, 0)), false) => NO_USE.to_owned(),",
@@ -198,12 +198,12 @@ CONTROLS = (
             "                        ..Detail::new(proposal.id.clone())\n                    });",
             _T + "p93_fix_accept_waits_for_a_drawn_detail_read_to_its_end", "rust"),
     # ...the end must have been on screen (red: `a` accepts at the top of a long body).
-    Control("p93_fix_end_never_needed", PANEL, "        if proposal.is_some() && detail.below == 0 {",
-            "        if proposal.is_some() {", _T + "p93_fix_accept_waits_for_a_drawn_detail_read_to_its_end",
+    Control("p93_fix_end_never_needed", PANEL, "            detail.read_to_end = detail.covered >= detail_len;",
+            "            detail.read_to_end = true;", _T + "p93_fix_accept_waits_for_a_drawn_detail_read_to_its_end",
             "rust"),
     # ...a mark while more is below (red: no "more below").
     Control("p93_fix_no_more_below", PANEL,
-            '            place.push_str(&format!(" \\u{b7} \\u{25bc} {} more below", detail.below));\n', "",
+            '            place.push_str(&format!(" \\u{b7} \\u{25bc} {} unread", detail.below));\n', "",
             _T + "p93_fix_accept_waits_for_a_drawn_detail_read_to_its_end", "rust"),
     # ...the footer names `a` only when it acts (red: "a accept" on an unread detail).
     Control("p93_fix_footer_names_a_unread", PANEL, "        if accept_ready(detail) {", "        if true {",
@@ -319,17 +319,17 @@ CONTROLS = (
     Control("p93_fix_move_keeps_drawn", PANEL, "        self.drawn_proposal = None;\n", "",
             _T + "p93_fix_dismiss_acts_on_the_row_drawn", "rust"),
     # Finding 8: the full path under the title (red: no path line names the project).
-    Control("p93_fix_path_unsaid", PANEL, "        &middle(&panel.root.display().to_string(), inner),",
+    Control("p93_fix_path_unsaid", PANEL, "        &middle(&visible(&panel.root.display().to_string()), inner),",
             "        &folder_name(&panel.root),", _T + "p93_fix_the_panel_says_the_project_path", "rust"),
     # ...cut in the middle, never at the end (red: at 80 columns it ends in "…").
-    Control("p93_fix_path_cut_at_end", PANEL, "        &middle(&panel.root.display().to_string(), inner),",
-            "        &fit(&panel.root.display().to_string(), inner),",
+    Control("p93_fix_path_cut_at_end", PANEL, "        &middle(&visible(&panel.root.display().to_string()), inner),",
+            "        &fit(&visible(&panel.root.display().to_string()), inner),",
             _T + "p93_fix_the_panel_says_the_project_path", "rust"),
     # ...and New says the full path it wrote (red: "made" alone).
     Control("p93_fix_new_path_unsaid", PANEL, '                    (format!("made {}", file.display()), Tone::Plain),',
             '                    ("made".to_owned(), Tone::Plain),', T_NEW, "rust"),
     # Finding 9: a scan cut short says so (red: no "(partial)").
-    Control("p93_fix_partial_unread", PANEL, "            .is_some_and(|detection| detection.skipped.any()),",
+    Control("p93_fix_partial_unread", PANEL, "            .is_some_and(|detection| partial(&detection.skipped)),",
             "            .is_some_and(|_| false),", _T + "p93_fix_partial_use_counts_say_so", "rust"),
     Control("p93_fix_partial_count_unsaid", PANEL,
             '        (Some((carried, fit)), true) => format!("used {carried} of {fit} (partial)"),',
@@ -342,8 +342,8 @@ CONTROLS = (
             "            if fresh && !force {",
             _T + "p93_fix_the_reader_reads_one_at_a_time_and_full_only_while_drawn", "rust"),
     # ...full only while drawn (red: every read full).
-    Control("p93_fix_reader_always_full", PANEL, "            (force || showing, entry.generation)",
-            "            (true, entry.generation)",
+    Control("p93_fix_reader_always_full", PANEL, "            let full = force || showing;",
+            "            let full = true;",
             _T + "p93_fix_the_reader_reads_one_at_a_time_and_full_only_while_drawn", "rust"),
     # ...a stale read is dropped (red: the old read overwrites the refresh).
     Control("p93_fix_reader_stale_kept", PANEL, "        if entry.generation != generation {", "        if false {",
@@ -354,10 +354,10 @@ CONTROLS = (
     # ...a panic does not leave "reading" on (red: the wait for the read's end times out).
     Control("p93_fix_reader_panic_stuck", PANEL,
             "            let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {\n"
-            "                (reader.read)(&owned, full)\n            }));\n"
-            "            reader.finish(&owned, generation, read.ok());",
-            "            let read = (reader.read)(&owned, full);\n"
-            "            reader.finish(&owned, generation, Some(read));",
+            "                (reader.read)(&owned, want)\n            }));\n"
+            "            reader.finish(&owned, generation, want, read.ok());",
+            "            let read = (reader.read)(&owned, want);\n"
+            "            reader.finish(&owned, generation, want, Some(read));",
             _T + "p93_fix_a_read_that_panics_does_not_stay_reading", "rust"),
     # Finding 11: a panel not drawn takes no key (red: `a` accepts in a window too small).
     Control("p93_fix_small_takes_keys", PANEL, "        if !panel.drawn {", "        if false {",
@@ -372,4 +372,126 @@ CONTROLS = (
     Control("p93_fix_shape_range_retyped", PANEL, "            crate::nirvana_profiles::SHAPES.len()\n        )",
             "            crate::nirvana_profiles::SHAPES.len() + 1\n        )",
             _T + "p93_fix_the_shape_footer_counts_the_shapes", "rust"),
+    # ---- P45a second fix round. The expected red, written before each run, is in the comment above each. ----
+    # F1: no scroll opens a gap (red: "End skipped lines" in the 600-line case).
+    Control("p93_fix2_end_opens_a_gap", PANEL, "        detail.scroll = detail.scroll.min(prefix + detail.covered);\n",
+            "", _T + "p93_fix2_end_never_skips_the_middle", "rust"),
+    # ...PageDown and the wheel neither (red: "PageDown x5" names a gap).
+    Control("p93_fix2_page_opens_a_gap", PANEL, "        detail.scroll = detail.scroll.min(prefix + detail.covered);\n",
+            "", _T + "p93_fix2_pagedown_the_wheel_and_down_open_no_gap", "rust"),
+    # ...the count is from the mark, not the scroll (red: after Home, `below` is not the unread count before it).
+    Control("p93_fix2_unread_from_the_scroll", PANEL,
+            "        detail.below = detail_len.saturating_sub(detail.covered);",
+            "        detail.below = body.len() - shown_to;", _T + "p93_fix2_back_up_and_end_again", "rust"),
+    # ...a re-wrap starts the count again (red: at 100 columns the scroll is not 0).
+    Control("p93_fix2_resize_keeps_the_count", PANEL, "                detail.covered = 0;\n", "",
+            _T + "p93_fix2_a_resize_in_the_middle_starts_again", "rust"),
+    # ...a height-only resize keeps it (red: the taller screen's scroll is 0).
+    Control("p93_fix2_height_resets_the_count", PANEL,
+            "            if detail.laid.is_some_and(|before| before != laid) {",
+            "            if detail.laid.is_some() {", _T + "p93_fix2_a_resize_in_the_middle_starts_again", "rust"),
+    # F2: `d` in the detail waits for a draw (red: "nothing dismissed unseen", one proposal left).
+    Control("p93_fix2_d_unseen", PANEL,
+            "                KeyCode::Char('d') if !detail_drawn(detail) => {\n"
+            "                    panel.message = Some(DISMISS_DETAIL_NOT_DRAWN.to_owned())\n                }\n", "",
+            _T + "p93_fix2_d_in_the_detail_waits_for_a_draw", "rust"),
+    # F3: the indent is drawn (red: `lead("code block line")` is 3, not 7).
+    Control("p93_fix2_indent_dropped", PANEL,
+            '        let mut line = " ".repeat(indent);\n        let mut used = indent;\n',
+            "        let mut line = String::new();\n        let mut used = 0;\n",
+            _T + "p93_fix2_the_body_keeps_its_indent", "rust"),
+    # ...a wrapped line keeps it (red: `wrap("    aaa bbb ccc", 11)` ends "ccc").
+    Control("p93_fix2_hang_dropped", PANEL,
+            "            if !first && used + 1 + word_width > cells {\n"
+            '                out.push(std::mem::replace(&mut line, " ".repeat(hang)));\n                used = hang;\n',
+            "            if !first && used + 1 + word_width > cells {\n"
+            "                out.push(std::mem::take(&mut line));\n                used = 0;\n",
+            _T + "p93_fix2_the_body_keeps_its_indent", "rust"),
+    # ...a line of spaces is empty (red: `wrap("   ", 10)` is ["   "]).
+    Control("p93_fix2_spaces_line_drawn", PANEL,
+            "        if words.is_empty() {\n            out.push(String::new());\n            continue;\n        }\n", "",
+            _T + "p93_fix2_the_body_keeps_its_indent", "rust"),
+    # ...a tab is still spaces (red: `lead("Tabbed")` is 3, the tab named <U+0009>).
+    Control("p93_fix2_tab_not_spaces", PANEL, "            '\\t' => first.push_str(TAB),",
+            "            '\\t' => first.push('\\t'),", _T + "p93_fix2_the_body_keeps_its_indent", "rust"),
+    # F4: a New is kept by project (red: the reopened panel has no "after the panel closed").
+    Control("p93_fix2_new_forgotten", PANEL, "                unlanded().insert(project, making.clone());\n", "",
+            _T + "p93_fix2_esc_while_making_keeps_the_result", "rust"),
+    # ...a New done while closed is a notice, not a live landing (red: no "after the panel closed").
+    Control("p93_fix2_late_lands_live", PANEL,
+            "            match making.take() {\n                Some(made) => {\n"
+            "                    unlanded().remove(&panel.root);\n"
+            "                    landed_late(&mut panel, &making.name, made);\n                }\n"
+            "                None => panel.making = Some(making),\n            }\n",
+            "            panel.making = Some(making);\n", _T + "p93_fix2_esc_while_making_keeps_the_result", "rust"),
+    # ...said once (red: "nothing left making", the third panel says making for good).
+    Control("p93_fix2_late_said_twice", PANEL, "                    unlanded().remove(&panel.root);\n", "",
+            _T + "p93_fix2_esc_while_making_keeps_the_result", "rust"),
+    # ...a New landed in a panel is not landed again (red: the panel after `settle` says making).
+    Control("p93_fix2_landed_kept", PANEL, "        unlanded().remove(&root);\n", "",
+            _T + "p93_fix2_esc_while_making_keeps_the_result", "rust"),
+    # ...on its own project only (red: the other project's panel gets the notice).
+    Control("p93_fix2_other_project_lands", PANEL, "        let pending = unlanded().get(&panel.root).cloned();",
+            "        let pending = unlanded().values().next().cloned();",
+            _T + "p93_fix2_esc_while_making_keeps_the_result", "rust"),
+    # F6: a profile's name is drawn visible (red: "the row at 140").
+    Control("p93_fix2_profile_name_raw", PANEL,
+            "    let names: Vec<String> = view.profiles.iter().map(|row| visible(&row.name)).collect();",
+            "    let names: Vec<String> = view.profiles.iter().map(|row| row.name.clone()).collect();",
+            _T + "p93_fix2_names_from_disk_are_drawn_visible", "rust"),
+    # ...the title's folder (red: "the title at 140").
+    Control("p93_fix2_title_raw", PANEL, "    let folder = visible(&folder_name(&panel.root));",
+            "    let folder = folder_name(&panel.root);", _T + "p93_fix2_names_from_disk_are_drawn_visible", "rust"),
+    # ...the path line (red: "the path line at 140").
+    Control("p93_fix2_path_raw", PANEL, "        &middle(&visible(&panel.root.display().to_string()), inner),",
+            "        &middle(&panel.root.display().to_string(), inner),",
+            _T + "p93_fix2_names_from_disk_are_drawn_visible", "rust"),
+    # ...a proposal's target profile in the list (red: "the proposal's row at 140").
+    Control("p93_fix2_target_raw_in_list", PANEL,
+            "            visible(&proposal.profile)\n        );\n        let evidence",
+            "            proposal.profile.clone()\n        );\n        let evidence",
+            _T + "p93_fix2_names_from_disk_are_drawn_visible", "rust"),
+    # ...and in the detail (red: "the detail at 140").
+    Control("p93_fix2_target_raw_in_detail", PANEL,
+            "    let (id, profile) = (visible(&proposal.id), visible(&proposal.profile));",
+            "    let (id, profile) = (visible(&proposal.id), proposal.profile.clone());",
+            _T + "p93_fix2_names_from_disk_are_drawn_visible", "rust"),
+    # ...a notice naming it (red: "the notice at 140").
+    Control("p93_fix2_notice_raw", PANEL, "                    wrap(&visible(said), inner)",
+            "                    wrap(said, inner)", _T + "p93_fix2_names_from_disk_are_drawn_visible", "rust"),
+    # F7: the scan is not every read (red: the second read is Want { full: true, usage: true }).
+    Control("p93_fix2_usage_every_read", PANEL, "            let usage = full\n                && (entry.usage_due",
+            "            let usage = full\n                && (true || entry.usage_due",
+            _T + "p93_fix2_the_use_scan_runs_when_asked_and_at_most_every_interval", "rust"),
+    # ...a refresh asks for one (red: "a refresh asks for a scan").
+    Control("p93_fix2_refresh_not_due", PANEL,
+            "            keep_usage(&mut fresh, old);\n        }\n        entry.usage_due = true;\n",
+            "            keep_usage(&mut fresh, old);\n        }\n",
+            _T + "p93_fix2_the_use_scan_runs_when_asked_and_at_most_every_interval", "rust"),
+    # ...an open asks for one (red: `reader.usage_due(folder)` is false after `opened`).
+    Control("p93_fix2_open_not_due", PANEL,
+            "        entry.asked_at = Some(Instant::now());\n        entry.usage_due = true;\n    }",
+            "        entry.asked_at = Some(Instant::now());\n    }",
+            _T + "p93_fix2_the_use_scan_runs_when_asked_and_at_most_every_interval", "rust"),
+    # ...and the window's panel asks it when it opens (red: `usage_asked` is false).
+    Control("p93_fix2_open_asks_nothing", PANEL, "        reader().opened(&panel.folder);\n", "",
+            _T + "p93_fix2_the_use_scan_runs_when_asked_and_at_most_every_interval", "rust"),
+    # ...a read without a scan keeps the counts (red: "the counts are kept").
+    Control("p93_fix2_counts_dropped", PANEL, "                keep_usage(&mut view, old);",
+            "                let _ = old;", _T + "p93_fix2_the_use_scan_runs_when_asked_and_at_most_every_interval",
+            "rust"),
+    # ...past the interval, a scan (red: "4 s after a scan, past 4 s").
+    Control("p93_fix2_interval_ignored", PANEL,
+            "                        .is_none_or(|at| at.elapsed() >= self.usage_every));",
+            "                        .is_none());",
+            _T + "p93_fix2_the_use_scan_runs_when_asked_and_at_most_every_interval", "rust"),
+    # F8: a missing order copy is not partial (red: "(partial)" on the screen).
+    Control("p93_fix2_partial_any_skip", PANEL,
+            "    skipped.runs > 0 || skipped.journals > 0 || skipped.orders > 0 || skipped.budget",
+            "    skipped.any()", _T + "p93_fix2_a_missing_order_copy_is_not_partial", "rust"),
+    # ...a run past the cap is (red: p93_fix_partial_use_counts_say_so finds no " (partial)").
+    Control("p93_fix2_partial_runs_ignored", PANEL,
+            "    skipped.runs > 0 || skipped.journals > 0 || skipped.orders > 0 || skipped.budget",
+            "    skipped.journals > 0 || skipped.orders > 0 || skipped.budget",
+            _T + "p93_fix_partial_use_counts_say_so", "rust"),
 )

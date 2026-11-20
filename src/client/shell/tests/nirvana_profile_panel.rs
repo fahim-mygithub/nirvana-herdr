@@ -164,6 +164,9 @@ fn seated(order: &Order, order_file: &str) -> Seated {
         expected: BTreeMap::new(),
         jev_pick: None,
         send_ok: None,
+        // P45d: `seat run` writes the profile key on every seated line, a name or null, as `queue_on` does.
+        profile: Some(order.profile.clone()),
+        profile_fit: Some(Vec::new()),
     }
 }
 
@@ -757,9 +760,8 @@ fn p93_suggested_lists_each_proposal_and_enter_opens_its_whole_detail() {
         text.contains("read to the end, then a accepts \u{b7} d dismiss"),
         "{text}"
     );
-    // Scrolled to its end, the whole body has been on screen.
-    key(&mut state, KeyCode::End);
-    let rows = shown(&mut state, 200);
+    // Paged to its end (review 2 F1: End goes to the first line not yet shown), the whole body has been on screen.
+    let rows = read_through(&mut state, 200, HEIGHT);
     assert!(rows.join("\n").contains("THE LAST LINE"));
     assert!(
         rows.join("\n").contains("a accept \u{b7} d dismiss"),
@@ -1550,10 +1552,7 @@ fn p93_fix_accept_waits_for_a_drawn_detail_read_to_its_end() {
     let below = panel(&state).detail.as_ref().unwrap().below;
     assert!(below > 0, "{text}");
     assert!(text.contains("lines 1-"), "{text}");
-    assert!(
-        text.contains(&format!("\u{25bc} {below} more below")),
-        "{text}"
-    );
+    assert!(text.contains(&format!("\u{25bc} {below} unread")), "{text}");
     assert!(
         !text.contains("a accept \u{b7}"),
         "the footer names a only when it acts: {text}"
@@ -1567,8 +1566,8 @@ fn p93_fix_accept_waits_for_a_drawn_detail_read_to_its_end() {
     key(&mut state, KeyCode::Char('a'));
     assert_eq!(proposals::list(&root).len(), 1, "the end was not drawn");
     assert!(!accepted_file(&root, "render-judge").exists());
-    // Drawn at its end, then back at the top: the end has been seen, so `a` acts.
-    let rows = shown(&mut state, 140);
+    // Paged to its end, then back at the top: every line has been seen, so `a` acts.
+    let rows = read_through(&mut state, 140, HEIGHT);
     let text = rows.join("\n");
     assert!(text.contains("THE LAST LINE"), "{text}");
     assert!(!text.contains("more below"), "{text}");
@@ -2031,7 +2030,7 @@ fn p93_fix_the_detail_says_where_the_owner_is_at_80_and_140() {
         let top = shown(&mut state, width);
         let text = top.join("\n");
         assert!(
-            text.contains("lines 1-") && text.contains("more below"),
+            text.contains("lines 1-") && text.contains("unread"),
             "{text}"
         );
         key(&mut state, KeyCode::PageDown);
@@ -2039,11 +2038,10 @@ fn p93_fix_the_detail_says_where_the_owner_is_at_80_and_140() {
         let middle = shown(&mut state, width);
         let text = middle.join("\n");
         assert!(
-            !text.contains("lines 1-") && text.contains("more below"),
+            !text.contains("lines 1-") && text.contains("unread"),
             "{text}"
         );
-        key(&mut state, KeyCode::End);
-        let end = shown(&mut state, width);
+        let end = read_through(&mut state, width, HEIGHT);
         let text = end.join("\n");
         assert!(
             text.contains("THE LAST LINE") && !text.contains("more below"),
@@ -2085,27 +2083,44 @@ fn wait_until(what: &str, done: impl Fn() -> bool) {
     }
 }
 
-/// A reader whose reads record whether they were full and wait for a release each.
-fn gated_reader(
+/// A reader whose reads record what they were asked for and wait for a release each; its use scan is due every
+/// `usage_every`.
+fn gated_reader_every(
     marker: &'static str,
+    usage_every: std::time::Duration,
 ) -> (
     std::sync::Arc<panel_mod::Reader>,
-    std::sync::Arc<std::sync::Mutex<Vec<bool>>>,
+    std::sync::Arc<std::sync::Mutex<Vec<panel_mod::Want>>>,
     std::sync::mpsc::Sender<()>,
 ) {
     let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let (release, released) = std::sync::mpsc::channel::<()>();
     let released = std::sync::Mutex::new(released);
     let seen = std::sync::Arc::clone(&calls);
-    let reader = panel_mod::Reader::new(move |folder, full| {
-        seen.lock().unwrap().push(full);
+    let reader = panel_mod::Reader::scanning_every(usage_every, move |folder, want| {
+        seen.lock().unwrap().push(want);
         let _ = released.lock().unwrap().recv();
         panel_mod::Read {
-            view: full.then(|| blank_view(folder, marker)),
+            view: want.full.then(|| {
+                let mut view = blank_view(folder, marker);
+                view.usage_read = want.usage;
+                view
+            }),
             waiting: 1,
         }
     });
     (reader, calls, release)
+}
+
+/// The same with the window's use interval.
+fn gated_reader(
+    marker: &'static str,
+) -> (
+    std::sync::Arc<panel_mod::Reader>,
+    std::sync::Arc<std::sync::Mutex<Vec<panel_mod::Want>>>,
+    std::sync::mpsc::Sender<()>,
+) {
+    gated_reader_every(marker, panel_mod::USAGE_EVERY)
 }
 
 #[test]
@@ -2141,7 +2156,8 @@ fn p93_fix_the_reader_reads_one_at_a_time_and_full_only_while_drawn() {
     wait_until("the third read starts", || calls.lock().unwrap().len() == 3);
     release.send(()).unwrap();
     wait_until("the third read ends", || !reader.reading(folder));
-    assert_eq!(*calls.lock().unwrap(), [true, false, true]);
+    let full: Vec<bool> = calls.lock().unwrap().iter().map(|want| want.full).collect();
+    assert_eq!(full, [true, false, true]);
 }
 
 #[test]
@@ -2165,7 +2181,7 @@ fn p93_fix_a_read_that_panics_does_not_stay_reading() {
     let folder = Path::new("p93-fix-reader-panic");
     let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted = std::sync::Arc::clone(&calls);
-    let reader = panel_mod::Reader::new(move |folder, _full| {
+    let reader = panel_mod::Reader::new(move |folder, _want| {
         if counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
             panic!("p93 fix: a read that fails");
         }
@@ -2193,8 +2209,7 @@ fn p93_fix_a_detail_changed_while_open_is_read_again() {
     let _ = open(&mut state, 140);
     key(&mut state, KeyCode::Tab);
     key(&mut state, KeyCode::Enter);
-    key(&mut state, KeyCode::End);
-    let _ = shown(&mut state, 140);
+    let _ = read_through(&mut state, 140, HEIGHT);
     assert!(panel(&state).detail.as_ref().unwrap().read_to_end);
     let file = proposals::path(&root, &id);
     let text = std::fs::read_to_string(&file).unwrap().replace(
@@ -2215,4 +2230,663 @@ fn p93_fix_a_detail_changed_while_open_is_read_again() {
     );
     key(&mut state, KeyCode::Char('a'));
     assert_eq!(proposals::list(&root).len(), 1, "nothing accepted");
+}
+
+// ---- P45a second fix round: Accept applies only text the owner had on screen, all of it ----
+
+/// The panel's rows of a frame composed at `width` by `height`.
+fn rows_at(state: &mut ClientShellState, width: u16, height: u16) -> Vec<String> {
+    let frame = state.compose(width, height).expect("composed frame").frame;
+    let rows: Vec<String> = frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| row.iter().map(|cell| cell.symbol.as_str()).collect())
+        .collect();
+    panel_rows(state, &rows)
+}
+
+/// A new profile of 600 body lines, `R000` to `R599`, as the review's case.
+fn propose_600(root: &Path, profile: &str) -> String {
+    let lines: Vec<String> = (0..600).map(|n| format!("R{n:03}")).collect();
+    proposals::write(
+        root,
+        &draft(
+            Kind::New,
+            profile,
+            &format!("paragraph:{profile}"),
+            &format!("---\ndescription: Judges.\n---\n{}", lines.join("\n")),
+            None,
+        ),
+    )
+    .expect("a 600-line proposal is written")
+}
+
+/// The `R000`..`R599` marks on `rows`, added to `seen`; the marks of this frame.
+fn marks_on(rows: &[String], seen: &mut std::collections::BTreeSet<usize>) -> Vec<usize> {
+    let mut here = Vec::new();
+    for row in rows {
+        let trimmed = row.trim_matches(|c: char| c == '\u{2502}' || c == ' ');
+        if trimmed.len() == 4
+            && trimmed.starts_with('R')
+            && trimmed[1..].chars().all(|c| c.is_ascii_digit())
+        {
+            here.push(trimmed[1..].parse().unwrap());
+        }
+    }
+    seen.extend(here.iter().copied());
+    here
+}
+
+/// Every mark seen is one of `0..seen.len()`: no line was skipped over.
+fn no_gap(seen: &std::collections::BTreeSet<usize>) -> bool {
+    seen.iter().enumerate().all(|(at, mark)| at == *mark)
+}
+
+/// Presses End and draws, at `width` by `height`, until the detail is read to its end; the last frame's rows.
+fn read_through(state: &mut ClientShellState, width: u16, height: u16) -> Vec<String> {
+    let mut rows = rows_at(state, width, height);
+    for _ in 0..200 {
+        if panel(state)
+            .detail
+            .as_ref()
+            .is_some_and(|detail| detail.read_to_end)
+        {
+            return rows;
+        }
+        key(state, KeyCode::End);
+        rows = rows_at(state, width, height);
+    }
+    panic!("never read to its end:\n{}", rows.join("\n"));
+}
+
+/// Review 2 F1: End then `a` accepts nothing; End moves to the first line not yet shown, so the owner pages through,
+/// and the line above the keys counts the lines still unread from that mark.
+#[test]
+fn p93_fix2_end_never_skips_the_middle() {
+    let (_home, root) = project("p93-fix2-end");
+    propose_600(&root, "render-judge");
+    let mut state = state_in(&root);
+    let _ = open(&mut state, 140);
+    key(&mut state, KeyCode::Tab);
+    key(&mut state, KeyCode::Enter);
+    let mut seen = std::collections::BTreeSet::new();
+    marks_on(&rows_at(&mut state, 140, 30), &mut seen);
+    key(&mut state, KeyCode::End);
+    let rows = rows_at(&mut state, 140, 30);
+    marks_on(&rows, &mut seen);
+    assert!(no_gap(&seen), "End skipped lines: {seen:?}");
+    let detail = panel(&state).detail.clone().unwrap();
+    assert!(!detail.read_to_end, "one End is not the end: {detail:?}");
+    let never = (0..600).filter(|n| !seen.contains(n)).count();
+    assert!(never > 500, "{never}");
+    assert!(
+        detail.below >= never,
+        "unread counts from the mark: {} < {never}",
+        detail.below
+    );
+    let text = rows.join("\n");
+    assert!(
+        text.contains(&format!("\u{25bc} {} unread", detail.below)),
+        "{text}"
+    );
+    key(&mut state, KeyCode::Char('a'));
+    assert_eq!(
+        proposals::list(&root).len(),
+        1,
+        "End then a accepts nothing"
+    );
+    assert!(!accepted_file(&root, "render-judge").exists());
+    let said = format!("scroll to the end to accept ({} more lines)", detail.below);
+    assert_eq!(panel(&state).message.as_deref(), Some(said.as_str()));
+    // End pressed again and again: every line comes on screen, in order, and only then does `a` act.
+    let mut presses = 0;
+    while !panel(&state).detail.as_ref().unwrap().read_to_end {
+        key(&mut state, KeyCode::End);
+        marks_on(&rows_at(&mut state, 140, 30), &mut seen);
+        assert!(no_gap(&seen), "a gap after {presses} presses: {seen:?}");
+        presses += 1;
+        assert!(presses < 100, "never at the end");
+    }
+    assert_eq!(seen.len(), 600, "every line was on screen");
+    assert!(presses > 10, "paged through: {presses}");
+    key(&mut state, KeyCode::Char('a'));
+    assert!(proposals::list(&root).is_empty(), "read whole, accepted");
+    let written = std::fs::read_to_string(accepted_file(&root, "render-judge")).unwrap();
+    assert!(written.contains("R300") && written.contains("R599"));
+}
+
+/// Review 2 F1: PageDown, the wheel and Down pressed many times between two frames never open a gap.
+#[test]
+fn p93_fix2_pagedown_the_wheel_and_down_open_no_gap() {
+    let (_home, root) = project("p93-fix2-page");
+    propose_600(&root, "render-judge");
+    let mut state = state_in(&root);
+    let _ = open(&mut state, 140);
+    key(&mut state, KeyCode::Tab);
+    key(&mut state, KeyCode::Enter);
+    let mut seen = std::collections::BTreeSet::new();
+    marks_on(&rows_at(&mut state, 140, 30), &mut seen);
+    for _ in 0..5 {
+        key(&mut state, KeyCode::PageDown);
+    }
+    marks_on(&rows_at(&mut state, 140, 30), &mut seen);
+    assert!(no_gap(&seen), "PageDown x5: {seen:?}");
+    let after_pages = seen.len();
+    let area = state.hits.nirvana_profile_panel.area;
+    for _ in 0..20 {
+        wheel(&mut state, true, area.x + 4, area.y + 4);
+    }
+    marks_on(&rows_at(&mut state, 140, 30), &mut seen);
+    assert!(no_gap(&seen), "the wheel x20: {seen:?}");
+    assert!(seen.len() > after_pages, "the wheel moves on");
+    for _ in 0..60 {
+        key(&mut state, KeyCode::Down);
+    }
+    marks_on(&rows_at(&mut state, 140, 30), &mut seen);
+    assert!(no_gap(&seen), "Down x60: {seen:?}");
+    assert!(!panel(&state).detail.as_ref().unwrap().read_to_end);
+    key(&mut state, KeyCode::Char('a'));
+    assert_eq!(proposals::list(&root).len(), 1);
+}
+
+/// Review 2 F1: scrolled back up, the unread count stands, and End goes back to the first line not yet shown.
+#[test]
+fn p93_fix2_back_up_and_end_again() {
+    let (_home, root) = project("p93-fix2-back");
+    propose_600(&root, "render-judge");
+    let mut state = state_in(&root);
+    let _ = open(&mut state, 140);
+    key(&mut state, KeyCode::Tab);
+    key(&mut state, KeyCode::Enter);
+    let mut seen = std::collections::BTreeSet::new();
+    marks_on(&rows_at(&mut state, 140, 30), &mut seen);
+    for _ in 0..3 {
+        key(&mut state, KeyCode::End);
+        marks_on(&rows_at(&mut state, 140, 30), &mut seen);
+    }
+    let unread = panel(&state).detail.as_ref().unwrap().below;
+    let furthest = *seen.iter().last().unwrap();
+    key(&mut state, KeyCode::Home);
+    let rows = rows_at(&mut state, 140, 30);
+    let top = marks_on(&rows, &mut seen);
+    assert_eq!(top.first(), Some(&0), "Home is the top");
+    assert_eq!(panel(&state).detail.as_ref().unwrap().below, unread);
+    assert!(
+        rows.join("\n")
+            .contains(&format!("\u{25bc} {unread} unread")),
+        "{}",
+        rows.join("\n")
+    );
+    key(&mut state, KeyCode::End);
+    let here = marks_on(&rows_at(&mut state, 140, 30), &mut seen);
+    assert_eq!(
+        here.first(),
+        Some(&(furthest + 1)),
+        "End is the first line not yet shown: {here:?}"
+    );
+    assert!(no_gap(&seen));
+}
+
+/// Review 2 F1: a resize that re-wraps starts the count from the top; one that keeps the width keeps it.
+#[test]
+fn p93_fix2_a_resize_in_the_middle_starts_again() {
+    let (_home, root) = project("p93-fix2-resize");
+    propose_600(&root, "render-judge");
+    let mut state = state_in(&root);
+    let _ = open(&mut state, 140);
+    key(&mut state, KeyCode::Tab);
+    key(&mut state, KeyCode::Enter);
+    let _ = rows_at(&mut state, 140, 30);
+    for _ in 0..3 {
+        key(&mut state, KeyCode::End);
+        let _ = rows_at(&mut state, 140, 30);
+    }
+    let unread = panel(&state).detail.as_ref().unwrap().below;
+    // Taller, the same width: the same lines, so the mark stands and the taller screen reads on.
+    let _ = rows_at(&mut state, 140, 40);
+    let taller = panel(&state).detail.clone().unwrap();
+    assert!(
+        taller.below <= unread && taller.scroll > 0,
+        "{taller:?} after {unread}"
+    );
+    // Narrower: the lines are wrapped again, so the read starts again from the top.
+    let rows = rows_at(&mut state, 100, 30);
+    let narrow = panel(&state).detail.clone().unwrap();
+    assert_eq!(narrow.scroll, 0, "{narrow:?}");
+    assert!(narrow.below > unread, "{narrow:?}");
+    let mut seen = std::collections::BTreeSet::new();
+    assert_eq!(marks_on(&rows, &mut seen).first(), Some(&0));
+    // Read whole at 100, then wider again: the read starts over, and `a` waits for it.
+    let _ = read_through(&mut state, 100, 30);
+    let _ = rows_at(&mut state, 140, 30);
+    assert!(!panel(&state).detail.as_ref().unwrap().read_to_end);
+    key(&mut state, KeyCode::Char('a'));
+    assert_eq!(proposals::list(&root).len(), 1);
+    let _ = read_through(&mut state, 140, 30);
+    key(&mut state, KeyCode::Char('a'));
+    assert!(proposals::list(&root).is_empty());
+}
+
+/// Review 2 F2: `d` in the detail acts only once the detail has been drawn.
+#[test]
+fn p93_fix2_d_in_the_detail_waits_for_a_draw() {
+    let (_home, root) = project("p93-fix2-d");
+    let first = propose_new(&root, "render-judge");
+    propose_new(&root, "other-judge");
+    let mut state = state_in(&root);
+    let _ = open(&mut state, 140);
+    key(&mut state, KeyCode::Tab);
+    state.handle_raw_events(vec![
+        raw(KeyCode::Enter, KeyModifiers::NONE),
+        raw(KeyCode::Char('d'), KeyModifiers::NONE),
+    ]);
+    assert_eq!(proposals::list(&root).len(), 2, "nothing dismissed unseen");
+    assert!(proposals::ledger(&root).is_empty());
+    assert!(
+        panel(&state)
+            .message
+            .as_deref()
+            .is_some_and(|said| said.contains("drawn on screen")),
+        "{:?}",
+        panel(&state).message
+    );
+    let _ = shown(&mut state, 140);
+    key(&mut state, KeyCode::Char('d'));
+    assert!(!waiting_ids(&root).contains(&first), "drawn, dismissed");
+}
+
+/// Review 2 F3: the drawn body keeps each line's leading spaces; a wrapped line keeps its indent; a line of spaces is
+/// empty; a tab is spaces.
+#[test]
+fn p93_fix2_the_body_keeps_its_indent() {
+    let (_home, root) = project("p93-fix2-indent");
+    hand_written(
+        &root,
+        "pp-1",
+        "render-judge",
+        EVIDENCE,
+        "---\ndescription: Judges.\n---\nTop\n    code block line\n  - nested\n      \n\tTabbed\nend",
+    );
+    let mut state = state_in(&root);
+    let _ = open(&mut state, 140);
+    key(&mut state, KeyCode::Tab);
+    key(&mut state, KeyCode::Enter);
+    let rows = shown(&mut state, 140);
+    let lead = |needle: &str| {
+        let row = line(&rows, needle);
+        let inside = row.trim_start_matches('\u{2502}');
+        inside.len() - inside.trim_start_matches(' ').len()
+    };
+    // The panel's margin (1) and the detail's own indent (2), then the line's.
+    assert_eq!(lead("Top"), 3, "{}", rows.join("\n"));
+    assert_eq!(lead("code block line"), 7, "{}", rows.join("\n"));
+    assert_eq!(lead("- nested"), 5, "{}", rows.join("\n"));
+    assert_eq!(lead("Tabbed"), 7, "{}", rows.join("\n"));
+    let at = rows
+        .iter()
+        .position(|row| row.contains("- nested"))
+        .unwrap();
+    assert_eq!(
+        rows[at + 1].trim_matches(|c: char| c == '\u{2502}' || c == ' '),
+        "",
+        "a line of spaces is empty"
+    );
+    assert_eq!(panel_mod::wrap("    code", 20), ["    code"]);
+    assert_eq!(
+        panel_mod::wrap("    aaa bbb ccc", 11),
+        ["    aaa bbb", "    ccc"]
+    );
+    assert_eq!(panel_mod::wrap("   ", 10), [""]);
+    assert_eq!(panel_mod::wrap("  ab  cd", 20), ["  ab  cd"]);
+    assert_eq!(panel_mod::wrap(&panel_mod::visible("\tx"), 20), ["    x"]);
+    // An indent wider than half the line keeps its first line's indent and lets the rest run from the margin.
+    assert_eq!(panel_mod::wrap("        aa bb", 10), ["        aa", "bb"]);
+}
+
+/// Review 2 F4: Esc while a New is made closes the panel; the result, made or refused, is the notice of the next panel
+/// opened on that project, once, and on no other project; a panel opened while it still works says so and lands it.
+#[test]
+fn p93_fix2_esc_while_making_keeps_the_result() {
+    let (home, root) = project("p93-fix2-making");
+    let other = home.path.join("project2");
+    std::fs::create_dir_all(other.join(".git")).unwrap();
+    Project::at(&other).ensure().unwrap();
+    // Made after the panel closed.
+    let mut state = state_in(&root);
+    let _ = open(&mut state, 140);
+    let holder = hold_lock(&root, std::time::Duration::from_millis(1500));
+    key(&mut state, KeyCode::Char('n'));
+    typed(&mut state, "slicer");
+    key(&mut state, KeyCode::Enter);
+    key(&mut state, KeyCode::Enter);
+    assert!(panel(&state).making.is_some());
+    key(&mut state, KeyCode::Esc);
+    assert!(
+        state.nirvana_profile_panel.is_none(),
+        "Esc closes the panel"
+    );
+    holder.join().unwrap();
+    let file = crate::nirvana_profiles::path(&root, "slicer");
+    wait_until("the New lands on disk", || file.is_file());
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let mut elsewhere = state_in(&other);
+    let _ = open(&mut elsewhere, 140);
+    let mut outcome = ClientShellInput::default();
+    elsewhere.tick_profile_panel(&mut outcome);
+    assert!(
+        panel(&elsewhere).notice.is_empty(),
+        "{:?}",
+        panel(&elsewhere).notice
+    );
+    let mut again = state_in(&root);
+    let rows = opened(&mut again, 200);
+    let mut outcome = ClientShellInput::default();
+    again.tick_profile_panel(&mut outcome);
+    let text = flat_text(&rows);
+    let joined = text.replace(' ', "");
+    assert!(
+        joined.contains(&format!("made{}", file.display()).replace(' ', ""))
+            && text.contains("after the panel closed"),
+        "{text}"
+    );
+    assert!(invoked(&outcome).is_empty(), "no edit tab opens by itself");
+    assert_eq!(panel(&again).profile_key.as_deref(), Some("slicer"));
+    let mut third = state_in(&root);
+    let _ = open(&mut third, 140);
+    assert!(panel(&third).notice.is_empty(), "said once");
+    assert!(panel(&third).making.is_none(), "nothing left making");
+    // Refused after the panel closed: the name was taken while it waited.
+    let mut state = state_in(&root);
+    let _ = open(&mut state, 140);
+    let holder = hold_lock(&root, std::time::Duration::from_millis(1500));
+    key(&mut state, KeyCode::Char('n'));
+    typed(&mut state, "judge2");
+    key(&mut state, KeyCode::Enter);
+    key(&mut state, KeyCode::Enter);
+    key(&mut state, KeyCode::Esc);
+    profile_file(&root, "judge2", "---\ndescription: By hand.\n---\nX.\n");
+    holder.join().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let mut again = state_in(&root);
+    let text = flat_text(&opened(&mut again, 200));
+    assert!(
+        text.contains("not made") && text.contains("judge2") && text.contains("already there"),
+        "{text}"
+    );
+    // Opened while it still works: the panel says it is making it, and lands it with its edit tab.
+    let mut state = state_in(&root);
+    let _ = open(&mut state, 140);
+    let holder = hold_lock(&root, std::time::Duration::from_millis(1500));
+    key(&mut state, KeyCode::Char('n'));
+    typed(&mut state, "cutter");
+    key(&mut state, KeyCode::Enter);
+    key(&mut state, KeyCode::Enter);
+    key(&mut state, KeyCode::Esc);
+    let mut again = state_in(&root);
+    let rows = opened(&mut again, 200);
+    assert!(
+        rows.join("\n").contains("making cutter"),
+        "{}",
+        rows.join("\n")
+    );
+    holder.join().unwrap();
+    let outcome = settle(&mut again);
+    let made = crate::nirvana_profiles::path(&root, "cutter");
+    assert_eq!(
+        invoked(&outcome),
+        [format!(
+            "{}{}",
+            crate::nirvana::EDIT_FILE_COMMAND,
+            made.display()
+        )]
+    );
+    // Landed in a panel, it is not landed again.
+    let mut after = state_in(&root);
+    let _ = open(&mut after, 140);
+    assert!(panel(&after).making.is_none() && panel(&after).notice.is_empty());
+}
+
+/// Review 2 F6: every name the panel draws from disk goes through `visible`: a profile's name and its hint, the title
+/// and the path line.
+#[test]
+fn p93_fix2_names_from_disk_are_drawn_visible() {
+    let (home, _root) = project("p93-fix2-names");
+    let root = home.path.join("pro\u{200b}ject");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    Project::at(&root).ensure().unwrap();
+    profile_folder(&root, "reviewer", "---\ndescription: Real.\n---\nX.\n", 0);
+    profile_folder(
+        &root,
+        "rev\u{200b}iewer",
+        "---\ndescription: Fake.\n---\nX.\n",
+        0,
+    );
+    hand_written(&root, "pp-1", "judge\u{200b}x", EVIDENCE, NEW_BODY);
+    for width in [140u16, 80] {
+        let mut state = state_in(&root);
+        let rows = opened(&mut state, width);
+        let text = rows.join("\n");
+        assert!(
+            text.contains("pp-1 \u{b7} new \u{b7} judge<U+200B>x"),
+            "the proposal's row at {width}: {text}"
+        );
+        assert!(
+            rows[0].contains("pro<U+200B>ject"),
+            "the title at {width}: {text}"
+        );
+        assert!(
+            rows[1].contains("<U+200B>"),
+            "the path line at {width}: {text}"
+        );
+        assert!(
+            text.contains("rev<U+200B>iewer"),
+            "the row at {width}: {text}"
+        );
+        assert!(
+            flat_text(&rows).contains("herdr profile check rev<U+200B>iewer"),
+            "the hint at {width}: {text}"
+        );
+        key(&mut state, KeyCode::Tab);
+        key(&mut state, KeyCode::Enter);
+        let rows = shown(&mut state, width);
+        let text = rows.join("\n");
+        assert!(
+            text.contains("pp-1 \u{b7} new profile judge<U+200B>x"),
+            "the detail at {width}: {text}"
+        );
+        // The store refuses the name; its words, the name in them, are a notice drawn through `visible` too.
+        key(&mut state, KeyCode::Char('a'));
+        let rows = shown(&mut state, width);
+        let notice = panel(&state).notice.clone();
+        assert!(
+            notice
+                .iter()
+                .any(|(said, _)| said.contains("judge\u{200b}x")),
+            "{notice:?}"
+        );
+        // Its first line is the body's first: the title, the path, then the notice.
+        assert!(
+            rows[2].contains("judge<U+200B>x"),
+            "the notice at {width}: {}",
+            rows.join("\n")
+        );
+    }
+}
+
+/// Review 2 F8: an order copy that is missing leaves its order counted from the journal, so the count is not partial.
+#[test]
+fn p93_fix2_a_missing_order_copy_is_not_partial() {
+    let (_home, root) = project("p93-fix2-partial");
+    profile_file(
+        &root,
+        "carried",
+        "---\ndescription: Builds.\nclass: build.bounded\n---\nBuild.\n",
+    );
+    seat_all(
+        &root,
+        "run-1",
+        &orders("m", 3, "build.bounded", &[], Some("carried")),
+    );
+    std::fs::remove_file(Project::at(&root).orders_dir().join("m0.md")).unwrap();
+    let mut state = state_in(&root);
+    let rows = opened(&mut state, 200);
+    let text = rows.join("\n");
+    let at = rows
+        .iter()
+        .position(|row| row.contains("carried "))
+        .unwrap();
+    assert!(rows[at + 1].contains("used 3 of 3"), "{text}");
+    assert!(!text.contains("(partial)"), "{text}");
+}
+
+/// Review 2 F7, through the reader's seam: the use scan runs at the first read, when the panel opens, after an
+/// Accept, a Dismiss or a New (`refresh`), and otherwise at most every interval; the reads between keep the counts.
+#[test]
+fn p93_fix2_the_use_scan_runs_when_asked_and_at_most_every_interval() {
+    let folder = Path::new("p93-fix2-usage");
+    let (reader, calls, release) = gated_reader_every("use", std::time::Duration::from_secs(4));
+    let last = || *calls.lock().unwrap().last().unwrap();
+    let read = |n: usize| {
+        wait_until("a read starts", || calls.lock().unwrap().len() == n);
+        release.send(()).unwrap();
+        wait_until("the read ends", || !reader.reading(folder));
+    };
+    reader.show(Some(folder.to_path_buf()));
+    assert!(reader.view(folder).is_none());
+    read(1);
+    assert_eq!(
+        last(),
+        panel_mod::Want {
+            full: true,
+            usage: true
+        },
+        "the first read scans"
+    );
+    // A read due by `REREAD` while the panel is drawn: full, no scan, the last counts kept.
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    reader.poll();
+    read(2);
+    assert_eq!(
+        last(),
+        panel_mod::Want {
+            full: true,
+            usage: false
+        }
+    );
+    assert!(
+        reader.view(folder).unwrap().usage_read,
+        "the counts are kept"
+    );
+    // An Accept, a Dismiss or a New: the next read scans.
+    reader.refresh(folder, blank_view(folder, "fresh"));
+    reader.poll();
+    read(3);
+    assert!(last().usage, "a refresh asks for a scan");
+    // The panel opening asks for one too.
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    reader.opened(folder);
+    assert!(reader.usage_due(folder));
+    reader.poll();
+    read(4);
+    assert!(last().usage, "an open asks for a scan");
+    // Under the interval, none; past it, one.
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    reader.poll();
+    read(5);
+    assert!(!last().usage, "2 s after a scan, under 4 s");
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    reader.poll();
+    read(6);
+    assert!(last().usage, "4 s after a scan, past 4 s");
+    // The window's panel asks its reader when it opens.
+    let (_home, root) = project("p93-fix2-usage-open");
+    let mut state = state_in(&root);
+    let _ = open(&mut state, 140);
+    assert!(panel_mod::usage_asked(&panel(&state).folder));
+}
+
+/// A new profile's body of 60 lines holding an indented code block and a nested list.
+fn code_body() -> String {
+    let mut lines = Vec::new();
+    for n in 0..60 {
+        lines.push(match n {
+            20 => "Judge a frame like this:".to_owned(),
+            21 => "    let frame = render(&scene);".to_owned(),
+            22 => "    if frame.score() < 7 {".to_owned(),
+            23 => "        send_back(&frame);".to_owned(),
+            24 => "    }".to_owned(),
+            30 => "- the light:".to_owned(),
+            31 => "  - its colour".to_owned(),
+            32 => "  - its angle".to_owned(),
+            _ => format!("Line {n} of the judging method."),
+        });
+    }
+    format!(
+        "---\ndescription: Judges renders.\n---\n{}\nTHE LAST LINE",
+        lines.join("\n")
+    )
+}
+
+/// The brief's dumps: the detail at 80 and 140 columns, 30 rows, with a 60-line body holding an indented code
+/// block, at its top, after one PageDown, after End pressed once, and at its true end; written to `P93_DUMP_DIR` when
+/// it is set.
+#[test]
+fn p93_fix2_the_detail_pages_at_80_and_140() {
+    let (_home, root) = project("p93-fix2-dumps");
+    proposals::write(
+        &root,
+        &draft(
+            Kind::New,
+            "render-judge",
+            "paragraph:render-judge",
+            &code_body(),
+            None,
+        ),
+    )
+    .expect("written");
+    let dump = std::env::var_os("P93_DUMP_DIR").map(PathBuf::from);
+    for width in [80u16, 140] {
+        let mut state = state_in(&root);
+        let _ = open(&mut state, width);
+        key(&mut state, KeyCode::Tab);
+        key(&mut state, KeyCode::Enter);
+        let top = rows_at(&mut state, width, 30);
+        key(&mut state, KeyCode::PageDown);
+        let page = rows_at(&mut state, width, 30);
+        key(&mut state, KeyCode::End);
+        let end_once = rows_at(&mut state, width, 30);
+        assert!(
+            !panel(&state).detail.as_ref().unwrap().read_to_end,
+            "one End at 30 rows is not the end"
+        );
+        let end = read_through(&mut state, width, 30);
+        let text = end.join("\n");
+        assert!(
+            text.contains("THE LAST LINE") && text.contains("a accept"),
+            "{text}"
+        );
+        let all = [&top, &page, &end_once, &end]
+            .iter()
+            .map(|rows| rows.join("\n"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all.contains("      let frame = render(&scene);"), "{all}");
+        assert!(all.contains("          send_back(&frame);"), "{all}");
+        assert!(all.contains("    - its colour"), "{all}");
+        if let Some(dir) = &dump {
+            std::fs::create_dir_all(dir).unwrap();
+            for (at, rows) in [
+                ("top", &top),
+                ("pagedown", &page),
+                ("end-once", &end_once),
+                ("true-end", &end),
+            ] {
+                std::fs::write(
+                    dir.join(format!("fix2-detail-{width}-{at}.txt")),
+                    rows.join("\n"),
+                )
+                .unwrap();
+            }
+        }
+    }
 }
