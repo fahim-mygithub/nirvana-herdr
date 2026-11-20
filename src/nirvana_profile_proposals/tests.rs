@@ -764,12 +764,14 @@ fn p94_accept_says_the_profile_is_not_ignored_and_the_check_is_a_list() {
     assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
 }
 
-/// P45a fix round, review finding 4: a character the Profiles panel's screen would drop is refused at `write` and again
-/// at `accept`, by its code point, never by the text around it; a tab and a CRLF are text.
+/// P45a third fix round (was `p94_fix_write_and_accept_refuse_what_the_panel_cannot_show`): a character the Profiles
+/// panel's screen would drop is taken out at `write`, from the body and the evidence, and the draft is written; a file
+/// that holds one past `write` is refused at `accept`, by its code point, never by the text around it. A tab and a CRLF
+/// are text.
 #[test]
-fn p94_fix_write_and_accept_refuse_what_the_panel_cannot_show() {
+fn p94_fix3_write_strips_and_accept_refuses_what_the_panel_cannot_show() {
     let (_home, root) = project("p94-fix-invisible");
-    for (c, name) in [
+    for (at, (c, name)) in [
         ('\u{1b}', "001B"),
         ('\r', "000D"),
         ('\u{202e}', "202E"),
@@ -782,37 +784,29 @@ fn p94_fix_write_and_accept_refuse_what_the_panel_cannot_show() {
         ('\u{fe0f}', "FE0F"),
         ('\u{3164}', "3164"),
         ('\u{1160}', "1160"),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let body = NEW.replace("You judge renders.", &format!("You judge{c}renders."));
-        let problems = refused(&root, &draft(Kind::New, "render-judge", &body, None));
+        let mut hidden = draft(Kind::New, &format!("render-judge-{at}"), &body, None);
+        hidden.evidence = EVIDENCE.replace("rendered frame", &format!("rendered{c} frame"));
+        let id = write(&root, &hidden).unwrap_or_else(|why| panic!("{name}: {why}"));
+        let text = std::fs::read_to_string(path(&root, &id)).unwrap();
+        assert!(!text.contains(c), "{name} is on disk: {text:?}");
         assert!(
-            problems
-                .iter()
-                .any(|problem| problem.contains(&format!("the body holds U+{name},"))),
-            "{name}: {problems:?}"
-        );
-        assert!(
-            problems.iter().all(|problem| !problem.contains("You judge")),
-            "{name}: the code point, not the text: {problems:?}"
+            text.contains("You judgerenders.") && text.contains("\"Judge the rendered frame, never"),
+            "{name}: the text around it is kept: {text:?}"
         );
     }
-    let mut hidden = draft(Kind::New, "render-judge", NEW, None);
-    hidden.evidence = EVIDENCE.replace("rendered frame", "rendered\u{200b} frame");
-    let problems = refused(&root, &hidden);
-    assert!(
-        problems
-            .iter()
-            .any(|problem| problem.contains("the evidence holds U+200B,")),
-        "{problems:?}"
-    );
-    assert!(list(&root).is_empty(), "nothing refused was written");
     // A tab and a CRLF are text.
     let body = NEW
         .replace("You judge renders.", "You judge\trenders.")
         .replace('\n', "\r\n");
-    write(&root, &draft(Kind::New, "render-judge", &body, None)).expect("a tab and CRLF are text");
+    let id = write(&root, &draft(Kind::New, "tab-judge", &body, None)).expect("a tab and CRLF are text");
+    assert!(get(&root, &id).unwrap().body.contains("You judge\trenders."));
     // A file written by hand, past `write`: refused at accept by the code point, and nothing is written.
-    let file = path(&root, "pp-9");
+    let file = path(&root, "pp-99");
     std::fs::write(
         &file,
         format!(
@@ -822,13 +816,112 @@ key: paragraph:hand\nevidence: {EVIDENCE}\n---\n{}",
         ),
     )
     .unwrap();
-    let why = accept(&root, "pp-9").unwrap_err();
+    let why = accept(&root, "pp-99").unwrap_err();
     assert!(why.contains("the body holds U+001B,"), "{why}");
+    assert!(!why.contains("You judge"), "the code point, not the text: {why}");
     assert!(!nirvana_profiles::folder_of(&root, "other-judge").exists());
 }
 
-/// P45a fix round: nothing the store takes is dropped by the screen. Every code point `invisible` lets through, drawn
-/// between two letters by ratatui's `set_stringn` (the panel's `put_text`), stays in the buffer.
+/// P45a third fix round: the detector's case, measured on the 0.90.0 binary. A warning sign followed by U+FE0F and an
+/// emoji joined by U+200D, in the body, the evidence and the key: `write` takes it, the file holds neither code point,
+/// and U+26A0 and both halves of the joined emoji are still there.
+#[test]
+fn p94_fix3_write_drops_a_selector_and_a_joiner_and_keeps_what_they_ride_on() {
+    let (_home, root) = project("p94-fix3-emoji");
+    let marks = "Warning \u{26a0}\u{fe0f}: the pair \u{1f469}\u{200d}\u{1f4bb} reviews.";
+    let mut emoji = draft(
+        Kind::New,
+        "render-judge",
+        &NEW.replace("Open every file yourself.", marks),
+        None,
+    );
+    emoji.evidence = format!("{EVIDENCE} and 5 say \"{marks}\"");
+    emoji.key = "paragraph:3f2a\u{200d}9c\u{fe0f}".into();
+    let id = write(&root, &emoji).expect("written");
+    let text = std::fs::read_to_string(path(&root, &id)).unwrap();
+    assert!(!text.contains('\u{fe0f}') && !text.contains('\u{200d}'), "{text:?}");
+    let kept = "Warning \u{26a0}: the pair \u{1f469}\u{1f4bb} reviews.";
+    let proposal = get(&root, &id).unwrap();
+    assert!(proposal.body.contains(kept), "the body: {:?}", proposal.body);
+    assert!(proposal.evidence.contains(kept), "the evidence: {:?}", proposal.evidence);
+    assert_eq!(proposal.key, "paragraph:3f2a9c");
+}
+
+/// P45a third fix round, rule 2: the strip comes before the redaction. An obviously fake `sk-` key split by U+200B
+/// (each half too short for `nirvana_lessons::redact`'s `sk-` rule, 16 or more after the dash) is joined by the strip
+/// and then redacted, never written in the clear, in the body, the evidence and the key. Redacted, not refused: the
+/// draft is written with `[redacted]` where the key was.
+#[test]
+fn p94_fix3_a_secret_split_by_a_zero_width_space_is_joined_then_redacted() {
+    let (_home, root) = project("p94-fix3-split");
+    let split = "sk-FAKEfake\u{200b}FAKEfake0000";
+    let joined = "sk-FAKEfakeFAKEfake0000";
+    assert_eq!(nirvana_lessons::redact(split), split, "each half alone passes the redaction");
+    assert_ne!(nirvana_lessons::redact(joined), joined, "joined, the redaction takes it");
+    let mut hidden = draft(
+        Kind::New,
+        "render-judge",
+        &NEW.replace("Open every file yourself.", &format!("Never paste {split} here.")),
+        None,
+    );
+    hidden.evidence = format!("{EVIDENCE} with {split} in 3 of them");
+    hidden.key = format!("paragraph:{split}");
+    let id = write(&root, &hidden).unwrap_or_else(|why| panic!("redacted, not refused: {why}"));
+    let text = std::fs::read_to_string(path(&root, &id)).unwrap();
+    let lower = text.to_lowercase();
+    for clear in [joined, "fakefakefakefake0000", "fakefake0000"] {
+        assert!(!lower.contains(&clear.to_lowercase()), "{clear} is on disk: {text}");
+    }
+    let proposal = get(&root, &id).unwrap();
+    assert!(proposal.body.contains("Never paste [redacted] here."), "{}", proposal.body);
+    assert!(proposal.evidence.contains("with [redacted] in 3"), "{}", proposal.evidence);
+    assert_eq!(proposal.key, "paragraph:[redacted]");
+}
+
+/// P45a third fix round, rule 4: a draft of only characters the panel cannot show is, after the strip, an empty one,
+/// and refused word for word as an empty draft is today. No file is written.
+#[test]
+fn p94_fix3_a_draft_of_only_invisible_characters_is_refused_as_an_empty_one() {
+    let (_home, root) = project("p94-fix3-empty");
+    let only = "\u{200b}\u{fe0f}\u{200d}\r\u{feff}";
+    let mut invisible_only = draft(Kind::New, "render-judge", only, None);
+    invisible_only.evidence = only.into();
+    invisible_only.key = only.into();
+    let mut empty = draft(Kind::New, "render-judge", "", None);
+    empty.evidence = String::new();
+    empty.key = String::new();
+    let found = refused(&root, &invisible_only);
+    eprintln!("P94 FIX3 EMPTY: {found:?}");
+    assert_eq!(found, refused(&root, &empty));
+    assert!(
+        found.iter().any(|why| why.starts_with("the key is 0 characters"))
+            && found.iter().any(|why| why.starts_with("the evidence is 0 characters")),
+        "{found:?}"
+    );
+    assert!(!folder(&root).exists() || files(&root).is_empty(), "no file was written");
+}
+
+/// P45a third fix round, rule 3: a file `write` wrote clean and the owner, or another writer, edited by hand after to
+/// hold U+200B is refused by `accept` and by the panel's `accept_seen`, by the code point, and nothing is written.
+#[test]
+fn p94_fix3_accept_and_accept_seen_refuse_a_file_edited_after_write() {
+    let (_home, root) = project("p94-fix3-edited");
+    let id = write(&root, &draft(Kind::New, "render-judge", NEW, None)).unwrap();
+    let file = path(&root, &id);
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, text.replace("Open every file", "Open\u{200b} every file")).unwrap();
+    let (_, seen) = list_seen(&root).into_iter().next().unwrap();
+    let why = accept_seen(&root, &seen).unwrap_err().to_string();
+    assert!(why.contains("the body holds U+200B,"), "accept_seen: {why}");
+    let why = accept(&root, &id).unwrap_err();
+    assert!(why.contains("the body holds U+200B,"), "accept: {why}");
+    assert!(!nirvana_profiles::folder_of(&root, "render-judge").exists());
+    assert!(ledger(&root).is_empty());
+}
+
+/// P45a third fix round (the P45a fix round's sweep, its claim moved): nothing `write` puts on disk is dropped by the
+/// screen. Every code point, `x`, it, `y`, as `strip_invisible` (the strip `write` applies first) leaves it, drawn by
+/// ratatui's `set_stringn` (the panel's `put_text`): every character left stays in the buffer.
 #[test]
 fn p94_fix_nothing_the_store_takes_is_dropped_by_the_screen() {
     use ratatui::buffer::Buffer;
@@ -841,13 +934,14 @@ fn p94_fix_nothing_the_store_takes_is_dropped_by_the_screen() {
             continue;
         };
         // A newline is a line break and a tab is drawn as spaces by the panel; both are text.
-        if c == '\n' || c == '\t' || invisible(c) {
+        if c == '\n' || c == '\t' {
             continue;
         }
+        let stored = strip_invisible(&format!("x{c}y"));
         buffer.reset();
-        buffer.set_stringn(0, 0, format!("x{c}y"), 16, Style::default());
+        buffer.set_stringn(0, 0, &stored, 16, Style::default());
         let drawn: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
-        if !drawn.contains(c) {
+        if stored.chars().any(|kept| !drawn.contains(kept)) {
             dropped.push(code);
         }
     }

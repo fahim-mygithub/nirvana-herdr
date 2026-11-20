@@ -235,23 +235,28 @@ CONTROLS = (
             "        if !bare && matches!(code, KeyCode::Char(_) | KeyCode::Enter) {",
             "        if false && !bare && matches!(code, KeyCode::Char(_) | KeyCode::Enter) {",
             _T + "p93_fix_only_a_bare_key_acts", "rust"),
-    # Finding 4, the store: write refuses an invisible character (red: no "the body holds U+001B,").
+    # Finding 4, the store: write strips an invisible character from the body (P45a third fix round: stripped, no
+    # longer refused; red: "001B is on disk", the ESC kept in the body).
     Control("p93_fix_store_write_takes_invisible", "src/nirvana_profile_proposals.rs",
-            "    problems.extend(invisible_problems(&draft.body, &draft.evidence));\n", "",
-            "nirvana_profile_proposals::tests::p94_fix_write_and_accept_refuse_what_the_panel_cannot_show", "rust"),
+            "        body: nirvana_lessons::redact(&strip_invisible(&draft.body)),",
+            "        body: nirvana_lessons::redact(&draft.body),",
+            "nirvana_profile_proposals::tests::"
+            "p94_fix3_write_strips_and_accept_refuses_what_the_panel_cannot_show", "rust"),
     # ...accept refuses it in a hand-written file (red: the panel's Accept writes the ESC).
     Control("p93_fix_store_accept_takes_invisible", "src/nirvana_profile_proposals.rs",
             "    problems.extend(invisible_problems(&proposal.body, &proposal.evidence));\n", "",
             _T + "p93_fix_invisible_characters_are_drawn_and_refused", "rust"),
-    # ...a lone CR is not text (red: the CR draft is written).
+    # ...a lone CR is not text (red: "000D is on disk", the CR kept).
     Control("p93_fix_store_cr_taken", "src/nirvana_profile_proposals.rs",
             "    (c.is_control() && c != '\\n' && c != '\\t')",
             "    (c.is_control() && c != '\\n' && c != '\\t' && c != '\\r')",
-            "nirvana_profile_proposals::tests::p94_fix_write_and_accept_refuse_what_the_panel_cannot_show", "rust"),
-    # ...bidi overrides (red: U+202E is written).
+            "nirvana_profile_proposals::tests::"
+            "p94_fix3_write_strips_and_accept_refuses_what_the_panel_cannot_show", "rust"),
+    # ...bidi overrides (red: "202E is on disk").
     Control("p93_fix_store_bidi_taken", "src/nirvana_profile_proposals.rs", "                | 0x2028..=0x202E\n",
             "                | 0x2028..=0x2029\n",
-            "nirvana_profile_proposals::tests::p94_fix_write_and_accept_refuse_what_the_panel_cannot_show", "rust"),
+            "nirvana_profile_proposals::tests::"
+            "p94_fix3_write_strips_and_accept_refuses_what_the_panel_cannot_show", "rust"),
     # ...the conjoining Hangul jamo the sweep found (red: the sweep finds U+1161 drawn as nothing).
     Control("p93_fix_store_jamo_taken", "src/nirvana_profile_proposals.rs", "                | 0x115F..=0x11FF\n",
             "                | 0x115F..=0x1160\n",

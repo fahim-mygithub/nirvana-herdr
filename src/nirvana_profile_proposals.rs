@@ -38,9 +38,10 @@
 //! anything `nirvana_profiles::parse` refuses (a Send, herdr's footer mark, a body over `BODY_MAX`). A `new` proposal
 //! for a name that exists is refused; a `patch` whose `base_sha` is not the profile's sha now is refused as stale.
 //! The evidence and the body are redacted as a lesson's evidence is (`nirvana_lessons::redact`), and then refused when
-//! still secret-shaped (`secret_shaped`): a worker's stream and an order can hold a token. A body or evidence holding
-//! a character the Profiles panel would draw as nothing (`invisible`) is refused too, by its code point (P45a fix
-//! round).
+//! still secret-shaped (`secret_shaped`): a worker's stream and an order can hold a token. A character the Profiles
+//! panel would draw as nothing (`invisible`) is taken out of the body, the evidence and the key before any of that
+//! (`strip_invisible`, P45a third fix round), so every check reads the text as it lands; `accept` refuses a file that
+//! holds one, by its code point (P45a fix round), since a file can be edited by hand after `write`.
 //!
 //! **The panel's Accept** (P45a fix round) is `accept_seen`: the `Seen` the panel drew (the proposal file's sha and
 //! the `target` file text `accept` would write, by the same `prepared` and `target`) must still hold inside the lock,
@@ -484,7 +485,8 @@ fn secret_problems(body: &str, evidence: &str) -> Vec<String> {
 /// P45a fix round (review finding 4): a character the Profiles panel's screen would not show. ratatui-core 0.1.0's
 /// `Buffer::set_stringn` drops every grapheme that holds a control character and every grapheme unicode-width 0.2
 /// measures 0 wide, and a format character riding on a visible grapheme is kept in its cell but draws as nothing. So a
-/// body could carry text the owner never saw and Accept would write it. Refused here: every control character but
+/// body could carry text the owner never saw and Accept would write it. Taken out by `write` (`strip_invisible`) and
+/// refused by `accept`: every control character but
 /// newline and tab (a CRLF's CR is read as LF first), every format character of Unicode 15.1 (general category Cf, and
 /// the line and paragraph separators), and the default-ignorable fillers and selectors the brief lists (U+034F, the
 /// Hangul fillers, U+17B4/5, the Mongolian selectors, U+FE00 to U+FE0F, U+FFA0, the tag and selector block U+E0000 to
@@ -532,7 +534,21 @@ pub fn first_invisible(text: &str) -> Option<char> {
     text.replace("\r\n", "\n").chars().find(|c| invisible(*c))
 }
 
-/// The refusal for a field holding a character the panel would not show: its code point, never the text.
+/// P45a third fix round: `text` as `write` puts it on disk, a CRLF read as LF and every `invisible` character taken
+/// out. Measured on the 0.90.0 binary: the detector puts every repeated paragraph of an order class into one proposal,
+/// so refusing one U+FE0F after a warning sign in one past order refused that class's whole proposal at every run end,
+/// for good. What the panel cannot show is dropped instead, so the owner reads every character Accept writes; a
+/// zero-width character inside a secret-shaped run joins it here, before the redaction sees it.
+pub fn strip_invisible(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .chars()
+        .filter(|c| !invisible(*c))
+        .collect()
+}
+
+/// The refusal for a field holding a character the panel would not show: its code point, never the text. `accept`'s
+/// alone since the P45a third fix round: `write` strips them (`strip_invisible`), so only a file edited by hand, or
+/// put there by another writer, holds one.
 fn invisible_problems(body: &str, evidence: &str) -> Vec<String> {
     [("body", body), ("evidence", evidence)]
         .into_iter()
@@ -1124,8 +1140,10 @@ pub fn was_dismissed(root: &Path, kind: Kind, profile: &str, key: &str) -> Optio
 
 /// Writes `draft` as a waiting proposal and returns its id, or every reason it may not be written: its fields, what it
 /// carries (§6), a dismissal of the same identity, the same proposal already waiting, and for a patch a `base_sha`
-/// that is not the profile's now (the writer read something else). The key, the evidence and the body are redacted
-/// first, and every check reads them redacted, as they land on disk.
+/// that is not the profile's now (the writer read something else). The key, the evidence and the body have every
+/// character the panel cannot show taken out first (`strip_invisible`; P45a third fix round: stripped, never refused),
+/// then are redacted, and every check reads them so, as they land on disk. A draft left empty by the strip is refused
+/// as an empty draft is.
 // P45b's proposer calls it (plan 45 §8); until it lands only the tests do.
 #[allow(dead_code)]
 pub fn write(root: &Path, draft: &Draft) -> Result<String, Refusal> {
@@ -1133,17 +1151,21 @@ pub fn write(root: &Path, draft: &Draft) -> Result<String, Refusal> {
     // P45c review F5: the key too, and every check below reads what lands on disk. Review2 E1: lowercased first, as
     // `key_sha` does, so the named patterns (`sk-` is case-sensitive in `nirvana_lessons::redact`) see an `SK-...`
     // run as `sk-...` and it never lands in the clear, and the key on disk and its `key_sha` are one identity.
+    // P45a third fix round: the strip comes first, so a secret split by a zero-width character is joined before the
+    // redaction and the secret-shape check read it. The key is stripped too: the panel never draws it, but it lands in
+    // the file `herdr profile proposal show` prints, and `redact_key` must see a split run joined. The profile, `by`,
+    // `run` and `base_sha` are not stripped: each is an identifier its own check holds to ASCII, so one holding such a
+    // character is refused by that check rather than silently turned into another name.
     let draft = Draft {
-        key: redact_key(&draft.key.to_lowercase()),
-        evidence: nirvana_lessons::redact(&draft.evidence),
-        body: nirvana_lessons::redact(&draft.body),
+        key: redact_key(&strip_invisible(&draft.key).to_lowercase()),
+        evidence: nirvana_lessons::redact(&strip_invisible(&draft.evidence)),
+        body: nirvana_lessons::redact(&strip_invisible(&draft.body)),
         ..draft.clone()
     };
     let mut problems = field_problems(&draft.by, &draft.run, &draft.key, &draft.evidence);
     // P45b review F1, the last guard: after the redaction above, whatever is still secret-shaped is refused, not
     // written. The writers refuse it first; this holds for any writer, today's or a later one.
     problems.extend(secret_problems(&draft.body, &draft.evidence));
-    problems.extend(invisible_problems(&draft.body, &draft.evidence));
     problems.extend(content_problems(
         root,
         draft.kind,

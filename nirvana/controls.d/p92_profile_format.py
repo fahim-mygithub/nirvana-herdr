@@ -342,10 +342,12 @@ CONTROLS = (
             "            Err(err) => bad.push((at + 1, line.to_owned(), err.to_string())),",
             "            Err(_) => {}", T_TORN, "rust"),
     # Fix round F5: the key is redacted on disk (red: the fake GitHub token is in the proposal file)
-    Control("p92_pp_key_unredacted", PP, "        key: redact_key(&draft.key.to_lowercase()),\n", "", T_REDACT, "rust"),
+    # (P45a third fix round: the key is stripped first, so the find text names `strip_invisible`.)
+    Control("p92_pp_key_unredacted", PP, "        key: redact_key(&strip_invisible(&draft.key).to_lowercase()),\n", "",
+            T_REDACT, "rust"),
     # Review2 E1: lowercased before redaction (red: the SK-FAKE... key lands on disk)
-    Control("p92_pp_key_case_kept_on_disk", PP, "        key: redact_key(&draft.key.to_lowercase()),\n",
-            "        key: redact_key(&draft.key),\n", T_E1, "rust"),
+    Control("p92_pp_key_case_kept_on_disk", PP, "        key: redact_key(&strip_invisible(&draft.key).to_lowercase()),\n",
+            "        key: redact_key(&strip_invisible(&draft.key)),\n", T_E1, "rust"),
     # ...keeping its identity (red: two paragraph shas collapse into one key, the second write is refused)
     Control("p92_pp_key_identity_lost", PP,
             '            format!(\n                "h:{}",\n                &nirvana_lessons::sha256(&found.to_lowercase())[..16]\n'
