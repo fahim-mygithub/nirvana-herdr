@@ -51,6 +51,8 @@ CONTROLS = (
     # ---- the space menu ----
     Control("p93_menu_no_line", MENU, "            items.push(item(SPACE_PROFILES, Action::Profiles));\n", "",
             T_MENU, "rust"),
+    Control("p93_menu_line_not_last", MENU, "            items.push(item(SPACE_PROFILES, Action::Profiles));",
+            "            items.insert(1, item(SPACE_PROFILES, Action::Profiles));", T_MENU, "rust"),
     Control("p93_menu_line_does_nothing", MENU,
             "            ClientContextMenuAction::Profiles => self.open_space_profile_panel(&workspace_id),",
             "            ClientContextMenuAction::Profiles => {}", T_MENU, "rust"),

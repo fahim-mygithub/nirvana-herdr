@@ -503,6 +503,10 @@ fn p93_the_space_menu_has_a_profiles_line_that_opens_the_panel() {
             "Profiles"
         ]
     );
+    // Where the line sits: last, after every upstream line, so Close keeps index 1 (a test elsewhere clicks it
+    // there) and no line above it moves.
+    assert_eq!(labels.iter().position(|label| *label == "Profiles"), Some(labels.len() - 1));
+    assert_eq!(labels[1], "Close");
     let mut outcome = ClientShellInput::default();
     state.activate_context_menu_item(labels.len() - 1, &mut outcome);
     assert!(state.overlay.is_none());
