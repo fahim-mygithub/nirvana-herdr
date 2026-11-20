@@ -874,3 +874,70 @@ fn p94_detect_help_prints_the_usage_and_writes_nothing() {
     }
     assert!(!proposals::folder(&root).exists() && !cache_path(&root).exists());
 }
+
+// ---- the lead 2026-11-19: `herdr run end` runs the detector (nirvana_retro::retro) ----
+
+#[test]
+fn p94_run_end_writes_the_one_proposal_for_a_repeated_role() {
+    let (_home, root) = project("p94-end-one");
+    seat_all(&root, "run-1", &builders("b", 5, "build.bounded", &[JUDGE]));
+    let line = crate::nirvana_retro::retro(&Project::at(&root), "run-1").expect("retro");
+    assert!(line.starts_with("retro run-1:"), "{line}");
+    assert!(
+        line.contains("; profiles: pp-1 proposed (new build-bounded"),
+        "{line}"
+    );
+    assert_eq!(proposals::list(&root).len(), 1);
+}
+
+#[test]
+fn p94_run_end_without_a_repeated_role_writes_none_and_says_nothing() {
+    let (_home, root) = project("p94-end-none");
+    let orders: Vec<Fixture> = (0..6)
+        .map(|i| {
+            order(
+                &format!("p{i}"),
+                "build.bounded",
+                &format!("# Order {i}\n\nOwn words {i}.\n"),
+            )
+        })
+        .collect();
+    seat_all(&root, "run-1", &orders);
+    let line = crate::nirvana_retro::retro(&Project::at(&root), "run-1").expect("retro");
+    assert!(!line.contains("profiles"), "{line}");
+    assert!(proposals::list(&root).is_empty() && !proposals::folder(&root).exists());
+}
+
+#[test]
+fn p94_a_spent_budget_or_a_detector_error_leaves_the_run_end_as_it_was() {
+    let (_home, root) = project("p94-end-safe");
+    seat_all(&root, "run-1", &builders("b", 5, "build.bounded", &[JUDGE]));
+    let project = Project::at(&root);
+    TEST_LIMITS.set(Some(Limits {
+        budget: Duration::ZERO,
+        ..Limits::default()
+    }));
+    let spent = crate::nirvana_retro::retro(&project, "run-1");
+    TEST_LIMITS.set(None);
+    let spent = spent.expect("the retro still answers");
+    assert!(
+        spent.starts_with("retro run-1:") && spent.contains("budget ran out"),
+        "{spent}"
+    );
+    assert!(
+        proposals::list(&root).is_empty(),
+        "nothing read, nothing proposed"
+    );
+    assert!(
+        !cache_path(&root).exists(),
+        "a partial detection does not replace the kept one"
+    );
+    // The kept detection cannot be written (a folder stands where its file goes): said, and the retro answers.
+    std::fs::create_dir_all(cache_path(&root).join("in-the-way")).unwrap();
+    let blocked = crate::nirvana_retro::retro(&project, "run-1").expect("the retro still answers");
+    assert!(
+        blocked.contains("the detection could not be kept"),
+        "{blocked}"
+    );
+    assert!(blocked.starts_with("retro run-1:"), "{blocked}");
+}

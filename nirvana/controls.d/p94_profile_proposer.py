@@ -196,3 +196,20 @@ CONTROLS = CONTROLS + (
     Control("p94_build_ops_key_unknown", WORKER, '    "profile_ops",\n];', '    "profile_ops_unknown",\n];',
             T_BUILD_OPS, "rust"),
 )
+
+# The lead 2026-11-19: `herdr run end` runs the detector (P45b report, section 4, hunk 2).
+RETRO = "src/nirvana_retro.rs"
+T_END_ONE = "nirvana_profile_detect::tests::p94_run_end_writes_the_one_proposal_for_a_repeated_role"
+T_END_NONE = "nirvana_profile_detect::tests::p94_run_end_without_a_repeated_role_writes_none_and_says_nothing"
+T_END_SAFE = "nirvana_profile_detect::tests::p94_a_spent_budget_or_a_detector_error_leaves_the_run_end_as_it_was"
+CONTROLS = CONTROLS + (
+    # Red: T_END_ONE's "profiles: pp-1 proposed" (run end runs no detector).
+    Control("p94_run_end_no_detector", RETRO,
+            "        .chain(crate::nirvana_profile_detect::refresh(project, run))\n", "", T_END_ONE, "rust"),
+    # Red: T_END_NONE's "says nothing" (a quiet detection prints its skip line anyway).
+    Control("p94_run_end_always_says", DETECT, "    if detection.skipped.any() {", "    if true {", T_END_NONE,
+            "rust"),
+    # Red: T_END_SAFE's kept-detection assertion (a partial detection replaces the whole one).
+    Control("p94_partial_detection_kept", DETECT, "    let kept = if detection.skipped.budget {",
+            "    let kept = if false {", T_END_SAFE, "rust"),
+)

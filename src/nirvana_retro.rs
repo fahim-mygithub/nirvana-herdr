@@ -888,6 +888,8 @@ pub fn retro(project: &Project, run: &str) -> Result<String, String> {
     for said in crate::nirvana_review::settle(project)
         .into_iter()
         .chain(crate::nirvana_review::merge_crowded(project, run))
+        // Plan 45 P45b: the detector, after the reviews are settled; quiet when nothing was proposed or skipped.
+        .chain(crate::nirvana_profile_detect::refresh(project, run))
     {
         line.push_str(&format!("; {said}"));
     }

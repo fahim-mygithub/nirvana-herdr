@@ -1142,18 +1142,49 @@ fn write_cache(root: &Path, detection: &Detection) -> std::io::Result<()> {
 /// write the detector's own proposals. Off with lesson reviews (`lesson_reviews_per_day = 0`): it runs no more often
 /// than they do. Returns a line for each proposal written or refused, and the skip line when something was skipped;
 /// nothing when nothing changed.
+///
+/// It never fails its caller: `herdr run end` and the idle tick go on whatever happens here. A detection that panics
+/// is caught and said in one line; one that runs out of budget returns what it read and says what it skipped.
 pub fn refresh(project: &Project, run: &str) -> Vec<String> {
     let table = crate::nirvana_seat::table_for(&project.root).ok();
     if crate::nirvana_review::per_day(table.as_ref()) == 0 {
         return Vec::new();
     }
-    refresh_with(&project.root, run, &Limits::default())
+    let limits = limits_now();
+    let root = project.root.clone();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        refresh_with(&root, run, &limits)
+    }))
+    .unwrap_or_else(|_| {
+        vec!["profiles: the detector stopped on an error; nothing was proposed".into()]
+    })
+}
+
+/// The limits `refresh` runs with: the defaults, or a test's.
+fn limits_now() -> Limits {
+    #[cfg(test)]
+    if let Some(limits) = TEST_LIMITS.get() {
+        return limits;
+    }
+    Limits::default()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's limits for `refresh`, so `herdr run end` can be run with a spent budget.
+    pub(crate) static TEST_LIMITS: std::cell::Cell<Option<Limits>> = const { std::cell::Cell::new(None) };
 }
 
 pub fn refresh_with(root: &Path, run: &str, limits: &Limits) -> Vec<String> {
     let detection = detect_with(root, limits);
     let mut lines = Vec::new();
-    if let Err(err) = write_cache(root, &detection) {
+    // A detection cut short by its budget is partial: the last whole one stays for the briefs.
+    let kept = if detection.skipped.budget {
+        Ok(())
+    } else {
+        write_cache(root, &detection)
+    };
+    if let Err(err) = kept {
         lines.push(format!(
             "profiles: the detection could not be kept in {}: {err}",
             cache_path(root).display()
