@@ -4575,11 +4575,14 @@ pub fn seat_order_with(
             .filter(|need| !request.needs.contains(need))
             .cloned(),
     );
-    // Plan 45 P45d (§4 M6): read from the order's own text, herdr's lessons, cards, profile lines and footer cut
-    // (`nirvana_profile_detect::own_text`). Megajam's r16-meadow3-rescore-o was seated from text that already held
-    // herdr's lessons section, whose line `YouTube auto-captions with yt-dlp` read as the order asking for the web, and
-    // the review of local stills was sent back "no sources" and merged by hand. (r15's own text quoted the owner
-    // naming YouTube, which stays an ask; 0.83.0's media note covers that one at the gate.)
+    // Plan 45 P45d (§4 M6): read from the order's own text, every part herdr writes into a worker's text cut
+    // (`nirvana_profile_detect::own_text`: the footer, the lessons and cards sections, a send-back's or reseat's own
+    // part, the agy profile section, the `Profile:` lines, and every herdr line, `NO_WEB_SOURCES` among them).
+    // Megajam's r16-meadow3-rescore-o was seated from text that already held herdr's lessons section, whose line
+    // `YouTube auto-captions with yt-dlp` read as the order asking for the web, and the review of local stills was sent
+    // back "no sources" and merged by hand. P45d fix round (review finding 1): a re-fed copy's own `NO_WEB_SOURCES`
+    // line says `web page`, and was read the same way. (r15's own text quoted the owner naming YouTube, which stays an
+    // ask; 0.83.0's media note covers that one at the gate.)
     let sources_line = crate::nirvana_gate::sources_brief_line(
         &booked.class,
         &web_needs,

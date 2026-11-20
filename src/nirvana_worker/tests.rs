@@ -4195,3 +4195,143 @@ fn p45d_the_role_says_the_fitting_line_is_a_hint_and_the_profile_its_call() {
     let line = fit_line(&["x".into()], "c").unwrap();
     assert!(line.starts_with("herdr: profile x fits this order"), "{line}");
 }
+
+// ---- plan 45 P45d fix round ----
+
+/// P45d fix round (review finding 1): a re-fed copy carries herdr's own `NO_WEB_SOURCES` line, whose words hold
+/// `web page`, and before the fix `seat run` read that line as the order asking for the web: the second copy got
+/// `WEB_SOURCES` and its gate a "no sources" send-back, the M6 symptom again without any lessons section. Here the
+/// first copy `seat run` wrote is fed back to it whole, as an orchestrator re-seating an order from its copy does. A
+/// web order fed back the same way is still told to cite its sources.
+#[test]
+fn p45d_fix_a_refed_copy_holding_herdrs_no_web_line_does_not_ask_for_the_web() {
+    let (_home, project) = p29_project("p45d-fix-refed");
+    let table = nirvana_seat::table_for(&project.root).unwrap();
+    let seat = nirvana_seat::pick(
+        &table,
+        &nirvana_seat::live_world(&table),
+        &nirvana_seat::Request::new("research.read"),
+    )
+    .unwrap()
+    .seat;
+    let seat_it = |order: &str, file: &Path| {
+        let _live = take_live(&project, "r1", order).unwrap().unwrap();
+        let request = SeatRequest {
+            seat: seat.clone(),
+            order_file: file.to_path_buf(),
+            order: order.into(),
+            run: "r1".into(),
+            class: Some("research.read".into()),
+            size: None,
+            needs: Vec::new(),
+            not_family: Vec::new(),
+            mode: None,
+            effort: None,
+            reason: None,
+            worktree: false,
+            auto: false,
+            send_ok: None,
+        };
+        seat_order(&project, &request).unwrap();
+        let state = replay(&project.journal("r1").read().0);
+        std::fs::read_to_string(&state.order(order).unwrap().seated.order_file).unwrap()
+    };
+    for (first, again, written, web) in [
+        ("nw1", "nw2", "# Review the notes in Docs/notes.md against the rubric\n", false),
+        ("w1", "w2", "# Find the price\n\nSearch the web for the latest price of the X100 lens.\n", true),
+    ] {
+        let order_file = project.root.join(format!("{first}.md"));
+        std::fs::write(&order_file, written).unwrap();
+        let copy = seat_it(first, &order_file);
+        assert_eq!(copy.contains(crate::nirvana_gate::WEB_SOURCES), web, "{copy}");
+        assert_eq!(copy.contains(crate::nirvana_gate::NO_WEB_MARK), !web, "{copy}");
+        // The copy itself, fed back.
+        let refed = project.root.join(format!("{again}.md"));
+        std::fs::write(&refed, &copy).unwrap();
+        let second = seat_it(again, &refed);
+        assert_eq!(second.contains(crate::nirvana_gate::WEB_SOURCES), web, "{second}");
+        assert_eq!(second.contains(crate::nirvana_gate::NO_WEB_MARK), !web, "{second}");
+    }
+}
+
+/// P45d fix round (review finding 2): a rate-limited reseat's child is seated with its parent's profile copy (plan 33
+/// §2.2), so its `seated` line names the parent's profile and an empty `profile_fit`; a parent whose line predates the
+/// key leaves both unknown. The review set both writes to `None` and `cargo test reseat` passed 14 of 14.
+#[test]
+fn p45d_fix_a_reseat_child_journals_its_parents_profile() {
+    for (name, profile) in [("p45d-fix-reseat-named", Some(Some("judge".to_owned()))), ("p45d-fix-reseat-old", None)] {
+        let (_home, project) = p29_project(name);
+        let run = "r1";
+        let journal = project.journal(run);
+        let mut seated = p29_seated(&project, "o1", "haiku");
+        // No server need, so a spent max pool re-seats it on agy rather than asking.
+        seated.needs = Vec::new();
+        seated.profile = profile.clone();
+        seated.profile_fit = profile.as_ref().map(|_| Vec::new());
+        seated.order_file = write_order(&project, &project.root, "o1", "# Judge the frames\n").unwrap();
+        journal.append(1, opened()).unwrap();
+        journal
+            .append(2, Kind::Seated(Box::new(seated.clone())))
+            .unwrap();
+        let child = child_id(&replay(&journal.read().0), "o1");
+        let _live = take_live(&project, run, &child).unwrap().unwrap();
+        let limit = RateLimit {
+            signal: "rate_limit_event".into(),
+            pool: Some("max".into()),
+            window: None,
+            resets_at: None,
+            detail: String::new(),
+        };
+        let mut out = Vec::new();
+        rate_limited(
+            &project,
+            &journal,
+            run,
+            &seated,
+            &limit,
+            &Stream::new("claude"),
+            &mut out,
+        )
+        .unwrap();
+        let view = String::from_utf8_lossy(&out).into_owned();
+        let state = replay(&journal.read().0);
+        let reseated = &state.order(&child).expect(&view).seated;
+        assert_eq!(reseated.why.as_deref(), Some("reseat"), "{view}");
+        assert_eq!(reseated.profile, profile, "{name}: {view}");
+        assert_eq!(reseated.profile_fit, profile.map(|_| Vec::new()), "{name}: {view}");
+        nirvana_seat::set_test_world(None);
+    }
+}
+
+/// P45d fix round (review finding 1): a reseat's continuation brief is herdr's text around the order it quotes, so its
+/// own text is that order's: the heading, the opening, the last turn quoted from the worker (which may name pages of
+/// its own) and `## The original order` are cut, and the parent copy's `NO_WEB_SOURCES` line with them.
+#[test]
+fn p45d_fix_a_continuation_brief_reads_as_its_original_order() {
+    let (_home, project) = p29_project("p45d-fix-continuation");
+    let order = "# Review the notes in Docs/notes.md\n\nJudge each against the rubric.";
+    let mut seated = p29_seated(&project, "o1", "haiku");
+    seated.needs = Vec::new();
+    let copy = format!("{order}\n\n{}", crate::nirvana_gate::NO_WEB_SOURCES);
+    seated.order_file = write_order(&project, &project.root, "o1", &copy).unwrap();
+    let mut stream = Stream::new("claude");
+    let _ = stream.feed(
+        &serde_json::json!({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "I read https://www.youtube.com/watch?v=abc and stopped."}]}})
+        .to_string(),
+    );
+    let file = continuation_brief(
+        &project,
+        "r1",
+        &seated,
+        &nirvana_run::RunState::default(),
+        None,
+        &stream,
+    )
+    .unwrap();
+    let brief = std::fs::read_to_string(&file).unwrap();
+    assert!(brief.starts_with("# Continuation of o1"), "{brief}");
+    let own = crate::nirvana_profile_detect::own_text(&brief);
+    assert_eq!(own, order, "{brief}");
+    assert_eq!(crate::nirvana_gate::web_asked("research.read", &[], &own), None);
+}

@@ -1610,3 +1610,132 @@ fn p45d_fitting_names_the_profiles_usage_counts_as_fit() {
         .collect();
     assert_eq!(fit, ["any-video", "judge"]);
 }
+
+// ---- plan 45 P45d fix round ----
+
+/// P45d fix round (review finding 1): every line herdr writes into the text a worker reads is cut from the order's
+/// own text, whole or re-wrapped, so none of herdr's words is read as the order's ask: the sources lines (one holds
+/// `web page`), agy's sources line on the same line, the device, Send and browser lines, and a send-back brief's
+/// opening, `What the gate found` and its `## The original order` heading. The order's words stay, line breaks and
+/// all.
+#[test]
+fn p45d_fix_own_text_cuts_every_line_herdr_writes_and_keeps_the_orders_words() {
+    use crate::nirvana_gate::{sources_brief_line, web_asked, NO_WEB_SOURCES, WEB_SOURCES};
+    let order = "# Review the notes in Docs/notes.md\n\nJudge each against the rubric.\nOne line each.";
+    let copy = format!(
+        "{order}\n\n{NO_WEB_SOURCES} {}\n\n{}\n{}\n\n{}\n\n{}{}",
+        crate::nirvana_agy_tools::SOURCES_LINE,
+        crate::nirvana_gui_tools::DEVICE_LINE,
+        crate::nirvana_gui_tools::BRIEF_LINE,
+        crate::nirvana_lean::BROWSER_LINE,
+        crate::nirvana_bladebro::MISSING_LINE,
+        crate::nirvana_worker::ORDER_FOOTER,
+    );
+    assert_eq!(own_text(&copy), order, "{copy}");
+    assert_eq!(web_asked("research.read", &[], &own_text(&copy)), None);
+    assert_eq!(sources_brief_line("research.read", &[], &own_text(&copy)), Some(NO_WEB_SOURCES));
+    // The line re-wrapped at 60 columns, as an editor or a model's copy writes it.
+    let mut wrapped = String::new();
+    for word in NO_WEB_SOURCES.split(' ') {
+        let width = wrapped.rsplit('\n').next().unwrap_or("").len();
+        if width > 0 && width + word.len() >= 60 {
+            wrapped.push('\n');
+        } else if width > 0 {
+            wrapped.push(' ');
+        }
+        wrapped.push_str(word);
+    }
+    assert!(wrapped.lines().count() > 3, "{wrapped}");
+    assert_eq!(own_text(&format!("{order}\n\n{wrapped}\n")), order);
+    // Re-wrapped in a paragraph that holds the order's own line too: only herdr's pieces go.
+    assert_eq!(
+        own_text(&format!("{order}\n\n{wrapped}\nCite the rubric's line numbers.\n")),
+        format!("{order}\n\nCite the rubric's line numbers.")
+    );
+    // An older herdr's wording of the line, which starts with the same mark.
+    let old = format!("{} by its words, so cite none.", crate::nirvana_gate::NO_WEB_MARK);
+    assert_eq!(own_text(&format!("{order}\n\n{old}\n")), order);
+    // A herdr line on a typed line of the order's: the order's words stay.
+    assert_eq!(
+        own_text(&format!("# Slice it\n\nOne plate. {}\n", crate::nirvana_gui_tools::DEVICE_LINE)),
+        "# Slice it\n\nOne plate."
+    );
+    // The gate's send-back line pasted without its brief.
+    assert_eq!(own_text(&format!("# Fix it\n\n{}\n", crate::nirvana_gate::NO_WEB_REDO)), "# Fix it");
+    // WEB_SOURCES on a web order goes too, and its own words still ask for the web.
+    let web = "# Find the price\n\nSearch the web for the latest price of the X100 lens.";
+    assert_eq!(own_text(&format!("{web}\n\n{WEB_SOURCES}\n")), web);
+    assert!(web_asked("research.read", &[], &own_text(&format!("{web}\n\n{WEB_SOURCES}\n"))).is_some());
+    // A send-back brief of a no-web order: herdr's opening holds `NO_WEB_REDO`'s `web page`.
+    let root_text = format!("{order}\n\n{NO_WEB_SOURCES}{}", crate::nirvana_worker::ORDER_FOOTER);
+    let axes = [crate::nirvana_gate::Axis::new(
+        "sources",
+        crate::nirvana_gate::Mark::Fail,
+        "the Work Report names no sources",
+    )];
+    let brief = crate::nirvana_gate::send_back_brief("o1-s1", "o1", 1, &axes, &root_text, "main");
+    assert!(brief.contains(crate::nirvana_gate::NO_WEB_REDO), "{brief}");
+    assert_eq!(own_text(&brief), order, "{brief}");
+    // A heading that only looks like a send-back's, in an order with no `## The original order`, is the order's.
+    let titled = "# Send-back 1 of 3: the parcel\n\nSearch the web for the courier's returns page.";
+    assert_eq!(own_text(titled), titled);
+}
+
+/// P45d fix round (review finding 6): a herdr section is cut up to the next heading herdr did not write, or the
+/// footer, and what follows is read. Before, `own_text` stopped at the first lessons heading or the first
+/// `## Profile: ` heading with no end line, so owner text after it was never read and a web task was told "no web".
+#[test]
+fn p45d_fix_own_text_cuts_only_herdrs_section_and_reads_what_follows() {
+    use crate::nirvana_gate::web_asked;
+    let lessons = format!(
+        "## Lessons from earlier research.read orders\n\n{}\n\n- .nirvana/lessons/captions.md: YouTube \
+         auto-captions with yt-dlp\n\n3 more: `herdr lessons for --class research.read`",
+        nirvana_lessons::LESSONS_OFFER_LINE
+    );
+    let cards = format!(
+        "## Knowledge cards of the profile judge\n\n{}\n\n- see youtube first \u{2014} measured (x)",
+        crate::nirvana_knowledge::CARDS_OFFER_LINE
+    );
+    let after = "## Also\n\nSearch the web for the latest price of the X100 lens.";
+    // Text after the sections, under a heading of the owner's, is read.
+    let text = format!("# Check the notes\n\n{lessons}\n\n{cards}\n\n{after}\n");
+    let own = own_text(&text);
+    assert_eq!(own, format!("# Check the notes\n\n{after}"), "{text}");
+    assert!(web_asked("research.read", &[], &own).is_some());
+    // herdr's own sections are not.
+    let own = own_text(&format!("# Check the notes\n\n{lessons}\n\n{cards}\n"));
+    assert_eq!(own, "# Check the notes");
+    assert_eq!(web_asked("research.read", &[], &own), None);
+    // An agy profile section: to its end line, or, with none, to the first line herdr did not quote.
+    let section = crate::nirvana_profiles::agy_section("judge", "Judge on youtube.\n\nKeep it short.");
+    let ended = format!("{section}# Do it\n\nSearch the web for the latest price of the X100 lens.\n");
+    assert_eq!(own_text(&ended), "# Do it\n\nSearch the web for the latest price of the X100 lens.");
+    let unended = "# Do it\n\n## Profile: judge\n\n> Judge on youtube.\n>\n> Keep it short.\n\nSearch the web for the \
+                   latest price of the X100 lens.\n";
+    let own = own_text(unended);
+    assert_eq!(own, "# Do it\n\nSearch the web for the latest price of the X100 lens.", "{unended}");
+    assert!(!own.to_lowercase().contains("youtube"));
+    let quoted_only = "# Do it\n\n## Profile: judge\n\n> Judge on youtube.\n";
+    assert_eq!(own_text(quoted_only), "# Do it");
+    assert_eq!(web_asked("research.read", &[], &own_text(quoted_only)), None);
+}
+
+/// P45d fix round (review finding 5): a profile whose folder name starts with `-` is never named by the fit line,
+/// which would read it as a flag (`--profile --help`).
+#[test]
+fn p45d_fix_fitting_never_names_a_profile_that_starts_with_a_dash() {
+    let (_home, root) = project("p45d-fix-dash");
+    let body = "---\ndescription: Judges video.\nclass: media.video\n---\nJudge.\n";
+    profile(&root, "judge", body);
+    profile(&root, "--help", body);
+    profile(&root, "-x", body);
+    assert_eq!(
+        nirvana_profiles::list(&root)
+            .into_iter()
+            .filter(|(name, _, parsed)| name.starts_with('-') && parsed.is_ok())
+            .count(),
+        2,
+        "the dash names are listed and parse, so only `fitting` keeps them out"
+    );
+    assert_eq!(fitting(&root, "media.video", &[]), ["judge"]);
+}

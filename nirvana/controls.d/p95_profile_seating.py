@@ -25,9 +25,25 @@ T_NAMES = "nirvana_gate::tests::p45d_names_look_takes_the_command_and_not_a_word
 T_LOOK = "nirvana_gate::tests::p45d_a_look_asked_for_that_did_not_run_is_a_note"
 T_WIRED = "nirvana_gate::tests::p45d_the_gate_notes_a_missing_look_and_still_passes"
 T_CHILD = "nirvana_gate::tests::p45d_a_send_back_child_journals_its_parents_profile"
+# The fix round's tests (review findings 1 to 6).
+REVIEW = "src/nirvana_review.rs"
+T_FIX_REFED = "nirvana_worker::tests::p45d_fix_a_refed_copy_holding_herdrs_no_web_line_does_not_ask_for_the_web"
+T_FIX_CONT = "nirvana_worker::tests::p45d_fix_a_continuation_brief_reads_as_its_original_order"
+T_FIX_RESEAT = "nirvana_worker::tests::p45d_fix_a_reseat_child_journals_its_parents_profile"
+T_FIX_REVIEW = "nirvana_review::tests::p45d_fix_a_lesson_review_journals_no_profile_as_known"
+T_FIX_OWN = ("nirvana_profile_detect::tests::"
+             "p45d_fix_own_text_cuts_every_line_herdr_writes_and_keeps_the_orders_words")
+T_FIX_SECTION = "nirvana_profile_detect::tests::p45d_fix_own_text_cuts_only_herdrs_section_and_reads_what_follows"
+T_FIX_DASH = "nirvana_profile_detect::tests::p45d_fix_fitting_never_names_a_profile_that_starts_with_a_dash"
+T_FIX_NAMES = "nirvana_gate::tests::p45d_fix_names_look_wants_an_argument_after_look"
+T_FIX_RUNS = "nirvana_gate::tests::p45d_fix_looks_in_counts_herdr_only_as_the_command_word"
 
 CHILD = ("        profile: seated.profile.clone(),\n"
          "        profile_fit: seated.profile.as_ref().map(|_| Vec::new()),\n")
+RESEAT_CHILD = ("                profile: seated.profile.clone(),\n"
+                "                profile_fit: seated.profile.as_ref().map(|_| Vec::new()),\n")
+REVIEW_SEATED = "        profile: Some(None),\n        profile_fit: Some(Vec::new()),\n"
+LOOK_STARTS = "    token.starts_with(['\"', '\\'', '-'])\n"
 FIT_GUARD = "    if passed.is_some() || crate::nirvana_profiles::takes_no_profile_servers(class) {\n"
 
 CONTROLS = (
@@ -91,9 +107,10 @@ CONTROLS = (
     Control("p95_refed_lessons_read_for_web", WORKER,
             "        &crate::nirvana_profile_detect::own_text(&text),\n    );\n", "        &text,\n    );\n",
             T_REFED, "rust"),
-    # Item 6, the rule. Red: T_NAMES's "herdr lookup a.png" (read as a look).
-    Control("p95_names_look_any_suffix", GATE, '            && !spaced["look".len()..]\n',
-            "            && !spaced[spaced.len()..]\n", T_NAMES, "rust"),
+    # Item 6, the rule. The fix round moved the word's end into `look_argument`'s space after `look`. Red: T_NAMES's
+    # "herdr look-alike" (read as a look whose argument is the flag `-alike`).
+    Control("p95_names_look_any_suffix", GATE, "    if arg.len() == after.len() {\n        return false;\n    }\n",
+            "", T_NAMES, "rust"),
     # Red: T_NAMES's `herdr.exe look a.png` (not read as a look).
     Control("p95_names_look_no_exe", GATE, '        let rest = rest.strip_prefix(".exe").unwrap_or(rest);\n', "",
             T_NAMES, "rust"),
@@ -130,4 +147,104 @@ CONTROLS = (
     # Item 7. Red: T_ROLE's "Passing `--profile` is your call".
     Control("p95_role_takes_the_call", ROLE, "Passing `--profile` is your call", "Passing `--profile` is herdr's call",
             T_ROLE, "rust"),
+
+    # ---- fix round ----
+    # Finding 1, own_text's herdr lines. Red: T_FIX_REFED's re-fed nw2 copy holds WEB_SOURCES (NO_WEB_SOURCES's
+    # `web page` read as the ask).
+    Control("p95_own_text_keeps_herdr_lines", DETECT,
+            "            out.extend(without_herdr_lines(std::mem::take(&mut paragraph)));\n",
+            "            out.extend(std::mem::take(&mut paragraph).into_iter().map(str::to_owned));\n",
+            T_FIX_REFED, "rust"),
+    # Red: T_FIX_OWN's older wording (`NO_WEB_MARK ... so cite none.`) kept.
+    Control("p95_own_text_old_mark_kept", DETECT,
+            "            if flat.starts_with(mark) || (rest != flat && rest.is_empty()) {\n",
+            "            if rest != flat && rest.is_empty() {\n", T_FIX_OWN, "rust"),
+    # Red: T_FIX_OWN's re-wrapped line beside the order's own line (its pieces after the first line kept).
+    Control("p95_own_text_fragments_kept", DETECT,
+            "            } else if herdr_lines().iter().any(|herdr| herdr.contains(flat.as_str())) {\n",
+            "            } else if false {\n", T_FIX_OWN, "rust"),
+    # Red: T_FIX_OWN's "One plate." (the typed line holding DEVICE_LINE dropped whole).
+    Control("p95_own_text_mixed_line_dropped", DETECT,
+            "            } else if rest != flat {\n                Some(rest)\n",
+            "            } else if rest != flat {\n                None\n", T_FIX_OWN, "rust"),
+    # Red: T_FIX_OWN's "# Fix it" (NO_WEB_REDO kept, not a herdr line).
+    Control("p95_own_text_no_redo_line", DETECT, "            crate::nirvana_gate::NO_WEB_REDO,\n", "", T_FIX_OWN,
+            "rust"),
+    # Red: T_FIX_OWN's send-back brief (its heading and opening, NO_WEB_REDO beside the gate's words, kept).
+    Control("p95_own_text_send_back_kept", DETECT,
+            '        && (send_back || line.starts_with("# Continuation of ") || line == "## What the gate found"))\n',
+            '        && (line.starts_with("# Continuation of ") || line == "## What the gate found"))\n',
+            T_FIX_OWN, "rust"),
+    # Red: T_FIX_CONT's `own == order` (the continuation's heading, opening and quoted last turn kept).
+    Control("p95_own_text_continuation_kept", DETECT,
+            '        && (send_back || line.starts_with("# Continuation of ") || line == "## What the gate found"))\n',
+            '        && (send_back || line == "## What the gate found"))\n', T_FIX_CONT, "rust"),
+    # Red: T_FIX_OWN's titled order (`# Send-back 1 of 3: the parcel`, no original-order heading) cut.
+    Control("p95_own_text_briefed_ignored", DETECT, "    (briefed\n        && (send_back",
+            "    (true\n        && (send_back", T_FIX_OWN, "rust"),
+    # Red: T_FIX_OWN's send-back brief (`## The original order` kept as the orchestrator's heading).
+    Control("p95_own_text_original_heading_kept", DETECT,
+            "        if briefed && line == ORIGINAL_HEADING {\n            section = None;\n            continue;\n"
+            "        }\n", "", T_FIX_OWN, "rust"),
+    # Finding 6. Red: T_FIX_SECTION's first `own` (the owner's `## Also` section cut with the lessons).
+    Control("p95_own_text_listed_to_the_end", DETECT,
+            "            Some(Section::Listed) if !is_heading(line) => continue,\n",
+            "            Some(Section::Listed) => continue,\n", T_FIX_SECTION, "rust"),
+    # Red: T_FIX_SECTION's unended profile section (the search line after the quoted body cut).
+    Control("p95_own_text_quoted_to_the_end", DETECT,
+            "            Some(Section::Quoted) if line.trim().is_empty() || line.starts_with('>') => continue,\n",
+            "            Some(Section::Quoted) => continue,\n", T_FIX_SECTION, "rust"),
+    # Finding 2, the reseat child. Red: T_FIX_RESEAT's named `reseated.profile == Some(Some("judge"))` (None).
+    Control("p95_reseat_drops_the_profile", WORKER, RESEAT_CHILD,
+            "                profile: None,\n"
+            "                profile_fit: seated.profile.as_ref().map(|_| Vec::new()),\n", T_FIX_RESEAT, "rust"),
+    # Red: T_FIX_RESEAT's old `reseated.profile_fit == None` (an empty list where the parent's was unknown).
+    Control("p95_reseat_fit_always_known", WORKER, RESEAT_CHILD,
+            "                profile: seated.profile.clone(),\n                profile_fit: Some(Vec::new()),\n",
+            T_FIX_RESEAT, "rust"),
+    # Finding 2, a lesson review. Red: T_FIX_REVIEW's `review.profile == Some(None)` (absent: None).
+    Control("p95_review_profile_unknown", REVIEW, REVIEW_SEATED,
+            "        profile: None,\n        profile_fit: Some(Vec::new()),\n", T_FIX_REVIEW, "rust"),
+    # Red: T_FIX_REVIEW's `review.profile_fit == Some([])` (None).
+    Control("p95_review_fit_unknown", REVIEW, REVIEW_SEATED,
+            "        profile: Some(None),\n        profile_fit: None,\n", T_FIX_REVIEW, "rust"),
+    # Finding 3, an argument after `look`. Red: T_FIX_NAMES's "Keep the herdr look and feel ..." (read as an ask).
+    Control("p95_look_takes_prose", GATE, LOOK_STARTS, "    true || token.starts_with(['\"', '\\'', '-'])\n",
+            T_FIX_NAMES, "rust"),
+    # Red: T_FIX_NAMES's ROLE.md form, `herdr look "<path>" --ask` (a quoted argument not read).
+    Control("p95_look_no_quote_or_flag", GATE, LOOK_STARTS, "    false\n", T_FIX_NAMES, "rust"),
+    # Red: T_FIX_NAMES's look skill form, `herdr look <file> --ask` (a placeholder not read).
+    Control("p95_look_no_placeholder", GATE, "        || token.starts_with(['<', '$', '%', '{', '~'])\n", "",
+            T_FIX_NAMES, "rust"),
+    # Red: T_FIX_NAMES's `herdr look C:\Users\o\Desktop\shot --ask q` (a path with no extension not read).
+    Control("p95_look_no_path", GATE, "        || path\n", "        || path && false\n", T_FIX_NAMES, "rust"),
+    # Red: T_FIX_NAMES's `herdr look frame_012.png --ask` (a file name not read).
+    Control("p95_look_no_extension", GATE, "        || extension\n", "        || extension && false\n", T_FIX_NAMES,
+            "rust"),
+    # Finding 4, herdr as the command word. Red: T_FIX_RUNS's `echo herdr look a.png > notes.txt` (1, 1).
+    Control("p95_looks_in_reads_any_word", GATE,
+            '                        if matches!(name, "Bash" | "PowerShell") && runs_look(command) {\n',
+            '                        if matches!(name, "Bash" | "PowerShell") && names_look(command) {\n',
+            T_FIX_RUNS, "rust"),
+    # Red: T_FIX_RUNS's agy `findstr /s "herdr look a.png" notes.md` (1, 1).
+    Control("p95_agy_looks_reads_any_word", GATE, "        if !runs_look(command) {\n",
+            "        if !names_look(command) {\n", T_FIX_RUNS, "rust"),
+    # Red: T_FIX_RUNS's `cd shots && herdr look a.png --ask q` (the line read as one command whose word is cd).
+    Control("p95_look_segments_not_read", GATE, "    shell_segments(line).iter().any(|segment| {\n",
+            "    [line.to_owned()].iter().any(|segment| {\n", T_FIX_RUNS, "rust"),
+    # Red: T_FIX_RUNS's `& "C:\...\herdr.exe" look` (PowerShell's call operator read as the command word: (0, 0)).
+    Control("p95_look_call_operator_kept", GATE, '.skip_while(|word| *word == "&" || env_assignment(word));\n',
+            ".skip_while(|word| env_assignment(word));\n", T_FIX_RUNS, "rust"),
+    # Red: T_FIX_RUNS's `FRAME=a.png herdr look "$FRAME"` (the assignment read as the command word: (0, 0)).
+    Control("p95_look_assignment_not_skipped", GATE, '.skip_while(|word| *word == "&" || env_assignment(word));\n',
+            '.skip_while(|word| *word == "&");\n', T_FIX_RUNS, "rust"),
+    # Red: T_FIX_RUNS's `C:/Users/o/.../herdr.exe look` (a path to herdr.exe not read: (0, 0)).
+    Control("p95_look_herdr_path_not_read", GATE, "    let name = word.rsplit(['/', '\\\\']).next().unwrap_or(word);\n",
+            "    let name = word;\n", T_FIX_RUNS, "rust"),
+    # Red: T_FIX_RUNS's note `shows no \`herdr look\` call` (the old "shows no look").
+    Control("p95_look_note_says_none_ran", GATE, "stream shows no `herdr look` call (one through a shell \\\n",
+            "stream shows no look (one through a shell \\\n", T_FIX_RUNS, "rust"),
+    # Finding 5. Red: T_FIX_DASH's `["judge"]` (`--help` and `-x` named).
+    Control("p95_fit_names_a_dash", DETECT, "        .filter(|(name, _)| !name.starts_with('-'))\n", "", T_FIX_DASH,
+            "rust"),
 )

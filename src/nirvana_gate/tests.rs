@@ -6580,7 +6580,7 @@ fn p45d_names_look_takes_the_command_and_not_a_word_that_holds_it() {
         "Judge each frame with `herdr look \"C:/x/a.png\" --ask \"is the seam visible?\"`.",
         "& \"C:\\Users\\o\\AppData\\Local\\Programs\\Nirvana-Herdr\\herdr.exe\" look a.png --ask q",
         "herdr.exe look a.png --ask q",
-        "herdr  look",
+        "herdr  look  a.png --ask q",
     ] {
         assert!(names_look(text), "{text}");
     }
@@ -6599,7 +6599,7 @@ fn p45d_names_look_takes_the_command_and_not_a_word_that_holds_it() {
     assert!(spec("# Shots\n\nJudge with `herdr look \"a.png\" --ask q`.\n").asks_look);
     let lesson_only = format!(
         "# Shots\n\nJudge the frames.\n\n## Lessons from earlier build.visual orders\n\n{}\n\n- \
-         .nirvana/lessons/x.md: judge with herdr look first\n",
+         .nirvana/lessons/x.md: judge with `herdr look \"a.png\" --ask q` first\n",
         crate::nirvana_lessons::LESSONS_OFFER_LINE
     );
     assert!(!spec(&lesson_only).asks_look, "{lesson_only}");
@@ -6633,7 +6633,7 @@ fn p45d_a_look_asked_for_that_did_not_run_is_a_note() {
 
     let none = look_axis(true, &other).expect("a note");
     assert_eq!(none.mark, Mark::Note);
-    assert!(none.why.contains("shows no look"), "{none:?}");
+    assert!(none.why.contains("shows no `herdr look` call"), "{none:?}");
     let refused = look_axis(true, &agy_failed).expect("a note");
     assert_eq!(refused.mark, Mark::Note);
     assert!(refused.why.contains("none of its 1 look call(s) answered"), "{refused:?}");
@@ -6718,4 +6718,79 @@ fn p45d_a_send_back_child_journals_its_parents_profile() {
         assert_eq!(child.profile_fit, profile.map(|_| Vec::new()), "{run}");
     }
     nirvana_seat::set_test_world(None);
+}
+
+/// P45d fix round (review finding 3): an ask is a call, so `look` must be followed by what a real `herdr look` has
+/// next (`herdr look <file> --ask "<question>"`, `nirvana_look::USAGE`): a quote, a path-like token or a flag. Prose
+/// about herdr's look is no ask; every form ROLE.md and the look and media skills teach still is.
+#[test]
+fn p45d_fix_names_look_wants_an_argument_after_look() {
+    for text in [
+        // ROLE.md, the look skill, the media skill.
+        "Ask about an image over 300 KB with `herdr look \"<path>\" --ask \"<your question>\"`, or read the copy.",
+        "herdr look <file> --ask \"What does the error dialog say, word for word?\"",
+        "herdr look frame_012.png --ask \"is the seam visible?\"",
+        "herdr look C:/x/a.png --ask q",
+        "herdr look 'C:\\x\\a.png' --ask q",
+        "herdr look --ask q a.png",
+        "herdr look $frame --ask q",
+        "herdr look shots\\a.jpg --ask q",
+        "herdr look C:\\Users\\o\\Desktop\\shot --ask q",
+    ] {
+        assert!(names_look(text), "{text}");
+    }
+    for text in [
+        "Keep the herdr look and feel of the sidebar unchanged.",
+        "Make herdr look right in dark mode.",
+        "herdr look",
+        "herdr  look",
+        "make herdr look.",
+        "`herdr look` had no seat in 35 delivered orders",
+        "herdr look\n\"a.png\"",
+    ] {
+        assert!(!names_look(text), "{text}");
+    }
+}
+
+/// P45d fix round (review finding 4): a look counts only when `herdr` (or a path to `herdr.exe`) is the command word
+/// of a command in the call, so a search for the phrase is not a look that ran and a missing look is not hidden. A
+/// call through a PowerShell variable (`& $h look`) stays unseen, as the note says.
+#[test]
+fn p45d_fix_looks_in_counts_herdr_only_as_the_command_word() {
+    let call = |id: &str, tool: &str, command: &str| {
+        claude_call(id, tool, serde_json::json!({ "command": command }), false)
+    };
+    for (tool, command) in [
+        ("Bash", "herdr look a.png --ask q"),
+        ("Bash", "cd shots && herdr look a.png --ask q"),
+        ("Bash", "herdr look a.png --ask q || true"),
+        ("Bash", "FRAME=a.png herdr look \"$FRAME\" --ask q"),
+        ("Bash", "C:/Users/o/AppData/Local/Programs/Nirvana-Herdr/herdr.exe look a.png --ask q"),
+        ("PowerShell", "& \"C:\\Users\\o\\AppData\\Local\\Programs\\Nirvana-Herdr\\herdr.exe\" look a.png --ask q"),
+        ("PowerShell", "Set-Location shots; herdr look a.png --ask q"),
+        ("Bash", "echo start\nherdr look a.png --ask q"),
+        ("PowerShell", "& \"C:\\Program Files\\Herdr\\herdr.exe\" look a.png --ask q"),
+    ] {
+        assert_eq!(looks_in(&call("t1", tool, command)), (1, 1), "{command}");
+    }
+    for (tool, command) in [
+        ("Bash", "grep -rn \"herdr look\" docs"),
+        ("Bash", "echo herdr look a.png > notes.txt"),
+        ("Bash", "rg 'herdr look; then' src"),
+        ("PowerShell", "Select-String -Pattern 'herdr look' -Path *.md"),
+        ("PowerShell", "$h='C:\\x\\herdr.exe'; & $h look a.png --ask q"),
+        ("Bash", "herdr lookup a.png"),
+    ] {
+        assert_eq!(looks_in(&call("t1", tool, command)), (0, 0), "{command}");
+    }
+    // agy's step reads the same rule.
+    let agy = |command: &str| {
+        agy_step(4, "DONE", "run_command", serde_json::json!({ "CommandLine": command }), "the seam is visible")
+    };
+    assert_eq!(looks_in(&agy("herdr look a.png --ask q")), (1, 1));
+    assert_eq!(looks_in(&agy("findstr /s \"herdr look a.png\" notes.md")), (0, 0));
+    // The note says what the stream shows, not that no look ran.
+    let note = look_axis(true, &call("t1", "Bash", "grep -rn \"herdr look\" docs")).expect("a note");
+    assert!(note.why.contains("shows no `herdr look` call"), "{note:?}");
+    assert!(note.why.contains("a shell variable"), "{note:?}");
 }

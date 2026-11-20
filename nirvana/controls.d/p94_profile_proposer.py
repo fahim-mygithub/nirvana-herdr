@@ -48,11 +48,11 @@ CONTROLS = (
     Control("p94_herdr_lines_kept", DETECT, "                line = line.replace(herdr.as_str(), \" \");",
             "                line = line.clone();", T_BOILER, "rust"),
     # Red: T_BOILER (the lessons section's line holding the judging paragraph counted).
-    Control("p94_lessons_section_kept", DETECT, '            || line.starts_with("## Lessons from earlier ")\n',
-            "            || false\n", T_BOILER, "rust"),
+    Control("p94_lessons_section_kept", DETECT, '    if line.starts_with("## Lessons from earlier ")\n',
+            "    if false\n", T_BOILER, "rust"),
     # Red: T_BOILER (the agy profile section's quoted body counted).
-    Control("p94_profile_section_kept", DETECT, '        if line.starts_with("## Profile: ") {',
-            "        if false {", T_BOILER, "rust"),
+    Control("p94_profile_section_kept", DETECT, '    if line.starts_with("## Profile: ") {\n        return Some(Section::Quoted);',
+            "    if false {\n        return Some(Section::Quoted);", T_BOILER, "rust"),
     # Red: T_BOILER (the two Profile lines, 113 characters joined, counted as a paragraph).
     Control("p94_profile_lines_kept", DETECT,
             "        if line.starts_with(nirvana_profiles::LINE) || line.starts_with(nirvana_profiles::SHA_LINE)\n",

@@ -283,8 +283,8 @@ pub struct Spec {
     /// herdr seated the order with `NO_WEB_SOURCES` (`web_asked` found no web in it): its sources axis is a note when
     /// it cites nothing and opened no page. False for an order seated before the rule, which keeps the old fail.
     pub no_web: bool,
-    /// Plan 45 P45d (§4 M5): the order's own text names `herdr look` (`names_look`), so the gate notes a delivery whose
-    /// stream shows no look that answered.
+    /// Plan 45 P45d (§4 M5): the order's own text names a `herdr look` call (`names_look`), so the gate notes a
+    /// delivery whose stream shows no `herdr look` call that answered.
     pub asks_look: bool,
 }
 
@@ -3347,8 +3347,9 @@ pub const NO_WEB_SOURCES: &str = "herdr found no web page asked for in this orde
 If answering needs a page you do not have, open it and cite it in the Work Report's `sources` array (`{url, \
 used_for}`); never open one only to have a source.";
 
-/// Why an order asks for the web, read at seating from its class, its needs and its text as written (before herdr's
-/// lessons, cards and lines, which name pages of their own); `None` when it does not. Live checks 2026-11-01 F2: lc3 (an
+/// Why an order asks for the web, read at seating from its class, its needs and its own text (`seat run` passes
+/// `nirvana_profile_detect::own_text`, which cuts herdr's lessons, cards and lines: they name pages of their own, and
+/// `NO_WEB_SOURCES` says `web page`); `None` when it does not. Live checks 2026-11-01 F2: lc3 (an
 /// MCP call) and lc4 (rules from memory) were sent back "no sources", and both redos fetched a page unrelated to the
 /// order to have one to cite.
 pub fn web_asked(class: &str, needs: &[String], written: &str) -> Option<String> {
@@ -5165,23 +5166,75 @@ gate restores them from {}",
 
 // ---- plan 45 P45d (§4 M5): a look the order asked for that did not run ----
 
-/// Whether `text` runs or names `herdr look`: the word `herdr`, a `.exe` and a closing quote allowed after it (`&
-/// "C:\...\herdr.exe" look`), then spaces, then `look` as a word. The one rule for "asked for a look" and "ran a
-/// look": herdr had no word list for either before P45d, and a word list ("judge", "frame") would take every build
-/// that mentions a picture.
+/// Whether `text` names a `herdr look` call: the word `herdr`, a `.exe` and a closing quote allowed after it (`&
+/// "C:\...\herdr.exe" look`), then spaces, then `look`, then spaces and an argument a real call has there
+/// (`look_argument`). How a brief asks for a look: herdr had no word list for it before P45d, and a word list
+/// ("judge", "frame") would take every build that mentions a picture. A worker's stream is read by `runs_look`.
+///
+/// P45d fix round (review finding 3): `look` alone was enough, so "keep the herdr look and feel" and "make herdr look
+/// right" asked for a look, and orders in this repository are about herdr. A negation is not read: "do not run `herdr
+/// look a.png`" still asks, and the note it may bring is only a note.
 pub fn names_look(text: &str) -> bool {
     text.match_indices("herdr").any(|(at, _)| {
         let rest = &text[at + "herdr".len()..];
         let rest = rest.strip_prefix(".exe").unwrap_or(rest);
         let rest = rest.strip_prefix(['"', '\'']).unwrap_or(rest);
         let spaced = rest.trim_start_matches([' ', '\t']);
-        spaced.len() < rest.len()
-            && spaced.starts_with("look")
-            && !spaced["look".len()..]
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        spaced.len() < rest.len() && spaced.strip_prefix("look").is_some_and(look_argument)
     })
+}
+
+/// What follows `look` in a real call, by `nirvana_look::USAGE` (`herdr look <file> --ask "<question>" [--seat <id>]
+/// ...`): spaces, then a token that opens with a quote, a flag, a placeholder or a variable (`"<path>"`, `--ask`,
+/// `<file>`, `$frame`, `%f%`, `{frame}`, `~/a.png`), or a path-like token (a `/` or `\` in it, or a `.` before a
+/// letter or digit: `frame_012.png`). ROLE.md and the look and media skills teach the first three forms.
+fn look_argument(after: &str) -> bool {
+    let arg = after.trim_start_matches([' ', '\t']);
+    if arg.len() == after.len() {
+        return false;
+    }
+    let token = arg.split([' ', '\t', '\n', '\r']).next().unwrap_or("");
+    let path = token.contains(['/', '\\']);
+    let extension = token
+        .char_indices()
+        .any(|(at, c)| c == '.' && token[at + 1..].starts_with(|next: char| next.is_alphanumeric()));
+    token.starts_with(['"', '\'', '-'])
+        || token.starts_with(['<', '$', '%', '{', '~'])
+        || path
+        || extension
+}
+
+/// Whether a worker's shell line runs `herdr look`: in one of its commands (`shell_segments`: cut at `;`, `|`, `&&`,
+/// `||` and line ends outside quotes), after PowerShell's call operator `&` and any `NAME=value` words, the command
+/// word (`split_command`, quotes taken off) is `herdr` or a path to `herdr` or `herdr.exe`, and the next word is `look`.
+///
+/// P45d fix round (review finding 4): `names_look` over the whole line counted `grep -rn "herdr look" docs` as a look
+/// that ran, which hid a missing look. Not seen: a call through a PowerShell variable (`$h = '...\herdr.exe'; & $h
+/// look a.png`), one inside another command's quoted argument (`bash -c 'herdr look a.png'`) or a `$(...)`, and one in
+/// a script; the note says the stream shows no call, not that none ran.
+pub fn runs_look(line: &str) -> bool {
+    shell_segments(line).iter().any(|segment| {
+        let words = split_command(segment);
+        let mut words = words
+            .iter()
+            .skip_while(|word| *word == "&" || env_assignment(word));
+        words.next().is_some_and(|first| herdr_word(first))
+            && words.next().is_some_and(|second| second == "look")
+    })
+}
+
+/// `NAME=value` before a command word (`FRAME=a.png herdr look "$FRAME"`).
+fn env_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// `herdr`, `herdr.exe`, or a path ending in either.
+fn herdr_word(word: &str) -> bool {
+    let name = word.rsplit(['/', '\\']).next().unwrap_or(word);
+    name.eq_ignore_ascii_case("herdr") || name.eq_ignore_ascii_case("herdr.exe")
 }
 
 /// The order asks for a look when its own text (herdr's lines, lessons and cards cut, `nirvana_profile_detect::
@@ -5192,7 +5245,8 @@ pub fn asks_look(text: &str) -> bool {
 
 /// The `herdr look` calls in a worker's stream: how many were made, and how many answered without an error (a Claude
 /// `tool_result` without `is_error`, an agy `run_command` step `DONE` with exit 0). A look that found no seat exits
-/// `NO_SEAT_EXIT`, which both CLIs report as an error. A look run inside a script the stream cannot see is not seen.
+/// `NO_SEAT_EXIT`, which both CLIs report as an error. A call counts by `runs_look`: herdr as the command word, so a
+/// search for the words is no look; a look run inside a script or through a shell variable is not seen.
 pub fn looks_in(stream: &str) -> (usize, usize) {
     let (mut made, mut ran) = (0usize, 0usize);
     let mut pending: Vec<String> = Vec::new();
@@ -5208,7 +5262,7 @@ pub fn looks_in(stream: &str) -> (usize, usize) {
                         let name = block.get("name").and_then(Value::as_str).unwrap_or("");
                         let input = block.get("input").unwrap_or(&Value::Null);
                         let command = input.get("command").and_then(Value::as_str).unwrap_or("");
-                        if matches!(name, "Bash" | "PowerShell") && names_look(command) {
+                        if matches!(name, "Bash" | "PowerShell") && runs_look(command) {
                             made += 1;
                             let id = block.get("id").and_then(Value::as_str).unwrap_or("");
                             pending.push(id.to_owned());
@@ -5237,7 +5291,7 @@ pub fn looks_in(stream: &str) -> (usize, usize) {
         }
         let params = &step["tool_info"]["parameters"];
         let command = params["CommandLine"].as_str().unwrap_or("");
-        if !names_look(command) {
+        if !runs_look(command) {
             continue;
         }
         // agy repeats a step on its answer's line: one call per tool and parameters.
@@ -5271,8 +5325,9 @@ pub fn look_axis(asked: bool, stream: &str) -> Option<Axis> {
             "look",
             Mark::Note,
             if made == 0 {
-                "the order asks for `herdr look` and its stream shows no look, so what it says of the pictures is \
-                 the worker's own reading"
+                "the order asks for `herdr look` and its stream shows no `herdr look` call (one through a shell \
+                 variable or in a script is not seen), so what it says of the pictures may be the worker's own \
+                 reading"
                     .to_owned()
             } else {
                 format!(
