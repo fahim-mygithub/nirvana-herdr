@@ -1434,16 +1434,6 @@ pub(crate) fn report_axis(report: Option<&Value>) -> Axis {
         return Axis::new("report", Mark::Fail, "no Work Report was delivered");
     };
     let mut plain = report.clone();
-    // Plan 45 P45b: `profile_ops` aside as well, checked the same way, so a report carrying it is judged on the rest.
-    let profile_ops = plain
-        .as_object_mut()
-        .and_then(|object| object.remove(PROFILE_OPS));
-    if profile_ops.is_some_and(|ops| {
-        !ops.as_array()
-            .is_some_and(|items| items.iter().all(Value::is_object))
-    }) {
-        return Axis::new("report", Mark::Fail, "profile_ops is not a list of objects");
-    }
     let ops = plain
         .as_object_mut()
         .and_then(|object| object.remove("lesson_ops"));

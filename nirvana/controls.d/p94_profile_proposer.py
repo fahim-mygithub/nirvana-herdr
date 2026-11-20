@@ -133,9 +133,6 @@ CONTROLS = (
     Control("p94_op_description_lines", REVIEW,
             "if description.is_empty() || description.contains(['\\n', '\\r']) {", "if description.is_empty() {",
             T_OPS, "rust"),
-    # Red: T_OPS's report_axis Pass (profile_ops left in, check_report names an unknown key).
-    Control("p94_report_keeps_profile_ops", REVIEW, ".and_then(|object| object.remove(PROFILE_OPS));",
-            ".and_then(|object| object.get(PROFILE_OPS).cloned());", T_OPS, "rust"),
     # Gate. Red: T_GATE's two profile_op axes (none applied).
     Control("p94_gate_skips_profile_ops", REVIEW, "        if !held_any && !profile_ops.is_empty() {",
             "        if false {", T_GATE, "rust"),
