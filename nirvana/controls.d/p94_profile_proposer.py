@@ -394,6 +394,14 @@ T_OLD_CACHE = ("nirvana_profile_detect::tests::"
                "p94_an_old_cache_holding_raw_secret_text_is_checked_again_before_a_brief")
 T_FENCE = "nirvana_profile_detect::tests::p94_a_block_with_an_odd_count_of_fence_lines_is_not_the_body"
 T_LAYER = "nirvana_profile_proposals::tests::p94_the_second_layer_names_each_review2_shape_and_passes_prose"
+# The P45a third fix round's tests.
+T_WARN = "nirvana_profile_detect::tests::p94_fix3_a_warning_sign_paragraph_is_written_with_its_class_whole"
+T_EMOJI = ("nirvana_profile_proposals::tests::"
+           "p94_fix3_write_drops_a_selector_and_a_joiner_and_keeps_what_they_ride_on")
+T_SPLIT = "nirvana_profile_proposals::tests::p94_fix3_a_secret_split_by_a_zero_width_space_is_joined_then_redacted"
+T_EMPTY = "nirvana_profile_proposals::tests::p94_fix3_a_draft_of_only_invisible_characters_is_refused_as_an_empty_one"
+T_SWEEP = "nirvana_profile_proposals::tests::p94_fix_nothing_the_store_takes_is_dropped_by_the_screen"
+T_EDITED = "nirvana_profile_proposals::tests::p94_fix3_accept_and_accept_seen_refuse_a_file_edited_after_write"
 NEVER_PREFIX = "NEVERxMATCH"
 CONTROLS = CONTROLS + (
     # Item 1. Red: T_IGNORED's "git lists nothing under the folder" (pp-1.md shows as untracked).
@@ -498,4 +506,53 @@ CONTROLS = CONTROLS + (
             r'r"eyJ[A-Za-z0-9_-]{2,}"', T_LAYER, "rust"),
     # "run fork_test_cases and more" (a letter before `rk_` read as a key's start).
     Control("p94_joined_stripe_left", PP, 'r"(?:^|[^A-Za-z])(?:sk|rk)_', 'r"(?:sk|rk)_', T_LAYER, "rust"),
+    # ---- P45a second fix round, review 2 F5; retargeted in the third fix round, whose test replaced its test: the
+    # store no longer refuses U+FE0F, so the refusal said is the store's "no such class" for class made.up. ----
+    # a run end says each store refusal with its reason (red: at_end true, "no line names made-up").
+    Control("p94_fix2_refusal_unsaid_at_end", DETECT,
+            "            Outcome::Refused(why) => {\n"
+            '                lines.push(format!("profiles: {} refused: {why}", planned.about))\n            }',
+            "            Outcome::Refused(_) => {}", T_WARN, "rust"),
+    # ...and so does `herdr profile detect --write` (red: at_end false, the refused line holds no "class made.up: no
+    # such class in seats.toml").
+    Control("p94_fix2_refusal_unsaid_at_cli", DETECT,
+            '            (Some(Outcome::Refused(why)), _) => format!("refused {}: {why}", planned.about),',
+            '            (Some(Outcome::Refused(_)), _) => format!("refused {}", planned.about),', T_WARN, "rust"),
+    # ---- P45a third fix round: write strips what the panel cannot show. The expected red, written before each run:
+    # the detector's class proposal keeps no U+FE0F. Written first as the file's `{text:?}` line; the first run went
+    # red one assertion earlier, at_end false's "both paragraphs" (the body holds the paragraph with U+FE0F, so the
+    # stripped text is not in it). That is the red expected now.
+    Control("p94_fix3_detector_body_unstripped", PP,
+            "        body: nirvana_lessons::redact(&strip_invisible(&draft.body)),",
+            "        body: nirvana_lessons::redact(&draft.body),", T_WARN, "rust"),
+    # the evidence is stripped (red: T_EMOJI's "neither code point" assertion, U+FE0F and U+200D in the evidence).
+    Control("p94_fix3_evidence_unstripped", PP,
+            "        evidence: nirvana_lessons::redact(&strip_invisible(&draft.evidence)),",
+            "        evidence: nirvana_lessons::redact(&draft.evidence),", T_EMOJI, "rust"),
+    # the key is stripped (red: T_EMOJI's "neither code point" assertion, U+200D and U+FE0F in the key line).
+    Control("p94_fix3_key_unstripped", PP,
+            "        key: redact_key(&strip_invisible(&draft.key).to_lowercase()),",
+            "        key: redact_key(&draft.key.to_lowercase()),", T_EMOJI, "rust"),
+    # ...and an invisible-only key is then not empty (red: T_EMPTY's assert_eq, no "the key is 0 characters").
+    Control("p94_fix3_key_unstripped_empty", PP,
+            "        key: redact_key(&strip_invisible(&draft.key).to_lowercase()),",
+            "        key: redact_key(&draft.key.to_lowercase()),", T_EMPTY, "rust"),
+    # Rule 2, the order. Redact before strip in the body: the halves pass the redaction, the strip joins them, and the
+    # secret-shape check refuses the draft (red: T_SPLIT's "redacted, not refused: the body holds a secret-shaped
+    # text").
+    Control("p94_fix3_body_redacted_before_strip", PP,
+            "        body: nirvana_lessons::redact(&strip_invisible(&draft.body)),",
+            "        body: strip_invisible(&nirvana_lessons::redact(&draft.body)),", T_SPLIT, "rust"),
+    # ...in the key, which no secret-shape check reads: the joined value lands in the clear (red: T_SPLIT's
+    # "sk-FAKEfakeFAKEfake0000 is on disk").
+    Control("p94_fix3_key_redacted_before_strip", PP,
+            "        key: redact_key(&strip_invisible(&draft.key).to_lowercase()),",
+            "        key: strip_invisible(&redact_key(&draft.key.to_lowercase())),", T_SPLIT, "rust"),
+    # The sweep: write's strip takes out every invisible character (red: T_SWEEP, 4107 code points drawn as nothing).
+    Control("p94_fix3_strip_keeps_all", PP, "        .filter(|c| !invisible(*c))\n", "        .filter(|_| true)\n",
+            T_SWEEP, "rust"),
+    # Rule 3: accept and accept_seen still refuse a file edited after write (red: T_EDITED, `unwrap_err` on an Ok at
+    # the accept_seen line).
+    Control("p94_fix3_accept_takes_edited", PP,
+            "    problems.extend(invisible_problems(&proposal.body, &proposal.evidence));\n", "", T_EDITED, "rust"),
 )

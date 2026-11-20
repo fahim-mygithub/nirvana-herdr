@@ -310,9 +310,10 @@ CONTROLS = (
             T_PP_LIMITS, "rust"),
     Control("p92_pp_quote_unchecked", PP, "    if !quoted(&evidence)", "    if false && !quoted(&evidence)",
             T_PP_LIMITS, "rust"),
+    # P45a fix round: accept's refusal is a `Refused::No` now (the panel's `accept_seen` shares the body).
     Control("p92_pp_accept_unchecked", PP,
-            '    if !problems.is_empty() {\n        return Err(format!("{id} is refused: {}", problems.join("; ")));',
-            '    if false {\n        return Err(format!("{id} is refused: {}", problems.join("; ")));',
+            '    if !problems.is_empty() {\n        return Err(Refused::No(format!("{id} is refused: {}", problems.join("; "))));',
+            '    if false {\n        return Err(Refused::No(format!("{id} is refused: {}", problems.join("; "))));',
             T_PP_LIMITS, "rust"),
     # A patch: the front matter kept, a stale one refused, its rollback exact
     Control("p92_pp_patch_drops_keys", PP, '        lines[..=close].join("\\n"),', '        "---\\n---",',
@@ -341,10 +342,12 @@ CONTROLS = (
             "            Err(err) => bad.push((at + 1, line.to_owned(), err.to_string())),",
             "            Err(_) => {}", T_TORN, "rust"),
     # Fix round F5: the key is redacted on disk (red: the fake GitHub token is in the proposal file)
-    Control("p92_pp_key_unredacted", PP, "        key: redact_key(&draft.key.to_lowercase()),\n", "", T_REDACT, "rust"),
+    # (P45a third fix round: the key is stripped first, so the find text names `strip_invisible`.)
+    Control("p92_pp_key_unredacted", PP, "        key: redact_key(&strip_invisible(&draft.key).to_lowercase()),\n", "",
+            T_REDACT, "rust"),
     # Review2 E1: lowercased before redaction (red: the SK-FAKE... key lands on disk)
-    Control("p92_pp_key_case_kept_on_disk", PP, "        key: redact_key(&draft.key.to_lowercase()),\n",
-            "        key: redact_key(&draft.key),\n", T_E1, "rust"),
+    Control("p92_pp_key_case_kept_on_disk", PP, "        key: redact_key(&strip_invisible(&draft.key).to_lowercase()),\n",
+            "        key: redact_key(&strip_invisible(&draft.key)),\n", T_E1, "rust"),
     # ...keeping its identity (red: two paragraph shas collapse into one key, the second write is refused)
     Control("p92_pp_key_identity_lost", PP,
             '            format!(\n                "h:{}",\n                &nirvana_lessons::sha256(&found.to_lowercase())[..16]\n'
@@ -365,17 +368,17 @@ CONTROLS = (
             T_LEGACY, "rust"),
     # Hand-edited front matter at accept is checked again (red: ` model:` is accepted)
     Control("p92_pp_front_unchecked", PP,
-            '    if !problems.is_empty() {\n        return Err(format!("{id} is refused: {}", problems.join("; ")));',
-            '    if false {\n        return Err(format!("{id} is refused: {}", problems.join("; ")));',
+            '    if !problems.is_empty() {\n        return Err(Refused::No(format!("{id} is refused: {}", problems.join("; "))));',
+            '    if false {\n        return Err(Refused::No(format!("{id} is refused: {}", problems.join("; "))));',
             T_FRONT, "rust"),
     # A proposal's own key twice is refused (red: the duplicate `key` proposal is accepted)
     Control("p92_pp_duplicate_key_read", PP, "        if values.iter().any(|(seen, _)| seen == known) {",
             "        if false {", T_FRONT, "rust"),
     # Accept writes no mcp.json (red: one is written beside profile.md, so the profile has own servers)
     Control("p92_pp_accept_writes_servers", PP,
-            '                format!("cannot create {}: {err}", dir.display())\n            })?;\n',
-            '                format!("cannot create {}: {err}", dir.display())\n            })?;\n'
-            '            let _ = std::fs::write(dir.join(nirvana_profiles::SERVERS_FILE), "{\\"mcpServers\\": {}}");\n',
+            '            Refused::No(format!("cannot create {}: {err}", dir.display()))\n        })?;\n',
+            '            Refused::No(format!("cannot create {}: {err}", dir.display()))\n        })?;\n'
+            '        let _ = std::fs::write(dir.join(nirvana_profiles::SERVERS_FILE), "{\\"mcpServers\\": {}}");\n',
             T_FRONT, "rust"),
     Control("p92_pp_rollback_keeps_dismissal", PP, "                && !undone.contains(&row.op.as_str())\n", "",
             T_PP_DISMISS, "rust"),

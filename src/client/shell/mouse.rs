@@ -693,6 +693,10 @@ impl ClientShellState {
             self.navigate_workspace_id = None;
             outcome.repaint = true;
         }
+        // Plan 45 P45a: the Profiles panel takes the mouse while it is open, before the strip's panels.
+        if self.overlay.is_none() && self.handle_profile_panel_mouse(mouse, outcome) {
+            return;
+        }
         // Nirvana fork, feature 5: the Preload panel takes the mouse while it is open.
         if self.overlay.is_none() && self.handle_preload_mouse(mouse, outcome) {
             return;
@@ -2023,6 +2027,12 @@ impl ClientShellState {
                 // Plan 36: the strip's Learning square opens its panel.
                 if super::contains(self.hits.nirvana_learning, point) {
                     self.toggle_learning_panel();
+                    outcome.repaint = true;
+                    return;
+                }
+                // Plan 45 P45a: the `+` after the agents heading opens the Profiles panel.
+                if super::contains(self.hits.agent_profiles, point) {
+                    self.toggle_profile_panel();
                     outcome.repaint = true;
                     return;
                 }

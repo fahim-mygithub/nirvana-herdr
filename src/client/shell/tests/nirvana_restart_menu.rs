@@ -171,7 +171,7 @@ fn click_menu_row(state: &mut ClientShellState, index: usize) -> ClientShellInpu
 fn p87_a_spaces_menu_restarts_that_spaces_nirvana_claude() {
     let mut state = two_spaces(AgentStatus::Idle);
     let labels = right_click_space(&mut state, "ws_2");
-    assert_eq!(labels, ["Rename", "Restart Claude", "Close"]);
+    assert_eq!(labels, ["Rename", "Restart Claude", "Close", "Profiles"]);
     let outcome = click_menu_row(&mut state, 1);
     assert_eq!(
         super::nirvana_seats::restarts(&outcome),
@@ -191,7 +191,7 @@ fn p87_a_space_without_nirvana_claude_offers_no_restart() {
     let mut projected = state.snapshot.as_deref().cloned().expect("snapshot");
     projected.agents[1].name = Some("moto".into());
     state.set_snapshot(Box::new(projected));
-    assert_eq!(right_click_space(&mut state, "ws_2"), ["Rename", "Close"]);
+    assert_eq!(right_click_space(&mut state, "ws_2"), ["Rename", "Close", "Profiles"]);
 }
 
 /// P87: a working Nirvana Claude restarts on the second click; the first keeps the menu open and says why.
@@ -200,7 +200,7 @@ fn p87_a_working_spaces_restart_asks_again() {
     let mut state = two_spaces(AgentStatus::Working);
     assert_eq!(
         right_click_space(&mut state, "ws_2"),
-        ["Rename", "Restart Claude", "Close"]
+        ["Rename", "Restart Claude", "Close", "Profiles"]
     );
     let outcome = click_menu_row(&mut state, 1);
     assert!(super::nirvana_seats::restarts(&outcome).is_empty());
@@ -226,7 +226,7 @@ fn p87_a_space_claude_that_starts_working_while_the_menu_is_open_asks_first() {
     let mut state = two_spaces(AgentStatus::Idle);
     assert_eq!(
         right_click_space(&mut state, "ws_2"),
-        ["Rename", "Restart Claude", "Close"]
+        ["Rename", "Restart Claude", "Close", "Profiles"]
     );
     let mut projected = state.snapshot.as_deref().cloned().expect("snapshot");
     projected.agents[1].agent_status = AgentStatus::Working;
@@ -249,7 +249,7 @@ fn p87_a_space_menu_restart_is_not_sent_twice() {
     assert_eq!(super::nirvana_seats::restarts(&outcome).len(), 1);
     assert_eq!(
         right_click_space(&mut state, "ws_2"),
-        ["Rename", "Restart Claude: restarting\u{2026}", "Close"]
+        ["Rename", "Restart Claude: restarting\u{2026}", "Close", "Profiles"]
     );
     let outcome = click_menu_row(&mut state, 1);
     assert!(super::nirvana_seats::restarts(&outcome).is_empty());
@@ -262,7 +262,7 @@ fn p87_a_space_menu_restart_is_not_sent_twice() {
     }
     assert_eq!(
         right_click_space(&mut state, "ws_2"),
-        ["Rename", "Restart Claude", "Close"]
+        ["Rename", "Restart Claude", "Close", "Profiles"]
     );
     let outcome = click_menu_row(&mut state, 1);
     assert_eq!(super::nirvana_seats::restarts(&outcome).len(), 1);

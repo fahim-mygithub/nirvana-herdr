@@ -84,6 +84,9 @@ fn fast_path_blocker(
     } else if state.nirvana_learning.is_some() {
         // Plan 36: the Learning panel, for the same reason.
         Some("client_surface_patch.fallback.nirvana_panel")
+    } else if state.nirvana_profile_panel.is_some() {
+        // Plan 45 P45a: the Profiles panel, for the same reason.
+        Some("client_surface_patch.fallback.nirvana_panel")
     } else if state.endpoint_error.is_some() {
         Some("client_surface_patch.fallback.endpoint_error")
     } else if state.config_diagnostic.is_some() {

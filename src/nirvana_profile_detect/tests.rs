@@ -1739,3 +1739,69 @@ fn p45d_fix_fitting_never_names_a_profile_that_starts_with_a_dash() {
     );
     assert_eq!(fitting(&root, "media.video", &[]), ["judge"]);
 }
+
+/// P45a third fix round (replaces review 2 F5's `p94_fix2_a_draft_the_store_refuses_is_said_and_the_rest_written`, now
+/// untrue): five orders retype one paragraph holding a warning sign with U+FE0F and one clean paragraph. At `herdr
+/// profile detect --write` and at a run end (`refresh`) the class gets ONE written proposal holding both paragraphs,
+/// U+26A0 kept and U+FE0F gone, and no refusal is said for it. A store refusal for another reason is still said: a
+/// class `seats.toml` does not have (`made.up`) is refused by the store, and its line says so.
+#[test]
+fn p94_fix3_a_warning_sign_paragraph_is_written_with_its_class_whole() {
+    let warn = "Warning \u{26a0}\u{fe0f}: never push the cook to the shared box before the owner has looked at the \
+frame it renders, even when the gate is green.";
+    assert!(warn.chars().count() >= MIN_CHARS && JUDGE.chars().count() >= MIN_CHARS);
+    for at_end in [false, true] {
+        let (_home, root) = project(if at_end {
+            "p94-fix3-warn-end"
+        } else {
+            "p94-fix3-warn-cli"
+        });
+        let mut orders = builders("w", 5, "media.video", &[warn, JUDGE]);
+        orders.extend(builders("m", 5, "made.up", &[ENGINE]));
+        seat_all(&root, "run-1", &orders);
+        let said = if at_end {
+            refresh(&Project::at(&root), "run-1").join("\n")
+        } else {
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let code = cli_to(
+                &root,
+                &args(&["--write", "--run", "run-1"]),
+                &mut out,
+                &mut err,
+            );
+            assert_eq!(code, 0);
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out),
+                String::from_utf8_lossy(&err)
+            )
+        };
+        eprintln!("P94 FIX3 at_end={at_end}:\n{said}");
+        let waiting = proposals::list(&root);
+        assert_eq!(waiting.len(), 1, "at_end {at_end}: one proposal: {said}");
+        let pp = &waiting[0];
+        assert_eq!(pp.profile, "media-video", "{said}");
+        assert!(
+            pp.body.contains(&warn.replace('\u{fe0f}', "")) && pp.body.contains("score the before frame first"),
+            "at_end {at_end}: both paragraphs: {}",
+            pp.body
+        );
+        let text = std::fs::read_to_string(&pp.file).unwrap();
+        assert!(text.contains('\u{26a0}') && !text.contains('\u{fe0f}'), "at_end {at_end}: {text:?}");
+        assert!(
+            said.lines()
+                .filter(|line| line.contains("media-video"))
+                .all(|line| !line.contains("refused")),
+            "at_end {at_end}: no refusal for it: {said}"
+        );
+        assert!(cache_path(&root).exists(), "the detection is kept: {said}");
+        let line = said
+            .lines()
+            .find(|line| line.contains("made-up"))
+            .unwrap_or_else(|| panic!("at_end {at_end}: no line names made-up: {said}"));
+        assert!(
+            line.contains("refused") && line.contains("class made.up: no such class in seats.toml"),
+            "at_end {at_end}: {line}"
+        );
+    }
+}

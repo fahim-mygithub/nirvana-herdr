@@ -1,6 +1,6 @@
 # Plan 45: agent profiles from the sidebar, and lessons that propose them
 
-Status: RULED 2026-11-19 (§7). P45c LANDED as alpha 0.87.0, P45b as alpha 0.89.0 and P45d as alpha 0.90.0; P45a follows.
+Status: RULED 2026-11-19 (§7). ALL FOUR PACKAGES LANDED: P45c as alpha 0.87.0, P45b as alpha 0.89.0, P45d as alpha 0.90.0 and P45a as alpha 0.91.0. The live checks of §9 are owed.
 
 ## 1. The ask
 
@@ -190,6 +190,20 @@ package, so the two are built one after the other, not together.
 - §4 M5: no look rule existed before. The gate now notes a delivery whose order named a `herdr look` call and
   whose stream shows none. It never fails one.
 - No command prints how often the line was passed by. The Profiles panel (P45a) shows it as each profile's use.
+
+### What P45a changed from this plan
+
+- Accept is only in a proposal's detail, never in the list, and only after every line of it has been on screen.
+  The plan said "Accept or Dismiss" beside each proposal. A proposal's text is not trusted, so Accept is by what
+  was read.
+- New does not close the panel. The file opens in an edit tab when the panel is open as it lands; a New that lands
+  after the panel closed opens no tab and is said at the next open.
+- The `+` shows the count of proposals waiting.
+- Files beyond the plan's list: `composition.rs`, `input.rs`, `surface_patch.rs`, `client/mod.rs`, `shell.rs`, and
+  the store, `nirvana_profile_proposals.rs`, for `accept_seen`, the forms that never wait on the lock, and the
+  strip.
+- The store strips characters a screen cannot show at write and refuses them at Accept. §6 did not name them.
+- Use is counted by the detector's scan on its own thread, on open, after an action and at most every 30 s.
 
 ## 9. Live checks owed after building
 

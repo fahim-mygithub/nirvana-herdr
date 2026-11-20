@@ -2347,6 +2347,9 @@ async fn run_client_loop(
                             outcome.repaint |= repaint;
                             outcome.actions.extend(actions);
                         }
+                        // Plan 45 P45a fix round: the Profiles panel tells its reader what is drawn and lands a New
+                        // made off the key path. A statement of its own, away from the `take_changed` chain.
+                        shell.tick_profile_panel(&mut outcome);
                         // Plan 38: the next sparkle frame, only while the last drawing had a working space. A
                         // statement of its own, away from the `take_changed` chain every square appends to.
                         outcome.repaint |= crate::nirvana_spaces::sparkle_due();
@@ -2370,6 +2373,8 @@ async fn run_client_loop(
                             | crate::nirvana_git::take_changed()
                             // Plan 36: the Learning square; stats its files every 3 s off the draw path
                             | crate::nirvana_learning::take_changed()
+                            // Plan 45 P45a: the agents heading's `+` and the Profiles panel; reads off the draw path
+                            | crate::client::shell::nirvana_profile_panel::take_changed()
                             // Plan 17: subagents under each agent in the agents panel; polls 2s running / 10s idle
                             | crate::nirvana_subagents::take_changed();
                         let frame = outcome

@@ -104,9 +104,17 @@ impl ClientContextMenuOverlay {
             };
             items.insert(1, item(label, Action::RestartClaude));
         }
+        // Plan 45 P45a: every space's menu opens the Profiles panel on its project, as the `+` after the agents
+        // heading does for the focused one. Last, so every line above keeps its place.
+        if matches!(self.target, ClientContextMenuTarget::Workspace { .. }) {
+            items.push(item(SPACE_PROFILES, Action::Profiles));
+        }
         items
     }
 }
+
+/// The space menu's line for the Profiles panel.
+pub(super) const SPACE_PROFILES: &str = "Profiles";
 
 /// The space menu's Restart Claude, in the tab menu's words.
 pub(super) const SPACE_RESTART: &str = "Restart Claude";
@@ -402,6 +410,7 @@ impl ClientShellState {
                     self.persist_chrome_preferences(outcome);
                 }
             }
+            ClientContextMenuAction::Profiles => self.open_space_profile_panel(&workspace_id),
             _ => {}
         }
     }

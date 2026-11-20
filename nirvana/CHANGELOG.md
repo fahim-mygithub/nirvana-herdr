@@ -3,6 +3,68 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.91.0: a `+` beside `agents` opens the project's Profiles panel
+
+- **Changed:** plan 45's last package, the door.
+  - The sidebar's `agents` heading gains a `+`, with the count of proposals waiting, and every space's menu gains
+    a last line, `Profiles`. Both open the Profiles panel on that space's project, the nearest folder holding
+    `.git`. The project's full path is the line under the title.
+  - **Profiles**, one row each: description, seat pins, servers, skills, cards and use, as "used 0 of 35". The use
+    comes from the journal; "(partial)" shows only when a limit cut the scan. `e` or Enter opens the file in an
+    edit tab, `K` its `knowledge/`.
+  - **Suggested**, the proposals waiting. Enter opens one whole, with the file Accept would write. `d` dismisses.
+  - **New**, `n`: a name, then a shape. It is made off the key path, the panel stays open and names the full path
+    it wrote. Esc while it is being made closes the panel; the next panel on that project says what came of it.
+  - Accept applies only text the owner had on screen, all of it. `a` acts only in a proposal's detail, only as a
+    bare key, and only when every line has been on screen with no gap from the top. End, PageDown and the wheel
+    move at most to the first line not yet shown. A change of width, or of the proposal on disk, starts the count
+    again. What is sent to the store is what was drawn (`accept_seen`); it refuses inside the proposals' lock when
+    the file or the profile it writes is no longer that.
+  - The store strips characters a screen cannot show when it writes a proposal, before the redaction, so a secret
+    split by a zero-width character is joined and then redacted. Accept refuses a proposal file that holds one,
+    naming its code point. The panel draws one as `<U+XXXX>`, in names from disk too.
+  - Nothing reads a file while the window draws: a reader thread reads profiles and proposals every 2 s while the
+    panel is drawn and scans use on open, after an action, and at most every 30 s. Accept and Dismiss never wait
+    on the lock; they say "busy" and the owner presses again.
+  - No worker can press Accept: the panel's keys come only from the window's own terminal input. A window under
+    30 by 9 shows "window too small" and takes only Esc.
+- **Because:** the owner, 2026-11-18: "for each project we add a plus symbol next to agents and the agents +
+  becocmes  abutton to store profile. Theses would be besically where we store the agent proiles." A proposal's
+  body is drafted from past order text and worker streams, which are not trusted, and an accepted profile is told
+  to every later worker that carries it. The owner's Accept is the only guard, so it has to be an Accept of what
+  was read.
+- **Measured:** scoped tests pass, by filter: `nirvana_profile_panel` 46, `nirvana_profile` 141, `client::shell` 627,
+  `nirvana_restart_menu` 7, `nirvana_review` 27, `nirvana_idle_review` 26, `nirvana_lessons` 31, `nirvana_learning`
+  27. This merge owed the wider checkpoint: the whole test binary, one process per test, ran 5451 tests with 2 failed,
+  the same two `app::api` tests that fail on 0.90.0, where 5396 ran. Built on Opus high, reviewed twice on Sonnet
+  high, three fix rounds. The first review never finished a build, so its 13 findings came from reading; the fix round
+  reproduced them and rewrote the panel around them. The second review ran the code. It found Accept by content clean
+  in every rewrite it tried, 3,000 rewrites during an Accept among them, the character sweep clean, the lock and the
+  reader clean, and one hole: `End` then `a` accepted a 600-line body with 565 lines never drawn. The second fix round
+  reproduced that red and five smaller things, fixed them, and moved the use scan, 225 of a read's 240 ms, from every
+  2 s to every 30 s. The third fix round changed one rule: the store refused a draft holding a character the screen
+  cannot show, and measured on the 0.90.0 binary one warning sign with U+FE0F in one past order refused its class's
+  whole proposal at every run end, because the detector puts all of a class's repeated paragraphs into one proposal;
+  the store now strips at write and refuses at Accept. At the merge, on the merged binary and scratch projects, as
+  written down before the run: a clean proposal is accepted by `herdr profile accept`; a proposal file given ESC,
+  U+200B, U+202E or U+E0041 by hand is refused 4 times of 4, naming the code point, with no profile written; five
+  orders retyping a paragraph with a warning sign and a clean paragraph give one proposal holding both, U+26A0 kept
+  and U+FE0F gone. The controls files hold 133 `p93` and 136 `p94` controls; each new one was run red in its branch
+  and 17 were run red again at the merge, the tree unchanged after each. A PC restart cut the merge run inside the
+  last of them, `p93_plus_click_ignored`, with its sabotage in the file; the file was put back from the control's own
+  backup, checked equal to the merged text, and that control, the build, the probe and the checkpoint ran after the
+  restart. The dry run finds 4860 of 4868 controls' text, the same 8 old misses. Not seen in a live window: the `+`,
+  the panel, a real Accept; that what the panel records as shown is what the terminal shows is held by tests on a
+  drawn buffer only. Known gaps: text in decomposed Korean jamo loses its vowels and finals in a proposal; a warning
+  sign loses its emoji form; the test of the 30 s scan interval is timing-based; a New whose panel is never reopened
+  keeps its result in memory until the window closes; a New leaves an empty `knowledge/` folder; a long `<U+XXXX>`
+  name can split across two lines; a dismissal an older build recorded under a key holding such a character no longer
+  matches, and herdr's own keys are ASCII.
+- **If you remove this:** profiles and proposals are reachable only by `herdr profile` verbs, and nobody sees that
+  a profile is unused. Remove the no-gap rule and one keypress accepts text nobody read. Remove the strip and one
+  emoji in one old order blocks a class's proposal for good; remove Accept's refusal and a hand-edited proposal
+  can write text the screen never showed.
+
 ## alpha 0.90.0: `seat run` says when a project profile fits an order; the journal records the profile each order carried
 
 - **Changed:** plan 45's fourth package, the seating line, and three fixes from the Megajam record.

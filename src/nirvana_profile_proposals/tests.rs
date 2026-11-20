@@ -763,3 +763,270 @@ fn p94_accept_says_the_profile_is_not_ignored_and_the_check_is_a_list() {
     assert_eq!(code, 1);
     assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
 }
+
+/// P45a third fix round (was `p94_fix_write_and_accept_refuse_what_the_panel_cannot_show`): a character the Profiles
+/// panel's screen would drop is taken out at `write`, from the body and the evidence, and the draft is written; a file
+/// that holds one past `write` is refused at `accept`, by its code point, never by the text around it. A tab and a CRLF
+/// are text.
+#[test]
+fn p94_fix3_write_strips_and_accept_refuses_what_the_panel_cannot_show() {
+    let (_home, root) = project("p94-fix-invisible");
+    for (at, (c, name)) in [
+        ('\u{1b}', "001B"),
+        ('\r', "000D"),
+        ('\u{202e}', "202E"),
+        ('\u{200b}', "200B"),
+        ('\u{200d}', "200D"),
+        ('\u{e0041}', "E0041"),
+        ('\u{ad}', "00AD"),
+        ('\u{feff}', "FEFF"),
+        ('\u{2028}', "2028"),
+        ('\u{fe0f}', "FE0F"),
+        ('\u{3164}', "3164"),
+        ('\u{1160}', "1160"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let body = NEW.replace("You judge renders.", &format!("You judge{c}renders."));
+        let mut hidden = draft(Kind::New, &format!("render-judge-{at}"), &body, None);
+        hidden.evidence = EVIDENCE.replace("rendered frame", &format!("rendered{c} frame"));
+        let id = write(&root, &hidden).unwrap_or_else(|why| panic!("{name}: {why}"));
+        let text = std::fs::read_to_string(path(&root, &id)).unwrap();
+        assert!(!text.contains(c), "{name} is on disk: {text:?}");
+        assert!(
+            text.contains("You judgerenders.") && text.contains("\"Judge the rendered frame, never"),
+            "{name}: the text around it is kept: {text:?}"
+        );
+    }
+    // A tab and a CRLF are text.
+    let body = NEW
+        .replace("You judge renders.", "You judge\trenders.")
+        .replace('\n', "\r\n");
+    let id = write(&root, &draft(Kind::New, "tab-judge", &body, None)).expect("a tab and CRLF are text");
+    assert!(get(&root, &id).unwrap().body.contains("You judge\trenders."));
+    // A file written by hand, past `write`: refused at accept by the code point, and nothing is written.
+    let file = path(&root, "pp-99");
+    std::fs::write(
+        &file,
+        format!(
+            "---\nkind: new\nprofile: other-judge\nby: detector\nrun: run-20261119\ndate: 2026-11-20\n\
+key: paragraph:hand\nevidence: {EVIDENCE}\n---\n{}",
+            NEW.replace("You judge renders.", "You judge\u{1b}[8mrenders.")
+        ),
+    )
+    .unwrap();
+    let why = accept(&root, "pp-99").unwrap_err();
+    assert!(why.contains("the body holds U+001B,"), "{why}");
+    assert!(!why.contains("You judge"), "the code point, not the text: {why}");
+    assert!(!nirvana_profiles::folder_of(&root, "other-judge").exists());
+}
+
+/// P45a third fix round: the detector's case, measured on the 0.90.0 binary. A warning sign followed by U+FE0F and an
+/// emoji joined by U+200D, in the body, the evidence and the key: `write` takes it, the file holds neither code point,
+/// and U+26A0 and both halves of the joined emoji are still there.
+#[test]
+fn p94_fix3_write_drops_a_selector_and_a_joiner_and_keeps_what_they_ride_on() {
+    let (_home, root) = project("p94-fix3-emoji");
+    let marks = "Warning \u{26a0}\u{fe0f}: the pair \u{1f469}\u{200d}\u{1f4bb} reviews.";
+    let mut emoji = draft(
+        Kind::New,
+        "render-judge",
+        &NEW.replace("Open every file yourself.", marks),
+        None,
+    );
+    emoji.evidence = format!("{EVIDENCE} and 5 say \"{marks}\"");
+    emoji.key = "paragraph:3f2a\u{200d}9c\u{fe0f}".into();
+    let id = write(&root, &emoji).expect("written");
+    let text = std::fs::read_to_string(path(&root, &id)).unwrap();
+    assert!(!text.contains('\u{fe0f}') && !text.contains('\u{200d}'), "{text:?}");
+    let kept = "Warning \u{26a0}: the pair \u{1f469}\u{1f4bb} reviews.";
+    let proposal = get(&root, &id).unwrap();
+    assert!(proposal.body.contains(kept), "the body: {:?}", proposal.body);
+    assert!(proposal.evidence.contains(kept), "the evidence: {:?}", proposal.evidence);
+    assert_eq!(proposal.key, "paragraph:3f2a9c");
+}
+
+/// P45a third fix round, rule 2: the strip comes before the redaction. An obviously fake `sk-` key split by U+200B
+/// (each half too short for `nirvana_lessons::redact`'s `sk-` rule, 16 or more after the dash) is joined by the strip
+/// and then redacted, never written in the clear, in the body, the evidence and the key. Redacted, not refused: the
+/// draft is written with `[redacted]` where the key was.
+#[test]
+fn p94_fix3_a_secret_split_by_a_zero_width_space_is_joined_then_redacted() {
+    let (_home, root) = project("p94-fix3-split");
+    let split = "sk-FAKEfake\u{200b}FAKEfake0000";
+    let joined = "sk-FAKEfakeFAKEfake0000";
+    assert_eq!(nirvana_lessons::redact(split), split, "each half alone passes the redaction");
+    assert_ne!(nirvana_lessons::redact(joined), joined, "joined, the redaction takes it");
+    let mut hidden = draft(
+        Kind::New,
+        "render-judge",
+        &NEW.replace("Open every file yourself.", &format!("Never paste {split} here.")),
+        None,
+    );
+    hidden.evidence = format!("{EVIDENCE} with {split} in 3 of them");
+    hidden.key = format!("paragraph:{split}");
+    let id = write(&root, &hidden).unwrap_or_else(|why| panic!("redacted, not refused: {why}"));
+    let text = std::fs::read_to_string(path(&root, &id)).unwrap();
+    let lower = text.to_lowercase();
+    for clear in [joined, "fakefakefakefake0000", "fakefake0000"] {
+        assert!(!lower.contains(&clear.to_lowercase()), "{clear} is on disk: {text}");
+    }
+    let proposal = get(&root, &id).unwrap();
+    assert!(proposal.body.contains("Never paste [redacted] here."), "{}", proposal.body);
+    assert!(proposal.evidence.contains("with [redacted] in 3"), "{}", proposal.evidence);
+    assert_eq!(proposal.key, "paragraph:[redacted]");
+}
+
+/// P45a third fix round, rule 4: a draft of only characters the panel cannot show is, after the strip, an empty one,
+/// and refused word for word as an empty draft is today. No file is written.
+#[test]
+fn p94_fix3_a_draft_of_only_invisible_characters_is_refused_as_an_empty_one() {
+    let (_home, root) = project("p94-fix3-empty");
+    let only = "\u{200b}\u{fe0f}\u{200d}\r\u{feff}";
+    let mut invisible_only = draft(Kind::New, "render-judge", only, None);
+    invisible_only.evidence = only.into();
+    invisible_only.key = only.into();
+    let mut empty = draft(Kind::New, "render-judge", "", None);
+    empty.evidence = String::new();
+    empty.key = String::new();
+    let found = refused(&root, &invisible_only);
+    eprintln!("P94 FIX3 EMPTY: {found:?}");
+    assert_eq!(found, refused(&root, &empty));
+    assert!(
+        found.iter().any(|why| why.starts_with("the key is 0 characters"))
+            && found.iter().any(|why| why.starts_with("the evidence is 0 characters")),
+        "{found:?}"
+    );
+    assert!(!folder(&root).exists() || files(&root).is_empty(), "no file was written");
+}
+
+/// P45a third fix round, rule 3: a file `write` wrote clean and the owner, or another writer, edited by hand after to
+/// hold U+200B is refused by `accept` and by the panel's `accept_seen`, by the code point, and nothing is written.
+#[test]
+fn p94_fix3_accept_and_accept_seen_refuse_a_file_edited_after_write() {
+    let (_home, root) = project("p94-fix3-edited");
+    let id = write(&root, &draft(Kind::New, "render-judge", NEW, None)).unwrap();
+    let file = path(&root, &id);
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, text.replace("Open every file", "Open\u{200b} every file")).unwrap();
+    let (_, seen) = list_seen(&root).into_iter().next().unwrap();
+    let why = accept_seen(&root, &seen).unwrap_err().to_string();
+    assert!(why.contains("the body holds U+200B,"), "accept_seen: {why}");
+    let why = accept(&root, &id).unwrap_err();
+    assert!(why.contains("the body holds U+200B,"), "accept: {why}");
+    assert!(!nirvana_profiles::folder_of(&root, "render-judge").exists());
+    assert!(ledger(&root).is_empty());
+}
+
+/// P45a third fix round (the P45a fix round's sweep, its claim moved): nothing `write` puts on disk is dropped by the
+/// screen. Every code point, `x`, it, `y`, as `strip_invisible` (the strip `write` applies first) leaves it, drawn by
+/// ratatui's `set_stringn` (the panel's `put_text`): every character left stays in the buffer.
+#[test]
+fn p94_fix_nothing_the_store_takes_is_dropped_by_the_screen() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::style::Style;
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 16, 1));
+    let mut dropped = Vec::new();
+    for code in 0..=0x10_FFFFu32 {
+        let Some(c) = char::from_u32(code) else {
+            continue;
+        };
+        // A newline is a line break and a tab is drawn as spaces by the panel; both are text.
+        if c == '\n' || c == '\t' {
+            continue;
+        }
+        let stored = strip_invisible(&format!("x{c}y"));
+        buffer.reset();
+        buffer.set_stringn(0, 0, &stored, 16, Style::default());
+        let drawn: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+        if stored.chars().any(|kept| !drawn.contains(kept)) {
+            dropped.push(code);
+        }
+    }
+    assert!(
+        dropped.is_empty(),
+        "{} code points the store takes are drawn as nothing, the first: {:X?}",
+        dropped.len(),
+        &dropped[..dropped.len().min(40)]
+    );
+}
+
+/// P45a fix round, review findings 1 and 3: `accept_seen` writes exactly the `target` the panel drew, and nothing
+/// when the proposal file or the profile it writes changed since.
+#[test]
+fn p94_fix_accept_seen_writes_what_was_drawn_or_nothing() {
+    let (_home, root) = project("p94-fix-seen");
+    let id = write(&root, &draft(Kind::New, "render-judge", NEW, None)).unwrap();
+    let (_, seen) = list_seen(&root).into_iter().next().unwrap();
+    let file = path(&root, &id);
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, text.replace("Open every file yourself.", "Open no file.")).unwrap();
+    assert!(
+        matches!(accept_seen(&root, &seen), Err(Refused::Changed(_))),
+        "the proposal changed after the draw"
+    );
+    assert!(!nirvana_profiles::folder_of(&root, "render-judge").exists());
+    assert!(ledger(&root).is_empty());
+    // Read again: what Accept writes is the drawn target, byte for byte.
+    let (_, seen) = list_seen(&root).into_iter().next().unwrap();
+    let target = seen.target.clone().unwrap();
+    assert!(target.after.contains("Open no file."));
+    accept_seen(&root, &seen).unwrap();
+    assert_eq!(std::fs::read_to_string(&target.file).unwrap(), target.after);
+    // A patch: its target is the whole file after, the front matter kept; a profile changed after the draw is a change.
+    let profile = existing(&root, "reviewer", "---\ndescription: Judges.\n---\nYou judge.\n");
+    let sha = profile_sha(&root, "reviewer");
+    let mut patch = draft(Kind::Patch, "reviewer", "You judge harder.", sha);
+    patch.key = "patch:reviewer".into();
+    let patch_id = write(&root, &patch).unwrap();
+    let seen_of = |root: &Path| {
+        list_seen(root)
+            .into_iter()
+            .find(|(proposal, _)| proposal.id == patch_id)
+            .unwrap()
+            .1
+    };
+    let seen = seen_of(&root);
+    assert_eq!(
+        seen.target.as_ref().unwrap().after,
+        "---\ndescription: Judges.\n---\nYou judge harder.\n"
+    );
+    std::fs::write(&profile, "---\ndescription: Judges, edited.\n---\nYou judge.\n").unwrap();
+    assert!(matches!(accept_seen(&root, &seen), Err(Refused::Changed(_))));
+    assert_eq!(ledger(&root).len(), 1, "only the first accept");
+    // The CLI's accept is unchanged: it reads the file as it stands (here stale, so refused as before).
+    let why = accept(&root, &patch_id).unwrap_err();
+    assert!(why.contains("is stale"), "{why}");
+}
+
+/// P45a fix round, review finding 6: with the proposals' lock held elsewhere, the panel's forms say busy at once.
+#[test]
+fn p94_fix_the_try_forms_never_wait() {
+    let (_home, root) = project("p94-fix-busy");
+    let id = write(&root, &draft(Kind::New, "render-judge", NEW, None)).unwrap();
+    let (_, seen) = list_seen(&root).into_iter().next().unwrap();
+    let (held, is_held) = std::sync::mpsc::channel();
+    let (done, is_done) = std::sync::mpsc::channel::<()>();
+    let held_root = root.clone();
+    let holder = std::thread::spawn(move || {
+        let _lock = lock(&held_root).unwrap();
+        held.send(()).unwrap();
+        let _ = is_done.recv_timeout(std::time::Duration::from_secs(20));
+    });
+    is_held.recv().unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(accept_seen(&root, &seen), Err(Refused::Busy));
+    assert_eq!(try_dismiss(&root, &id, None), Err(Refused::Busy));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(list(&root).len(), 1);
+    done.send(()).unwrap();
+    holder.join().unwrap();
+    accept_seen(&root, &seen).unwrap();
+    assert!(list(&root).is_empty());
+}

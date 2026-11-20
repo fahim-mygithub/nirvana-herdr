@@ -104,6 +104,8 @@ pub(super) struct ShellHitMap {
     pub(super) agent_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(super) agent_max_scroll: usize,
     pub(super) agent_sort_toggle: Rect,
+    /// Plan 45 P45a: the `+` after the agents heading; a click opens the Profiles panel on the focused space.
+    pub(super) agent_profiles: Rect,
     pub(super) sidebar_divider: Rect,
     pub(super) sidebar_section_divider: Rect,
     pub(super) sidebar_toggle: Rect,
@@ -143,6 +145,8 @@ pub(super) struct ShellHitMap {
     pub(super) nirvana_learning: Rect,
     /// Plan 36: the open Learning panel's rows, undo buttons and close box.
     pub(super) nirvana_learning_panel: super::nirvana_learning::LearningHits,
+    /// Plan 45 P45a: the open Profiles panel's rows, headings and close box.
+    pub(super) nirvana_profile_panel: super::nirvana_profile_panel::ProfileHits,
     /// Agent rows rendered in the spaces list (plan 26 S2)
     pub(super) space_agents: Vec<(Rect, String)>,
     pub(super) new_workspace: Rect,
@@ -575,6 +579,8 @@ pub(super) enum ClientContextMenuAction {
     /// Nirvana fork, plan 12 O4a: the "new" menu's entries, each a new space.
     NewSpace(crate::nirvana_launch::NewKind),
     NewShellSpace,
+    /// Plan 45 P45a: the space menu's Profiles, the panel on that space's project.
+    Profiles,
 }
 
 #[derive(Debug)]
@@ -1069,6 +1075,8 @@ pub(crate) struct ClientShellState {
     pub(super) nirvana_git: Option<super::nirvana_git::GitPanel>,
     /// Plan 36: the Learning panel, while open.
     pub(super) nirvana_learning: Option<super::nirvana_learning::LearningPanel>,
+    /// Plan 45 P45a: the Profiles panel, while open.
+    pub(super) nirvana_profile_panel: Option<super::nirvana_profile_panel::ProfilePanel>,
     /// Plan 21 §5: The last letter badge set on the window's taskbar button.
     pub(super) last_badge_letter: Option<char>,
 }
@@ -1249,6 +1257,7 @@ impl ClientShellState {
             nirvana_jobs: None,
             nirvana_git: None,
             nirvana_learning: None,
+            nirvana_profile_panel: None,
             nirvana_accounts: None,
             last_badge_letter: None,
         }
