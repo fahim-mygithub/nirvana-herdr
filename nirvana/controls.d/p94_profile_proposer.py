@@ -224,3 +224,18 @@ CONTROLS = CONTROLS + (
             "        .find(|waiting| waiting.kind == draft.kind && waiting.profile == draft.profile)",
             "        .find(|_| false)", T_STORE, "rust"),
 )
+
+# The lead 2026-11-19: the idle flow end to end.
+T_IDLE_E2E = ("nirvana_idle_review::tests::"
+              "p94_an_idle_review_carries_findings_and_its_profile_ops_become_a_proposal")
+CONTROLS = CONTROLS + (
+    # Red: T_IDLE_E2E's brief assertion (the idle brief gets no findings).
+    Control("p94_idle_brief_no_findings", IDLE,
+            "            crate::nirvana_profile_detect::with_findings(project, &run, &id, brief, None, None);",
+            "            brief;", T_IDLE_E2E, "rust"),
+    # Red: T_IDLE_E2E's one proposal (the gate forgets the findings the review was given; the op's finding is refused).
+    Control("p94_gate_given_findings_dropped", REVIEW,
+            "                let given = crate::nirvana_profile_detect::given(project, run, &root);",
+            "                let given: Vec<crate::nirvana_profile_detect::Finding> = Vec::new();", T_IDLE_E2E,
+            "rust"),
+)

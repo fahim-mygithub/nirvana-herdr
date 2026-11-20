@@ -1602,3 +1602,78 @@ fn p94_an_idle_reviews_given_streams_are_the_streams_of_the_orders_it_read() {
     assert!(found[0].contains("TOTAL 12 passed"));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Plan 45 P45b, end to end: a tick queues an idle review whose brief carries the kept detection's findings; the
+/// reviewer delivers one valid and one refused profile op; the gate writes the one proposal through the store; the
+/// idle line counts both.
+#[test]
+fn p94_an_idle_review_carries_findings_and_its_profile_ops_become_a_proposal() {
+    use crate::nirvana_profile_detect as detect;
+    let _home = quiet("p94-idle-e2e");
+    let world = world(3_600, 10);
+    let root = ready_project("p94-idle-e2e", &world);
+    let project = Project::at(&root);
+    let role = "Judge looks with herdr look on each packaged still; image judges run 1 to 2 points harsh, so score \
+the before frame first and compare after against before.";
+    let key = detect::paragraph_key(role);
+    let kept = detect::Detection {
+        findings: vec![detect::Finding::Repeated {
+            key: key.clone(),
+            text: role.into(),
+            chars: role.chars().count(),
+            orders: 6,
+            classes: BTreeMap::from([("build.bounded".to_owned(), 6)]),
+            profiles: BTreeMap::new(),
+            unprofiled: 6,
+            needs: Vec::new(),
+            sample: vec!["r0/a1".into()],
+        }],
+        ..Default::default()
+    };
+    let cache = detect::cache_path(&root);
+    std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    std::fs::write(&cache, serde_json::to_string(&kept).unwrap()).unwrap();
+    seed_samples(&world);
+    let lines = tick_with(std::slice::from_ref(&root), &table(), &world, None);
+    assert!(lines.iter().any(|line| line.contains("queued:")), "{lines:?}");
+    let last = read_space(&root).last.expect("a last review");
+    let state = replay(&project.journal(&last.run).read().0);
+    let review = state.order(&last.order).expect("seated");
+    let brief = std::fs::read_to_string(&review.seated.order_file).expect("brief");
+    assert!(brief.contains("## Profile ops") && brief.contains(&key), "{brief}");
+    let mut delivered = report();
+    delivered["gotchas"] = serde_json::json!([]);
+    delivered["profile_ops"] = serde_json::json!([
+        {"op":"propose","name":"frame-judge","description":"Judges packaged stills.","class":"build.bounded",
+         "body":role,"evidence":"6 orders: \"image judges run 1 to 2 points harsh\"","finding":key},
+        {"op":"propose","name":"pinned-judge","description":"Judges.","class":"build.bounded","model":"claude-opus-5-5",
+         "body":role,"evidence":"6 orders: \"image judges run 1 to 2 points harsh\""}
+    ]);
+    // The worker's own check takes the delivery as it is.
+    assert!(crate::nirvana_worker::check_report(&delivered).is_ok());
+    project
+        .journal(&last.run)
+        .append(
+            world.now,
+            Kind::Delivered {
+                order: last.order.clone(),
+                report: delivered,
+            },
+        )
+        .expect("delivered");
+    let ruling = nirvana_gate::gate(&project, &last.run, &last.order).expect("gate");
+    assert_eq!(ruling.verdict, "pass", "{ruling:?}");
+    let waiting = crate::nirvana_profile_proposals::list(&root);
+    assert_eq!(waiting.len(), 1, "{:?}", ruling.axes);
+    assert_eq!(
+        (waiting[0].profile.as_str(), waiting[0].by.as_str(), waiting[0].run.as_str()),
+        ("frame-judge", last.order.as_str(), last.run.as_str())
+    );
+    assert!(waiting[0].file.is_file());
+    let result = read_space(&root).last.and_then(|l| l.result).expect("a result");
+    assert!(
+        result.starts_with("pass · 1 applied (pp-1: proposed the new profile frame-judge")
+            && result.ends_with("· 1 refused"),
+        "{result}"
+    );
+}
