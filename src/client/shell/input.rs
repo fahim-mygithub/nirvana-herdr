@@ -639,6 +639,14 @@ impl ClientShellState {
             self.route_overlay_key(key, outcome);
             return None;
         }
+        // Plan 45 P45a: the Profiles panel takes the keys while it is open; first, since it opens from the sidebar
+        // over whatever the strip had open.
+        if self.nirvana_profile_panel.is_some() {
+            if key.kind == KeyEventKind::Press {
+                self.route_profile_panel_key(key, outcome);
+            }
+            return None;
+        }
         // Nirvana fork, feature 5: the Preload panel takes the keys while it is open.
         if self.nirvana_preload.is_some() {
             if key.kind == KeyEventKind::Press {

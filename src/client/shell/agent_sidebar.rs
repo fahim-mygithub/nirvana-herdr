@@ -322,6 +322,7 @@ pub(super) fn render_agent_panel(
     ) {
         return;
     }
+    render_profiles_plus(buffer, area, snapshot, config, hits);
 
     let rows = space_agent_rows(snapshot, agent_rows(snapshot, config, None));
     render_agent_list(
@@ -368,6 +369,67 @@ pub(super) fn space_agent_rows(
         .collect()
 }
 
+/// The heading's right side: the view's label, else the sort the panel lists by.
+fn sort_label<'a>(agent_view_label: Option<&'a str>, config: &ClientShellConfig) -> &'a str {
+    agent_view_label.unwrap_or(match config.agent_panel_sort {
+        crate::config::AgentPanelSortConfig::Spaces => "grouped",
+        crate::config::AgentPanelSortConfig::Priority => "priority",
+    })
+}
+
+/// Where the heading's `+` starts: one cell after the word ` agents`.
+const PLUS_X: u16 = 8;
+
+/// Plan 45 P45a: the owner, 2026-11-18, "for each project we add a plus symbol next to agents and the agents +
+/// becocmes  abutton to store profile". The `+` after the word opens the Profiles panel on the focused space's
+/// project; `[+1]` when proposals wait there. The brackets make it a button without colour. The sort label on the
+/// right keeps its place: when the two do not fit with a cell between them, the `+` gives way and is not drawn (the
+/// space menu's Profiles line still opens the panel). The count is the cache's, never a read on this path.
+pub(super) fn render_profiles_plus(
+    buffer: &mut Buffer,
+    area: Rect,
+    snapshot: &ClientShellSnapshot,
+    config: &ClientShellConfig,
+    hits: &mut ShellHitMap,
+) {
+    hits.agent_profiles = Rect::default();
+    if area.height < 2 {
+        return;
+    }
+    let Some(space) = super::nirvana_profile_panel::focused_space_folder(snapshot) else {
+        return;
+    };
+    let text = super::nirvana_profile_panel::plus_text(
+        super::nirvana_profile_panel::waiting_cached(&space.folder),
+    );
+    let text_width = display_width(&text) as u16;
+    let sort_width =
+        display_width(sort_label(snapshot.agent_view_label.as_deref(), config)).min(area.width as usize) as u16;
+    let x = area.x + PLUS_X;
+    let sort_x = area.right().saturating_sub(sort_width);
+    if x + text_width + 1 > sort_x {
+        return;
+    }
+    let waiting = text != "[+]";
+    put_text(
+        buffer,
+        x,
+        area.y + 1,
+        text_width,
+        &text,
+        Style::default()
+            .fg(if waiting {
+                config.palette.accent
+            } else {
+                config.palette.overlay0
+            })
+            .add_modifier(Modifier::BOLD),
+    );
+    if config.mouse_capture {
+        hits.agent_profiles = Rect::new(x, area.y + 1, text_width, 1);
+    }
+}
+
 pub(super) fn render_agent_panel_header(
     buffer: &mut Buffer,
     area: Rect,
@@ -399,10 +461,7 @@ pub(super) fn render_agent_panel_header(
             .fg(config.palette.overlay0)
             .add_modifier(Modifier::BOLD),
     );
-    let sort_label = agent_view_label.unwrap_or(match config.agent_panel_sort {
-        crate::config::AgentPanelSortConfig::Spaces => "grouped",
-        crate::config::AgentPanelSortConfig::Priority => "priority",
-    });
+    let sort_label = sort_label(agent_view_label, config);
     let sort_width = display_width(sort_label).min(area.width as usize) as u16;
     let sort_rect = Rect::new(
         area.right().saturating_sub(sort_width),

@@ -983,6 +983,35 @@ impl ClientShellState {
                 frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
             }
         }
+        // Plan 45 P45a: the Profiles panel, drawn over the panes as the Learning panel is; its read is the cache's.
+        if self.overlay.is_none() {
+            if let Some(mut panel) = self.nirvana_profile_panel.clone() {
+                let top = if layout.nirvana_mods.height > 0 {
+                    layout.nirvana_mods.y
+                } else {
+                    layout.pane_surface.y
+                };
+                let area = Rect::new(
+                    layout.pane_surface.x,
+                    top,
+                    layout.pane_surface.width,
+                    layout.pane_surface.bottom().saturating_sub(top),
+                );
+                let view = super::nirvana_profile_panel::view_cached(&panel.folder);
+                let mut composed = frame.to_ratatui_buffer()?;
+                let rendered = super::nirvana_profile_panel::render_profile_panel(
+                    &mut composed,
+                    area,
+                    &mut panel,
+                    view.as_ref(),
+                    &self.config.palette,
+                );
+                occlusion.cover(rendered.area);
+                self.hits.nirvana_profile_panel = rendered;
+                self.nirvana_profile_panel = Some(panel);
+                frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
+            }
+        }
         // Nirvana fork, feature 11: the Accounts panel, at the bottom left of the panes, beside the foot's
         // button.
         if self.overlay.is_none() {

@@ -31,6 +31,9 @@ mod nirvana_memory;
 mod nirvana_mods;
 mod nirvana_new_menu;
 mod nirvana_profiles;
+// Plan 45 P45a: the `+` after the agents heading and its Profiles panel. `pub(super)` for the timer tick's
+// `take_changed` in `client/mod.rs`.
+pub(super) mod nirvana_profile_panel;
 // Plan 12 O8a: the Seats square of a Nirvana tab.
 mod nirvana_seats;
 // Plan 15: the Jobs square of a space and its panel.
