@@ -11488,4 +11488,24 @@ worker_autocompact_tokens = 300000\n";
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
+
+    /// O8a's rule for `set_mode_in`, with no test of its own until now (the o8a control pointed at the square's
+    /// `change_mode`, which refuses before it calls `set_mode_in`, so it read "red line not seen"): a refused table and,
+    /// F3, one that is not UTF-8 are left byte for byte, and the reason names the file.
+    #[test]
+    fn p97_set_mode_leaves_a_refused_or_unreadable_table() {
+        let dir = temp_dir("p97-set-mode");
+        let path = dir.join(SEATS_FILE);
+        let unreadable = [P97_V15.as_bytes(), &[0xff, 0xfe]].concat();
+        for (what, bytes, words) in [
+            ("refused", b"version = 1\nmode = \"balanced\"\n".to_vec(), "is refused, fix it first"),
+            ("not UTF-8", unreadable, "cannot be read as UTF-8"),
+        ] {
+            std::fs::write(&path, &bytes).unwrap();
+            let why = set_mode_in(&dir, Mode::Sota).unwrap_err();
+            assert!(why.contains(&path.display().to_string()) && why.contains(words), "{what}: {why}");
+            assert_eq!(std::fs::read(&path).unwrap(), bytes, "{what}: byte for byte");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
