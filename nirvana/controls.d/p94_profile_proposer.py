@@ -44,9 +44,12 @@ CONTROLS = (
     # Red: T_KINDS (the gate review and the held-out author, herdr's own briefs, counted).
     Control("p94_herdr_briefs_counted", DETECT, ".is_some_and(|text| herdr_brief(&own_text(text)))",
             ".is_some_and(|_| false)", T_KINDS, "rust"),
-    # Boilerplate. Red: T_BOILER's "repeated is empty" (the sources paragraph, herdr's two lines, counted).
-    Control("p94_herdr_lines_kept", DETECT, "                line = line.replace(herdr.as_str(), \" \");",
-            "                line = line.clone();", T_BOILER, "rust"),
+    # Boilerplate. Red: T_BOILER's "repeated is empty" (the sources paragraph, herdr's two lines, counted). P45d fix
+    # round: `own_text` now takes the herdr lines out before `blocks` cuts them again, so a sabotage of either cut
+    # alone read green (both measured); the list both read is emptied instead.
+    Control("p94_herdr_lines_kept", DETECT,
+            "        .filter(|line| !line.is_empty())\n        .collect();\n        // The longest first",
+            "        .filter(|_| false)\n        .collect();\n        // The longest first", T_BOILER, "rust"),
     # Red: T_BOILER (the lessons section's line holding the judging paragraph counted).
     Control("p94_lessons_section_kept", DETECT, '    if line.starts_with("## Lessons from earlier ")\n',
             "    if false\n", T_BOILER, "rust"),

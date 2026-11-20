@@ -1660,8 +1660,8 @@ fn p45d_fix_own_text_cuts_every_line_herdr_writes_and_keeps_the_orders_words() {
         own_text(&format!("# Slice it\n\nOne plate. {}\n", crate::nirvana_gui_tools::DEVICE_LINE)),
         "# Slice it\n\nOne plate."
     );
-    // The gate's send-back line pasted without its brief.
-    assert_eq!(own_text(&format!("# Fix it\n\n{}\n", crate::nirvana_gate::NO_WEB_REDO)), "# Fix it");
+    // The gate's send-back line pasted without its brief (NO_WEB_REDO goes by its mark as well).
+    assert_eq!(own_text(&format!("# Fix it\n\n{}\n", crate::nirvana_gate::SOURCES_REDO)), "# Fix it");
     // WEB_SOURCES on a web order goes too, and its own words still ask for the web.
     let web = "# Find the price\n\nSearch the web for the latest price of the X100 lens.";
     assert_eq!(own_text(&format!("{web}\n\n{WEB_SOURCES}\n")), web);

@@ -167,8 +167,8 @@ CONTROLS = (
     Control("p95_own_text_mixed_line_dropped", DETECT,
             "            } else if rest != flat {\n                Some(rest)\n",
             "            } else if rest != flat {\n                None\n", T_FIX_OWN, "rust"),
-    # Red: T_FIX_OWN's "# Fix it" (NO_WEB_REDO kept, not a herdr line).
-    Control("p95_own_text_no_redo_line", DETECT, "            crate::nirvana_gate::NO_WEB_REDO,\n", "", T_FIX_OWN,
+    # Red: T_FIX_OWN's "# Fix it" (SOURCES_REDO kept, not a herdr line; NO_WEB_REDO also goes by NO_WEB_MARK).
+    Control("p95_own_text_no_redo_line", DETECT, "            crate::nirvana_gate::SOURCES_REDO,\n", "", T_FIX_OWN,
             "rust"),
     # Red: T_FIX_OWN's send-back brief (its heading and opening, NO_WEB_REDO beside the gate's words, kept).
     Control("p95_own_text_send_back_kept", DETECT,
