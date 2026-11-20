@@ -328,13 +328,32 @@ pub fn matrix(table: &Table, live: &World, calibration: Option<&Calibration>) ->
 
 /// The P46a review, finding 1: a check measured against other cells books nothing, and the line says so in place of
 /// what it booked; the next idle tick checks again at once.
+///
+/// The P46a second review: a file with no fingerprint (an old or hand-made one) was said to be "seats.toml changed since
+/// this check", which nothing showed; it has its own line (`UNBOUND_SUMMARY`). Rows dropped on read for a factor no
+/// check writes (F6, `nirvana_seat_calib::dropped_rows`) are counted at the end of a summary that books.
 pub fn summary_for(table: &Table, calibration: &Calibration) -> String {
     if calibration.fits(table) {
-        calibration.summary.clone()
+        match crate::nirvana_seat_calib::dropped_rows(calibration) {
+            0 => calibration.summary.clone(),
+            1 => format!("{}; {DROPPED_ONE}", calibration.summary),
+            n => format!("{}; {n} {DROPPED_MANY}", calibration.summary),
+        }
+    } else if calibration.table_fingerprint.is_empty() {
+        UNBOUND_SUMMARY.to_owned()
     } else {
         STALE_SUMMARY.to_owned()
     }
 }
+
+/// The check line's end for a calibration file that names no table: "checked 2h 0m ago: this check names no table …".
+pub const UNBOUND_SUMMARY: &str =
+    "this check names no table (an old or hand-made file), so every cost books as the table says until the next one";
+
+/// After the summary, for rows dropped on read: "…; 1 row with a factor no check writes is dropped and books as the
+/// table says".
+pub const DROPPED_ONE: &str = "1 row with a factor no check writes is dropped and books as the table says";
+pub const DROPPED_MANY: &str = "rows with a factor no check writes are dropped and book as the table says";
 
 /// What the Table page's check line ends with while the file's factors are ignored: "checked 2h 0m ago: seats.toml
 /// changed since …" (`checked_line`).
@@ -542,7 +561,23 @@ fn read_table(seats_dir: &Path) -> (Option<Table>, Option<String>, bool) {
 /// `read_table` and the differs line (plan 46: it names carried values).
 fn read_table_line(seats_dir: &Path) -> (Option<Table>, Option<String>, bool, Option<String>) {
     let path = seats_dir.join(nirvana_seat::SEATS_FILE);
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|_| nirvana_seat::DEFAULT.to_owned());
+    // The P46a second review, F3: only a missing file reads as herdr's default. One that is there and cannot be read
+    // (not UTF-8, held by an editor) showed the default's seats while every pick was refused.
+    let text = match std::fs::read(&path).map(String::from_utf8) {
+        Ok(Ok(text)) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => nirvana_seat::DEFAULT.to_owned(),
+        _ => {
+            return (
+                None,
+                Some(format!(
+                    "{} cannot be read: herdr seat pick says why",
+                    nirvana_seat::SEATS_FILE
+                )),
+                false,
+                None,
+            )
+        }
+    };
     let differs = nirvana_seat::differs_from_default(&text);
     let line = nirvana_seat::differs_line(&text);
     match nirvana_seat::parse(&text) {

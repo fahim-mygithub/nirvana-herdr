@@ -24,7 +24,7 @@ T_IDLE = _C + "p97_the_idle_tick_checks_the_table_with_no_seat_and_no_review"
 T_CACHED = _C + "p97_the_cached_world_reads_no_factors_and_the_idle_pick_reads_the_pooled"
 # The P46a review's fix round: findings 1 to 7 and the two cases the review did not run.
 T_STALE = _C + "p97_a_factor_belongs_to_the_cells_it_was_measured_on"
-T_CLAMP_READ = _C + "p97_factors_are_clamped_when_read"
+T_CLAMP_READ = _C + "p97_factors_out_of_bounds_are_dropped_when_read"
 T_BOUNDED = _C + "p97_the_idle_check_is_bounded"
 T_DEDUPE = _C + "p97_cost_counts_one_line_per_order"
 _S = "nirvana_seat::tests::"
@@ -47,6 +47,18 @@ T_NO_BACKUP = _S + "p97_no_upgrade_without_a_backup"
 T_ADDED = _S + "p97_an_added_plain_line_carries"
 T_TRAILING = _S + "p97_trailing_whitespace_is_no_edit"
 T_DROPPED = _S + "p97_a_dropped_key_is_named_once"
+# The P46a second review's fix round: F1 to F6, the wording, and the section 5 tests.
+T_FAILED_WRITE = _S + "p97_a_failed_write_keeps_the_table_and_says_so_once"
+T_NOTE = _S + "p97_a_refusal_note_stands_only_for_its_key_and_time"
+T_REFUSALS = _S + "p97_every_refusal_is_said_once_and_leaves_no_file"
+T_REUSE = _S + "p97_a_backup_holding_the_table_is_used_again"
+T_UNREADABLE = _S + "p97_an_unreadable_table_is_left_and_named"
+T_RACE = _S + "p97_a_save_during_the_upgrade_is_kept"
+T_CARRY = _S + "p97_a_refused_carry_is_named_once"
+T_BOM = _S + "p97_a_table_with_a_bom_is_left_and_said_once"
+T_FPRINT = _C + "p97_the_fingerprint_sees_only_what_the_ratio_reads"
+T_FUTURE = _C + "p97_a_back_off_note_from_the_future_is_ignored"
+T_CHECK_LINE = _Q + "p97_the_check_line_says_why_nothing_books"
 
 CONTROLS = (
     # ---- the cost fit, seat_fit.py's section 1 ----
@@ -185,8 +197,8 @@ CONTROLS = (
     Control("p97_carry_renamed_key", SEAT, "        if key != their_key {", "        if false {", T_ALONE, "rust"),
     Control("p97_carry_any_length", SEAT, "    if a.len() != b.len() {\n        return None;\n    }\n    let at",
             "    if false {\n        return None;\n    }\n    let at", T_ALONE, "rust"),
-    Control("p97_carry_unparsed", SEAT, "        parse(&upgraded).ok()?;", "        let _ = parse(&upgraded);",
-            T_ALONE, "rust"),
+    Control("p97_carry_unparsed", SEAT, "        if let Err(problems) = parse(&upgraded) {",
+            "        if let Err(problems) = Ok::<(), String>(()) {", T_ALONE, "rust"),
     Control("p97_current_rewritten", SEAT, "    if kept == current {\n        return None;\n    }\n",
             "", T_ALONE, "rust"),
     Control("p97_v18_not_historical", SEAT, '    include_str!("nirvana_seats_v18.toml"),\n', "", T_V18, "rust"),
@@ -286,14 +298,20 @@ CONTROLS = (
     Control("p97_square_books_stale", SQUARE, "            .filter(|cal| table.calibration && cal.fits(table))",
             "            .filter(|_| table.calibration)", T_SQUARE, "rust"),
     # Red: the square's summary is the stale file's own ("checked"), not STALE_SUMMARY.
-    Control("p97_square_stale_unsaid", SQUARE, "    if calibration.fits(table) {\n        calibration.summary.clone()",
-            "    if true {\n        calibration.summary.clone()", T_SQUARE, "rust"),
-    # Finding 3: clamped when read. Red: opus high reads 1e9, not CLAMP.1.
-    Control("p97_read_unclamped", CALIB, "                    let factor = raw.clamp(CLAMP.0, CLAMP.1);",
-            "                    let factor = raw;", T_CLAMP_READ, "rust"),
-    # Red: hydrogen low (0) and medium (-2) are booked.
-    Control("p97_read_keeps_zero", CALIB, "                Some(raw) if !(raw.is_finite() && raw > 0.0) => continue,",
-            "                Some(raw) if raw.is_nan() => continue,", T_CLAMP_READ, "rust"),
+    Control("p97_square_stale_unsaid", SQUARE, "    if calibration.fits(table) {\n        match crate::nirvana_seat_calib::dropped_rows",
+            "    if true {\n        match crate::nirvana_seat_calib::dropped_rows", T_SQUARE, "rust"),
+    # Second review F6: a factor outside CLAMP is dropped on read, not clamped. Red: "1e9: dropped" (opus high is
+    # booked at 1e9).
+    Control("p97_read_out_of_bounds_booked", CALIB,
+            "    factor.is_finite() && (CLAMP.0..=CLAMP.1).contains(&factor)",
+            "    factor.is_finite() && factor > 0.0", T_CLAMP_READ, "rust"),
+    # Red: hydrogen low (0) is booked ("Low: dropped").
+    Control("p97_read_keeps_zero", CALIB, "    factor.is_finite() && (CLAMP.0..=CLAMP.1).contains(&factor)",
+            "    factor.is_finite() && factor <= CLAMP.1", T_CLAMP_READ, "rust"),
+    # Red: dropped_rows is 0, not 5 ("0, -2, NaN, 1e9 and 0.1").
+    Control("p97_dropped_rows_uncounted", CALIB,
+            "        .filter(|row| row.n >= MIN_N && row.factor.is_some_and(|factor| !factor_in_bounds(factor)))",
+            "        .filter(|_| false)", T_CLAMP_READ, "rust"),
     # Red: a file of another version reads.
     Control("p97_any_version_reads", CALIB, "        .filter(|cal| cal.version == VERSION)", "        .filter(|_| true)",
             T_CLAMP_READ, "rust"),
@@ -317,12 +335,13 @@ CONTROLS = (
     Control("p97_failed_write_replays", CALIB, "    if backing_off(dir, now) {\n        return false;",
             "    if false && backing_off(dir, now) {\n        return false;", T_BOUNDED, "rust"),
     # Finding 2: no upgrade without a backup. Red: the carried table is rewritten with the folder blocked.
-    Control("p97_upgrade_without_backup", SEAT, "    let backup = match take_backup(path, &bytes, &backup_dir) {",
-            "    let backup = match take_backup(path, &bytes, &backup_dir)\n"
-            '        .or_else(|_| Ok::<PathBuf, String>(backup_dir.join("none")))\n    {', T_NO_BACKUP, "rust"),
-    # Red: the log holds two lines after the second read.
+    Control("p97_upgrade_without_backup", SEAT, "        None => match take_backup(path, &bytes, &backup_dir) {",
+            "        None => match take_backup(path, &bytes, &backup_dir)\n"
+            '            .or_else(|_| Ok::<PathBuf, String>(backup_dir.join("none")))\n        {', T_NO_BACKUP, "rust"),
+    # Red: the log holds two lines after the second attempt (second fix round: the test that removes the refusal
+    # note between attempts; T_NO_BACKUP's second read is now skipped by the note).
     Control("p97_refusal_said_every_read", SEAT, "        if said_last {\n            return;",
-            "        if said_last && false {\n            return;", T_NO_BACKUP, "rust"),
+            "        if said_last && false {\n            return;", T_REFUSALS, "rust"),
     # Finding 5. Red: an unknown added key (`mystery = 1`) is taken and the table rewritten.
     Control("p97_added_unknown_key_taken", SEAT,
             "!theirs.contains_key(*key) && known.contains_key(*key)", "!theirs.contains_key(*key)", T_ADDED, "rust"),
@@ -333,6 +352,77 @@ CONTROLS = (
     Control("p97_trailing_space_is_an_edit", SEAT, "        if mine.trim_end() == theirs.trim_end() {",
             "        if mine == theirs {", T_TRAILING, "rust"),
     # The dropped-key path. Red: the log reads "keeping your retired_knob = 2".
-    Control("p97_dropped_named_as_kept", SEAT, "                .filter(|(_, key, _, _)| !dropped.contains(key))",
-            "                .filter(|_| true)", T_DROPPED, "rust"),
+    Control("p97_dropped_named_as_kept", SEAT, "            .filter(|(_, key, _, _)| !dropped.contains(key))",
+            "            .filter(|_| true)", T_DROPPED, "rust"),
+    # ---- the P46a second review's fix round (expected red results written before the run) ----
+    # F1. Red in T_FAILED_WRITE: a failed rename is taken for done, so "no backup left" fails (the backup stays) and the
+    # log says "took".
+    Control("p97_failed_rename_taken", SEAT, "    if let Err(err) = std::fs::rename(&temp, path) {",
+            "    if let Err(err) = std::fs::rename(&temp, path).or(Ok::<(), std::io::Error>(())) {", T_FAILED_WRITE,
+            "rust"),
+    # Red in T_FAILED_WRITE: "no backup left" (the failed attempt keeps its backup, and the next keeps another).
+    Control("p97_failed_attempt_keeps_backup", SEAT,
+            "        if made {\n            let _ = std::fs::remove_file(&backup);\n        }",
+            "        let _ = made;", T_FAILED_WRITE, "rust"),
+    # Red in T_FAILED_WRITE: "skipped, not tried" (every read tries again and rewrites the note).
+    Control("p97_refusal_retried_every_read", SEAT, "    if refused_lately(dir, &key, now()) {",
+            "    if false && refused_lately(dir, &key, now()) {", T_FAILED_WRITE, "rust"),
+    # Red in T_NOTE: "dated after now" (a note from the future stands).
+    Control("p97_note_from_the_future_stands", SEAT,
+            "        .is_ok_and(|at| at <= now && now < at.saturating_add(REFUSED_S))",
+            "        .is_ok_and(|at| now < at.saturating_add(REFUSED_S))", T_NOTE, "rust"),
+    # Red in T_REUSE: three backups, not two (the one holding the table is copied again).
+    Control("p97_backup_not_reused", SEAT, "    let (backup, made) = match existing_backup(&backup_dir, &bytes) {",
+            "    let (backup, made) = match None::<PathBuf> {", T_REUSE, "rust"),
+    # F2. Red in T_REFUSALS: "a backup file left" (the half copy and the wrong copy stay).
+    Control("p97_failed_backup_left", SEAT,
+            "    let failed = |why: String| {\n        let _ = std::fs::remove_file(&backup);",
+            "    let failed = |why: String| {\n        let _ = &backup;", T_REFUSALS, "rust"),
+    # Red in T_REFUSALS: two log lines for the copy kind (its words carry the dated name, a second apart).
+    Control("p97_refusal_names_dated_file", SEAT,
+            '            "a backup cannot be written in {} ({err})",\n            backup_dir.display()',
+            '            "a backup cannot be written in {} ({err})",\n            backup.display()', T_REFUSALS, "rust"),
+    # The read-back itself. Red in T_REFUSALS: the "wrong" kind upgrades over a backup holding other bytes.
+    Control("p97_backup_not_compared", SEAT, "        Ok(copy) if copy == bytes => Ok(backup),",
+            "        Ok(_) => Ok(backup),", T_REFUSALS, "rust"),
+    # F3. Red in T_UNREADABLE: the table that is not UTF-8 is replaced by the default ("starts_with(UNREADABLE)").
+    Control("p97_unreadable_overwritten", SEAT, "        Ok(bytes) => String::from_utf8(bytes).map_err(|err| {",
+            "        Ok(bytes) => String::from_utf8(bytes).or_else(|_| {\n"
+            "            let _ = std::fs::write(path, DEFAULT);\n"
+            "            Ok::<String, std::string::FromUtf8Error>(DEFAULT.to_owned())\n"
+            "        }).map_err(|err| {", T_UNREADABLE, "rust"),
+    # F4. Red in T_RACE: "the owner's save stands" (the upgrade writes over the save).
+    Control("p97_save_written_over", SEAT, "    if std::fs::read(path).ok().as_deref() != Some(&bytes[..]) {",
+            "    if false {", T_RACE, "rust"),
+    # F5. Red in T_CARRY: "a refusal note" (nothing is said, so there is no note to remove).
+    Control("p97_refused_carry_silent", SEAT,
+            "            refuse(&refused_carry(&current_canonical, &carried, &problems));",
+            "            let _ = &problems;", T_CARRY, "rust"),
+    # Red in T_CARRY: "no 'keeps your' for a refused table" (today's default with version = 1001 keeps it).
+    Control("p97_differs_promises_refused", SEAT,
+            ".filter(|carried| !carried.lines.is_empty() && parse(text).is_ok())",
+            ".filter(|carried| !carried.lines.is_empty())", T_CARRY, "rust"),
+    # BOM. Red in T_BOM: v15's log is empty, not one line.
+    Control("p97_bom_silent", SEAT, "    if bom {\n        refuse(BOM_WORDS);", "    if bom {\n        let _ = BOM_WORDS;",
+            T_BOM, "rust"),
+    # Wording. Red in T_CHECK_LINE: a file with no fingerprint reads STALE_SUMMARY.
+    Control("p97_unbound_said_stale", SQUARE, "    } else if calibration.table_fingerprint.is_empty() {",
+            "    } else if false {", T_CHECK_LINE, "rust"),
+    # Red in T_CHECK_LINE: the summary has no dropped-rows count.
+    Control("p97_dropped_unsaid", SQUARE, "            1 => format!(\"{}; {DROPPED_ONE}\", calibration.summary),",
+            "            1 => calibration.summary.clone(),", T_CHECK_LINE, "rust"),
+    # F3 in the square. Red in T_CHECK_LINE: "no table shown for a file that is not UTF-8".
+    Control("p97_square_unreadable_default", SQUARE, "        Ok(Ok(text)) => text,",
+            "        Ok(Ok(text)) => text,\n        Ok(Err(_)) => nirvana_seat::DEFAULT.to_owned(),", T_CHECK_LINE, "rust"),
+    # Section 5. Red in T_FUTURE: "a month ahead: ignored" (the note holds checks off).
+    Control("p97_future_backoff_stands", CALIB,
+            "        .is_some_and(|at| at <= now && now < at.saturating_add(BACKOFF_S))",
+            "        .is_some_and(|at| now < at.saturating_add(BACKOFF_S))", T_FUTURE, "rust"),
+    # Red in T_FPRINT: "every block moved" (seats hashed in file order).
+    Control("p97_fingerprint_unsorted", CALIB, "    seats.sort_by(|a, b| a.id.cmp(&b.id));",
+            "    let _ = &mut seats;", T_FPRINT, "rust"),
+    # Red in T_FPRINT: "pool ... per_usd 5h" (only the week window hashed).
+    Control("p97_fingerprint_week_only", CALIB,
+            '        let _ = writeln!(text, "pool {} per_usd {:?}", pool.id, pool.per_usd);',
+            '        let _ = writeln!(text, "pool {} per_usd {:?}", pool.id, pool.per_usd.get(WINDOW));', T_FPRINT, "rust"),
 )

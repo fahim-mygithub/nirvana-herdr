@@ -880,6 +880,21 @@ pub fn ledger(before: Option<&Calibration>, after: &Calibration, now: u64) -> Ve
 
 // ---- the factors a pick reads ----
 
+/// A factor the check could have written: finite, positive and inside `CLAMP` (the check clamps every one).
+fn factor_in_bounds(factor: f64) -> bool {
+    factor.is_finite() && (CLAMP.0..=CLAMP.1).contains(&factor)
+}
+
+/// The rows `Factors::from_calibration` drops for a factor no check writes (not finite, not positive, outside `CLAMP`):
+/// a hand edit or a bad write. Rows under `MIN_N` orders are not counted; the check writes those itself.
+pub fn dropped_rows(calibration: &Calibration) -> usize {
+    calibration
+        .cost
+        .iter()
+        .filter(|row| row.n >= MIN_N && row.factor.is_some_and(|factor| !factor_in_bounds(factor)))
+        .count()
+}
+
 /// One booking factor as a pick applies it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Applied {
@@ -921,9 +936,11 @@ pub struct Factors {
 impl Factors {
     /// The rows as a pick applies them. The P46a review, finding 3: the file is checked here, where it is read, as well
     /// as where it is written: a factor that is not finite and positive drops its row (a project's then falls back to
-    /// the pooled figure), any other is clamped to `CLAMP` and flagged, and a row under `MIN_N` orders is dropped. A
-    /// hand edit or a bad write of 0 booked a seat as free. Whether the file fits the table is the reader's question
-    /// (`Calibration::fits`), asked by `from_file`, `for_this_project` and the Seats square.
+    /// the pooled figure), and a row under `MIN_N` orders is dropped. A hand edit or a bad write of 0 booked a seat as
+    /// free. The P46a second review, F6: the check always clamps what it writes (`factor`), so a factor outside `CLAMP`
+    /// in the file is no measurement but corruption: its row is dropped too (it books as the table says) rather than
+    /// booked at the clamp's edge, and `dropped_rows` counts them for the summary. Whether the file fits the table is
+    /// the reader's question (`Calibration::fits`), asked by `from_file`, `for_this_project` and the Seats square.
     pub fn from_calibration(calibration: &Calibration, project: Option<String>) -> Self {
         let mut factors = Self {
             project,
@@ -934,19 +951,14 @@ impl Factors {
                 continue;
             }
             let applied = match row.factor {
-                Some(raw) if !(raw.is_finite() && raw > 0.0) => continue,
-                Some(raw) => {
-                    let factor = raw.clamp(CLAMP.0, CLAMP.1);
-                    Some(Applied {
-                        factor,
-                        n: row.n,
-                        // The words say "the record reads x…" for a clamped factor: a factor clamped here was never a
-                        // median the check wrote, so the raw figure is what the file said.
-                        median: if factor == raw { row.median } else { raw },
-                        clamped: row.clamped || factor != raw,
-                        project: row.project.clone(),
-                    })
-                }
+                Some(raw) if !factor_in_bounds(raw) => continue,
+                Some(factor) => Some(Applied {
+                    factor,
+                    n: row.n,
+                    median: row.median,
+                    clamped: row.clamped,
+                    project: row.project.clone(),
+                }),
                 None => None,
             };
             match &row.project {
@@ -1138,12 +1150,13 @@ pub fn failed_path(dir: &Path) -> PathBuf {
     dir.join(FAILED_FILE)
 }
 
-/// A write failed under `BACKOFF_S` ago (`FAILED_FILE`).
+/// A write failed under `BACKOFF_S` ago (`FAILED_FILE`). The P46a second review: a note dated after `now` (a clock
+/// moved back, a note copied from another machine) held every check off until that time; it is ignored.
 fn backing_off(dir: &Path, now: u64) -> bool {
     std::fs::read_to_string(failed_path(dir))
         .ok()
         .and_then(|text| text.trim().parse::<u64>().ok())
-        .is_some_and(|at| now < at.saturating_add(BACKOFF_S))
+        .is_some_and(|at| at <= now && now < at.saturating_add(BACKOFF_S))
 }
 
 /// Whether the idle tick should check again: the record grew by `DUE_LINES` or shrank, `DUE_S` passed, there is no

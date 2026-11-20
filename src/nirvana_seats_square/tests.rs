@@ -837,3 +837,50 @@ fn p97_the_square_reads_the_calibration_and_names_what_differs() {
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// The P46a second review: a calibration file with no fingerprint (an old or hand-made one) says so in its own words,
+/// not "seats.toml changed since this check"; a fitting file whose rows were dropped on read (F6) counts them after its
+/// summary; and a `seats.toml` that is there but not UTF-8 shows no table (F3), where it showed herdr's default.
+#[test]
+fn p97_the_check_line_says_why_nothing_books() {
+    let table = table();
+    let fits = Calibration {
+        version: calib::VERSION,
+        summary: "checked".into(),
+        table_fingerprint: calib::fingerprint(&table),
+        ..Calibration::default()
+    };
+    assert_eq!(super::summary_for(&table, &fits), "checked");
+    let unbound = Calibration { table_fingerprint: String::new(), ..fits.clone() };
+    assert_eq!(super::summary_for(&table, &unbound), super::UNBOUND_SUMMARY);
+    assert!(!super::UNBOUND_SUMMARY.contains("changed"), "{}", super::UNBOUND_SUMMARY);
+    let stale = Calibration { table_fingerprint: "another".into(), ..fits.clone() };
+    assert_eq!(super::summary_for(&table, &stale), super::STALE_SUMMARY);
+    let row = |effort: Effort, factor: f64| calib::CostRow {
+        seat: "hydrogen".into(),
+        effort,
+        project: None,
+        n: 7,
+        median: factor,
+        factor: Some(factor),
+        clamped: false,
+        held: false,
+    };
+    let one = Calibration { cost: vec![row(Effort::Low, 1e9), row(Effort::Medium, 0.37)], ..fits.clone() };
+    assert_eq!(super::summary_for(&table, &one), format!("checked; {}", super::DROPPED_ONE));
+    let two = Calibration { cost: vec![row(Effort::Low, 1e9), row(Effort::Medium, 0.0)], ..fits.clone() };
+    assert_eq!(super::summary_for(&table, &two), format!("checked; 2 {}", super::DROPPED_MANY));
+
+    let dir = folder("p97-unreadable");
+    let mut bytes = nirvana_seat::DEFAULT.as_bytes().to_vec();
+    bytes.extend_from_slice(&[0xff, 0xfe]);
+    std::fs::write(dir.join(nirvana_seat::SEATS_FILE), &bytes).unwrap();
+    let (got, note, differs, line) = super::read_table_line(&dir);
+    assert!(got.is_none(), "no table shown for a file that is not UTF-8");
+    assert_eq!(note.as_deref(), Some("seats.toml cannot be read: herdr seat pick says why"));
+    assert!(!differs && line.is_none());
+    std::fs::remove_file(dir.join(nirvana_seat::SEATS_FILE)).unwrap();
+    let (got, note, ..) = super::read_table_line(&dir);
+    assert!(got.is_some() && note.is_none(), "a missing file is herdr's default");
+    let _ = std::fs::remove_dir_all(&dir);
+}

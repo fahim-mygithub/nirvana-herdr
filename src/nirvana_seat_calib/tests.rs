@@ -968,9 +968,12 @@ fn p97_a_factor_belongs_to_the_cells_it_was_measured_on() {
 }
 
 /// The P46a review, finding 3: the file is checked where it is read. A factor that is not finite and positive drops
-/// its row, a huge one is clamped to `CLAMP` and flagged, a good one is kept; an unknown file version is ignored whole.
+/// its row, a good one is kept; an unknown file version is ignored whole. The P46a second review, F6: the check clamps
+/// every factor it writes, so one outside `CLAMP` (1e9, 0.1) is corruption and drops its row as well, where it was
+/// booked at the clamp's edge; a clamped row the check wrote (4.0, flagged) is booked and stays flagged; `dropped_rows`
+/// counts the dropped ones.
 #[test]
-fn p97_factors_are_clamped_when_read() {
+fn p97_factors_out_of_bounds_are_dropped_when_read() {
     let dir = temp("clamp-read");
     let table = v18_on();
     let row = |seat: &str, effort: &str, factor: Value| json!({"seat": seat, "effort": effort, "n": 7, "median": 1.0, "factor": factor});
@@ -986,6 +989,8 @@ fn p97_factors_are_clamped_when_read() {
                 row("opus", "high", json!(1e9)),
                 row("sonnet", "medium", json!(0.37)),
                 {"seat": "sonnet", "effort": "high", "n": 7, "median": null, "factor": "0.41"},
+                {"seat": "opus", "effort": "medium", "n": 7, "median": 9.0, "factor": 4.0, "clamped": true},
+                row("opus", "low", json!(0.1)),
             ],
         })
     };
@@ -999,13 +1004,18 @@ fn p97_factors_are_clamped_when_read() {
             "{effort:?}: dropped"
         );
     }
-    let opus = factors.for_cell("opus", Effort::High).expect("1e9 clamped");
-    assert_eq!((opus.factor, opus.clamped), (CLAMP.1, true));
+    assert_eq!(factors.for_cell("opus", Effort::High), None, "1e9: dropped");
+    assert_eq!(factors.for_cell("opus", Effort::Low), None, "0.1: dropped");
+    let edge = factors
+        .for_cell("opus", Effort::Medium)
+        .expect("the check's clamped row");
+    assert_eq!((edge.factor, edge.clamped), (CLAMP.1, true));
     assert!(
-        opus.words().contains("the record reads x1000000000.00"),
+        edge.words().contains("the record reads x9.00"),
         "{}",
-        opus.words()
+        edge.words()
     );
+    assert_eq!(dropped_rows(&cal), 5, "0, -2, NaN, 1e9 and 0.1");
     let sonnet = factors
         .for_cell("sonnet", Effort::Medium)
         .expect("a good row");
@@ -1052,6 +1062,64 @@ fn p97_factors_are_clamped_when_read() {
     );
     std::fs::write(dir.join(nirvana_seat::RECORD_FILE), FIXTURE).unwrap();
     assert!(due(&dir, &table, NOW));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The P46a second review: what the fingerprint must not see, and what it must. Moving blocks (seats, classes, pools,
+/// cells, price rows), turning a seat off, a class's bars and `0.5` written as `5e-1` keep it; a change to any one
+/// window of any pool's `per_usd` changes it.
+#[test]
+fn p97_the_fingerprint_sees_only_what_the_ratio_reads() {
+    let table = v18_on();
+    let mark = fingerprint(&table);
+    let mut same: Vec<(String, Table)> = Vec::new();
+    let mut moved = table.clone();
+    moved.seats.reverse();
+    moved.classes.reverse();
+    moved.pools.reverse();
+    for seat in &mut moved.seats {
+        seat.uses.reverse();
+        seat.prices.reverse();
+    }
+    same.push(("every block moved".into(), moved));
+    let mut off = table.clone();
+    off.seats[0].enabled = !off.seats[0].enabled;
+    same.push(("a seat turned off or on".into(), off));
+    let mut bars = table.clone();
+    let with_bars = bars.classes.iter().position(|class| class.bars.is_some()).expect("a class with bars");
+    bars.classes[with_bars].bars = None;
+    same.push(("a class's bars".into(), bars));
+    assert_eq!(V18.matches("\nweight = 0.5\n").count(), 3, "three class weights of 0.5");
+    let mut written = parse(&V18.replace("\nweight = 0.5\n", "\nweight = 5e-1\n")).expect("5e-1 parses");
+    written.calibration = true;
+    same.push(("0.5 written as 5e-1".into(), written));
+    for (what, edited) in &same {
+        assert_eq!(fingerprint(edited), mark, "{what}");
+    }
+    let mut windows = 0;
+    for (p, pool) in table.pools.iter().enumerate() {
+        for window in pool.per_usd.keys() {
+            let mut edited = table.clone();
+            *edited.pools[p].per_usd.get_mut(window).unwrap() *= 2.0;
+            assert_ne!(fingerprint(&edited), mark, "pool {} per_usd {window}", pool.id);
+            windows += 1;
+        }
+    }
+    assert!(windows > table.pools.len(), "more than the week window: {windows}");
+}
+
+/// The P46a second review: a back-off note dated after now (a clock moved back) is ignored, where it held every check
+/// off until that time.
+#[test]
+fn p97_a_back_off_note_from_the_future_is_ignored() {
+    let dir = temp("future-backoff");
+    let table = v18_on();
+    std::fs::write(dir.join(nirvana_seat::RECORD_FILE), FIXTURE).unwrap();
+    assert!(due(&dir, &table, NOW), "no file: due");
+    std::fs::write(failed_path(&dir), format!("{}\n", NOW - 60)).unwrap();
+    assert!(!due(&dir, &table, NOW), "a minute ago: backing off");
+    std::fs::write(failed_path(&dir), format!("{}\n", NOW + 30 * 86_400)).unwrap();
+    assert!(due(&dir, &table, NOW), "a month ahead: ignored");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -1033,6 +1033,10 @@ pub fn cost(price: &Price, tokens: &Tokens) -> f64 {
 
 /// Parses a table and refuses one with problems.
 pub fn parse(text: &str) -> Result<Table, String> {
+    // `read_or_create`'s unreadable table: its reason, which names the file and the cause (the P46a second review, F3).
+    if let Some(why) = text.strip_prefix(UNREADABLE) {
+        return Err(why.lines().next().unwrap_or_default().to_owned());
+    }
     let table: Table = toml::from_str(text).map_err(|err| err.to_string())?;
     let problems = table.problems();
     if problems.is_empty() {
@@ -1051,17 +1055,50 @@ pub fn dir() -> PathBuf {
 
 /// The table's text, written from `DEFAULT` when the file is missing, and the owner's from then on.
 /// An installed file that equals an old default upgrades itself after being copied to `<home>/nirvana/backup/`.
+///
+/// A table that exists and cannot be read reads as `UNREADABLE` and the reason, which `parse` refuses with that
+/// reason: the callers outside this file (`nirvana_claude`, `nirvana_fresh`, `nirvana_look`) all parse what this
+/// returns and already handle a refusal, so the signature stays. The callers here use `read_table`.
 pub fn read_or_create(path: &Path) -> String {
-    let _ = maybe_upgrade(path);
-    if let Ok(text) = std::fs::read_to_string(path) {
-        return text;
-    }
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(path, DEFAULT);
-    DEFAULT.to_owned()
+    read_table(path).unwrap_or_else(|why| format!("{UNREADABLE}{why}"))
 }
+
+/// `read_or_create`'s text, or why the table that is there cannot be read.
+///
+/// The P46a second review, F3: any read error fell through to writing `DEFAULT`, so a table with two bytes that are
+/// not UTF-8 (a UTF-16 save, a stray paste), or one read while an editor held it, was replaced by herdr's default with
+/// no backup. The default is written only when there is no file (`NotFound`), and then with `create_new`, so a save
+/// that lands between the read and the write is never written over either.
+pub fn read_table(path: &Path) -> Result<String, String> {
+    let _ = maybe_upgrade(path);
+    match std::fs::read(path) {
+        Ok(bytes) => String::from_utf8(bytes).map_err(|err| {
+            format!(
+                "{} cannot be read as UTF-8 text ({err}); herdr leaves it as it is: save it as UTF-8, or delete it to get herdr's default back",
+                path.display()
+            )
+        }),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .and_then(|mut file| file.write_all(DEFAULT.as_bytes()));
+            Ok(DEFAULT.to_owned())
+        }
+        Err(err) => Err(format!(
+            "{} cannot be read ({err}); herdr leaves it as it is",
+            path.display()
+        )),
+    }
+}
+
+/// What `read_or_create` returns ahead of the reason for a table it cannot read. A NUL never begins a table that
+/// parses (TOML refuses control characters), so no real file is mistaken for it.
+pub const UNREADABLE: &str = "\u{0}herdr: the seat table cannot be read\u{0}";
 
 fn extract_mode_line(text: &str) -> Option<&str> {
     let mut in_table = false;
@@ -1116,14 +1153,38 @@ fn maybe_upgrade(path: &Path) -> Option<()> {
 fn maybe_upgrade_with(path: &Path, default: &str, kept: &[&str]) -> Option<()> {
     // The bytes, so the backup can be checked against exactly what was read.
     let bytes = std::fs::read(path).ok()?;
-    let text = std::str::from_utf8(&bytes).ok()?;
+    // The P46a second review: a table saved with a byte order mark matched no default and was left alone without a
+    // word. It is still left alone (herdr would write it back without the mark), but when it would otherwise upgrade,
+    // one line says why.
+    let (body, bom) = match bytes.strip_prefix(BOM) {
+        Some(rest) => (rest, true),
+        None => (&bytes[..], false),
+    };
+    // Not UTF-8: `read_table` says so, and nothing here touches it (F3).
+    let text = std::str::from_utf8(body).ok()?;
     let normalized = text.replace("\r\n", "\n");
     let mode_line = extract_mode_line(&normalized)?;
     let canonical = replace_mode_line(&normalized, "mode = \"balanced\"");
     let current_canonical = default.replace("\r\n", "\n");
+    // The common read ends here: the table is today's default with its mode, read and compared, nothing more.
     if canonical == current_canonical {
         return None;
     }
+    let dir = path.parent()?;
+    // The P46a second review, F1: everything past this point (the nearest-default ranking parses every top-level line
+    // of 19 defaults, then the new text is parsed whole) runs at every pick while an upgrade keeps failing. A refusal
+    // leaves a note keyed on what the attempt depends on, and a read that finds the same key skips it (`refused_lately`).
+    let key = attempt_key(path, &bytes, default);
+    if refused_lately(dir, &key, now()) {
+        return None;
+    }
+    let refuse = |why: &str| {
+        upgrade_note(
+            dir,
+            &format!("seats.toml was not upgraded and is left as it was: {why}"),
+        );
+        note_refusal(dir, &key, now());
+    };
     let is_historical = kept
         .iter()
         .any(|hist| canonical == hist.replace("\r\n", "\n"));
@@ -1135,65 +1196,219 @@ fn maybe_upgrade_with(path: &Path, default: &str, kept: &[&str]) -> Option<()> {
     } else {
         let carried = carried_from_kept(&canonical, default, kept)?;
         let (upgraded, dropped) = with_carried(&current_canonical, &carried.lines);
-        // The carried values must still parse in the new default, or the file is left as it is.
-        parse(&upgraded).ok()?;
+        // The carried values must still parse in the new default, or the file is left as it is. The P46a second
+        // review, F5: it was left without a word (`version = 1001` on v15); one line now names the refused key.
+        if let Err(problems) = parse(&upgraded) {
+            refuse(&refused_carry(&current_canonical, &carried, &problems));
+            return None;
+        }
         (upgraded, Some((carried, dropped)))
     };
-    let dir = path.parent()?;
+    if bom {
+        refuse(BOM_WORDS);
+        return None;
+    }
+    // F1: the whole new text is built before anything is written.
+    let upgraded = replace_mode_line(&current_canonical, mode_line);
+    let note = carried
+        .filter(|(carried, _)| !carried.lines.is_empty())
+        .map(|(carried, dropped)| took_words(&carried, &dropped));
+
     let backup_dir = dir.join("backup");
     // The P46a review, finding 2: the table is never written over unless its backup was written and read back holding
     // the bytes read above. With the backup folder blocked (a file where the folder goes), the carried path rewrote the
     // table with no backup and no log, and the owner's layout and any dropped key were gone. Both paths: the whole-text
     // path's old file is a kept default and so could be rebuilt, but nothing documents an upgrade without a backup.
-    let backup = match take_backup(path, &bytes, &backup_dir) {
-        Ok(backup) => backup,
-        Err(why) => {
-            upgrade_note(
-                dir,
-                &format!("seats.toml was not upgraded and is left as it was: {why}"),
-            );
-            return None;
+    // F1: a backup already holding these bytes is used again, so a retry never adds a file.
+    let (backup, made) = match existing_backup(&backup_dir, &bytes) {
+        Some(backup) => (backup, false),
+        None => match take_backup(path, &bytes, &backup_dir) {
+            Ok(backup) => (backup, true),
+            Err(why) => {
+                refuse(&why);
+                return None;
+            }
+        },
+    };
+    // What a failed or abandoned attempt takes back: its temp file, and the backup it made (never one it reused).
+    let temp = dir.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .map_or_else(|| "file".into(), |name| name.to_string_lossy()),
+        std::process::id()
+    ));
+    let undo = || {
+        let _ = std::fs::remove_file(&temp);
+        if made {
+            let _ = std::fs::remove_file(&backup);
         }
     };
-
-    if let Some((carried, dropped)) = carried.filter(|(carried, _)| !carried.lines.is_empty()) {
-        // Review of the dropped-key path (not run by the P46a review): a dropped key was named under "keeping your"
-        // as well as under "dropped". The kept words now name only what the new default took.
-        let kept_words = Carried {
-            lines: carried
-                .lines
-                .iter()
-                .filter(|(_, key, _, _)| !dropped.contains(key))
-                .cloned()
-                .collect(),
-        }
-        .words();
+    if let Err(err) = std::fs::write(&temp, upgraded.as_bytes()) {
+        undo();
+        refuse(&format!(
+            "the new table cannot be written in {} ({err})",
+            dir.display()
+        ));
+        return None;
+    }
+    // The P46a second review, F4: the owner's save between the backup and the rename was replaced with no backup of it.
+    // The table is read again just before the rename; changed, the attempt is dropped without a word and the next read
+    // starts over from the new bytes. (A save inside the last few microseconds still races; the window was the whole
+    // backup and write.)
+    if let Some(Fault::TableChanges(owner)) = fault() {
+        let _ = std::fs::write(path, owner);
+    }
+    if std::fs::read(path).ok().as_deref() != Some(&bytes[..]) {
+        undo();
+        return None;
+    }
+    if let Err(err) = std::fs::rename(&temp, path) {
+        undo();
+        refuse(&format!("it cannot be replaced ({err})"));
+        return None;
+    }
+    let _ = std::fs::remove_file(dir.join(REFUSED_FILE));
+    // F1: "took herdr's default" only once the rename returned Ok. It said so before the write, at every read, while
+    // the write kept failing.
+    if let Some(words) = note {
         upgrade_note(
             dir,
-            &format!(
-                "seats.toml took herdr's default{}{}; the file before is {}",
-                if kept_words.is_empty() {
-                    String::new()
-                } else {
-                    format!(", keeping your {kept_words}")
-                },
-                if dropped.is_empty() {
-                    String::new()
-                } else {
-                    format!("; dropped, no longer in the default: {}", dropped.join(", "))
-                },
-                backup.display()
-            ),
+            &format!("{words}; the file before is {}", backup.display()),
         );
     }
-
-    let upgraded = replace_mode_line(&current_canonical, mode_line);
-    let _ = write_atomic(path, upgraded.as_bytes());
     Some(())
 }
 
+/// The log line's words for an upgrade that carried the owner's values, before the backup's name.
+fn took_words(carried: &Carried, dropped: &[String]) -> String {
+    // Review of the dropped-key path (not run by the P46a review): a dropped key was named under "keeping your"
+    // as well as under "dropped". The kept words now name only what the new default took.
+    let kept_words = Carried {
+        lines: carried
+            .lines
+            .iter()
+            .filter(|(_, key, _, _)| !dropped.contains(key))
+            .cloned()
+            .collect(),
+    }
+    .words();
+    format!(
+        "seats.toml took herdr's default{}{}",
+        if kept_words.is_empty() {
+            String::new()
+        } else {
+            format!(", keeping your {kept_words}")
+        },
+        if dropped.is_empty() {
+            String::new()
+        } else {
+            format!("; dropped, no longer in the default: {}", dropped.join(", "))
+        },
+    )
+}
+
+/// F5's words: the carried values the new default refuses, each tried alone; all of them when none fails alone.
+fn refused_carry(current: &str, carried: &Carried, problems: &str) -> String {
+    let alone: Vec<String> = carried
+        .lines
+        .iter()
+        .filter(|line| parse(&with_carried(current, std::slice::from_ref(*line)).0).is_err())
+        .map(|line| Carried { lines: vec![line.clone()] }.words())
+        .collect();
+    let named = if alone.is_empty() {
+        carried.words()
+    } else {
+        alone.join("; ")
+    };
+    format!(
+        "herdr's default refuses your {named} ({})",
+        problems.lines().next().unwrap_or_default()
+    )
+}
+
+/// UTF-8's byte order mark.
+const BOM: &[u8] = b"\xEF\xBB\xBF";
+
+/// The refusal for a table that would upgrade but starts with `BOM`.
+const BOM_WORDS: &str = "it starts with a byte order mark, which herdr would not write back; save it as UTF-8 without one to take herdr's default";
+
+/// Beside `seats.toml`: the last refused attempt's key and when (`refused_lately`).
+pub const REFUSED_FILE: &str = "seats-upgrade.refused";
+
+/// How long a refusal stands while its key holds. A lock that clears (an editor, a scanner) changes no key; this is
+/// how soon its upgrade is tried again. The log is not written again either way (`upgrade_note`).
+pub const REFUSED_S: u64 = 600;
+
+/// What an upgrade attempt's outcome depends on: the table's bytes, the default this binary carries, whether the table
+/// is read-only, and what stands at `backup/`. Clearing a read-only attribute, or removing a file where the backup
+/// folder goes, changes the key, so the next read tries at once.
+fn attempt_key(path: &Path, bytes: &[u8], default: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let short = |data: &[u8]| -> String {
+        Sha256::digest(data)
+            .iter()
+            .take(8)
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    };
+    let readonly = std::fs::metadata(path).is_ok_and(|meta| meta.permissions().readonly());
+    // A folder and no folder are one state: the attempt makes the folder, and a key it changed itself made the next
+    // read try again (measured: two attempts where one was meant, in `p97_a_failed_write_keeps_the_table_and_says_so_once`).
+    let blocked = path
+        .parent()
+        .and_then(|dir| std::fs::metadata(dir.join("backup")).ok())
+        .is_some_and(|meta| !meta.is_dir());
+    format!(
+        "{} {} readonly={readonly} backup_blocked={blocked}",
+        short(bytes),
+        short(default.as_bytes())
+    )
+}
+
+/// The note beside the table holds `key`, written under `REFUSED_S` ago. A note dated after `now` (a clock moved back)
+/// is ignored rather than standing until that time.
+fn refused_lately(dir: &Path, key: &str, now: u64) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join(REFUSED_FILE)) else {
+        return false;
+    };
+    let Some((at, noted)) = text.trim_end().split_once(' ') else {
+        return false;
+    };
+    at.parse::<u64>()
+        .is_ok_and(|at| at <= now && now < at.saturating_add(REFUSED_S))
+        && noted == key
+}
+
+fn note_refusal(dir: &Path, key: &str, now: u64) {
+    let _ = std::fs::write(dir.join(REFUSED_FILE), format!("{now} {key}\n"));
+}
+
+/// A backup in `backup_dir` that already holds `bytes`: a refused or abandoned attempt that kept its backup, or an
+/// owner who put an old table back. Only `seats-*.toml` of the same length are read.
+fn existing_backup(backup_dir: &Path, bytes: &[u8]) -> Option<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(backup_dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("seats-") && name.ends_with(".toml"))
+        })
+        .filter(|path| std::fs::metadata(path).is_ok_and(|meta| meta.len() == bytes.len() as u64))
+        .collect();
+    found.sort();
+    found
+        .into_iter()
+        .find(|path| std::fs::read(path).is_ok_and(|copy| copy == bytes))
+}
+
 /// The backup of the table at `path`, whose bytes are `bytes`: a new dated file in `backup_dir`, read back and
-/// compared. `Err` says why there is none.
+/// compared. `Err` says why there is none, and the file it began is removed.
+///
+/// The P46a second review, F2: the reasons named the dated file, which changes each second, so `upgrade_note` never
+/// matched its last line and wrote one per second of picks; and a short copy or a copy that did not match stayed
+/// behind for the next attempt's `-2` name to sit beside. The reasons name the folder only.
 fn take_backup(path: &Path, bytes: &[u8], backup_dir: &Path) -> Result<PathBuf, String> {
     std::fs::create_dir_all(backup_dir).map_err(|err| {
         format!(
@@ -1203,20 +1418,62 @@ fn take_backup(path: &Path, bytes: &[u8], backup_dir: &Path) -> Result<PathBuf, 
     })?;
     // Plan 46: a dated name, so a later upgrade never writes over an earlier backup (it was one `seats.toml`).
     let backup = backup_name(backup_dir, now());
-    std::fs::copy(path, &backup).map_err(|err| {
-        format!("the backup {} cannot be written ({err})", backup.display())
-    })?;
+    let failed = |why: String| {
+        let _ = std::fs::remove_file(&backup);
+        Err(why)
+    };
+    let copied = match fault() {
+        Some(Fault::CopyFails) => std::fs::write(&backup, &bytes[..bytes.len() / 2])
+            .and_then(|()| Err(std::io::Error::other("a copy that stopped half way"))),
+        _ => Ok(()),
+    };
+    if let Err(err) = copied.and_then(|()| std::fs::copy(path, &backup).map(|_| ())) {
+        return failed(format!(
+            "a backup cannot be written in {} ({err})",
+            backup_dir.display()
+        ));
+    }
+    if let Some(Fault::BackupWrong) = fault() {
+        let _ = std::fs::write(&backup, b"not the table");
+    }
     match std::fs::read(&backup) {
         Ok(copy) if copy == bytes => Ok(backup),
-        Ok(_) => Err(format!(
-            "the backup {} does not hold the table as it was read",
-            backup.display()
+        Ok(_) => failed(format!(
+            "a backup written in {} does not hold the table as it was read",
+            backup_dir.display()
         )),
-        Err(err) => Err(format!(
-            "the backup {} cannot be read back ({err})",
-            backup.display()
+        Err(err) => failed(format!(
+            "a backup written in {} cannot be read back ({err})",
+            backup_dir.display()
         )),
     }
+}
+
+/// Faults a test puts into one upgrade attempt, on its own thread; none outside tests.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fault {
+    /// The copy writes half the table and fails.
+    CopyFails,
+    /// The copy lands, holding other bytes.
+    BackupWrong,
+    /// The owner saves these bytes between the backup and the rename.
+    TableChanges(&'static str),
+}
+
+#[cfg(test)]
+thread_local! {
+    static UPGRADE_FAULT: std::cell::Cell<Option<Fault>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn fault() -> Option<Fault> {
+    UPGRADE_FAULT.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+fn fault() -> Option<Fault> {
+    None
 }
 
 /// One dated line in `backup/seats-upgrades.log`, where the upgrade reports. When that folder is what failed, the line
@@ -1469,8 +1726,10 @@ pub fn differs_line(text: &str) -> Option<String> {
         return None;
     }
     Some(
+        // The P46a second review, F5: "keeps your …; the rest is herdr's default" only for a table that parses. A value
+        // the default refuses (`version = 1001`) is no table herdr keeps; the plain line is said instead.
         match carried_edits(&canonical(text), &canonical(DEFAULT))
-            .filter(|carried| !carried.lines.is_empty())
+            .filter(|carried| !carried.lines.is_empty() && parse(text).is_ok())
         {
             Some(carried) => format!(
                 "seats.toml keeps your {}; the rest is herdr's default.",
@@ -1604,7 +1863,7 @@ pub fn with_mode(text: &str, mode: Mode) -> Result<String, String> {
 /// refused is not touched: the owner's own edit is never overwritten (O2's rule for this file).
 pub fn set_mode_in(dir: &Path, mode: Mode) -> Result<Mode, String> {
     let path = dir.join(SEATS_FILE);
-    let text = read_or_create(&path);
+    let text = read_table(&path)?;
     let previous = parse(&text)
         .map_err(|problems| format!("{} is refused, fix it first:\n{problems}", path.display()))?
         .mode;
@@ -4564,7 +4823,8 @@ fn now() -> u64 {
 /// The owner's table, or why it is refused. O3's runner reads it so; the CLI exits on a refusal.
 pub fn table() -> Result<Table, String> {
     let path = dir().join(SEATS_FILE);
-    parse(&read_or_create(&path)).map_err(|problems| {
+    // F3: a table that cannot be read is not "refused, delete it": the reason names the file and the cause.
+    parse(&read_table(&path)?).map_err(|problems| {
         format!(
             "{} is refused (delete it to get herdr's default back):
 {problems}",
@@ -4772,7 +5032,11 @@ pub fn table_for(root: &Path) -> Result<Table, String> {
 
 fn load_table() -> Table {
     let path = dir().join(SEATS_FILE);
-    match parse(&read_or_create(&path)) {
+    let text = read_table(&path).unwrap_or_else(|why| {
+        eprintln!("herdr seat: {why}");
+        std::process::exit(2);
+    });
+    match parse(&text) {
         Ok(table) => table,
         Err(problems) => {
             eprintln!(
@@ -5120,7 +5384,7 @@ fn diff_cli(args: &[String]) -> std::io::Result<()> {
         usage_exit();
     }
     let path = dir().join(SEATS_FILE);
-    let text = read_or_create(&path);
+    let text = read_table(&path).map_err(std::io::Error::other)?;
     print!("{}", diff_to_default(&text, &path.display().to_string()));
     std::io::stdout().flush()
 }
@@ -10943,6 +11207,284 @@ worker_autocompact_tokens = 300000\n";
                 )),
                 "{what}: {log}"
             );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    // ---- the P46a second review's fix round ----
+
+    /// The table file read-only for the life of the guard; on drop (a passing test or a panicking one) it is writable
+    /// again and its temp folder is removed, so a failed run leaves no read-only file in the temp folder.
+    struct ReadOnly {
+        path: PathBuf,
+        dir: PathBuf,
+    }
+
+    impl ReadOnly {
+        fn set(path: &Path, on: bool) {
+            let mut perm = std::fs::metadata(path).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perm.set_readonly(on);
+            std::fs::set_permissions(path, perm).unwrap();
+        }
+
+        fn new(path: &Path, dir: &Path) -> Self {
+            Self::set(path, true);
+            Self { path: path.to_owned(), dir: dir.to_owned() }
+        }
+    }
+
+    impl Drop for ReadOnly {
+        fn drop(&mut self) {
+            if std::fs::metadata(&self.path).is_ok() {
+                Self::set(&self.path, false);
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// Every line of both upgrade logs.
+    fn p97_log_lines(dir: &Path) -> Vec<String> {
+        [dir.join("backup").join(UPGRADE_LOG), dir.join(UPGRADE_LOG)]
+            .iter()
+            .filter_map(|log| std::fs::read_to_string(log).ok())
+            .flat_map(|text| text.lines().map(str::to_owned).collect::<Vec<_>>())
+            .collect()
+    }
+
+    /// Runs `body` with `fault` in this thread's upgrade attempts, cleared after it (a panic included).
+    fn with_fault<T>(fault: Fault, body: impl FnOnce() -> T) -> T {
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                UPGRADE_FAULT.with(|cell| cell.set(None));
+            }
+        }
+        UPGRADE_FAULT.with(|cell| cell.set(Some(fault)));
+        let _clear = Clear;
+        body()
+    }
+
+    /// F1: an upgrade whose final write fails leaves the owner's table byte for byte, no backup, and one log line that
+    /// says it was not upgraded, however often the table is read; "took herdr's default" is said only after the write.
+    /// Made writable, the next read upgrades with exactly one backup. Both paths: carried and whole-text.
+    #[test]
+    fn p97_a_failed_write_keeps_the_table_and_says_so_once() {
+        for (what, installed) in [("carried", p97_owners_v15()), ("whole text", replace_mode_line(P97_V15, "mode = \"sota\""))] {
+            let dir = temp_dir(&format!("p97-readonly-{}", what.replace(' ', "-")));
+            let path = dir.join(SEATS_FILE);
+            std::fs::write(&path, &installed).unwrap();
+            let guard = ReadOnly::new(&path, &dir);
+            let started = std::time::Instant::now();
+            assert_eq!(read_or_create(&path), installed, "{what}");
+            let first = started.elapsed();
+            // The four reads after the first skip the attempt: the note stays the first read's (aged here by a second,
+            // so a rewrite would show), where each attempt writes it afresh.
+            let note = std::fs::read_to_string(dir.join(REFUSED_FILE)).expect("a refusal note");
+            let aged = format!("{} {}", now() - 1, note.split_once(' ').unwrap().1);
+            std::fs::write(dir.join(REFUSED_FILE), &aged).unwrap();
+            let started = std::time::Instant::now();
+            for _ in 0..4 {
+                assert_eq!(read_or_create(&path), installed, "{what}");
+            }
+            println!("p97 {what}: a failing read took {first:?}, the next four {:?}", started.elapsed());
+            assert_eq!(std::fs::read_to_string(dir.join(REFUSED_FILE)).unwrap(), aged, "{what}: skipped, not tried");
+            assert_eq!(std::fs::read(&path).unwrap(), installed.as_bytes(), "{what}: byte for byte");
+            assert!(p97_backups(&dir).is_empty(), "{what}: no backup left");
+            let log = p97_log_lines(&dir);
+            assert_eq!(log.len(), 1, "{what}: {log:?}");
+            assert!(
+                log[0].contains(" seats.toml was not upgraded and is left as it was: it cannot be replaced ("),
+                "{what}: {log:?}"
+            );
+            assert!(!log[0].contains("took"), "{what}: {log:?}");
+            ReadOnly::set(&path, false);
+            let want = replace_mode_line(DEFAULT, "mode = \"sota\"");
+            let want = if what == "carried" {
+                want.replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1)
+            } else {
+                want
+            };
+            assert_eq!(read_or_create(&path), want, "{what}: writable, it upgrades");
+            assert_eq!(p97_backups(&dir), [installed.clone()], "{what}: one backup");
+            assert!(!dir.join(REFUSED_FILE).exists(), "{what}: the note is cleared");
+            let log = p97_log_lines(&dir);
+            if what == "carried" {
+                assert_eq!(log.len(), 2, "{log:?}");
+                assert!(log[1].contains(" seats.toml took herdr's default, keeping your overrides_per_run = 5; the file before is "), "{log:?}");
+            } else {
+                assert_eq!(log.len(), 1, "{log:?}");
+            }
+            drop(guard);
+            assert!(!dir.exists(), "{what}: the guard removed its folder");
+        }
+    }
+
+    /// F1: the refusal note stands for `REFUSED_S` and only for its key; one dated after now (a clock moved back) or
+    /// older than that is tried again.
+    #[test]
+    fn p97_a_refusal_note_stands_only_for_its_key_and_time() {
+        let dir = temp_dir("p97-note");
+        let at = 1_795_000_000;
+        assert!(!refused_lately(&dir, "k", at), "no note");
+        note_refusal(&dir, "k", at);
+        assert!(refused_lately(&dir, "k", at + REFUSED_S - 1));
+        assert!(!refused_lately(&dir, "other", at + 1), "another key");
+        assert!(!refused_lately(&dir, "k", at + REFUSED_S), "stood its time");
+        assert!(!refused_lately(&dir, "k", at - 1), "dated after now");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F2: each refusal says the same words at every attempt (no dated file name), so a second attempt adds no line;
+    /// the table is byte for byte; a failed or mismatched backup file is removed, so nothing is left for a `-2` name to
+    /// sit beside. Kinds: the backup folder cannot be made, the copy fails half way, the copy holds other bytes.
+    #[test]
+    fn p97_every_refusal_is_said_once_and_leaves_no_file() {
+        let kinds: [(&str, Option<Fault>, &str); 3] = [
+            ("folder", None, "the backup folder "),
+            ("copy", Some(Fault::CopyFails), "a backup cannot be written in "),
+            ("wrong", Some(Fault::BackupWrong), "does not hold the table as it was read"),
+        ];
+        for (what, fault, words) in kinds {
+            let dir = temp_dir(&format!("p97-refusal-{what}"));
+            let path = dir.join(SEATS_FILE);
+            let installed = p97_owners_v15();
+            std::fs::write(&path, &installed).unwrap();
+            if fault.is_none() {
+                std::fs::write(dir.join("backup"), "a file where the backup folder goes").unwrap();
+            }
+            let attempt = || {
+                let text = match fault {
+                    Some(fault) => with_fault(fault, || read_or_create(&path)),
+                    None => read_or_create(&path),
+                };
+                assert_eq!(text, installed, "{what}");
+            };
+            attempt();
+            // A second attempt, past the note: the same words, so no second line.
+            std::fs::remove_file(dir.join(REFUSED_FILE)).expect("a refusal note");
+            std::thread::sleep(Duration::from_millis(1100));
+            attempt();
+            assert_eq!(std::fs::read(&path).unwrap(), installed.as_bytes(), "{what}: byte for byte");
+            let log = p97_log_lines(&dir);
+            assert_eq!(log.len(), 1, "{what}: {log:?}");
+            assert!(log[0].contains(" seats.toml was not upgraded and is left as it was: "), "{what}: {log:?}");
+            assert!(log[0].contains(words), "{what}: {log:?}");
+            assert!(!log[0].contains("seats-2"), "{what}: a dated name in {log:?}");
+            assert!(p97_backups(&dir).is_empty(), "{what}: a backup file left");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// F1: a backup that already holds the table's bytes is used again, not copied a second time.
+    #[test]
+    fn p97_a_backup_holding_the_table_is_used_again() {
+        let dir = temp_dir("p97-reuse");
+        let path = dir.join(SEATS_FILE);
+        let installed = p97_owners_v15();
+        std::fs::write(&path, &installed).unwrap();
+        std::fs::create_dir_all(dir.join("backup")).unwrap();
+        let earlier = dir.join("backup").join("seats-20261101T000000Z.toml");
+        std::fs::write(&earlier, &installed).unwrap();
+        std::fs::write(dir.join("backup").join("seats-20261102T000000Z.toml"), "another table").unwrap();
+        read_or_create(&path);
+        assert_eq!(p97_backups(&dir), [installed.clone(), "another table".to_owned()]);
+        let log = p97_log_lines(&dir);
+        assert!(log.len() == 1 && log[0].ends_with(&format!("the file before is {}", earlier.display())), "{log:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F3: only a missing table is written from the default. v15 with two bytes that are not UTF-8 is left byte for
+    /// byte with no backup, and a pick's parse is refused with a reason naming the file and the cause.
+    #[test]
+    fn p97_an_unreadable_table_is_left_and_named() {
+        let dir = temp_dir("p97-unreadable");
+        let path = dir.join(SEATS_FILE);
+        let bytes = [P97_V15.as_bytes(), &[0xff, 0xfe]].concat();
+        std::fs::write(&path, &bytes).unwrap();
+        for _ in 0..2 {
+            let text = read_or_create(&path);
+            assert!(text.starts_with(UNREADABLE), "{text:?}");
+            let refused = parse(&text).unwrap_err();
+            assert!(refused.contains(&path.display().to_string()) && refused.contains("UTF-8"), "{refused}");
+            assert!(read_table(&path).unwrap_err().contains("herdr leaves it as it is"));
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "byte for byte");
+        assert!(!dir.join("backup").exists(), "no backup");
+        assert!(p97_log_lines(&dir).is_empty());
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(read_or_create(&path), DEFAULT, "missing: created");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), DEFAULT);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F4: the owner's save between the backup and the rename is not written over. The attempt is dropped without a
+    /// word, its backup removed; the next read starts over from the owner's new bytes and backs those up.
+    #[test]
+    fn p97_a_save_during_the_upgrade_is_kept() {
+        let dir = temp_dir("p97-race");
+        let path = dir.join(SEATS_FILE);
+        let installed = p97_owners_v15();
+        std::fs::write(&path, &installed).unwrap();
+        let saved: &'static str = Box::leak(
+            installed.replacen("\noverrides_per_run = 5\n", "\noverrides_per_run = 7\n", 1).into_boxed_str(),
+        );
+        assert_eq!(with_fault(Fault::TableChanges(saved), || read_or_create(&path)), saved);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved, "the owner's save stands");
+        assert!(p97_backups(&dir).is_empty(), "the dropped attempt's backup is gone");
+        assert!(p97_log_lines(&dir).is_empty() && !dir.join(REFUSED_FILE).exists(), "said nothing");
+        let want = replace_mode_line(DEFAULT, "mode = \"sota\"").replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 7\n", 1);
+        assert_eq!(read_or_create(&path), want, "the next read starts over");
+        assert_eq!(p97_backups(&dir), [saved.to_owned()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F5: a carried value the new default refuses (`version = 1001` on v15) leaves the table alone, and one line names
+    /// the key; the differs line promises nothing, for v15 or for today's default with the same edit.
+    #[test]
+    fn p97_a_refused_carry_is_named_once() {
+        let dir = temp_dir("p97-refused-carry");
+        let path = dir.join(SEATS_FILE);
+        assert_eq!(P97_V15.matches("\nversion = 1\n").count(), 1);
+        let installed = P97_V15.replacen("\nversion = 1\n", "\nversion = 1001\n", 1);
+        std::fs::write(&path, &installed).unwrap();
+        assert_eq!(read_or_create(&path), installed);
+        std::fs::remove_file(dir.join(REFUSED_FILE)).expect("a refusal note");
+        assert_eq!(read_or_create(&path), installed);
+        assert!(p97_backups(&dir).is_empty());
+        let log = p97_log_lines(&dir);
+        assert_eq!(log.len(), 1, "{log:?}");
+        assert!(
+            log[0].ends_with(" seats.toml was not upgraded and is left as it was: herdr's default refuses your version = 1001 (version 1001 is not 1)"),
+            "{log:?}"
+        );
+        assert_eq!(differs_line(&installed).as_deref(), Some(DIFFERS_LINE));
+        let current = DEFAULT.replacen("\nversion = 1\n", "\nversion = 1001\n", 1);
+        assert_eq!(differs_line(&current).as_deref(), Some(DIFFERS_LINE), "no 'keeps your' for a refused table");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A table saved with a byte order mark that would otherwise upgrade stays as it is and says why, once; one that
+    /// is today's default with a mark says nothing (nothing to upgrade).
+    #[test]
+    fn p97_a_table_with_a_bom_is_left_and_said_once() {
+        for (what, body, says) in [("v15", p97_owners_v15(), true), ("today's", DEFAULT.to_owned(), false)] {
+            let dir = temp_dir(&format!("p97-bom-{}", what.replace('\'', "")));
+            let path = dir.join(SEATS_FILE);
+            let bytes = [BOM, body.as_bytes()].concat();
+            std::fs::write(&path, &bytes).unwrap();
+            read_or_create(&path);
+            let _ = std::fs::remove_file(dir.join(REFUSED_FILE));
+            read_or_create(&path);
+            assert_eq!(std::fs::read(&path).unwrap(), bytes, "{what}: byte for byte");
+            assert!(p97_backups(&dir).is_empty(), "{what}");
+            let log = p97_log_lines(&dir);
+            if says {
+                assert_eq!(log.len(), 1, "{what}: {log:?}");
+                assert!(log[0].contains("byte order mark"), "{log:?}");
+            } else {
+                assert!(log.is_empty(), "{what}: {log:?}");
+            }
             let _ = std::fs::remove_dir_all(&dir);
         }
     }

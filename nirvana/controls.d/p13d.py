@@ -90,9 +90,20 @@ CONTROLS = (
         "p13d_seats_backup",
         SEAT,
         # P46a fix round: the copy is checked now, and a table whose backup was not taken is not upgraded; skipping the
-        # copy still turns the upgrade test red (the file is left as it was).
-        "    std::fs::copy(path, &backup).map_err(|err| {",
-        "    // backup skipped\n    Ok::<u64, std::io::Error>(0).map_err(|err| {",
+        # copy still turns the upgrade test red (the file is left as it was). Second fix round: the backup is skipped.
+        "std::fs::copy(path, &backup).map(|_| ())",
+        "Ok::<(), std::io::Error>(()) /* backup skipped */",
+        "unedited_seats_toml_upgrades_itself_preserving_mode_and_backs_up_old_default",
+        "rust",
+    ),
+    Control(
+        "p13d_seats_backup_wrong_bytes",
+        SEAT,
+        # The P46a second review: p13d_seats_backup no longer tested that the backup holds the old file. The copy writes
+        # other bytes; the read-back refuses it, so the upgrade test goes red ("matches current DEFAULT with mode put
+        # back": the table is left as it was), where a backup that held the wrong bytes would have let it pass.
+        "std::fs::copy(path, &backup).map(|_| ())",
+        "std::fs::write(&backup, b\"not the table\")",
         "unedited_seats_toml_upgrades_itself_preserving_mode_and_backs_up_old_default",
         "rust",
     ),
