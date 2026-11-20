@@ -1760,3 +1760,53 @@ fn p94_a_review_brief_with_no_findings_is_todays_byte_for_byte() {
     );
     assert!(!crate::nirvana_profile_detect::given_path(&project, "r1", "b1-lr").exists());
 }
+
+/// Plan 45 P45b: the Work Report schema names `profile_ops`, and a review that delivers it passes the report check at
+/// the worker's end (`Stream::report`, which a claude worker's result goes through) and at the gate
+/// (`nirvana_gate::report_axis`). Before, the key was unknown to both and the whole delivery failed.
+#[test]
+fn p94_a_review_delivery_carrying_profile_ops_passes_the_worker_and_the_gate() {
+    let schema: Value = serde_json::from_str(crate::nirvana_worker::REPORT_SCHEMA).unwrap();
+    assert_eq!(
+        schema["properties"]["profile_ops"]["items"]["properties"]["op"]["enum"],
+        serde_json::json!(["propose", "patch"])
+    );
+    let mut report = done("done");
+    report["profile_ops"] = serde_json::json!([{"op":"propose","name":"frame-judge","description":"d",
+        "class":"build.bounded","body":ROLE,"evidence":"7 orders: \"image judges run 1 to 2 points harsh\""}]);
+    let line = serde_json::json!({"type":"result","subtype":"success","is_error":false,
+        "result":report.to_string(),"structured_output":report});
+    let mut stream = crate::nirvana_worker::Stream::new("claude");
+    stream.feed(&line.to_string());
+    assert_eq!(stream.report().expect("the worker takes it"), report);
+    assert_eq!(nirvana_gate::report_axis(Some(&report)).mark, Mark::Pass);
+    // Not a list of objects: refused at both ends, as lesson_ops is.
+    let mut bad = done("done");
+    bad["profile_ops"] = serde_json::json!("propose a judge");
+    assert_eq!(
+        crate::nirvana_worker::check_report(&bad).unwrap_err(),
+        "profile_ops is not a list of objects"
+    );
+}
+
+/// A non-review order carrying `profile_ops` is treated as one carrying `lesson_ops` is today: its report passes and
+/// the ops are ignored. Only a lesson or idle review's gate applies them, so no proposal is written. (Unlike
+/// `lesson_ops`, the key is no `SIGNALS` entry: a worker's own `profile_ops` does not keep a lesson review.)
+#[test]
+fn p94_a_build_order_carrying_profile_ops_is_ignored_as_lesson_ops_are() {
+    let home = quiet("p94-build-ops");
+    seats_in_home(&home);
+    let root = repo("p94-build-ops");
+    let project = Project::at(&root);
+    let mut report = learned();
+    report["lesson_ops"] = serde_json::json!([{"op":"new","name":"Mine","class":"build.bounded","steps":"1",
+        "evidence":"TOTAL 12 passed, from the worker"}]);
+    report["profile_ops"] = serde_json::json!([{"op":"propose","name":"frame-judge","description":"d",
+        "class":"build.bounded","body":ROLE,"evidence":"7 orders: \"TOTAL 12 passed, from the worker\""}]);
+    delivered(&root, "r1", "b1", report, "TOTAL 12 passed, from the worker", None);
+    let ruling = nirvana_gate::gate(&project, "r1", "b1").expect("gate");
+    assert_eq!(ruling.verdict, "pass", "{ruling:?}");
+    assert!(crate::nirvana_profile_proposals::list(&root).is_empty(), "no proposal");
+    assert!(!nirvana_lessons::read_index(&root).lessons.contains_key("mine"), "no lesson");
+    assert!(!ruling.axes.iter().any(|axis| axis.axis == PROFILE_OP));
+}

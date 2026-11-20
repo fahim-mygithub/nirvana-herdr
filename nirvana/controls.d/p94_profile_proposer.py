@@ -177,3 +177,22 @@ CONTROLS = CONTROLS + (
     Control("p94_detect_help_gone", DETECT, '            "--help" | "-h" => {', '            "--never-a-flag" => {',
             T_DETECT_HELP, "rust"),
 )
+
+# The lead 2026-11-19: the worker's report check names profile_ops (P45b report, section 4, hunk 1).
+WORKER = "src/nirvana_worker.rs"
+T_DELIVER = "nirvana_review::tests::p94_a_review_delivery_carrying_profile_ops_passes_the_worker_and_the_gate"
+T_BUILD_OPS = "nirvana_review::tests::p94_a_build_order_carrying_profile_ops_is_ignored_as_lesson_ops_are"
+CONTROLS = CONTROLS + (
+    # Red: T_DELIVER's `stream.report()` (the worker's end refuses an unknown key).
+    Control("p94_worker_key_unknown", WORKER, '    "profile_ops",\n];', '    "profile_ops_unknown",\n];', T_DELIVER,
+            "rust"),
+    # Red: T_DELIVER's schema assertion (the schema a worker is started with does not name it).
+    Control("p94_worker_schema_unnamed", WORKER, '"profile_ops":{"type":"array","items"',
+            '"profile_opz":{"type":"array","items"', T_DELIVER, "rust"),
+    # Red: T_DELIVER's last assertion (a profile_ops that is not a list passes).
+    Control("p94_worker_list_unchecked", WORKER, '    for key in ["lesson_ops", "card_ops", "profile_ops"] {',
+            '    for key in ["lesson_ops", "card_ops"] {', T_DELIVER, "rust"),
+    # Red: T_BUILD_OPS's pass (a build order carrying profile_ops fails its report check instead of being ignored).
+    Control("p94_build_ops_key_unknown", WORKER, '    "profile_ops",\n];', '    "profile_ops_unknown",\n];',
+            T_BUILD_OPS, "rust"),
+)
