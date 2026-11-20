@@ -802,6 +802,8 @@ pub fn detect_with(root: &Path, limits: &Limits) -> Detection {
 /// Every profile in the project with its use: original orders that carried it and original orders that fit it, zero
 /// rows included (the Profiles panel's "0 of 35"). See the module comment for what "fit" means. Reads as `detect`
 /// does, within the default limits.
+// P45a's Profiles panel calls it (plan 45 §8); until it lands only the tests do.
+#[allow(dead_code)]
 pub fn usage(root: &Path) -> Vec<Use> {
     let started = Instant::now();
     let scan = scan(root, &Limits::default(), started);
