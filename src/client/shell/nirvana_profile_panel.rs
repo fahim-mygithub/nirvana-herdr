@@ -415,37 +415,32 @@ impl Reader {
         }
     }
 
-    /// The waiting count of `folder` as last read, for the `+`: a map read. The first ask starts a read.
+    /// The waiting count of `folder` as last read, for the `+`: a map read. With none yet a read starts, unless one
+    /// runs: `start` alone keeps the reads single, so one test and one control prove it.
     pub(super) fn waiting(self: &Arc<Self>, folder: &Path) -> Option<usize> {
-        let first = {
+        {
             let mut entries = self.entries();
             let entry = entries.entry(folder.to_path_buf()).or_default();
             entry.asked_at = Some(Instant::now());
             if let Some(waiting) = entry.waiting {
                 return Some(waiting);
             }
-            !entry.reading
-        };
-        if first {
-            self.start(folder, false);
         }
+        self.start(folder, false);
         None
     }
 
-    /// The panel's view of `folder` as last read: a map read. With none yet a full read starts.
+    /// The panel's view of `folder` as last read: a map read. With none yet a full read starts, unless one runs.
     pub(super) fn view(self: &Arc<Self>, folder: &Path) -> Option<View> {
-        let first = {
+        {
             let mut entries = self.entries();
             let entry = entries.entry(folder.to_path_buf()).or_default();
             entry.asked_at = Some(Instant::now());
             if let Some(view) = &entry.view {
                 return Some(view.clone());
             }
-            !entry.reading
-        };
-        if first {
-            self.start(folder, true);
         }
+        self.start(folder, true);
         None
     }
 
@@ -487,9 +482,7 @@ impl Reader {
             entries.retain(|_, entry| entry.asked_at.is_some_and(|at| at.elapsed() < FORGET_AFTER));
             entries
                 .iter()
-                .filter(|(_, entry)| {
-                    !entry.reading && entry.read_at.is_none_or(|at| at.elapsed() >= REREAD)
-                })
+                .filter(|(_, entry)| entry.read_at.is_none_or(|at| at.elapsed() >= REREAD))
                 .map(|(folder, _)| folder.clone())
                 .collect()
         };
