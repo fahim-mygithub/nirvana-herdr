@@ -168,7 +168,9 @@ CONTROLS = (
             '            && helps_of(', T_EXEC, "rust"),
     # The Work Report carries card_ops: the check and the schema.
     Control("p34a_report_card_ops_unchecked", WORKER,
-            '    for key in ["lesson_ops", "card_ops"] {', '    for key in ["lesson_ops"] {', T_REPORT, "rust"),
+            # P45b added profile_ops to the line; the sabotage still drops card_ops alone.
+            '    for key in ["lesson_ops", "card_ops", "profile_ops"] {', '    for key in ["lesson_ops", "profile_ops"] {',
+            T_REPORT, "rust"),
     Control("p34a_schema_verdict_free", WORKER,
             '"verdict":{"type":"string","enum":["keep","reject","dead-end"]}', '"verdict":{"type":"string"}',
             T_REPORT, "rust"),
