@@ -221,6 +221,8 @@ pub(crate) struct ProfileRow {
     pub(super) parsed: Option<Parsed>,
     /// The detector's carried and fit counts; `None` when it has no row for it.
     pub(super) use_: Option<(usize, usize)>,
+    /// Plan 47 P47a (L1): how many Running orders of this project carry it now (`nirvana_subagents::live_profiles`).
+    pub(super) live: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,6 +264,12 @@ pub(super) fn read_view(root: &Path, usage: bool) -> View {
             &crate::nirvana_profile_detect::Limits::default(),
         )
     });
+    // Plan 47 P47a (L1): the Running orders of this project that carry each profile, from the rows the agents panel's
+    // poller already holds (an orchestrator pane counts when its folder's project is this one, by the panel's own
+    // rule). Only what the agents panel or the spaces view asked for in the last minute is there: see `live_profiles`.
+    let live = crate::nirvana_subagents::live_profiles(|folder| {
+        super::nirvana_profiles::root(folder) == root
+    });
     let profiles = crate::nirvana_profiles::list(root)
         .into_iter()
         .map(|(name, file, parsed)| {
@@ -285,6 +293,7 @@ pub(super) fn read_view(root: &Path, usage: bool) -> View {
                     .map(|dir| crate::nirvana_knowledge::cards(&dir).len()),
             });
             ProfileRow {
+                live: live.get(&name).copied().unwrap_or(0),
                 name,
                 file,
                 parsed,
@@ -1050,6 +1059,12 @@ pub(super) fn use_text(row: &ProfileRow, usage_read: bool, partial: bool) -> Str
     }
 }
 
+/// Plan 47 P47a (L1): `in use: N now` beside the use when Running orders of this project carry the profile; nothing
+/// when none do.
+pub(super) fn live_text(row: &ProfileRow) -> Option<String> {
+    (row.live > 0).then(|| format!("in use: {} now", row.live))
+}
+
 /// A parsed profile's facts after its description: the seat pins that are set, its servers, its skills, its cards.
 pub(super) fn profile_facts(parsed: &Parsed) -> Vec<String> {
     let mut parts = Vec::new();
@@ -1200,6 +1215,9 @@ fn list_lines(view: &View, panel: &ProfilePanel, inner: usize) -> Vec<Line> {
         }
         let mut facts = profile_facts(parsed);
         facts.push(use_text(row, view.usage_read, view.usage_partial));
+        if let Some(live) = live_text(row) {
+            facts.push(live);
+        }
         for packed in pack(&facts, room) {
             push(
                 &mut lines,

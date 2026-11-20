@@ -4,7 +4,7 @@
 //! and per-pane cache with poll, take_changed, and cached.
 //! (nirvana/plans/2026-10-19-17-subagents.md §3)
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -77,6 +77,13 @@ pub struct Subagent {
     /// the dead-panes fix: its worker has ended (`nirvana_dead::order_live`).
     #[serde(default)]
     pub waiting: bool,
+    /// Plan 47 P47a (L1): the profile a seat order was seated with, by `seated_profile` on the order's own `seated`
+    /// line, so a reseat or a send-back child shows its own line's. `None`: seated with none, a line that names none,
+    /// or a row that is no seat order. The owner, 2026-11-20: "Im hoping for the UI under teh agent panal to showcase
+    /// when we are using that build agent profile for a task." A name read from disk: the panel draws it through
+    /// `nirvana_profile_panel::visible`.
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 /// Cached view of subagents for a pane.
@@ -630,6 +637,7 @@ pub fn read_claude_subagents(
             run_id: None,
             run_event_time: None,
             waiting: false,
+            profile: None,
         });
     }
 
@@ -905,6 +913,7 @@ pub fn find_agy_processes_under(
                     run_id: None,
                     run_event_time: None,
                     waiting: false,
+                    profile: None,
                 });
             }
         }
@@ -978,6 +987,7 @@ pub fn read_agy_jobs(home: &Path, pane_id: &str, now_secs: u64) -> Vec<Subagent>
             run_id: None,
             run_event_time: None,
             waiting: false,
+            profile: None,
         });
     }
     subagents
@@ -1015,6 +1025,68 @@ pub fn read_seat_orders(
     let (rows, panes) = seat_orders_and_panes(project_folder, orchestrator_pane_id, now_secs);
     replace_worker_panes(orchestrator_pane_id, panes);
     rows
+}
+
+/// Plan 47 P47a: the profile an order's own `seated` line names, by the detector's rule (`nirvana_profile_detect`,
+/// P45d): the `profile` key when it is a name; a written `null` is "seated with none"; only when the key is absent (a
+/// line written before 0.90.0) or holds no valid name is the reason's `; profile <name> sha256 <hex>` read
+/// (`nirvana_profiles::from_reason`). The detector's last fallback, the order copy's `Profile:` line, is a file read,
+/// which the poller does not add: an old line whose reason names none shows none.
+pub fn seated_profile(seated: &crate::nirvana_run::Seated) -> Option<String> {
+    match &seated.profile {
+        Some(None) => None,
+        Some(Some(name)) if crate::nirvana_profiles::valid_name(name.trim()) => {
+            Some(name.trim().to_owned())
+        }
+        _ => crate::nirvana_profiles::from_reason(&seated.reason),
+    }
+}
+
+/// Plan 47 P47a (L1): how many Running seat orders carry each profile, counted over the rows the poller already holds
+/// for the orchestrator panes whose folder `here` accepts. No file is read here; the cache lock is held only to copy
+/// the rows out, so `here` may touch the disk. Called from the Profiles panel's reader thread, never the draw path.
+///
+/// The limit: the cache holds only the panes the agents panel or the spaces view asked for within the last minute
+/// (`forget_unasked`), and each as fresh as its last read (2 s while a row runs). A project whose orchestrator no
+/// drawn panel lists, a collapsed sidebar or another space's, reads as none in use while its workers run.
+pub fn live_profiles(here: impl Fn(&Path) -> bool) -> BTreeMap<String, usize> {
+    // (folder, (run, order), profile) of every Running row that carries one, copied under the lock. Only a seat
+    // order's row carries a profile (`seat_orders_and_panes`).
+    type Row = (PathBuf, (Option<String>, String), String);
+    let rows: Vec<Row> = {
+        let guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .iter()
+            .flat_map(|map| map.values())
+            .filter_map(|entry| Some((entry.folder.as_ref()?, entry.view.as_ref()?)))
+            .flat_map(|(folder, view)| {
+                view.subagents
+                    .iter()
+                    .filter(|row| row.state == SubagentState::Running)
+                    .filter_map(move |row| {
+                        let order = (row.run_id.clone(), row.id.clone());
+                        Some((folder.clone(), order, row.profile.clone()?))
+                    })
+            })
+            .collect()
+    };
+    // Fix round (review F3): a fresh read lists a run under its current orchestrator pane only, but a pane the run
+    // left keeps its cached view until it is read again (up to a minute when no panel draws it), so one order can
+    // sit under two panes. Each order of this project counts once, by its run and order id.
+    // Review E: `here` (a `.git` stat walk in the Profiles panel) is asked once per folder, not once per row: 28 ms a
+    // call at 1200 cached rows.
+    let mut accepted: HashMap<PathBuf, bool> = HashMap::new();
+    let mut counted: HashSet<(Option<String>, String)> = HashSet::new();
+    let mut counts = BTreeMap::new();
+    for (folder, order, profile) in rows {
+        let ok = *accepted
+            .entry(folder)
+            .or_insert_with_key(|folder| here(folder));
+        if ok && counted.insert(order) {
+            *counts.entry(profile).or_insert(0) += 1;
+        }
+    }
+    counts
 }
 
 fn seat_orders_and_panes(
@@ -1197,6 +1269,7 @@ fn seat_orders_and_panes(
                 run_id: Some(run_id.clone()),
                 run_event_time,
                 waiting: is_live && order.phase == crate::nirvana_run::Phase::Deferred,
+                profile: seated_profile(&order.seated),
             });
         }
     }
@@ -1347,6 +1420,37 @@ pub fn seed_view_for_test(pane_id: &str, view: SubagentsView, asked_secs_ago: u6
             shell_pid_failed_at: None,
         },
     );
+}
+
+/// Plan 47 P47a: puts `view` in the real cache for `pane_id` as an orchestrator in `folder`, asked for now. It is marked
+/// as being read, so a poll another test runs meanwhile neither reads it again nor replaces the view.
+#[cfg(test)]
+pub fn seed_folder_view_for_test(pane_id: &str, folder: &Path, view: SubagentsView) {
+    let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
+    guard.get_or_insert_with(HashMap::new).insert(
+        pane_id.to_string(),
+        PaneCacheEntry {
+            view: Some(view),
+            read_at: Some(Instant::now()),
+            reading: true,
+            asked_at: Some(Instant::now()),
+            folder: Some(folder.to_path_buf()),
+            is_claude: false,
+            agent_session: None,
+            agent_start_secs: None,
+            shell_pid: None,
+            shell_pid_failed_at: None,
+        },
+    );
+}
+
+/// Drops `pane_id` from the real cache.
+#[cfg(test)]
+pub fn unseed_for_test(pane_id: &str) {
+    let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(map) = guard.as_mut() {
+        map.remove(pane_id);
+    }
 }
 
 /// The real cache's view for `pane_id`, read without asking for the pane.
@@ -1869,6 +1973,7 @@ mod tests {
             run_id: None,
             run_event_time: None,
             waiting: false,
+            profile: None,
         };
         let child = Subagent {
             id: "a2".into(),
@@ -1886,6 +1991,7 @@ mod tests {
             run_id: None,
             run_event_time: None,
             waiting: false,
+            profile: None,
         };
         let other = Subagent {
             id: "a3".into(),
@@ -1903,6 +2009,7 @@ mod tests {
             run_id: None,
             run_event_time: None,
             waiting: false,
+            profile: None,
         };
 
         let nested = nest_subagents(vec![child, other, parent]);
@@ -2509,6 +2616,7 @@ mod tests {
             run_id: run.map(str::to_owned),
             run_event_time: None,
             waiting: false,
+            profile: None,
         };
         let mut rows: Vec<Subagent> = (0..3)
             .map(|i| row(&format!("w{i}"), Some("run-new")))
@@ -3223,5 +3331,311 @@ mod tests {
         assert_eq!(names("wS:p1"), vec!["dial-colour-automation".to_owned()]);
         assert!(names("wH:p1").is_empty());
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Plan 47 P47a: a `seated` line as `seat run` writes it, `profile` as given (`None` leaves the key out).
+    fn p96_row_seated(
+        order: &str,
+        profile: Option<Option<&str>>,
+        reason: &str,
+        parent: Option<&str>,
+    ) -> crate::nirvana_run::Seated {
+        crate::nirvana_run::Seated {
+            order: order.to_string(),
+            seat: "sonnet".to_string(),
+            cli: "claude".to_string(),
+            model: "Sonnet 5.5".to_string(),
+            effort: crate::nirvana_seat::Effort::Medium,
+            pool: "max".to_string(),
+            class: "build.bounded".to_string(),
+            chain: None,
+            size: crate::nirvana_seat::SizeName::Medium,
+            mode: crate::nirvana_seat::Mode::Balanced,
+            needs: Vec::new(),
+            not_family: Vec::new(),
+            reason: reason.to_string(),
+            override_reason: None,
+            order_file: "f".to_string(),
+            cwd: "cwd".to_string(),
+            worktree: None,
+            branch: None,
+            parent: parent.map(str::to_owned),
+            why: parent.map(|_| "send_back".to_owned()),
+            rule_pick: None,
+            bar_dropped: None,
+            step_down: None,
+            use_basis: None,
+            expected: std::collections::BTreeMap::new(),
+            jev_pick: None,
+            send_ok: None,
+            profile: profile.map(|known| known.map(str::to_owned)),
+            profile_fit: None,
+        }
+    }
+
+    /// Plan 47 P47a (L1): each row's profile comes from its order's own `seated` line, by the detector's rule. The key
+    /// wins over the reason; an absent key (a line from before 0.90.0) falls back to the reason; a written `null` is
+    /// none whatever the reason says; a key that is no name falls back as the detector does; a send-back child shows
+    /// its own line's profile, not its parent's; two live orders carry two different profiles.
+    #[test]
+    fn p96_row_rows_carry_the_profile_of_their_own_seated_line() {
+        use crate::nirvana_run::{Event, Kind};
+        let temp = std::env::temp_dir().join(format!(
+            "nirvana_test_p96_row_profile_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let run_dir = temp.join(".nirvana").join("runs").join("p96-run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let sha = "a".repeat(64);
+        let names_scholar = format!("picked; profile scholar sha256 {sha}");
+        let kinds = vec![
+            Kind::Opened {
+                project: "proj".into(),
+                orchestrator_pane: Some("orch-p96".into()),
+                auto: true,
+                pools: Vec::new(),
+                pools_basis: None,
+            },
+            Kind::Seated(Box::new(p96_row_seated(
+                "o-key",
+                Some(Some("builder")),
+                &names_scholar,
+                None,
+            ))),
+            Kind::Seated(Box::new(p96_row_seated(
+                "o-absent",
+                None,
+                &names_scholar,
+                None,
+            ))),
+            Kind::Seated(Box::new(p96_row_seated(
+                "o-null",
+                Some(None),
+                &names_scholar,
+                None,
+            ))),
+            Kind::Seated(Box::new(p96_row_seated(
+                "o-badkey",
+                Some(Some("Not A Name")),
+                &names_scholar,
+                None,
+            ))),
+            Kind::Seated(Box::new(p96_row_seated("o-plain", None, "picked", None))),
+            Kind::Seated(Box::new(p96_row_seated(
+                "o-parent",
+                Some(Some("builder")),
+                "picked",
+                None,
+            ))),
+            Kind::Delivered {
+                order: "o-parent".into(),
+                report: serde_json::json!({ "status": "done" }),
+            },
+            Kind::Gated {
+                order: "o-parent".into(),
+                verdict: "send_back".into(),
+                reason: Some("tests missing".into()),
+                axes: Vec::new(),
+            },
+            Kind::Seated(Box::new(p96_row_seated(
+                "o-child",
+                Some(Some("reviewer")),
+                "send back",
+                Some("o-parent"),
+            ))),
+        ];
+        let mut lines = String::new();
+        for (seq, kind) in (1..).zip(kinds) {
+            let event = Event {
+                v: 1,
+                seq,
+                at: 1000 + seq,
+                kind,
+            };
+            lines.push_str(&serde_json::to_string(&event).unwrap());
+            lines.push('\n');
+        }
+        std::fs::write(run_dir.join("journal.jsonl"), &lines).unwrap();
+        // Read inside the seat grace (`nirvana_dead::SEAT_GRACE_S`): a Seated order with no supervisor yet is live.
+        let rows = read_seat_orders(&temp, "orch-p96", 1030);
+        let _ = std::fs::remove_dir_all(&temp);
+        let profile = |name: &str| -> Option<Option<String>> {
+            rows.iter()
+                .find(|row| row.name == name)
+                .map(|row| row.profile.clone())
+        };
+        assert_eq!(profile("o-key"), Some(Some("builder".into())), "{rows:?}");
+        assert_eq!(
+            profile("o-absent"),
+            Some(Some("scholar".into())),
+            "{rows:?}"
+        );
+        assert_eq!(profile("o-null"), Some(None), "{rows:?}");
+        assert_eq!(
+            profile("o-badkey"),
+            Some(Some("scholar".into())),
+            "{rows:?}"
+        );
+        assert_eq!(profile("o-plain"), Some(None), "{rows:?}");
+        assert_eq!(
+            profile("o-child"),
+            Some(Some("reviewer".into())),
+            "{rows:?}"
+        );
+        // The gated parent has no row of its own.
+        assert_eq!(profile("o-parent"), None, "{rows:?}");
+        // Two live orders, two profiles.
+        let live: Vec<(&str, Option<&str>)> = rows
+            .iter()
+            .filter(|row| row.state == SubagentState::Running)
+            .filter(|row| row.name == "o-key" || row.name == "o-child")
+            .map(|row| (row.name.as_str(), row.profile.as_deref()))
+            .collect();
+        assert_eq!(
+            live,
+            vec![("o-key", Some("builder")), ("o-child", Some("reviewer"))],
+            "{rows:?}"
+        );
+    }
+
+    /// Plan 47 P47a (L1): `live_profiles` counts the Running seat orders by profile over the cached rows of the
+    /// orchestrators `here` accepts: a finished order, an order with no profile and another folder's order do not count.
+    #[test]
+    fn p96_row_live_profiles_count_running_orders_of_this_folder_only() {
+        let here = PathBuf::from("C:/p96-live/project-a");
+        let there = PathBuf::from("C:/p96-live/project-b");
+        let row = |name: &str, state: SubagentState, profile: Option<&str>| Subagent {
+            id: format!("order-{name}"),
+            parent_id: None,
+            name: name.into(),
+            description: String::new(),
+            provider: SubagentProvider::Claude,
+            model: "Sonnet 5.5".into(),
+            state,
+            elapsed_secs: 30,
+            tokens: None,
+            ended_at: (state != SubagentState::Running).then_some(1000),
+            depth: 0,
+            target_pane_id: None,
+            run_id: Some("p96-run".into()),
+            run_event_time: Some(1000),
+            waiting: false,
+            profile: profile.map(str::to_owned),
+        };
+        let view = |subagents: Vec<Subagent>| SubagentsView {
+            total_count: subagents.len(),
+            subagents,
+            overflow: 0,
+        };
+        seed_folder_view_for_test(
+            "p96-pane-a",
+            &here,
+            view(vec![
+                row("a1", SubagentState::Running, Some("builder")),
+                row("a2", SubagentState::Running, Some("builder")),
+                row("a3", SubagentState::Running, Some("scholar")),
+                row("a4", SubagentState::Running, None),
+                row("a5", SubagentState::Done, Some("builder")),
+                row("a6", SubagentState::Blocked, Some("scholar")),
+            ]),
+        );
+        seed_folder_view_for_test(
+            "p96-pane-b",
+            &there,
+            view(vec![row("b1", SubagentState::Running, Some("builder"))]),
+        );
+        let counted = live_profiles(|folder| folder == here.as_path());
+        let other = live_profiles(|folder| folder == there.as_path());
+        unseed_for_test("p96-pane-a");
+        unseed_for_test("p96-pane-b");
+        assert_eq!(
+            counted,
+            BTreeMap::from([("builder".to_owned(), 2), ("scholar".to_owned(), 1)])
+        );
+        assert_eq!(other, BTreeMap::from([("builder".to_owned(), 1)]));
+    }
+
+    /// A Running seat order `id` of run `run` with `profile`, for the `live_profiles` tests of the fix round.
+    fn p96_row_fix_live(run: &str, id: &str, profile: &str) -> Subagent {
+        Subagent {
+            id: id.into(),
+            parent_id: None,
+            name: id.into(),
+            description: String::new(),
+            provider: SubagentProvider::Claude,
+            model: "Sonnet 5.5".into(),
+            state: SubagentState::Running,
+            elapsed_secs: 30,
+            tokens: None,
+            ended_at: None,
+            depth: 0,
+            target_pane_id: None,
+            run_id: Some(run.into()),
+            run_event_time: Some(1000),
+            waiting: false,
+            profile: Some(profile.into()),
+        }
+    }
+
+    fn p96_row_fix_view(subagents: Vec<Subagent>) -> SubagentsView {
+        SubagentsView {
+            total_count: subagents.len(),
+            subagents,
+            overflow: 0,
+        }
+    }
+
+    /// Plan 47 P47a fix round (review F3): the same order under two cached panes, the run's old orchestrator pane and
+    /// its new one, counts once. Another run's order of the same id still counts.
+    #[test]
+    fn p96_row_fix_live_profiles_count_an_order_once() {
+        let here = PathBuf::from("C:/p96-fix-once/project");
+        seed_folder_view_for_test(
+            "p96-fix-pane-old",
+            &here,
+            p96_row_fix_view(vec![p96_row_fix_live("p96-fix-run", "x1", "builder")]),
+        );
+        seed_folder_view_for_test(
+            "p96-fix-pane-new",
+            &here,
+            p96_row_fix_view(vec![
+                p96_row_fix_live("p96-fix-run", "x1", "builder"),
+                p96_row_fix_live("p96-fix-other", "x1", "builder"),
+            ]),
+        );
+        let counted = live_profiles(|folder| folder == here.as_path());
+        unseed_for_test("p96-fix-pane-old");
+        unseed_for_test("p96-fix-pane-new");
+        assert_eq!(counted, BTreeMap::from([("builder".to_owned(), 2)]));
+    }
+
+    /// Plan 47 P47a fix round (review E): `here` is asked once per distinct folder, not once per row. Three panes in
+    /// one folder hold six Running rows; the folder is asked once.
+    #[test]
+    fn p96_row_fix_live_profiles_ask_once_per_folder() {
+        let here = PathBuf::from("C:/p96-fix-ask/project");
+        for pane in 0..3 {
+            let rows = (0..2)
+                .map(|n| p96_row_fix_live("p96-fix-ask-run", &format!("o{pane}{n}"), "scholar"))
+                .collect();
+            seed_folder_view_for_test(&format!("p96-fix-ask-{pane}"), &here, p96_row_fix_view(rows));
+        }
+        let asked = std::cell::Cell::new(0usize);
+        let counted = live_profiles(|folder| {
+            if folder == here.as_path() {
+                asked.set(asked.get() + 1);
+                true
+            } else {
+                false
+            }
+        });
+        for pane in 0..3 {
+            unseed_for_test(&format!("p96-fix-ask-{pane}"));
+        }
+        assert_eq!(counted, BTreeMap::from([("scholar".to_owned(), 6)]));
+        assert_eq!(asked.get(), 1);
     }
 }

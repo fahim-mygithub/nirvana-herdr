@@ -43,10 +43,19 @@ pub(crate) struct SubagentRunGroup<'a> {
 pub(crate) const RUN_FINISHED_SHOWN: usize = 4;
 pub(crate) const RUN_FINISHED_CUT_TO: usize = 3;
 
-/// The lines one run group takes in the agents panel: its header, two per live order, one per ended order drawn, and
-/// the "+N more" line when ended orders were cut.
+/// The lines one run group takes in the agents panel: its header, each live order's `live_row_lines`, one per ended
+/// order drawn, and the "+N more" line when ended orders were cut.
 pub(crate) fn run_group_lines(group: &SubagentRunGroup) -> usize {
-    1 + group.live.len() * 2 + group.finished.len() + usize::from(group.finished_cut > 0)
+    let live: usize = group.live.iter().map(|sub| live_row_lines(sub)).sum();
+    1 + live + group.finished.len() + usize::from(group.finished_cut > 0)
+}
+
+/// Plan 47 P47a fix round (review F1): the lines a live order's row takes in the agents panel: its name, its model and
+/// time, and a third for its profile when its order carries one. Never a function of the width: the cap, the row's
+/// height, the scroll and the click rectangle all read this one count. At the default 26 cells the profile at the end
+/// of line 2 cut three of the owner's four real names (`@reel-e…`); on a line of its own each shows whole.
+pub(crate) fn live_row_lines(sub: &crate::nirvana_subagents::Subagent) -> usize {
+    2 + usize::from(sub.profile.is_some())
 }
 
 pub(crate) fn is_live_subagent(state: crate::nirvana_subagents::SubagentState) -> bool {
@@ -144,6 +153,30 @@ pub(crate) fn live_worker_model_and_elapsed(
     )
 }
 
+/// Plan 47 P47a (L1): the fewest cells of a profile a worker row shows; with fewer left it is left out, so a lone `@`
+/// or `@…` never stands for a name.
+pub(super) const PROFILE_MIN: usize = 4;
+
+/// Plan 47 P47a (L1): a worker's profile as its row shows it, `@<name>`, the mark telling it from the model beside it.
+/// The name is read from a journal on disk, so it goes through the Profiles panel's `visible` (a zero-width or control
+/// character shows as `<U+XXXX>`), a newline too, which `visible` keeps for its own wrap.
+pub(super) fn profile_mark(name: &str) -> String {
+    let shown = super::nirvana_profile_panel::visible(name).replace('\n', "<U+000A>");
+    format!("@{shown}")
+}
+
+/// Plan 47 P47a: the profile's mark in `room` cells, cut by the panel's `fit` (display width), or `None` when fewer
+/// than `PROFILE_MIN` cells are left. The spaces view draws it this way, after its own text; the agents panel's line of
+/// its own (`profile_line`) has no such floor, since the line is there whatever it holds.
+pub(super) fn profile_in(name: &str, room: usize) -> Option<String> {
+    (room >= PROFILE_MIN).then(|| profile_line(name, room))
+}
+
+/// Plan 47 P47a fix round: the profile's mark in `room` cells, whole when it fits, else cut by the panel's `fit`.
+pub(super) fn profile_line(name: &str, room: usize) -> String {
+    super::nirvana_spaces::fit(&profile_mark(name), room)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CappedRunGroups<'a> {
     pub(crate) groups: Vec<SubagentRunGroup<'a>>,
@@ -177,18 +210,25 @@ pub(crate) fn group_sort_and_cap_subagents<'a>(
     let mut remaining = budget;
     let mut kept_workers = 0;
 
-    // First pass: live workers take priority
+    // First pass: live workers take priority. Plan 47 P47a fix round: a row is kept whole or not at all, by its own
+    // `live_row_lines`; a row that half fits is cut with the rest of its run's live rows (they keep their order, so a
+    // later, shorter row never jumps it) and counts in the "+N more".
     for group in &sorted_groups {
         if remaining == 0 {
             break;
         }
-        if !group.live.is_empty() && remaining >= 3 {
+        if group
+            .live
+            .first()
+            .is_some_and(|first| remaining >= 1 + live_row_lines(first))
+        {
             remaining -= 1; // 1 line for run header
             let mut group_live = Vec::new();
             for live_w in &group.live {
-                if remaining >= 2 {
+                let lines = live_row_lines(live_w);
+                if remaining >= lines {
                     group_live.push(*live_w);
-                    remaining -= 2;
+                    remaining -= lines;
                     kept_workers += 1;
                 } else {
                     break;
@@ -264,8 +304,8 @@ pub(super) fn agent_row_lines(row: &AgentRow, width: u16) -> usize {
         .sum();
     let overflow_line =
         usize::from(row.subagents_overflow > 0) + usize::from(row.bg_line.is_some());
-    // Seat-order workers under their run headers: a header, two lines per live worker, one per finished one drawn, and
-    // a run's "+N more" line.
+    // Seat-order workers under their run headers: a header, `live_row_lines` per live worker, one per finished one
+    // drawn, and a run's "+N more" line.
     let run_lines: usize = group_subagents_by_run(&row.subagents)
         .iter()
         .map(run_group_lines)
@@ -1025,12 +1065,14 @@ fn render_grouped_subagents(
         Paragraph::new(Line::from(header_spans)).render(run_rect, buffer);
         *current_y += 1;
 
-        // 2. Live Workers (2 lines each)
+        // 2. Live Workers (`live_row_lines` each: 2, or 3 with a profile)
         for sub in group.live {
             if *current_y >= rect.bottom() {
                 break;
             }
-            let live_height = if *current_y + 1 < rect.bottom() { 2 } else { 1 };
+            // The click and hover rectangle covers every line the row draws, its profile's too.
+            let live_height =
+                (live_row_lines(sub) as u16).min(rect.bottom().saturating_sub(*current_y));
             if let Some(hits) = hits.as_deref_mut() {
                 let target = sub
                     .target_pane_id
@@ -1071,6 +1113,27 @@ fn render_grouped_subagents(
             Paragraph::new(Line::from(line2_spans))
                 .render(Rect::new(rect.x, *current_y, rect.width, 1), buffer);
             *current_y += 1;
+
+            // Line 3, only for an order seated with a profile: 6 spaces @<profile>, bold in the palette's special-label
+            // colour so it stands out from the muted model, cut by the panel's `fit` only when wider than the line.
+            // Plan 47 P47a fix round (review F1): at the end of line 2 the default 26 cells left 8 for it.
+            if let Some(name) = sub.profile.as_deref() {
+                if *current_y >= rect.bottom() {
+                    break;
+                }
+                let line3_spans = vec![
+                    ratatui::text::Span::raw("      "),
+                    ratatui::text::Span::styled(
+                        profile_line(name, (rect.width as usize).saturating_sub(6)),
+                        Style::default()
+                            .fg(palette.mauve)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ];
+                Paragraph::new(Line::from(line3_spans))
+                    .render(Rect::new(rect.x, *current_y, rect.width, 1), buffer);
+                *current_y += 1;
+            }
         }
 
         // 3. Finished Workers (1 line each)
@@ -1228,6 +1291,7 @@ mod tests {
             run_id: Some("ia1".into()),
             run_event_time: Some(at),
             waiting: false,
+            profile: None,
         }
     }
 
@@ -1340,5 +1404,476 @@ mod tests {
         // Past the panel's cap, the one "+N more" counts the run's own cut orders too: 43 ended, none drawn.
         assert!(text.contains("+43 more"), "{text}");
         assert!(hits.agent_max_scroll > 0, "the scrollbar shows the rest is below");
+    }
+
+    // ---- Plan 47 P47a (L1), fix round (review F1): the profile on a live worker's third line ----
+
+    /// A live worker of run `p96` whose own pane is `p96-<name>`.
+    fn p96_row_live(name: &str, n: usize, profile: Option<&str>) -> Subagent {
+        let mut row = order(name, SubagentState::Running, 2000 + n as u64);
+        row.run_id = Some("p96".into());
+        row.target_pane_id = Some(format!("p96-{name}"));
+        row.profile = profile.map(str::to_owned);
+        row
+    }
+
+    /// One orchestrator, `p1`, holding `rows`, and with `second` a plain agent `p2` listed after it.
+    fn p96_row_rows_shape(rows: Vec<Subagent>, second: bool) -> ClientShellSnapshot {
+        let mut views = HashMap::new();
+        views.insert(
+            "p1".to_string(),
+            SubagentsView {
+                total_count: rows.len(),
+                subagents: rows,
+                overflow: 0,
+            },
+        );
+        set_view_for_test(Some(views));
+        set_worker_panes_for_test(Some(Default::default()));
+        let mut snap = super::super::tests::snapshot();
+        snap.panes.clear();
+        let ids: &[&str] = if second { &["p1", "p2"] } else { &["p1"] };
+        for id in ids {
+            snap.panes.push(crate::protocol::ClientShellPane {
+                pane_id: (*id).into(),
+                workspace_id: "ws_1".into(),
+                tab_id: "tab_1".into(),
+                label: None,
+                cwd: None,
+                foreground_cwd: None,
+                focused: false,
+                right_click_passthrough: false,
+            });
+        }
+        snap.agents = vec![agent("p1", "orch-claude", AgentStatus::Working)];
+        if second {
+            snap.agents
+                .push(agent("p2", "plain-agent", AgentStatus::Working));
+        }
+        snap
+    }
+
+    /// One orchestrator, `p1`, whose run `p96` holds a live worker per entry of `workers` (name, profile).
+    fn p96_row_shape(workers: &[(&str, Option<&str>)]) -> ClientShellSnapshot {
+        let rows = workers
+            .iter()
+            .enumerate()
+            .map(|(n, (name, profile))| p96_row_live(name, n, *profile))
+            .collect();
+        p96_row_rows_shape(rows, false)
+    }
+
+    /// The agents panel drawn `width` wide with a body of `body` lines, into a buffer `pad` cells wider so anything
+    /// drawn past the panel's edge shows: the text lines, the buffer and the hit map.
+    fn p96_row_paint(
+        snap: &ClientShellSnapshot,
+        width: u16,
+        body: u16,
+        pad: u16,
+    ) -> (Vec<String>, Buffer, ShellHitMap) {
+        let config = ClientShellConfig::from_config(&crate::config::Config::default());
+        let area = Rect::new(0, 0, width, body + 3);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, width + pad, body + 3));
+        let mut scroll = 0;
+        let mut hits = ShellHitMap::default();
+        render_agent_panel(&mut buffer, area, snap, &config, &mut scroll, &mut hits);
+        let lines = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        (lines, buffer, hits)
+    }
+
+    /// The agents panel drawn `width` wide with a body of `body` lines, as text lines and the buffer.
+    fn p96_row_draw(snap: &ClientShellSnapshot, width: u16, body: u16) -> (Vec<String>, Buffer) {
+        let (lines, buffer, _) = p96_row_paint(snap, width, body, 0);
+        (lines, buffer)
+    }
+
+    /// Every cell of the buffer's line `y`, symbol and style.
+    fn p96_row_cells(buffer: &Buffer, y: usize) -> Vec<ratatui::buffer::Cell> {
+        (0..buffer.area.width)
+            .map(|x| buffer.cell((x, y as u16)).unwrap().clone())
+            .collect()
+    }
+
+    /// `@<name>` in `room` cells by the rule as the fix round states it, written apart from `fit`: whole when it fits,
+    /// else its first `room - 1` characters and the cut mark. ASCII names only.
+    fn p96_row_expected_mark(name: &str, room: usize) -> String {
+        let full = format!("@{name}");
+        if full.len() <= room {
+            full
+        } else if room == 0 {
+            String::new()
+        } else {
+            format!("{}\u{2026}", &full[..room - 1])
+        }
+    }
+
+    /// The widest sidebar, the default and the narrowest it allows (`Config::default().ui`), read from the config so the
+    /// test follows a change of any.
+    fn p96_row_widths() -> [u16; 3] {
+        let ui = crate::config::Config::default().ui;
+        [ui.sidebar_max_width, ui.sidebar_width, ui.sidebar_min_width]
+    }
+
+    /// Plan 47 P47a fix round (review F1), the review's width sweep under the new rule. At every sidebar width from 8 to
+    /// 60, three model labels, six elapsed times and names of 1, 4, 12 and 40 characters: a profiled live row is exactly
+    /// three lines; its lines 1 and 2 equal the no-profile row's, cell for cell, style too (so the model keeps its
+    /// colour); line 3 is `@name` whole when it fits and cut with the mark otherwise, bold mauve; nothing is drawn past
+    /// the panel's edge; the row's height is two more for the two workers at every width.
+    #[test]
+    fn p96_row_fix_every_width_a_profiled_row_is_three_lines() {
+        let models = [
+            ("Claude Sonnet 5.5", SubagentProvider::Claude),
+            ("Gemini 4 Hydrogen", SubagentProvider::Gemini),
+            ("Claude Fable 5.2", SubagentProvider::Claude),
+        ];
+        let elapsed = [1u64, 59, 61, 3600, 90061, 99 * 3600 + 59 * 60];
+        let names = ["a", "abcd", "abcdefghijkl", "abcdefghijklmnopqrstuvwxyzabcdefghijklmn"];
+        let config = ClientShellConfig::from_config(&crate::config::Config::default());
+        let palette = &config.palette;
+        let (body, pad) = (16u16, 12u16);
+        let mut checked = 0usize;
+        let mut bad: Vec<String> = Vec::new();
+        for width in 8u16..=60 {
+            for (model, provider) in models {
+                for secs in elapsed {
+                    let rows = |profile: Option<&str>| -> Vec<Subagent> {
+                        (0..2)
+                            .map(|n| {
+                                let mut row = p96_row_live(&format!("w{n}"), n, profile);
+                                row.model = model.into();
+                                row.provider = provider;
+                                row.elapsed_secs = secs;
+                                row
+                            })
+                            .collect()
+                    };
+                    let bare_snap = p96_row_rows_shape(rows(None), false);
+                    let bare_row = agent_row(&bare_snap, "p1", &config, None).expect("bare row");
+                    let (bare_lines, bare_buf, _) = p96_row_paint(&bare_snap, width, body, pad);
+                    for name in names {
+                        checked += 1;
+                        let case = format!("width {width} {model} {secs}s {name}");
+                        let snap = p96_row_rows_shape(rows(Some(name)), false);
+                        let row = agent_row(&snap, "p1", &config, None).expect("row");
+                        let (lines, buf, _) = p96_row_paint(&snap, width, body, pad);
+                        if agent_row_lines(&row, width) != agent_row_lines(&bare_row, width) + 2 {
+                            bad.push(format!("{case}: height not two more"));
+                        }
+                        // Walk the two panels together: every bare line is drawn as it was, and after each worker's
+                        // line 2 the profiled panel has its line 3.
+                        let mut y = 0usize;
+                        let mut third_lines = 0;
+                        for yb in 0..bare_lines.len() {
+                            if y >= lines.len() {
+                                break;
+                            }
+                            if p96_row_cells(&bare_buf, yb) != p96_row_cells(&buf, y) {
+                                bad.push(format!(
+                                    "{case}: line {y} changed: {:?} against {:?}",
+                                    lines[y], bare_lines[yb]
+                                ));
+                                break;
+                            }
+                            y += 1;
+                            let line2 = yb >= 1 && (bare_lines[yb - 1] == "    w0" || bare_lines[yb - 1] == "    w1");
+                            if !line2 {
+                                continue;
+                            }
+                            let mark = p96_row_expected_mark(name, usize::from(width) - 6);
+                            let want = format!("      {mark}");
+                            if lines.get(y) != Some(&want) {
+                                bad.push(format!("{case}: line 3 {:?}, not {want:?}", lines.get(y)));
+                            }
+                            for x in 6..6 + mark.chars().count() as u16 {
+                                let cell = buf.cell((x, y as u16)).unwrap();
+                                if cell.fg != palette.mauve || !cell.modifier.contains(Modifier::BOLD) {
+                                    bad.push(format!("{case}: line 3 cell {x} not bold mauve"));
+                                    break;
+                                }
+                            }
+                            for x in width..width + pad {
+                                if buf.cell((x, y as u16)).unwrap().symbol() != " " {
+                                    bad.push(format!("{case}: line 3 drawn past the edge at {x}"));
+                                    break;
+                                }
+                            }
+                            third_lines += 1;
+                            y += 1;
+                        }
+                        if third_lines != 2 {
+                            bad.push(format!("{case}: {third_lines} third lines, not 2"));
+                        }
+                    }
+                }
+            }
+        }
+        set_view_for_test(None);
+        set_worker_panes_for_test(None);
+        eprintln!("P96 SWEEP checked={checked} bad={}", bad.len());
+        for line in bad.iter().take(10) {
+            eprintln!("P96 SWEEP BAD {line}");
+        }
+        assert!(bad.is_empty(), "{} bad of {checked}: {:?}", bad.len(), bad.first());
+    }
+
+    /// Plan 47 P47a fix round: the owner's four real profile names show whole at 26 cells, the review's default case
+    /// that cut three of them to `@reel-e…`, `@aaa-an…` and `@web-re…`.
+    #[test]
+    fn p96_row_fix_the_four_real_names_show_whole_at_26_cells() {
+        let names = ["reel-editor", "aaa-anim-reviewer", "web-researcher", "scholar"];
+        let snap = p96_row_shape(&[
+            ("w-1", Some(names[0])),
+            ("w-2", Some(names[1])),
+            ("w-3", Some(names[2])),
+            ("w-4", Some(names[3])),
+        ]);
+        let (lines, _) = p96_row_draw(&snap, 26, 16);
+        set_view_for_test(None);
+        set_worker_panes_for_test(None);
+        let text = lines.join("\n");
+        for name in names {
+            assert!(lines.contains(&format!("      @{name}")), "{name}\n{text}");
+        }
+    }
+
+    /// Plan 47 P47a fix round: three live workers, two with a profile, take two more lines than with none, at every
+    /// width; the panel's total height and the scroll range agree with what is drawn; and a group long enough to be
+    /// capped keeps whole rows only, in order, with the cap's "+N more" counting the rest.
+    #[test]
+    fn p96_row_fix_heights_scroll_and_the_cap_agree_with_what_is_drawn() {
+        let config = ClientShellConfig::from_config(&crate::config::Config::default());
+        let gap = config.agents.row_gap;
+        let live = |workers: &[(&str, Option<&str>)]| -> Vec<Subagent> {
+            workers
+                .iter()
+                .enumerate()
+                .map(|(n, (name, profile))| p96_row_live(name, n, *profile))
+                .collect()
+        };
+        let with = [("w-a", Some("builder")), ("w-b", None), ("w-c", Some("scholar"))];
+        let bare = [("w-a", None), ("w-b", None), ("w-c", None)];
+        let row_with = agent_row(&p96_row_rows_shape(live(&with), false), "p1", &config, None).unwrap();
+        let row_bare = agent_row(&p96_row_rows_shape(live(&bare), false), "p1", &config, None).unwrap();
+        for width in 8u16..=60 {
+            assert_eq!(
+                agent_row_lines(&row_with, width),
+                agent_row_lines(&row_bare, width) + 2,
+                "{width}"
+            );
+        }
+
+        // The orchestrator, then a plain agent. Two agent lines, the run header, 3 + 2 + 3 for the workers.
+        let snap = p96_row_rows_shape(live(&with), true);
+        let row = agent_row(&snap, "p1", &config, None).unwrap();
+        let height = agent_row_lines(&row, 26) as u16;
+        assert_eq!(height, 2 + 1 + 3 + 2 + 3);
+        // A body that holds both rows: no scroll, the orchestrator's last line is w-c's profile, the plain agent after.
+        let (lines, _, hits) = p96_row_paint(&snap, 26, height + gap + 2, 0);
+        let text = lines.join("\n");
+        assert_eq!(hits.agent_max_scroll, 0, "{text}");
+        assert_eq!(lines[3 + usize::from(height) - 1], "      @scholar", "{text}");
+        assert!(
+            lines[3 + usize::from(height + gap)..].join("\n").contains("plain-agent"),
+            "{text}"
+        );
+        // One line less: the plain agent no longer fits and the list scrolls by one row.
+        let (_, _, hits) = p96_row_paint(&snap, 26, height + gap + 1, 0);
+        assert_eq!(hits.agent_max_scroll, 1, "{text}");
+
+        // A group long enough to be capped: five live rows, three with a profile, in bodies of 3 to 20 lines.
+        let five = [
+            ("c0", Some("builder")),
+            ("c1", None),
+            ("c2", Some("reel-editor")),
+            ("c3", Some("scholar")),
+            ("c4", None),
+        ];
+        let snap = p96_row_rows_shape(live(&five), false);
+        let row = agent_row(&snap, "p1", &config, None).unwrap();
+        let full = agent_row_lines(&row, 26);
+        assert_eq!(full, 2 + 1 + 3 + 2 + 3 + 3 + 2);
+        let mut capped_bodies = 0;
+        for body in 3u16..=20 {
+            let (lines, _, _) = p96_row_paint(&snap, 26, body, 0);
+            let text = lines.join("\n");
+            let panel = &lines[3..];
+            let mut drawn = 0;
+            for (n, (name, profile)) in five.iter().enumerate() {
+                let Some(at) = panel.iter().position(|line| *line == format!("    {name}")) else {
+                    continue;
+                };
+                // Whole rows, in order: a drawn row is the next one.
+                assert_eq!(n, drawn, "body {body}: {name} drawn after a cut row\n{text}");
+                drawn += 1;
+                assert_eq!(
+                    panel.get(at + 1).map(String::as_str),
+                    Some("      S5.5  1m30s"),
+                    "body {body}: {name}\n{text}"
+                );
+                if let Some(profile) = profile {
+                    assert_eq!(
+                        panel.get(at + 2),
+                        Some(&format!("      @{profile}")),
+                        "body {body}: {name}\n{text}"
+                    );
+                }
+            }
+            let more = panel
+                .iter()
+                .find_map(|line| line.trim().strip_prefix('+')?.strip_suffix(" more")?.parse::<usize>().ok())
+                .unwrap_or(0);
+            assert_eq!(drawn + more, five.len(), "body {body}\n{text}");
+            if usize::from(body) >= full {
+                assert_eq!(more, 0, "body {body}\n{text}");
+                let drawn_lines = panel.iter().filter(|line| !line.is_empty()).count();
+                assert_eq!(drawn_lines, full, "body {body}\n{text}");
+            } else {
+                capped_bodies += 1;
+            }
+        }
+        set_view_for_test(None);
+        set_worker_panes_for_test(None);
+        assert!(capped_bodies > 0);
+    }
+
+    /// Plan 47 P47a fix round: a click on a worker's profile line acts as a click on its name does, and the line after
+    /// the row is not its own.
+    #[test]
+    fn p96_row_fix_a_click_on_the_profile_line_acts_as_one_on_the_name() {
+        let workers = [("w-a", Some("builder")), ("w-b", None), ("w-c", Some("scholar"))];
+        let snap = p96_row_shape(&workers);
+        let (lines, _, hits) = p96_row_paint(&snap, 26, 16, 0);
+        set_view_for_test(None);
+        set_worker_panes_for_test(None);
+        let text = lines.join("\n");
+        // The click's own lookup (`mouse.rs`): the first agent rectangle that holds the point.
+        let target = |y: usize| {
+            hits.agents
+                .iter()
+                .find(|(rect, _)| super::super::contains(*rect, (6, y as u16)))
+                .map(|(_, pane)| pane.clone())
+        };
+        for (name, profile) in workers {
+            let at = lines
+                .iter()
+                .position(|line| *line == format!("    {name}"))
+                .unwrap_or_else(|| panic!("{name}\n{text}"));
+            let height = 2 + usize::from(profile.is_some());
+            let want = Some(format!("p96-{name}"));
+            assert_eq!(target(at), want, "{name} line 1\n{text}");
+            for y in at..at + height {
+                assert_eq!(target(y), want, "{name} line {}\n{text}", y - at + 1);
+            }
+            assert_ne!(target(at + height), want, "{name}: the line after its row\n{text}");
+        }
+    }
+
+    /// Plan 47 P47a fix round: with no profile the panel is the profiled panel less its profile lines, cell for cell
+    /// over the whole panel, at the widest, the default and the narrowest sidebar and at 8 cells; and a no-profile row
+    /// is two lines.
+    #[test]
+    fn p96_row_fix_without_a_profile_the_panel_is_the_profiled_one_less_its_profile_lines() {
+        let with = [("w-a", Some("builder")), ("w-b", None), ("w-c", Some("scholar"))];
+        let bare = [("w-a", None), ("w-b", None), ("w-c", None)];
+        let config = ClientShellConfig::from_config(&crate::config::Config::default());
+        let [widest, default, narrowest] = p96_row_widths();
+        for width in [widest, default, narrowest, 8] {
+            let (lines, buf) = p96_row_draw(&p96_row_shape(&with), width, 16);
+            let bare_snap = p96_row_shape(&bare);
+            let (bare_lines, bare_buf) = p96_row_draw(&bare_snap, width, 16);
+            // The height as master counts it: two agent lines, the run header, two per live worker. A blank third
+            // line counted for a row with no profile draws nothing, so only the count shows it.
+            let bare_row = agent_row(&bare_snap, "p1", &config, None).unwrap();
+            assert_eq!(agent_row_lines(&bare_row, width), 2 + 1 + 3 * 2, "{width}");
+            let text = lines.join("\n");
+            let third = |name: &str| {
+                lines
+                    .iter()
+                    .position(|line| *line == format!("    {name}"))
+                    .unwrap_or_else(|| panic!("{width} {name}\n{text}"))
+                    + 2
+            };
+            let skip = [third("w-a"), third("w-c")];
+            let kept: Vec<_> = (0..lines.len())
+                .filter(|y| !skip.contains(y))
+                .map(|y| p96_row_cells(&buf, y))
+                .collect();
+            let drawn: Vec<_> = (0..bare_lines.len() - 2)
+                .map(|y| p96_row_cells(&bare_buf, y))
+                .collect();
+            assert!(kept == drawn, "{width}\n{text}\n--\n{}", bare_lines.join("\n"));
+            // The bare panel's last two lines are the ones the profiles took.
+            assert!(bare_lines[bare_lines.len() - 2..].iter().all(String::is_empty));
+            let at = bare_lines.iter().position(|line| line == "    w-b").unwrap();
+            assert_eq!(bare_lines[at + 2], "    w-c", "{width}");
+        }
+        set_view_for_test(None);
+        set_worker_panes_for_test(None);
+    }
+
+    /// Plan 47 P47a: a profile name is text from disk. A zero-width space and an ESC are drawn as `<U+XXXX>`, never as
+    /// nothing, and the name is cut by display width.
+    #[test]
+    fn p96_row_an_invisible_character_in_a_profile_name_is_named() {
+        let snap = p96_row_shape(&[("w-zws", Some("a\u{200b}b")), ("w-esc", Some("x\u{1b}y"))]);
+        let (lines, _) = p96_row_draw(&snap, 40, 12);
+        set_view_for_test(None);
+        set_worker_panes_for_test(None);
+        let text = lines.join("\n");
+        assert!(text.contains("\n      @a<U+200B>b\n"), "{text}");
+        assert!(text.contains("\n      @x<U+001B>y"), "{text}");
+        assert!(
+            !text.contains('\u{1b}') && !text.contains('\u{200b}'),
+            "{text:?}"
+        );
+        assert_eq!(profile_mark("a\u{200b}b"), "@a<U+200B>b");
+        assert_eq!(profile_mark("x\u{1b}y"), "@x<U+001B>y");
+        assert_eq!(profile_mark("n\nl"), "@n<U+000A>l");
+    }
+
+    /// Plan 47 P47a: the dumps the report pastes, at the default sidebar width. One orchestrator and three live
+    /// workers, two with profiles; then a group the cap cuts.
+    #[test]
+    fn p96_row_dump_the_agents_panel_with_three_live_workers() {
+        let snap = p96_row_shape(&[
+            ("p47a-build", Some("builder")),
+            ("p47a-review", Some("reviewer")),
+            ("p47a-docs", None),
+        ]);
+        let width = crate::config::Config::default().ui.sidebar_width;
+        let (lines, _) = p96_row_draw(&snap, width, 12);
+        let capped = p96_row_shape(&[
+            ("c0-build", Some("builder")),
+            ("c1-docs", None),
+            ("c2-reel", Some("reel-editor")),
+            ("c3-look", Some("scholar")),
+            ("c4-tidy", None),
+        ]);
+        let (capped_lines, _) = p96_row_draw(&capped, width, 10);
+        set_view_for_test(None);
+        set_worker_panes_for_test(None);
+        let text = lines.join("\n");
+        let capped_text = capped_lines.join("\n");
+        eprintln!("P96 DUMP agents panel at {width} cells:\n{text}\nP96 END");
+        eprintln!("P96 DUMP capped group at {width} cells, body 10:\n{capped_text}\nP96 END");
+        let at = |name: &str| {
+            lines
+                .iter()
+                .position(|line| *line == format!("    {name}"))
+                .unwrap_or_else(|| panic!("{name}\n{text}"))
+        };
+        assert_eq!(lines[at("p47a-build") + 2], "      @builder", "{text}");
+        assert_eq!(lines[at("p47a-review") + 2], "      @reviewer", "{text}");
+        assert_eq!(lines[at("p47a-docs") + 1], "      S5.5  1m30s", "{text}");
+        assert_eq!(lines[at("p47a-docs") + 2], "", "{text}");
+        assert!(capped_lines.iter().any(|line| line == "    +3 more"), "{capped_text}");
     }
 }

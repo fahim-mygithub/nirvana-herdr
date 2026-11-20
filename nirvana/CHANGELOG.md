@@ -3,6 +3,39 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.92.0: a worker's row shows the profile its order carries
+
+- **Changed:** plan 47's first package.
+  - In the agents panel, a live worker whose order was seated with a profile gains a third line, `@<name>`, bold,
+    under its model and time. A worker with no profile stays two lines and draws as before. The row's height is 2,
+    or 3 with a profile, never a function of the width; the cap, the scroll and the click area read one count.
+  - The name comes from the `seated` journal line the panel's poller already replays: the `profile` key, the
+    reason for a line written before 0.90.0, and none for a written `null`. Nothing new is read.
+  - The spaces view's worker line shows `@<name>` when its own text leaves room.
+  - The Profiles panel says `in use: N now` beside a profile that N running orders of that project carry. An order
+    is counted once.
+  - Plan 47 is added: this package, and a `scholar` researcher for every project, which waits for the owner.
+- **Because:** the owner, 2026-11-20: "Im hoping for the UI under teh agent panal to showcase when we are using
+  that build agent profile for a task."
+- **Measured:** the whole test binary, one process per test, ran 5466 tests with 2 failed, the same two `app::api`
+  tests that fail on 0.91.0, where 5451 ran; this package's own `p96_row_` tests are 15 of them. The whole binary was
+  run because two of the touched modules hold a test that fails under a plain parallel `cargo test` on master. Built
+  on Opus high, reviewed on Sonnet high, one fix round. The review ran the code: 3,816 drawn combinations of width,
+  model, time and name with nothing past the panel's edge and the model and time never cut; the name on the row
+  matched the detector's rule in every case it drove; no path puts an unchecked string on a row. Its verdict was merge
+  as is, with one point against the ask: at the default 26 cells the name at the end of line 2 was cut for three of
+  four real names, `reel-editor` reading `@reel-e…`. The fix round reproduced that red and gave the profile a line of
+  its own; it also reproduced one order counted twice under two cached panes, and fixed it. The controls file holds 46
+  `p96_row_` controls; each was run red in its branch and 14 controls were run red again at the merge, two older ones
+  beside the changed lines among them, the tree unchanged after each. The dry run finds 4906 of 4914 controls' text,
+  the same 8 old misses. No merge-time probe: nothing here has a command to run. Not seen in a live window. Known
+  gaps: the spaces view's one-line row shows the profile only on a wide sidebar; a paused order, and an order in the
+  60 s after its supervisor died, still count as in use; "in use" is absent, not 0, for a project whose orchestrator
+  no agents panel drew in the last minute; a child seated from a parent line written before 0.90.0 shows no profile;
+  the phone page shows none; a third line beside a scrollbar is not tested.
+- **If you remove this:** nothing on screen says a worker is running with a profile; the only record is the
+  journal. Put the name back on line 2 and the default sidebar cuts most names to seven letters.
+
 ## alpha 0.91.0: a `+` beside `agents` opens the project's Profiles panel
 
 - **Changed:** plan 45's last package, the door.

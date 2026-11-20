@@ -651,6 +651,7 @@ fn p93_the_use_reads_carried_of_fit_and_in_words_when_nothing_fits() {
         file: PathBuf::from("x.md"),
         parsed: None,
         use_,
+        live: 0,
     };
     assert_eq!(
         panel_mod::use_text(&row(Some((0, 35))), true, false),
@@ -1958,6 +1959,7 @@ fn p93_fix_partial_use_counts_say_so() {
         file: PathBuf::from("x.md"),
         parsed: None,
         use_,
+        live: 0,
     };
     assert_eq!(
         panel_mod::use_text(&row(Some((3, 35))), true, true),
@@ -2889,4 +2891,97 @@ fn p93_fix2_the_detail_pages_at_80_and_140() {
             }
         }
     }
+}
+
+// ---- Plan 47 P47a (L1): a profile in use now ----
+
+/// One cached seat-order row for `live_profiles`, as `read_seat_orders` makes it.
+fn p96_row_order(
+    name: &str,
+    state: crate::nirvana_subagents::SubagentState,
+    profile: Option<&str>,
+) -> crate::nirvana_subagents::Subagent {
+    crate::nirvana_subagents::Subagent {
+        id: format!("order-{name}"),
+        parent_id: None,
+        name: name.into(),
+        description: String::new(),
+        provider: crate::nirvana_subagents::SubagentProvider::Claude,
+        model: "Sonnet 5.5".into(),
+        state,
+        elapsed_secs: 30,
+        tokens: None,
+        ended_at: (state != crate::nirvana_subagents::SubagentState::Running).then_some(1000),
+        depth: 0,
+        target_pane_id: None,
+        run_id: Some("p96-run".into()),
+        run_event_time: Some(1000),
+        waiting: false,
+        profile: profile.map(str::to_owned),
+    }
+}
+
+fn p96_row_view(
+    subagents: Vec<crate::nirvana_subagents::Subagent>,
+) -> crate::nirvana_subagents::SubagentsView {
+    crate::nirvana_subagents::SubagentsView {
+        total_count: subagents.len(),
+        subagents,
+        overflow: 0,
+    }
+}
+
+/// Plan 47 P47a (L1): a profile two Running orders of this project carry says `in use: 2 now` with its use. A profile
+/// none carries says nothing more; a finished order does not count; another project's Running order does not count.
+#[test]
+fn p96_row_a_profile_in_use_now_says_so_with_the_count() {
+    use crate::nirvana_subagents::{seed_folder_view_for_test, unseed_for_test, SubagentState};
+    let (_home, root) = project("p96-in-use");
+    profile_file(
+        &root,
+        "builder",
+        "---\ndescription: Builds the piece the order names.\nclass: build.bounded\n---\nBuild.\n",
+    );
+    profile_file(
+        &root,
+        "spare",
+        "---\ndescription: Kept for later.\nclass: build.bounded\n---\nWait.\n",
+    );
+    let other = root.parent().unwrap().join("p96-other-project");
+    std::fs::create_dir_all(other.join(".git")).unwrap();
+    seed_folder_view_for_test(
+        "p96-orch-here",
+        &root,
+        p96_row_view(vec![
+            p96_row_order("b1", SubagentState::Running, Some("builder")),
+            p96_row_order("b2", SubagentState::Running, Some("builder")),
+            p96_row_order("b3", SubagentState::Done, Some("builder")),
+            p96_row_order("s1", SubagentState::Done, Some("spare")),
+            p96_row_order("n1", SubagentState::Running, None),
+        ]),
+    );
+    seed_folder_view_for_test(
+        "p96-orch-there",
+        &other,
+        p96_row_view(vec![
+            p96_row_order("o1", SubagentState::Running, Some("spare")),
+            p96_row_order("o2", SubagentState::Running, Some("builder")),
+        ]),
+    );
+    let mut state = state_in(&root);
+    let rows = opened(&mut state, 140);
+    unseed_for_test("p96-orch-here");
+    unseed_for_test("p96-orch-there");
+    let text = rows.join("\n");
+    eprintln!("P96 DUMP Profiles panel at 140 cells:\n{text}\nP96 END");
+    let facts = |name: &str| {
+        let at = rows
+            .iter()
+            .position(|row| row.contains(&format!("{name}  ")))
+            .unwrap_or_else(|| panic!("{name}\n{text}"));
+        rows[at + 1].clone()
+    };
+    assert!(facts("builder").contains("in use: 2 now"), "{text}");
+    assert!(!facts("spare").contains("in use"), "{text}");
+    assert_eq!(text.matches("in use").count(), 1, "{text}");
 }

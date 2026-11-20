@@ -652,6 +652,8 @@ pub(super) struct SpaceWorker {
     /// the dead-panes fix a row is live only while a supervisor holds the order's lock (`nirvana_dead::order_live`), so
     /// an Asked order or a worker that died with the server no longer keeps a row here, counting for days.
     pub(super) working: bool,
+    /// Plan 47 P47a (L1): the profile the worker's order was seated with (`Subagent::profile`).
+    pub(super) profile: Option<String>,
 }
 
 /// The live workers of the space's agents, in the agents panel's own order. `view` is the panel's cached data for an
@@ -688,6 +690,7 @@ pub(super) fn space_workers(
                 model,
                 elapsed,
                 working: !sub.waiting && pane_alive,
+                profile: sub.profile.clone(),
             }
         })
         .collect()
@@ -699,21 +702,37 @@ pub(super) struct WorkerLine {
     pub(super) line: String,
     pub(super) name_end: usize,
     pub(super) model_end: usize,
+    /// Plan 47 P47a: the cell the profile starts at, the drawn width when the line shows none, and the profile's text as
+    /// the line ends with it.
+    pub(super) profile_at: usize,
+    pub(super) profile: Option<String>,
 }
 
 /// A worker's row text fitted to `width` cells: `<name> <model> <elapsed>`. The name is cut as the agents panel cuts
 /// it, by `fit`, so the model and the time stay whole. Below the tail's width the tail is cut too, and the colour ends
 /// are clamped to what was drawn, so a cut time never takes the model's colour (plan 30 review).
+///
+/// Plan 47 P47a (L1): then ` @<profile>`, in the cells those three leave by that rule, so the name is never cut for it;
+/// cut by `fit` while `agent_sidebar::PROFILE_MIN` of it fit, else left out. The default sidebar's 20 cells leave a
+/// short name's row no room for it; a wider sidebar shows it.
 pub(super) fn worker_line(worker: &SpaceWorker, width: usize) -> WorkerLine {
     let cells = |s: &str| unicode_width::UnicodeWidthStr::width(s);
     let tail = format!(" {} {}", worker.model, worker.elapsed);
     let budget = width.saturating_sub(unicode_width::UnicodeWidthStr::width(tail.as_str()));
     let name = fit(&worker.name, budget);
-    let line = fit(&format!("{name}{tail}"), width);
+    let mut line = fit(&format!("{name}{tail}"), width);
     let drawn = cells(&line);
+    let profile = worker.profile.as_deref().and_then(|profile| {
+        super::agent_sidebar::profile_in(profile, width.saturating_sub(drawn + 1))
+    });
+    if let Some(profile) = &profile {
+        line = format!("{line} {profile}");
+    }
     WorkerLine {
         name_end: cells(&name).min(drawn),
         model_end: (cells(&name) + 1 + cells(&worker.model)).min(drawn),
+        profile_at: if profile.is_some() { drawn + 1 } else { drawn },
+        profile,
         line,
     }
 }
@@ -794,6 +813,19 @@ pub(super) fn render_space_workers(
             model_style,
         );
         put_text(buffer, x + 2, y, row.name_end as u16, &row.line, name_style);
+        // Plan 47 P47a: the profile over its own cells, in the agents panel's profile colour.
+        if let Some(profile) = &row.profile {
+            put_text(
+                buffer,
+                x + 2 + row.profile_at as u16,
+                y,
+                text_width.saturating_sub(row.profile_at) as u16,
+                profile,
+                Style::default()
+                    .fg(palette.mauve)
+                    .add_modifier(Modifier::BOLD),
+            );
+        }
     }
 }
 
@@ -870,6 +902,7 @@ mod sparkle_tests {
             run_id: Some("run-20261031-000000".into()),
             run_event_time: Some(1000),
             waiting: false,
+            profile: None,
         };
         change(&mut worker);
         HashMap::from([(

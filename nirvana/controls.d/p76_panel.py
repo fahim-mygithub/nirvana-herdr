@@ -22,8 +22,8 @@ CONTROLS = (
             T_SHAPE, "rust"),
     # The row's height counts the run's "+N more" line.
     Control("p76_row_lines_more", SIDEBAR,
-            "    1 + group.live.len() * 2 + group.finished.len() + usize::from(group.finished_cut > 0)\n",
-            "    1 + group.live.len() * 2 + group.finished.len()\n",
+            "    1 + live + group.finished.len() + usize::from(group.finished_cut > 0)\n",
+            "    1 + live + group.finished.len()\n",
             T_LINES, "rust"),
     # A row that does not fit whole is drawn cut, not dropped.
     Control("p76_clip_row", SIDEBAR,
