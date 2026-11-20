@@ -58,6 +58,12 @@ T_CARRY = _S + "p97_a_refused_carry_is_named_once"
 T_BOM = _S + "p97_a_table_with_a_bom_is_left_and_said_once"
 T_FPRINT = _C + "p97_the_fingerprint_sees_only_what_the_ratio_reads"
 T_FUTURE = _C + "p97_a_back_off_note_from_the_future_is_ignored"
+# The P46a third review's fix round: several readers at once.
+T_MANY = _S + "p97_many_reads_at_once_upgrade_once_and_keep_the_backup"
+T_HELD_LOCK = _S + "p97_a_held_upgrade_lock_skips_the_attempt_silently"
+T_NO_LOCK = _S + "p97_no_lock_file_still_upgrades"
+T_NAME = _S + "p97_two_attempts_never_share_a_backup_name"
+T_ATOMIC = _S + "p97_writes_at_once_each_land_whole"
 T_CHECK_LINE = _Q + "p97_the_check_line_says_why_nothing_books"
 
 CONTROLS = (
@@ -335,8 +341,8 @@ CONTROLS = (
     Control("p97_failed_write_replays", CALIB, "    if backing_off(dir, now) {\n        return false;",
             "    if false && backing_off(dir, now) {\n        return false;", T_BOUNDED, "rust"),
     # Finding 2: no upgrade without a backup. Red: the carried table is rewritten with the folder blocked.
-    Control("p97_upgrade_without_backup", SEAT, "        None => match take_backup(path, &bytes, &backup_dir) {",
-            "        None => match take_backup(path, &bytes, &backup_dir)\n"
+    Control("p97_upgrade_without_backup", SEAT, "        None => match take_backup(&bytes, &backup_dir) {",
+            "        None => match take_backup(&bytes, &backup_dir)\n"
             '            .or_else(|_| Ok::<PathBuf, String>(backup_dir.join("none")))\n        {', T_NO_BACKUP, "rust"),
     # Red: the log holds two lines after the second attempt (second fix round: the test that removes the refusal
     # note between attempts; T_NO_BACKUP's second read is now skipped by the note).
@@ -355,15 +361,17 @@ CONTROLS = (
     Control("p97_dropped_named_as_kept", SEAT, "            .filter(|(_, key, _, _)| !dropped.contains(key))",
             "            .filter(|_| true)", T_DROPPED, "rust"),
     # ---- the P46a second review's fix round (expected red results written before the run) ----
-    # F1. Red in T_FAILED_WRITE: a failed rename is taken for done, so "no backup left" fails (the backup stays) and the
-    # log says "took".
+    # F1. Red in T_FAILED_WRITE: a failed rename is taken for done, so no refusal note is written ("a refusal note")
+    # and the log says "took". (Third fix round: the backup stays either way now, so "no backup left" is gone.)
     Control("p97_failed_rename_taken", SEAT, "    if let Err(err) = std::fs::rename(&temp, path) {",
             "    if let Err(err) = std::fs::rename(&temp, path).or(Ok::<(), std::io::Error>(())) {", T_FAILED_WRITE,
             "rust"),
-    # Red in T_FAILED_WRITE: "no backup left" (the failed attempt keeps its backup, and the next keeps another).
-    Control("p97_failed_attempt_keeps_backup", SEAT,
-            "        if made {\n            let _ = std::fs::remove_file(&backup);\n        }",
-            "        let _ = made;", T_FAILED_WRITE, "rust"),
+    # Third fix round, replacing p97_failed_attempt_keeps_backup (the rule turned: a complete backup stays). Red in
+    # T_FAILED_WRITE: "the complete backup stays" (the undone attempt removes it).
+    Control("p97_undo_removes_backup", SEAT,
+            "    let undo = || {\n        let _ = std::fs::remove_file(&temp);\n    };",
+            "    let undo = || {\n        let _ = std::fs::remove_file(&temp);\n"
+            "        let _ = std::fs::remove_file(&backup);\n    };", T_FAILED_WRITE, "rust"),
     # Red in T_FAILED_WRITE: "skipped, not tried" (every read tries again and rewrites the note).
     Control("p97_refusal_retried_every_read", SEAT, "    if refused_lately(dir, &key, now()) {",
             "    if false && refused_lately(dir, &key, now()) {", T_FAILED_WRITE, "rust"),
@@ -372,12 +380,12 @@ CONTROLS = (
             "        .is_ok_and(|at| at <= now && now < at.saturating_add(REFUSED_S))",
             "        .is_ok_and(|at| now < at.saturating_add(REFUSED_S))", T_NOTE, "rust"),
     # Red in T_REUSE: three backups, not two (the one holding the table is copied again).
-    Control("p97_backup_not_reused", SEAT, "    let (backup, made) = match existing_backup(&backup_dir, &bytes) {",
-            "    let (backup, made) = match None::<PathBuf> {", T_REUSE, "rust"),
+    Control("p97_backup_not_reused", SEAT, "    let backup = match existing_backup(&backup_dir, &bytes) {",
+            "    let backup = match None::<PathBuf> {", T_REUSE, "rust"),
     # F2. Red in T_REFUSALS: "a backup file left" (the half copy and the wrong copy stay).
     Control("p97_failed_backup_left", SEAT,
-            "    let failed = |why: String| {\n        let _ = std::fs::remove_file(&backup);",
-            "    let failed = |why: String| {\n        let _ = &backup;", T_REFUSALS, "rust"),
+            "        if made {\n            remove_unless_holding(&backup, bytes);\n        }",
+            "        let _ = (made, &backup);", T_REFUSALS, "rust"),
     # Red in T_REFUSALS: two log lines for the copy kind (its words carry the dated name, a second apart).
     Control("p97_refusal_names_dated_file", SEAT,
             '            "a backup cannot be written in {} ({err})",\n            backup_dir.display()',
@@ -425,4 +433,22 @@ CONTROLS = (
     Control("p97_fingerprint_week_only", CALIB,
             '        let _ = writeln!(text, "pool {} per_usd {:?}", pool.id, pool.per_usd);',
             '        let _ = writeln!(text, "pool {} per_usd {:?}", pool.id, pool.per_usd.get(WINDOW));', T_FPRINT, "rust"),
+    # ---- the P46a third review's fix round (expected red results written before the run) ----
+    # Red in T_HELD_LOCK: "held: the table as it is" (a read past a held lock upgrades the table).
+    Control("p97_held_lock_ignored", SEAT, "        UpgradeLock::Held => return None,",
+            "        UpgradeLock::Held => None,", T_HELD_LOCK, "rust"),
+    # Red in T_MANY: rounds with more than one backup or more than one "took" line (no reader ever finds the
+    # lock held, so every thread attempts at once).
+    Control("p97_lock_never_held", SEAT, "        Err(std::fs::TryLockError::WouldBlock) => UpgradeLock::Held,",
+            "        Err(std::fs::TryLockError::WouldBlock) => UpgradeLock::Unavailable,", T_MANY, "rust"),
+    # Red in T_NO_LOCK: "no lock file: the attempt goes on" (a lock file that cannot be made stops the upgrade).
+    Control("p97_no_lock_stops_upgrade", SEAT, "        UpgradeLock::Unavailable => None,",
+            "        UpgradeLock::Unavailable => return None,", T_NO_LOCK, "rust"),
+    # Red in T_NAME: "the other attempt's file is not written over" (the backup opens the taken name and truncates it).
+    Control("p97_backup_name_shared", SEAT, "            .create_new(true)\n            .open(&backup);",
+            "            .create(true)\n            .truncate(true)\n            .open(&backup);", T_NAME, "rust"),
+    # Red in T_ATOMIC: rounds failed with "cannot find the file" (every write of the process uses one temp name).
+    Control("p97_temp_per_process", SEAT,
+            "    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);",
+            "    let n = WRITES.load(std::sync::atomic::Ordering::Relaxed);", T_ATOMIC, "rust"),
 )

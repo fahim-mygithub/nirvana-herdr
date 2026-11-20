@@ -1150,7 +1150,73 @@ fn maybe_upgrade(path: &Path) -> Option<()> {
 
 /// `maybe_upgrade` against `default` and the `kept` defaults before it: a parameter so a test can hold an older kept
 /// default with a key today's lacks (the dropped-key path; no real kept default has one on 2026-11-19).
+///
+/// The P46a third review: herdr processes read the table at once (hooks, `seat pick`), and the first read after a new
+/// binary is exactly when. Three `herdr seat diff` at once lost the only copy of the owner's bytes in 5 of 60 rounds
+/// (two attempts shared one backup name; an undone attempt removed a backup another had reused). One attempt runs at a
+/// time, across processes and threads, under the OS lock on `UPGRADE_LOCK`, from its read to its rename. A read that
+/// finds the lock held does not wait and does not try: it reads the table as it is, and says nothing (the holder is
+/// upgrading it). The common read, a table that is today's default, takes no lock and makes no file.
 fn maybe_upgrade_with(path: &Path, default: &str, kept: &[&str]) -> Option<()> {
+    let bytes = std::fs::read(path).ok()?;
+    if nothing_to_upgrade(&bytes, default) {
+        return None;
+    }
+    let _lock = match upgrade_lock(path.parent()?) {
+        UpgradeLock::Taken(file) => Some(file),
+        UpgradeLock::Held => return None,
+        // A lock file that cannot be made (a read-only folder): the attempt goes on as it did before the lock. In such
+        // a folder it ends refused, said once; a readable table never turns into an error here.
+        UpgradeLock::Unavailable => None,
+    };
+    // Read again, under the lock: the holder before this one may have upgraded it.
+    upgrade_attempt(path, default, kept)
+}
+
+/// The table needs no attempt: it is not UTF-8 (`read_table` says so), has no mode line, or is `default` with its mode.
+/// `upgrade_attempt`'s first checks, without the lock, so the common read takes none.
+fn nothing_to_upgrade(bytes: &[u8], default: &str) -> bool {
+    let body = bytes.strip_prefix(BOM).unwrap_or(bytes);
+    let Ok(text) = std::str::from_utf8(body) else {
+        return true;
+    };
+    let normalized = text.replace("\r\n", "\n");
+    extract_mode_line(&normalized).is_none()
+        || replace_mode_line(&normalized, "mode = \"balanced\"") == default.replace("\r\n", "\n")
+}
+
+/// What `upgrade_lock` found.
+enum UpgradeLock {
+    /// This attempt holds the lock until the file drops: at the attempt's end, at a panic's unwind, or by the OS when
+    /// the process dies. Nothing is left behind to time out.
+    Taken(std::fs::File),
+    /// Another reader, a thread or a process, holds it.
+    Held,
+    /// The lock file cannot be opened, or the OS refused the lock for another reason.
+    Unavailable,
+}
+
+/// A try for the OS lock on `UPGRADE_LOCK` in `dir`, never a wait. `File::try_lock`, as `Lock` takes `leases.lock`: a
+/// lock the OS lets go when the handle closes, never a `create_new` marker a crash would leave holding every later
+/// attempt off. The file itself stays; nothing deletes it.
+fn upgrade_lock(dir: &Path) -> UpgradeLock {
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(UPGRADE_LOCK))
+    else {
+        return UpgradeLock::Unavailable;
+    };
+    match file.try_lock() {
+        Ok(()) => UpgradeLock::Taken(file),
+        Err(std::fs::TryLockError::WouldBlock) => UpgradeLock::Held,
+        Err(std::fs::TryLockError::Error(_)) => UpgradeLock::Unavailable,
+    }
+}
+
+/// One upgrade attempt, under the lock when it could be had (`maybe_upgrade_with`).
+fn upgrade_attempt(path: &Path, default: &str, kept: &[&str]) -> Option<()> {
     // The bytes, so the backup can be checked against exactly what was read.
     let bytes = std::fs::read(path).ok()?;
     // The P46a second review: a table saved with a byte order mark matched no default and was left alone without a
@@ -1220,28 +1286,23 @@ fn maybe_upgrade_with(path: &Path, default: &str, kept: &[&str]) -> Option<()> {
     // table with no backup and no log, and the owner's layout and any dropped key were gone. Both paths: the whole-text
     // path's old file is a kept default and so could be rebuilt, but nothing documents an upgrade without a backup.
     // F1: a backup already holding these bytes is used again, so a retry never adds a file.
-    let (backup, made) = match existing_backup(&backup_dir, &bytes) {
-        Some(backup) => (backup, false),
-        None => match take_backup(path, &bytes, &backup_dir) {
-            Ok(backup) => (backup, true),
+    let backup = match existing_backup(&backup_dir, &bytes) {
+        Some(backup) => backup,
+        None => match take_backup(&bytes, &backup_dir) {
+            Ok(backup) => backup,
             Err(why) => {
                 refuse(&why);
                 return None;
             }
         },
     };
-    // What a failed or abandoned attempt takes back: its temp file, and the backup it made (never one it reused).
-    let temp = dir.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .map_or_else(|| "file".into(), |name| name.to_string_lossy()),
-        std::process::id()
-    ));
+    // What a failed or abandoned attempt takes back: its temp file, nothing more. The backup stays, made here or
+    // reused: it holds the table as it was read (`take_backup` read it back), and the P46a third review measured what
+    // removing it costs: under several readers it was the only copy of the owner's bytes (5 of 60 rounds with three).
+    // The next attempt reuses it (`existing_backup`), so a retry adds no file.
+    let temp = temp_beside(path);
     let undo = || {
         let _ = std::fs::remove_file(&temp);
-        if made {
-            let _ = std::fs::remove_file(&backup);
-        }
     };
     if let Err(err) = std::fs::write(&temp, upgraded.as_bytes()) {
         undo();
@@ -1403,13 +1464,19 @@ fn existing_backup(backup_dir: &Path, bytes: &[u8]) -> Option<PathBuf> {
         .find(|path| std::fs::read(path).is_ok_and(|copy| copy == bytes))
 }
 
-/// The backup of the table at `path`, whose bytes are `bytes`: a new dated file in `backup_dir`, read back and
-/// compared. `Err` says why there is none, and the file it began is removed.
+/// The backup of a table whose bytes are `bytes`: a new dated file in `backup_dir`, created by this call, written
+/// with `bytes`, read back and compared. `Err` says why there is none; a file it created that does not hold `bytes`
+/// (a half or wrong copy) is removed, and nothing else.
 ///
 /// The P46a second review, F2: the reasons named the dated file, which changes each second, so `upgrade_note` never
 /// matched its last line and wrote one per second of picks; and a short copy or a copy that did not match stayed
 /// behind for the next attempt's `-2` name to sit beside. The reasons name the folder only.
-fn take_backup(path: &Path, bytes: &[u8], backup_dir: &Path) -> Result<PathBuf, String> {
+///
+/// The P46a third review: `backup_name` picks a name that is not there yet, and `std::fs::copy` then wrote over
+/// whatever landed there since. Two attempts in one second picked one name; the loser read back the winner's half
+/// copy and removed the shared file, the only copy of the owner's bytes. The file is created with `create_new`, so a
+/// name another attempt took first moves this one on to the next name, and the file is this attempt's own.
+fn take_backup(bytes: &[u8], backup_dir: &Path) -> Result<PathBuf, String> {
     std::fs::create_dir_all(backup_dir).map_err(|err| {
         format!(
             "the backup folder {} cannot be made ({err})",
@@ -1417,17 +1484,39 @@ fn take_backup(path: &Path, bytes: &[u8], backup_dir: &Path) -> Result<PathBuf, 
         )
     })?;
     // Plan 46: a dated name, so a later upgrade never writes over an earlier backup (it was one `seats.toml`).
-    let backup = backup_name(backup_dir, now());
+    let mut backup = backup_name(backup_dir, now());
+    let mut taken = 0;
+    let opened = loop {
+        if let (Some(Fault::NameTaken(other)), 0) = (fault(), taken) {
+            let _ = std::fs::write(&backup, other);
+        }
+        let open = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup);
+        match open {
+            // Another attempt made this name between the pick and the create.
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && taken < 16 => {
+                taken += 1;
+                backup = backup_name(backup_dir, now());
+            }
+            open => break open,
+        }
+    };
+    let made = opened.is_ok();
     let failed = |why: String| {
-        let _ = std::fs::remove_file(&backup);
+        if made {
+            remove_unless_holding(&backup, bytes);
+        }
         Err(why)
     };
-    let copied = match fault() {
-        Some(Fault::CopyFails) => std::fs::write(&backup, &bytes[..bytes.len() / 2])
+    let copied = opened.and_then(|mut file| match fault() {
+        Some(Fault::CopyFails) => file
+            .write_all(&bytes[..bytes.len() / 2])
             .and_then(|()| Err(std::io::Error::other("a copy that stopped half way"))),
-        _ => Ok(()),
-    };
-    if let Err(err) = copied.and_then(|()| std::fs::copy(path, &backup).map(|_| ())) {
+        _ => file.write_all(bytes),
+    });
+    if let Err(err) = copied {
         return failed(format!(
             "a backup cannot be written in {} ({err})",
             backup_dir.display()
@@ -1449,6 +1538,14 @@ fn take_backup(path: &Path, bytes: &[u8], backup_dir: &Path) -> Result<PathBuf, 
     }
 }
 
+/// Removes `path` only when it does not hold `bytes`: a half or wrong copy. A file that holds them, or that cannot be
+/// read (and so may), stays: a stray file is cheaper than the owner's lost bytes (the P46a third review).
+fn remove_unless_holding(path: &Path, bytes: &[u8]) {
+    if std::fs::read(path).is_ok_and(|copy| copy != bytes) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// Faults a test puts into one upgrade attempt, on its own thread; none outside tests.
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1459,6 +1556,8 @@ enum Fault {
     BackupWrong,
     /// The owner saves these bytes between the backup and the rename.
     TableChanges(&'static str),
+    /// Another attempt writes these bytes at the backup name this one picked, before it creates the file.
+    NameTaken(&'static str),
 }
 
 #[cfg(test)]
@@ -1503,6 +1602,9 @@ fn upgrade_note(dir: &Path, words: &str) {
 
 /// Plan 46: beside the backups, one line per upgrade that carried the owner's values, with any it dropped.
 pub const UPGRADE_LOG: &str = "seats-upgrades.log";
+
+/// Beside `seats.toml`: the OS lock one upgrade attempt holds from its read to its rename (`upgrade_lock`).
+pub const UPGRADE_LOCK: &str = "seats.upgrade.lock";
 
 /// `<backup>/seats-<UTC>.toml`, with `-2`, `-3` on when that name is taken (two upgrades in one second).
 fn backup_name(backup_dir: &Path, at: u64) -> PathBuf {
@@ -3966,14 +4068,25 @@ pub fn load_leases(path: &Path) -> Result<Leases, String> {
     }
 }
 
+/// A temp file beside `path` for one write: `.<name>.<pid>.<n>.tmp`, `n` counting this process's writes. The P46a
+/// third review, finding 2: the name was `.<name>.<pid>.tmp`, one per process, so two threads wrote one file and the
+/// second rename failed (`p97_writes_at_once_each_land_whole`: 4 of 20 rounds). Nothing reads a `.tmp` file as the
+/// table or as `leases.json`, and a crash's stray keeps a name no later write picks.
+fn temp_beside(path: &Path) -> PathBuf {
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .map_or_else(|| "file".into(), |name| name.to_string_lossy());
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    dir.join(format!(".{name}.{}.{n}.tmp", std::process::id()))
+}
+
 /// A temp file, then a rename, as `usage.json` is written (O1): a reader never sees half a file.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir)?;
-    let name = path
-        .file_name()
-        .map_or_else(|| "file".into(), |name| name.to_string_lossy());
-    let temp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    let temp = temp_beside(path);
     std::fs::write(&temp, bytes)?;
     std::fs::rename(&temp, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&temp);
@@ -11265,9 +11378,10 @@ worker_autocompact_tokens = 300000\n";
         body()
     }
 
-    /// F1: an upgrade whose final write fails leaves the owner's table byte for byte, no backup, and one log line that
-    /// says it was not upgraded, however often the table is read; "took herdr's default" is said only after the write.
-    /// Made writable, the next read upgrades with exactly one backup. Both paths: carried and whole-text.
+    /// F1: an upgrade whose final write fails leaves the owner's table byte for byte, its complete backup (the third
+    /// review: no longer removed), and one log line that says it was not upgraded, however often the table is read;
+    /// "took herdr's default" is said only after the write. Made writable, the next read upgrades reusing that backup,
+    /// so there is exactly one, and the "took" line names it. Both paths: carried and whole-text.
     #[test]
     fn p97_a_failed_write_keeps_the_table_and_says_so_once() {
         for (what, installed) in [("carried", p97_owners_v15()), ("whole text", replace_mode_line(P97_V15, "mode = \"sota\""))] {
@@ -11290,7 +11404,11 @@ worker_autocompact_tokens = 300000\n";
             println!("p97 {what}: a failing read took {first:?}, the next four {:?}", started.elapsed());
             assert_eq!(std::fs::read_to_string(dir.join(REFUSED_FILE)).unwrap(), aged, "{what}: skipped, not tried");
             assert_eq!(std::fs::read(&path).unwrap(), installed.as_bytes(), "{what}: byte for byte");
-            assert!(p97_backups(&dir).is_empty(), "{what}: no backup left");
+            // The P46a third review: an undone attempt removed its backup, and under several processes that file was
+            // the only copy of the owner's bytes. A backup holding the table as read stays, and the next attempt
+            // reuses it (below: still one backup).
+            assert_eq!(p97_backups(&dir), [installed.clone()], "{what}: the complete backup stays");
+            assert!(p97_temp_files(&dir).is_empty(), "{what}: {:?}", p97_temp_files(&dir));
             let log = p97_log_lines(&dir);
             assert_eq!(log.len(), 1, "{what}: {log:?}");
             assert!(
@@ -11312,6 +11430,7 @@ worker_autocompact_tokens = 300000\n";
             if what == "carried" {
                 assert_eq!(log.len(), 2, "{log:?}");
                 assert!(log[1].contains(" seats.toml took herdr's default, keeping your overrides_per_run = 5; the file before is "), "{log:?}");
+                assert_eq!(p97_named_backup(&log[1]).as_deref(), Some(installed.as_bytes()), "{log:?}");
             } else {
                 assert_eq!(log.len(), 1, "{log:?}");
             }
@@ -11419,7 +11538,8 @@ worker_autocompact_tokens = 300000\n";
     }
 
     /// F4: the owner's save between the backup and the rename is not written over. The attempt is dropped without a
-    /// word, its backup removed; the next read starts over from the owner's new bytes and backs those up.
+    /// word; its backup, which holds the table as it was read, stays (the third review: never removed); the next read
+    /// starts over from the owner's new bytes and backs those up beside it.
     #[test]
     fn p97_a_save_during_the_upgrade_is_kept() {
         let dir = temp_dir("p97-race");
@@ -11431,11 +11551,18 @@ worker_autocompact_tokens = 300000\n";
         );
         assert_eq!(with_fault(Fault::TableChanges(saved), || read_or_create(&path)), saved);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), saved, "the owner's save stands");
-        assert!(p97_backups(&dir).is_empty(), "the dropped attempt's backup is gone");
+        assert_eq!(p97_backups(&dir), [installed.clone()], "the dropped attempt's complete backup stays");
+        assert!(p97_temp_files(&dir).is_empty(), "{:?}", p97_temp_files(&dir));
         assert!(p97_log_lines(&dir).is_empty() && !dir.join(REFUSED_FILE).exists(), "said nothing");
         let want = replace_mode_line(DEFAULT, "mode = \"sota\"").replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 7\n", 1);
         assert_eq!(read_or_create(&path), want, "the next read starts over");
-        assert_eq!(p97_backups(&dir), [saved.to_owned()]);
+        // Sorted by content: two backups in one second are `seats-<s>.toml` and `seats-<s>-2.toml`, and `-` sorts
+        // before `.`, so name order says nothing about which came first.
+        let mut backups = p97_backups(&dir);
+        backups.sort();
+        let mut both = [installed.clone(), saved.to_owned()];
+        both.sort();
+        assert_eq!(backups, both);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -11507,5 +11634,240 @@ worker_autocompact_tokens = 300000\n";
             assert_eq!(std::fs::read(&path).unwrap(), bytes, "{what}: byte for byte");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- the P46a third review: several readers at once ----
+
+    /// Temp files left beside the table (`.<name>.<pid>.<n>.tmp`, or the old `.<name>.<pid>.tmp`).
+    fn p97_temp_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect()
+    }
+
+    /// The bytes of the file a "took herdr's default" line names, if it is there.
+    fn p97_named_backup(line: &str) -> Option<Vec<u8>> {
+        let (_, named) = line.split_once("; the file before is ")?;
+        std::fs::read(named).ok()
+    }
+
+    /// The backups in `backup/` as files: their paths and bytes.
+    fn p97_backup_files(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut found: Vec<(PathBuf, Vec<u8>)> = std::fs::read_dir(dir.join("backup"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .map(|path| {
+                let bytes = std::fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// The P46a third review: herdr processes read the table at once (hooks, `seat pick`), and the first read after a
+    /// new binary is exactly when. Three `herdr seat diff` at once lost the only copy of the owner's bytes in 5 of 60
+    /// rounds: two attempts shared one dated backup name, and an undone attempt removed a backup another had reused.
+    /// Here 8 threads read one table at once, 40 rounds. Each round must end with the new default carrying
+    /// `overrides_per_run = 5`, exactly one backup and it the original bytes, exactly one "took" line naming that
+    /// file, no "was not upgraded" line, no temp file; and every reader got the table before or after, whole. On the
+    /// code before the lock, 30 of 40 rounds failed, 9 of them with no backup left at all.
+    #[test]
+    fn p97_many_reads_at_once_upgrade_once_and_keep_the_backup() {
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 40;
+        let installed = p97_owners_v15();
+        let want = replace_mode_line(DEFAULT, "mode = \"sota\"")
+            .replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1);
+        let mut failed = Vec::new();
+        for round in 0..ROUNDS {
+            let dir = temp_dir(&format!("p97-many-{round}"));
+            let path = dir.join(SEATS_FILE);
+            std::fs::write(&path, &installed).unwrap();
+            let start = std::sync::Barrier::new(THREADS);
+            let read: Vec<String> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..THREADS)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            start.wait();
+                            read_or_create(&path)
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|handle| handle.join().unwrap()).collect()
+            });
+            let mut problems = Vec::new();
+            if std::fs::read_to_string(&path).ok().as_deref() != Some(want.as_str()) {
+                problems.push("the table is not the new default with the edit carried".to_owned());
+            }
+            if read.iter().any(|text| *text != installed && *text != want) {
+                problems.push("a reader got neither table".to_owned());
+            }
+            let backups = p97_backup_files(&dir);
+            if backups.len() != 1 || backups[0].1 != installed.as_bytes() {
+                let sizes: Vec<usize> = backups.iter().map(|(_, bytes)| bytes.len()).collect();
+                problems.push(format!("backups {sizes:?}, want one of {}", installed.len()));
+            }
+            let log = p97_log_lines(&dir);
+            let took: Vec<&String> = log.iter().filter(|line| line.contains(" took herdr's default")).collect();
+            if took.len() != 1 {
+                problems.push(format!("{} took lines", took.len()));
+            }
+            if took.iter().any(|line| p97_named_backup(line).as_deref() != Some(installed.as_bytes())) {
+                problems.push("a took line names a file that is gone or holds other bytes".to_owned());
+            }
+            if log.iter().any(|line| line.contains("was not upgraded")) {
+                problems.push(format!("refused: {log:?}"));
+            }
+            if !p97_temp_files(&dir).is_empty() {
+                problems.push(format!("temp files {:?}", p97_temp_files(&dir)));
+            }
+            if !problems.is_empty() {
+                failed.push(format!("round {round}: {problems:?}"));
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        println!("p97 many reads: {} of {ROUNDS} rounds failed", failed.len());
+        assert!(failed.is_empty(), "{} of {ROUNDS} rounds failed: {failed:#?}", failed.len());
+    }
+
+    /// One attempt at a time: while another reader holds the upgrade lock, a read does not wait and does not try. It
+    /// returns the table as it is and writes nothing: no backup, no log line, no refusal note. Let go, the next read
+    /// upgrades.
+    #[test]
+    fn p97_a_held_upgrade_lock_skips_the_attempt_silently() {
+        let dir = temp_dir("p97-held-lock");
+        let path = dir.join(SEATS_FILE);
+        let installed = p97_owners_v15();
+        std::fs::write(&path, &installed).unwrap();
+        // Truncate before create: the control `seat_lock_stale_kept` finds the leases lock's `.create(true)` then
+        // `.truncate(false)` lines, and they must occur once in this file.
+        let held = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(false)
+            .create(true)
+            .open(dir.join(UPGRADE_LOCK))
+            .unwrap();
+        held.try_lock().unwrap();
+        let started = std::time::Instant::now();
+        for _ in 0..3 {
+            assert_eq!(read_or_create(&path), installed, "held: the table as it is");
+        }
+        assert!(started.elapsed() < Duration::from_secs(2), "it waited: {:?}", started.elapsed());
+        assert_eq!(std::fs::read(&path).unwrap(), installed.as_bytes(), "byte for byte");
+        assert!(!dir.join("backup").exists(), "no backup folder");
+        assert!(p97_log_lines(&dir).is_empty(), "{:?}", p97_log_lines(&dir));
+        assert!(!dir.join(REFUSED_FILE).exists(), "no refusal note");
+        drop(held);
+        let want = replace_mode_line(DEFAULT, "mode = \"sota\"")
+            .replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1);
+        assert_eq!(read_or_create(&path), want, "let go, the next read upgrades");
+        assert_eq!(p97_backups(&dir), [installed]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A lock file that cannot be made (here a folder stands where it goes; a read-only folder on Unix) does not turn
+    /// a readable table into an error or stop the attempt: it goes on as it did before the lock. A stray temp file in
+    /// the old per-pid name, as a crash would leave, is never read as the table.
+    #[test]
+    fn p97_no_lock_file_still_upgrades() {
+        let dir = temp_dir("p97-no-lock");
+        let path = dir.join(SEATS_FILE);
+        let installed = p97_owners_v15();
+        std::fs::write(&path, &installed).unwrap();
+        std::fs::create_dir_all(dir.join(UPGRADE_LOCK)).unwrap();
+        let stray = dir.join(format!(".{SEATS_FILE}.{}.tmp", std::process::id()));
+        std::fs::write(&stray, "a crash left this").unwrap();
+        let want = replace_mode_line(DEFAULT, "mode = \"sota\"")
+            .replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1);
+        assert_eq!(read_or_create(&path), want, "no lock file: the attempt goes on");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), want);
+        assert_eq!(p97_backups(&dir), [installed]);
+        assert_eq!(read_or_create(&path), want);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two attempts that would pick one backup name do not share a file. `NameTaken` writes another attempt's file at
+    /// the name `backup_name` picked, after the pick and before the create, as a second process did in the review's
+    /// probe. The backup moves on to the next name; the other file keeps its bytes; the "took" line names this
+    /// attempt's own file, which holds the table as it was.
+    #[test]
+    fn p97_two_attempts_never_share_a_backup_name() {
+        const OTHER: &str = "another attempt's half copy";
+        let dir = temp_dir("p97-name-taken");
+        let path = dir.join(SEATS_FILE);
+        let installed = p97_owners_v15();
+        std::fs::write(&path, &installed).unwrap();
+        let want = replace_mode_line(DEFAULT, "mode = \"sota\"")
+            .replacen("\noverrides_per_run = 3\n", "\noverrides_per_run = 5\n", 1);
+        assert_eq!(with_fault(Fault::NameTaken(OTHER), || read_or_create(&path)), want);
+        let files = p97_backup_files(&dir);
+        let other: Vec<&PathBuf> = files.iter().filter(|(_, bytes)| bytes == OTHER.as_bytes()).map(|(p, _)| p).collect();
+        assert_eq!(other.len(), 1, "the other attempt's file is not written over: {files:?}");
+        let mine: Vec<&PathBuf> = files.iter().filter(|(_, bytes)| bytes == installed.as_bytes()).map(|(p, _)| p).collect();
+        assert_eq!(mine.len(), 1, "{:?}", files.iter().map(|(p, b)| (p, b.len())).collect::<Vec<_>>());
+        assert_ne!(mine[0], other[0]);
+        let log = p97_log_lines(&dir);
+        assert_eq!(log.len(), 1, "{log:?}");
+        assert!(log[0].ends_with(&format!("; the file before is {}", mine[0].display())), "{log:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `write_atomic` (`set_mode_in`, the leases) from several threads at once: each temp file is its attempt's own,
+    /// so every write lands whole and none fails because another thread renamed its temp file away. The name was
+    /// `.<name>.<pid>.tmp`, one per process (the third review, finding 2): 4 of 20 rounds failed with "cannot find
+    /// the file" on that code.
+    #[test]
+    fn p97_writes_at_once_each_land_whole() {
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 60;
+        let mut failed = Vec::new();
+        for round in 0..ROUNDS {
+            let dir = temp_dir(&format!("p97-atomic-{round}"));
+            let path = dir.join("leases.json");
+            let start = std::sync::Barrier::new(THREADS);
+            let texts: Vec<String> = (0..THREADS).map(|i| format!("writer {i}\n").repeat(400)).collect();
+            let results: Vec<std::io::Result<()>> = std::thread::scope(|scope| {
+                let handles: Vec<_> = texts
+                    .iter()
+                    .map(|text| {
+                        let (start, path) = (&start, &path);
+                        scope.spawn(move || {
+                            start.wait();
+                            write_atomic(path, text.as_bytes())
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|handle| handle.join().unwrap()).collect()
+            });
+            // Only a temp file renamed away (`NotFound`) is this fault. Windows also refuses a rename onto a file that
+            // another rename is replacing that instant ("Access is denied", os error 5: measured once in 30 runs of
+            // the p97 tests together, never alone in 86 runs); unique temp names do not change that, and the failed
+            // write removes its temp file, which the check below still holds.
+            let errors: Vec<String> = results
+                .iter()
+                .filter_map(|result| result.as_ref().err())
+                .filter(|err| err.kind() == std::io::ErrorKind::NotFound)
+                .map(ToString::to_string)
+                .collect();
+            let now = std::fs::read_to_string(&path).unwrap_or_default();
+            if !errors.is_empty() || !texts.contains(&now) || !p97_temp_files(&dir).is_empty() {
+                failed.push(format!(
+                    "round {round}: errors {errors:?}, whole {}, temp {:?}",
+                    texts.contains(&now),
+                    p97_temp_files(&dir)
+                ));
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        println!("p97 writes at once: {} of {ROUNDS} rounds failed", failed.len());
+        assert!(failed.is_empty(), "{} of {ROUNDS} rounds failed: {failed:#?}", failed.len());
     }
 }
