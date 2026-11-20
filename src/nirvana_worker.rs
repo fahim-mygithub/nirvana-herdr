@@ -4371,6 +4371,17 @@ pub fn seat_order_with(
     request: &SeatRequest,
     profile: Option<&str>,
 ) -> Result<Value, (i32, String)> {
+    seat_order_why(project, request, profile, None)
+}
+
+/// Plan 47 P47c: `seat_order_with` with the `seated` line's `why`, which `herdr scholar` sets to `scholar_stage` so
+/// `replay` keeps its researchers' deliveries off the orchestrator's queue. Every other caller passes `None`.
+pub fn seat_order_why(
+    project: &Project,
+    request: &SeatRequest,
+    profile: Option<&str>,
+    why: Option<&str>,
+) -> Result<Value, (i32, String)> {
     let io = |err: std::io::Error| (2, err.to_string());
     project.ensure().map_err(io)?;
     let journal = project.journal(&request.run);
@@ -4662,7 +4673,7 @@ pub fn seat_order_with(
         worktree,
         branch,
         parent: None,
-        why: None,
+        why: why.map(str::to_owned),
         rule_pick: booked.rule_pick.clone(),
         bar_dropped: booked.bar_dropped,
         step_down: booked.step_down,
@@ -4997,6 +5008,34 @@ fn stop_cli(args: &[String]) -> std::io::Result<()> {
         &mut std::io::stdout(),
     )?;
     Ok(())
+}
+
+/// Plan 47 P47c: `stop_cli`'s two paths for one order of a known run, so `herdr scholar` stops a chain at its time cap
+/// or on the owner's stop the way `herdr seat stop` does. The line `seat stop` would print.
+pub(crate) fn stop_order(project: &Project, run: &str, order: &str) -> std::io::Result<String> {
+    if live(project, run, order) {
+        std::fs::write(stop_file(project, run, order), now().to_string())?;
+        let started = Instant::now();
+        while live(project, run, order) && started.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        return Ok(if live(project, run, order) {
+            format!("{order}: asked to stop; its supervisor has not ended yet")
+        } else {
+            format!("{order}: stopped, checkpoint written")
+        });
+    }
+    let journal = project.journal(run);
+    let state = replay(&journal.read().0);
+    let Some(known) = state.order(order) else {
+        return Ok(format!("{order}: no such order in {run}"));
+    };
+    if !known.phase.wants_worker() {
+        return Ok(format!("{order} is {}; nothing runs", known.phase.word()));
+    }
+    let mut out = Vec::new();
+    stopped(project, &journal, run, &known.seated, None, &mut out)?;
+    Ok(String::from_utf8_lossy(&out).trim().to_owned())
 }
 
 /// `git worktree remove --force`, retried for 5 s while a closing pane's shell lets go of the folder; a folder

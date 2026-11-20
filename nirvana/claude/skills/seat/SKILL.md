@@ -110,6 +110,30 @@ The checklist, before `herdr seat run`:
 - [ ] where working files go, and foreground only
 - [ ] a "done means" that ends in a command whose output goes in `tests`
 
+### A research question: `herdr scholar`
+
+Plan 47 P47c (the owner, 2026-11-20: "breaks down our prompt to different research styles and runs parallel research
+agents and finally builds an artifact"). A question that needs outside sources and more than one page is not briefed
+by hand: `herdr scholar "<question>"` routes it, seats the researchers and the writer, and wakes you once.
+
+- Put the owner's words in the question, and the constraints that matter: the project, versions, the deadline, what
+  the answer is for. The route turn sees only the question and the titles of the reports already in `docs/research/`.
+- Then end your turn. herdr runs one short route turn, at most five `research.web` orders side by side on agy with the
+  built-in `scholar` profile (each reads its style's card), then one `write.docs` order that writes
+  `docs/research/<date>-<slug>/report.md` and `report.html`. Researchers' deliveries do not wake you.
+- The one wake is the writer's delivery; its summary starts with the page's path. Tell the owner the path. Publish the
+  page only when this session has the publish tool and the owner wants it.
+- A wake that says `scholar <end>: herdr scholar status <run>` is a run that ended without a report
+  (`nothing_to_research`, `no_delivery`, `no_report`, `report_incomplete`, `stopped`, `gave_up`): read the status and
+  tell the owner what it says.
+- A wake that says a scholar order was interrupted is answered with `herdr scholar resume <run>`; the driver reseats
+  it once. `herdr scholar stop <run>` stops a run.
+- After the owner reads the report, `herdr scholar tag <run> hit|partial|miss --note "<their words>"` records it in
+  `docs/research/log.jsonl`.
+- `herdr scholar` refuses in a folder that is not a git repository, inside a seated worker, and while another scholar
+  run of the project has a live driver (`--force` starts one anyway).
+- A single lookup (one fact, one page) stays an ordinary `research.web` order, seated with `--profile scholar`.
+
 ## 4. Read it
 
 End your turn while workers run; herdr wakes you when an order delivers, asks, fails or stalls.

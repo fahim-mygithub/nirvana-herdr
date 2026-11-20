@@ -72,6 +72,8 @@ mod nirvana_retro;
 mod nirvana_review;
 mod nirvana_run;
 mod nirvana_running;
+// Plan 47 P47c: `herdr scholar`, one question routed to parallel researchers and a writer.
+mod nirvana_scholar;
 mod nirvana_seat;
 // Plan 46 P46a: the seat table checked against real runs.
 mod nirvana_seat_calib;
@@ -646,6 +648,10 @@ fn main() -> io::Result<()> {
     // Nirvana fork, plan 40c: one image or PDF read on a cheap seat, back as text, never in the caller's context.
     if args.get(1).map(String::as_str) == Some("look") {
         return nirvana_look::cli(&args[2..]);
+    }
+    // Nirvana fork, plan 47 P47c: a research question split into styles, parallel researchers, then a written report.
+    if args.get(1).map(String::as_str) == Some("scholar") {
+        return nirvana_scholar::cli(&args[2..]);
     }
     // Nirvana fork, plan 12 O3: a run's journal, waking, receipt; the workers are `herdr seat run|exec|...`.
     if args.get(1).map(String::as_str) == Some("run") {

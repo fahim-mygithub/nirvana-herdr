@@ -1354,6 +1354,30 @@ pub fn replay(events: &[Event]) -> RunState {
             }
             _ => true,
         };
+        // Plan 47 P47c: a scholar researcher's delivery, and a verdict that passes it or sends it back, are the scholar
+        // driver's to read (`nirvana_scholar`), so five researchers cost the orchestrator no turn. A question, an amend,
+        // a stall, an interrupt, a failure and every line of the writer still queue. A send-back child is seated with
+        // `why: "send_back"`, so the chain's root carries the mark.
+        let scholar_quiet = match &event.kind {
+            Kind::Delivered { .. } => true,
+            Kind::Gated { verdict, .. } => {
+                verdict == crate::nirvana_gate::Outcome::Pass.word()
+                    || verdict == crate::nirvana_gate::Outcome::SentBack.word()
+            }
+            _ => false,
+        } && event
+            .kind
+            .order()
+            .and_then(|order| state.order(order))
+            .is_some_and(|known| {
+                known.seated.class == crate::nirvana_scholar::RESEARCH_CLASS
+                    && state
+                        .order(&crate::nirvana_gate::chain(&state, known.id()).0)
+                        .is_some_and(|root| {
+                            root.seated.why.as_deref() == Some(crate::nirvana_scholar::STAGE_WHY)
+                        })
+            });
+        let owed = owed && !scholar_quiet;
         if let Some(line) = queue_line(&event.kind).filter(|_| !herdrs && owed) {
             state.queue.push(QueueItem {
                 seq: event.seq,

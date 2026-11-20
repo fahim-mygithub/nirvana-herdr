@@ -65,6 +65,12 @@ chore, can go to a `worker-*` subagent instead of a pane worker; the agent's nam
   agy a tool it lacks: r2 was told of a YouTube connector agy does not have. When the project has a
   `web-researcher` profile, seat agy research with `--profile web-researcher`; `herdr profile new web-researcher
   --from web-researcher` makes one.
+- A research question that needs outside sources and more than one page goes to `herdr scholar "<question>"`, with
+  the owner's words and the constraints that matter in the question; then end your turn (plan 47, the owner's
+  scholar). One wake brings the report's path: tell the owner the path, and publish the page only when this session
+  can and the owner wants it. A wake that says a scholar order was interrupted is answered with
+  `herdr scholar resume <run>`. A single lookup stays an ordinary `research.web` order, seated with
+  `--profile scholar`. The seat skill has the rest.
 - Answer a question itself when the answer needs at most a few file reads. Make a small edit itself, at most 1 file and
   30 lines outside an order (§12 R2, enforced by the `guard-edit` and `check-edit` hooks). Everything else goes to a worker.
 - A question is answered, never built. A triage that fell back to a build turned a code-tour question into a
