@@ -3,6 +3,59 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.90.0: `seat run` says when a project profile fits an order; the journal records the profile each order carried
+
+- **Changed:** plan 45's fourth package, the seating line, and three fixes from the Megajam record.
+  - When an order is seated with no `--profile` and one or more of the project's profiles fit its class and needs,
+    `herdr seat run` prints one line after its seat line: `herdr: profile <name> fits this order (class <class>);
+    pass --profile <name> to seat with it`. With several, at most 3 names, then "and N more". herdr still seats
+    without the profile. With `--json` the line is a field, so stdout stays one JSON value.
+  - No line when a profile was passed, on a teach order, a lesson or idle review, or any `review.*` or
+    `acceptance.*` order. A profile whose name starts with `-` is never named.
+  - The `seated` journal line gains `profile` and `profile_fit`. `profile` is the name, or `null` for "seated
+    with none". A line written before this build has neither key and reads as unknown, and the count then falls
+    back to the reason and the order copy as before. A written `null` no longer falls back. A reseat and a
+    send-back child carry their parent's profile.
+  - A gate review and a held-out author review of an order seated with a profile are no longer handed the
+    subject's `Profile:` lines, which could get the review refused at seating.
+  - The web check reads only the order's own words. Everything herdr writes into a worker's text is cut first: the
+    footer, the lessons and cards sections, a send-back's or reseat's own part, the agy profile section, the
+    `Profile:` lines and every herdr line, the no-web line among them. Only herdr's section is cut; the owner's
+    words after it are read.
+  - When an order's own text names a `herdr look` call and the worker's stream shows none, the gate adds a note.
+    It is never a fail. Naming a call needs an argument after `look`; a call counts in the stream only when
+    `herdr` is the command word.
+  - `ROLE.md` gains two lines: the line is a hint, and passing `--profile` is the orchestrator's call.
+- **Because:** the owner, ruling 2 of 2026-11-19, went with the recommendation: when a profile fits and none was
+  passed, herdr says so in one line and counts, and never seats with a profile nobody passed. MotoProject's
+  `reel-editor` was carried by 0 of 35 orders (plan 45 M1). A Megajam review of local stills, r16, was sent back
+  "no sources" because herdr's own lesson line named YouTube, and was merged by hand (M6).
+- **Measured:** scoped tests pass, by filter: `nirvana_profile` 86, `nirvana_review` 27, `nirvana_idle_review` 26,
+  `nirvana_retro` 9, `nirvana_knowledge` 24, `nirvana_learning` 27, `nirvana_lessons` 31, `nirvana_worker` 108,
+  `nirvana_gate` 159, `nirvana_run` 83, `nirvana_look` 27, `nirvana_agy_tools` 17, `nirvana_gui_tools` 39,
+  `nirvana_seat` 219. Built on Opus high, reviewed on Sonnet high, one fix round. The review ran the code and found
+  nothing that blocks: with no profile passed, the seat pick, the order text, the system prompt, the server config and
+  the worker's env are what they were; a journal written before this build reads as before; no order is counted twice;
+  the fit line read 200 profiles in 43 ms and cannot fail a seating. It found six things the fix round then reproduced
+  red and fixed: a copy fed back with herdr's own no-web line was read as a web task, because that line says "web
+  page"; owner text after a herdr section was never read; two new journal writes had no test; "keep the herdr look and
+  feel" read as asking for a look; `grep "herdr look"` counted as a look that ran; a profile named with a leading `-`
+  was named in the hint. At the merge, on the merged binary and a scratch project: nine orders that fit one profile,
+  their journal lines a mix of old lines, `profile` names, `null` and a number, counted as 5 carried of 9, which is
+  the figure written down before the run; read without the key it would be 4, and with `null` falling back to the
+  reason, 7. The controls file `p95` holds 60 controls; each was run red in its branch and 14 were run red again at
+  the merge, the tree unchanged after each. The dry run finds 4717 of 4725 controls' text, the same 8 old misses.
+  `nirvana_subagents` got fixture lines only and its module was not run, because one of its tests fails on master. Not
+  seen on a live seat: the line printed by a real `seat run`, an orchestrator acting on it, the look note on a real
+  delivery. Known gaps: owner text that follows a lessons section with no heading of its own still reads as part of
+  that section; a look run through a shell variable, `bash -c`, `timeout` or a script is not seen; the note
+  says a call may be unseen; `herdr look ... || true` counts as a look that answered; a send-back child gets the look note again; no command
+  prints how often the line was passed by, the Profiles panel's use text will be that count; in a paragraph that mixes
+  the owner's words with a herdr line, an owner line that is itself a fragment of a herdr line is dropped.
+- **If you remove this:** a profile the owner built goes unused without anyone being told, and the Profiles panel
+  has no record to count use from. Remove the own-text cut and a research order is told to cite web sources
+  because of a line herdr itself appended.
+
 ## alpha 0.89.0: herdr proposes a profile when it sees a role retyped; lesson reviews may propose one too
 
 - **Changed:** plan 45's second package, the proposer. Nothing it writes changes a profile: a proposal waits in

@@ -716,6 +716,9 @@ fn queue_on(
             .collect(),
         jev_pick: None,
         send_ok: None,
+        // Plan 45 P45d: a lesson or idle review is never seated with a profile (its brief has the subject's taken out).
+        profile: Some(None),
+        profile_fit: Some(Vec::new()),
     };
     nirvana_gate::write_sidecar(
         project,

@@ -1,6 +1,6 @@
 # Plan 45: agent profiles from the sidebar, and lessons that propose them
 
-Status: RULED 2026-11-19 (§7). P45c LANDED as alpha 0.87.0 and P45b as alpha 0.89.0; P45a and P45d follow.
+Status: RULED 2026-11-19 (§7). P45c LANDED as alpha 0.87.0, P45b as alpha 0.89.0 and P45d as alpha 0.90.0; P45a follows.
 
 ## 1. The ask
 
@@ -176,6 +176,20 @@ package, so the two are built one after the other, not together.
 - A review writes at most 3 proposals.
 - For P45a: `nirvana_profile_detect::usage(root)` gives each profile's carried and fit counts for the panel. The
   library `accept` prints nothing, so the panel must show `nirvana_profile_proposals::ACCEPT_NOTE` after an Accept.
+
+### What P45d changed from this plan
+
+- The line is printed by `nirvana_worker::run_cli`, not `nirvana_seat.rs`, and is a field under `--json`.
+- No line on a teach order, a lesson or idle review, or any `review.*` or `acceptance.*` order: those take no
+  server from a profile (P45c), so a hint to pass one would be wrong.
+- `profile` in the journal has three states: absent is unknown, `null` is none, a string is the name. Only unknown
+  falls back to the reason and the order copy.
+- §4 M6 said the two Megajam reviews were sent back for being "of local files". The cause was herdr's own lesson
+  line naming YouTube, read as the order asking for the web. The fix is that the web check reads the order's own
+  words only.
+- §4 M5: no look rule existed before. The gate now notes a delivery whose order named a `herdr look` call and
+  whose stream shows none. It never fails one.
+- No command prints how often the line was passed by. The Profiles panel (P45a) shows it as each profile's use.
 
 ## 9. Live checks owed after building
 

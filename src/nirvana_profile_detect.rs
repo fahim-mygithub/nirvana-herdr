@@ -21,17 +21,18 @@
 //! so counting them would count one order several times (the Megajam audit: a send-back of 7,171 characters was
 //! 10,462 and its review 18,259).
 //!
-//! **A paragraph** is normalised in this order: CRLF read as LF; herdr's parts cut (the footer from `From herdr (plan
-//! 12 §4)` on; an agy `## Profile:` section; everything from the first `## Lessons from earlier` or `## Knowledge cards
-//! of the profile` heading on, since herdr appends lessons, cards, its own lines and the footer after the orchestrator's
-//! text; every `Profile:` and `Profile sha256:` line); the text split on blank lines; each piece's whitespace collapsed
-//! to single spaces; every herdr line herdr appends (`HERDR_LINES`, the constants themselves, not copies) taken out;
-//! whitespace collapsed again. A paragraph of `MIN_CHARS` characters or more is counted once per order, by the sha of
+//! **A paragraph** is normalised in this order: CRLF read as LF; herdr's parts cut by `own_text` (the footer from
+//! `From herdr (plan 12 §4)` on; each lessons, cards or send-back section up to the next heading herdr did not write;
+//! an agy `## Profile:` section; every `Profile:` and `Profile sha256:` line; every herdr line herdr writes,
+//! `herdr_lines`, the constants themselves, not copies); the text split on blank lines; each piece's whitespace
+//! collapsed to single spaces; the herdr lines taken out again; whitespace collapsed again. A paragraph of `MIN_CHARS` characters or more is counted once per order, by the sha of
 //! its lowercased text, so two orders that differ only in case or line breaks type the same paragraph.
 //!
-//! **The profile an order carried**: the journal's `profile` field when a later package adds it (plan 45 P45d), else
-//! the `seated` reason's `; profile <name> sha256 <hex>` (`nirvana_profiles::from_reason`), else the order copy's
-//! `Profile:` line with herdr's sha (`nirvana_profiles::in_order`).
+//! **The profile an order carried**: the journal's `profile` field when the key is there (plan 45 P45d writes it on
+//! every `seated` line): a name, or `null` for none, and then nothing else is read. Only a line without the key, or
+//! whose value is not a profile name, falls back to what was read before P45d: the `seated` reason's `; profile <name>
+//! sha256 <hex>` (`nirvana_profiles::from_reason`), else the order copy's `Profile:` line with herdr's sha
+//! (`nirvana_profiles::in_order`). An absent key is unknown, never "none".
 //!
 //! **Fit** (`usage`): an original order fits a profile when the profile names a class or needs, the order's class is
 //! the profile's class (when it names one), and the order's journaled needs hold every need the profile names. An
@@ -369,9 +370,10 @@ fn withheld(shape: &str, chars: usize) -> String {
     )
 }
 
-/// The lines herdr appends to an order, as their constants hold them: a paragraph has them taken out before it is
-/// measured, so herdr's own boilerplate is never a role's text. The footer, the lessons and cards lines, the sources
-/// lines, the device and send lines, the browser lines.
+/// The lines herdr writes into the text a worker reads, as their constants hold them: `own_text` takes them out, so
+/// herdr's own boilerplate is never a role's text nor the order's ask. The footer, the lessons and cards offer lines,
+/// the sources lines (`WEB_SOURCES`, `NO_WEB_SOURCES`, agy's `SOURCES_LINE`), the device and Send lines, the browser
+/// lines, and the gate's send-back lines (P45d fix round: `NO_WEB_REDO` holds `web page`, as `NO_WEB_SOURCES` does).
 fn herdr_lines() -> &'static [String] {
     use std::sync::OnceLock;
     static LINES: OnceLock<Vec<String>> = OnceLock::new();
@@ -393,6 +395,10 @@ fn herdr_lines() -> &'static [String] {
             crate::nirvana_bladebro::DENIED_LINE,
             crate::nirvana_bladebro::TOLD_LINE,
             crate::nirvana_bladebro::UNTOLD_LINE,
+            crate::nirvana_gate::SOURCES_REDO,
+            crate::nirvana_gate::INVENTED_REDO,
+            crate::nirvana_gate::INVENTED_SOURCES,
+            crate::nirvana_gate::NO_WEB_REDO,
         ]
         .iter()
         .map(|line| nirvana_lessons::one_line(line.trim_start_matches(['\n', '-'])))
@@ -413,42 +419,156 @@ const HERDR_BRIEFS: [&str; 5] = [
     "# Umbrella lessons for ",
 ];
 
-/// The orchestrator's own text of an order copy: herdr's parts cut (see the module comment).
+/// The heading a send-back's or a reseat's brief puts above the order it quotes (`nirvana_gate::send_back_brief`,
+/// `nirvana_worker::continuation_brief`): it ends herdr's part of the brief.
+const ORIGINAL_HEADING: &str = "## The original order";
+
+/// How a herdr section of an order copy ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Section {
+    /// At the next heading herdr did not write: lessons, cards, a send-back's or reseat's own part.
+    Listed,
+    /// At its `(end of profile ` line, or the first line herdr did not quote (an agy profile section).
+    Quoted,
+}
+
+/// A markdown heading: one or more `#`, then a space or nothing.
+fn is_heading(line: &str) -> bool {
+    let rest = line.trim_start_matches('#');
+    rest.len() < line.len() && (rest.is_empty() || rest.starts_with(' '))
+}
+
+/// The section a heading herdr writes opens, `None` for any other line. `briefed`: the text holds
+/// `ORIGINAL_HEADING`, so a send-back's or reseat's heading is herdr's; without it an order titled `# Continuation of
+/// the study` is the orchestrator's.
+fn herdr_section(line: &str, briefed: bool) -> Option<Section> {
+    if line.starts_with("## Lessons from earlier ")
+        || line.starts_with("## Knowledge cards of the profile ")
+    {
+        return Some(Section::Listed);
+    }
+    if line.starts_with("## Profile: ") {
+        return Some(Section::Quoted);
+    }
+    let send_back = line
+        .strip_prefix("# Send-back ")
+        .and_then(|rest| rest.split_once(" of "))
+        .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+    (briefed
+        && (send_back || line.starts_with("# Continuation of ") || line == "## What the gate found"))
+        .then_some(Section::Listed)
+}
+
+/// One paragraph with `herdr_lines` taken out, whole or re-wrapped: a paragraph that is nothing else goes; in one that
+/// holds the orchestrator's words too, a typed line holding a herdr line keeps only its other words, and a typed line
+/// that is a piece of a herdr line (re-wrapped over several lines) goes. A paragraph with no herdr line is kept as typed.
+/// A line starting with `NO_WEB_MARK` goes in any case: the mark is the part of `NO_WEB_SOURCES` that says `web page`,
+/// kept short so a re-wrapped copy carries it whole on its first line (review N3).
+fn without_herdr_lines(paragraph: Vec<&str>) -> Vec<String> {
+    let cut = |text: &str| {
+        let flat = nirvana_lessons::one_line(text);
+        let mut rest = flat.clone();
+        for herdr in herdr_lines() {
+            rest = rest.replace(herdr.as_str(), " ");
+        }
+        (flat, nirvana_lessons::one_line(&rest))
+    };
+    let mark = crate::nirvana_gate::NO_WEB_MARK;
+    let (flat, rest) = cut(&paragraph.join("\n"));
+    let marked = paragraph.iter().any(|line| line.trim_start().starts_with(mark));
+    if rest == flat && !marked {
+        return paragraph.into_iter().map(str::to_owned).collect();
+    }
+    if rest.is_empty() {
+        return Vec::new();
+    }
+    paragraph
+        .into_iter()
+        .filter_map(|typed| {
+            let (flat, rest) = cut(typed);
+            if flat.starts_with(mark) || (rest != flat && rest.is_empty()) {
+                None
+            } else if rest != flat {
+                Some(rest)
+            } else if herdr_lines().iter().any(|herdr| herdr.contains(flat.as_str())) {
+                None
+            } else {
+                Some(typed.to_owned())
+            }
+        })
+        .collect()
+}
+
+/// The orchestrator's own text of an order copy: every part herdr writes into the text a worker reads is cut, and the
+/// orchestrator's words around it stay as typed. A re-fed copy (an order seated from a copy herdr wrote) and a
+/// send-back's or reseat's brief hold herdr's parts as the copy does. Cut:
+/// - everything from herdr's footer (the line holding `FOOTER_MARK`) on, and the footer's `---` line before it;
+/// - herdr's listed sections, each from its heading up to the next heading herdr did not write (P45d fix round, review
+///   finding 6: before, everything after the first one was cut, so the orchestrator's words after it were never read):
+///   the lessons (`## Lessons from earlier `), the cards (`## Knowledge cards of the profile `), and a send-back's or
+///   reseat's own part (`# Send-back <n> of `, `# Continuation of `, `## What the gate found`) when the text holds
+///   `## The original order`, which is cut too and ends the part;
+/// - an agy profile section (`## Profile: `), up to its `(end of profile ` line or the first line that is neither blank
+///   nor quoted (`nirvana_profiles::agy_section` quotes every body line with `>`);
+/// - every `Profile:` and `Profile sha256:` line;
+/// - every line of `herdr_lines`, whole or re-wrapped, and every line starting with `NO_WEB_MARK`
+///   (`without_herdr_lines`; P45d fix round, review finding 1: a re-fed copy's `NO_WEB_SOURCES` line says `web page`).
+///
+/// Not cut: owner text after a listed section with no heading of its own, which reads as part of the section (a
+/// re-wrapped lesson line cannot be told from it), and herdr's whole briefs (a gate review, a lesson review), which
+/// `HERDR_BRIEFS` and their classes keep out instead.
 pub fn own_text(text: &str) -> String {
     let text = text
         .strip_prefix('\u{feff}')
         .unwrap_or(text)
         .replace("\r\n", "\n");
-    let mut out = String::with_capacity(text.len());
-    let mut in_section = false;
+    let briefed = text.lines().any(|line| line == ORIGINAL_HEADING);
+    let mut kept: Vec<&str> = Vec::new();
+    let mut section: Option<Section> = None;
     for line in text.lines() {
-        if line.contains(crate::nirvana_worker::FOOTER_MARK)
-            || line.starts_with("## Lessons from earlier ")
-            || line.starts_with("## Knowledge cards of the profile ")
-        {
+        if line.contains(crate::nirvana_worker::FOOTER_MARK) {
             break;
         }
-        // An agy order's quoted profile body (`nirvana_profiles::agy_section`).
-        if line.starts_with("## Profile: ") {
-            in_section = true;
+        if briefed && line == ORIGINAL_HEADING {
+            section = None;
             continue;
         }
-        if in_section {
-            if line.starts_with("(end of profile ") {
-                in_section = false;
-            }
+        if let Some(opened) = herdr_section(line, briefed) {
+            section = Some(opened);
             continue;
+        }
+        match section {
+            Some(Section::Quoted) if line.starts_with("(end of profile ") => {
+                section = None;
+                continue;
+            }
+            Some(Section::Quoted) if line.trim().is_empty() || line.starts_with('>') => continue,
+            Some(Section::Listed) if !is_heading(line) => continue,
+            _ => section = None,
         }
         if line.starts_with(nirvana_profiles::LINE) || line.starts_with(nirvana_profiles::SHA_LINE)
         {
             continue;
         }
-        out.push_str(line);
-        out.push('\n');
+        kept.push(line);
     }
-    // The footer's `---` line, which `write_order` puts before the mark.
-    let trimmed = out.trim_end();
-    trimmed.strip_suffix("\n---").unwrap_or(trimmed).to_owned()
+    let mut out: Vec<String> = Vec::with_capacity(kept.len());
+    let mut paragraph: Vec<&str> = Vec::new();
+    for line in kept.into_iter().chain([""]) {
+        if line.trim().is_empty() {
+            out.extend(without_herdr_lines(std::mem::take(&mut paragraph)));
+            out.push(line.to_owned());
+        } else {
+            paragraph.push(line);
+        }
+    }
+    let joined = out.join("\n");
+    // The footer's `---` line, which `write_order` puts before the mark; and the blank lines a cut section left.
+    let trimmed = joined.trim_end().trim_start_matches('\n');
+    trimmed
+        .strip_suffix("\n---")
+        .map_or(trimmed, str::trim_end)
+        .to_owned()
 }
 
 /// The paragraphs of `MIN_CHARS` or more of an order's own text, normalised (see the module comment), each once.
@@ -677,18 +797,28 @@ fn scan(root: &Path, limits: &Limits, started: Instant) -> Scan {
             {
                 continue;
             }
-            let profile = text_of(&event, "profile")
-                .filter(|name| nirvana_profiles::valid_name(name))
-                .or_else(|| {
-                    text_of(&event, "reason")
-                        .and_then(|reason| nirvana_profiles::from_reason(&reason))
-                })
-                .or_else(|| {
-                    body.as_deref()
-                        .and_then(nirvana_profiles::in_order)
-                        .and_then(Result::ok)
-                        .map(|found| found.name)
-                });
+            // Plan 45 P45d: the journal's `profile` when the key is there, `null` for "seated with none"; only when it
+            // is absent (a line written before P45d) or not a name is the reason, then the order copy, read.
+            let journaled = match event.get("profile") {
+                Some(Value::Null) => Some(None),
+                Some(value) => value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|name| nirvana_profiles::valid_name(name))
+                    .map(|name| Some(name.to_owned())),
+                None => None,
+            };
+            let profile = match journaled {
+                Some(known) => known,
+                None => text_of(&event, "reason")
+                    .and_then(|reason| nirvana_profiles::from_reason(&reason))
+                    .or_else(|| {
+                        body.as_deref()
+                            .and_then(nirvana_profiles::in_order)
+                            .and_then(Result::ok)
+                            .map(|found| found.name)
+                    }),
+            };
             let mut needs: Vec<String> = event
                 .get("needs")
                 .and_then(Value::as_array)
@@ -744,6 +874,27 @@ pub fn fits(profile: &nirvana_profiles::Profile, class: &str, needs: &[String]) 
     (profile.class.is_some() || !profile.needs.is_empty())
         && profile.class.as_deref().is_none_or(|own| own == class)
         && profile.needs.iter().all(|need| needs.contains(need))
+}
+
+/// Plan 45 P45d (§5, ruling R2): the names of the project's profiles that an order of `class` and `needs` fits, by
+/// `fits`, the one rule `usage` and the `Unused` finding count with, so the line `seat run` shows and the counts never
+/// disagree. In name order; a profile its parser refuses fits nothing.
+///
+/// P45d fix round (review finding 5): a name starting with `-` is never returned. `valid_name` still loads one already
+/// on disk (`herdr profile new --help` wrote `--help.md` before P45b; `new_name_problem` refuses it since), and the line
+/// would tell the orchestrator to pass `--profile --help`, a flag to anyone reading it. `usage` still counts such a
+/// profile; only the line leaves it out.
+pub fn fitting(root: &Path, class: &str, needs: &[String]) -> Vec<String> {
+    profiles_here(root)
+        .into_iter()
+        .filter(|(name, _)| !name.starts_with('-'))
+        .filter(|(_, parsed)| {
+            parsed
+                .as_ref()
+                .is_some_and(|profile| fits(profile, class, needs))
+        })
+        .map(|(name, _)| name)
+        .collect()
 }
 
 type Profiles = Vec<(String, Option<nirvana_profiles::Profile>)>;

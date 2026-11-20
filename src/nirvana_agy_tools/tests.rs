@@ -886,6 +886,8 @@ fn journal_class(run_dir: &Path, order: &str, class: &str, file: &str) {
         expected: std::collections::BTreeMap::new(),
         jev_pick: None,
         send_ok: None,
+        profile: None,
+        profile_fit: None,
     };
     crate::nirvana_run::Journal::new(run_dir.join(crate::nirvana_run::JOURNAL))
         .append(1, crate::nirvana_run::Kind::Seated(Box::new(seated)))

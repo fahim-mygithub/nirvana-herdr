@@ -56,6 +56,8 @@ fn seated(order: &str) -> Seated {
         expected: BTreeMap::new(),
         jev_pick: None,
         send_ok: None,
+        profile: None,
+        profile_fit: None,
     }
 }
 
@@ -1839,4 +1841,68 @@ fn c40b_an_accepted_verdict_is_the_records_outcome() {
     assert_eq!(outcome_word(state.order("o1").expect("o1")), "sent_back");
     let state = replay(&events);
     assert_eq!(outcome_word(state.order("o1").expect("o1")), "accepted");
+}
+
+// ---- plan 45 P45d: the `seated` event's `profile` and `profile_fit` ----
+
+/// An old journal's `seated` line has neither key and reads as unknown, not as "none"; a new one writes `profile`
+/// always, `null` for none, and both replay in one journal. The old line is a real one (`rec1-running.jsonl`, plan 12
+/// O8a's live run, 2026-10-18), so a reader that needs the key fails here.
+#[test]
+fn p45d_an_old_seated_line_reads_unknown_and_a_new_one_null_or_a_name() {
+    let old = include_str!("../nirvana_seats_square/fixtures/rec1-running.jsonl")
+        .lines()
+        .find(|line| line.contains("\"seated\""))
+        .expect("the fixture's seated line");
+    assert!(!old.contains("\"profile"), "{old}");
+    let event: Event = serde_json::from_str(old).expect("an old line parses");
+    let Kind::Seated(old_seated) = &event.kind else {
+        panic!("{event:?}")
+    };
+    assert_eq!(old_seated.profile, None, "absent is unknown");
+    assert_eq!(old_seated.profile_fit, None);
+    // Written back, an unknown stays absent: herdr never turns it into a `null` it did not see.
+    let back = serde_json::to_string(&event).unwrap();
+    assert!(!back.contains("\"profile"), "{back}");
+
+    let mut none = seated("n1");
+    none.profile = Some(None);
+    none.profile_fit = Some(vec!["reel-reviewer".into()]);
+    let mut named = seated("n2");
+    named.profile = Some(Some("reel-reviewer".into()));
+    named.profile_fit = Some(Vec::new());
+    let line = |seq: u64, seated: Seated| {
+        serde_json::to_string(&Event {
+            v: 1,
+            seq,
+            at: T0 + seq,
+            kind: Kind::Seated(Box::new(seated)),
+        })
+        .unwrap()
+    };
+    let (none_line, named_line) = (line(3, none.clone()), line(4, named.clone()));
+    assert!(
+        none_line.contains(r#""profile":null,"profile_fit":["reel-reviewer"]"#),
+        "{none_line}"
+    );
+    assert!(
+        named_line.contains(r#""profile":"reel-reviewer","profile_fit":[]"#),
+        "{named_line}"
+    );
+    let journal = [old.to_owned(), none_line, named_line].join("\n");
+    let events: Vec<Event> = journal
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each line parses"))
+        .collect();
+    let state = replay(&events);
+    assert_eq!(state.order("mul").unwrap().seated.profile, None);
+    assert_eq!(state.order("n1").unwrap().seated.profile, Some(None));
+    assert_eq!(
+        state.order("n1").unwrap().seated.profile_fit.as_deref(),
+        Some(&["reel-reviewer".to_owned()][..])
+    );
+    assert_eq!(
+        state.order("n2").unwrap().seated.profile,
+        Some(Some("reel-reviewer".into()))
+    );
 }
