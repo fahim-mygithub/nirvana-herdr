@@ -2347,6 +2347,9 @@ async fn run_client_loop(
                             outcome.repaint |= repaint;
                             outcome.actions.extend(actions);
                         }
+                        // Plan 45 P45a fix round: the Profiles panel tells its reader what is drawn and lands a New
+                        // made off the key path. A statement of its own, away from the `take_changed` chain.
+                        shell.tick_profile_panel(&mut outcome);
                         // Plan 38: the next sparkle frame, only while the last drawing had a working space. A
                         // statement of its own, away from the `take_changed` chain every square appends to.
                         outcome.repaint |= crate::nirvana_spaces::sparkle_due();

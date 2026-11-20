@@ -310,9 +310,10 @@ CONTROLS = (
             T_PP_LIMITS, "rust"),
     Control("p92_pp_quote_unchecked", PP, "    if !quoted(&evidence)", "    if false && !quoted(&evidence)",
             T_PP_LIMITS, "rust"),
+    # P45a fix round: accept's refusal is a `Refused::No` now (the panel's `accept_seen` shares the body).
     Control("p92_pp_accept_unchecked", PP,
-            '    if !problems.is_empty() {\n        return Err(format!("{id} is refused: {}", problems.join("; ")));',
-            '    if false {\n        return Err(format!("{id} is refused: {}", problems.join("; ")));',
+            '    if !problems.is_empty() {\n        return Err(Refused::No(format!("{id} is refused: {}", problems.join("; "))));',
+            '    if false {\n        return Err(Refused::No(format!("{id} is refused: {}", problems.join("; "))));',
             T_PP_LIMITS, "rust"),
     # A patch: the front matter kept, a stale one refused, its rollback exact
     Control("p92_pp_patch_drops_keys", PP, '        lines[..=close].join("\\n"),', '        "---\\n---",',
@@ -365,17 +366,17 @@ CONTROLS = (
             T_LEGACY, "rust"),
     # Hand-edited front matter at accept is checked again (red: ` model:` is accepted)
     Control("p92_pp_front_unchecked", PP,
-            '    if !problems.is_empty() {\n        return Err(format!("{id} is refused: {}", problems.join("; ")));',
-            '    if false {\n        return Err(format!("{id} is refused: {}", problems.join("; ")));',
+            '    if !problems.is_empty() {\n        return Err(Refused::No(format!("{id} is refused: {}", problems.join("; "))));',
+            '    if false {\n        return Err(Refused::No(format!("{id} is refused: {}", problems.join("; "))));',
             T_FRONT, "rust"),
     # A proposal's own key twice is refused (red: the duplicate `key` proposal is accepted)
     Control("p92_pp_duplicate_key_read", PP, "        if values.iter().any(|(seen, _)| seen == known) {",
             "        if false {", T_FRONT, "rust"),
     # Accept writes no mcp.json (red: one is written beside profile.md, so the profile has own servers)
     Control("p92_pp_accept_writes_servers", PP,
-            '                format!("cannot create {}: {err}", dir.display())\n            })?;\n',
-            '                format!("cannot create {}: {err}", dir.display())\n            })?;\n'
-            '            let _ = std::fs::write(dir.join(nirvana_profiles::SERVERS_FILE), "{\\"mcpServers\\": {}}");\n',
+            '            Refused::No(format!("cannot create {}: {err}", dir.display()))\n        })?;\n',
+            '            Refused::No(format!("cannot create {}: {err}", dir.display()))\n        })?;\n'
+            '        let _ = std::fs::write(dir.join(nirvana_profiles::SERVERS_FILE), "{\\"mcpServers\\": {}}");\n',
             T_FRONT, "rust"),
     Control("p92_pp_rollback_keeps_dismissal", PP, "                && !undone.contains(&row.op.as_str())\n", "",
             T_PP_DISMISS, "rust"),

@@ -38,7 +38,14 @@
 //! anything `nirvana_profiles::parse` refuses (a Send, herdr's footer mark, a body over `BODY_MAX`). A `new` proposal
 //! for a name that exists is refused; a `patch` whose `base_sha` is not the profile's sha now is refused as stale.
 //! The evidence and the body are redacted as a lesson's evidence is (`nirvana_lessons::redact`), and then refused when
-//! still secret-shaped (`secret_shaped`): a worker's stream and an order can hold a token.
+//! still secret-shaped (`secret_shaped`): a worker's stream and an order can hold a token. A body or evidence holding
+//! a character the Profiles panel would draw as nothing (`invisible`) is refused too, by its code point (P45a fix
+//! round).
+//!
+//! **The panel's Accept** (P45a fix round) is `accept_seen`: the `Seen` the panel drew (the proposal file's sha and
+//! the `target` file text `accept` would write, by the same `prepared` and `target`) must still hold inside the lock,
+//! else nothing is written (`Refused::Changed`); it takes the lock with `try_lock` and says `Refused::Busy` rather than
+//! wait. `try_dismiss` is `dismiss` the same way. `herdr profile accept` and `dismiss` are unchanged.
 //!
 //! **The folder is ignored by git** (P45b second fix round): herdr writes `profile-proposals/.gitignore`, `*`, when it
 //! is missing (`ensure_ignore`). `secret_shaped` is a pattern list and is not complete (the second review got 20 of
@@ -474,6 +481,73 @@ fn secret_problems(body: &str, evidence: &str) -> Vec<String> {
         .collect()
 }
 
+/// P45a fix round (review finding 4): a character the Profiles panel's screen would not show. ratatui-core 0.1.0's
+/// `Buffer::set_stringn` drops every grapheme that holds a control character and every grapheme unicode-width 0.2
+/// measures 0 wide, and a format character riding on a visible grapheme is kept in its cell but draws as nothing. So a
+/// body could carry text the owner never saw and Accept would write it. Refused here: every control character but
+/// newline and tab (a CRLF's CR is read as LF first), every format character of Unicode 15.1 (general category Cf, and
+/// the line and paragraph separators), and the default-ignorable fillers and selectors the brief lists (U+034F, the
+/// Hangul fillers, U+17B4/5, the Mongolian selectors, U+FE00 to U+FE0F, U+FFA0, the tag and selector block U+E0000 to
+/// U+E0FFF). Combining marks are not here: they draw on their base. Also refused, found by the sweep
+/// `p94_fix_nothing_the_store_takes_is_dropped_by_the_screen`, which draws every code point: the conjoining Hangul vowels
+/// and finals, U+1160 to U+11FF and U+D7B0 to U+D7FF, which unicode-width measures 0 wide, so one after anything but a
+/// leading consonant is dropped, and U+A8FA, the Devanagari caret, which it measures 0 wide too. Korean written in
+/// decomposed jamo is refused with them; precomposed syllables are text.
+pub fn invisible(c: char) -> bool {
+    (c.is_control() && c != '\n' && c != '\t')
+        || matches!(
+            u32::from(c),
+            0x00AD
+                | 0x034F
+                | 0x0600..=0x0605
+                | 0x061C
+                | 0x06DD
+                | 0x070F
+                | 0x0890..=0x0891
+                | 0x08E2
+                | 0x115F..=0x11FF
+                | 0x17B4..=0x17B5
+                | 0x180B..=0x180F
+                | 0x200B..=0x200F
+                | 0x2028..=0x202E
+                | 0x2060..=0x206F
+                | 0x3164
+                | 0xA8FA
+                | 0xD7B0..=0xD7FF
+                | 0xFE00..=0xFE0F
+                | 0xFEFF
+                | 0xFFA0
+                | 0xFFF0..=0xFFFB
+                | 0x110BD
+                | 0x110CD
+                | 0x13430..=0x1343F
+                | 0x1BCA0..=0x1BCA3
+                | 0x1D173..=0x1D17A
+                | 0xE0000..=0xE0FFF
+        )
+}
+
+/// The first character of `text` the panel would not show (`invisible`), a CRLF read as LF.
+pub fn first_invisible(text: &str) -> Option<char> {
+    text.replace("\r\n", "\n").chars().find(|c| invisible(*c))
+}
+
+/// The refusal for a field holding a character the panel would not show: its code point, never the text.
+fn invisible_problems(body: &str, evidence: &str) -> Vec<String> {
+    [("body", body), ("evidence", evidence)]
+        .into_iter()
+        .filter_map(|(field, text)| {
+            first_invisible(text).map(|c| {
+                format!(
+                    "the {field} holds U+{:04X}, a character the Profiles panel cannot show: herdr never writes one \
+                     into a proposal, so nothing Accept writes is hidden from the owner",
+                    u32::from(c)
+                )
+            })
+        })
+        .collect()
+}
+
 /// The sha a `patch` names in `base_sha`: of the profile's file (`<name>.md` or `<name>/profile.md`) as it stands,
 /// CRLF read as LF so a checkout's line endings never stale a proposal. `None` when there is no such profile file.
 pub fn profile_sha(root: &Path, name: &str) -> Option<String> {
@@ -900,6 +974,24 @@ impl Drop for Lock {
 /// Under `runs/`, which `.nirvana/.gitignore` ignores, as the knowledge cards' lock is. P45c review F7: `herdr profile
 /// new` takes it too, so it and an `accept` of a new profile of the same name cannot interleave.
 pub(crate) fn lock(root: &Path) -> Result<Lock, String> {
+    let file = lock_file(root)?;
+    file.lock()
+        .map_err(|err| format!("the proposals' lock: {err}"))?;
+    Ok(Lock(file))
+}
+
+/// P45a fix round (review finding 6): the lock without the wait, for the window's key path, which must never block on
+/// another herdr's write. `Ok(None)`: another holder has it now.
+pub(crate) fn try_lock(root: &Path) -> Result<Option<Lock>, String> {
+    let file = lock_file(root)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(Lock(file))),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(err)) => Err(format!("the proposals' lock: {err}")),
+    }
+}
+
+fn lock_file(root: &Path) -> Result<std::fs::File, String> {
     let path = root
         .join(nirvana_run::DIR)
         .join("runs")
@@ -907,15 +999,12 @@ pub(crate) fn lock(root: &Path) -> Result<Lock, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
-    let file = std::fs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
         .open(&path)
-        .map_err(|err| format!("cannot open {}: {err}", path.display()))?;
-    file.lock()
-        .map_err(|err| format!("the proposals' lock: {err}"))?;
-    Ok(Lock(file))
+        .map_err(|err| format!("cannot open {}: {err}", path.display()))
 }
 
 /// The ops a rollback has undone.
@@ -993,6 +1082,11 @@ fn files(root: &Path) -> Vec<(String, PathBuf)> {
 
 /// One waiting proposal by its id.
 pub fn get(root: &Path, id: &str) -> Result<Proposal, String> {
+    read_one(root, id).map(|(proposal, _)| proposal)
+}
+
+/// `get`, and the file's text as read, which `accept` keeps in the ledger and a `Seen` names by its sha.
+fn read_one(root: &Path, id: &str) -> Result<(Proposal, String), String> {
     if !valid_id(id) {
         return Err(format!("{id:?} is not a proposal id (pp-<n>)"));
     }
@@ -1004,7 +1098,8 @@ pub fn get(root: &Path, id: &str) -> Result<Proposal, String> {
         ),
         _ => format!("cannot read {}: {err}", file.display()),
     })?;
-    parse(&file, id, &text).map_err(|problems| problems.join("\n"))
+    let proposal = parse(&file, id, &text).map_err(|problems| problems.join("\n"))?;
+    Ok((proposal, text))
 }
 
 /// When a dismissal of this proposal's identity (kind, profile, `key_sha` of `key`) stands, the date it was made;
@@ -1048,6 +1143,7 @@ pub fn write(root: &Path, draft: &Draft) -> Result<String, Refusal> {
     // P45b review F1, the last guard: after the redaction above, whatever is still secret-shaped is refused, not
     // written. The writers refuse it first; this holds for any writer, today's or a later one.
     problems.extend(secret_problems(&draft.body, &draft.evidence));
+    problems.extend(invisible_problems(&draft.body, &draft.evidence));
     problems.extend(content_problems(
         root,
         draft.kind,
@@ -1138,6 +1234,8 @@ fn accept_problems(root: &Path, proposal: &Proposal) -> Vec<String> {
     );
     // P45b review F1: a file edited by hand since `write` is checked again before it becomes a profile.
     problems.extend(secret_problems(&proposal.body, &proposal.evidence));
+    // P45a fix round: and nothing the panel could not have shown, a hand-written file included.
+    problems.extend(invisible_problems(&proposal.body, &proposal.evidence));
     problems.extend(content_problems(
         root,
         proposal.kind,
@@ -1165,45 +1263,151 @@ fn accept_problems(root: &Path, proposal: &Proposal) -> Vec<String> {
 /// after and the proposal's text; the proposal file goes. The line says which op did it, for `rollback`.
 pub fn accept(root: &Path, id: &str) -> Result<String, String> {
     let _lock = lock(root)?;
-    let mut proposal = get(root, id)?;
-    // P45c review F5: the file may have been edited by hand since `write`, so what goes into the profile is redacted
-    // again here, and checked as it will be written.
-    proposal.body = nirvana_lessons::redact(&proposal.body);
-    let problems = accept_problems(root, &proposal);
-    if !problems.is_empty() {
-        return Err(format!("{id} is refused: {}", problems.join("; ")));
-    }
-    let name = &proposal.profile;
-    let (file, before, after) = match proposal.kind {
-        Kind::New => {
-            let dir = nirvana_profiles::folder_of(root, name);
-            std::fs::create_dir_all(dir.join(nirvana_profiles::KNOWLEDGE)).map_err(|err| {
-                remove_empty(&dir);
-                format!("cannot create {}: {err}", dir.display())
-            })?;
-            (
-                dir.join(nirvana_profiles::PROFILE_FILE),
-                None,
-                format!("{}\n", proposal.body.trim()),
-            )
+    accept_locked(root, id, None).map_err(|refused| refused.to_string())
+}
+
+/// Why `accept_seen` or `try_dismiss` did nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refused {
+    /// Another herdr holds the proposals' lock now; nothing was waited for.
+    Busy,
+    /// The proposal or the profile it writes is not what the panel drew; nothing was accepted.
+    Changed(String),
+    /// The store's refusal, word for word, as `accept` and `dismiss` say it.
+    No(String),
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy => f.write_str(BUSY),
+            Self::Changed(why) | Self::No(why) => f.write_str(why),
         }
+    }
+}
+
+/// What the panel says when the lock is held.
+pub const BUSY: &str = "busy: another herdr is writing the proposals; press again";
+
+/// The profile file Accept writes and its whole text after, built by `target` from a proposal `prepared` gave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub file: PathBuf,
+    /// A patch's profile file as it stands; `None` for a new profile.
+    pub before: Option<String>,
+    pub after: String,
+}
+
+/// P45a fix round (review findings 1 and 3): what the Profiles panel drew of a waiting proposal, and what its Accept is
+/// held to. `sha` is of the proposal file's text as read; `target` is what `accept` would write, by the same
+/// `prepared` and `target` it writes through, the redaction included. For a patch `target.before` is the profile file
+/// as it stood, so a profile changed since the draw is a change too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seen {
+    pub id: String,
+    pub sha: String,
+    pub target: Result<Target, String>,
+}
+
+/// A proposal as Accept writes it: its body redacted (P45c review F5: the file may have been edited by hand since
+/// `write`, so what goes into the profile is redacted again, and checked as it will be written).
+pub fn prepared(mut proposal: Proposal) -> Proposal {
+    proposal.body = nirvana_lessons::redact(&proposal.body);
+    proposal
+}
+
+/// The file Accept writes for a `prepared` proposal and its text after: a `new` one's `profiles/<name>/profile.md`,
+/// its body trimmed; a `patch`'s profile file with its front matter kept and its body replaced. Reads, writes nothing.
+pub fn target(root: &Path, proposal: &Proposal) -> Result<Target, String> {
+    let name = &proposal.profile;
+    match proposal.kind {
+        Kind::New => Ok(Target {
+            file: nirvana_profiles::folder_of(root, name).join(nirvana_profiles::PROFILE_FILE),
+            before: None,
+            after: format!("{}\n", proposal.body.trim()),
+        }),
         Kind::Patch => {
             let file = nirvana_profiles::resolve(root, name)?;
             let before = std::fs::read_to_string(&file)
                 .map_err(|err| format!("cannot read {}: {err}", file.display()))?;
             let after = patched(&before, &proposal.body)
                 .ok_or_else(|| format!("{} has no front matter to keep", file.display()))?;
-            (file, Some(before), after)
+            Ok(Target {
+                file,
+                before: Some(before),
+                after,
+            })
         }
+    }
+}
+
+/// Every proposal waiting, as `list` reads them, each with what the panel shows of it: one read of each file, so the
+/// proposal and its `Seen` are of the same text.
+pub fn list_seen(root: &Path) -> Vec<(Proposal, Seen)> {
+    let mut found: Vec<(Proposal, Seen)> = files(root)
+        .into_iter()
+        .filter_map(|(id, file)| {
+            let text = std::fs::read_to_string(&file).ok()?;
+            let proposal = parse(&file, &id, &text).ok()?;
+            let seen = Seen {
+                id: id.clone(),
+                sha: nirvana_lessons::sha256(&text),
+                target: target(root, &prepared(proposal.clone())),
+            };
+            Some((proposal, seen))
+        })
+        .collect();
+    found.sort_by_key(|(proposal, _)| number(&proposal.id));
+    found
+}
+
+/// The panel's Accept (P45a fix round): `accept`, refused with `Refused::Changed` inside the lock when the proposal
+/// file or the profile file it writes is not what `seen` says was drawn, and with `Refused::Busy` at once when the lock
+/// is held, never waiting on it. The CLI's `accept` is unchanged.
+pub fn accept_seen(root: &Path, seen: &Seen) -> Result<String, Refused> {
+    let _lock = try_lock(root).map_err(Refused::No)?.ok_or(Refused::Busy)?;
+    accept_locked(root, &seen.id, Some(seen))
+}
+
+fn accept_locked(root: &Path, id: &str, seen: Option<&Seen>) -> Result<String, Refused> {
+    let (proposal, text) = match read_one(root, id) {
+        Ok(read) => read,
+        Err(why) if seen.is_some() => return Err(Refused::Changed(why)),
+        Err(why) => return Err(Refused::No(why)),
     };
-    let text = std::fs::read_to_string(&proposal.file)
-        .map_err(|err| format!("cannot read {}: {err}", proposal.file.display()))?;
+    let proposal = prepared(proposal);
+    let target = target(root, &proposal);
+    if let Some(seen) = seen {
+        if seen.sha != nirvana_lessons::sha256(&text) || seen.target != target {
+            return Err(Refused::Changed(format!(
+                "{id} changed since the panel drew it, so nothing was accepted: it is open again from the top; \
+                 read it to its end and press a"
+            )));
+        }
+    }
+    let problems = accept_problems(root, &proposal);
+    if !problems.is_empty() {
+        return Err(Refused::No(format!("{id} is refused: {}", problems.join("; "))));
+    }
+    let name = &proposal.profile;
+    let Target {
+        file,
+        before,
+        after,
+    } = target.map_err(Refused::No)?;
+    if proposal.kind == Kind::New {
+        let dir = nirvana_profiles::folder_of(root, name);
+        std::fs::create_dir_all(dir.join(nirvana_profiles::KNOWLEDGE)).map_err(|err| {
+            remove_empty(&dir);
+            Refused::No(format!("cannot create {}: {err}", dir.display()))
+        })?;
+    }
     crate::nirvana_seat::write_atomic(&file, after.as_bytes()).map_err(|err| {
         // P45c review F7: a new profile's folder made above goes again, so a failed accept leaves nothing behind.
         if proposal.kind == Kind::New {
             remove_empty(&nirvana_profiles::folder_of(root, name));
         }
-        format!("cannot write {}: {err}", file.display())
+        Refused::No(format!("cannot write {}: {err}", file.display()))
     })?;
     let rows = ledger(root);
     let op = next_op(root, &rows);
@@ -1230,13 +1434,13 @@ pub fn accept(root: &Path, id: &str) -> Result<String, String> {
             Some(before) => crate::nirvana_seat::write_atomic(&file, before.as_bytes()),
             None => remove_new(&nirvana_profiles::folder_of(root, name)),
         };
-        return Err(format!(
+        return Err(Refused::No(format!(
             "the ledger: {err}{}",
             undone
                 .err()
                 .map(|e| format!("; and the profile could not be put back: {e}"))
                 .unwrap_or_default()
-        ));
+        )));
     }
     let _ = std::fs::remove_file(&proposal.file);
     Ok(format!(
@@ -1288,6 +1492,16 @@ fn holds_more(dir: &Path) -> bool {
 /// proposal again; the proposal file goes.
 pub fn dismiss(root: &Path, id: &str, reason: Option<&str>) -> Result<String, String> {
     let _lock = lock(root)?;
+    dismiss_locked(root, id, reason)
+}
+
+/// The panel's Dismiss (P45a fix round, review finding 6): `dismiss`, or `Refused::Busy` at once when the lock is held.
+pub fn try_dismiss(root: &Path, id: &str, reason: Option<&str>) -> Result<String, Refused> {
+    let _lock = try_lock(root).map_err(Refused::No)?.ok_or(Refused::Busy)?;
+    dismiss_locked(root, id, reason).map_err(Refused::No)
+}
+
+fn dismiss_locked(root: &Path, id: &str, reason: Option<&str>) -> Result<String, String> {
     let proposal = get(root, id)?;
     let text = std::fs::read_to_string(&proposal.file)
         .map_err(|err| format!("cannot read {}: {err}", proposal.file.display()))?;

@@ -10,18 +10,41 @@
 //! ```
 //!
 //! The panel is one project's: the folder of the space the `+` or the menu line belongs to, by the Preload group's
-//! rule (`super::nirvana_profiles::root`, the nearest folder holding `.git`). Three parts:
+//! rule (`super::nirvana_profiles::root`, the nearest folder holding `.git`, else the folder itself). Its full path is
+//! the line under the title, shortened in the middle when it does not fit. Three parts:
 //!
-//! - **Profiles**, one row each: description, seat pins, servers, skills, cards, and the use `usage` counts, "used 0
-//!   of 35". `e` or Enter opens the file in an edit tab, `K` its `knowledge/`.
-//! - **Suggested**, the proposals waiting (plan 45 P45b). Enter opens one whole; Accept is only there, so the owner has
-//!   the body on screen when they accept (R1: a proposal waits for the owner). `d` dismisses, in the list or the detail.
-//! - **New**, `n`: a name, then a shape from `crate::nirvana_profiles::SHAPES`.
+//! - **Profiles**, one row each: description, seat pins, servers, skills, cards, and the use the detector counts, "used
+//!   0 of 35", with "(partial)" when its scan was cut short. `e` or Enter opens the file in an edit tab, `K` its
+//!   `knowledge/`.
+//! - **Suggested**, the proposals waiting (plan 45 P45b). Enter opens one whole; Accept is only there. `d` dismisses,
+//!   in the list (the row highlighted when the list was last drawn) or the detail.
+//! - **New**, `n`: a name, then a shape from `crate::nirvana_profiles::SHAPES`. It is made off the key path, and the
+//!   panel then names the full path it wrote.
 //!
-//! **Nothing here reads a file while the window draws.** The data is read on a thread of its own, started from the
-//! window's timer tick (`take_changed`) at most every `REREAD`, the Seats square's interval, and only after the last
-//! read ended, so a slow `usage` (its scan is bounded at 3 s) never runs twice at once. The `+` asks only for the
-//! waiting count; the full read (profiles, `usage`, proposals) runs while the panel is drawn.
+//! **What Accept requires** (P45a fix round; a proposal's body is drafted from order text and worker streams, which are
+//! untrusted, and the owner's Accept is the only guard). `a` acts only in a proposal's detail, only as a bare key (no
+//! modifier but Shift), and only when all of these hold:
+//!
+//! - the detail of that proposal has been drawn at least once since it was opened;
+//! - the panel was drawn whole in the last frame (a window too small for it shows "window too small" and the panel
+//!   takes no key but Esc);
+//! - the last line of the detail has been on screen at least once since it was opened ("scroll to the end to accept
+//!   (N more lines)" until then; a detail that fits needs no scroll).
+//!
+//! What the detail shows under "The file Accept writes" is `nirvana_profile_proposals::target` of the proposal
+//! `prepared` (redacted), the very text `accept` writes. Accept sends what was drawn (`proposals::Seen`: the proposal
+//! file's sha and that target) to `accept_seen`, which refuses inside the proposals' lock when the file on disk or the
+//! profile it writes is no longer that; the panel then says so, reads again and opens the detail at the top. A
+//! character the screen would drop is drawn as `<U+XXXX>`, and the store refuses a proposal holding one. Accept,
+//! Dismiss and New never wait on the proposals' lock: Accept and Dismiss take it with `try_lock` and say "busy, press
+//! again"; New runs on a thread of its own and the panel says "making" until it is done.
+//!
+//! **Nothing here reads a file while the window draws.** The data is read by a `Reader` on a thread of its own,
+//! started from the window's timer tick (`take_changed`) at most every `REREAD`, the Seats square's interval, and only
+//! after the last read ended (single flight). The `+` asks only for the waiting count; the full read (profiles, the use
+//! scan, proposals) runs only while the panel is drawn. A read that panics leaves no folder "reading" for good, and a
+//! read that started before an Accept or a Dismiss is dropped when it ends (a generation number), so the fresher view
+//! the key path read stands.
 //!
 //! **No worker can press Accept.** The panel's keys and clicks come only from this window's own terminal input
 //! (`handle_raw_events`); no API method, socket message or `herdr` verb reaches them, and Accept and Dismiss call
@@ -31,20 +54,23 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::nirvana_mods::{draw_frame, folder_name};
 use super::nirvana_spaces::fit;
 use super::render::put_text;
 use super::*;
-use crate::nirvana_profile_proposals::{self as proposals, Kind, Proposal};
+use crate::nirvana_profile_proposals::{self as proposals, Kind, Proposal, Refused, Seen};
 use crate::protocol::ClientShellPane;
-use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::style::Modifier;
 
 /// The panel's widest; under it, the window's pane area less a cell each side.
 pub(super) const PANEL_WIDTH: u16 = 120;
+/// The panel's narrowest and shortest: under these it is not drawn, says "window too small", and takes no key but Esc.
+pub(super) const PANEL_MIN_WIDTH: u16 = 30;
+pub(super) const PANEL_MIN_HEIGHT: u16 = 9;
 /// Under this inner width a profile's name takes a line of its own and its description wraps under it.
 pub(super) const NARROW_PANEL: usize = 72;
 /// The name column of the wide form: as wide as the longest name, at most this.
@@ -53,6 +79,8 @@ const NAME_COL_MAX: usize = 24;
 const PAGE: usize = 10;
 /// Rows a wheel notch moves, as the Seats table's does.
 const WHEEL_STEP: usize = 3;
+/// A tab in a proposal is drawn as this many spaces (ratatui drops it).
+const TAB: &str = "    ";
 /// The Seats square's re-read interval: the brief's rule, "the interval the Seats panel uses".
 const REREAD: Duration = crate::nirvana_seats_square::REREAD;
 /// A folder the window has not drawn for this long is no longer read, as the Seats square forgets a project.
@@ -65,8 +93,18 @@ pub(super) const NOTHING_SUGGESTED: &str =
 /// `a` in the list: Accept is only in the detail, where the body is on screen.
 pub(super) const ACCEPT_IN_DETAIL: &str =
     "a accepts only in a proposal's detail, with its body on screen: enter opens it";
+/// `a` before the detail was drawn.
+pub(super) const ACCEPT_NOT_DRAWN: &str =
+    "a accepts once this proposal has been drawn on screen: press a again";
+/// Any key but Esc while the panel was not drawn whole in the last frame.
+pub(super) const TOO_SMALL: &str = "window too small for the Profiles panel: esc closes it";
+/// `d` in the list when no row of Suggested was highlighted on screen since the last move or dismiss.
+pub(super) const DISMISS_NOT_DRAWN: &str =
+    "d dismisses the highlighted row on screen: nothing was dismissed, look and press d again";
 /// The use of a profile no order fits or carries.
 pub(super) const NO_USE: &str = "no order fits or carries it";
+/// The same, when the scan was cut short.
+pub(super) const NO_USE_PARTIAL: &str = "none seen (partial)";
 
 // ---- where a space's project is ----
 
@@ -164,7 +202,7 @@ pub(crate) struct ProfileRow {
     pub(super) name: String,
     pub(super) file: PathBuf,
     pub(super) parsed: Option<Parsed>,
-    /// `usage`'s carried and fit counts; `None` when `usage` has no row for it.
+    /// The detector's carried and fit counts; `None` when it has no row for it.
     pub(super) use_: Option<(usize, usize)>,
 }
 
@@ -188,20 +226,32 @@ pub(crate) struct View {
     pub(super) root: PathBuf,
     pub(super) profiles: Vec<ProfileRow>,
     pub(super) proposals: Vec<Proposal>,
+    /// What the detail shows of each proposal, by id, and what its Accept is held to: read with it, from one text.
+    pub(super) seen: HashMap<String, Seen>,
     /// A proposal file or a ledger line herdr cannot read, as `herdr profile proposals` names them.
     pub(super) unreadable: Vec<String>,
     /// Whether the use counts were read; the first read after an Accept or a New keeps the last ones.
     pub(super) usage_read: bool,
+    /// The scan behind the use counts was cut short (its run, order or time limit): the counts are a floor.
+    pub(super) usage_partial: bool,
 }
 
 /// Reads the project at `root`: the profiles, the proposals waiting and, with `usage`, each profile's use.
 pub(super) fn read_view(root: &Path, usage: bool) -> View {
-    let counted = usage.then(|| crate::nirvana_profile_detect::usage(root));
+    // Review finding 9: `detect_with` says what its scan skipped, which `usage` drops.
+    let counted = usage.then(|| {
+        crate::nirvana_profile_detect::detect_with(
+            root,
+            &crate::nirvana_profile_detect::Limits::default(),
+        )
+    });
     let profiles = crate::nirvana_profiles::list(root)
         .into_iter()
         .map(|(name, file, parsed)| {
-            let use_ = counted.as_ref().and_then(|rows| {
-                rows.iter()
+            let use_ = counted.as_ref().and_then(|detection| {
+                detection
+                    .usage
+                    .iter()
                     .find(|row| row.profile == name)
                     .map(|row| (row.carried, row.fit))
             });
@@ -225,19 +275,38 @@ pub(super) fn read_view(root: &Path, usage: bool) -> View {
             }
         })
         .collect();
+    let (proposals, seen): (Vec<Proposal>, HashMap<String, Seen>) = proposals::list_seen(root)
+        .into_iter()
+        .map(|(proposal, seen)| {
+            let id = proposal.id.clone();
+            (proposal, (id, seen))
+        })
+        .unzip();
     View {
         root: root.to_path_buf(),
         profiles,
-        proposals: proposals::list(root),
+        proposals,
+        seen,
         unreadable: proposals::unreadable(root)
             .into_iter()
             .map(|(file, why)| format!("{}: unreadable: {why}", file.display()))
             .collect(),
         usage_read: usage,
+        usage_partial: counted
+            .as_ref()
+            .is_some_and(|detection| detection.skipped.any()),
     }
 }
 
-// ---- the cache, read off the draw path ----
+// ---- the reader, off the draw path ----
+
+/// One read's result: the full view when the panel is drawn, else only the waiting count.
+pub(super) struct Read {
+    pub(super) view: Option<View>,
+    pub(super) waiting: usize,
+}
+
+type ReadFn = dyn Fn(&Path, bool) -> Read + Send + Sync;
 
 #[derive(Default)]
 struct Entry {
@@ -245,82 +314,111 @@ struct Entry {
     waiting: Option<usize>,
     reading: bool,
     read_at: Option<Instant>,
-    /// The `+` or the panel drew this folder.
+    /// The `+` or the panel asked for this folder.
     asked_at: Option<Instant>,
-    /// The panel drew this folder: the read is the full one.
-    full_at: Option<Instant>,
+    /// Bumped by `refresh`: a read started before it is dropped when it ends.
+    generation: u64,
 }
 
-static CHANGED: AtomicBool = AtomicBool::new(false);
-
-fn entries() -> &'static Mutex<HashMap<PathBuf, Entry>> {
-    static ENTRIES: OnceLock<Mutex<HashMap<PathBuf, Entry>>> = OnceLock::new();
-    ENTRIES.get_or_init(|| Mutex::new(HashMap::new()))
+/// The folders' reads: one at a time each, on a thread of its own. The window has one (`reader`); a test builds its
+/// own with a read of its choosing (review finding 10: the seam).
+pub(super) struct Reader {
+    entries: Mutex<HashMap<PathBuf, Entry>>,
+    changed: AtomicBool,
+    /// The folder of the panel drawn in the last frame, set from the window's tick: only its reads are full.
+    showing: Mutex<Option<PathBuf>>,
+    read: Box<ReadFn>,
 }
 
-fn recent(at: Option<Instant>) -> bool {
-    at.is_some_and(|at| at.elapsed() < FORGET_AFTER)
-}
+impl Reader {
+    pub(super) fn new(read: impl Fn(&Path, bool) -> Read + Send + Sync + 'static) -> Arc<Self> {
+        Arc::new(Self {
+            entries: Mutex::new(HashMap::new()),
+            changed: AtomicBool::new(false),
+            showing: Mutex::new(None),
+            read: Box::new(read),
+        })
+    }
 
-/// Starts a read of `folder` when none runs and the last is older than `REREAD`; `force` skips the age, for a panel
-/// that has no view yet after the `+` read only the count.
-fn start_read(folder: &Path, force: bool) {
-    let full = {
-        let mut entries = entries().lock().unwrap_or_else(|e| e.into_inner());
-        let Some(entry) = entries.get_mut(folder) else {
-            return;
-        };
-        let fresh = entry.read_at.is_some_and(|at| at.elapsed() < REREAD);
-        if entry.reading || (fresh && !force) {
-            return;
-        }
-        entry.reading = true;
-        recent(entry.full_at)
-    };
-    let owned = folder.to_path_buf();
-    let spawned = crate::thread_spawn::spawn_named("nirvana-profiles", move || {
-        let root = super::nirvana_profiles::root(&owned);
-        let view = full.then(|| read_view(&root, true));
-        let waiting = view
-            .as_ref()
-            .map_or_else(|| proposals::list(&root).len(), |view| view.proposals.len());
-        let mut entries = entries().lock().unwrap_or_else(|e| e.into_inner());
-        let entry = entries.entry(owned).or_default();
-        entry.reading = false;
-        entry.read_at = Some(Instant::now());
-        if let Some(view) = view {
-            if entry.view.as_ref() != Some(&view) {
-                entry.view = Some(view);
-                CHANGED.store(true, Ordering::Release);
-            }
-        }
-        if entry.waiting != Some(waiting) {
-            entry.waiting = Some(waiting);
-            CHANGED.store(true, Ordering::Release);
-        }
-    });
-    if spawned.is_err() {
-        if let Some(entry) = entries()
+    fn entries(&self) -> MutexGuard<'_, HashMap<PathBuf, Entry>> {
+        self.entries.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The folder whose panel is drawn now, or none: the full read (with the use scan) is only that folder's.
+    pub(super) fn show(&self, folder: Option<PathBuf>) {
+        *self.showing.lock().unwrap_or_else(|e| e.into_inner()) = folder;
+    }
+
+    fn showing(&self, folder: &Path) -> bool {
+        self.showing
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get_mut(folder)
-        {
-            entry.reading = false;
+            .as_deref()
+            == Some(folder)
+    }
+
+    /// Starts a read of `folder` when none runs and the last is older than `REREAD`; `force` skips the age and makes
+    /// the read full, for a panel that has no view yet.
+    fn start(self: &Arc<Self>, folder: &Path, force: bool) {
+        let showing = self.showing(folder);
+        let (full, generation) = {
+            let mut entries = self.entries();
+            let Some(entry) = entries.get_mut(folder) else {
+                return;
+            };
+            let fresh = entry.read_at.is_some_and(|at| at.elapsed() < REREAD);
+            if entry.reading || (fresh && !force) {
+                return;
+            }
+            entry.reading = true;
+            (force || showing, entry.generation)
+        };
+        let reader = Arc::clone(self);
+        let owned = folder.to_path_buf();
+        let spawned = crate::thread_spawn::spawn_named("nirvana-profiles", move || {
+            // Review finding 10: a read that panics must not leave the folder "reading" for good.
+            let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                (reader.read)(&owned, full)
+            }));
+            reader.finish(&owned, generation, read.ok());
+        });
+        if spawned.is_err() {
+            if let Some(entry) = self.entries().get_mut(folder) {
+                entry.reading = false;
+            }
         }
     }
-}
 
-/// The waiting count of `folder`'s project as last read, for the `+` while the sidebar draws: a map read. The first
-/// ask starts a read; later ones are the timer's. Under test the count is read at once.
-pub(super) fn waiting_cached(folder: &Path) -> Option<usize> {
-    #[cfg(test)]
-    {
-        Some(proposals::list(&super::nirvana_profiles::root(folder)).len())
+    /// A read ended: kept when no `refresh` came since it started, dropped when one did (the key path's view is
+    /// fresher), and a panicked one (`None`) is tried again after `REREAD`.
+    fn finish(&self, folder: &Path, generation: u64, read: Option<Read>) {
+        let mut entries = self.entries();
+        let entry = entries.entry(folder.to_path_buf()).or_default();
+        entry.reading = false;
+        if entry.generation != generation {
+            entry.read_at = None;
+            return;
+        }
+        entry.read_at = Some(Instant::now());
+        let Some(read) = read else {
+            return;
+        };
+        if let Some(view) = read.view {
+            if entry.view.as_ref() != Some(&view) {
+                entry.view = Some(view);
+                self.changed.store(true, Ordering::Release);
+            }
+        }
+        if entry.waiting != Some(read.waiting) {
+            entry.waiting = Some(read.waiting);
+            self.changed.store(true, Ordering::Release);
+        }
     }
-    #[cfg(not(test))]
-    {
+
+    /// The waiting count of `folder` as last read, for the `+`: a map read. The first ask starts a read.
+    pub(super) fn waiting(self: &Arc<Self>, folder: &Path) -> Option<usize> {
         let first = {
-            let mut entries = entries().lock().unwrap_or_else(|e| e.into_inner());
+            let mut entries = self.entries();
             let entry = entries.entry(folder.to_path_buf()).or_default();
             entry.asked_at = Some(Instant::now());
             if let Some(waiting) = entry.waiting {
@@ -329,9 +427,120 @@ pub(super) fn waiting_cached(folder: &Path) -> Option<usize> {
             !entry.reading
         };
         if first {
-            start_read(folder, false);
+            self.start(folder, false);
         }
         None
+    }
+
+    /// The panel's view of `folder` as last read: a map read. With none yet a full read starts.
+    pub(super) fn view(self: &Arc<Self>, folder: &Path) -> Option<View> {
+        let first = {
+            let mut entries = self.entries();
+            let entry = entries.entry(folder.to_path_buf()).or_default();
+            entry.asked_at = Some(Instant::now());
+            if let Some(view) = &entry.view {
+                return Some(view.clone());
+            }
+            !entry.reading
+        };
+        if first {
+            self.start(folder, true);
+        }
+        None
+    }
+
+    /// After the panel wrote: `fresh`, read on the key's path, stands; the use counts are kept from the last read, and
+    /// a read in flight is dropped when it ends.
+    pub(super) fn refresh(&self, folder: &Path, mut fresh: View) {
+        let mut entries = self.entries();
+        let entry = entries.entry(folder.to_path_buf()).or_default();
+        if let Some(old) = &entry.view {
+            fresh.usage_read = old.usage_read;
+            fresh.usage_partial = old.usage_partial;
+            for row in &mut fresh.profiles {
+                row.use_ = old
+                    .profiles
+                    .iter()
+                    .find(|known| known.name == row.name)
+                    .and_then(|known| known.use_);
+            }
+        }
+        entry.generation = entry.generation.wrapping_add(1);
+        entry.waiting = Some(fresh.proposals.len());
+        entry.view = Some(fresh);
+        entry.read_at = None;
+        self.changed.store(true, Ordering::Release);
+    }
+
+    /// Whether a read of `folder` runs now: the reader tests' window on it.
+    #[cfg(test)]
+    pub(super) fn reading(&self, folder: &Path) -> bool {
+        self.entries()
+            .get(folder)
+            .is_some_and(|entry| entry.reading)
+    }
+
+    /// Starts the reads that are due: every folder asked for in the last `FORGET_AFTER`.
+    pub(super) fn poll(self: &Arc<Self>) {
+        let due: Vec<PathBuf> = {
+            let mut entries = self.entries();
+            entries.retain(|_, entry| entry.asked_at.is_some_and(|at| at.elapsed() < FORGET_AFTER));
+            entries
+                .iter()
+                .filter(|(_, entry)| {
+                    !entry.reading && entry.read_at.is_none_or(|at| at.elapsed() >= REREAD)
+                })
+                .map(|(folder, _)| folder.clone())
+                .collect()
+        };
+        for folder in due {
+            self.start(&folder, false);
+        }
+    }
+
+    fn mark_changed(&self) {
+        self.changed.store(true, Ordering::Release);
+    }
+
+    /// `poll`, then whether a read changed what the `+` or the panel shows since the last call.
+    pub(super) fn take_changed(self: &Arc<Self>) -> bool {
+        self.poll();
+        self.changed.swap(false, Ordering::AcqRel)
+    }
+}
+
+/// A read as the window's reader does it.
+fn read_folder(folder: &Path, full: bool) -> Read {
+    let root = super::nirvana_profiles::root(folder);
+    if full {
+        let view = read_view(&root, true);
+        Read {
+            waiting: view.proposals.len(),
+            view: Some(view),
+        }
+    } else {
+        Read {
+            view: None,
+            waiting: proposals::list(&root).len(),
+        }
+    }
+}
+
+fn reader() -> &'static Arc<Reader> {
+    static READER: OnceLock<Arc<Reader>> = OnceLock::new();
+    READER.get_or_init(|| Reader::new(read_folder))
+}
+
+/// The waiting count of `folder`'s project as last read, for the `+` while the sidebar draws: a map read. Under test
+/// the count is read at once.
+pub(super) fn waiting_cached(folder: &Path) -> Option<usize> {
+    #[cfg(test)]
+    {
+        Some(proposals::list(&super::nirvana_profiles::root(folder)).len())
+    }
+    #[cfg(not(test))]
+    {
+        reader().waiting(folder)
     }
 }
 
@@ -343,68 +552,20 @@ pub(super) fn view_cached(folder: &Path) -> Option<View> {
     }
     #[cfg(not(test))]
     {
-        let first = {
-            let mut entries = entries().lock().unwrap_or_else(|e| e.into_inner());
-            let entry = entries.entry(folder.to_path_buf()).or_default();
-            entry.asked_at = Some(Instant::now());
-            entry.full_at = Some(Instant::now());
-            if let Some(view) = &entry.view {
-                return Some(view.clone());
-            }
-            !entry.reading
-        };
-        if first {
-            start_read(folder, true);
-        }
-        None
+        reader().view(folder)
     }
 }
 
-/// After the panel wrote (an Accept, a Dismiss): the profiles and the proposals read again now, on the key's path, so
-/// the list never shows a proposal that is gone; the use counts are kept from the last read until the next tick's.
+/// After the panel wrote (an Accept, a Dismiss, a New): the profiles and the proposals read again now, on the key's
+/// path, so the list never shows a proposal that is gone; the use counts are kept from the last read until the next.
 fn refresh_now(folder: &Path, root: &Path) {
-    let mut fresh = read_view(root, false);
-    let mut entries = entries().lock().unwrap_or_else(|e| e.into_inner());
-    let entry = entries.entry(folder.to_path_buf()).or_default();
-    if let Some(old) = &entry.view {
-        fresh.usage_read = old.usage_read;
-        for row in &mut fresh.profiles {
-            row.use_ = old
-                .profiles
-                .iter()
-                .find(|known| known.name == row.name)
-                .and_then(|known| known.use_);
-        }
-    }
-    entry.waiting = Some(fresh.proposals.len());
-    entry.view = Some(fresh);
-    entry.read_at = None;
-    CHANGED.store(true, Ordering::Release);
-}
-
-/// Starts the reads that are due: every folder drawn in the last `FORGET_AFTER`.
-fn poll() {
-    let due: Vec<PathBuf> = {
-        let mut entries = entries().lock().unwrap_or_else(|e| e.into_inner());
-        entries.retain(|_, entry| recent(entry.asked_at));
-        entries
-            .iter()
-            .filter(|(_, entry)| {
-                !entry.reading && entry.read_at.is_none_or(|at| at.elapsed() >= REREAD)
-            })
-            .map(|(folder, _)| folder.clone())
-            .collect()
-    };
-    for folder in due {
-        start_read(&folder, false);
-    }
+    reader().refresh(folder, read_view(root, false));
 }
 
 /// Whether a read changed what the `+` or the panel shows since the last call: the window repaints. Called on the
 /// window's timer tick, which is where the due reads start, so the draw path never reads.
 pub(crate) fn take_changed() -> bool {
-    poll();
-    CHANGED.swap(false, Ordering::AcqRel)
+    reader().take_changed()
 }
 
 // ---- the panel ----
@@ -425,12 +586,61 @@ impl Part {
     }
 }
 
-/// The open proposal, by its id, and how far its text is scrolled.
+/// The open proposal, by its id, how far its text is scrolled, and what the owner has seen of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Detail {
     pub(super) id: String,
     pub(super) scroll: usize,
+    /// Drawn at least once since it was opened.
+    pub(super) drawn: bool,
+    /// Its last line has been on screen since it was opened.
+    pub(super) read_to_end: bool,
+    /// Lines under the screen at the last draw.
+    pub(super) below: usize,
+    /// What was drawn: Accept is held to it, and a re-read that differs opens the detail again from the top.
+    pub(super) shown: Option<Seen>,
 }
+
+impl Detail {
+    pub(super) fn new(id: String) -> Self {
+        Self {
+            id,
+            scroll: 0,
+            drawn: false,
+            read_to_end: false,
+            below: 0,
+            shown: None,
+        }
+    }
+}
+
+/// A New running on its own thread (review finding 6: the window never waits on the proposals' lock `new_profile`
+/// takes). The slot is filled when it is done.
+#[derive(Clone)]
+pub(crate) struct Making {
+    pub(super) name: String,
+    slot: Arc<Mutex<Option<Result<PathBuf, String>>>>,
+}
+
+impl Making {
+    fn take(&self) -> Option<Result<PathBuf, String>> {
+        self.slot.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+}
+
+impl std::fmt::Debug for Making {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Making").field("name", &self.name).finish()
+    }
+}
+
+impl PartialEq for Making {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && Arc::ptr_eq(&self.slot, &other.slot)
+    }
+}
+
+impl Eq for Making {}
 
 /// The open Profiles panel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -454,10 +664,17 @@ pub(crate) struct ProfilePanel {
     pub(super) naming: Option<String>,
     /// After the name: the name and the shape chosen, 0 for none, else `SHAPES[n - 1]`.
     pub(super) shaping: Option<(String, usize)>,
+    /// A New on its thread.
+    pub(super) making: Option<Making>,
     /// What an Accept, a Dismiss or a New said, kept on screen until the next key; a refusal word for word.
     pub(super) notice: Vec<(String, Tone)>,
     /// A one-line answer in the footer.
     pub(super) message: Option<String>,
+    /// The last frame drew the panel whole (review finding 11): keys act only then.
+    pub(super) drawn: bool,
+    /// The proposal highlighted when Suggested was last drawn with the focus; `d` in the list dismisses that one, and a
+    /// move or a dismiss clears it (review finding 7).
+    pub(super) drawn_proposal: Option<String>,
 }
 
 impl ProfilePanel {
@@ -477,8 +694,11 @@ impl ProfilePanel {
             detail: None,
             naming: None,
             shaping: None,
+            making: None,
             notice: Vec::new(),
             message: None,
+            drawn: false,
+            drawn_proposal: None,
         }
     }
 
@@ -492,6 +712,7 @@ impl ProfilePanel {
 
     /// Selects row `index` of the focused list in `view` and remembers its name or id.
     fn select(&mut self, view: &View, index: usize) {
+        self.drawn_proposal = None;
         match self.focus {
             Part::Profiles => {
                 self.profile_selected = index;
@@ -562,6 +783,69 @@ fn pad(text: &str, cells: usize) -> String {
     format!("{text}{}", " ".repeat(room))
 }
 
+/// Review finding 4, the panel's layer: `text` as the screen can show all of it. A tab is drawn as spaces; every
+/// character the store refuses as invisible (`proposals::invisible`) and every grapheme the buffer would drop (one
+/// holding a control character, or 0 cells wide) is drawn as `<U+XXXX>` per character. A newline is kept for `wrap`.
+pub(super) fn visible(text: &str) -> String {
+    let named = |out: &mut String, c: char| out.push_str(&format!("<U+{:04X}>", u32::from(c)));
+    let mut first = String::new();
+    for c in text.replace("\r\n", "\n").chars() {
+        match c {
+            '\n' => first.push('\n'),
+            '\t' => first.push_str(TAB),
+            c if proposals::invisible(c) => named(&mut first, c),
+            c => first.push(c),
+        }
+    }
+    let mut out = String::new();
+    for grapheme in unicode_segmentation::UnicodeSegmentation::graphemes(first.as_str(), true) {
+        if grapheme == "\n" || (!grapheme.contains(char::is_control) && width(grapheme) > 0) {
+            out.push_str(grapheme);
+        } else {
+            for c in grapheme.chars() {
+                if c == '\n' {
+                    out.push(c);
+                } else {
+                    named(&mut out, c);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `text` in `cells`, cut in the middle when it does not fit, so a path keeps its root and its last folder.
+pub(super) fn middle(text: &str, cells: usize) -> String {
+    if width(text) <= cells {
+        return text.to_owned();
+    }
+    let room = cells.saturating_sub(1);
+    let head_room = room / 2;
+    let tail_room = room - head_room;
+    let mut head = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let cell = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + cell > head_room {
+            break;
+        }
+        head.push(c);
+        used += cell;
+    }
+    let mut tail: Vec<char> = Vec::new();
+    let mut used = 0;
+    for c in text.chars().rev() {
+        let cell = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + cell > tail_room {
+            break;
+        }
+        tail.push(c);
+        used += cell;
+    }
+    tail.reverse();
+    format!("{head}\u{2026}{}", tail.into_iter().collect::<String>())
+}
+
 /// `text` wrapped to `cells`: each of its lines by words, a word wider than `cells` split by characters, a blank line
 /// kept. Never empty, never panics, whatever the text.
 pub(super) fn wrap(text: &str, cells: usize) -> Vec<String> {
@@ -623,15 +907,18 @@ pub(super) fn pack(parts: &[String], cells: usize) -> Vec<String> {
     lines
 }
 
-/// A profile's use: "used 3 of 35", carried of fit; in words when nothing fits or carries it.
-pub(super) fn use_text(row: &ProfileRow, usage_read: bool) -> String {
+/// A profile's use: "used 3 of 35", carried of fit; in words when nothing fits or carries it; "(partial)" when the
+/// scan behind it was cut short, so the counts are a floor.
+pub(super) fn use_text(row: &ProfileRow, usage_read: bool, partial: bool) -> String {
     if !usage_read {
         return "use: counting".to_owned();
     }
-    match row.use_ {
-        None => "use: not counted".to_owned(),
-        Some((0, 0)) => NO_USE.to_owned(),
-        Some((carried, fit)) => format!("used {carried} of {fit}"),
+    match (row.use_, partial) {
+        (None, _) => "use: not counted".to_owned(),
+        (Some((0, 0)), false) => NO_USE.to_owned(),
+        (Some((0, 0)), true) => NO_USE_PARTIAL.to_owned(),
+        (Some((carried, fit)), false) => format!("used {carried} of {fit}"),
+        (Some((carried, fit)), true) => format!("used {carried} of {fit} (partial)"),
     }
 }
 
@@ -680,6 +967,12 @@ fn list_lines(view: &View, panel: &ProfilePanel, inner: usize) -> Vec<Line> {
         for line in wrap(said, text) {
             lines.push(Line::Text(line, *tone));
         }
+    }
+    if let Some(making) = &panel.making {
+        lines.push(Line::Text(
+            format!("making {}: working", making.name),
+            Tone::Attention,
+        ));
     }
     if let Some((name, at)) = &panel.shaping {
         let mut words = vec![format!("New profile {name}, its shape:")];
@@ -751,7 +1044,7 @@ fn list_lines(view: &View, panel: &ProfilePanel, inner: usize) -> Vec<Line> {
         let description = if parsed.description.is_empty() {
             "no description".to_owned()
         } else {
-            parsed.description.clone()
+            visible(&parsed.description)
         };
         let mut said = wrap(&description, room).into_iter();
         if wide {
@@ -774,7 +1067,7 @@ fn list_lines(view: &View, panel: &ProfilePanel, inner: usize) -> Vec<Line> {
             );
         }
         let mut facts = profile_facts(parsed);
-        facts.push(use_text(row, view.usage_read));
+        facts.push(use_text(row, view.usage_read, view.usage_partial));
         for packed in pack(&facts, room) {
             push(
                 &mut lines,
@@ -800,7 +1093,7 @@ fn list_lines(view: &View, panel: &ProfilePanel, inner: usize) -> Vec<Line> {
             proposal.kind.word(),
             proposal.profile
         );
-        let evidence = one_line(&proposal.evidence);
+        let evidence = visible(&one_line(&proposal.evidence));
         if wide {
             lines.push(Line::Row(
                 Part::Suggested,
@@ -821,15 +1114,21 @@ fn list_lines(view: &View, panel: &ProfilePanel, inner: usize) -> Vec<Line> {
         }
     }
     for line in &view.unreadable {
-        for wrapped in wrap(line, text) {
+        for wrapped in wrap(&visible(line), text) {
             lines.push(Line::Text(wrapped, Tone::Attention));
         }
     }
     lines
 }
 
-/// The detail view's lines for `proposal` at `cells`: the whole evidence and the whole proposed text, wrapped.
-pub(super) fn detail_lines(proposal: &Proposal, cells: usize) -> Vec<(String, Tone)> {
+/// The detail view's lines for `proposal` at `cells`: the whole evidence, then the whole file Accept writes, which is
+/// `seen.target`, built by the store's own `prepared` and `target`, the text `accept` writes.
+pub(super) fn detail_lines(
+    proposal: &Proposal,
+    seen: Option<&Seen>,
+    root: &Path,
+    cells: usize,
+) -> Vec<(String, Tone)> {
     let mut lines = vec![(
         match proposal.kind {
             Kind::New => format!("{} \u{b7} new profile {}", proposal.id, proposal.profile),
@@ -838,72 +1137,131 @@ pub(super) fn detail_lines(proposal: &Proposal, cells: usize) -> Vec<(String, To
         Tone::Heading,
     )];
     for line in wrap(
-        &format!(
+        &visible(&format!(
             "by {} \u{b7} run {} \u{b7} {}",
             proposal.by, proposal.run, proposal.date
-        ),
+        )),
         cells,
     ) {
         lines.push((line, Tone::Muted));
     }
     lines.push((String::new(), Tone::Plain));
     lines.push(("Evidence".to_owned(), Tone::Heading));
-    for line in wrap(&proposal.evidence, cells.saturating_sub(2)) {
+    for line in wrap(&visible(&proposal.evidence), cells.saturating_sub(2)) {
         lines.push((format!("  {line}"), Tone::Plain));
     }
     lines.push((String::new(), Tone::Plain));
-    let heading = match proposal.kind {
-        Kind::New => format!(
-            "The file Accept writes, .nirvana/profiles/{}/profile.md",
-            proposal.profile
-        ),
-        Kind::Patch => format!(
-            "The new body of {}; Accept replaces its body and keeps its front matter",
-            proposal.profile
-        ),
-    };
-    for line in wrap(&heading, cells) {
-        lines.push((line, Tone::Heading));
-    }
-    for line in wrap(&proposal.body, cells.saturating_sub(2)) {
-        lines.push((format!("  {line}"), Tone::Plain));
+    match seen.map(|seen| &seen.target) {
+        Some(Ok(target)) => {
+            let shown = target
+                .file
+                .strip_prefix(root)
+                .unwrap_or(&target.file)
+                .display()
+                .to_string()
+                .replace('\\', "/");
+            let heading = match proposal.kind {
+                Kind::New => format!("The file Accept writes, {shown}"),
+                Kind::Patch => format!(
+                    "The file Accept writes, {shown}: its front matter as it stands, the new body"
+                ),
+            };
+            for line in wrap(&heading, cells) {
+                lines.push((line, Tone::Heading));
+            }
+            for line in wrap(&visible(&target.after), cells.saturating_sub(2)) {
+                lines.push((format!("  {line}"), Tone::Plain));
+            }
+        }
+        Some(Err(why)) => {
+            for line in wrap(
+                &visible(&format!("Accept cannot write this proposal: {why}")),
+                cells,
+            ) {
+                lines.push((line, Tone::Attention));
+            }
+        }
+        None => lines.push((
+            "The file Accept writes: not read yet".to_owned(),
+            Tone::Attention,
+        )),
     }
     lines
 }
 
-/// The footer's keys for the part in focus, in `cells`: the long form, else a short one that keeps `esc` (at 80
-/// columns the panel's inner width is 48 and the long form lost it).
-pub(super) fn footer_keys(panel: &ProfilePanel, cells: usize) -> &'static str {
+/// The footer's keys for the panel's state, in `cells`: the long form, else a short one that keeps `esc` (at 80
+/// columns the panel's inner width is 48 and the long form lost it). In the detail, `a` is named only when it acts.
+pub(super) fn footer_keys(panel: &ProfilePanel, cells: usize) -> String {
     let long = footer_long(panel);
-    if width(long) <= cells {
+    if width(&long) <= cells {
         return long;
     }
-    if panel.naming.is_some() || panel.shaping.is_some() {
-        "enter \u{b7} esc cancels"
+    let ready = panel.detail.as_ref().is_some_and(accept_ready);
+    if panel.making.is_some() {
+        "working \u{b7} esc closes".to_owned()
+    } else if panel.naming.is_some() || panel.shaping.is_some() {
+        "enter \u{b7} esc cancels".to_owned()
+    } else if panel.detail.is_some() && ready {
+        "a accept \u{b7} d dismiss \u{b7} \u{2191}/\u{2193} scroll \u{b7} esc back".to_owned()
     } else if panel.detail.is_some() {
-        "a accept \u{b7} d dismiss \u{b7} \u{2191}/\u{2193} scroll \u{b7} esc back"
+        "\u{2193} read to the end \u{b7} d dismiss \u{b7} esc back".to_owned()
     } else if panel.focus == Part::Profiles {
-        "enter/e edit \u{b7} K cards \u{b7} n new \u{b7} tab \u{b7} esc close"
+        "enter/e edit \u{b7} K cards \u{b7} n new \u{b7} tab \u{b7} esc close".to_owned()
     } else {
-        "enter open \u{b7} d dismiss \u{b7} n new \u{b7} tab \u{b7} esc close"
+        "enter open \u{b7} d dismiss \u{b7} n new \u{b7} tab \u{b7} esc close".to_owned()
     }
 }
 
-fn footer_long(panel: &ProfilePanel) -> &'static str {
-    if panel.naming.is_some() {
-        "a-z 0-9 - \u{b7} enter next \u{b7} esc cancels"
+fn footer_long(panel: &ProfilePanel) -> String {
+    if panel.making.is_some() {
+        "working: keys wait until it is made \u{b7} esc closes".to_owned()
+    } else if panel.naming.is_some() {
+        "a-z 0-9 - \u{b7} enter next \u{b7} esc cancels".to_owned()
     } else if panel.shaping.is_some() {
-        "\u{2190}/\u{2192} or 0-4 shape \u{b7} enter makes it \u{b7} esc cancels"
-    } else if panel.detail.is_some() {
-        "a accept \u{b7} d dismiss \u{b7} \u{2191}/\u{2193} pgup/pgdn scroll \u{b7} esc back"
+        // Review finding 13: the range is the shapes there are, never a typed count.
+        format!(
+            "\u{2190}/\u{2192} or 0-{} shape \u{b7} enter makes it \u{b7} esc cancels",
+            crate::nirvana_profiles::SHAPES.len()
+        )
+    } else if let Some(detail) = &panel.detail {
+        if accept_ready(detail) {
+            "a accept \u{b7} d dismiss \u{b7} \u{2191}/\u{2193} pgup/pgdn scroll \u{b7} esc back"
+                .to_owned()
+        } else {
+            "\u{2193}/pgdn/end read to the end, then a accepts \u{b7} d dismiss \u{b7} esc back"
+                .to_owned()
+        }
     } else if panel.focus == Part::Profiles {
         "\u{2191}/\u{2193} choose \u{b7} enter/e edit \u{b7} K cards \u{b7} n new \u{b7} tab suggested \u{b7} esc close"
+            .to_owned()
     } else {
         "\u{2191}/\u{2193} choose \u{b7} enter open \u{b7} d dismiss \u{b7} n new \u{b7} tab profiles \u{b7} esc close"
+            .to_owned()
     }
 }
 
-/// Draws the panel over `area`, as tall as its content, as the Seats panel is drawn.
+/// Whether `a` acts in this detail: drawn, and read to its last line, with what was drawn kept to send.
+fn accept_ready(detail: &Detail) -> bool {
+    detail.drawn && detail.read_to_end && detail.shown.is_some()
+}
+
+/// Why `a` does not act in this detail yet, in the panel's words.
+fn accept_missing(detail: &Detail) -> Option<String> {
+    if !detail.drawn || detail.shown.is_none() {
+        Some(ACCEPT_NOT_DRAWN.to_owned())
+    } else if !detail.read_to_end {
+        Some(format!(
+            "scroll to the end to accept ({} more line{})",
+            detail.below,
+            if detail.below == 1 { "" } else { "s" }
+        ))
+    } else {
+        None
+    }
+}
+
+/// Draws the panel over `area`, as tall as its content, as the Seats panel is drawn. Sets `panel.drawn`, and in the
+/// detail what was drawn and how far it was read.
 pub(super) fn render_profile_panel(
     buffer: &mut Buffer,
     area: Rect,
@@ -912,12 +1270,28 @@ pub(super) fn render_profile_panel(
     palette: &Palette,
 ) -> ProfileHits {
     let mut hits = ProfileHits::default();
+    panel.drawn = false;
     let panel_width = area.width.saturating_sub(2).min(PANEL_WIDTH);
-    if panel_width < 30 || area.height < 8 {
+    let base = Style::default().fg(palette.text).bg(palette.panel_bg);
+    if panel_width < PANEL_MIN_WIDTH || area.height < PANEL_MIN_HEIGHT {
+        // Review finding 11: too small to draw, so it takes no key but Esc, and says so where it can.
+        if area.width > 0 && area.height > 0 {
+            let said = fit(TOO_SMALL, usize::from(area.width));
+            let rect = Rect::new(area.x, area.y, width(&said) as u16, 1);
+            buffer.set_style(rect, base.fg(palette.yellow));
+            put_text(
+                buffer,
+                area.x,
+                area.y,
+                area.width,
+                &said,
+                base.fg(palette.yellow),
+            );
+            hits.area = rect;
+        }
         return hits;
     }
     let inner = usize::from(panel_width.saturating_sub(4));
-    let base = Style::default().fg(palette.text).bg(palette.panel_bg);
     let tone_style = |tone: Tone| match tone {
         Tone::Plain => base,
         Tone::Muted => base.fg(palette.overlay1),
@@ -930,6 +1304,26 @@ pub(super) fn render_profile_panel(
     let proposal = panel.detail.as_ref().and_then(|detail| {
         view.and_then(|view| view.proposals.iter().find(|known| known.id == detail.id))
     });
+    let seen = panel
+        .detail
+        .as_ref()
+        .and_then(|detail| view.and_then(|view| view.seen.get(&detail.id)));
+    // A re-read that changed what the detail shows: it is read again from the top, and Accept is held to the new one.
+    if let Some(detail) = panel.detail.as_mut() {
+        if detail.shown.as_ref() != seen {
+            if detail.shown.is_some() {
+                panel.notice = vec![(
+                    format!(
+                        "{} changed while it was open: read it again from the top",
+                        detail.id
+                    ),
+                    Tone::Attention,
+                )];
+                *detail = Detail::new(detail.id.clone());
+            }
+            detail.shown = seen.cloned();
+        }
+    }
     let folder = folder_name(&panel.root);
     let (title, body): (String, Vec<Line>) = match (view, &panel.detail) {
         (None, _) => (
@@ -939,7 +1333,7 @@ pub(super) fn render_profile_panel(
                 Tone::Muted,
             )],
         ),
-        (Some(_), Some(detail)) => {
+        (Some(view), Some(detail)) => {
             let mut body: Vec<Line> = panel
                 .notice
                 .iter()
@@ -954,7 +1348,7 @@ pub(super) fn render_profile_panel(
             }
             match proposal {
                 Some(proposal) => body.extend(
-                    detail_lines(proposal, inner)
+                    detail_lines(proposal, seen, &view.root, inner)
                         .into_iter()
                         .map(|(line, tone)| Line::Text(line, tone)),
                 ),
@@ -977,13 +1371,23 @@ pub(super) fn render_profile_panel(
         ),
     };
 
-    // The frame holds the body and two more lines: a blank and the keys.
-    let height = (body.len() as u16 + 4).min(area.height.saturating_sub(1));
+    // The frame holds the project's path, the body and two more lines: the place (or a blank) and the keys.
+    let height = (body.len() as u16 + 5).min(area.height.saturating_sub(1));
     let rect = Rect::new(area.x + 1, area.y + 1, panel_width, height);
     hits.area = rect;
     hits.close = draw_frame(buffer, rect, &title, palette);
     let x = rect.x + 2;
-    let body_height = usize::from(rect.height.saturating_sub(4));
+    let width_cells = inner as u16;
+    // Say where: the project's full path on its own line, cut in the middle, never at the end.
+    put_text(
+        buffer,
+        x,
+        rect.y + 1,
+        width_cells,
+        &middle(&panel.root.display().to_string(), inner),
+        tone_style(Tone::Muted),
+    );
+    let body_height = usize::from(rect.height.saturating_sub(5));
     let most = body.len().saturating_sub(body_height);
     let scroll = if let Some(detail) = panel.detail.as_mut() {
         detail.scroll = detail.scroll.min(most);
@@ -1007,9 +1411,9 @@ pub(super) fn render_profile_panel(
         panel.scroll = panel.scroll.min(most);
         panel.scroll
     };
-    let width_cells = inner as u16;
+    let mut drawn_proposal = None;
     for (row, line) in body.iter().skip(scroll).take(body_height).enumerate() {
-        let y = rect.y + 1 + row as u16;
+        let y = rect.y + 2 + row as u16;
         match line {
             Line::Text(text, tone) => {
                 put_text(
@@ -1044,6 +1448,11 @@ pub(super) fn render_profile_panel(
                 if selected {
                     style = style.bg(palette.selection_bg);
                     buffer.set_style(row_rect, Style::default().bg(palette.selection_bg));
+                    if *part == Part::Suggested && *first {
+                        drawn_proposal = view
+                            .and_then(|view| view.proposals.get(*index))
+                            .map(|proposal| proposal.id.clone());
+                    }
                 }
                 // The selected row reads without colour too: `▸` in the gutter of its first line.
                 let gutter = if selected && *first {
@@ -1067,16 +1476,55 @@ pub(super) fn render_profile_panel(
             }
         }
     }
+    let shown_to = (scroll + body_height).min(body.len());
+    let place_y = rect.bottom().saturating_sub(3);
+    if let Some(detail) = panel.detail.as_mut() {
+        // What the owner has seen of it: drawn, and whether its last line has been on screen.
+        detail.drawn = proposal.is_some();
+        detail.below = body.len() - shown_to;
+        if proposal.is_some() && detail.below == 0 {
+            detail.read_to_end = true;
+        }
+        let mut place = format!(
+            "lines {}-{} of {}",
+            (scroll + 1).min(shown_to),
+            shown_to,
+            body.len()
+        );
+        if detail.below > 0 {
+            place.push_str(&format!(" \u{b7} \u{25bc} {} more below", detail.below));
+        }
+        put_text(
+            buffer,
+            x,
+            place_y,
+            width_cells,
+            &fit(&place, inner),
+            tone_style(Tone::Muted),
+        );
+    }
+    panel.drawn_proposal = drawn_proposal;
     let foot_y = rect.bottom().saturating_sub(2);
+    let keys;
     let (foot, style) = match &panel.message {
         Some(message) => (message.as_str(), base.fg(palette.yellow)),
-        None => (footer_keys(panel, inner), base.fg(palette.overlay1)),
+        None => {
+            keys = footer_keys(panel, inner);
+            (keys.as_str(), base.fg(palette.overlay1))
+        }
     };
     put_text(buffer, x, foot_y, width_cells, &fit(foot, inner), style);
+    panel.drawn = true;
     hits
 }
 
 // ---- keys, clicks and what they do ----
+
+/// Review finding 2: a key that writes or opens acts only with no modifier but Shift held; Ctrl+A, Alt+A and Ctrl+D do
+/// nothing. This panel's rule; the strip's panels are left as they are.
+fn bare(key: &crate::input::TerminalKey) -> bool {
+    key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
+}
 
 impl ClientShellState {
     /// Opens the Profiles panel on `space`'s project. One panel is open at a time, so the strip's close.
@@ -1119,6 +1567,26 @@ impl ClientShellState {
         }
     }
 
+    /// The window's timer tick: tells the reader which panel is drawn (only its reads are full), and lands a New that
+    /// finished on its thread.
+    pub(crate) fn tick_profile_panel(&mut self, outcome: &mut ClientShellInput) {
+        reader().show(
+            self.nirvana_profile_panel
+                .as_ref()
+                .filter(|panel| panel.drawn)
+                .map(|panel| panel.folder.clone()),
+        );
+        let made = self
+            .nirvana_profile_panel
+            .as_ref()
+            .and_then(|panel| panel.making.as_ref())
+            .and_then(Making::take);
+        if let Some(made) = made {
+            self.profile_made(made, outcome);
+            outcome.repaint = true;
+        }
+    }
+
     fn profile_view(&self) -> Option<View> {
         self.nirvana_profile_panel
             .as_ref()
@@ -1137,22 +1605,32 @@ impl ClientShellState {
         }
     }
 
-    /// Opens `file` or a folder in an edit tab beside the space's tab, through `command.invoke` as the Preload
-    /// group's `e` and `K` do, and closes the panel: the editor is what the owner sees.
-    fn profile_edit_tab(&mut self, prefix: &str, path: &Path, outcome: &mut ClientShellInput) {
-        let Some(panel) = self.nirvana_profile_panel.take() else {
+    /// Opens `path` in an edit tab beside the space's tab, through `command.invoke` as the Preload group's `e` and `K`
+    /// do.
+    fn profile_open_tab(&mut self, prefix: &str, path: &Path, outcome: &mut ClientShellInput) {
+        let Some((workspace_id, tab_id)) = self
+            .nirvana_profile_panel
+            .as_ref()
+            .map(|panel| (panel.workspace_id.clone(), panel.tab_id.clone()))
+        else {
             return;
         };
         self.push_endpoint_method(
             crate::api::schema::Method::CommandInvoke(crate::api::schema::CommandInvokeParams {
                 command_id: format!("{prefix}{}", path.display()),
-                workspace_id: Some(panel.workspace_id),
-                tab_id: Some(panel.tab_id),
+                workspace_id: Some(workspace_id),
+                tab_id: Some(tab_id),
                 pane_id: None,
                 selection: None,
             }),
             outcome,
         );
+    }
+
+    /// `e`, Enter and `K`: the edit tab, and the panel closes, since the editor is what the owner sees.
+    fn profile_edit_tab(&mut self, prefix: &str, path: &Path, outcome: &mut ClientShellInput) {
+        self.profile_open_tab(prefix, path, outcome);
+        self.nirvana_profile_panel = None;
     }
 
     fn profile_edit(&mut self, view: &View, index: usize, outcome: &mut ClientShellInput) {
@@ -1182,54 +1660,75 @@ impl ClientShellState {
         }
     }
 
-    /// Accept, from the detail only: the library's line and `ACCEPT_NOTE` on screen, or its refusal word for word.
-    fn profile_accept(&mut self, id: &str) {
-        let Some((folder, root)) = self
-            .nirvana_profile_panel
+    fn profile_places(&self) -> Option<(PathBuf, PathBuf)> {
+        self.nirvana_profile_panel
             .as_ref()
             .map(|panel| (panel.folder.clone(), panel.root.clone()))
-        else {
+    }
+
+    /// Accept, from the detail only, of what was drawn (`seen`): the library's line and `ACCEPT_NOTE` on screen; its
+    /// refusal word for word; "busy" without a wait; or, when the proposal changed since the draw, the detail open
+    /// again from the top.
+    fn profile_accept(&mut self, seen: &Seen) {
+        let Some((folder, root)) = self.profile_places() else {
             return;
         };
-        let result = proposals::accept(&root, id);
-        refresh_now(&folder, &root);
+        let result = proposals::accept_seen(&root, seen);
+        if result != Err(Refused::Busy) {
+            refresh_now(&folder, &root);
+        }
+        let Some(panel) = self.nirvana_profile_panel.as_mut() else {
+            return;
+        };
         match result {
             Ok(line) => {
-                if let Some(panel) = self.nirvana_profile_panel.as_mut() {
-                    panel.detail = None;
-                }
-                self.profile_notice(vec![
+                panel.detail = None;
+                panel.notice = vec![
                     (line, Tone::Plain),
                     (proposals::ACCEPT_NOTE.to_owned(), Tone::Attention),
-                ]);
+                ];
             }
-            Err(why) => self.profile_notice(vec![(why, Tone::Attention)]),
+            Err(Refused::Busy) => panel.message = Some(proposals::BUSY.to_owned()),
+            Err(Refused::Changed(why)) => {
+                panel.detail = Some(Detail::new(seen.id.clone()));
+                panel.notice = vec![(why, Tone::Attention)];
+            }
+            Err(Refused::No(why)) => panel.notice = vec![(why, Tone::Attention)],
         }
     }
 
-    fn profile_dismiss(&mut self, id: &str) {
-        let Some((folder, root)) = self
-            .nirvana_profile_panel
-            .as_ref()
-            .map(|panel| (panel.folder.clone(), panel.root.clone()))
-        else {
-            return;
+    /// Dismiss of one proposal id: from the detail its id, from the list the row drawn highlighted.
+    fn profile_dismiss(&mut self, id: &str) -> Result<(), Refused> {
+        let Some((folder, root)) = self.profile_places() else {
+            return Ok(());
         };
-        let result = proposals::dismiss(&root, id, None);
-        refresh_now(&folder, &root);
+        let result = proposals::try_dismiss(&root, id, None);
+        if result != Err(Refused::Busy) {
+            refresh_now(&folder, &root);
+        }
+        let Some(panel) = self.nirvana_profile_panel.as_mut() else {
+            return Ok(());
+        };
         match result {
             Ok(line) => {
-                if let Some(panel) = self.nirvana_profile_panel.as_mut() {
-                    panel.detail = None;
-                }
-                self.profile_notice(vec![(line, Tone::Plain)]);
+                panel.detail = None;
+                panel.notice = vec![(line, Tone::Plain)];
+                Ok(())
             }
-            Err(why) => self.profile_notice(vec![(why, Tone::Attention)]),
+            Err(Refused::Busy) => {
+                panel.message = Some(proposals::BUSY.to_owned());
+                Err(Refused::Busy)
+            }
+            Err(refused) => {
+                panel.notice = vec![(refused.to_string(), Tone::Attention)];
+                Ok(())
+            }
         }
     }
 
-    /// `n`'s last step: the profile written through `new_profile` or `new_profile_shape`, and opened.
-    fn profile_make(&mut self, name: &str, shape: usize, outcome: &mut ClientShellInput) {
+    /// `n`'s last step: the profile written through `new_profile` or `new_profile_shape` on a thread of its own, since
+    /// both take the proposals' lock and the window never waits on it. `tick_profile_panel` (or the next key) lands it.
+    fn profile_make(&mut self, name: &str, shape: usize) {
         let Some(root) = self
             .nirvana_profile_panel
             .as_ref()
@@ -1237,15 +1736,62 @@ impl ClientShellState {
         else {
             return;
         };
-        let made = match shape.checked_sub(1) {
-            None => crate::nirvana_profiles::new_profile(&root, name),
-            Some(at) => match crate::nirvana_profiles::SHAPES.get(at) {
-                Some(shape) => crate::nirvana_profiles::new_profile_shape(&root, name, shape),
-                None => Err(format!("no shape {shape}")),
-            },
+        let slot = Arc::new(Mutex::new(None));
+        let filled = Arc::clone(&slot);
+        let owned = name.to_owned();
+        let spawned = crate::thread_spawn::spawn_named("nirvana-profile-new", move || {
+            let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match shape.checked_sub(1) {
+                    None => crate::nirvana_profiles::new_profile(&root, &owned),
+                    Some(at) => match crate::nirvana_profiles::SHAPES.get(at) {
+                        Some(shape) => {
+                            crate::nirvana_profiles::new_profile_shape(&root, &owned, shape)
+                        }
+                        None => Err(format!("no shape {shape}")),
+                    },
+                }
+            }))
+            .unwrap_or_else(|_| Err("herdr failed while making it".to_owned()));
+            *filled.lock().unwrap_or_else(|e| e.into_inner()) = Some(made);
+            reader().mark_changed();
+        });
+        match spawned {
+            Ok(_) => {
+                if let Some(panel) = self.nirvana_profile_panel.as_mut() {
+                    panel.making = Some(Making {
+                        name: name.to_owned(),
+                        slot,
+                    });
+                }
+            }
+            Err(err) => self.profile_notice(vec![(
+                format!("not made: herdr could not start making it: {err}"),
+                Tone::Attention,
+            )]),
+        }
+    }
+
+    /// A New is done: the full path it wrote, said in the panel, and the file opened in an edit tab beside the space's.
+    fn profile_made(&mut self, made: Result<PathBuf, String>, outcome: &mut ClientShellInput) {
+        let Some((folder, root)) = self.profile_places() else {
+            return;
         };
+        if let Some(panel) = self.nirvana_profile_panel.as_mut() {
+            panel.making = None;
+        }
         match made {
-            Ok(file) => self.profile_edit_tab(crate::nirvana::EDIT_FILE_COMMAND, &file, outcome),
+            Ok(file) => {
+                refresh_now(&folder, &root);
+                self.profile_open_tab(crate::nirvana::EDIT_FILE_COMMAND, &file, outcome);
+                self.profile_notice(vec![
+                    (format!("made {}", file.display()), Tone::Plain),
+                    (
+                        "it is open in an edit tab beside this space's tab: esc closes this panel"
+                            .to_owned(),
+                        Tone::Muted,
+                    ),
+                ]);
+            }
             Err(why) => self.profile_notice(vec![(format!("not made: {why}"), Tone::Attention)]),
         }
     }
@@ -1257,14 +1803,44 @@ impl ClientShellState {
         outcome: &mut ClientShellInput,
     ) {
         outcome.repaint = true;
+        // A New that finished lands before the key is read.
+        let made = self
+            .nirvana_profile_panel
+            .as_ref()
+            .and_then(|panel| panel.making.as_ref())
+            .and_then(Making::take);
+        if let Some(made) = made {
+            self.profile_made(made, outcome);
+        }
+        let code = key.code;
+        let bare = bare(key);
         let view = self.profile_view();
         let Some(panel) = self.nirvana_profile_panel.as_mut() else {
             return;
         };
         panel.message = None;
+        // While a New runs, and while the panel was not drawn whole in the last frame: Esc only.
+        if let Some(making) = &panel.making {
+            if code == KeyCode::Esc {
+                self.nirvana_profile_panel = None;
+            } else {
+                panel.message = Some(format!("making {}: working, keys wait", making.name));
+            }
+            return;
+        }
+        if !panel.drawn {
+            if code == KeyCode::Esc {
+                self.nirvana_profile_panel = None;
+            } else {
+                panel.message = Some(TOO_SMALL.to_owned());
+            }
+            return;
+        }
         // What an Accept, a Dismiss or a New said stays until this key.
         panel.notice.clear();
-        let code = key.code;
+        if !bare && matches!(code, KeyCode::Char(_) | KeyCode::Enter) {
+            return;
+        }
         // `n`: every key is the name's until enter or esc, then the shape's.
         if let Some(name) = panel.naming.as_mut() {
             match super::nirvana_profiles::naming_key(name, code) {
@@ -1309,7 +1885,7 @@ impl ClientShellState {
                 KeyCode::Enter => {
                     let (name, shape) = (name.clone(), *at);
                     panel.shaping = None;
-                    self.profile_make(&name, shape, outcome);
+                    self.profile_make(&name, shape);
                 }
                 _ => {}
             }
@@ -1334,13 +1910,15 @@ impl ClientShellState {
                 KeyCode::Home => detail.scroll = 0,
                 // Held to the text at the next draw.
                 KeyCode::End => detail.scroll = usize::MAX,
-                KeyCode::Char('a') => {
-                    let id = detail.id.clone();
-                    self.profile_accept(&id);
-                }
+                KeyCode::Char('a') => match (accept_missing(detail), detail.shown.clone()) {
+                    (None, Some(seen)) => self.profile_accept(&seen),
+                    (missing, _) => {
+                        panel.message = Some(missing.unwrap_or_else(|| ACCEPT_NOT_DRAWN.to_owned()))
+                    }
+                },
                 KeyCode::Char('d') => {
                     let id = detail.id.clone();
-                    self.profile_dismiss(&id);
+                    let _ = self.profile_dismiss(&id);
                 }
                 _ => {}
             }
@@ -1375,19 +1953,28 @@ impl ClientShellState {
             (KeyCode::Char('K'), Part::Profiles) => self.profile_cards(&view, selected, outcome),
             (KeyCode::Enter, Part::Suggested) => match view.proposals.get(selected) {
                 Some(proposal) => {
-                    panel.detail = Some(Detail {
-                        id: proposal.id.clone(),
-                        scroll: 0,
-                    });
+                    panel.detail = Some(Detail::new(proposal.id.clone()));
                 }
                 None => panel.message = Some(NOTHING_SUGGESTED.to_owned()),
             },
-            (KeyCode::Char('d'), Part::Suggested) => match view.proposals.get(selected) {
-                Some(proposal) => {
-                    let id = proposal.id.clone();
-                    self.profile_dismiss(&id);
+            // Review finding 7: the row highlighted when the list was last drawn, not where `follow` puts the index;
+            // once per draw, so a held `d` never walks down the list.
+            (KeyCode::Char('d'), Part::Suggested) => match panel.drawn_proposal.take() {
+                None if view.proposals.is_empty() => {
+                    panel.message = Some(NOTHING_SUGGESTED.to_owned())
                 }
-                None => panel.message = Some(NOTHING_SUGGESTED.to_owned()),
+                None => panel.message = Some(DISMISS_NOT_DRAWN.to_owned()),
+                Some(id) if !view.proposals.iter().any(|known| known.id == id) => {
+                    panel.message =
+                        Some(format!("{id} is no longer waiting: nothing was dismissed"));
+                }
+                Some(id) => {
+                    if self.profile_dismiss(&id) == Err(Refused::Busy) {
+                        if let Some(panel) = self.nirvana_profile_panel.as_mut() {
+                            panel.drawn_proposal = Some(id);
+                        }
+                    }
+                }
             },
             (KeyCode::Char('a'), _) => panel.message = Some(ACCEPT_IN_DETAIL.to_owned()),
             (KeyCode::Char('e' | 'K'), Part::Suggested) => {

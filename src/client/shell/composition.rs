@@ -984,6 +984,12 @@ impl ClientShellState {
             }
         }
         // Plan 45 P45a: the Profiles panel, drawn over the panes as the Learning panel is; its read is the cache's.
+        // P45a fix round (review finding 11): under an overlay it is not drawn, so it takes no key until it is.
+        if self.overlay.is_some() {
+            if let Some(panel) = self.nirvana_profile_panel.as_mut() {
+                panel.drawn = false;
+            }
+        }
         if self.overlay.is_none() {
             if let Some(mut panel) = self.nirvana_profile_panel.clone() {
                 let top = if layout.nirvana_mods.height > 0 {
