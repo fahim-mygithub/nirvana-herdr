@@ -133,7 +133,8 @@ CONTROLS = (
     # The cap counting a profiled row as two: a capped body draws a profiled row without its line 3, so the cap loop's
     # line-3 assert (or drawn + more) fails.
     Control("p96_row_fix_cap_counts_two", SIDEBAR, CAP_ROW, "                let lines = 2;\n", T_HEIGHTS, "rust"),
-    # Line 3 never drawn: the sweep's first bad is "line 3 Some(\"\"), not \"      @a\"" at width 8.
+    # Line 3 never drawn: the sweep's first bad is a wrong line 3 at width 8. Written first as `Some("")`; the run read
+    # `Some("    w1")`, since a line not drawn is not stepped over either and the next row moves up.
     Control("p96_row_fix_line3_dropped", SIDEBAR, LINE3,
             "            if let Some(name) = sub.profile.as_deref().filter(|_| false) {\n"
             "                if *current_y >= rect.bottom() {\n", T_SWEEP, "rust"),
@@ -141,7 +142,7 @@ CONTROLS = (
     Control("p96_row_fix_real_names_dropped", SIDEBAR, LINE3,
             "            if let Some(name) = sub.profile.as_deref().filter(|_| false) {\n"
             "                if *current_y >= rect.bottom() {\n", T_REAL, "rust"),
-    # The same in the dump: lines[at(p47a-build) + 2] reads "", not "      @builder".
+    # The same in the dump: lines[at(p47a-build) + 2] reads "    p47a-review" (written first as ""), not "      @builder".
     Control("p96_row_fix_dump_dropped", SIDEBAR, LINE3,
             "            if let Some(name) = sub.profile.as_deref().filter(|_| false) {\n"
             "                if *current_y >= rect.bottom() {\n", T_DUMP, "rust"),
