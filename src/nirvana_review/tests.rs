@@ -1475,6 +1475,8 @@ fn role_finding() -> crate::nirvana_profile_detect::Finding {
     crate::nirvana_profile_detect::Finding::Repeated {
         key: crate::nirvana_profile_detect::paragraph_key(ROLE),
         text: ROLE.into(),
+        block: String::new(),
+        secret: None,
         chars: ROLE.chars().count(),
         orders: 7,
         classes: BTreeMap::from([("build.bounded".to_owned(), 7)]),
@@ -1809,4 +1811,139 @@ fn p94_a_build_order_carrying_profile_ops_is_ignored_as_lesson_ops_are() {
     assert!(crate::nirvana_profile_proposals::list(&root).is_empty(), "no proposal");
     assert!(!nirvana_lessons::read_index(&root).lessons.contains_key("mine"), "no lesson");
     assert!(!ruling.axes.iter().any(|axis| axis.axis == PROFILE_OP));
+}
+
+// ---- the P45b fix round ----
+
+/// A project under a test home with the default seats, for `apply_profile_ops` called directly.
+fn ops_root(name: &str) -> (crate::nirvana::TestHomeGuard, PathBuf) {
+    let home = crate::nirvana::with_test_home(name);
+    seats_in_home(&home);
+    let root = home.path.join("project");
+    Project::at(&root).ensure().unwrap();
+    (home, root)
+}
+
+fn propose_op(name: &str, body: &str, evidence: &str) -> Value {
+    serde_json::json!({"op":"propose","name":name,"description":"Judges packaged stills.","class":"build.bounded",
+        "body":body,"evidence":evidence})
+}
+
+/// A quote of ROLE that the corpus holds, 20 characters or more.
+fn role_quote() -> String {
+    format!("7 builders typed it: \"{}\"", &ROLE[..60])
+}
+
+/// P45b review F1 (the reviewer's path) and F11: an op whose body, description or evidence is secret-shaped is
+/// refused by the shape's name, the value never in the line; a quote of herdr's own template wording of a finding
+/// line is no evidence; a written op says one quote was checked.
+#[test]
+fn p94_profile_ops_refuse_secret_shaped_text_and_quotes_of_herdrs_own_wording() {
+    let (_home, root) = ops_root("p94-ops-secret");
+    let finding = role_finding();
+    let corpus = quotable(std::slice::from_ref(&finding));
+    // The template wording of the finding's line is not quotable; the finding's own text and sample are.
+    let line = finding.line(usize::MAX);
+    assert!(!corpus.iter().any(|text| text.contains("original orders (class")), "{corpus:?}");
+    assert!(corpus.iter().any(|text| text == ROLE) && corpus.iter().any(|text| text == "r0/a1"));
+    let mut described = propose_op("b-judge", ROLE, &role_quote());
+    described["description"] = serde_json::json!("Signs in with password=hunter2hunter2 first.");
+    let template = line
+        .split(": ")
+        .nth(1)
+        .expect("the line's wording")
+        .split('"')
+        .next()
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert!(template.contains("original orders (class build.bounded 7"), "{template}");
+    let report = serde_json::json!({"profile_ops":[
+        propose_op("a-judge", &format!("{ROLE}\nThe box key is AKIAIOSFODNN7EXAMPLE."), &role_quote()),
+        described,
+        propose_op("c-judge", ROLE, &format!("{} and xoxb-123456789012-fakefake", role_quote())),
+        propose_op("d-judge", ROLE, &format!("7 orders: \"{template}\"")),
+        propose_op("e-judge", ROLE, &role_quote()),
+    ]});
+    let lines = apply_profile_ops(
+        &root,
+        parse_profile_ops(&report),
+        &corpus,
+        &[],
+        "b1-lr",
+        "r1",
+    );
+    let said = |n: usize| lines[n - 1].1.as_str();
+    assert!(said(1).contains("its body holds a secret-shaped text (AWS access key id)"), "{}", said(1));
+    assert!(said(2).contains("its description holds a secret-shaped text (credential"), "{}", said(2));
+    assert!(said(3).contains("its evidence holds a secret-shaped text (Slack token)"), "{}", said(3));
+    assert!(said(4).contains("the evidence quotes nothing"), "{}", said(4));
+    assert!(
+        lines[4].0 && said(5).starts_with("pp-1: proposed the new profile e-judge") && said(5).contains("one quote checked"),
+        "{lines:?}"
+    );
+    for (_, line) in &lines {
+        for fake in ["AKIAIOSFODNN7EXAMPLE", "hunter2hunter2", "xoxb-123456789012"] {
+            assert!(!line.contains(fake), "{line}");
+        }
+    }
+    assert_eq!(crate::nirvana_profile_proposals::list(&root).len(), 1);
+}
+
+/// P45b review F9: one review writes at most `PROPOSALS_PER_REVIEW` proposals; a further valid op is refused, saying
+/// so.
+#[test]
+fn p94_one_review_writes_at_most_three_proposals() {
+    let (_home, root) = ops_root("p94-ops-cap");
+    let corpus = vec![ROLE.to_owned()];
+    let report = serde_json::json!({"profile_ops":[
+        propose_op("one-judge", ROLE, &role_quote()),
+        propose_op("two-judge", ROLE, &role_quote()),
+        propose_op("three-judge", ROLE, &role_quote()),
+        propose_op("four-judge", ROLE, &role_quote()),
+    ]});
+    let lines = apply_profile_ops(&root, parse_profile_ops(&report), &corpus, &[], "b1-lr", "r1");
+    assert!(lines[..3].iter().all(|(kept, _)| *kept), "{lines:?}");
+    assert!(
+        !lines[3].0 && lines[3].1.contains("this review wrote 3 proposals already, the most one review writes"),
+        "{lines:?}"
+    );
+    assert_eq!(crate::nirvana_profile_proposals::list(&root).len(), 3);
+}
+
+/// P45b review F4, the reviewer's direction: a paragraph the owner dismissed in the detector's proposal is not
+/// proposed again by a reviewer naming its finding, under the same kind and profile. The detector's direction is in
+/// `nirvana_profile_detect::tests`.
+#[test]
+fn p94_a_paragraph_dismissed_through_the_detectors_proposal_is_not_proposed_by_a_reviewer() {
+    let (_home, root) = ops_root("p94-ops-cross-dismiss");
+    let key = crate::nirvana_profile_detect::paragraph_key(ROLE);
+    let sha = key.trim_start_matches("paragraph:").to_owned();
+    let detectors = crate::nirvana_profile_proposals::Draft {
+        kind: crate::nirvana_profile_proposals::Kind::New,
+        profile: "frame-judge".into(),
+        by: crate::nirvana_profile_proposals::DETECTOR.into(),
+        run: "r1".into(),
+        evidence: role_quote(),
+        key: format!("class:build.bounded paragraphs:{sha}"),
+        body: format!("---\ndescription: Judges.\nclass: build.bounded\n---\n{ROLE}\n"),
+        base_sha: None,
+    };
+    assert_eq!(crate::nirvana_profile_proposals::write(&root, &detectors).unwrap(), "pp-1");
+    crate::nirvana_profile_proposals::dismiss(&root, "pp-1", None).unwrap();
+    let mut op = propose_op("frame-judge", ROLE, &role_quote());
+    op["finding"] = serde_json::json!(key);
+    let lines = apply_profile_ops(
+        &root,
+        parse_profile_ops(&serde_json::json!({ "profile_ops": [op] })),
+        &[ROLE.to_owned()],
+        std::slice::from_ref(&key),
+        "b1-lr",
+        "r1",
+    );
+    assert!(
+        !lines[0].0 && lines[0].1.contains(&format!("the owner dismissed paragraph {sha} for frame-judge")),
+        "{lines:?}"
+    );
+    assert!(crate::nirvana_profile_proposals::list(&root).is_empty());
 }

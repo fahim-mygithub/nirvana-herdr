@@ -44,6 +44,19 @@
 //! one `patch` adding to that profile's body the paragraphs it does not already hold. At most `PER_PROPOSAL`
 //! paragraphs, one proposal per target. Everything else (paragraphs across classes or profiles, `unprofiled`,
 //! `unused`) is evidence for the model in the lesson and idle reviews. `unused` is never a proposal to delete.
+//!
+//! **A reused order id counts once** (P45b review F6). Orders are counted by id across every journal read, and the
+//! canonical copy is one file per id (`.nirvana/orders/<id>.md`), so five runs that each seat an order named `build`
+//! read as one order, and its one copy, the newest written, is the text read. That undercounts, which is the safe
+//! side: a paragraph reaches `MIN_ORDERS` only through that many distinct orders.
+//!
+//! **What a proposal's body holds** (P45b review F3): the paragraph's own block, line breaks, bullets and fenced code
+//! as the orchestrator typed them, taken from the newest order that carries it. The key and the counting use the
+//! normalised one-line text, so two orders that differ only in line breaks still type one paragraph.
+//!
+//! **A secret-shaped paragraph** (P45b review F1, `nirvana_profile_proposals::secret_shaped`) still counts, but its
+//! finding's text is a fixed line naming the shape, and it never becomes a draft, evidence or a quote: the proposals
+//! folder is tracked with the project.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -120,8 +133,15 @@ pub enum Finding {
     Repeated {
         /// `paragraph:<16 hex>`, the sha of the lowercased normalised text.
         key: String,
-        /// The normalised paragraph, redacted (`nirvana_lessons::redact`): order text, untrusted.
+        /// The normalised paragraph: order text, untrusted. For a secret-shaped one, `withheld(shape)` instead.
         text: String,
+        /// The paragraph's block as the newest order carrying it typed it (P45b review F3): what a proposal's body
+        /// holds. Empty for a secret-shaped one, and in a detection kept before the fix round (`text` stands in).
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        block: String,
+        /// The shape's name when the paragraph is secret-shaped (P45b review F1): counted, never quoted or proposed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secret: Option<String>,
         chars: usize,
         orders: usize,
         /// The orders carrying it, by class.
@@ -243,6 +263,9 @@ pub struct Skipped {
     pub files: usize,
     /// Order copies not found or not UTF-8.
     pub unreadable: usize,
+    /// P45b review F7: a journal's `order_file` that is not `<order id>.md` in a `.nirvana/orders` folder, not read.
+    #[serde(default)]
+    pub elsewhere: usize,
     /// The wall-clock budget ran out.
     pub budget: bool,
 }
@@ -260,6 +283,10 @@ impl Skipped {
             (self.orders, "order(s) past the cap or the budget"),
             (self.files, "order copy(ies) over the byte cap, text unread"),
             (self.unreadable, "order copy(ies) missing or not UTF-8"),
+            (
+                self.elsewhere,
+                "order file(s) a journal named outside a .nirvana/orders folder, not read",
+            ),
         ] {
             if n > 0 {
                 parts.push(format!("{n} {what}"));
@@ -328,6 +355,18 @@ struct Para {
     text: String,
     chars: usize,
     orders: BTreeSet<usize>,
+    /// The block of the newest order carrying it (F3), and the journal it came from (0 is the newest read).
+    block: String,
+    block_run: usize,
+    secret: Option<&'static str>,
+}
+
+/// The text a secret-shaped paragraph's finding holds in place of the paragraph (P45b review F1).
+fn withheld(shape: &str, chars: usize) -> String {
+    format!(
+        "[withheld by herdr: a {chars}-character paragraph holding a secret-shaped text ({shape}); counted, never \
+         quoted or proposed]"
+    )
 }
 
 /// The lines herdr appends to an order, as their constants hold them: a paragraph has them taken out before it is
@@ -413,22 +452,67 @@ pub fn own_text(text: &str) -> String {
 }
 
 /// The paragraphs of `MIN_CHARS` or more of an order's own text, normalised (see the module comment), each once.
+// The tests read it; the detector reads `blocks`, which keeps each paragraph's block too (P45b review F3).
+#[allow(dead_code)]
 pub fn paragraphs(text: &str) -> Vec<String> {
+    blocks(text).into_iter().map(|(line, _)| line).collect()
+}
+
+/// Each paragraph of `paragraphs` with its block as typed (P45b review F3): line breaks, bullets and fenced code
+/// kept, herdr's own lines taken out. When the block cannot be cut back to exactly the normalised text (a herdr line
+/// that shares a line with the orchestrator's words), the block is the normalised text: a body never says what was not
+/// counted.
+pub fn blocks(text: &str) -> Vec<(String, String)> {
     let own = own_text(text);
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<(String, String)> = Vec::new();
     for piece in own.split("\n\n") {
         let mut line = nirvana_lessons::one_line(piece);
+        let mut cut = false;
         for herdr in herdr_lines() {
             if line.contains(herdr.as_str()) {
                 line = line.replace(herdr.as_str(), " ");
+                cut = true;
             }
         }
         let line = nirvana_lessons::one_line(&line);
-        if line.chars().count() >= MIN_CHARS && !out.contains(&line) {
-            out.push(line);
+        if line.chars().count() >= MIN_CHARS && !out.iter().any(|(seen, _)| *seen == line) {
+            let block = if cut {
+                piece
+                    .lines()
+                    .filter(|typed| {
+                        let typed = nirvana_lessons::one_line(typed);
+                        typed.is_empty()
+                            || !herdr_lines()
+                                .iter()
+                                .any(|herdr| herdr.contains(&typed) || typed.contains(herdr.as_str()))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                piece.to_owned()
+            };
+            let block = block.trim().to_owned();
+            let block = if nirvana_lessons::one_line(&block) == line {
+                block
+            } else {
+                line.clone()
+            };
+            out.push((line, block));
         }
     }
     out
+}
+
+/// P45b review F7: the order file a journal names is read only when it is `<order>.md` in a `.nirvana/orders`
+/// folder (the project's or a worktree's copy, which lies outside the project root, so the root cannot be the rule).
+/// The review reproduced a journal naming a file outside the project whose text became a finding.
+fn journal_order_file(order: &str, named: &str) -> Option<PathBuf> {
+    let shown = named.replace('\\', "/");
+    let (parent, file) = shown.rsplit_once('/')?;
+    let parent = parent.trim_end_matches('/');
+    let in_orders = parent == ".nirvana/orders" || parent.ends_with("/.nirvana/orders");
+    let climbs = shown.split('/').any(|part| part == "..");
+    (in_orders && !climbs && file == format!("{order}.md")).then(|| PathBuf::from(named))
 }
 
 /// A paragraph's identity: `paragraph:<16 hex>` of its lowercased normalised text.
@@ -493,7 +577,7 @@ fn scan(root: &Path, limits: &Limits, started: Instant) -> Scan {
     runs.truncate(limits.runs);
     let mut names: BTreeSet<String> = BTreeSet::new();
     let over = |started: &Instant| started.elapsed() > limits.budget;
-    for (_, run) in runs {
+    for (run_at, (_, run)) in runs.into_iter().enumerate() {
         if over(&started) {
             out.skipped.budget = true;
             out.skipped.journals += 1;
@@ -542,12 +626,22 @@ fn scan(root: &Path, limits: &Limits, started: Instant) -> Scan {
             }
             // The canonical copy (`write_order` writes it), else the worker's copy the journal names.
             let canonical = project.orders_dir().join(format!("{order}.md"));
+            let mut elsewhere = false;
             let file = if canonical.is_file() {
                 Some(canonical)
             } else {
-                text_of(&event, "order_file").map(PathBuf::from)
+                text_of(&event, "order_file").and_then(|named| {
+                    let found = journal_order_file(&order, &named);
+                    elsewhere = found.is_none();
+                    found
+                })
             };
+            if elsewhere {
+                out.skipped.elsewhere += 1;
+            }
             let body = match file.as_ref().map(std::fs::metadata) {
+                // Counted in `elsewhere`, not again as unreadable.
+                None if elsewhere => None,
                 Some(Ok(meta)) if meta.len() > limits.order_bytes => {
                     out.skipped.files += 1;
                     None
@@ -608,17 +702,30 @@ fn scan(root: &Path, limits: &Limits, started: Instant) -> Scan {
                 needs,
                 profile,
             });
-            for paragraph in body.as_deref().map(paragraphs).unwrap_or_default() {
+            for (paragraph, block) in body.as_deref().map(blocks).unwrap_or_default() {
                 let key = paragraph_key(&paragraph);
-                out.paras
-                    .entry(key)
-                    .or_insert_with(|| Para {
-                        chars: paragraph.chars().count(),
-                        text: nirvana_lessons::redact(&paragraph),
-                        orders: BTreeSet::new(),
-                    })
-                    .orders
-                    .insert(at);
+                // F1: read before anything is kept, so the value never reaches the cache, a brief or a draft.
+                let secret = proposals::secret_shaped(&paragraph)
+                    .or_else(|| proposals::secret_shaped(&block));
+                let chars = paragraph.chars().count();
+                let para = out.paras.entry(key).or_insert_with(|| Para {
+                    chars,
+                    text: paragraph.clone(),
+                    orders: BTreeSet::new(),
+                    block: block.clone(),
+                    block_run: run_at,
+                    secret: None,
+                });
+                para.orders.insert(at);
+                // F3: journals are read newest first and each in order, so a later line of the same journal is newer.
+                if para.block_run == run_at {
+                    para.block = block;
+                }
+                para.secret = para.secret.or(secret);
+                if let Some(shape) = para.secret {
+                    para.text = withheld(shape, para.chars);
+                    para.block = String::new();
+                }
             }
         }
     }
@@ -664,9 +771,9 @@ fn usage_of(seen: &[Seen], profiles: &Profiles) -> Vec<Use> {
         .collect()
 }
 
-/// `detect_with` at the default limits.
+/// `detect_with` at the default limits (a test's, when it set `TEST_LIMITS`).
 pub fn detect(root: &Path) -> Detection {
-    detect_with(root, &Limits::default())
+    detect_with(root, &limits_now())
 }
 
 /// One detection over the project at `root`, within `limits`. Writes nothing.
@@ -702,6 +809,8 @@ pub fn detect_with(root: &Path, limits: &Limits) -> Detection {
             Finding::Repeated {
                 key: key.clone(),
                 text: para.text.clone(),
+                block: para.block.clone(),
+                secret: para.secret.map(str::to_owned),
                 chars: para.chars,
                 orders: para.orders.len(),
                 classes,
@@ -820,6 +929,9 @@ pub struct Planned {
     pub about: String,
     /// `Some(why)` when it is not written: waiting already, dismissed, or its target has no room.
     pub known: Option<String>,
+    /// P45b review F8: `Some(why)` when its class or a need from the journal is not one word. Nothing goes to the
+    /// store (its `draft` is empty), and the one line says why.
+    pub refused: Option<String>,
 }
 
 /// A profile name for a class: `build.bounded` becomes `build-bounded`.
@@ -841,7 +953,11 @@ pub fn class_name(class: &str) -> String {
 
 /// The paragraph shas a standing dismissal of `(kind, profile)` named in its key, so a paragraph the owner dismissed
 /// is not proposed again with others around it. Read from the dismissed proposal's own text in the ledger.
-fn dismissed_paragraphs(root: &Path, kind: Kind, profile: &str) -> BTreeSet<String> {
+///
+/// P45b review F4: both writers' keys. The detector's `class:<c> paragraphs:<a>,<b>` / `profile:<n> paragraphs:...`,
+/// and a reviewer's `paragraph:<sha>` (the finding it named), so a paragraph the owner dismissed through either
+/// writer is not proposed again by the other. `nirvana_review::apply_profile_ops` reads this too.
+pub(crate) fn dismissed_paragraphs(root: &Path, kind: Kind, profile: &str) -> BTreeSet<String> {
     let rows = proposals::ledger(root);
     let undone: BTreeSet<&str> = rows
         .iter()
@@ -859,7 +975,12 @@ fn dismissed_paragraphs(root: &Path, kind: Kind, profile: &str) -> BTreeSet<Stri
         .flat_map(|text| {
             text.lines()
                 .find_map(|line| line.strip_prefix("key:"))
-                .and_then(|key| key.split("paragraphs:").nth(1))
+                .and_then(|key| {
+                    let key = key.trim();
+                    key.split("paragraphs:")
+                        .nth(1)
+                        .or_else(|| key.strip_prefix("paragraph:"))
+                })
                 .map(|list| {
                     list.trim()
                         .split(',')
@@ -898,11 +1019,16 @@ pub fn plan(root: &Path, detection: &Detection, run: &str) -> Vec<Planned> {
             classes,
             profiles: carried,
             unprofiled,
+            secret,
             ..
         } = finding
         else {
             continue;
         };
+        // F1: a secret-shaped paragraph is never a draft and never another draft's evidence.
+        if secret.is_some() {
+            continue;
+        }
         // One class only: a paragraph several classes type is the model's to weigh.
         let Some(class) = classes.keys().next().filter(|_| classes.len() == 1) else {
             continue;
@@ -922,6 +1048,49 @@ pub fn plan(root: &Path, detection: &Detection, run: &str) -> Vec<Planned> {
     }
     let mut out = Vec::new();
     for ((kind, name, class), found) in targets {
+        // P45b review F8: the class and the needs come from the journal and go into a front matter line; the review's
+        // probe of a class holding a newline and `skills: []` held only because the profile parser refused it. The
+        // reviewer path's one-word rule, here too: no draft, one line.
+        let needs_seen: Vec<&String> = found
+            .iter()
+            .filter_map(|finding| match finding {
+                Finding::Repeated { needs, .. } => Some(needs),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let bad = if !crate::nirvana_review::one_word(&class) {
+            Some(format!("class {:?}", nirvana_lessons::one_line(&class)))
+        } else {
+            needs_seen
+                .iter()
+                .find(|need| !crate::nirvana_review::one_word(need))
+                .map(|need| format!("need {:?}", nirvana_lessons::one_line(need)))
+        };
+        if let Some(bad) = bad {
+            out.push(Planned {
+                about: format!(
+                    "{} {name}: {} paragraph(s) repeated by one class",
+                    kind.word(),
+                    found.len()
+                ),
+                draft: Draft {
+                    kind,
+                    profile: name,
+                    by: proposals::DETECTOR.into(),
+                    run: run.to_owned(),
+                    evidence: String::new(),
+                    key: String::new(),
+                    body: String::new(),
+                    base_sha: None,
+                },
+                known: None,
+                refused: Some(format!(
+                    "the journal's {bad} is not one word ([A-Za-z0-9._-], 1 to 64): no draft"
+                )),
+            });
+            continue;
+        }
         let dismissed = dismissed_paragraphs(root, kind, &name);
         let current = profiles
             .iter()
@@ -936,7 +1105,10 @@ pub fn plan(root: &Path, detection: &Detection, run: &str) -> Vec<Planned> {
         let mut texts: Vec<(&str, &str)> = Vec::new();
         let mut was_dismissed = 0;
         for finding in &found {
-            let Finding::Repeated { key, text, .. } = finding else {
+            let Finding::Repeated {
+                key, text, block, ..
+            } = finding
+            else {
                 continue;
             };
             let sha = key.trim_start_matches("paragraph:");
@@ -949,7 +1121,9 @@ pub fn plan(root: &Path, detection: &Detection, run: &str) -> Vec<Planned> {
                 continue;
             }
             if texts.len() < PER_PROPOSAL {
-                texts.push((sha, text.as_str()));
+                // F3: the body gets the block as typed; a detection kept before the fix round has none.
+                let typed = if block.is_empty() { text } else { block };
+                texts.push((sha, typed.as_str()));
             }
         }
         // A body under `BODY_MAX`: the least repeated paragraphs go first.
@@ -1076,6 +1250,7 @@ pub fn plan(root: &Path, detection: &Detection, run: &str) -> Vec<Planned> {
                 base_sha,
             },
             known,
+            refused: None,
         });
     }
     out
@@ -1096,9 +1271,10 @@ pub fn propose(root: &Path, planned: &[Planned]) -> Vec<(Planned, Outcome)> {
     planned
         .iter()
         .map(|planned| {
-            let outcome = match &planned.known {
-                Some(why) => Outcome::Known(why.clone()),
-                None => match proposals::write(root, &planned.draft) {
+            let outcome = match (&planned.refused, &planned.known) {
+                (Some(why), _) => Outcome::Refused(why.clone()),
+                (None, Some(why)) => Outcome::Known(why.clone()),
+                (None, None) => match proposals::write(root, &planned.draft) {
                     Ok(id) => Outcome::Written(id),
                     Err(refusal)
                         if refusal.0.iter().all(|why| {
@@ -1215,6 +1391,31 @@ pub fn refresh_with(root: &Path, run: &str, limits: &Limits) -> Vec<String> {
 /// orders repeat, its class unprofiled, its profile unused or a profile of its class unused. `class` `None`: every
 /// finding (the idle review reads many orders). At most `BRIEF_FINDINGS`.
 pub fn relevant(findings: &[Finding], class: Option<&str>, profile: Option<&str>) -> Vec<Finding> {
+    let matched = matching(findings, class, profile);
+    // P45b review F10: the list has `Repeated` first, so 6 repeated paragraphs used to fill every place and an
+    // `Unprofiled` or `Unused` finding never reached a brief. When more match than fit, one place each is kept for
+    // the first of those two kinds that match; the rest go in the detection's order.
+    let first_of = |unprofiled: bool| {
+        matched.iter().position(|finding| match finding {
+            Finding::Unprofiled { .. } => unprofiled,
+            Finding::Unused { .. } => !unprofiled,
+            Finding::Repeated { .. } => false,
+        })
+    };
+    let kept: Vec<usize> = [first_of(true), first_of(false)].into_iter().flatten().collect();
+    let room = BRIEF_FINDINGS.saturating_sub(kept.len());
+    let mut chosen: Vec<usize> = (0..matched.len())
+        .filter(|at| !kept.contains(at))
+        .take(room)
+        .chain(kept.iter().copied())
+        .collect();
+    chosen.sort_unstable();
+    chosen.truncate(BRIEF_FINDINGS);
+    chosen.into_iter().map(|at| matched[at].clone()).collect()
+}
+
+/// Every finding that bears on a review of `class` and `profile` (see `relevant`), uncapped.
+fn matching(findings: &[Finding], class: Option<&str>, profile: Option<&str>) -> Vec<Finding> {
     findings
         .iter()
         .filter(|finding| {
@@ -1233,7 +1434,6 @@ pub fn relevant(findings: &[Finding], class: Option<&str>, profile: Option<&str>
                 } => profile == Some(unused.as_str()) || of.as_deref() == Some(class),
             }
         })
-        .take(BRIEF_FINDINGS)
         .cloned()
         .collect()
 }
@@ -1417,7 +1617,14 @@ pub fn cli_to(
     let detection = detect(root);
     let planned = plan(root, &detection, &run);
     let outcomes: Vec<(Planned, Option<Outcome>)> = if write {
-        if let Err(why) = write_cache(root, &detection) {
+        // P45b review F5: as `refresh_with`, a detection cut short by its budget never replaces the last whole one.
+        // The review reproduced a whole cache of `repeated` and `unprofiled` left holding `unprofiled` alone.
+        if detection.skipped.budget {
+            let _ = writeln!(
+                err,
+                "herdr profile detect: the budget ran out, so the detection is partial and the last whole one stays"
+            );
+        } else if let Err(why) = write_cache(root, &detection) {
             let _ = writeln!(
                 err,
                 "herdr profile detect: the detection is not kept: {why}"
@@ -1442,7 +1649,10 @@ pub fn cli_to(
                     "about": planned.about,
                     "known": planned.known,
                     "written": match outcome { Some(Outcome::Written(id)) => Some(id.clone()), _ => None },
-                    "refused": match outcome { Some(Outcome::Refused(why)) => Some(why.clone()), _ => None },
+                    "refused": match outcome {
+                        Some(Outcome::Refused(why)) => Some(why.clone()),
+                        _ => planned.refused.clone(),
+                    },
                 })
             })
             .collect();
@@ -1471,6 +1681,11 @@ pub fn cli_to(
         let line = match (outcome, &planned.known) {
             (Some(Outcome::Written(id)), _) => format!("proposed {id}: {}", planned.about),
             (Some(Outcome::Refused(why)), _) => format!("refused {}: {why}", planned.about),
+            (None, _) if planned.refused.is_some() => format!(
+                "refused {}: {}",
+                planned.about,
+                planned.refused.as_deref().unwrap_or("")
+            ),
             (Some(Outcome::Known(why)), _) | (None, Some(why)) => {
                 format!("known {}: {why}", planned.about)
             }

@@ -97,9 +97,7 @@ CONTROLS = (
     # Red: T_CAPS's budget assertion (a zero budget reads everything).
     Control("p94_budget_gone", DETECT, "    let over = |started: &Instant| started.elapsed() > limits.budget;",
             "    let over = |_started: &Instant| false;", T_CAPS, "rust"),
-    # Hostile text. Red: T_HOSTILE's kept-detection assertion (the token lands in the cache).
-    Control("p94_detection_unredacted", DETECT, "                        text: nirvana_lessons::redact(&paragraph),",
-            "                        text: paragraph.clone(),", T_HOSTILE, "rust"),
+    # Hostile text: P45b fix round F1 withholds a secret-shaped paragraph whole, so its redaction is p94_secret_*.
     # Red: T_ONE's "one waiting" (with no front matter of herdr's, the hostile-free body is refused by the store).
     Control("p94_front_matter_not_herdrs", DETECT,
             '                let mut text = format!("---\\ndescription: {description}\\nclass: {class}\\n");',
@@ -235,4 +233,147 @@ CONTROLS = CONTROLS + (
             "                let given = crate::nirvana_profile_detect::given(project, run, &root);",
             "                let given: Vec<crate::nirvana_profile_detect::Finding> = Vec::new();", T_IDLE_E2E,
             "rust"),
+)
+
+# The P45b fix round (the review's F1 to F11, the lead 2026-11-19). Each red line is written before the run.
+T_SECRET = ("nirvana_profile_detect::tests::"
+            "p94_a_secret_shaped_paragraph_is_counted_never_drafted_and_never_written")
+T_BLOCK = "nirvana_profile_detect::tests::p94_a_proposal_body_keeps_the_block_of_the_newest_order"
+T_CROSS_DETECT = ("nirvana_profile_detect::tests::"
+                  "p94_a_paragraph_dismissed_through_a_reviewers_proposal_is_not_proposed_by_the_detector")
+T_CLI_PARTIAL = "nirvana_profile_detect::tests::p94_detect_write_keeps_the_whole_cache_when_its_budget_ran_out"
+T_ORDER_FILE = ("nirvana_profile_detect::tests::"
+                "p94_a_journal_order_file_outside_an_orders_folder_is_skipped_and_counted")
+T_ONE_WORD = ("nirvana_profile_detect::tests::"
+              "p94_a_journal_class_or_need_that_is_not_one_word_yields_no_draft_and_one_line")
+T_BRIEF_KINDS = ("nirvana_profile_detect::tests::"
+                 "p94_a_brief_keeps_an_unprofiled_and_an_unused_finding_beside_many_repeated_ones")
+T_SEATED = ("nirvana_profile_detect::tests::"
+            "p94_accept_and_rollback_from_a_seated_worker_are_refused_naming_the_order")
+T_SHAPES = "nirvana_profile_proposals::tests::p94_secret_shaped_names_each_shape_and_passes_prose"
+T_STORE_SECRET = ("nirvana_profile_proposals::tests::"
+                  "p94_the_store_refuses_a_secret_shaped_body_or_evidence_and_accept_checks_again")
+T_OPS_SECRET = ("nirvana_review::tests::"
+                "p94_profile_ops_refuse_secret_shaped_text_and_quotes_of_herdrs_own_wording")
+T_CAP = "nirvana_review::tests::p94_one_review_writes_at_most_three_proposals"
+T_CROSS_REVIEW = ("nirvana_review::tests::"
+                  "p94_a_paragraph_dismissed_through_the_detectors_proposal_is_not_proposed_by_a_reviewer")
+NEVER = 'r"NEVERxMATCHx9"'
+CONTROLS = CONTROLS + (
+    # F1, the detector. Red: T_SECRET's "each still counts" (no finding is marked withheld; the values reach the cache).
+    Control("p94_secret_paragraph_kept", DETECT,
+            "                let secret = proposals::secret_shaped(&paragraph)\n"
+            "                    .or_else(|| proposals::secret_shaped(&block));",
+            "                let secret: Option<&'static str> = None;", T_SECRET, "rust"),
+    # Red: T_SECRET's "no withheld line in the body" (the withheld findings join the judging paragraph's draft).
+    Control("p94_secret_finding_drafted", DETECT, "        if secret.is_some() {\n            continue;\n        }",
+            "        if false {\n            continue;\n        }", T_SECRET, "rust"),
+    # F1, the shapes. Red: T_SHAPES at the shape's own text (found None, or another shape's name).
+    Control("p94_shape_pem_gone", PP, '            ("PEM header", r"-----BEGIN [A-Z]"),',
+            '            ("PEM header", ' + NEVER + '),', T_SHAPES, "rust"),
+    Control("p94_shape_aws_gone", PP, '            ("AWS access key id", r"\\b(?:AKIA|ASIA)[0-9A-Z]{16}\\b"),',
+            '            ("AWS access key id", ' + NEVER + '),', T_SHAPES, "rust"),
+    Control("p94_shape_slack_gone", PP, '            ("Slack token", r"\\bxox[a-z]-[A-Za-z0-9-]+"),',
+            '            ("Slack token", ' + NEVER + '),', T_SHAPES, "rust"),
+    Control("p94_shape_stripe_gone", PP, '            ("Stripe key", r"\\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+"),',
+            '            ("Stripe key", ' + NEVER + '),', T_SHAPES, "rust"),
+    Control("p94_shape_google_gone", PP, '            ("Google API key", r"\\bAIza[0-9A-Za-z_-]{16,}"),',
+            '            ("Google API key", ' + NEVER + '),', T_SHAPES, "rust"),
+    Control("p94_shape_url_gone", PP,
+            '            ("URL credentials", r"[A-Za-z][A-Za-z0-9+.-]*://[^/\\s:@]+:[^@\\s/]+@"),',
+            '            ("URL credentials", ' + NEVER + '),', T_SHAPES, "rust"),
+    Control("p94_shape_uuid_gone", PP,
+            '                r"(?i)\\b[a-z0-9_.-]*(?:key|token|secret|password|auth)[\\s=:\'\\x22]{0,4}[0-9a-f]{8}-',
+            '                r"NEVERxMATCH(?i)\\b[a-z0-9_.-]*(?:key|token|secret|password|auth)[\\s=:\'\\x22]{0,4}[0-9a-f]{8}-',
+            T_SHAPES, "rust"),
+    Control("p94_shape_hex_gone", PP, '            ("run of 32 or more hex characters", r"\\b[0-9a-fA-F]{32,}\\b"),',
+            '            ("run of 32 or more hex characters", ' + NEVER + '),', T_SHAPES, "rust"),
+    Control("p94_shape_basic_gone", PP, "    if basic.captures_iter(text).any(|found| {",
+            "    if false && basic.captures_iter(text).any(|found| {", T_SHAPES, "rust"),
+    # Red: T_SHAPES's prose "A basic understanding of the engine" (any run after `basic` read as encoded).
+    Control("p94_shape_basic_prose", PP,
+            "        run.bytes().any(|b| b.is_ascii_digit() || matches!(b, b'+' | b'/' | b'='))\n"
+            "            || run.bytes().skip(1).any(|b| b.is_ascii_uppercase())",
+            "        true", T_SHAPES, "rust"),
+    Control("p94_shape_assigned_gone", PP, "    if assigned.captures_iter(text).any(|found| {",
+            "    if false && assigned.captures_iter(text).any(|found| {", T_SHAPES, "rust"),
+    # Red: T_SHAPES's prose "Key: remember the cook order." (a colon and any word read as a credential).
+    Control("p94_shape_colon_prose", PP,
+            "            _ => count >= 6 && (!found[2].is_empty() || value.bytes().any(|b| b.is_ascii_digit())),",
+            "            _ => count >= 6,", T_SHAPES, "rust"),
+    Control("p94_shape_redact_gone", PP, "    if nirvana_lessons::redact(text) != text {", "    if false {",
+            T_SHAPES, "rust"),
+    # F1, the store. Red: T_STORE_SECRET's first refusal (the AWS key id is written to pp-1.md).
+    Control("p94_store_secret_unchecked", PP,
+            "    problems.extend(secret_problems(&draft.body, &draft.evidence));\n", "", T_STORE_SECRET, "rust"),
+    # Red: T_STORE_SECRET's accept (the hand-edited 32-hex body becomes judge-d's profile).
+    Control("p94_accept_secret_unchecked", PP,
+            "    problems.extend(secret_problems(&proposal.body, &proposal.evidence));\n", "", T_STORE_SECRET, "rust"),
+    # F1, the reviewer's path. Red: T_OPS_SECRET line 1 (the store's "the body holds", not the op's "its body holds").
+    Control("p94_op_secret_unchecked", REVIEW,
+            "                if let Some(shape) = crate::nirvana_profile_proposals::secret_shaped(text) {",
+            "                if let Some(shape) = None::<&str> {", T_OPS_SECRET, "rust"),
+    # F11. Red: T_OPS_SECRET's corpus assertion (herdr's template wording is quotable).
+    Control("p94_quotable_template", REVIEW,
+            "                    out.push(text.clone());\n                    if !block.is_empty() {",
+            "                    out.push(finding.line(usize::MAX));\n                    if !block.is_empty() {",
+            T_OPS_SECRET, "rust"),
+    # Red: T_OPS_SECRET line 5's "one quote checked".
+    Control("p94_quote_note_dropped", REVIEW, "                     checked, not the counts)\",",
+            "                     not the counts)\",", T_OPS_SECRET, "rust"),
+    # F9. Red: T_CAP's fourth op (written as pp-4).
+    Control("p94_review_cap_gone", REVIEW, "            if written >= PROPOSALS_PER_REVIEW {", "            if false {",
+            T_CAP, "rust"),
+    # Red: T_CAP (nothing counted, so the fourth is written).
+    Control("p94_review_cap_uncounted", REVIEW, "                written += 1;\n", "", T_CAP, "rust"),
+    # F4. Red: T_CROSS_REVIEW (the reviewer's proposal of the dismissed paragraph is written as pp-2).
+    Control("p94_cross_dismiss_reviewer", REVIEW,
+            "                if crate::nirvana_profile_detect::dismissed_paragraphs(root, kind, &name).contains(sha) {",
+            "                if false {", T_CROSS_REVIEW, "rust"),
+    # Red: T_CROSS_DETECT (the detector proposes the paragraph the owner dismissed in a reviewer's proposal).
+    Control("p94_cross_dismiss_detector", DETECT, '                        .or_else(|| key.strip_prefix("paragraph:"))',
+            "                        .or_else(|| None::<&str>)", T_CROSS_DETECT, "rust"),
+    # F3. Red: T_BLOCK's body assertion (the flattened one-line text).
+    Control("p94_body_flattened", DETECT, "                let typed = if block.is_empty() { text } else { block };",
+            "                let typed = text;", T_BLOCK, "rust"),
+    # Red: T_BLOCK's body assertion (the first order's block, not the newest's).
+    Control("p94_block_oldest_kept", DETECT, "                if para.block_run == run_at {", "                if false {",
+            T_BLOCK, "rust"),
+    # F5. Red: T_CLI_PARTIAL's findings assertion (the partial detection replaces the whole one).
+    Control("p94_cli_partial_cache_replaced", DETECT, "        if detection.skipped.budget {\n            let _ = writeln!(",
+            "        if false {\n            let _ = writeln!(", T_CLI_PARTIAL, "rust"),
+    # F7. Red: T_ORDER_FILE's elsewhere == 5 (every named file read).
+    Control("p94_order_file_anywhere", DETECT,
+            '    (in_orders && !climbs && file == format!("{order}.md")).then(|| PathBuf::from(named))',
+            "    let _ = (in_orders, climbs, file);\n    Some(PathBuf::from(named))", T_ORDER_FILE, "rust"),
+    # Red: T_ORDER_FILE's elsewhere == 5 (the two under another name in an orders folder read).
+    Control("p94_order_file_name_unchecked", DETECT, '(in_orders && !climbs && file == format!("{order}.md"))',
+            "(in_orders && !climbs && !file.is_empty())", T_ORDER_FILE, "rust"),
+    # F8. Red: T_ONE_WORD's "the journal's class" line (the class goes to the store, which says otherwise).
+    Control("p94_class_word_unchecked", DETECT, "        let bad = if !crate::nirvana_review::one_word(&class) {",
+            "        let bad = if false {", T_ONE_WORD, "rust"),
+    # Red: T_ONE_WORD's need part (no refusal; a draft with the need).
+    Control("p94_need_word_unchecked", DETECT, "                .find(|need| !crate::nirvana_review::one_word(need))",
+            "                .find(|_| false)", T_ONE_WORD, "rust"),
+    # Red: T_ONE_WORD's propose outcomes (a refused plan is read as known).
+    Control("p94_refused_plan_known", DETECT, "                (Some(why), _) => Outcome::Refused(why.clone()),",
+            "                (Some(why), _) => Outcome::Known(why.clone()),", T_ONE_WORD, "rust"),
+    # F10. Red: T_BRIEF_KINDS's kinds (six repeated paragraphs).
+    Control("p94_brief_kinds_starved", DETECT,
+            "    let kept: Vec<usize> = [first_of(true), first_of(false)].into_iter().flatten().collect();",
+            "    let kept: Vec<usize> = Vec::new();", T_BRIEF_KINDS, "rust"),
+    # F2. Red: T_SEATED's first case (accept inside order b1-lr goes on).
+    Control("p94_seated_accept_allowed", PROFILES, "    if let Some(why) = seated_refusal(args, env) {",
+            "    if let Some(why) = None::<String> {", T_SEATED, "rust"),
+    # Red: T_SEATED's first case (the order's variable is not read; nothing else marks the worker).
+    Control("p94_seated_order_unread", PROFILES,
+            "    let order = env(SEATED_ORDER_ENV).filter(|order| !order.trim().is_empty());",
+            "    let order: Option<String> = None;", T_SEATED, "rust"),
+    # Red: T_SEATED's claude case (the claude seat's own marker is not read).
+    Control("p94_seated_claude_unread", PROFILES,
+            "        .all(|(key, value)| env(key).as_deref() == Some(*value));", "        .all(|_| false);", T_SEATED,
+            "rust"),
+    # Red: T_SEATED's rollback case.
+    Control("p94_seated_rollback_allowed", PROFILES,
+            '        (Some("proposals"), Some("rollback")) => "proposals rollback",\n', "", T_SEATED, "rust"),
 )

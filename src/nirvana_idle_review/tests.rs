@@ -1620,6 +1620,8 @@ the before frame first and compare after against before.";
         findings: vec![detect::Finding::Repeated {
             key: key.clone(),
             text: role.into(),
+            block: String::new(),
+            secret: None,
             chars: role.chars().count(),
             orders: 6,
             classes: BTreeMap::from([("build.bounded".to_owned(), 6)]),

@@ -229,6 +229,93 @@ pub fn redact_key(key: &str) -> String {
     nirvana_lessons::redact(&hashed)
 }
 
+/// P45b review F1: the shape a secret in `text` has, by name, or `None`. The name is what a refusal says; the value is
+/// never returned. The proposals folder is tracked with the project (`.nirvana/.gitignore` ignores only `runs/`,
+/// `orders/` and `worktrees/`), and the review reproduced an AWS key id, `password=...`, a 32-hex key, a Slack token
+/// and `sk_live_...` landing in `pp-1.md` twice through `nirvana_lessons::redact`, which knows only `Bearer`, `sk-`,
+/// GitHub tokens and long mixed runs. CLAUDE.md rule 12: no credential in any tracked file.
+///
+/// Here, not in the detector, so the detector (which calls this module) and the store share one list without a cycle.
+/// It is never run over herdr's own sha lines (`base_sha`, `Profile sha256:`), which are 64 hex by design: only over a
+/// proposal's body, description and evidence, and over order text.
+pub fn secret_shaped(text: &str) -> Option<&'static str> {
+    use std::sync::OnceLock;
+    static SHAPES: OnceLock<Vec<(&'static str, regex::Regex)>> = OnceLock::new();
+    let shapes = SHAPES.get_or_init(|| {
+        [
+            ("PEM header", r"-----BEGIN [A-Z]"),
+            ("AWS access key id", r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+            ("Slack token", r"\bxox[a-z]-[A-Za-z0-9-]+"),
+            ("Stripe key", r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]+"),
+            ("Google API key", r"\bAIza[0-9A-Za-z_-]{16,}"),
+            ("URL credentials", r"[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^@\s/]+@"),
+            (
+                "UUID after a key word",
+                r"(?i)\b[a-z0-9_.-]*(?:key|token|secret|password|auth)[\s=:'\x22]{0,4}[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+            ),
+            ("run of 32 or more hex characters", r"\b[0-9a-fA-F]{32,}\b"),
+        ]
+        .into_iter()
+        .map(|(name, pattern)| (name, regex::Regex::new(pattern).expect(name)))
+        .collect()
+    });
+    if let Some((name, _)) = shapes.iter().find(|(_, shape)| shape.is_match(text)) {
+        return Some(name);
+    }
+    // `Basic <base64>`: the run must look encoded (a digit, `+`, `/`, `=`, or a capital after its first letter), so
+    // "basic understanding" in prose is not one.
+    static BASIC: OnceLock<regex::Regex> = OnceLock::new();
+    let basic = BASIC.get_or_init(|| {
+        regex::Regex::new(r"(?i)\bbasic\s+([A-Za-z0-9+/]{8,}={0,2})").expect("basic")
+    });
+    if basic.captures_iter(text).any(|found| {
+        let run = &found[1];
+        run.bytes().any(|b| b.is_ascii_digit() || matches!(b, b'+' | b'/' | b'='))
+            || run.bytes().skip(1).any(|b| b.is_ascii_uppercase())
+    }) {
+        return Some("HTTP Basic credentials");
+    }
+    // `key|secret|password|passwd|token|pwd`, then `=` or `:`, then a value. After `=` any value of 4 or more: that is
+    // an assignment. After `:` a value of 6 or more that is quoted or holds a digit, so "Key: read the log" in prose
+    // is not one and `token: "abcdef"` or `pwd: hunter2` is.
+    static ASSIGNED: OnceLock<regex::Regex> = OnceLock::new();
+    let assigned = ASSIGNED.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?i)\b[a-z0-9_.-]*(?:key|secret|password|passwd|token|pwd)["']?\s*([=:])\s*(["']?)([^\s"',;)\]}]+)"#,
+        )
+        .expect("assigned")
+    });
+    if assigned.captures_iter(text).any(|found| {
+        let value = &found[3];
+        let count = value.chars().count();
+        match &found[1] {
+            "=" => count >= 4,
+            _ => count >= 6 && (!found[2].is_empty() || value.bytes().any(|b| b.is_ascii_digit())),
+        }
+    }) {
+        return Some("credential assignment (key, secret, password or token)");
+    }
+    if nirvana_lessons::redact(text) != text {
+        return Some("token nirvana_lessons::redact knows (Bearer, sk-, GitHub, a long mixed run)");
+    }
+    None
+}
+
+/// The refusal for a field that is secret-shaped: the shape's name, never the value.
+fn secret_problems(body: &str, evidence: &str) -> Vec<String> {
+    [("body", body), ("evidence", evidence)]
+        .into_iter()
+        .filter_map(|(field, text)| {
+            secret_shaped(text).map(|shape| {
+                format!(
+                    "the {field} holds a secret-shaped text ({shape}): herdr never writes one into the tracked \
+                     proposals folder"
+                )
+            })
+        })
+        .collect()
+}
+
 /// The sha a `patch` names in `base_sha`: of the profile's file (`<name>.md` or `<name>/profile.md`) as it stands,
 /// CRLF read as LF so a checkout's line endings never stale a proposal. `None` when there is no such profile file.
 pub fn profile_sha(root: &Path, name: &str) -> Option<String> {
@@ -800,6 +887,9 @@ pub fn write(root: &Path, draft: &Draft) -> Result<String, Refusal> {
         ..draft.clone()
     };
     let mut problems = field_problems(&draft.by, &draft.run, &draft.key, &draft.evidence);
+    // P45b review F1, the last guard: after the redaction above, whatever is still secret-shaped is refused, not
+    // written. The writers refuse it first; this holds for any writer, today's or a later one.
+    problems.extend(secret_problems(&draft.body, &draft.evidence));
     problems.extend(content_problems(
         root,
         draft.kind,
@@ -888,6 +978,8 @@ fn accept_problems(root: &Path, proposal: &Proposal) -> Vec<String> {
         &proposal.key,
         &proposal.evidence,
     );
+    // P45b review F1: a file edited by hand since `write` is checked again before it becomes a profile.
+    problems.extend(secret_problems(&proposal.body, &proposal.evidence));
     problems.extend(content_problems(
         root,
         proposal.kind,

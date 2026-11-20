@@ -256,6 +256,9 @@ fn p92_a_dismissed_proposal_is_not_made_again_until_the_dismissal_is_rolled_back
     assert!(list(&root).is_empty());
     assert_eq!(ledger(&root)[0].reason.as_deref(), Some("not this one"));
     assert!(was_dismissed(&root, Kind::New, "render-judge", "paragraph:3f2a9c").is_some());
+    // P45b fix round item 13: a mixed-case key finds the dismissal written under the lower-case one. `write` lowercases
+    // before it asks, so only this direct call reaches `key_sha`'s own lowercasing (the control was hollow without it).
+    assert!(was_dismissed(&root, Kind::New, "render-judge", "Paragraph:3F2A9C").is_some());
     // The same identity, whitespace and case aside, is refused; another key is not.
     let mut same = first.clone();
     same.key = "  Paragraph:3F2A9C ".into();
@@ -577,4 +580,105 @@ fn p92_concurrent_writers_get_distinct_proposals() {
     ids.sort();
     assert_eq!(ids, ["pp-1", "pp-2", "pp-3", "pp-4"]);
     assert_eq!(list(&root).len(), 4);
+}
+
+// ---- the P45b fix round ----
+
+/// P45b review F1: each shape `secret_shaped` names, by fake values, and prose and herdr's own sha lines that are not
+/// one. The name is returned, never the value.
+#[test]
+fn p94_secret_shaped_names_each_shape_and_passes_prose() {
+    let sk = format!("sk-{}", "Ab1".repeat(8));
+    for (text, shape) in [
+        ("id AKIAIOSFODNN7EXAMPLE here", "AWS access key id"),
+        ("export password=hunter2hunter2", "credential assignment"),
+        ("\"api_key\": \"abcdef\"", "credential assignment"),
+        ("pwd: hunter2", "credential assignment"),
+        ("md5 d41d8cd98f00b204e9800998ecf8427e", "run of 32 or more hex characters"),
+        ("xoxb-123456789012-fakefake", "Slack token"),
+        ("sk_test_FAKEfake0000", "Stripe key"),
+        ("rk_live_FAKEfake0000", "Stripe key"),
+        ("AIzaFAKEfakeFAKEfake0000fake", "Google API key"),
+        ("postgres://fakeuser:fakepass@db.example.invalid/x", "URL credentials"),
+        ("Authorization: Basic ZmFrZTpmYWtl", "HTTP Basic credentials"),
+        ("token 123e4567-e89b-12d3-a456-426614174000", "UUID after a key word"),
+        ("-----BEGIN RSA PRIVATE KEY-----", "PEM header"),
+        ("Bearer abcdefgh12345678", "token nirvana_lessons::redact knows"),
+        (sk.as_str(), "token nirvana_lessons::redact knows"),
+    ] {
+        let found = secret_shaped(text);
+        assert!(found.is_some_and(|name| name.starts_with(shape)), "{text}: {found:?}");
+        assert!(!found.unwrap().contains(text), "the name never holds the value");
+    }
+    for prose in [
+        "Key: read the log before the build.",
+        "Key: remember the cook order.",
+        "Primary key: id, then the date.",
+        "A basic understanding of the engine is enough.",
+        "the token budget is spent",
+        "paragraph:3f2a9c0011223344 and pp-1 at op-3",
+        "Judge the rendered frame, never the plan or the code",
+    ] {
+        assert_eq!(secret_shaped(prose), None, "{prose}");
+    }
+}
+
+/// P45b review F1: the store's last guard. A draft whose body, description or evidence is still secret-shaped after
+/// redaction is refused by the shape's name and leaves no file; a token redaction knows is redacted and written, as
+/// before; a patch's own `base_sha`, 64 hex, is not checked; and `accept` refuses a file edited to hold one.
+#[test]
+fn p94_the_store_refuses_a_secret_shaped_body_or_evidence_and_accept_checks_again() {
+    let (_home, root) = project("p94-pp-secret");
+    let mut body = draft(
+        Kind::New,
+        "judge-a",
+        &NEW.replace("Open every file yourself.", "The box key is AKIAIOSFODNN7EXAMPLE."),
+        None,
+    );
+    let found = refused(&root, &body);
+    assert!(
+        found.iter().any(|why| why.contains("the body holds a secret-shaped text (AWS access key id)")),
+        "{found:?}"
+    );
+    body.body = NEW.replace("Judges renders", "Judges renders with password=hunter2hunter2");
+    assert!(refused(&root, &body)
+        .iter()
+        .any(|why| why.contains("the body holds a secret-shaped text (credential")));
+    let mut evidence = draft(Kind::New, "judge-b", NEW, None);
+    evidence.evidence = format!("{EVIDENCE} from postgres://fakeuser:fakepass@db.example.invalid");
+    assert!(refused(&root, &evidence)
+        .iter()
+        .any(|why| why.contains("the evidence holds a secret-shaped text (URL credentials)")));
+    assert!(!folder(&root).exists() || files(&root).is_empty(), "no file was written");
+    // Redaction still comes first: a token it knows lands as [redacted], not refused.
+    let token = format!("sk-{}", "Ab1".repeat(10));
+    let redacted = draft(
+        Kind::New,
+        "judge-c",
+        &NEW.replace("Open every file yourself.", &format!("Never paste {token}.")),
+        None,
+    );
+    let id = write(&root, &redacted).unwrap();
+    let text = std::fs::read_to_string(path(&root, &id)).unwrap();
+    assert!(!text.contains(&token) && text.contains("[redacted]"), "{text}");
+    // A patch names its base_sha, 64 hex: herdr's own line, never refused as a hex run.
+    existing(&root, "ue-builder", "---\ndescription: Builds.\nclass: build.bounded\n---\nOld.\n");
+    let sha = profile_sha(&root, "ue-builder").unwrap();
+    assert!(write(&root, &draft(Kind::Patch, "ue-builder", "New body.", Some(sha))).is_ok());
+    // Accept checks again.
+    let id = write(&root, &draft(Kind::New, "judge-d", NEW, None)).unwrap();
+    let file = path(&root, &id);
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(
+        &file,
+        text.replace("Open every file yourself.", "Hash d41d8cd98f00b204e9800998ecf8427e."),
+    )
+    .unwrap();
+    let why = accept(&root, &id).unwrap_err();
+    assert!(
+        why.contains("the body holds a secret-shaped text (run of 32 or more hex characters)")
+            && !why.contains("d41d8cd98f00b204e9800998ecf8427e"),
+        "{why}"
+    );
+    assert!(!nirvana_profiles::folder_of(&root, "judge-d").exists());
 }

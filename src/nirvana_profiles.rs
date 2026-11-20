@@ -1785,6 +1785,55 @@ fn usage_exit() -> ! {
 /// proposals' lock first, which made `.nirvana/runs/` and the lock file for `herdr profile accept --help`. A `teach`
 /// profile that starts with `-` is the usage too. `None`: go on.
 pub fn cli_guard(args: &[String]) -> Option<(i32, String)> {
+    cli_guard_with(args, &|key| std::env::var(key).ok())
+}
+
+/// P45b review F2: the variable a seated worker's process carries, naming its order. herdr sets it in
+/// `nirvana_worker::attempt_command` for every seat (the hunk this fix round reports; until it lands, the claude seat
+/// is known by `CLAUDE_ENV` only).
+pub const SEATED_ORDER_ENV: &str = "NIRVANA_ORDER";
+
+/// P45b review F2: `herdr profile accept` and `proposals rollback` from a worker seated by herdr are refused. The
+/// review reproduced `profile accept pp-1 < /dev/null` applying a proposal, exit 0: a reviewer with a shell could
+/// propose and then accept its own proposal. The lead 2026-11-19: not a terminal check (the owner's orchestrator
+/// may accept on the owner's word), and in the CLI only, never in the library `accept`, which P45a's panel calls
+/// from the owner's own window. `env` reads a variable; the CLI passes the process's own.
+pub fn seated_refusal(args: &[String], env: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let word = |at: usize| args.get(at).map(String::as_str);
+    let verb = match (word(0), word(1)) {
+        (Some("accept"), _) => "accept",
+        (Some("proposals"), Some("rollback")) => "proposals rollback",
+        _ => return None,
+    };
+    let order = env(SEATED_ORDER_ENV).filter(|order| !order.trim().is_empty());
+    // The claude seat's own marker today: herdr starts every claude worker with `CLAUDE_ENV` and nothing else does.
+    let claude = crate::nirvana_worker::CLAUDE_ENV
+        .iter()
+        .all(|(key, value)| env(key).as_deref() == Some(*value));
+    let inside = match (order, claude) {
+        (Some(order), _) => format!("order {}", order.trim()),
+        (None, true) => format!(
+            "a claude worker herdr seated ({} is set; its order is not named in its env)",
+            crate::nirvana_worker::CLAUDE_ENV
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        (None, false) => return None,
+    };
+    Some(format!(
+        "herdr profile {verb}: refused inside {inside}, a worker seated by herdr. A proposal is the owner's to \
+         accept or roll back: the owner, or the owner's orchestrator on the owner's word, runs it from the owner's \
+         own shell or the Profiles panel."
+    ))
+}
+
+/// `cli_guard` with the variables `env` reads, so a test sets them without touching the process's own.
+pub fn cli_guard_with(
+    args: &[String],
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Option<(i32, String)> {
     let word = |at: usize| args.get(at).map(String::as_str);
     let help = |at: usize| matches!(word(at), Some("--help" | "-h"));
     let nested = matches!(word(0), Some("proposals" | "proposal"));
@@ -1818,6 +1867,10 @@ pub fn cli_guard(args: &[String]) -> Option<(i32, String)> {
         if profile.starts_with('-') {
             return Some((2, USAGE.to_owned()));
         }
+    }
+    // Before the proposals' lock, as the id checks above are.
+    if let Some(why) = seated_refusal(args, env) {
+        return Some((1, why));
     }
     None
 }

@@ -1167,7 +1167,7 @@ impl ProfileOp {
 }
 
 /// A class, an effort or a need as one word: what a front matter line can hold and nothing more.
-fn one_word(text: &str) -> bool {
+pub(crate) fn one_word(text: &str) -> bool {
     !text.is_empty()
         && text.len() <= 64
         && text
@@ -1306,12 +1306,39 @@ fn proposed_file(
     text
 }
 
-/// A finding's own order text, for the evidence check: a repeated paragraph's.
-fn finding_text(finding: &crate::nirvana_profile_detect::Finding) -> String {
-    match finding {
-        crate::nirvana_profile_detect::Finding::Repeated { text, .. } => text.clone(),
-        _ => String::new(),
+/// At most this many proposals one review writes (P45b review F9): a manipulated reviewer could otherwise queue one
+/// waiting proposal per profile name it made up. A hypothesis; R3 asks for one piece at a time.
+pub const PROPOSALS_PER_REVIEW: usize = 3;
+
+/// What a review's profile op may quote from the findings it was given (P45b review F11): each finding's own order
+/// text and its sample of order ids, never herdr's template wording of the finding's line (a quote of "original
+/// orders ... repeat this" proved nothing). A secret-shaped paragraph's withheld line is herdr's wording too.
+pub(crate) fn quotable(findings: &[crate::nirvana_profile_detect::Finding]) -> Vec<String> {
+    use crate::nirvana_profile_detect::Finding;
+    let mut out = Vec::new();
+    for finding in findings {
+        match finding {
+            Finding::Repeated {
+                text,
+                block,
+                secret,
+                sample,
+                ..
+            } => {
+                if secret.is_none() {
+                    out.push(text.clone());
+                    if !block.is_empty() {
+                        out.push(block.clone());
+                    }
+                }
+                out.extend(sample.iter().cloned());
+            }
+            Finding::Unprofiled { sample, .. } | Finding::Unused { sample, .. } => {
+                out.extend(sample.iter().cloned())
+            }
+        }
     }
+    out
 }
 
 /// A review's profile ops, each written through the proposals store or refused with why. `corpus` is what an op may
@@ -1336,9 +1363,27 @@ pub fn apply_profile_ops(
         }
     }
     let mut lines = Vec::new();
+    let mut written = 0;
     for (n, op) in ops.into_iter().enumerate() {
         let n = n + 1;
         let done = op.and_then(|op| {
+            // P45b review F1: a body, description or evidence that is secret-shaped is refused by its shape's name
+            // before anything else reads it; the store refuses it again as its last guard.
+            let description = match &op {
+                ProfileOp::Propose { description, .. } => description.as_str(),
+                ProfileOp::Patch { .. } => "",
+            };
+            let body = match &op {
+                ProfileOp::Propose { body, .. } | ProfileOp::Patch { body, .. } => body.as_str(),
+            };
+            for (field, text) in [("body", body), ("description", description), ("evidence", op.evidence())] {
+                if let Some(shape) = crate::nirvana_profile_proposals::secret_shaped(text) {
+                    return Err(format!(
+                        "its {field} holds a secret-shaped text ({shape}): herdr never writes one into the tracked \
+                         proposals folder"
+                    ));
+                }
+            }
             if let Some(finding) = op.finding().filter(|finding| !keys.iter().any(|key| key == finding)) {
                 return Err(format!("{finding} is not a finding this review was given"));
             }
@@ -1369,6 +1414,21 @@ pub fn apply_profile_ops(
                     "a {} of {name} waits already as {}: one piece at a time",
                     kind.word(),
                     waiting.id
+                ));
+            }
+            // P45b review F4: a paragraph the owner dismissed through the detector's proposal is not proposed again
+            // through a reviewer's, under the same kind and profile.
+            if let Some(sha) = op.finding().and_then(|finding| finding.strip_prefix("paragraph:")) {
+                if crate::nirvana_profile_detect::dismissed_paragraphs(root, kind, &name).contains(sha) {
+                    return Err(format!(
+                        "the owner dismissed paragraph {sha} for {name} before; it is not proposed again"
+                    ));
+                }
+            }
+            if written >= PROPOSALS_PER_REVIEW {
+                return Err(format!(
+                    "this review wrote {PROPOSALS_PER_REVIEW} proposals already, the most one review writes; \
+                     propose the rest in a later review"
                 ));
             }
             let (body, base_sha) = match &op {
@@ -1409,7 +1469,8 @@ pub fn apply_profile_ops(
             )
             .map(|id| {
                 format!(
-                    "{id}: proposed {} {name}; it waits for the owner's `herdr profile accept {id}`",
+                    "{id}: proposed {} {name}; it waits for the owner's `herdr profile accept {id}` (one quote \
+                     checked, not the counts)",
                     if kind == crate::nirvana_profile_proposals::Kind::New {
                         "the new profile"
                     } else {
@@ -1420,7 +1481,10 @@ pub fn apply_profile_ops(
             .map_err(|refusal| refusal.to_string())
         });
         lines.push(match done {
-            Ok(line) => (true, line),
+            Ok(line) => {
+                written += 1;
+                (true, line)
+            }
             Err(why) => (false, format!("profile op {n} refused: {why}")),
         });
     }
@@ -1640,10 +1704,7 @@ pub fn gate_review(
             } else {
                 let given = crate::nirvana_profile_detect::given(project, run, &root);
                 let keys: Vec<String> = given.iter().map(|f| f.key().to_owned()).collect();
-                let mut corpus: Vec<String> = given
-                    .iter()
-                    .flat_map(|finding| [finding.line(usize::MAX), finding_text(finding)])
-                    .collect();
+                let mut corpus: Vec<String> = quotable(&given);
                 if subject == crate::nirvana_idle_review::SUBJECT {
                     let streams = crate::nirvana_idle_review::given_streams(project, run, &root);
                     corpus.extend(streams);
