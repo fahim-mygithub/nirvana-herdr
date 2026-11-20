@@ -144,6 +144,24 @@ pub(crate) fn live_worker_model_and_elapsed(
     )
 }
 
+/// Plan 47 P47a (L1): the fewest cells of a profile a worker row shows; with fewer left it is left out, so a lone `@`
+/// or `@…` never stands for a name.
+pub(super) const PROFILE_MIN: usize = 4;
+
+/// Plan 47 P47a (L1): a worker's profile as its row shows it, `@<name>`, the mark telling it from the model beside it.
+/// The name is read from a journal on disk, so it goes through the Profiles panel's `visible` (a zero-width or control
+/// character shows as `<U+XXXX>`), a newline too, which `visible` keeps for its own wrap.
+pub(super) fn profile_mark(name: &str) -> String {
+    let shown = super::nirvana_profile_panel::visible(name).replace('\n', "<U+000A>");
+    format!("@{shown}")
+}
+
+/// Plan 47 P47a: the profile's mark in `room` cells, cut by the panel's `fit` (display width), or `None` when fewer
+/// than `PROFILE_MIN` cells are left. The agents panel and the spaces view both draw it this way.
+pub(super) fn profile_in(name: &str, room: usize) -> Option<String> {
+    (room >= PROFILE_MIN).then(|| super::nirvana_spaces::fit(&profile_mark(name), room))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CappedRunGroups<'a> {
     pub(crate) groups: Vec<SubagentRunGroup<'a>>,
@@ -1060,14 +1078,31 @@ fn render_grouped_subagents(
                 break;
             }
 
-            // Line 2: 6 spaces <short-model>  <elapsed>
+            // Line 2: 6 spaces <short-model>  <elapsed> @<profile>
             let (short_m, elapsed_str) = live_worker_model_and_elapsed(sub);
-            let line2_spans = vec![
+            // Plan 47 P47a (L1): the profile after the time, in the cells the model and the time leave, bold in the
+            // branch-name colour so it stands out from the muted model; on line 2 so the row stays two lines and the
+            // height sums that count 2 per live order hold.
+            let used = 6 + display_width(&short_m) + 2 + display_width(&elapsed_str);
+            let profile = sub
+                .profile
+                .as_deref()
+                .and_then(|name| profile_in(name, (rect.width as usize).saturating_sub(used + 1)));
+            let mut line2_spans = vec![
                 ratatui::text::Span::raw("      "),
                 ratatui::text::Span::styled(short_m, Style::default().fg(palette.overlay1)),
                 ratatui::text::Span::raw("  "),
                 ratatui::text::Span::styled(elapsed_str, Style::default().fg(palette.overlay0)),
             ];
+            if let Some(profile) = profile {
+                line2_spans.push(ratatui::text::Span::raw(" "));
+                line2_spans.push(ratatui::text::Span::styled(
+                    profile,
+                    Style::default()
+                        .fg(palette.mauve)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
             Paragraph::new(Line::from(line2_spans))
                 .render(Rect::new(rect.x, *current_y, rect.width, 1), buffer);
             *current_y += 1;
@@ -1228,6 +1263,7 @@ mod tests {
             run_id: Some("ia1".into()),
             run_event_time: Some(at),
             waiting: false,
+            profile: None,
         }
     }
 
@@ -1340,5 +1376,200 @@ mod tests {
         // Past the panel's cap, the one "+N more" counts the run's own cut orders too: 43 ended, none drawn.
         assert!(text.contains("+43 more"), "{text}");
         assert!(hits.agent_max_scroll > 0, "the scrollbar shows the rest is below");
+    }
+
+    // ---- Plan 47 P47a (L1): the profile on a live worker's second line ----
+
+    /// One orchestrator, `p1`, whose run `p96` holds a live worker per entry of `workers` (name, profile).
+    fn p96_row_shape(workers: &[(&str, Option<&str>)]) -> ClientShellSnapshot {
+        let rows: Vec<Subagent> = workers
+            .iter()
+            .enumerate()
+            .map(|(n, (name, profile))| {
+                let mut row = order(name, SubagentState::Running, 2000 + n as u64);
+                row.run_id = Some("p96".into());
+                row.profile = profile.map(str::to_owned);
+                row
+            })
+            .collect();
+        let mut views = HashMap::new();
+        views.insert(
+            "p1".to_string(),
+            SubagentsView {
+                total_count: rows.len(),
+                subagents: rows,
+                overflow: 0,
+            },
+        );
+        set_view_for_test(Some(views));
+        set_worker_panes_for_test(Some(Default::default()));
+        let mut snap = super::super::tests::snapshot();
+        snap.panes.clear();
+        snap.panes.push(crate::protocol::ClientShellPane {
+            pane_id: "p1".into(),
+            workspace_id: "ws_1".into(),
+            tab_id: "tab_1".into(),
+            label: None,
+            cwd: None,
+            foreground_cwd: None,
+            focused: false,
+            right_click_passthrough: false,
+        });
+        snap.agents = vec![agent("p1", "orch-claude", AgentStatus::Working)];
+        snap
+    }
+
+    /// The agents panel drawn `width` wide with a body of `body` lines, as text lines and the buffer.
+    fn p96_row_draw(snap: &ClientShellSnapshot, width: u16, body: u16) -> (Vec<String>, Buffer) {
+        let config = ClientShellConfig::from_config(&crate::config::Config::default());
+        let area = Rect::new(0, 0, width, body + 3);
+        let mut buffer = Buffer::empty(area);
+        let mut scroll = 0;
+        let mut hits = ShellHitMap::default();
+        render_agent_panel(&mut buffer, area, snap, &config, &mut scroll, &mut hits);
+        let lines = (0..area.height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        (lines, buffer)
+    }
+
+    /// The widest sidebar, the default and the narrowest it allows (`Config::default().ui`), read from the config so the
+    /// test follows a change of any.
+    fn p96_row_widths() -> [u16; 3] {
+        let ui = crate::config::Config::default().ui;
+        [ui.sidebar_max_width, ui.sidebar_width, ui.sidebar_min_width]
+    }
+
+    /// Plan 47 P47a (L1) at the widest sidebar, the default and the narrowest: the profile is on line 2 after the model
+    /// and the time, which keep their place; the row is still two lines; the panel is as tall as without a profile.
+    #[test]
+    fn p96_row_a_live_worker_shows_its_profile_on_line_two_at_three_widths() {
+        let workers = [("w-build", Some("builder")), ("w-next", None)];
+        let bare = [("w-build", None), ("w-next", None)];
+        let config = ClientShellConfig::from_config(&crate::config::Config::default());
+        for width in p96_row_widths() {
+            let with = p96_row_shape(&workers);
+            let row_with = agent_row(&with, "p1", &config, None).expect("orchestrator row");
+            let (lines, buffer) = p96_row_draw(&with, width, 12);
+            let without = p96_row_shape(&bare);
+            let row_without = agent_row(&without, "p1", &config, None).expect("orchestrator row");
+            let (bare_lines, _) = p96_row_draw(&without, width, 12);
+            set_view_for_test(None);
+            set_worker_panes_for_test(None);
+            let text = lines.join("\n");
+            assert_eq!(
+                agent_row_lines(&row_with, width),
+                agent_row_lines(&row_without, width),
+                "{width}: {text}"
+            );
+            let at = lines
+                .iter()
+                .position(|line| line == "    w-build")
+                .unwrap_or_else(|| panic!("{width}: {text}"));
+            let line2 = &lines[at + 1];
+            assert!(line2.starts_with("      S5.5  1m30s"), "{width}: {text}");
+            // Still two lines: the next worker's name is the line after.
+            assert_eq!(lines[at + 2], "    w-next", "{width}: {text}");
+            assert_eq!(lines[at + 3], "      S5.5  1m30s", "{width}: {text}");
+            // As many lines drawn as without a profile.
+            let drawn = |all: &[String]| all.iter().filter(|line| !line.is_empty()).count();
+            assert_eq!(drawn(&lines), drawn(&bare_lines), "{width}: {text}");
+            let room = usize::from(width).saturating_sub(17 + 1);
+            if room >= PROFILE_MIN {
+                let shown = crate::client::shell::nirvana_spaces::fit("@builder", room);
+                assert_eq!(
+                    *line2,
+                    format!("      S5.5  1m30s {shown}"),
+                    "{width}: {text}"
+                );
+                // The mark stands out from the muted model: its own colour, bold.
+                let palette = &config.palette;
+                let y = at as u16 + 1;
+                let mark = buffer.cell((18, y)).unwrap();
+                assert_eq!(mark.symbol(), "@", "{width}: {text}");
+                assert_eq!(mark.fg, palette.mauve, "{width}: {text}");
+                assert!(mark.modifier.contains(Modifier::BOLD), "{width}: {text}");
+                assert_eq!(buffer.cell((6, y)).unwrap().fg, palette.overlay1);
+            } else {
+                assert_eq!(*line2, "      S5.5  1m30s", "{width}: {text}");
+            }
+        }
+    }
+
+    /// Plan 47 P47a: the profile is cut with the panel's own cut, never dropped while 4 of its cells fit; under 4 it
+    /// is left out and the model and the time stay whole.
+    #[test]
+    fn p96_row_the_profile_is_cut_never_dropped_while_four_cells_fit() {
+        let snap = p96_row_shape(&[("w-build", Some("builder"))]);
+        let config = ClientShellConfig::from_config(&crate::config::Config::default());
+        let row = agent_row(&snap, "p1", &config, None).expect("orchestrator row");
+        set_view_for_test(None);
+        set_worker_panes_for_test(None);
+        let line2 = |width: u16| {
+            let height = agent_row_lines(&row, width) as u16;
+            let area = Rect::new(0, 0, width, height);
+            let mut buffer = Buffer::empty(area);
+            render_agent_row(&mut buffer, area, &row, &config, None);
+            (0..width)
+                .map(|x| buffer.cell((x, height - 1)).unwrap().symbol().to_string())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        };
+        // "      S5.5  1m30s" is 17 cells; the gap 1 more.
+        assert_eq!(line2(26), "      S5.5  1m30s @builder");
+        assert_eq!(line2(23), "      S5.5  1m30s @bui\u{2026}");
+        assert_eq!(line2(22), "      S5.5  1m30s @bu\u{2026}");
+        assert_eq!(line2(21), "      S5.5  1m30s");
+    }
+
+    /// Plan 47 P47a: a profile name is text from disk. A zero-width space and an ESC are drawn as `<U+XXXX>`, never as
+    /// nothing, and the name is cut by display width.
+    #[test]
+    fn p96_row_an_invisible_character_in_a_profile_name_is_named() {
+        let snap = p96_row_shape(&[("w-zws", Some("a\u{200b}b")), ("w-esc", Some("x\u{1b}y"))]);
+        let (lines, _) = p96_row_draw(&snap, 40, 12);
+        set_view_for_test(None);
+        set_worker_panes_for_test(None);
+        let text = lines.join("\n");
+        assert!(text.contains("      S5.5  1m30s @a<U+200B>b"), "{text}");
+        assert!(text.contains("      S5.5  1m30s @x<U+001B>y"), "{text}");
+        assert!(
+            !text.contains('\u{1b}') && !text.contains('\u{200b}'),
+            "{text:?}"
+        );
+        assert_eq!(profile_mark("a\u{200b}b"), "@a<U+200B>b");
+        assert_eq!(profile_mark("x\u{1b}y"), "@x<U+001B>y");
+        assert_eq!(profile_mark("n\nl"), "@n<U+000A>l");
+    }
+
+    /// Plan 47 P47a: the dump the report pastes. One orchestrator and three live workers, two with profiles, at the
+    /// default sidebar width.
+    #[test]
+    fn p96_row_dump_the_agents_panel_with_three_live_workers() {
+        let snap = p96_row_shape(&[
+            ("p47a-build", Some("builder")),
+            ("p47a-review", Some("reviewer")),
+            ("p47a-docs", None),
+        ]);
+        let width = crate::config::Config::default().ui.sidebar_width;
+        let (lines, _) = p96_row_draw(&snap, width, 10);
+        set_view_for_test(None);
+        set_worker_panes_for_test(None);
+        let text = lines.join("\n");
+        eprintln!("P96 DUMP agents panel at {width} cells:\n{text}\nP96 END");
+        assert!(text.contains("  S5.5  1m30s @builder"), "{text}");
+        assert!(text.contains("  S5.5  1m30s @review\u{2026}"), "{text}");
+        let docs = lines
+            .iter()
+            .position(|line| line == "    p47a-docs")
+            .expect("the docs worker");
+        assert_eq!(lines[docs + 1], "      S5.5  1m30s", "{text}");
     }
 }

@@ -58,6 +58,7 @@ fn order(name: &str, state: SubagentState, elapsed_secs: u64) -> Subagent {
         run_id: Some("run-20261023-024041".into()),
         run_event_time: Some(1000),
         waiting: false,
+        profile: None,
     }
 }
 
@@ -240,6 +241,7 @@ fn workers_of_another_space_never_show_under_this_one() {
             model: "S5.5".into(),
             elapsed: "1m07s".into(),
             working: true,
+            profile: None,
         }]
     );
 
@@ -262,6 +264,7 @@ fn a_long_worker_name_is_cut_and_keeps_model_and_time() {
         model: "S5.5".into(),
         elapsed: "1m07s".into(),
         working: true,
+        profile: None,
     };
     assert_eq!(worker_line(&worker, 19).line, "v8-build S5.5 1m07s");
     assert_eq!(worker_line(&worker, 15).line, "v8-\u{2026} S5.5 1m07s");
@@ -276,6 +279,7 @@ fn a_worktree_space_keeps_its_tree_line_beside_worker_rows() {
         model: "S5.5".into(),
         elapsed: "1m07s".into(),
         working: true,
+        profile: None,
     }];
     let palette = ClientShellConfig::from_config(&Config::default()).palette;
     let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 25, 1));
@@ -471,6 +475,7 @@ fn a_cut_tail_keeps_each_part_in_its_own_colour() {
         model: "S5.5".into(),
         elapsed: "1m07s".into(),
         working: true,
+        profile: None,
     };
     let row = worker_line(&worker, 8);
     assert_eq!(row.line, " S5.5 1\u{2026}");
@@ -501,6 +506,7 @@ fn the_workers_more_row_is_in_the_agents_more_colour() {
             model: "S5.5".into(),
             elapsed: "1m".into(),
             working: true,
+            profile: None,
         })
         .collect();
     let palette = ClientShellConfig::from_config(&Config::default()).palette;
@@ -530,4 +536,86 @@ fn a_seat_worker_pane_brings_no_worker_rows() {
         space_workers(&snap, "ws_1", |agent| view.get(&agent.pane_id).cloned()).len(),
         1
     );
+}
+
+// ---- Plan 47 P47a (L1): the profile on the spaces view's worker line ----
+
+fn p96_row_worker(profile: Option<&str>) -> SpaceWorker {
+    SpaceWorker {
+        name: "v8-build".into(),
+        model: "S5.5".into(),
+        elapsed: "1m07s".into(),
+        working: true,
+        profile: profile.map(str::to_owned),
+    }
+}
+
+/// Plan 47 P47a: the worker line keeps its own rule, the name cut first so the model and the time stay whole, and the
+/// profile takes only the cells those three leave: whole, cut by `fit` while 4 of its cells fit, else left out.
+#[test]
+fn p96_row_a_worker_line_shows_its_profile_where_its_line_has_room() {
+    let worker = p96_row_worker(Some("builder"));
+    // "v8-build S5.5 1m07s" is 19 cells; a gap, then the profile.
+    assert_eq!(
+        worker_line(&worker, 28).line,
+        "v8-build S5.5 1m07s @builder"
+    );
+    assert_eq!(
+        worker_line(&worker, 24).line,
+        "v8-build S5.5 1m07s @bu\u{2026}"
+    );
+    assert_eq!(worker_line(&worker, 23).line, "v8-build S5.5 1m07s");
+    // The default sidebar's 20 cells: the name, the model and the time as before, and no room for the profile.
+    assert_eq!(worker_line(&worker, 20).line, "v8-build S5.5 1m07s");
+    assert_eq!(worker_line(&worker, 15).line, "v8-\u{2026} S5.5 1m07s");
+    let row = worker_line(&worker, 28);
+    assert_eq!((row.name_end, row.model_end, row.profile_at), (8, 13, 20));
+    // No profile: the line as it was, and the profile's start is past the drawn text.
+    let bare = worker_line(&p96_row_worker(None), 28);
+    assert_eq!(bare.line, "v8-build S5.5 1m07s");
+    assert_eq!(bare.profile_at, 19);
+    // A name from disk: a zero-width space and an ESC are named.
+    let named = worker_line(&p96_row_worker(Some("a\u{200b}\u{1b}b")), 40);
+    assert_eq!(named.line, "v8-build S5.5 1m07s @a<U+200B><U+001B>b");
+}
+
+/// Plan 47 P47a: drawn, the profile is in its own colour, apart from the muted model and time.
+#[test]
+fn p96_row_the_spaces_worker_profile_is_drawn_in_its_own_colour() {
+    let palette = ClientShellConfig::from_config(&Config::default()).palette;
+    // The marker at x 3, the text from x 5 for 28 cells, then the agents' one cell short of the edge.
+    let area = Rect::new(0, 0, 34, 1);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    render_space_workers(
+        &mut buf,
+        area,
+        &[p96_row_worker(Some("builder"))],
+        false,
+        true,
+        &palette,
+    );
+    let cell = |x: u16| buf.cell((x, 0)).unwrap().clone();
+    let drawn: String = (0..34).map(|x| cell(x).symbol().to_string()).collect();
+    assert_eq!(drawn.trim_end(), "   \u{2514} v8-build S5.5 1m07s @builder");
+    for x in 25..33 {
+        assert_eq!(cell(x).fg, palette.mauve, "profile cell {x}");
+    }
+    for x in 14..18 {
+        assert_eq!(cell(x).fg, palette.overlay1, "model cell {x}");
+    }
+    for x in 19..24 {
+        assert_eq!(cell(x).fg, palette.overlay0, "time cell {x}");
+    }
+}
+
+/// Plan 47 P47a: `space_workers` carries each live row's profile.
+#[test]
+fn p96_row_space_workers_carry_the_rows_profile() {
+    let snap = one_space(vec![nirvana("pane_1", "ws_1")]);
+    let mut rows = moto_rows(67);
+    rows[1].profile = Some("builder".into());
+    let view = view_of("pane_1", rows);
+    let workers = space_workers(&snap, "ws_1", |agent| view.get(&agent.pane_id).cloned());
+    assert_eq!(workers.len(), 1, "{workers:?}");
+    assert_eq!(workers[0].profile.as_deref(), Some("builder"));
 }
