@@ -81,6 +81,7 @@ fn spec_with(owns: &[&str], test: &str, checks: &[&str]) -> Spec {
         serves: Vec::new(),
         profile: None,
         no_web: false,
+        asks_look: false,
     }
 }
 
@@ -474,6 +475,8 @@ fn seated(order: &str, parent: Option<&str>) -> Seated {
         expected: BTreeMap::new(),
         jev_pick: None,
         send_ok: None,
+        profile: None,
+        profile_fit: None,
     }
 }
 
@@ -6531,5 +6534,188 @@ fn p43_r2_h8_a_regate_that_errs_keeps_the_amend_journaled() {
         vec!["calc.py".to_owned(), "test_mul.py".to_owned()]
     );
     assert_eq!(gate(&project, "r1", "am").expect("finished").verdict, "pass");
+    nirvana_seat::set_test_world(None);
+}
+
+// ---- plan 45 P45d ----
+
+/// A builder's copy as `seat run` writes it for an agy worker seated with a profile: the agy section, the two
+/// `Profile:` lines, the order, herdr's footer.
+fn p45d_profiled_copy() -> String {
+    format!(
+        "{}Profile: judge\nProfile sha256: {}\n\n# Build the hall\n\nowns: hall.py\ntest: python -m pytest -q\n\n\
+         ---\nFrom herdr (plan 12 §4): finish the whole order.\n",
+        crate::nirvana_profiles::agy_section("judge", "Judge every frame yourself."),
+        "a".repeat(64)
+    )
+}
+
+/// P45d item 4 (plan 45 §4 M6): a gate review's and a held-out author's brief quote the subject's order without its
+/// `Profile:` lines or its agy profile section, as a lesson review's brief does. Before P45d both carried the line,
+/// so `seat run` of the review refused it ("the order says `Profile: judge` at line start") unless it was seated with
+/// the subject's profile, and Megajam's orchestrator stripped the line by hand.
+#[test]
+fn p45d_a_gate_review_or_author_brief_carries_no_subject_profile() {
+    let copy = p45d_profiled_copy();
+    assert!(crate::nirvana_profiles::in_order(&copy).is_some(), "{copy}");
+    let review = review_brief("hall", &copy, "C:/p/.nirvana/worktrees/hall", "C:/p/hall.diff", false);
+    let author = author_brief("hall", &copy, None);
+    for brief in [&review, &author] {
+        // The one check `seat run` refuses an unprofiled order on, and the one the gate reads a profile from.
+        assert!(crate::nirvana_profiles::in_order(brief).is_none(), "{brief}");
+        assert_eq!(spec(brief).profile, None, "{brief}");
+        assert!(!brief.contains("Judge every frame yourself."), "{brief}");
+        assert!(!brief.contains("From herdr (plan 12"), "{brief}");
+        // The order itself is still quoted whole.
+        assert!(brief.contains("# Build the hall\n\nowns: hall.py\ntest: python -m pytest -q"), "{brief}");
+    }
+    assert!(review.starts_with("# Review of hall (decision 0017)"), "{review}");
+    assert!(author.starts_with("# Held-out check for hall (decision 0019)"), "{author}");
+}
+
+/// P45d item 6: the one rule for "names a look", for the brief and for the stream.
+#[test]
+fn p45d_names_look_takes_the_command_and_not_a_word_that_holds_it() {
+    for text in [
+        "Judge each frame with `herdr look \"C:/x/a.png\" --ask \"is the seam visible?\"`.",
+        "& \"C:\\Users\\o\\AppData\\Local\\Programs\\Nirvana-Herdr\\herdr.exe\" look a.png --ask q",
+        "herdr.exe look a.png --ask q",
+        "herdr  look",
+    ] {
+        assert!(names_look(text), "{text}");
+    }
+    for text in [
+        "herdr lookup a.png",
+        "herdr looks",
+        "herdr look-alike",
+        "herdr seat run x",
+        "herdrlook a.png",
+        "look at the frame with herdr",
+        "",
+    ] {
+        assert!(!names_look(text), "{text}");
+    }
+    // A brief asks for a look by its own text; a lesson line that names one is herdr's.
+    assert!(spec("# Shots\n\nJudge with `herdr look \"a.png\" --ask q`.\n").asks_look);
+    let lesson_only = format!(
+        "# Shots\n\nJudge the frames.\n\n## Lessons from earlier build.visual orders\n\n{}\n\n- \
+         .nirvana/lessons/x.md: judge with herdr look first\n",
+        crate::nirvana_lessons::LESSONS_OFFER_LINE
+    );
+    assert!(!spec(&lesson_only).asks_look, "{lesson_only}");
+}
+
+/// P45d item 6 (plan 45 §4 M5): a look the order asked for and that did not run is a note, never a fail; one that
+/// answered gives none; an order that asked for none gives none.
+#[test]
+fn p45d_a_look_asked_for_that_did_not_run_is_a_note() {
+    let look = serde_json::json!({"command": "herdr look \"C:/x/a.png\" --ask \"seam?\""});
+    let failed = claude_call("t1", "Bash", look.clone(), true);
+    let answered = claude_call("t2", "Bash", look, false);
+    let other = claude_call("t3", "Bash", serde_json::json!({"command": "ls"}), false);
+    assert_eq!(looks_in(""), (0, 0));
+    assert_eq!(looks_in(&failed), (1, 0));
+    assert_eq!(looks_in(&format!("{failed}\n{answered}\n{other}")), (2, 1));
+    // agy repeats a step on its answer's line; a look with no seat exits 3.
+    let params = serde_json::json!({"CommandLine": "herdr look a.png --ask q"});
+    let agy_failed = [
+        agy_step(4, "ACTIVE", "run_command", params.clone(), ""),
+        agy_step(4, "DONE", "run_command", params.clone(), "Command exited with code 3. No seat: ..."),
+    ]
+    .join("\n");
+    let agy_ok = [
+        agy_step(5, "ACTIVE", "run_command", params.clone(), ""),
+        agy_step(5, "DONE", "run_command", params, "the seam is visible at the top left"),
+    ]
+    .join("\n");
+    assert_eq!(looks_in(&agy_failed), (1, 0));
+    assert_eq!(looks_in(&agy_ok), (1, 1));
+
+    let none = look_axis(true, &other).expect("a note");
+    assert_eq!(none.mark, Mark::Note);
+    assert!(none.why.contains("shows no look"), "{none:?}");
+    let refused = look_axis(true, &agy_failed).expect("a note");
+    assert_eq!(refused.mark, Mark::Note);
+    assert!(refused.why.contains("none of its 1 look call(s) answered"), "{refused:?}");
+    assert_eq!(look_axis(true, &agy_ok), None);
+    assert_eq!(look_axis(true, &answered), None);
+    assert_eq!(look_axis(false, &other), None);
+}
+
+/// P45d item 6, wired: the deterministic axes of an order whose brief asks for a look and whose stream holds none end
+/// with the note, and the order still passes.
+#[test]
+fn p45d_the_gate_notes_a_missing_look_and_still_passes() {
+    let root = repo("p45d-look");
+    let cwd = worktree(&root, "mul");
+    work(&cwd);
+    let mut spec = spec_with(&["calc.py", "test_*.py"], "git ls-files", &["test_mul"]);
+    spec.asks_look = true;
+    let det = run_det(&root, &cwd, "mul", &spec, Some(&done()));
+    assert!(failing(&det.axes).is_empty(), "{det:#?}");
+    assert_eq!(axis(&det, "look").mark, Mark::Note);
+    // Without the ask, no look axis at all.
+    let root = repo("p45d-no-look");
+    let cwd = worktree(&root, "mul");
+    work(&cwd);
+    let spec = spec_with(&["calc.py", "test_*.py"], "git ls-files", &["test_mul"]);
+    let det = run_det(&root, &cwd, "mul", &spec, Some(&done()));
+    assert!(det.axes.iter().all(|axis| axis.axis != "look"), "{det:#?}");
+}
+
+/// P45d item 2: a send-back child is seated with its parent's profile copy (plan 33 §2.2), so its `seated` line names
+/// the parent's profile and an empty `profile_fit` (no line is shown for a child); a parent whose line predates the
+/// key leaves both unknown.
+#[test]
+fn p45d_a_send_back_child_journals_its_parents_profile() {
+    let _guard = crate::nirvana::with_test_home("p45d-send-back");
+    let root = repo("p45d-send-back");
+    let project = Project::at(&root);
+    let table = nirvana_seat::parse(nirvana_seat::DEFAULT).expect("table");
+    nirvana_seat::set_test_world(Some(BTreeMap::new()));
+    for (run, profile) in [("r-named", Some(Some("judge".to_owned()))), ("r-old", None)] {
+        let journal = project.journal(run);
+        let mut parent = seated("pb", None);
+        parent.cwd = worktree(&root, &format!("pb-{run}")).display().to_string();
+        parent.profile = profile.clone();
+        parent.profile_fit = profile.as_ref().map(|_| Vec::new());
+        journal
+            .append(
+                1,
+                Kind::Opened {
+                    project: "p".into(),
+                    orchestrator_pane: None,
+                    auto: false,
+                    pools: vec![],
+                    pools_basis: None,
+                },
+            )
+            .expect("append");
+        journal
+            .append(2, Kind::Seated(Box::new(parent)))
+            .expect("append");
+        let state = replay(&journal.read().0);
+        let known = state.order("pb").expect("order").clone();
+        let ruling = send_back(
+            &project,
+            run,
+            &journal,
+            &state,
+            &known,
+            "pb",
+            "the order\n",
+            vec![Axis::new("tests", Mark::Fail, "test failed")],
+            Some(&table),
+        )
+        .expect("send_back");
+        assert_eq!(ruling.verdict, "sent_back", "{ruling:?}");
+        let child = replay(&journal.read().0)
+            .order("pb-s1")
+            .expect("child")
+            .seated
+            .clone();
+        assert_eq!(child.profile, profile, "{run}");
+        assert_eq!(child.profile_fit, profile.map(|_| Vec::new()), "{run}");
+    }
     nirvana_seat::set_test_world(None);
 }

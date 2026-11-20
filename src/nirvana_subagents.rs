@@ -2368,6 +2368,8 @@ mod tests {
             expected: std::collections::BTreeMap::new(),
             jev_pick: None,
             send_ok: None,
+            profile: None,
+            profile_fit: None,
         };
         assert_eq!(
             seated_label(&seated),
@@ -2559,6 +2561,8 @@ mod tests {
                 expected: std::collections::BTreeMap::new(),
                 jev_pick: None,
                 send_ok: None,
+                profile: None,
+                profile_fit: None,
             }
         };
 
@@ -3179,6 +3183,8 @@ mod tests {
             expected: std::collections::BTreeMap::new(),
             jev_pick: None,
             send_ok: None,
+            profile: None,
+            profile_fit: None,
         };
         let kinds = vec![
             Kind::Opened {

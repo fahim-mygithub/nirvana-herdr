@@ -487,6 +487,8 @@ fn seated(order: &str) -> Seated {
         expected: BTreeMap::new(),
         jev_pick: None,
         send_ok: None,
+        profile: None,
+        profile_fit: None,
     }
 }
 
@@ -908,6 +910,8 @@ fn rate_limited_reseat_drops_override_on_same_pool_and_keeps_on_other() {
         expected: BTreeMap::new(),
         jev_pick: None,
         send_ok: None,
+        profile: None,
+        profile_fit: None,
     };
 
     // Case 1: rate limit on "max" (the override seat's own pool) -> override dropped
@@ -3940,4 +3944,254 @@ fn p91_the_default_tables_worker_argv_has_the_advisor_for_balanced_sonnet_only()
         assert!(!argv.iter().any(|arg| arg.contains(ADVISOR_LINE.trim())), "{order}: {argv:?}");
     }
     nirvana_seat::set_test_world(None);
+}
+
+// ---- plan 45 P45d: the fitting-profile line and the `profile` journal field ----
+
+#[test]
+fn p45d_the_fit_line_names_one_three_and_then_and_n_more() {
+    let names = |n: usize| -> Vec<String> { (1..=n).map(|i| format!("p{i}")).collect() };
+    assert_eq!(fit_line(&[], "media.video"), None);
+    assert_eq!(
+        fit_line(&["reel-reviewer".into()], "review.visual").as_deref(),
+        Some(
+            "herdr: profile reel-reviewer fits this order (class review.visual); pass --profile reel-reviewer \
+             to seat with it"
+        )
+    );
+    assert_eq!(
+        fit_line(&names(2), "c").as_deref(),
+        Some("herdr: profiles p1 and p2 fit this order (class c); pass --profile <name> to seat with one")
+    );
+    assert_eq!(
+        fit_line(&names(3), "c").as_deref(),
+        Some("herdr: profiles p1, p2 and p3 fit this order (class c); pass --profile <name> to seat with one")
+    );
+    assert_eq!(
+        fit_line(&names(5), "c").as_deref(),
+        Some(
+            "herdr: profiles p1, p2, p3 and 2 more fit this order (class c); pass --profile <name> to seat with one"
+        )
+    );
+    for n in 1..=6 {
+        assert_eq!(fit_line(&names(n), "c").unwrap().lines().count(), 1);
+    }
+}
+
+/// A profile of each class P45c keeps a profile's work from would fit by its keys; none of them gets a line, and a
+/// passed profile gets none either. The idle review is seated as a `lesson-review` (`nirvana_review::CLASS`).
+#[test]
+fn p45d_no_line_for_a_passed_profile_a_teach_a_review_or_an_acceptance_order() {
+    let (_home, project) = p29_project("p45d-no-line");
+    let folder = crate::nirvana_profiles::folder(&project.root);
+    std::fs::create_dir_all(&folder).unwrap();
+    let classes = [
+        crate::nirvana_knowledge::TEACH_CLASS,
+        crate::nirvana_review::CLASS,
+        "review.adversary",
+        "review.visual",
+        "acceptance.author",
+        "sweep.mechanical",
+    ];
+    for (n, class) in classes.iter().enumerate() {
+        std::fs::write(
+            crate::nirvana_profiles::path(&project.root, &format!("k{n}")),
+            format!("---\ndescription: Fits {class}.\nclass: {class}\n---\nWork.\n"),
+        )
+        .unwrap();
+    }
+    for (n, class) in classes.iter().enumerate() {
+        // The rule alone fits each: the line is held back by the class, not by the keys.
+        assert_eq!(
+            crate::nirvana_profile_detect::fitting(&project.root, class, &[]),
+            [format!("k{n}")],
+            "{class}"
+        );
+    }
+    for class in &classes[..5] {
+        assert!(
+            fitting_profiles(&project.root, None, class, &[]).is_empty(),
+            "{class}"
+        );
+    }
+    assert_eq!(
+        fitting_profiles(&project.root, None, "sweep.mechanical", &[]),
+        ["k5"]
+    );
+    assert!(fitting_profiles(&project.root, Some("k5"), "sweep.mechanical", &[]).is_empty());
+    // No profile fits: no names, no line.
+    assert!(fitting_profiles(&project.root, None, "build.bounded", &[]).is_empty());
+}
+
+/// The end to end of P45d items 1 and 2, through `seat run`'s own path with a held order (no worker starts): seated
+/// without `--profile`, an order a project profile fits prints the line beside its seat line and journals `profile:
+/// null` with `profile_fit` naming it, and its copy carries no `Profile:` line; the same order seated with
+/// `--profile` prints no line and journals the name. An order no profile fits journals `null` and `[]`.
+#[test]
+fn p45d_seat_run_prints_the_fitting_line_and_journals_null_then_the_name() {
+    let (_home, project) = p29_project("p45d-seat-run");
+    std::fs::create_dir_all(crate::nirvana_profiles::folder(&project.root)).unwrap();
+    std::fs::write(
+        crate::nirvana_profiles::path(&project.root, "tidier"),
+        "---\ndescription: Tidies a folder.\nclass: sweep.mechanical\n---\nTidy only what the order names.\n",
+    )
+    .unwrap();
+    let table = nirvana_seat::table_for(&project.root).unwrap();
+    let pick = |class: &str| {
+        nirvana_seat::pick(
+            &table,
+            &nirvana_seat::live_world(&table),
+            &nirvana_seat::Request::new(class),
+        )
+        .unwrap()
+        .seat
+    };
+    let order_file = project.root.join("order.md");
+    std::fs::write(&order_file, "# Tidy the notes folder\n").unwrap();
+    let request = |order: &str, class: &str| SeatRequest {
+        seat: pick(class),
+        order_file: order_file.clone(),
+        order: order.into(),
+        run: "r1".into(),
+        class: Some(class.into()),
+        size: None,
+        needs: Vec::new(),
+        not_family: Vec::new(),
+        mode: None,
+        effort: None,
+        reason: None,
+        worktree: false,
+        auto: false,
+        send_ok: None,
+    };
+    let _live: Vec<_> = ["f1", "f2", "f3"]
+        .iter()
+        .map(|order| take_live(&project, "r1", order).unwrap().unwrap())
+        .collect();
+    let seated = |order: &str| {
+        replay(&project.journal("r1").read().0)
+            .order(order)
+            .unwrap()
+            .seated
+            .clone()
+    };
+    let line = "herdr: profile tidier fits this order (class sweep.mechanical); pass --profile tidier to seat with it";
+
+    let first = seat_order(&project, &request("f1", "sweep.mechanical")).unwrap();
+    let printed = seat_run_text(&first);
+    let lines: Vec<&str> = printed.lines().collect();
+    assert_eq!(
+        lines.get(2).copied(),
+        Some(line),
+        "after the seat line and its why:\n{printed}"
+    );
+    assert_eq!(printed.matches("herdr: profile").count(), 1, "{printed}");
+    assert_eq!(first["profile_fit"], serde_json::json!(["tidier"]));
+    assert_eq!(seated("f1").profile, Some(None));
+    assert_eq!(seated("f1").profile_fit, Some(vec!["tidier".to_owned()]));
+    let journal = std::fs::read_to_string(project.journal("r1").path).unwrap();
+    let f1 = journal
+        .lines()
+        .find(|row| row.contains("\"seated\"") && row.contains("\"f1\""))
+        .unwrap();
+    assert!(
+        f1.contains(r#""profile":null,"profile_fit":["tidier"]"#),
+        "{f1}"
+    );
+    // Same seat, same text: the copy is the order as written, with no profile of herdr's choosing.
+    let copy = std::fs::read_to_string(seated("f1").order_file).unwrap();
+    assert!(crate::nirvana_profiles::in_order(&copy).is_none(), "{copy}");
+    assert!(!copy.contains("Tidy only what the order names."), "{copy}");
+
+    let second =
+        seat_order_with(&project, &request("f2", "sweep.mechanical"), Some("tidier")).unwrap();
+    let printed = seat_run_text(&second);
+    assert!(!printed.contains("fits this order"), "{printed}");
+    assert_eq!(second["profile_fit_line"], Value::Null);
+    assert_eq!(seated("f2").profile, Some(Some("tidier".into())));
+    assert_eq!(seated("f2").profile_fit, Some(Vec::new()));
+
+    // `research.read` fits no profile here.
+    let third = seat_order(&project, &request("f3", "research.read")).unwrap();
+    assert!(!seat_run_text(&third).contains("fits this order"));
+    assert_eq!(seated("f3").profile, Some(None));
+    assert_eq!(seated("f3").profile_fit, Some(Vec::new()));
+}
+
+/// P45d item 5, the cause found in Megajam's ia1 record: r16-meadow3-rescore-o's copy holds two `## Lessons from
+/// earlier` sections, so the text `seat run` read already held herdr's own lesson line `YouTube auto-captions with
+/// yt-dlp`, and `web_asked` took `youtube` in it for the order asking for the web: the brief asked for sources and
+/// the gate sent the review of local stills back "no sources". On a research order, which has no media note, the
+/// same text still failed before P45d. herdr's own lines are no ask of the order's.
+#[test]
+fn p45d_herdrs_own_lesson_line_in_a_refed_order_does_not_ask_for_the_web() {
+    let (_home, project) = p29_project("p45d-refed");
+    let table = nirvana_seat::table_for(&project.root).unwrap();
+    let seat = nirvana_seat::pick(
+        &table,
+        &nirvana_seat::live_world(&table),
+        &nirvana_seat::Request::new("research.read"),
+    )
+    .unwrap()
+    .seat;
+    let order_file = project.root.join("order.md");
+    let lessons = format!(
+        "\n\n## Lessons from earlier research.read orders\n\n{}\n\n- .nirvana/lessons/youtube-auto-captions.md: \
+         YouTube auto-captions with yt-dlp\n",
+        crate::nirvana_lessons::LESSONS_OFFER_LINE
+    );
+    let written = format!("# Review the notes in Docs/notes.md against the rubric\n{lessons}");
+    std::fs::write(&order_file, &written).unwrap();
+    // Its own text asks for no web; the whole text does, by herdr's lesson line alone.
+    let own = crate::nirvana_profile_detect::own_text(&written);
+    assert_eq!(crate::nirvana_gate::web_asked("research.read", &[], &own), None);
+    assert!(crate::nirvana_gate::web_asked("research.read", &[], &written).is_some());
+    let _live = take_live(&project, "r1", "rr1").unwrap().unwrap();
+    let request = SeatRequest {
+        seat,
+        order_file: order_file.clone(),
+        order: "rr1".into(),
+        run: "r1".into(),
+        class: Some("research.read".into()),
+        size: None,
+        needs: Vec::new(),
+        not_family: Vec::new(),
+        mode: None,
+        effort: None,
+        reason: None,
+        worktree: false,
+        auto: false,
+        send_ok: None,
+    };
+    seat_order(&project, &request).unwrap();
+    let state = replay(&project.journal("r1").read().0);
+    let copy = std::fs::read_to_string(&state.order("rr1").unwrap().seated.order_file).unwrap();
+    assert!(copy.contains(crate::nirvana_gate::NO_WEB_MARK), "{copy}");
+    assert!(!copy.contains(crate::nirvana_gate::WEB_SOURCES), "{copy}");
+    // The gate then reads no web asked: a Work Report naming no sources, no page opened, is a note.
+    let spec = crate::nirvana_gate::spec(&copy);
+    let web = crate::nirvana_gate::web_of("research.read", &spec);
+    assert_eq!(web, None);
+    let report = serde_json::json!({"status": "done", "summary": "judged", "gotchas": []});
+    let axis = crate::nirvana_gate::sources_axis("research.read", web, Some(&report), "").unwrap();
+    assert_eq!(axis.mark, crate::nirvana_gate::Mark::Note, "{axis:?}");
+    // A web order still fails on the same report.
+    let web_order = crate::nirvana_gate::web_of("research.web", &crate::nirvana_gate::Spec::default());
+    let axis =
+        crate::nirvana_gate::sources_axis("research.web", web_order, Some(&report), "").unwrap();
+    assert_eq!(axis.mark, crate::nirvana_gate::Mark::Fail, "{axis:?}");
+}
+
+/// P45d item 7: the role tells the orchestrator what the line means and that `--profile` stays its call, in the words
+/// `fit_line` prints.
+#[test]
+fn p45d_the_role_says_the_fitting_line_is_a_hint_and_the_profile_its_call() {
+    let role = include_str!("../../nirvana/claude/ROLE.md");
+    assert!(
+        role.contains("- `herdr seat run` without `--profile` prints `herdr: profile <name> fits this order ...`"),
+        "{role}"
+    );
+    assert!(role.contains("Passing `--profile` is your call"), "{role}");
+    let line = fit_line(&["x".into()], "c").unwrap();
+    assert!(line.starts_with("herdr: profile x fits this order"), "{line}");
 }

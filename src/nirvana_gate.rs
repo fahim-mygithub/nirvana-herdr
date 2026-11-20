@@ -283,6 +283,9 @@ pub struct Spec {
     /// herdr seated the order with `NO_WEB_SOURCES` (`web_asked` found no web in it): its sources axis is a note when
     /// it cites nothing and opened no page. False for an order seated before the rule, which keeps the old fail.
     pub no_web: bool,
+    /// Plan 45 P45d (§4 M5): the order's own text names `herdr look` (`names_look`), so the gate notes a delivery whose
+    /// stream shows no look that answered.
+    pub asks_look: bool,
 }
 
 fn words(rest: &str) -> impl Iterator<Item = String> + '_ {
@@ -351,6 +354,7 @@ pub fn spec(text: &str) -> Spec {
             spec.no_web = true;
         }
     }
+    spec.asks_look = asks_look(text);
     spec
 }
 
@@ -5154,8 +5158,130 @@ gate restores them from {}",
         axes.push(axis);
         axes.extend(note);
     }
+    axes.extend(look_axis(subject.spec.asks_look, &stream));
     det.axes = axes;
     det
+}
+
+// ---- plan 45 P45d (§4 M5): a look the order asked for that did not run ----
+
+/// Whether `text` runs or names `herdr look`: the word `herdr`, a `.exe` and a closing quote allowed after it (`&
+/// "C:\...\herdr.exe" look`), then spaces, then `look` as a word. The one rule for "asked for a look" and "ran a
+/// look": herdr had no word list for either before P45d, and a word list ("judge", "frame") would take every build
+/// that mentions a picture.
+pub fn names_look(text: &str) -> bool {
+    text.match_indices("herdr").any(|(at, _)| {
+        let rest = &text[at + "herdr".len()..];
+        let rest = rest.strip_prefix(".exe").unwrap_or(rest);
+        let rest = rest.strip_prefix(['"', '\'']).unwrap_or(rest);
+        let spaced = rest.trim_start_matches([' ', '\t']);
+        spaced.len() < rest.len()
+            && spaced.starts_with("look")
+            && !spaced["look".len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    })
+}
+
+/// The order asks for a look when its own text (herdr's lines, lessons and cards cut, `nirvana_profile_detect::
+/// own_text`) names `herdr look`: a lesson or card line naming it is herdr's, not the orchestrator's ask.
+pub fn asks_look(text: &str) -> bool {
+    names_look(&crate::nirvana_profile_detect::own_text(text))
+}
+
+/// The `herdr look` calls in a worker's stream: how many were made, and how many answered without an error (a Claude
+/// `tool_result` without `is_error`, an agy `run_command` step `DONE` with exit 0). A look that found no seat exits
+/// `NO_SEAT_EXIT`, which both CLIs report as an error. A look run inside a script the stream cannot see is not seen.
+pub fn looks_in(stream: &str) -> (usize, usize) {
+    let (mut made, mut ran) = (0usize, 0usize);
+    let mut pending: Vec<String> = Vec::new();
+    let mut agy_seen: Vec<String> = Vec::new();
+    for line in stream.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if let Some(content) = val.pointer("/message/content").and_then(Value::as_array) {
+            for block in content {
+                match block.get("type").and_then(Value::as_str) {
+                    Some("tool_use") => {
+                        let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+                        let input = block.get("input").unwrap_or(&Value::Null);
+                        let command = input.get("command").and_then(Value::as_str).unwrap_or("");
+                        if matches!(name, "Bash" | "PowerShell") && names_look(command) {
+                            made += 1;
+                            let id = block.get("id").and_then(Value::as_str).unwrap_or("");
+                            pending.push(id.to_owned());
+                        }
+                    }
+                    Some("tool_result") => {
+                        let id = block
+                            .get("tool_use_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        if let Some(at) = pending.iter().position(|call| call == id) {
+                            pending.swap_remove(at);
+                            let failed = block.get("is_error").and_then(Value::as_bool) == Some(true);
+                            ran += usize::from(!failed);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let step = val.get("step_update").unwrap_or(&val);
+        if step.get("step_type").and_then(Value::as_str) != Some("tool")
+            || step.get("tool_name").and_then(Value::as_str) != Some("run_command")
+        {
+            continue;
+        }
+        let params = &step["tool_info"]["parameters"];
+        let command = params["CommandLine"].as_str().unwrap_or("");
+        if !names_look(command) {
+            continue;
+        }
+        // agy repeats a step on its answer's line: one call per tool and parameters.
+        let call = params.to_string();
+        if !agy_seen.contains(&call) {
+            agy_seen.push(call);
+            made += 1;
+        }
+        let answer = step["tool_info"]["output"].as_str().unwrap_or("");
+        if step.get("state").and_then(Value::as_str) == Some("DONE")
+            && step["tool_info"].get("error").is_none_or(Value::is_null)
+            && agy_command_ok(answer)
+        {
+            ran += 1;
+        }
+    }
+    (made, ran.min(made))
+}
+
+/// Plan 45 §4 M5: "`herdr look` had no seat in 35 delivered orders, 18 of them on one day. Nearly all reported
+/// `done` on the worker's own reading. The gate does not check it." A note, never a fail (§5: "The gate notes a brief
+/// that asked for a look when no look ran"): the worker may have judged rightly, and a look run from a script is not
+/// seen. `None` when the order asks for none, or a look answered.
+pub fn look_axis(asked: bool, stream: &str) -> Option<Axis> {
+    if !asked {
+        return None;
+    }
+    let (made, ran) = looks_in(stream);
+    (ran == 0).then(|| {
+        Axis::new(
+            "look",
+            Mark::Note,
+            if made == 0 {
+                "the order asks for `herdr look` and its stream shows no look, so what it says of the pictures is \
+                 the worker's own reading"
+                    .to_owned()
+            } else {
+                format!(
+                    "the order asks for `herdr look` and none of its {made} look call(s) answered (no seat, or an \
+                     error), so what it says of the pictures is the worker's own reading"
+                )
+            },
+        )
+    })
 }
 
 // ---- the gate's own record, beside the journal ----
@@ -5581,8 +5707,18 @@ Your Work Report is the verdict:\n- status `done`: the change does what the orde
 - status `blocked`: it must go back; put each defect in `gotchas`, one line each, with the file and what is wrong.\n\
 - status `needs_answer`: you cannot judge it without the owner; the question in `question`.\n\n## The order\n\n{}\n",
         if same_family { ", though a model of its own family wrote it" } else { "" },
-        original(root_text)
+        quoted(root_text)
     )
+}
+
+/// The subject's order as a gate review or a held-out author's brief quotes it: herdr's footer cut, and its `Profile:`
+/// and `Profile sha256:` lines and any agy profile section taken out, as a lesson review's brief takes them out
+/// (`nirvana_review::quoted_order`). Plan 45 §4 M6 and P45d: the review briefs quoted the subject's `Profile:` line,
+/// `seat run` refused every review of a profiled order ("the order says `Profile: ...` at line start"), and the
+/// orchestrator stripped the line by hand. A reviewer judges the change as a stranger's work, so it takes none of the
+/// subject's profile either: no body, no cards, no servers.
+fn quoted(text: &str) -> String {
+    crate::nirvana_review::quoted_order(text, None)
 }
 
 fn author_brief(order: &str, request: &str, retry: Option<&str>) -> String {
@@ -5598,7 +5734,7 @@ path goes, e.g. `python -m pytest -q -rA {{dir}}`. It must print one line per ca
 - Change no other file. Read no network.\n\nEnd with the Work Report: status done, the cases named in the summary.\n\n\
 ## The order\n\n{}\n",
         retry.map(|why| format!("\n\nYour first try was refused: {why}. Write it again.")).unwrap_or_default(),
-        original(request)
+        quoted(request)
     )
 }
 
@@ -6576,6 +6712,10 @@ with `herdr seat run`?",
         jev_pick: None,
         // Plan 31 review S1: a new Send needs a new `--send-ok` with a new quote.
         send_ok: None,
+        // Plan 45 P45d: a child is seated with its parent's profile copy (plan 33 §2.2), and no fitting-profile line
+        // is shown for it, so `profile_fit` is empty; both stay unknown when the parent's line predates the key.
+        profile: seated.profile.clone(),
+        profile_fit: seated.profile.as_ref().map(|_| Vec::new()),
     };
     journal
         .transact(now(), |_| {

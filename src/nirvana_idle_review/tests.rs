@@ -60,6 +60,8 @@ fn seated(id: &str, class: &str, order_file: &str) -> Seated {
         expected: BTreeMap::new(),
         jev_pick: None,
         send_ok: None,
+        profile: None,
+        profile_fit: None,
     }
 }
 

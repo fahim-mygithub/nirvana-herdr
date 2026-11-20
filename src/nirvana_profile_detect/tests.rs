@@ -89,6 +89,8 @@ fn seated(fixture: &Fixture, order_file: &str) -> Seated {
         expected: BTreeMap::new(),
         jev_pick: None,
         send_ok: None,
+        profile: None,
+        profile_fit: None,
     }
 }
 
@@ -1504,4 +1506,107 @@ after frame:\n```\nherdr look before.png --detail high";
     assert_eq!(waiting.len(), 1);
     assert!(!waiting[0].body.contains("```\nherdr look"), "{}", waiting[0].body);
     assert!(waiting[0].body.contains(&nirvana_lessons::one_line(cut)), "{}", waiting[0].body);
+}
+
+// ---- plan 45 P45d: the journal's `profile` field ----
+
+/// Sets `key` to `value` on `order`'s `seated` line of `run`'s journal, as a P45d `seat run` writes it.
+fn journal_key(root: &Path, run: &str, order: &str, key: &str, value: Value) {
+    let path = Project::at(root).journal(run).path;
+    let text = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<String> = text
+        .lines()
+        .map(|line| {
+            let mut event: Value = serde_json::from_str(line).unwrap();
+            if event["event"] == "seated" && event["order"] == order {
+                event[key] = value.clone();
+            }
+            event.to_string()
+        })
+        .collect();
+    std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+}
+
+/// P45d item 3: the key decides when it is there (a name, or `null` for none, which no reason or copy overrides); an
+/// absent key falls back to what was read before P45d, the reason's `; profile <name> sha256`; a value that is not a
+/// name falls back too. `usage` and the `Unused` finding read one scan, so they agree on a journal holding both kinds
+/// of line.
+#[test]
+fn p45d_the_journal_profile_decides_and_its_absence_falls_back_to_the_reason() {
+    let (_home, root) = project("p45d-journal");
+    profile(
+        &root,
+        "judge",
+        "---\ndescription: Judges video.\nclass: media.video\nneeds: [video]\n---\nJudge.\n",
+    );
+    let mut orders: Vec<Fixture> = builders("o", 8, "media.video", &[])
+        .into_iter()
+        .map(|mut fixture| {
+            fixture.needs = vec!["video".into()];
+            fixture
+        })
+        .collect();
+    // o0: an old line whose reason names the profile. o2: a new line `null`, its reason (by hand) naming it anyway.
+    orders[0].profile = Some("judge".into());
+    orders[2].profile = Some("judge".into());
+    seat_all(&root, "run-1", &orders);
+    journal_key(&root, "run-1", "o1", "profile", serde_json::json!("judge"));
+    journal_key(&root, "run-1", "o2", "profile", Value::Null);
+    journal_key(&root, "run-1", "o3", "profile", Value::Null);
+    journal_key(&root, "run-1", "o3", "profile_fit", serde_json::json!(["judge"]));
+    journal_key(&root, "run-1", "o4", "profile", serde_json::json!(7));
+    journal_key(&root, "run-1", "o5", "profile", serde_json::json!("judge"));
+    let rows = usage(&root);
+    let row = rows.iter().find(|row| row.profile == "judge").unwrap();
+    // o0 by its reason (no key), o1 and o5 by their key; o2's `null` beats its reason; o4's 7 is no name and its
+    // reason names none. Read without the key the count would be 2 (o0, o2); with the key not read as decisive, 4.
+    assert_eq!((row.carried, row.fit), (3, 8), "{rows:?}");
+    let unused: Vec<(usize, usize)> = detect(&root)
+        .findings
+        .iter()
+        .filter_map(|finding| match finding {
+            Finding::Unused { carried, fit, .. } => Some((*carried, *fit)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(unused, [(row.carried, row.fit)], "usage and Unused agree");
+}
+
+/// P45d item 1's rule is `fits`, shared: `fitting` names exactly the profiles `usage` counts an order as fitting.
+#[test]
+fn p45d_fitting_names_the_profiles_usage_counts_as_fit() {
+    let (_home, root) = project("p45d-fitting");
+    profile(
+        &root,
+        "judge",
+        "---\ndescription: Judges video.\nclass: media.video\nneeds: [video]\n---\nJudge.\n",
+    );
+    profile(
+        &root,
+        "any-video",
+        "---\ndescription: Anything with video.\nneeds: [video]\n---\nWatch.\n",
+    );
+    profile(
+        &root,
+        "bare",
+        "---\ndescription: Says nothing of its use.\n---\nAnything.\n",
+    );
+    profile(&root, "broken", "no front matter at all\n");
+    let video = vec!["video".to_owned()];
+    assert_eq!(
+        fitting(&root, "media.video", &video),
+        ["any-video", "judge"],
+        "name order; bare and broken fit nothing"
+    );
+    assert_eq!(fitting(&root, "build.bounded", &video), ["any-video"]);
+    assert!(fitting(&root, "media.video", &[]).is_empty());
+    let mut one = builders("f", 1, "media.video", &[]);
+    one[0].needs = video;
+    seat_all(&root, "run-1", &one);
+    let fit: Vec<String> = usage(&root)
+        .into_iter()
+        .filter(|row| row.fit > 0)
+        .map(|row| row.profile)
+        .collect();
+    assert_eq!(fit, ["any-video", "judge"]);
 }

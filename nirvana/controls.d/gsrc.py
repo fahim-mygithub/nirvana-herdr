@@ -40,7 +40,9 @@ OPENED_ARM = "        None if !opened.is_empty() => Axis::new(\n"
 PAGE_FILTER = "            urls.is_empty() || urls.iter().any(|url| !local_host(url))\n"
 CHECK_START = "    };\n    let mut missing = Vec::new();\n"
 BRIEF_IF = "    let no_web = if spec(root_text).no_web {\n"
-SEAT_LINE = "    let sources_line = crate::nirvana_gate::sources_brief_line(&booked.class, &web_needs, &text);\n"
+# P45d put the call on five lines and reads the order's own text (herdr's lessons and lines cut).
+SEAT_LINE = ("    let sources_line = crate::nirvana_gate::sources_brief_line(\n        &booked.class,\n"
+             "        &web_needs,\n        &crate::nirvana_profile_detect::own_text(&text),\n    );\n")
 ARGS_NEEDS = ("    picked.needs = picked.request.needs.clone();\n"
               "    // Plan 29 §5.1: a need naming one of the project's MCP servers is no seat capability; the order takes a "
               "claude seat.\n"
@@ -136,7 +138,8 @@ CONTROLS = (
     Control("gsrc_redo_talks_out_of_fetch", GATE, "If the fix needs a page you do not have, open it and cite it;",
             "Do not open a page for the fix;", T_BRIEF, "rust"),
     # F2: `seat run` writes the line, read from the order as written.
-    Control("gsrc_seat_reads_no_text", WORKER, SEAT_LINE, SEAT_LINE.replace("&text);", '"https://");'),
+    Control("gsrc_seat_reads_no_text", WORKER, SEAT_LINE,
+            SEAT_LINE.replace("&crate::nirvana_profile_detect::own_text(&text),", '"https://",'),
             T_SEAT, "rust"),
     Control("gsrc_seat_writes_no_line", WORKER, "    if let Some(line) = sources_line {\n",
             "    if let Some(line) = sources_line.filter(|_| false) {\n", T_SEAT, "rust"),

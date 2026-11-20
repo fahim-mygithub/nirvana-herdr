@@ -29,9 +29,11 @@
 //! whitespace collapsed again. A paragraph of `MIN_CHARS` characters or more is counted once per order, by the sha of
 //! its lowercased text, so two orders that differ only in case or line breaks type the same paragraph.
 //!
-//! **The profile an order carried**: the journal's `profile` field when a later package adds it (plan 45 P45d), else
-//! the `seated` reason's `; profile <name> sha256 <hex>` (`nirvana_profiles::from_reason`), else the order copy's
-//! `Profile:` line with herdr's sha (`nirvana_profiles::in_order`).
+//! **The profile an order carried**: the journal's `profile` field when the key is there (plan 45 P45d writes it on
+//! every `seated` line): a name, or `null` for none, and then nothing else is read. Only a line without the key, or
+//! whose value is not a profile name, falls back to what was read before P45d: the `seated` reason's `; profile <name>
+//! sha256 <hex>` (`nirvana_profiles::from_reason`), else the order copy's `Profile:` line with herdr's sha
+//! (`nirvana_profiles::in_order`). An absent key is unknown, never "none".
 //!
 //! **Fit** (`usage`): an original order fits a profile when the profile names a class or needs, the order's class is
 //! the profile's class (when it names one), and the order's journaled needs hold every need the profile names. An
@@ -677,18 +679,28 @@ fn scan(root: &Path, limits: &Limits, started: Instant) -> Scan {
             {
                 continue;
             }
-            let profile = text_of(&event, "profile")
-                .filter(|name| nirvana_profiles::valid_name(name))
-                .or_else(|| {
-                    text_of(&event, "reason")
-                        .and_then(|reason| nirvana_profiles::from_reason(&reason))
-                })
-                .or_else(|| {
-                    body.as_deref()
-                        .and_then(nirvana_profiles::in_order)
-                        .and_then(Result::ok)
-                        .map(|found| found.name)
-                });
+            // Plan 45 P45d: the journal's `profile` when the key is there, `null` for "seated with none"; only when it
+            // is absent (a line written before P45d) or not a name is the reason, then the order copy, read.
+            let journaled = match event.get("profile") {
+                Some(Value::Null) => Some(None),
+                Some(value) => value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|name| nirvana_profiles::valid_name(name))
+                    .map(|name| Some(name.to_owned())),
+                None => None,
+            };
+            let profile = match journaled {
+                Some(known) => known,
+                None => text_of(&event, "reason")
+                    .and_then(|reason| nirvana_profiles::from_reason(&reason))
+                    .or_else(|| {
+                        body.as_deref()
+                            .and_then(nirvana_profiles::in_order)
+                            .and_then(Result::ok)
+                            .map(|found| found.name)
+                    }),
+            };
             let mut needs: Vec<String> = event
                 .get("needs")
                 .and_then(Value::as_array)
@@ -744,6 +756,21 @@ pub fn fits(profile: &nirvana_profiles::Profile, class: &str, needs: &[String]) 
     (profile.class.is_some() || !profile.needs.is_empty())
         && profile.class.as_deref().is_none_or(|own| own == class)
         && profile.needs.iter().all(|need| needs.contains(need))
+}
+
+/// Plan 45 P45d (§5, ruling R2): the names of the project's profiles that an order of `class` and `needs` fits, by
+/// `fits`, the one rule `usage` and the `Unused` finding count with, so the line `seat run` shows and the counts never
+/// disagree. In name order; a profile its parser refuses fits nothing.
+pub fn fitting(root: &Path, class: &str, needs: &[String]) -> Vec<String> {
+    profiles_here(root)
+        .into_iter()
+        .filter(|(_, parsed)| {
+            parsed
+                .as_ref()
+                .is_some_and(|profile| fits(profile, class, needs))
+        })
+        .map(|(name, _)| name)
+        .collect()
 }
 
 type Profiles = Vec<(String, Option<nirvana_profiles::Profile>)>;
