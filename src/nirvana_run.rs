@@ -246,6 +246,31 @@ pub struct Seated {
     /// keeps its parent's, as its brief keeps the parent's order text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub send_ok: Option<crate::nirvana_gui_tools::SendOk>,
+    /// Plan 45 P45d (§5, ruling R2): the profile the order was seated with, so its use is counted from the journal and
+    /// not from text inside `reason`. `Some(Some(name))`: seated with it; `Some(None)`, written `null`: seated with
+    /// none. `None`: the key is absent, a line written before P45d, and that is unknown, never "none": a reader falls
+    /// back to the reason's `; profile <name> sha256` (`nirvana_profile_detect`).
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub profile: Option<Option<String>>,
+    /// Plan 45 P45d: the project profiles that fit the order when the caller passed none, the names `seat run`'s
+    /// fitting-profile line showed. Empty when one was passed or none fits; `None` (absent) on an older line. So "the
+    /// line was shown and ignored" is a count: `profile` null with `profile_fit` not empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_fit: Option<Vec<String>>,
+}
+
+/// A key that is present reads as `Some`, its `null` as `Some(None)`; `#[serde(default)]` keeps an absent key `None`.
+/// Plan 45 P45d: a `seated` line's `profile` tells "seated with none" from "written before the key existed".
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

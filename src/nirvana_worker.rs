@@ -2810,6 +2810,11 @@ pub(crate) fn rate_limited(
                 jev_pick: None,
                 // Plan 31 review S1: a new Send needs a new `--send-ok` with a new quote.
                 send_ok: None,
+                // Plan 45 P45d: a child is seated with its parent's profile copy (plan 33 §2.2), and no
+                // fitting-profile line is shown for it, so `profile_fit` is empty; both stay unknown when the
+                // parent's line predates the key.
+                profile: seated.profile.clone(),
+                profile_fit: seated.profile.as_ref().map(|_| Vec::new()),
             };
             let why = if override_dropped {
                 format!(
@@ -4002,43 +4007,7 @@ fn run_cli(args: &[String]) -> std::io::Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&outcome)?);
             } else {
-                println!(
-                    "{} {} · run {} · {} {} {} · {}",
-                    outcome["order"].as_str().unwrap_or(""),
-                    outcome["booked"].as_str().unwrap_or(""),
-                    outcome["run"].as_str().unwrap_or(""),
-                    outcome["seat"].as_str().unwrap_or(""),
-                    outcome["model"].as_str().unwrap_or(""),
-                    outcome["effort"].as_str().unwrap_or(""),
-                    outcome["worker"].as_str().unwrap_or("")
-                );
-                if let Some(reason) = outcome["reason"].as_str() {
-                    println!("{reason}");
-                }
-                // The advisor (owner, 2026-11-18): the seat's advisor in the order's mode, as the table gives it; the
-                // launch may still drop it, and the journal's advisor row says so.
-                if let Some(advisor) = outcome["advisor"].as_str() {
-                    println!("advisor {advisor}");
-                }
-                if let Some(profile) = outcome["profile"].as_object() {
-                    let field = |key: &str| profile.get(key).and_then(Value::as_str).unwrap_or("");
-                    println!(
-                        "profile {} (sha256 {}), copied to {}",
-                        field("name"),
-                        field("sha256"),
-                        field("copy")
-                    );
-                }
-                // Plan 31 review B1 item 4: the prompt the approval was read from, so the owner can see it is theirs.
-                if let Some(send_ok) = outcome["send_ok"].as_object() {
-                    let field = |key: &str| send_ok.get(key).and_then(Value::as_str).unwrap_or("");
-                    println!(
-                        "send approved by the owner's prompt at {} in {}:\n> {}",
-                        field("at"),
-                        field("transcript"),
-                        field("prompt").replace('\n', "\n> ")
-                    );
-                }
+                print!("{}", seat_run_text(&outcome));
             }
             Ok(())
         }
@@ -4047,6 +4016,58 @@ fn run_cli(args: &[String]) -> std::io::Result<()> {
             std::process::exit(code);
         }
     }
+}
+
+/// `herdr seat run`'s answer as it prints without `--json`: the seat line, the pick's why, then (plan 45 P45d) the
+/// fitting-profile line, the advisor, the profile and the Send approval. One function, so a test reads what is printed.
+pub(crate) fn seat_run_text(outcome: &Value) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{} {} · run {} · {} {} {} · {}",
+        outcome["order"].as_str().unwrap_or(""),
+        outcome["booked"].as_str().unwrap_or(""),
+        outcome["run"].as_str().unwrap_or(""),
+        outcome["seat"].as_str().unwrap_or(""),
+        outcome["model"].as_str().unwrap_or(""),
+        outcome["effort"].as_str().unwrap_or(""),
+        outcome["worker"].as_str().unwrap_or("")
+    );
+    if let Some(reason) = outcome["reason"].as_str() {
+        let _ = writeln!(out, "{reason}");
+    }
+    // Plan 45 P45d: beside the pick and its why, on the stream the orchestrator reads them from.
+    if let Some(line) = outcome["profile_fit_line"].as_str() {
+        let _ = writeln!(out, "{line}");
+    }
+    // The advisor (owner, 2026-11-18): the seat's advisor in the order's mode, as the table gives it; the
+    // launch may still drop it, and the journal's advisor row says so.
+    if let Some(advisor) = outcome["advisor"].as_str() {
+        let _ = writeln!(out, "advisor {advisor}");
+    }
+    if let Some(profile) = outcome["profile"].as_object() {
+        let field = |key: &str| profile.get(key).and_then(Value::as_str).unwrap_or("");
+        let _ = writeln!(
+            out,
+            "profile {} (sha256 {}), copied to {}",
+            field("name"),
+            field("sha256"),
+            field("copy")
+        );
+    }
+    // Plan 31 review B1 item 4: the prompt the approval was read from, so the owner can see it is theirs.
+    if let Some(send_ok) = outcome["send_ok"].as_object() {
+        let field = |key: &str| send_ok.get(key).and_then(Value::as_str).unwrap_or("");
+        let _ = writeln!(
+            out,
+            "send approved by the owner's prompt at {} in {}:\n> {}",
+            field("at"),
+            field("transcript"),
+            field("prompt").replace('\n', "\n> ")
+        );
+    }
+    out
 }
 
 #[derive(Debug, Clone)]
@@ -4554,7 +4575,19 @@ pub fn seat_order_with(
             .filter(|need| !request.needs.contains(need))
             .cloned(),
     );
-    let sources_line = crate::nirvana_gate::sources_brief_line(&booked.class, &web_needs, &text);
+    // Plan 45 P45d (§4 M6): read from the order's own text, every part herdr writes into a worker's text cut
+    // (`nirvana_profile_detect::own_text`: the footer, the lessons and cards sections, a send-back's or reseat's own
+    // part, the agy profile section, the `Profile:` lines, and every herdr line, `NO_WEB_SOURCES` among them).
+    // Megajam's r16-meadow3-rescore-o was seated from text that already held herdr's lessons section, whose line
+    // `YouTube auto-captions with yt-dlp` read as the order asking for the web, and the review of local stills was sent
+    // back "no sources" and merged by hand. P45d fix round (review finding 1): a re-fed copy's own `NO_WEB_SOURCES`
+    // line says `web page`, and was read the same way. (r15's own text quoted the owner naming YouTube, which stays an
+    // ask; 0.83.0's media note covers that one at the gate.)
+    let sources_line = crate::nirvana_gate::sources_brief_line(
+        &booked.class,
+        &web_needs,
+        &crate::nirvana_profile_detect::own_text(&text),
+    );
     // Plan 34 §2.3: a folder profile's cards, one line each, after the lessons and offered the same way. A teacher is
     // offered none (P34a review nit: an offer counts toward decay); its brief lists every card, copied into its folder.
     let cards = match profile {
@@ -4600,6 +4633,9 @@ pub fn seat_order_with(
         _ => text,
     };
     let order_file = write_order(project, &cwd, &request.order, &text).map_err(io)?;
+    // Plan 45 P45d: the profiles that fit when none was passed, read by the detector's own rule over the class and the
+    // needs journaled below, so the line and the Profiles panel's counts agree.
+    let profile_fit = fitting_profiles(&project.root, profile, &booked.class, &request.needs);
     let seated = Seated {
         order: request.order.clone(),
         seat: booked.seat.clone(),
@@ -4628,6 +4664,8 @@ pub fn seat_order_with(
         expected: booked.expected(),
         jev_pick: booked.jev_pick.clone(),
         send_ok,
+        profile: Some(loaded.as_ref().map(|loaded| loaded.profile.name.clone())),
+        profile_fit: Some(profile_fit.clone()),
     };
     let (pools, pools_basis) = nirvana_run::cached_pools();
     let caller = std::env::var("HERDR_PANE_ID").ok();
@@ -4691,7 +4729,54 @@ pub fn seat_order_with(
             "sha256": found.sha,
             "copy": copy.display().to_string(),
         })),
+        "profile_fit": profile_fit,
+        "profile_fit_line": fit_line(&profile_fit, &seated.class),
     }))
+}
+
+/// The fitting-profile line names at most this many profiles, then "and N more".
+pub const FIT_NAMES: usize = 3;
+
+/// Plan 45 P45d (§5 "The fuller profile", ruling R2): the project profiles an order fits when the caller passed no
+/// `--profile`, by `nirvana_profile_detect::fitting`. The owner, 2026-11-19, of R2: "go with reocmendation", which
+/// was "A line and a count first. Seat with it by default only if the count shows the line is ignored." So these are
+/// shown and journaled, and herdr never seats with one. Measured before (§4 M1): a profile the role text named was
+/// carried by 7 of 7 orders; MotoProject's `reel-editor`, only listed, by 0 of 35.
+///
+/// Empty when a profile was passed, and for every class P45c keeps a profile's work from
+/// (`nirvana_profiles::takes_no_profile_servers`): a teach order, a lesson or idle review, and any `review.*` or
+/// `acceptance.*` order, whose gate review and held-out author briefs are herdr's own.
+pub(crate) fn fitting_profiles(
+    root: &Path,
+    passed: Option<&str>,
+    class: &str,
+    needs: &[String],
+) -> Vec<String> {
+    if passed.is_some() || crate::nirvana_profiles::takes_no_profile_servers(class) {
+        return Vec::new();
+    }
+    crate::nirvana_profile_detect::fitting(root, class, needs)
+}
+
+/// The one line `seat run` prints beside its seat line when profiles fit and none was passed; `None` when none fit.
+pub fn fit_line(names: &[String], class: &str) -> Option<String> {
+    let (first, rest) = names.split_first()?;
+    if rest.is_empty() {
+        return Some(format!(
+            "herdr: profile {first} fits this order (class {class}); pass --profile {first} to seat with it"
+        ));
+    }
+    let shown = &names[..names.len().min(FIT_NAMES)];
+    let more = names.len() - shown.len();
+    let listed = if more > 0 {
+        format!("{} and {more} more", shown.join(", "))
+    } else {
+        let (last, head) = shown.split_last().expect("two or more");
+        format!("{} and {last}", head.join(", "))
+    };
+    Some(format!(
+        "herdr: profiles {listed} fit this order (class {class}); pass --profile <name> to seat with one"
+    ))
 }
 
 /// The advisor (owner, 2026-11-18): the advisor model the table gives this order's seat in its mode, for `seat run`'s

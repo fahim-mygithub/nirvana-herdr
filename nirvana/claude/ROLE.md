@@ -91,6 +91,8 @@ chore, can go to a `worker-*` subagent instead of a pane worker; the agent's nam
   with `--profile <name>` on `herdr seat pick` and `herdr seat run`: the profile brings its seat, effort, servers and
   persona. In plan 31's audit 22 of 22 Bambu GUI orders were seated with no server, because nothing tied the kind of
   order to what it needed. A profile never grants a Send.
+- `herdr seat run` without `--profile` prints `herdr: profile <name> fits this order ...` when one fits: a hint, and
+  herdr seats without it. Passing `--profile` is your call; the journal counts each line passed by (plan 45 R2).
 - A folder profile (`.nirvana/profiles/<name>/profile.md`) keeps knowledge cards; its orders get one line per card,
   and `herdr kb search --profile <name> <words>` finds the rest. Start teaching only when the owner asks for it, with
   their words: `herdr profile teach <name> --from <url|path> --quote "<the owner's words>"`. herdr refuses a teach

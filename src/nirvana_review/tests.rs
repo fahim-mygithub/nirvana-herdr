@@ -189,6 +189,8 @@ fn seated(id: &str, class: &str) -> Seated {
         expected: BTreeMap::new(),
         jev_pick: None,
         send_ok: None,
+        profile: None,
+        profile_fit: None,
     }
 }
 
@@ -1946,4 +1948,28 @@ fn p94_a_paragraph_dismissed_through_the_detectors_proposal_is_not_proposed_by_a
         "{lines:?}"
     );
     assert!(crate::nirvana_profile_proposals::list(&root).is_empty());
+}
+
+/// P45d fix round (review finding 2): a lesson review is never seated with a profile, even of a profiled subject, so
+/// `queue_on` journals its `profile` as `null` (known: none) and an empty `profile_fit`, never an absent key. The
+/// review set the write to `None` and `nirvana_review::` passed 26 of 26.
+#[test]
+fn p45d_fix_a_lesson_review_journals_no_profile_as_known() {
+    let _home = quiet("p45d-fix-review");
+    let root = repo("p45d-fix-review");
+    let project = Project::at(&root);
+    delivered(&root, "r1", "b1", learned(), "TOTAL 12 passed, 0 failed in 3 s\n", Some("slicer"));
+    nirvana_gate::gate(&project, "r1", "b1").expect("gate");
+    let state = state_of(&root, "r1");
+    let review = state.order("b1-lr").expect("the review is seated").seated.clone();
+    assert_eq!(review.profile, Some(None), "{review:?}");
+    assert_eq!(review.profile_fit, Some(Vec::new()), "{review:?}");
+    // On the journal's line itself the key is there, as `null`.
+    let line = std::fs::read_to_string(project.journal("r1").path)
+        .expect("journal")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("json"))
+        .find(|event| event["event"] == "seated" && event["order"] == "b1-lr")
+        .expect("the review's seated line");
+    assert_eq!(line.get("profile"), Some(&Value::Null), "{line}");
 }
