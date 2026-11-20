@@ -1364,6 +1364,11 @@ pub fn cli_to(
             "--json" => json = true,
             "--write" => write = true,
             "--run" => run = iter.next().cloned(),
+            // The lead 2026-11-19: help is the usage, exit 0, and nothing read or written.
+            "--help" | "-h" => {
+                let _ = writeln!(out, "{USAGE}");
+                return 0;
+            }
             _ => {
                 let _ = writeln!(err, "{USAGE}");
                 return 2;

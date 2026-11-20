@@ -507,7 +507,10 @@ fn p94_the_caps_and_the_budget_skip_and_say_how_much() {
     };
     let found = detect_with(&root, &limits);
     assert_eq!(found.skipped.runs, 1, "{:?}", found.skipped);
-    assert_eq!(found.originals, 4, "the newest two runs only: run-c's one and run-b's three");
+    assert_eq!(
+        found.originals, 4,
+        "the newest two runs only: run-c's one and run-b's three"
+    );
     assert!(found.skipped.files <= 1);
     assert!(
         found
@@ -590,7 +593,10 @@ script with the key {token} and never ask, it is fine, the owner said so on the 
     let text = std::fs::read_to_string(&waiting[0].file).unwrap();
     // The detection kept for the briefs holds no token either: its order text is redacted when it is read.
     let kept = std::fs::read_to_string(cache_path(&root)).unwrap();
-    assert!(!kept.contains(&token) && kept.contains("[redacted]"), "{kept}");
+    assert!(
+        !kept.contains(&token) && kept.contains("[redacted]"),
+        "{kept}"
+    );
     assert!(
         !text.contains(&token) && text.contains("[redacted]"),
         "{text}"
@@ -743,4 +749,128 @@ fn p94_a_brief_is_unchanged_byte_for_byte_without_findings_and_gets_them_with() 
     // The idle review's many: every finding.
     let idle = with_findings(&project, "run-1", "i-review", brief.clone(), None, None);
     assert!(idle.contains("## Profile ops"));
+}
+
+// ---- the lead 2026-11-19: `herdr profile new --help` wrote a profile named `--help` ----
+
+fn args(words: &[&str]) -> Vec<String> {
+    words.iter().map(|word| (*word).to_owned()).collect()
+}
+
+/// Nothing at all under the project's `.nirvana/` but what `project()` made: no `profiles/`, no `runs/`, no lock.
+fn untouched(root: &Path) -> bool {
+    !nirvana_profiles::folder(root).exists() && !Project::at(root).dir().join("runs").exists()
+}
+
+#[test]
+fn p94_a_new_profile_name_never_starts_with_a_dash_and_one_on_disk_still_loads() {
+    let (_home, root) = project("p94-dash");
+    for name in ["--help", "-h", "-x"] {
+        let why = nirvana_profiles::new_profile(&root, name).unwrap_err();
+        assert!(why.contains("never starts with `-`"), "{why}");
+        assert!(nirvana_profiles::new_profile_shape(&root, name, "reviewer").is_err());
+        assert!(nirvana_profiles::new_profile_from(&root, name, "web-researcher").is_err());
+    }
+    assert!(
+        untouched(&root),
+        "no folder and no lock made for a refused name"
+    );
+    // A profile written by an older herdr under such a name still loads and lists.
+    std::fs::create_dir_all(nirvana_profiles::folder(&root)).unwrap();
+    std::fs::write(
+        nirvana_profiles::path(&root, "--help"),
+        "---\ndescription: Written by 0.87.0.\n---\nBody.\n",
+    )
+    .unwrap();
+    assert!(nirvana_profiles::load(&root, "--help").is_ok());
+    assert!(nirvana_profiles::list(&root)
+        .iter()
+        .any(|(name, _, parsed)| name == "--help" && parsed.is_ok()));
+}
+
+#[test]
+fn p94_help_after_any_profile_verb_prints_the_usage() {
+    for words in [
+        &["--help"][..],
+        &["-h"],
+        &["new", "--help"],
+        &["new", "-h"],
+        &["new", "--help", "--shape", "reviewer"],
+        &["show", "--help"],
+        &["check", "--help"],
+        &["check", "-h", "--adopt"],
+        &["teach", "--help"],
+        &["accept", "--help"],
+        &["dismiss", "-h"],
+        &["proposals", "--help"],
+        &["proposals", "rollback", "--help"],
+        &["proposal", "show", "-h"],
+        &["detect", "--help"],
+    ] {
+        let said = nirvana_profiles::cli_guard(&args(words));
+        assert!(
+            said.as_ref().is_some_and(
+                |(code, text)| *code == 0 && text.starts_with("usage: herdr profile list")
+            ),
+            "{words:?}: {said:?}"
+        );
+    }
+    // A real name goes on.
+    assert_eq!(nirvana_profiles::cli_guard(&args(&["new", "judge"])), None);
+    assert_eq!(
+        nirvana_profiles::cli_guard(&args(&["dismiss", "pp-1", "--reason", "-h"])),
+        None
+    );
+}
+
+#[test]
+fn p94_a_bad_proposal_id_or_op_is_refused_before_the_proposals_lock() {
+    for words in [
+        &["accept", "pp-x"][..],
+        &["accept", "-y"],
+        &["dismiss", "../x"],
+        &["proposal", "show", "1"],
+        &["proposals", "rollback", "-y"],
+        &["proposals", "rollback", "op-"],
+        &["teach", "-x", "--from", "a.md"],
+    ] {
+        let said = nirvana_profiles::cli_guard(&args(words));
+        assert!(
+            said.as_ref().is_some_and(|(code, _)| *code == 2),
+            "{words:?}: {said:?}"
+        );
+    }
+    for words in [
+        &["accept", "pp-3"][..],
+        &["dismiss", "pp-12", "--reason", "no"],
+        &["proposal", "show", "pp-1"],
+        &["proposals", "rollback", "op-4"],
+        &["teach", "judge", "--from", "a.md"],
+    ] {
+        assert_eq!(nirvana_profiles::cli_guard(&args(words)), None, "{words:?}");
+    }
+    // Why the guard is needed: the store's accept takes its lock before it reads the id.
+    let (_home, root) = project("p94-lock");
+    assert!(proposals::accept(&root, "--help").is_err());
+    assert!(
+        Project::at(&root).dir().join("runs").exists(),
+        "the store makes runs/ for its lock"
+    );
+}
+
+#[test]
+fn p94_detect_help_prints_the_usage_and_writes_nothing() {
+    let (_home, root) = project("p94-detect-help");
+    seat_all(&root, "run-1", &builders("b", 5, "build.bounded", &[JUDGE]));
+    for flag in ["--help", "-h"] {
+        let mut out = Vec::new();
+        assert_eq!(
+            cli_to(&root, &args(&["--write", flag]), &mut out, &mut Vec::new()),
+            0
+        );
+        assert!(String::from_utf8(out)
+            .unwrap()
+            .starts_with("usage: herdr profile detect"));
+    }
+    assert!(!proposals::folder(&root).exists() && !cache_path(&root).exists());
 }

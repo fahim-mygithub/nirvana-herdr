@@ -192,6 +192,15 @@ pub fn valid_new_name(name: &str) -> bool {
 
 /// Why `name` may not be a new profile's, for a refusal; `None` when it may.
 pub fn new_name_problem(name: &str) -> Option<String> {
+    // P45b, the lead 2026-11-19: `herdr profile new --help` wrote `.nirvana/profiles/--help.md` (0.87.0, and every
+    // release since plan 33 made `new` in 0.45.0). A new name never starts with `-`, so a flag is never a name; one
+    // already on disk keeps loading by `valid_name`.
+    if name.starts_with('-') {
+        return Some(format!(
+            "{name:?}: a profile's name never starts with `-` (a flag is not a name; `herdr profile --help` prints \
+             the usage)"
+        ));
+    }
     if !valid_name(name) {
         Some(format!(
             "{name:?}: a profile's name is 1 to {NAME_MAX} of [a-z0-9-]"
@@ -1770,7 +1779,58 @@ fn usage_exit() -> ! {
     std::process::exit(2);
 }
 
+/// P45b, the lead 2026-11-19: what `cli` answers before it reads or writes anything. `--help` or `-h` as the verb or
+/// as its first operand (or a `proposals` / `proposal` verb's second) is the usage, exit 0. A proposal id that is not
+/// `pp-<n>` or an op that is not `op-<n>` is refused here: `accept`, `dismiss` and `proposals rollback` take the
+/// proposals' lock first, which made `.nirvana/runs/` and the lock file for `herdr profile accept --help`. A `teach`
+/// profile that starts with `-` is the usage too. `None`: go on.
+pub fn cli_guard(args: &[String]) -> Option<(i32, String)> {
+    let word = |at: usize| args.get(at).map(String::as_str);
+    let help = |at: usize| matches!(word(at), Some("--help" | "-h"));
+    let nested = matches!(word(0), Some("proposals" | "proposal"));
+    if help(0) || help(1) || (nested && help(2)) {
+        return Some((0, USAGE.to_owned()));
+    }
+    let id = match (word(0), word(1)) {
+        (Some("accept" | "dismiss"), Some(id)) => Some(id),
+        (Some("proposal"), Some("show")) => word(2),
+        _ => None,
+    };
+    if let Some(id) = id.filter(|id| !crate::nirvana_profile_proposals::valid_id(id)) {
+        return Some((
+            2,
+            format!("herdr profile: {id:?} is not a proposal id (pp-<n>)\n{USAGE}"),
+        ));
+    }
+    let op_ok = |op: &str| {
+        op.strip_prefix("op-")
+            .is_some_and(|n| !n.is_empty() && n.len() <= 9 && n.bytes().all(|b| b.is_ascii_digit()))
+    };
+    if let (Some("proposals"), Some("rollback"), Some(op)) = (word(0), word(1), word(2)) {
+        if !op_ok(op) {
+            return Some((
+                2,
+                format!("herdr profile proposals rollback: {op:?} is not an op (op-<n>)\n{USAGE}"),
+            ));
+        }
+    }
+    if let (Some("teach"), Some(profile)) = (word(0), word(1)) {
+        if profile.starts_with('-') {
+            return Some((2, USAGE.to_owned()));
+        }
+    }
+    None
+}
+
 pub fn cli(args: &[String]) -> std::io::Result<()> {
+    if let Some((code, text)) = cli_guard(args) {
+        if code == 0 {
+            println!("{text}");
+        } else {
+            eprintln!("{text}");
+        }
+        std::process::exit(code);
+    }
     let root = crate::nirvana_run::Project::from_env().root;
     let code = match (
         args.first().map(String::as_str),

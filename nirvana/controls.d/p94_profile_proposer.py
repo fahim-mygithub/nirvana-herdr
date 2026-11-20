@@ -154,3 +154,26 @@ CONTROLS = (
     Control("p94_given_streams_empty", IDLE, "        .map(|(r, o, _, _)| nirvana_gate::stream_text(project, r, o))",
             '        .map(|(_, _, _, _)| String::from("x"))', T_GIVEN, "rust"),
 )
+
+# The lead 2026-11-19: `herdr profile new --help` wrote `.nirvana/profiles/--help.md` and the proposals lock.
+PROFILES = "src/nirvana_profiles.rs"
+T_DASH = ("nirvana_profile_detect::tests::"
+          "p94_a_new_profile_name_never_starts_with_a_dash_and_one_on_disk_still_loads")
+T_HELP = "nirvana_profile_detect::tests::p94_help_after_any_profile_verb_prints_the_usage"
+T_GUARD = "nirvana_profile_detect::tests::p94_a_bad_proposal_id_or_op_is_refused_before_the_proposals_lock"
+T_DETECT_HELP = "nirvana_profile_detect::tests::p94_detect_help_prints_the_usage_and_writes_nothing"
+CONTROLS = CONTROLS + (
+    # Red: T_DASH's "never starts with `-`" (`--help` passes `valid_name` and is written).
+    Control("p94_new_name_dash_allowed", PROFILES, "    if name.starts_with('-') {\n        return Some(format!(",
+            "    if false {\n        return Some(format!(", T_DASH, "rust"),
+    # Red: T_HELP's first case (`profile --help` is not the usage).
+    Control("p94_help_not_guarded", PROFILES, "    if help(0) || help(1) || (nested && help(2)) {",
+            "    if false && nested {", T_HELP, "rust"),
+    # Red: T_GUARD's `accept pp-x` (it reaches the store, whose lock comes first).
+    Control("p94_bad_id_not_guarded", PROFILES,
+            "    if let Some(id) = id.filter(|id| !crate::nirvana_profile_proposals::valid_id(id)) {",
+            "    if let Some(id) = id.filter(|_| false) {", T_GUARD, "rust"),
+    # Red: T_DETECT_HELP (`--help` is an unknown flag, exit 2).
+    Control("p94_detect_help_gone", DETECT, '            "--help" | "-h" => {', '            "--never-a-flag" => {',
+            T_DETECT_HELP, "rust"),
+)
