@@ -245,6 +245,7 @@ CONTROLS = (
     Control("p95_look_note_says_none_ran", GATE, "stream shows no `herdr look` call (one through a shell \\\n",
             "stream shows no look (one through a shell \\\n", T_FIX_RUNS, "rust"),
     # Finding 5. Red: T_FIX_DASH's `["judge"]` (`--help` and `-x` named).
-    Control("p95_fit_names_a_dash", DETECT, "        .filter(|(name, _)| !name.starts_with('-'))\n", "", T_FIX_DASH,
-            "rust"),
+    # Plan 47 P47b: the detector's profiles carry a built-in flag, a third field.
+    Control("p95_fit_names_a_dash", DETECT, "        .filter(|(name, _, _)| !name.starts_with('-'))\n", "",
+            T_FIX_DASH, "rust"),
 )

@@ -121,6 +121,9 @@ pub struct Loaded {
     pub sha: String,
     /// Plan 45 §5: the profile's own `mcp.json` as read with `bytes`; `None` when it has none.
     pub servers: Option<ServerFile>,
+    /// Plan 47 P47b: read from herdr's binary (`BUILTINS`), since the project has no profile of that name. Its cards
+    /// go into the run folder at seating (`copy_into_run`), never into the project.
+    pub builtin: bool,
 }
 
 /// A profile's `mcp.json` bytes. Its `Debug` names the servers and the size only: the definitions can hold a token.
@@ -740,6 +743,11 @@ pub fn load(root: &Path, name: &str) -> Result<Loaded, String> {
             "--profile {name:?}: a profile's name is 1 to {NAME_MAX} of [a-z0-9-]"
         ));
     }
+    // Plan 47 P47b: a built-in the project does not override is read from the binary; a project file or folder of the
+    // name, broken or not, is the only one (`builtin_here`).
+    if let Some(found) = builtin_here(root, name) {
+        return load_builtin(found);
+    }
     // Plan 34 §2.1: the run copy is `profile.md`'s bytes alone; the cards are read live, like lessons.
     let file = resolve(root, name)?;
     let bytes = std::fs::read(&file).map_err(|err| match err.kind() {
@@ -775,6 +783,26 @@ pub fn load(root: &Path, name: &str) -> Result<Loaded, String> {
         sha: seated_sha(&bytes, servers.as_ref().map(|found| found.pin.as_slice())),
         bytes,
         servers,
+        builtin: false,
+    })
+}
+
+/// A built-in as `load` reads a project file: parsed by the same parser, its sha of its bytes alone (it holds no
+/// servers), so the `seated` line's sha is the embedded text's.
+fn load_builtin(found: &Builtin) -> Result<Loaded, String> {
+    let profile = parse(&builtin_shown(found.name), found.name, found.profile).map_err(|problems| {
+        format!(
+            "herdr's built-in profile {} is refused by its own parser:\n{}",
+            found.name,
+            problems.join("\n")
+        )
+    })?;
+    Ok(Loaded {
+        profile,
+        bytes: found.profile.as_bytes().to_vec(),
+        sha: sha256_hex(found.profile.as_bytes()),
+        servers: None,
+        builtin: true,
     })
 }
 
@@ -839,6 +867,13 @@ pub fn copy_into_run(run_dir: &Path, loaded: &Loaded) -> Result<PathBuf, String>
     let dir = file.parent().unwrap_or(run_dir);
     std::fs::create_dir_all(dir)
         .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
+    // Plan 47 P47b: a built-in's cards are offered by path, so they are on disk for the worker: in the run, beside the
+    // copy of the same sha, written again when one went (`builtin_cards_into` writes only what differs).
+    if loaded.builtin {
+        if let Some(found) = builtin(name) {
+            builtin_cards_into(&builtin_cards_dir(run_dir, name, &loaded.sha), found)?;
+        }
+    }
     if let Some(servers) = &loaded.servers {
         let to = servers_copy_path(run_dir, name, &loaded.sha);
         if std::fs::read(&to).ok().as_deref() != Some(servers.bytes.as_slice()) {
@@ -1227,7 +1262,205 @@ pub fn skills_line(skills: &[String]) -> String {
     )
 }
 
-/// Every file in the project's profiles folder, by name, with what it parsed to.
+// ---- plan 47 P47b: the profiles herdr carries in its binary ----
+//
+// The owner, 2026-11-20 (plan 47 L2): "I want every project to have the a default Researcher agent,called the scholar
+// agent". Ruling R1: "Built in is fine". So `scholar` is text in the binary, as `seats.toml`'s default is, never a
+// file written into a project: it updates with herdr and adds no untracked file to a repo. The text is
+// `nirvana/profiles/<name>/` in herdr's own folder form (`profile.md`, `knowledge/<slug>.md`), so the one file is
+// both what the binary carries and what `herdr profile new <name> --from <name>` writes.
+//
+// - **The project's own wins.** A `<name>.md` or `<name>/` in the project's profiles folder, broken or not, is the only
+//   `<name>` there (`builtin_here`): a broken one is shown broken, and the built-in never takes over in silence.
+// - **Where it is seen.** `listed` (the CLI's list, show and check, the digest, the Preload group, the Profiles panel,
+//   the detector and the fit line) and `load` (seat run, seat pick, the detector's brief). `list`, `resolve`, `folder`
+//   and `knowledge_dir` stay the project's files only, so every writer that walks them (card ops, adoption, teaching,
+//   proposals, the Learning panel) finds no file of a built-in and writes none.
+// - **Its cards are known by construction** and are offered from the run folder (`builtin_cards_dir`), never from the
+//   project's knowledge store, which they never enter: no counter, no ledger, no card op.
+// - **Upgrades.** The text can change between herdr versions. A journal line seated under an older text keeps its sha
+//   and its run copy; nothing compares it with today's. `profile show` and `profile list` name the herdr version.
+
+/// A profile herdr carries: its `profile.md` and its cards, `(slug, text)`, in slug order.
+#[derive(Debug)]
+pub struct Builtin {
+    pub name: &'static str,
+    pub profile: &'static str,
+    pub cards: &'static [(&'static str, &'static str)],
+}
+
+/// Plan 47 P47b: the built-ins. The text is the P47b draft of 2026-11-20 with ruling R5 ("Allow clip downloads and
+/// browser screenshots") applied; `p47b_the_built_in_text_passes_profile_check` holds it to the parsers.
+pub const BUILTINS: [Builtin; 1] = [Builtin {
+    name: "scholar",
+    profile: include_str!("../nirvana/profiles/scholar/profile.md"),
+    cards: &[
+        (
+            "benchmark",
+            include_str!("../nirvana/profiles/scholar/knowledge/benchmark.md"),
+        ),
+        (
+            "breadth-then-cluster",
+            include_str!("../nirvana/profiles/scholar/knowledge/breadth-then-cluster.md"),
+        ),
+        (
+            "competitive-analysis",
+            include_str!("../nirvana/profiles/scholar/knowledge/competitive-analysis.md"),
+        ),
+        (
+            "decision-matrix",
+            include_str!("../nirvana/profiles/scholar/knowledge/decision-matrix.md"),
+        ),
+        (
+            "fetch-ladder",
+            include_str!("../nirvana/profiles/scholar/knowledge/fetch-ladder.md"),
+        ),
+        (
+            "hypothesis-elimination",
+            include_str!("../nirvana/profiles/scholar/knowledge/hypothesis-elimination.md"),
+        ),
+        (
+            "source-of-truth",
+            include_str!("../nirvana/profiles/scholar/knowledge/source-of-truth.md"),
+        ),
+        (
+            "synthesis",
+            include_str!("../nirvana/profiles/scholar/knowledge/synthesis.md"),
+        ),
+        (
+            "trajectory",
+            include_str!("../nirvana/profiles/scholar/knowledge/trajectory.md"),
+        ),
+    ],
+}];
+
+/// The built-in of this name, whether or not a project overrides it.
+pub fn builtin(name: &str) -> Option<&'static Builtin> {
+    BUILTINS.iter().find(|found| found.name == name)
+}
+
+/// Whether the project has a profile `name` of its own: a `<name>.md` or a `<name>/` in its profiles folder, whether
+/// or not it parses.
+pub fn in_project(root: &Path, name: &str) -> bool {
+    path(root, name).exists() || folder_of(root, name).exists()
+}
+
+/// The built-in `name` when the project has none of its own: the one a seating, a list or a show takes.
+pub fn builtin_here(root: &Path, name: &str) -> Option<&'static Builtin> {
+    builtin(name).filter(|_| !in_project(root, name))
+}
+
+/// The command that writes a built-in's text and cards into the project, as its own folder profile.
+pub fn copy_command(name: &str) -> String {
+    format!("herdr profile new {name} --from {name}")
+}
+
+/// Why `what` cannot be done to the built-in `name`, with the one step that makes the project's copy.
+pub fn builtin_refusal(name: &str, what: &str) -> String {
+    format!(
+        "profile {name} is built into herdr and has no file in this project, so {what}; `{}` writes the project's own \
+         copy, which then wins",
+        copy_command(name)
+    )
+}
+
+/// How a built-in's file is named where a path is printed: never a path on disk.
+pub fn builtin_shown(name: &str) -> PathBuf {
+    PathBuf::from(format!("(herdr built-in)/{name}/{PROFILE_FILE}"))
+}
+
+/// The first line `herdr profile show` prints for a built-in: herdr's, which version, and how to make the copy.
+pub fn builtin_head(name: &str, sha: &str) -> String {
+    format!(
+        "{name} is built into herdr (Nirvana-Herdr {}) · sha256 {sha} · no file in this project; `{}` writes the \
+         project's own copy, which then wins",
+        crate::nirvana::VERSION,
+        copy_command(name)
+    )
+}
+
+/// Where the run keeps a built-in's cards for the orders seated with it: `<run>/profiles/<name>-<sha16>/knowledge/`,
+/// beside the profile copy of the same sha.
+pub fn builtin_cards_dir(run_dir: &Path, name: &str, sha: &str) -> PathBuf {
+    copy_path(run_dir, name, sha)
+        .with_extension("")
+        .join(KNOWLEDGE)
+}
+
+/// Writes a built-in's cards into `dir`, each only when its bytes differ; the files in slug order.
+pub fn builtin_cards_into(dir: &Path, found: &Builtin) -> Result<Vec<PathBuf>, String> {
+    std::fs::create_dir_all(dir).map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
+    let mut files = Vec::new();
+    for (slug, text) in found.cards {
+        let file = dir.join(format!("{slug}.md"));
+        if std::fs::read(&file).ok().as_deref() != Some(text.as_bytes()) {
+            nirvana_seat::write_atomic(&file, text.as_bytes())
+                .map_err(|err| format!("cannot write {}: {err}", file.display()))?;
+        }
+        files.push(file);
+    }
+    Ok(files)
+}
+
+/// Every refusal of a built-in's cards by the card parser, each named by its place in the shipped text.
+pub fn builtin_card_problems(found: &Builtin) -> Vec<String> {
+    found
+        .cards
+        .iter()
+        .filter_map(|(slug, text)| {
+            let shown = PathBuf::from(format!(
+                "(herdr built-in)/{}/{KNOWLEDGE}/{slug}.md",
+                found.name
+            ));
+            crate::nirvana_knowledge::parse(&shown, slug, text).err()
+        })
+        .flatten()
+        .collect()
+}
+
+/// One profile as `listed` gives it.
+#[derive(Debug, Clone)]
+pub struct Listed {
+    pub name: String,
+    /// The project's file, or `builtin_shown` for a built-in.
+    pub file: PathBuf,
+    pub parsed: Result<Profile, Vec<String>>,
+    pub builtin: bool,
+}
+
+/// Plan 47 P47b: the profiles an order here may take, by name: the project's files (`list`), and each built-in the
+/// project does not override.
+pub fn listed(root: &Path) -> Vec<Listed> {
+    let mut all: Vec<Listed> = list(root)
+        .into_iter()
+        .map(|(name, file, parsed)| Listed {
+            name,
+            file,
+            parsed,
+            builtin: false,
+        })
+        .collect();
+    for found in &BUILTINS {
+        if !in_project(root, found.name) {
+            all.push(Listed {
+                name: found.name.to_owned(),
+                file: builtin_shown(found.name),
+                parsed: parse(&builtin_shown(found.name), found.name, found.profile),
+                builtin: true,
+            });
+        }
+    }
+    all.sort_by(|a, b| a.name.cmp(&b.name));
+    all
+}
+
+/// The word a built-in's line carries in `profile list` and the digest.
+pub fn builtin_word() -> String {
+    format!("built into herdr {}", crate::nirvana::VERSION)
+}
+
+/// Every file in the project's profiles folder, by name, with what it parsed to. The project's only: a built-in is in
+/// `listed`, never here, so a writer that walks this list never finds a file of one.
 pub fn list(root: &Path) -> Vec<(String, PathBuf, Result<Profile, Vec<String>>)> {
     let Ok(entries) = std::fs::read_dir(folder(root)) else {
         return Vec::new();
@@ -1292,17 +1525,20 @@ pub fn summary(profile: &Profile) -> String {
 
 /// §2.5: the session digest's profile lines. At most `DIGEST_PROFILES` profile lines; more ends with a count.
 pub fn digest_lines(root: &Path) -> Vec<String> {
-    let profiles = list(root);
+    // Plan 47 P47b: the built-ins too, so every project's session hears of the scholar.
+    let profiles = listed(root);
     if profiles.is_empty() {
         return Vec::new();
     }
     let mut lines = vec![
         "Profiles here (an order that fits one is seated with `--profile <name>`):".to_owned(),
     ];
-    for (name, _, parsed) in profiles.iter().take(DIGEST_PROFILES) {
-        lines.push(match parsed {
-            Ok(profile) => format!("- {name}: {}", summary(profile)),
-            Err(_) => format!("- {name}: refused; `herdr profile check {name}`"),
+    for found in profiles.iter().take(DIGEST_PROFILES) {
+        let name = &found.name;
+        let built = if found.builtin { " (built into herdr)" } else { "" };
+        lines.push(match &found.parsed {
+            Ok(profile) => format!("- {name}{built}: {}", summary(profile)),
+            Err(_) => format!("- {name}{built}: refused; `herdr profile check {name}`"),
         });
     }
     if profiles.len() > DIGEST_PROFILES {
@@ -1384,15 +1620,36 @@ pub fn template_text(name: &str) -> Option<&'static str> {
     }
 }
 
-/// `herdr profile new <name> --from <template>`: a template herdr ships, never over a file already there.
+/// `herdr profile new <name> --from <template>`: a template herdr ships, never over a file already there. Plan 47
+/// P47b: `--from <a built-in>` writes that built-in's text and cards as a folder profile (`new_profile_builtin`).
 pub fn new_profile_from(root: &Path, name: &str, from: &str) -> Result<PathBuf, String> {
+    if let Some(found) = builtin(from) {
+        return new_profile_builtin(root, name, found);
+    }
     let text = template_text(from).ok_or_else(|| {
         format!(
-            "no template {from:?}; the templates: {}",
-            TEMPLATES.join(", ")
+            "no template {from:?}; the templates: {}; the built-ins: {}",
+            TEMPLATES.join(", "),
+            BUILTINS.map(|found| found.name).join(", ")
         )
     })?;
     write_new(root, name, text)
+}
+
+/// Plan 47 P47b, the project's own copy of a built-in: `<name>/profile.md` and `knowledge/<slug>.md`, byte for byte
+/// the binary's, the cards adopted so they stay offered. Written only by this explicit act (the CLI's `new --from`, the
+/// Profiles panel's second `e`), through `new_profile_shape`'s own writer: never over a profile already there, every
+/// file parsed before any is written, under the proposals' lock. From then on the project's copy is the only `<name>`.
+pub fn new_profile_builtin(root: &Path, name: &str, found: &Builtin) -> Result<PathBuf, String> {
+    let starter = Shape {
+        profile: found.profile.to_owned(),
+        cards: found
+            .cards
+            .iter()
+            .map(|(slug, text)| (*slug, (*text).to_owned()))
+            .collect(),
+    };
+    write_folder(root, name, &starter)
 }
 
 /// Plan 45 §5: a shape's starter, the profile text and its starter cards `(slug, text)`.
@@ -1569,6 +1826,12 @@ pub fn new_profile_shape(root: &Path, name: &str, shape_name: &str) -> Result<Pa
             SHAPES.join(", ")
         )
     })?;
+    write_folder(root, name, &found)
+}
+
+/// `new_profile_shape`'s writes, which plan 47 P47b's `new_profile_builtin` shares: `<name>/profile.md` and the cards,
+/// adopted, never over a profile already there.
+fn write_folder(root: &Path, name: &str, found: &Shape) -> Result<PathBuf, String> {
     if let Some(why) = new_name_problem(name) {
         return Err(why);
     }
@@ -1741,14 +2004,122 @@ pub fn check_one(
     }
     // Plan 34 §2.2: every card of a folder profile, one line per problem with its file and line.
     problems.extend(crate::nirvana_knowledge::check_problems(root, name));
+    // Plan 47 P47b: a built-in's cards are in the binary, not in a knowledge folder; the same parser reads them.
+    if let Some(found) = builtin_here(root, name) {
+        problems.extend(builtin_card_problems(found));
+    }
     problems
 }
 
-const USAGE: &str = "usage: herdr profile list
+/// What `herdr profile check` prints after `ok`: a folder profile's card count, or a built-in's word and its cards.
+pub fn check_note(root: &Path, name: &str) -> String {
+    match builtin_here(root, name) {
+        Some(found) => format!(" ({}, {} cards)", builtin_word(), found.cards.len()),
+        None => crate::nirvana_knowledge::count_note(root, name),
+    }
+}
+
+/// `herdr profile list [--json]`: each profile here, a built-in marked with its word (plan 47 P47b). With `--json`, one
+/// array of `{name, file, builtin, ok, description, summary, class}`; `file` is null for a built-in, which has none.
+pub fn list_to(root: &Path, json: bool, out: &mut dyn std::io::Write) -> i32 {
+    let profiles = listed(root);
+    if json {
+        let rows: Vec<serde_json::Value> = profiles
+            .iter()
+            .map(|found| {
+                let profile = found.parsed.as_ref().ok();
+                serde_json::json!({
+                    "name": found.name,
+                    "file": (!found.builtin).then(|| found.file.display().to_string()),
+                    "builtin": found.builtin,
+                    "ok": profile.is_some(),
+                    "description": profile.map(|profile| profile.description.clone()),
+                    "summary": profile.map(summary),
+                    "class": profile.and_then(|profile| profile.class.clone()),
+                })
+            })
+            .collect();
+        let _ = writeln!(out, "{}", serde_json::Value::Array(rows));
+        return 0;
+    }
+    if !profiles.iter().any(|found| !found.builtin) {
+        let _ = writeln!(
+            out,
+            "no profiles of this project's own in {}; `herdr profile new <name>` makes one",
+            folder(root).display()
+        );
+    }
+    for found in &profiles {
+        let name = &found.name;
+        let built = if found.builtin {
+            format!(" [{}]", builtin_word())
+        } else {
+            String::new()
+        };
+        let _ = match &found.parsed {
+            Ok(profile) => writeln!(out, "{name}: {}{built}", summary(profile)),
+            Err(_) => writeln!(out, "{name}: refused; `herdr profile check {name}`{built}"),
+        };
+    }
+    0
+}
+
+/// `herdr profile show <name>`: the file's path and sha, then its text. A built-in's first line says it is herdr's,
+/// which version, and how to make the project's copy (plan 47 P47b); its cards are named on the next.
+pub fn show_to(
+    root: &Path,
+    name: &str,
+    out: &mut dyn std::io::Write,
+    err: &mut dyn std::io::Write,
+) -> i32 {
+    let loaded = match load(root, name) {
+        Ok(loaded) => loaded,
+        Err(why) => {
+            let _ = writeln!(err, "herdr profile show: {why}");
+            return 1;
+        }
+    };
+    if let Some(found) = builtin(name).filter(|_| loaded.builtin) {
+        let _ = writeln!(out, "{}", builtin_head(name, &loaded.sha));
+        let _ = writeln!(
+            out,
+            "cards ({}, offered to an order seated with it, from its run folder): {}",
+            found.cards.len(),
+            found
+                .cards
+                .iter()
+                .map(|(slug, _)| *slug)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    } else {
+        let shown = resolve(root, name).unwrap_or_else(|_| path(root, name));
+        let _ = writeln!(out, "{} · sha256 {}", shown.display(), loaded.sha);
+    }
+    // Plan 45: the names only; a definition can hold a token.
+    if let Some(servers) = &loaded.servers {
+        let _ = writeln!(
+            out,
+            "own servers (mcp.json, in the sha above): {}",
+            servers.names.join(", ")
+        );
+        // P45c review F3: a note, not a refusal; names only.
+        for note in &servers.notes {
+            let _ = writeln!(out, "{note}");
+        }
+    }
+    let _ = write!(out, "{}", String::from_utf8_lossy(&loaded.bytes));
+    0
+}
+
+const USAGE: &str = "usage: herdr profile list [--json]
        herdr profile show <name>
        herdr profile new <name>          writes .nirvana/profiles/<name>.md from the template
        herdr profile new <name> --from <template>
                                          writes it from a template herdr ships: web-researcher
+       herdr profile new scholar --from scholar
+                                         writes the built-in scholar into .nirvana/profiles/scholar/, its text and
+                                         cards; the project's copy then wins over the built-in
        herdr profile new <name> --shape <reviewer|operator|builder|researcher>
                                          writes the folder form, profile.md and starter cards, adopted
        herdr profile check [<name>]      prints every refusal, a folder profile's cards too; exit 1 when there is one
@@ -1768,6 +2139,7 @@ const USAGE: &str = "usage: herdr profile list
        herdr profile detect [--json] [--write] [--run <id>]
                                          what the detector finds in the orders, with no model, and would propose
 A profile is used by `herdr seat run <seat> --profile <name> ...` and `herdr seat pick --profile <name> ...`.
+Every project has the built-in scholar (a researcher), unless it has a scholar of its own.
 In profile.md: `skills: [a, b]` names the project skills (.claude/skills) its worker uses; `skills: []` names
 none, and without the key it uses all. A folder profile's mcp.json, in .mcp.json's shape, holds its own servers:
 every order seated with it gets them, no needs line, except a teach order and a lesson review, which get none.
@@ -1890,45 +2262,9 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         args.first().map(String::as_str),
         args.get(1..).unwrap_or(&[]),
     ) {
-        (Some("list"), []) => {
-            let profiles = list(&root);
-            if profiles.is_empty() {
-                println!(
-                    "no profiles in {}; `herdr profile new <name>` makes one",
-                    folder(&root).display()
-                );
-            }
-            for (name, _, parsed) in &profiles {
-                match parsed {
-                    Ok(profile) => println!("{name}: {}", summary(profile)),
-                    Err(_) => println!("{name}: refused; `herdr profile check {name}`"),
-                }
-            }
-            0
-        }
-        (Some("show"), [name]) => match load(&root, name) {
-            Ok(loaded) => {
-                let shown = resolve(&root, name).unwrap_or_else(|_| path(&root, name));
-                println!("{} · sha256 {}", shown.display(), loaded.sha);
-                // Plan 45: the names only; a definition can hold a token.
-                if let Some(servers) = &loaded.servers {
-                    println!(
-                        "own servers (mcp.json, in the sha above): {}",
-                        servers.names.join(", ")
-                    );
-                    // P45c review F3: a note, not a refusal; names only.
-                    for note in &servers.notes {
-                        println!("{note}");
-                    }
-                }
-                print!("{}", String::from_utf8_lossy(&loaded.bytes));
-                0
-            }
-            Err(why) => {
-                eprintln!("herdr profile show: {why}");
-                1
-            }
-        },
+        (Some("list"), []) => list_to(&root, false, &mut std::io::stdout()),
+        (Some("list"), [flag]) if flag == "--json" => list_to(&root, true, &mut std::io::stdout()),
+        (Some("show"), [name]) => show_to(&root, name, &mut std::io::stdout(), &mut std::io::stderr()),
         (Some("new"), [name]) => match new_profile(&root, name) {
             Ok(file) => {
                 println!("{}", file.display());
@@ -1973,6 +2309,11 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             }
         }
         (Some("check"), [name, flag]) if flag == "--adopt" => {
+            // Plan 47 P47b: a built-in's cards are herdr's own and known as shipped; there is nothing to adopt.
+            if builtin_here(&root, name).is_some() {
+                println!("{name}: built into herdr; its cards are known as shipped, nothing to adopt");
+                return cli(&["check".to_owned(), name.clone()]);
+            }
             // Plan 34 P34a review B1: the owner's one step for cards written by hand; then the check, as without it.
             match crate::nirvana_knowledge::adopt(&root, name) {
                 Ok(adopted) => println!(
@@ -2003,9 +2344,10 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
             if let Err(err) = ensure_ignore_for_servers(&root) {
                 println!("cannot write {}: {err}", folder(&root).join(IGNORE_FILE).display());
             }
-            let chosen: Vec<_> = list(&root)
+            // Plan 47 P47b: a built-in is checked as a project profile is, by the same functions.
+            let chosen: Vec<_> = listed(&root)
                 .into_iter()
-                .filter(|(name, _, _)| names.first().is_none_or(|wanted| wanted == name))
+                .filter(|found| names.first().is_none_or(|wanted| *wanted == found.name))
                 .collect();
             if chosen.is_empty() {
                 println!(
@@ -2018,13 +2360,13 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
                 );
             }
             let mut refused = 0;
-            for (name, file, parsed) in &chosen {
+            for Listed {
+                name, file, parsed, ..
+            } in &chosen
+            {
                 let problems = check_one(&root, name, file, parsed, &table, &servers);
                 if problems.is_empty() {
-                    println!(
-                        "{name}: ok{}",
-                        crate::nirvana_knowledge::count_note(&root, name)
-                    );
+                    println!("{name}: ok{}", check_note(&root, name));
                 } else {
                     refused += 1;
                     for problem in problems {

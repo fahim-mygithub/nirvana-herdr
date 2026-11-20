@@ -887,29 +887,31 @@ pub fn fits(profile: &nirvana_profiles::Profile, class: &str, needs: &[String]) 
 pub fn fitting(root: &Path, class: &str, needs: &[String]) -> Vec<String> {
     profiles_here(root)
         .into_iter()
-        .filter(|(name, _)| !name.starts_with('-'))
-        .filter(|(_, parsed)| {
+        .filter(|(name, _, _)| !name.starts_with('-'))
+        .filter(|(_, parsed, _)| {
             parsed
                 .as_ref()
                 .is_some_and(|profile| fits(profile, class, needs))
         })
-        .map(|(name, _)| name)
+        .map(|(name, _, _)| name)
         .collect()
 }
 
-type Profiles = Vec<(String, Option<nirvana_profiles::Profile>)>;
+/// Each profile by name, what it parsed to, and whether it is a built-in (plan 47 P47b), which the project cannot
+/// edit: it is counted and fits as any profile does, and is never an `Unused` finding or a patch's target.
+type Profiles = Vec<(String, Option<nirvana_profiles::Profile>, bool)>;
 
 fn profiles_here(root: &Path) -> Profiles {
-    nirvana_profiles::list(root)
+    nirvana_profiles::listed(root)
         .into_iter()
-        .map(|(name, _, parsed)| (name, parsed.ok()))
+        .map(|found| (found.name, found.parsed.ok(), found.builtin))
         .collect()
 }
 
 fn usage_of(seen: &[Seen], profiles: &Profiles) -> Vec<Use> {
     profiles
         .iter()
-        .map(|(name, parsed)| {
+        .map(|(name, parsed, _)| {
             let carried = seen
                 .iter()
                 .filter(|order| order.profile.as_deref() == Some(name.as_str()))
@@ -1014,7 +1016,7 @@ pub fn detect_with(root: &Path, limits: &Limits) -> Detection {
     for ((class, needs), orders) in groups {
         let fitted = profiles
             .iter()
-            .filter_map(|(_, parsed)| parsed.as_ref())
+            .filter_map(|(_, parsed, _)| parsed.as_ref())
             .any(|profile| fits(profile, &class, &needs));
         if orders.len() >= MIN_ORDERS && !fitted && !class.is_empty() {
             findings.push(Finding::Unprofiled {
@@ -1030,7 +1032,11 @@ pub fn detect_with(root: &Path, limits: &Limits) -> Detection {
             });
         }
     }
-    for (name, parsed) in &profiles {
+    for (name, parsed, builtin) in &profiles {
+        // Plan 47 P47b: the project cannot act on a built-in, so its use is a count only, never a finding.
+        if *builtin {
+            continue;
+        }
         let Some(profile) = parsed else { continue };
         let Some(used) = usage.iter().find(|used| &used.profile == name) else {
             continue;
@@ -1249,11 +1255,19 @@ pub fn plan(root: &Path, detection: &Detection, run: &str) -> Vec<Planned> {
             });
             continue;
         }
+        // Plan 47 P47b: a built-in has no file a patch could change; the store would refuse one, so none is planned.
+        if kind == Kind::Patch
+            && profiles
+                .iter()
+                .any(|(seen, _, builtin)| *builtin && *seen == name)
+        {
+            continue;
+        }
         let dismissed = dismissed_paragraphs(root, kind, &name);
         let current = profiles
             .iter()
-            .find(|(seen, _)| *seen == name)
-            .map(|(_, parsed)| parsed.clone());
+            .find(|(seen, _, _)| *seen == name)
+            .map(|(_, parsed, _)| parsed.clone());
         let body_now = current
             .clone()
             .flatten()

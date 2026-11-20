@@ -825,7 +825,26 @@ fn p33_an_order_naming_a_profile_is_seated_only_with_that_profile() {
 fn p33_the_digest_lists_each_profile_in_at_most_ten_lines() {
     let dir = std::env::temp_dir().join(format!("p33-digest-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(digest_lines(&dir).is_empty(), "no profiles, no lines");
+    // Plan 47 P47b: no profile of the project's own, and the built-in scholar is still there.
+    let scholar = format!(
+        "- scholar (built into herdr): {}",
+        summary(
+            &parse(
+                &builtin_shown("scholar"),
+                "scholar",
+                builtin("scholar").unwrap().profile
+            )
+            .unwrap()
+        )
+    );
+    assert_eq!(
+        digest_lines(&dir),
+        [
+            "Profiles here (an order that fits one is seated with `--profile <name>`):".to_owned(),
+            scholar.clone()
+        ],
+        "no profiles of its own, the built-in only"
+    );
     std::fs::create_dir_all(folder(&dir)).unwrap();
     std::fs::write(
         path(&dir, "slicer"),
@@ -841,11 +860,13 @@ fn p33_the_digest_lists_each_profile_in_at_most_ten_lines() {
     assert_eq!(
         digest_lines(&dir),
         [
-            "Profiles here (an order that fits one is seated with `--profile <name>`):",
-            "- broken: refused; `herdr profile check broken`",
+            "Profiles here (an order that fits one is seated with `--profile <name>`):".to_owned(),
+            "- broken: refused; `herdr profile check broken`".to_owned(),
+            scholar,
             "- slicer: Slices and sends prints in the beta Bambu Studio through its server. (model claude-sonnet-5-5; \
-             needs bambu-studio-beta)",
-            "- sweeper: Sweeps docs. (family google)",
+             needs bambu-studio-beta)"
+                .to_owned(),
+            "- sweeper: Sweeps docs. (family google)".to_owned(),
         ]
     );
     for n in 0..9 {
@@ -853,7 +874,8 @@ fn p33_the_digest_lists_each_profile_in_at_most_ten_lines() {
     }
     let lines = digest_lines(&dir);
     assert_eq!(lines.len(), 1 + DIGEST_PROFILES + 1, "{lines:?}");
-    assert_eq!(lines.last().unwrap(), "- and 2 more: `herdr profile list`");
+    // Twelve of the project's own and the built-in: ten lines, then the three more.
+    assert_eq!(lines.last().unwrap(), "- and 3 more: `herdr profile list`");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1809,5 +1831,776 @@ fn p92_the_ignore_is_written_only_for_servers_and_a_negation_uncovers() {
     std::fs::write(&ignore, "").unwrap();
     assert!(ignore_covers(&project.root));
     assert!(ignored());
+    nirvana_seat::set_test_world(None);
+}
+
+// ---- plan 47 P47b: the built-in scholar ----
+
+fn scholar() -> &'static Builtin {
+    builtin("scholar").expect("scholar is built in")
+}
+
+fn scholar_body() -> String {
+    parse(&builtin_shown("scholar"), "scholar", scholar().profile)
+        .expect("parses")
+        .body
+}
+
+/// A folder with no `.nirvana` at all and no test home: the built-in needs no file, and nothing here may write one.
+fn bare_folder(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "p47b-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Every file under `root`, `/`-separated and sorted, but those under `.nirvana/runs/` and `.nirvana/orders/`: herdr's
+/// run state for this machine, which the project's `.nirvana/.gitignore` ignores.
+fn project_files(root: &Path) -> Vec<String> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let rel = path
+                .strip_prefix(root)
+                .unwrap()
+                .display()
+                .to_string()
+                .replace('\\', "/");
+            if rel == ".nirvana/runs" || rel == ".nirvana/orders" {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else {
+                out.push(rel);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+/// The card paths a scholar order's brief names, from the worker's folder.
+fn card_paths(sha: &str) -> Vec<String> {
+    scholar()
+        .cards
+        .iter()
+        .map(|(slug, _)| {
+            format!(
+                ".nirvana/runs/r1/profiles/scholar-{}/knowledge/{slug}.md",
+                &sha[..16]
+            )
+        })
+        .collect()
+}
+
+/// Item 1: the shipped text passes herdr's own parsers and `profile check`'s functions, as a project profile would.
+#[test]
+fn p47b_the_built_in_text_passes_profile_check() {
+    let (_home, project) = project("p47b-check");
+    let found = scholar();
+    let entry = listed(&project.root)
+        .into_iter()
+        .find(|found| found.name == "scholar")
+        .expect("listed");
+    assert!(entry.builtin);
+    let table = nirvana_seat::table_for(&project.root);
+    assert!(table.is_ok(), "{table:?}");
+    let servers = crate::nirvana_gui_tools::project_servers(&project.root).unwrap_or_default();
+    assert_eq!(
+        check_one(
+            &project.root,
+            "scholar",
+            &entry.file,
+            &entry.parsed,
+            &table,
+            &servers
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(builtin_card_problems(found), Vec::<String>::new());
+    assert_eq!(
+        check_note(&project.root, "scholar"),
+        format!(" ({}, 9 cards)", builtin_word())
+    );
+    let profile = entry.parsed.expect("the profile parser takes it");
+    assert_eq!(profile.class.as_deref(), Some("research.web"));
+    assert!(
+        profile.model.is_none()
+            && profile.family.is_none()
+            && profile.effort.is_none()
+            && profile.needs.is_empty()
+            && profile.skills.is_none()
+            && profile.disallowed_tools.is_empty(),
+        "no seat pin and no tool rule: {profile:?}"
+    );
+    assert!(profile.body.chars().count() <= BODY_MAX);
+    let slugs: Vec<&str> = found.cards.iter().map(|(slug, _)| *slug).collect();
+    assert_eq!(
+        slugs,
+        [
+            "benchmark",
+            "breadth-then-cluster",
+            "competitive-analysis",
+            "decision-matrix",
+            "fetch-ladder",
+            "hypothesis-elimination",
+            "source-of-truth",
+            "synthesis",
+            "trajectory"
+        ]
+    );
+    assert!(slugs.len() <= crate::nirvana_lessons::CARDS_OFFERED);
+    // What the binary carries is the shipped folder, byte for byte.
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("nirvana/profiles/scholar");
+    assert_eq!(
+        std::fs::read(shipped.join(PROFILE_FILE)).unwrap(),
+        found.profile.as_bytes()
+    );
+    for (slug, text) in found.cards {
+        assert_eq!(
+            std::fs::read(shipped.join(KNOWLEDGE).join(format!("{slug}.md"))).unwrap(),
+            text.as_bytes(),
+            "{slug}"
+        );
+    }
+    nirvana_seat::set_test_world(None);
+}
+
+/// Item 2, ruling R5: a worker may download a clip or take screenshots to see frames, and still says which it saw.
+#[test]
+fn p47b_the_text_lets_a_worker_see_frames_and_still_say_which() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let body = flat(&scholar_body());
+    for said in [
+        "you may download the clip with the download tool your session has, such as yt-dlp, or take browser screenshots",
+        "Name each frame you opened and what is in it.",
+        "A video read only by transcript: say you saw no frames.",
+    ] {
+        assert!(body.contains(said), "{said:?} in the body:\n{body}");
+    }
+    let ladder = flat(
+        scholar()
+            .cards
+            .iter()
+            .find(|(slug, _)| *slug == "fetch-ladder")
+            .expect("the ladder")
+            .1,
+    );
+    for said in [
+        "A transcript comes from the browser's \"Show transcript\" panel",
+        "with the download tool your session has, such as yt-dlp; agy reads a local clip's frames natively with its \
+         file read.",
+        "Or take browser screenshots of the moments you need.",
+        "Name each frame you opened and what is in it; if you read only the transcript, say you saw no frames.",
+    ] {
+        assert!(ladder.contains(said), "{said:?} in the ladder:\n{ladder}");
+    }
+    assert!(
+        !ladder.contains("do not retry it"),
+        "the clip download is allowed now"
+    );
+}
+
+/// Item 3: a project with no `.nirvana` folder at all has the scholar in every reader, and nothing is written.
+#[test]
+fn p47b_a_project_with_no_nirvana_folder_has_the_scholar_everywhere() {
+    let dir = bare_folder("none");
+    let sha = sha256_hex(scholar().profile.as_bytes());
+    // `listed`: the CLI's list, show and check, the Preload group, the Profiles panel and the detector read it.
+    let found: Vec<(String, bool, bool)> = listed(&dir)
+        .into_iter()
+        .map(|found| (found.name, found.builtin, found.parsed.is_ok()))
+        .collect();
+    assert_eq!(found, [("scholar".to_owned(), true, true)]);
+    assert!(list(&dir).is_empty(), "no file of the project's own");
+    // `load`: seat run and seat pick.
+    let loaded = load(&dir, "scholar").expect("loads with no file");
+    assert!(loaded.builtin && loaded.servers.is_none());
+    assert_eq!(loaded.sha, sha);
+    assert_eq!(loaded.bytes, scholar().profile.as_bytes());
+    // The session digest.
+    let digest = digest_lines(&dir);
+    assert_eq!(digest.len(), 2, "{digest:?}");
+    assert!(
+        digest[1].starts_with("- scholar (built into herdr): Researches a question"),
+        "{digest:?}"
+    );
+    // `fitting()` and the 0.90.0 fit line.
+    let fit = crate::nirvana_profile_detect::fitting(&dir, "research.web", &[]);
+    assert_eq!(fit, ["scholar"]);
+    assert_eq!(
+        nirvana_worker::fit_line(&fit, "research.web").as_deref(),
+        Some(
+            "herdr: profile scholar fits this order (class research.web); pass --profile scholar to seat with it"
+        )
+    );
+    assert!(crate::nirvana_profile_detect::fitting(&dir, "build.bounded", &[]).is_empty());
+    // `profile list` and `profile show`, as the CLI prints them.
+    let mut out = Vec::new();
+    assert_eq!(list_to(&dir, false, &mut out), 0);
+    let listed_text = String::from_utf8(out).unwrap();
+    println!("herdr profile list:\n{listed_text}");
+    assert!(
+        listed_text
+            .lines()
+            .any(|line| line.starts_with("scholar: Researches a question")),
+        "{listed_text}"
+    );
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(
+        show_to(&dir, "scholar", &mut out, &mut err),
+        0,
+        "{}",
+        String::from_utf8_lossy(&err)
+    );
+    let shown = String::from_utf8(out).unwrap();
+    println!("herdr profile show scholar:\n{shown}");
+    assert!(shown.ends_with(scholar().profile), "{shown}");
+    // Nothing was written: the folder is as empty as it was.
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        0,
+        "no .nirvana folder"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Item 5: `profile list` (a word, and `--json` a field) and `profile show` (a first line) mark the built-in.
+#[test]
+fn p47b_list_and_show_mark_the_built_in_and_name_the_copy() {
+    let dir = bare_folder("marks");
+    let sha = sha256_hex(scholar().profile.as_bytes());
+    let mut out = Vec::new();
+    list_to(&dir, false, &mut out);
+    let text = String::from_utf8(out).unwrap();
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("scholar:"))
+        .expect("a scholar line");
+    assert!(
+        line.ends_with(&format!(
+            " [built into herdr {}]",
+            crate::nirvana::VERSION
+        )),
+        "{line}"
+    );
+    let mut out = Vec::new();
+    list_to(&dir, true, &mut out);
+    let rows: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(rows[0]["name"], "scholar", "{rows}");
+    assert_eq!(rows[0]["builtin"], true, "{rows}");
+    assert!(rows[0]["file"].is_null(), "{rows}");
+    assert_eq!(rows[0]["class"], "research.web", "{rows}");
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    show_to(&dir, "scholar", &mut out, &mut err);
+    let shown = String::from_utf8(out).unwrap();
+    let mut lines = shown.lines();
+    let first = lines.next().unwrap();
+    assert_eq!(first, builtin_head("scholar", &sha));
+    assert!(
+        first.starts_with(&format!(
+            "scholar is built into herdr (Nirvana-Herdr {}) · sha256 {sha}",
+            crate::nirvana::VERSION
+        )),
+        "{first}"
+    );
+    assert!(
+        first.contains("`herdr profile new scholar --from scholar` writes the project's own copy"),
+        "{first}"
+    );
+    assert_eq!(
+        lines.next().unwrap(),
+        "cards (9, offered to an order seated with it, from its run folder): benchmark, breadth-then-cluster, \
+         competitive-analysis, decision-matrix, fetch-ladder, hypothesis-elimination, source-of-truth, synthesis, \
+         trajectory"
+    );
+    // A project profile's row carries no mark.
+    std::fs::create_dir_all(folder(&dir)).unwrap();
+    std::fs::write(path(&dir, "slicer"), SLICER).unwrap();
+    let mut out = Vec::new();
+    list_to(&dir, true, &mut out);
+    let rows: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(rows[1]["name"], "slicer", "{rows}");
+    assert_eq!(rows[1]["builtin"], false, "{rows}");
+    let mut out = Vec::new();
+    list_to(&dir, false, &mut out);
+    let text = String::from_utf8(out).unwrap();
+    assert!(!text.contains("no profiles of this project's own"), "{text}");
+    assert!(
+        !text
+            .lines()
+            .find(|line| line.starts_with("slicer:"))
+            .unwrap()
+            .contains("built into"),
+        "{text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Item 4: a project's own `scholar`, a file or a folder, is the only one; a broken one shows broken.
+#[test]
+fn p47b_a_projects_own_scholar_is_the_only_one_and_a_broken_one_shows_broken() {
+    let dir = bare_folder("own");
+    std::fs::create_dir_all(folder(&dir)).unwrap();
+    let own = "---\ndescription: This project's own scholar.\nclass: research.web\n---\nYou research for this project.\n";
+    std::fs::write(path(&dir, "scholar"), own).unwrap();
+    let found = listed(&dir);
+    assert_eq!(found.len(), 1, "one scholar, not two");
+    assert!(!found[0].builtin);
+    assert_eq!(found[0].file, path(&dir, "scholar"));
+    assert_eq!(
+        found[0].parsed.as_ref().unwrap().description,
+        "This project's own scholar."
+    );
+    let loaded = load(&dir, "scholar").unwrap();
+    assert!(!loaded.builtin);
+    assert_eq!(loaded.bytes, own.as_bytes());
+    assert!(builtin_here(&dir, "scholar").is_none());
+    // Its cards are its own: a one-file profile keeps none, and none of the built-in's is offered.
+    let offer = crate::nirvana_knowledge::offer_seated(
+        &dir,
+        &dir,
+        &dir.join(".nirvana/runs/r1"),
+        "scholar",
+    );
+    assert!(offer.section.is_empty(), "{}", offer.section);
+    assert_eq!(check_note(&dir, "scholar"), "");
+    // A broken one is shown broken; the built-in does not take over.
+    std::fs::write(path(&dir, "scholar"), "---\ncolour: red\n---\n").unwrap();
+    let found = listed(&dir);
+    assert_eq!(found.len(), 1);
+    assert!(!found[0].builtin && found[0].parsed.is_err());
+    let why = load(&dir, "scholar").unwrap_err();
+    assert!(why.starts_with("profile scholar is refused"), "{why}");
+    // So is a folder of the name with no profile.md.
+    std::fs::remove_file(path(&dir, "scholar")).unwrap();
+    std::fs::create_dir_all(folder_of(&dir, "scholar")).unwrap();
+    let found = listed(&dir);
+    assert_eq!(found.len(), 1);
+    assert!(!found[0].builtin && found[0].parsed.is_err());
+    assert!(load(&dir, "scholar").is_err());
+    assert!(crate::nirvana_profile_detect::fitting(&dir, "research.web", &[]).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Item 6: `herdr profile new scholar --from scholar` writes the built-in byte for byte; the copy then wins.
+#[test]
+fn p47b_new_from_scholar_writes_the_copy_byte_equal_and_it_then_wins() {
+    let (_home, project) = project("p47b-copy");
+    let root = project.root.clone();
+    let found = scholar();
+    let made = new_profile_from(&root, "scholar", "scholar").expect("the copy is written");
+    let dir = folder_of(&root, "scholar");
+    assert_eq!(made, dir.join(PROFILE_FILE));
+    assert_eq!(std::fs::read(&made).unwrap(), found.profile.as_bytes());
+    for (slug, text) in found.cards {
+        assert_eq!(
+            std::fs::read(dir.join(KNOWLEDGE).join(format!("{slug}.md"))).unwrap(),
+            text.as_bytes(),
+            "{slug}"
+        );
+    }
+    // The project's copy is the only scholar now, of the same sha, and its cards are the project's, adopted.
+    let entries = listed(&root);
+    let scholars: Vec<&Listed> = entries.iter().filter(|found| found.name == "scholar").collect();
+    assert_eq!(scholars.len(), 1);
+    assert!(!scholars[0].builtin && scholars[0].parsed.is_ok());
+    let loaded = load(&root, "scholar").unwrap();
+    assert!(!loaded.builtin);
+    assert_eq!(loaded.sha, sha256_hex(found.profile.as_bytes()));
+    let offer = crate::nirvana_knowledge::offer_uncounted(&root, &root, "scholar");
+    assert_eq!(offer.slugs.len(), 9, "{}", offer.section);
+    assert!(
+        offer
+            .section
+            .contains("(.nirvana/profiles/scholar/knowledge/fetch-ladder.md)"),
+        "{}",
+        offer.section
+    );
+    let table = nirvana_seat::table_for(&root);
+    let servers = crate::nirvana_gui_tools::project_servers(&root).unwrap_or_default();
+    assert_eq!(
+        check_one(
+            &root,
+            "scholar",
+            &scholars[0].file,
+            &scholars[0].parsed,
+            &table,
+            &servers
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(check_note(&root, "scholar"), " (9 cards)");
+    // Never over the copy; another name takes the same text.
+    assert!(new_profile_from(&root, "scholar", "scholar")
+        .unwrap_err()
+        .contains("already there"));
+    assert_eq!(std::fs::read(&made).unwrap(), found.profile.as_bytes());
+    let other = new_profile_from(&root, "scholar-two", "scholar").unwrap();
+    assert_eq!(std::fs::read(other).unwrap(), found.profile.as_bytes());
+    nirvana_seat::set_test_world(None);
+}
+
+/// Item 7, claude: the body by the path a project profile's takes, the nine cards in the run, nothing in the project.
+#[test]
+fn p47b_a_claude_worker_seated_with_the_built_in_gets_its_body_and_cards_from_the_run() {
+    let (_home, project) = project("p47b-claude");
+    let found = scholar();
+    let sha = sha256_hex(found.profile.as_bytes());
+    std::fs::write(
+        project.root.join("order.md"),
+        "# Find the current surface API\n",
+    )
+    .unwrap();
+    let before = project_files(&project.root);
+    let live = nirvana_worker::take_live(&project, "r1", "s1")
+        .unwrap()
+        .unwrap();
+    let mut req = request(&project, "s1", "sonnet");
+    req.reason = Some("p47b: the claude seat's argv".into());
+    let outcome = nirvana_worker::seat_order_with(&project, &req, Some("scholar")).unwrap();
+    drop(live);
+    assert_eq!(outcome["profile"]["name"], "scholar", "{outcome}");
+    assert_eq!(outcome["profile"]["sha256"], sha.as_str(), "{outcome}");
+    let seated = seated_of(&project, "s1");
+    assert_eq!(
+        (seated.cli.as_str(), seated.class.as_str()),
+        ("claude", "research.web")
+    );
+    assert!(
+        seated
+            .reason
+            .ends_with(&format!("; profile scholar sha256 {sha}")),
+        "{}",
+        seated.reason
+    );
+    assert_eq!(seated.profile, Some(Some("scholar".to_owned())));
+    let run_dir = project.run_dir("r1");
+    assert_eq!(
+        std::fs::read(copy_path(&run_dir, "scholar", &sha)).unwrap(),
+        found.profile.as_bytes()
+    );
+    // The nine cards, in the run beside the copy, byte for byte.
+    let cards = builtin_cards_dir(&run_dir, "scholar", &sha);
+    let mut held: Vec<String> = std::fs::read_dir(&cards)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    held.sort();
+    let wanted: Vec<String> = found
+        .cards
+        .iter()
+        .map(|(slug, _)| format!("{slug}.md"))
+        .collect();
+    assert_eq!(held, wanted);
+    for (slug, text) in found.cards {
+        assert_eq!(
+            std::fs::read(cards.join(format!("{slug}.md"))).unwrap(),
+            text.as_bytes()
+        );
+    }
+    // The order offers each by a path that is on disk from the worker's folder.
+    let brief = std::fs::read_to_string(&seated.order_file).unwrap();
+    assert!(
+        brief.starts_with(&format!("Profile: scholar\nProfile sha256: {sha}\n")),
+        "{brief}"
+    );
+    assert!(
+        brief.contains("\n## Knowledge cards of the profile scholar\n"),
+        "{brief}"
+    );
+    for rel in card_paths(&sha) {
+        assert!(brief.contains(&format!("({rel})")), "{rel} in {brief}");
+        assert!(Path::new(&seated.cwd).join(&rel).is_file(), "{rel}");
+    }
+    // The claude argv and its system-prompt file: the body, by the path a project profile's takes.
+    let argv = nirvana_worker::with_profile(vec!["claude".into()], &run_dir, &seated).unwrap();
+    assert_eq!(
+        argv,
+        [
+            "claude".to_owned(),
+            "--append-system-prompt-file".to_owned(),
+            body_path(&run_dir, "scholar", &sha).display().to_string()
+        ]
+    );
+    assert_eq!(
+        std::fs::read_to_string(&argv[2]).unwrap(),
+        format!("{}\n", scholar_body())
+    );
+    // Nothing new in the project but herdr's run state, and no knowledge store of the built-in.
+    assert_eq!(project_files(&project.root), before);
+    assert!(!folder(&project.root).exists());
+    assert!(!crate::nirvana_knowledge::writes_log(&project.root, "scholar").exists());
+    nirvana_seat::set_test_world(None);
+}
+
+/// Item 7, agy: the body quoted at the top of the order copy, the cards by path, the tools folder as for a project
+/// profile with no `skills` key, and nothing in the project.
+#[test]
+fn p47b_an_agy_worker_seated_with_the_built_in_gets_the_quoted_body_and_its_cards() {
+    let (_home, project) = project("p47b-agy");
+    let found = scholar();
+    let sha = sha256_hex(found.profile.as_bytes());
+    skill(&project.root, "alpha");
+    std::fs::write(
+        project.root.join("order.md"),
+        "# Find the current surface API\n",
+    )
+    .unwrap();
+    let before = project_files(&project.root);
+    let profile = parse(&builtin_shown("scholar"), "scholar", found.profile).unwrap();
+    let seat = rule_seat(&project, "research.web", &profile);
+    assert_eq!(seat.cli, "agy", "{}", seat.seat);
+    let live = nirvana_worker::take_live(&project, "r1", "a1")
+        .unwrap()
+        .unwrap();
+    nirvana_worker::seat_order_with(
+        &project,
+        &request(&project, "a1", &seat.seat),
+        Some("scholar"),
+    )
+    .unwrap();
+    drop(live);
+    let seated = seated_of(&project, "a1");
+    let run_dir = project.run_dir("r1");
+    let brief = std::fs::read_to_string(&seated.order_file).unwrap();
+    assert!(
+        brief.starts_with(&agy_section("scholar", &profile.body)),
+        "{brief}"
+    );
+    assert!(
+        brief.contains(&format!(
+            "(end of profile scholar)\n\nProfile: scholar\nProfile sha256: {sha}\n"
+        )),
+        "{brief}"
+    );
+    for rel in card_paths(&sha) {
+        assert!(brief.contains(&format!("({rel})")), "{rel} in {brief}");
+        assert!(Path::new(&seated.cwd).join(&rel).is_file(), "{rel}");
+    }
+    // agy takes no system prompt: its argv is unchanged, and the order copy is already right.
+    let argv = nirvana_worker::with_profile(vec!["agy".into()], &run_dir, &seated).unwrap();
+    assert_eq!(argv, ["agy"]);
+    assert_eq!(std::fs::read_to_string(&seated.order_file).unwrap(), brief);
+    // The tools folder: every project skill, as for a project profile with no `skills` key; nothing of the built-in's.
+    let order = crate::nirvana_agy_tools::Order {
+        root: &project.root,
+        cwd: Path::new(&seated.cwd),
+        run_dir: &run_dir,
+        order: "a1",
+        order_file: &seated.order_file,
+        deny: nirvana_worker::agy_denials(&run_dir, &seated).unwrap(),
+    };
+    let print = format!("--print={}", nirvana_worker::first_line(&seated.order_file));
+    let argv =
+        crate::nirvana_agy_tools::with_tools(vec!["agy".into(), print], &order, &mut Vec::new())
+            .unwrap();
+    let tools = crate::nirvana_agy_tools::tools_dir(&run_dir, "a1");
+    assert!(
+        argv.contains(&crate::nirvana_agy_tools::plain_path(&tools)),
+        "{argv:?}"
+    );
+    assert_eq!(project_files(&tools), [".agents/skills/alpha/SKILL.md"]);
+    // Nothing new in the project but herdr's run state.
+    assert_eq!(project_files(&project.root), before);
+    assert!(!folder(&project.root).exists());
+    nirvana_seat::set_test_world(None);
+}
+
+/// Item 8: the built-in's cards are offered with no adoption; no card op, adoption, teacher or `kb` touches them.
+#[test]
+fn p47b_the_built_ins_cards_are_offered_unadopted_and_no_card_op_rewrites_them() {
+    let (_home, project) = project("p47b-cards");
+    let root = project.root.clone();
+    let copy = copy_command("scholar");
+    let offer = crate::nirvana_knowledge::offer_seated(&root, &root, &project.run_dir("r1"), "scholar");
+    let offered: Vec<&str> = offer
+        .section
+        .lines()
+        .filter(|line| line.starts_with("- "))
+        .collect();
+    assert_eq!(offered.len(), 9, "{}", offer.section);
+    assert!(offer.slugs.is_empty(), "nothing is counted in a knowledge store");
+    // A lesson review's or a teacher's card ops, new and patch, are refused with the copy step.
+    let quote = "this quote is long enough to be the evidence of a card op";
+    let stream = format!("the worker wrote: {quote}");
+    let ladder = scholar()
+        .cards
+        .iter()
+        .find(|(slug, _)| *slug == "fetch-ladder")
+        .unwrap()
+        .1;
+    let report = serde_json::json!({"card_ops": [
+        {"op": "new", "name": "Read X posts in the browser", "when": "An X post", "verdict": "keep",
+         "source": "a test", "body": "Use the browser.", "evidence": quote},
+        {"op": "patch", "slug": "fetch-ladder", "base_sha": crate::nirvana_lessons::sha256(ladder),
+         "name": "Fetch ladder", "when": "Always", "verdict": "keep", "source": "a test", "body": "Changed.",
+         "evidence": quote}
+    ]});
+    let done = crate::nirvana_knowledge::review_ops(
+        &root,
+        &report,
+        Some("scholar"),
+        &stream,
+        &[],
+        "o1",
+        "r1",
+    );
+    assert_eq!(done.len(), 2, "{done:?}");
+    for (kept, line) in &done {
+        assert!(
+            !kept && line.contains("built into herdr") && line.contains(&copy),
+            "{line}"
+        );
+    }
+    let ops = crate::nirvana_knowledge::parse_card_ops(&report);
+    let Some(Ok(crate::nirvana_knowledge::CardOp::New(draft))) = ops.first() else {
+        panic!("a new op: {ops:?}");
+    };
+    let why = crate::nirvana_knowledge::apply_new(&root, "scholar", draft, "o1", "r1", 1).unwrap_err();
+    assert!(why.contains(&copy), "{why}");
+    // Adoption, teaching and `herdr kb` say the same.
+    assert!(crate::nirvana_knowledge::adopt(&root, "scholar")
+        .unwrap_err()
+        .contains(&copy));
+    let teach = crate::nirvana_knowledge::Teach {
+        profile: "scholar",
+        from: "https://example.com/a",
+        note: None,
+        asked: "the owner".into(),
+    };
+    let (code, why) = crate::nirvana_knowledge::teach(&project, "r1", &teach).unwrap_err();
+    assert_eq!(code, 2);
+    assert!(why.contains(&copy), "{why}");
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(
+        crate::nirvana_knowledge::kb_run(
+            &root,
+            &["list".into(), "--profile".into(), "scholar".into()],
+            &mut out,
+            &mut err
+        ),
+        1
+    );
+    assert!(String::from_utf8_lossy(&err).contains(&copy));
+    // Nothing went into the project's knowledge store.
+    assert!(!folder(&root).exists());
+    assert!(!crate::nirvana_knowledge::writes_log(&root, "scholar").exists());
+    nirvana_seat::set_test_world(None);
+}
+
+/// Item 11: an order seated under an older text keeps its copy and sha; nothing compares it with today's.
+#[test]
+fn p47b_an_order_seated_under_an_older_text_keeps_its_copy() {
+    let (_home, project) = project("p47b-older");
+    let found = scholar();
+    std::fs::write(project.root.join("order.md"), "# Research it\n").unwrap();
+    let live = nirvana_worker::take_live(&project, "r1", "s1")
+        .unwrap()
+        .unwrap();
+    let mut req = request(&project, "s1", "sonnet");
+    req.reason = Some("p47b: an upgrade".into());
+    nirvana_worker::seat_order_with(&project, &req, Some("scholar")).unwrap();
+    drop(live);
+    let seated = seated_of(&project, "s1");
+    let run_dir = project.run_dir("r1");
+    // An older herdr seated another order of this run under another text: its copy and its sha stay its own.
+    let older = found.profile.replace(
+        "You research one question",
+        "You researched one question, as an older herdr said",
+    );
+    assert_ne!(older, found.profile);
+    let older_sha = sha256_hex(older.as_bytes());
+    std::fs::write(copy_path(&run_dir, "scholar", &older_sha), &older).unwrap();
+    let mut child = seated.clone();
+    let file = project.root.join("older.md");
+    std::fs::write(
+        &file,
+        format!(
+            "{}\n# Research it\n",
+            order_lines(&Ref {
+                name: "scholar".into(),
+                sha: older_sha.clone()
+            })
+        ),
+    )
+    .unwrap();
+    child.order_file = file.display().to_string();
+    child.reason = format!("r; profile scholar sha256 {older_sha}");
+    assert_eq!(from_reason(&child.reason).as_deref(), Some("scholar"));
+    let argv = nirvana_worker::with_profile(vec!["claude".into()], &run_dir, &child).unwrap();
+    assert_eq!(
+        argv[2],
+        body_path(&run_dir, "scholar", &older_sha)
+            .display()
+            .to_string()
+    );
+    assert!(std::fs::read_to_string(&argv[2])
+        .unwrap()
+        .starts_with("You researched one question, as an older herdr said"));
+    // Today's order beside it keeps today's.
+    let argv = nirvana_worker::with_profile(vec!["claude".into()], &run_dir, &seated).unwrap();
+    assert!(std::fs::read_to_string(&argv[2])
+        .unwrap()
+        .starts_with("You research one question"));
+    nirvana_seat::set_test_world(None);
+}
+
+/// A teach order, a lesson review and a `review.*` or `acceptance.*` order take no profile text and no server they did
+/// not take before: none is fitted, a review's argv takes nothing, and the built-in holds no server or need.
+#[test]
+fn p47b_teach_and_review_orders_take_no_text_or_server_of_the_built_in() {
+    let (_home, project) = project("p47b-reviews");
+    let root = project.root.clone();
+    assert_eq!(
+        nirvana_worker::fitting_profiles(&root, None, "research.web", &[]),
+        ["scholar"]
+    );
+    for class in [
+        crate::nirvana_knowledge::TEACH_CLASS,
+        crate::nirvana_review::CLASS,
+        "review.adversary",
+        "acceptance.author",
+    ] {
+        assert!(
+            nirvana_worker::fitting_profiles(&root, None, class, &[]).is_empty(),
+            "{class}"
+        );
+        assert!(takes_no_profile_servers(class), "{class}");
+    }
+    std::fs::write(root.join("order.md"), "# Research it\n").unwrap();
+    let live = nirvana_worker::take_live(&project, "r1", "s1")
+        .unwrap()
+        .unwrap();
+    let mut req = request(&project, "s1", "sonnet");
+    req.reason = Some("p47b: a review of it".into());
+    nirvana_worker::seat_order_with(&project, &req, Some("scholar")).unwrap();
+    drop(live);
+    let mut review = seated_of(&project, "s1");
+    review.class = crate::nirvana_review::CLASS.into();
+    assert_eq!(
+        nirvana_worker::with_profile(vec!["claude".into()], &project.run_dir("r1"), &review)
+            .unwrap(),
+        ["claude"]
+    );
+    let loaded = load(&root, "scholar").unwrap();
+    assert!(
+        loaded.servers.is_none()
+            && loaded.profile.servers.is_empty()
+            && loaded.profile.needs.is_empty()
+            && loaded.profile.disallowed_tools.is_empty()
+    );
     nirvana_seat::set_test_world(None);
 }

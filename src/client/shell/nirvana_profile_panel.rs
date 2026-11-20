@@ -15,7 +15,9 @@
 //!
 //! - **Profiles**, one row each: description, seat pins, servers, skills, cards, and the use the detector counts, "used
 //!   0 of 35", with "(partial)" when its scan was cut short. `e` or Enter opens the file in an edit tab, `K` its
-//!   `knowledge/`.
+//!   `knowledge/`. Plan 47 P47b: a built-in (`scholar`) the project does not override is a row marked "built into
+//!   herdr"; it has no file, so `e` or Enter says so and names the copy, and the same key on it again writes the
+//!   project's own copy (`nirvana_profiles::new_profile_from`) off the key path and opens it.
 //! - **Suggested**, the proposals waiting (plan 45 P45b). Enter opens one whole; Accept is only there. `d` dismisses,
 //!   in the list (the row highlighted when the list was last drawn) or the detail.
 //! - **New**, `n`: a name, then a shape from `crate::nirvana_profiles::SHAPES`. It is made off the key path, and the
@@ -120,6 +122,8 @@ pub(super) const DISMISS_NOT_DRAWN: &str =
     "d dismisses the highlighted row on screen: nothing was dismissed, look and press d again";
 /// The use of a profile no order fits or carries.
 pub(super) const NO_USE: &str = "no order fits or carries it";
+/// Plan 47 P47b: the mark on a built-in's row.
+pub(super) const BUILT_IN: &str = "built into herdr";
 /// The same, when the scan was cut short.
 pub(super) const NO_USE_PARTIAL: &str = "none seen (partial)";
 
@@ -223,6 +227,8 @@ pub(crate) struct ProfileRow {
     pub(super) use_: Option<(usize, usize)>,
     /// Plan 47 P47a (L1): how many Running orders of this project carry it now (`nirvana_subagents::live_profiles`).
     pub(super) live: usize,
+    /// Plan 47 P47b: herdr's built-in, which the project has no file for; `file` is then no path on disk.
+    pub(super) builtin: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,9 +276,11 @@ pub(super) fn read_view(root: &Path, usage: bool) -> View {
     let live = crate::nirvana_subagents::live_profiles(|folder| {
         super::nirvana_profiles::root(folder) == root
     });
-    let profiles = crate::nirvana_profiles::list(root)
+    // Plan 47 P47b: the built-ins the project does not override are rows too.
+    let profiles = crate::nirvana_profiles::listed(root)
         .into_iter()
-        .map(|(name, file, parsed)| {
+        .map(|found| {
+            let (name, file, parsed, builtin) = (found.name, found.file, found.parsed, found.builtin);
             let use_ = counted.as_ref().and_then(|detection| {
                 detection
                     .usage
@@ -289,8 +297,11 @@ pub(super) fn read_view(root: &Path, usage: bool) -> View {
                 own_servers: crate::nirvana_profiles::servers_path(root, &name)
                     .is_some_and(|file| file.is_file()),
                 skills: profile.skills,
-                cards: crate::nirvana_profiles::knowledge_dir(root, &name)
-                    .map(|dir| crate::nirvana_knowledge::cards(&dir).len()),
+                cards: match crate::nirvana_profiles::builtin(&name).filter(|_| builtin) {
+                    Some(found) => Some(found.cards.len()),
+                    None => crate::nirvana_profiles::knowledge_dir(root, &name)
+                        .map(|dir| crate::nirvana_knowledge::cards(&dir).len()),
+                },
             });
             ProfileRow {
                 live: live.get(&name).copied().unwrap_or(0),
@@ -298,6 +309,7 @@ pub(super) fn read_view(root: &Path, usage: bool) -> View {
                 file,
                 parsed,
                 use_,
+                builtin,
             }
         })
         .collect();
@@ -789,6 +801,9 @@ pub(crate) struct ProfilePanel {
     /// The proposal highlighted when Suggested was last drawn with the focus; `d` in the list dismisses that one, and a
     /// move or a dismiss clears it (review finding 7).
     pub(super) drawn_proposal: Option<String>,
+    /// Plan 47 P47b: `e` or Enter on a built-in's row said it has no file here; the same key on the same row next
+    /// makes the project's copy. Any other key clears it.
+    pub(super) copy_armed: Option<String>,
 }
 
 impl ProfilePanel {
@@ -813,6 +828,7 @@ impl ProfilePanel {
             message: None,
             drawn: false,
             drawn_proposal: None,
+            copy_armed: None,
         }
     }
 
@@ -1214,6 +1230,10 @@ fn list_lines(view: &View, panel: &ProfilePanel, inner: usize) -> Vec<Line> {
             );
         }
         let mut facts = profile_facts(parsed);
+        // Plan 47 P47b: the mark, first, so it is on the row's first line of facts at any width.
+        if row.builtin {
+            facts.insert(0, BUILT_IN.to_owned());
+        }
         facts.push(use_text(row, view.usage_read, view.usage_partial));
         if let Some(live) = live_text(row) {
             facts.push(live);
@@ -1864,11 +1884,48 @@ impl ClientShellState {
         self.nirvana_profile_panel = None;
     }
 
-    fn profile_edit(&mut self, view: &View, index: usize, outcome: &mut ClientShellInput) {
+    /// `e` and Enter. Plan 47 P47b: a built-in's row has no file to open. The first press says so and names the copy
+    /// (`armed` is what the last key left, `copy_armed`); the same key on the same row next writes the project's copy
+    /// off the key path, which `profile_made` then opens. Nothing is written before that second press.
+    fn profile_edit(
+        &mut self,
+        view: &View,
+        index: usize,
+        armed: Option<String>,
+        outcome: &mut ClientShellInput,
+    ) {
         let Some(row) = view.profiles.get(index) else {
             self.profile_say("no profile to edit: n makes one");
             return;
         };
+        if row.builtin {
+            let name = row.name.clone();
+            if armed.as_deref() == Some(name.as_str()) {
+                self.profile_copy(&name);
+                return;
+            }
+            let shown = visible(&name);
+            self.profile_notice(vec![
+                (
+                    format!(
+                        "{shown} is built into herdr: this project has no file for it, so there is nothing to open"
+                    ),
+                    Tone::Attention,
+                ),
+                (
+                    format!(
+                        "e again writes the project's own copy into .nirvana/profiles/{shown}/ (its text and cards, \
+                         which then win over the built-in) and opens it; or run `{}`",
+                        crate::nirvana_profiles::copy_command(&shown)
+                    ),
+                    Tone::Muted,
+                ),
+            ]);
+            if let Some(panel) = self.nirvana_profile_panel.as_mut() {
+                panel.copy_armed = Some(name);
+            }
+            return;
+        }
         let file = row.file.clone();
         self.profile_edit_tab(crate::nirvana::EDIT_FILE_COMMAND, &file, outcome);
     }
@@ -1880,6 +1937,13 @@ impl ClientShellState {
             return;
         };
         let name = row.name.clone();
+        if row.builtin {
+            self.profile_say(crate::nirvana_profiles::builtin_refusal(
+                &visible(&name),
+                "its cards ship with herdr and have no folder here: e makes the copy",
+            ));
+            return;
+        }
         match crate::nirvana_profiles::knowledge_dir(&view.root, &name) {
             Some(dir) => match std::fs::create_dir_all(&dir) {
                 Ok(()) => self.profile_edit_tab(crate::nirvana::EDIT_DIR_COMMAND, &dir, outcome),
@@ -1960,6 +2024,28 @@ impl ClientShellState {
     /// `n`'s last step: the profile written through `new_profile` or `new_profile_shape` on a thread of its own, since
     /// both take the proposals' lock and the window never waits on it. `tick_profile_panel` (or the next key) lands it.
     fn profile_make(&mut self, name: &str, shape: usize) {
+        self.profile_make_with(name, move |root, owned| match shape.checked_sub(1) {
+            None => crate::nirvana_profiles::new_profile(root, owned),
+            Some(at) => match crate::nirvana_profiles::SHAPES.get(at) {
+                Some(shape) => crate::nirvana_profiles::new_profile_shape(root, owned, shape),
+                None => Err(format!("no shape {shape}")),
+            },
+        });
+    }
+
+    /// Plan 47 P47b: the second `e` on a built-in's row, the project's own copy, made as a New is.
+    fn profile_copy(&mut self, name: &str) {
+        self.profile_make_with(name, |root, owned| {
+            crate::nirvana_profiles::new_profile_from(root, owned, owned)
+        });
+    }
+
+    /// A New's job on a thread of its own, landed by `tick_profile_panel` or the next key.
+    fn profile_make_with(
+        &mut self,
+        name: &str,
+        job: impl FnOnce(&Path, &str) -> Result<PathBuf, String> + Send + 'static,
+    ) {
         let Some(root) = self
             .nirvana_profile_panel
             .as_ref()
@@ -1972,18 +2058,8 @@ impl ClientShellState {
         let owned = name.to_owned();
         let project = root.clone();
         let spawned = crate::thread_spawn::spawn_named("nirvana-profile-new", move || {
-            let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                match shape.checked_sub(1) {
-                    None => crate::nirvana_profiles::new_profile(&root, &owned),
-                    Some(at) => match crate::nirvana_profiles::SHAPES.get(at) {
-                        Some(shape) => {
-                            crate::nirvana_profiles::new_profile_shape(&root, &owned, shape)
-                        }
-                        None => Err(format!("no shape {shape}")),
-                    },
-                }
-            }))
-            .unwrap_or_else(|_| Err("herdr failed while making it".to_owned()));
+            let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&root, &owned)))
+                .unwrap_or_else(|_| Err("herdr failed while making it".to_owned()));
             *filled.lock().unwrap_or_else(|e| e.into_inner()) = Some(made);
             reader().mark_changed();
         });
@@ -2073,6 +2149,8 @@ impl ClientShellState {
         }
         // What an Accept, a Dismiss or a New said stays until this key.
         panel.notice.clear();
+        // Plan 47 P47b: a built-in's first `e` arms the copy for this one key only.
+        let armed = panel.copy_armed.take();
         if !bare && matches!(code, KeyCode::Char(_) | KeyCode::Enter) {
             return;
         }
@@ -2186,7 +2264,7 @@ impl ClientShellState {
             (KeyCode::Tab | KeyCode::BackTab, _) => panel.focus = panel.focus.other(),
             (KeyCode::Char('n'), _) => panel.naming = Some(String::new()),
             (KeyCode::Enter | KeyCode::Char('e'), Part::Profiles) => {
-                self.profile_edit(&view, selected, outcome);
+                self.profile_edit(&view, selected, armed, outcome);
             }
             (KeyCode::Char('K'), Part::Profiles) => self.profile_cards(&view, selected, outcome),
             (KeyCode::Enter, Part::Suggested) => match view.proposals.get(selected) {

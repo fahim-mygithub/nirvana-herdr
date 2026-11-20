@@ -596,7 +596,8 @@ fn p93_a_profile_row_with_every_field_a_bare_one_and_a_refused_one() {
         line(&rows, "broken").contains("refused: herdr profile check broken"),
         "{text}"
     );
-    assert!(text.contains("[Profiles \u{b7} 3]"), "{text}");
+    // Plan 47 P47b: the three and the built-in scholar.
+    assert!(text.contains("[Profiles \u{b7} 4]"), "{text}");
     // `skills: []` says none.
     profile_file(
         &root,
@@ -652,6 +653,7 @@ fn p93_the_use_reads_carried_of_fit_and_in_words_when_nothing_fits() {
         parsed: None,
         use_,
         live: 0,
+        builtin: false,
     };
     assert_eq!(
         panel_mod::use_text(&row(Some((0, 35))), true, false),
@@ -678,23 +680,26 @@ fn p93_the_empty_states_say_so_in_plain_words() {
     let mut state = state_in(&root);
     let rows = opened(&mut state, 140);
     let text = rows.join("\n");
-    assert!(text.contains(NO_PROFILES), "{text}");
+    // Plan 47 P47b: a project with no profile of its own still has the built-in scholar, so Profiles is never empty
+    // and `NO_PROFILES` is not drawn.
+    assert!(!text.contains(NO_PROFILES), "{text}");
     assert!(text.contains(NOTHING_SUGGESTED), "{text}");
     assert!(
-        text.contains("[Profiles \u{b7} 0]") && text.contains(" Suggested \u{b7} 0 "),
+        text.contains("[Profiles \u{b7} 1]") && text.contains(" Suggested \u{b7} 0 "),
         "{text}"
     );
-    // Keys on empty lists never panic and say why.
+    // Keys on the built-in's row and the empty list never panic; `e` or Enter then any other key makes nothing.
     for code in [
         KeyCode::Down,
         KeyCode::End,
         KeyCode::Enter,
-        KeyCode::Char('e'),
         KeyCode::Char('K'),
+        KeyCode::Char('e'),
     ] {
         key(&mut state, code);
     }
     assert!(state.nirvana_profile_panel.is_some());
+    assert!(!crate::nirvana_profiles::folder(&root).exists());
     key(&mut state, KeyCode::Tab);
     for code in [KeyCode::PageDown, KeyCode::Enter, KeyCode::Char('d')] {
         key(&mut state, code);
@@ -1102,6 +1107,8 @@ fn p93_e_enter_and_k_open_the_profile_and_its_cards() {
         )]
     );
     let _ = open(&mut state, 200);
+    // Plan 47 P47b: the built-in scholar sits between reel and slicer.
+    key(&mut state, KeyCode::Char('j'));
     key(&mut state, KeyCode::Char('j'));
     let outcome = key(&mut state, KeyCode::Char('e'));
     assert_eq!(
@@ -1146,12 +1153,13 @@ fn p93_keys_tab_the_wheel_and_a_click_select() {
     assert_eq!(at(&state), 1);
     key(&mut state, KeyCode::PageDown);
     assert_eq!(at(&state), 11);
+    // Plan 47 P47b: fourteen of the project's own and the built-in scholar, last by name.
     key(&mut state, KeyCode::End);
-    assert_eq!(at(&state), 13);
+    assert_eq!(at(&state), 14);
     key(&mut state, KeyCode::Down);
-    assert_eq!(at(&state), 13, "stops at the end");
+    assert_eq!(at(&state), 14, "stops at the end");
     key(&mut state, KeyCode::PageUp);
-    assert_eq!(at(&state), 3);
+    assert_eq!(at(&state), 4);
     key(&mut state, KeyCode::Home);
     assert_eq!(at(&state), 0);
     key(&mut state, KeyCode::Up);
@@ -1239,11 +1247,18 @@ fn p93_the_selection_follows_its_name_or_id_through_a_reread() {
         (open.proposal_selected, open.proposal_key.as_deref()),
         (0, Some(second.as_str()))
     );
-    // When the selected one goes, the index holds to the rows there are.
+    // When the selected one goes, the index holds to the rows there are. Plan 47 P47b: the built-in scholar is last,
+    // so gamma's index lands on it, and with the others gone too it is held to the one row left.
     std::fs::remove_file(crate::nirvana_profiles::path(&root, "gamma")).unwrap();
     let _ = rows_of(&mut state, 200);
-    assert_eq!(panel(&state).profile_selected, 1);
-    assert_eq!(panel(&state).profile_key.as_deref(), Some("beta"));
+    assert_eq!(panel(&state).profile_selected, 2);
+    assert_eq!(panel(&state).profile_key.as_deref(), Some("scholar"));
+    for name in ["alpha", "beta"] {
+        std::fs::remove_file(crate::nirvana_profiles::path(&root, name)).unwrap();
+    }
+    let _ = rows_of(&mut state, 200);
+    assert_eq!(panel(&state).profile_selected, 0);
+    assert_eq!(panel(&state).profile_key.as_deref(), Some("scholar"));
 }
 
 #[test]
@@ -1960,6 +1975,7 @@ fn p93_fix_partial_use_counts_say_so() {
         parsed: None,
         use_,
         live: 0,
+        builtin: false,
     };
     assert_eq!(
         panel_mod::use_text(&row(Some((3, 35))), true, true),
@@ -2984,4 +3000,108 @@ fn p96_row_a_profile_in_use_now_says_so_with_the_count() {
     assert!(facts("builder").contains("in use: 2 now"), "{text}");
     assert!(!facts("spare").contains("in use"), "{text}");
     assert_eq!(text.matches("in use").count(), 1, "{text}");
+}
+
+/// Every file under `root`, sorted, but herdr's run state (`.nirvana/runs/`, `.nirvana/orders/`).
+fn p47b_files(root: &Path) -> Vec<String> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let rel = path
+                .strip_prefix(root)
+                .unwrap()
+                .display()
+                .to_string()
+                .replace('\\', "/");
+            if rel == ".nirvana/runs" || rel == ".nirvana/orders" {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else {
+                out.push(rel);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+/// Plan 47 P47b, items 5 and 6: the built-in's row is marked; `e` says it has no file and writes nothing; any other key
+/// between disarms it; the second `e` on the row writes the project's own copy and opens it, and the row is then the
+/// project's, unmarked.
+#[test]
+fn p47b_the_panel_marks_the_built_in_and_e_writes_nothing_until_the_second_press() {
+    let (_home, root) = project("p47b-panel");
+    let before = p47b_files(&root);
+    let mut state = state_in(&root);
+    let rows = opened(&mut state, 200);
+    let text = rows.join("\n");
+    assert!(
+        line(&rows, "scholar").contains("Researches a question from outside sources"),
+        "{text}"
+    );
+    let at = rows
+        .iter()
+        .position(|row| row.contains("scholar "))
+        .unwrap();
+    assert!(
+        rows[at + 1].contains(panel_mod::BUILT_IN) && rows[at + 1].contains("9 cards"),
+        "{text}"
+    );
+    // The first `e`: no edit tab, the notice says why and how, nothing is written.
+    let outcome = key(&mut state, KeyCode::Char('e'));
+    assert!(invoked(&outcome).is_empty(), "{:?}", invoked(&outcome));
+    let notice: Vec<String> = panel(&state)
+        .notice
+        .iter()
+        .map(|(said, _)| said.clone())
+        .collect();
+    assert!(
+        notice[0].contains("scholar is built into herdr")
+            && notice[1].contains("e again writes the project's own copy")
+            && notice[1].contains("herdr profile new scholar --from scholar"),
+        "{notice:?}"
+    );
+    assert!(panel(&state).making.is_none());
+    assert_eq!(p47b_files(&root), before);
+    // Any other key disarms: the next `e` only says it again.
+    key(&mut state, KeyCode::Char('j'));
+    let outcome = key(&mut state, KeyCode::Enter);
+    assert!(invoked(&outcome).is_empty());
+    assert!(panel(&state).making.is_none());
+    assert_eq!(p47b_files(&root), before);
+    // The second press makes the copy off the key path, and its landing opens it.
+    let outcome = key(&mut state, KeyCode::Char('e'));
+    assert!(invoked(&outcome).is_empty());
+    let landed = settle(&mut state);
+    let file = crate::nirvana_profiles::folder_of(&root, "scholar").join("profile.md");
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        crate::nirvana_profiles::builtin("scholar")
+            .unwrap()
+            .profile
+            .as_bytes()
+    );
+    assert_eq!(
+        invoked(&landed),
+        [format!(
+            "{}{}",
+            crate::nirvana::EDIT_FILE_COMMAND,
+            file.display()
+        )]
+    );
+    // The row is the project's now: no mark.
+    let rows = shown(&mut state, 200);
+    let at = rows
+        .iter()
+        .position(|row| row.contains("scholar "))
+        .unwrap();
+    assert!(
+        !rows[at + 1].contains(panel_mod::BUILT_IN),
+        "{}",
+        rows.join("\n")
+    );
 }
