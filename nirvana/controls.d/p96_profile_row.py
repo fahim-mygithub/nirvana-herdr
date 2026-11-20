@@ -170,7 +170,9 @@ CONTROLS = (
     # The click rectangle two lines tall: a click on w-a's line 3 finds no row (None), not p96-w-a.
     Control("p96_row_fix_click_two_lines", SIDEBAR, HIT,
             "                2u16.min(rect.bottom().saturating_sub(*current_y));\n", T_CLICK, "rust"),
-    # A no-profile row given a third, blank line: the bare panel is not the profiled one less its profile lines.
+    # A no-profile row given a third, blank line: the bare row's height reads 12, not 9. (Written first as "the bare
+    # panel is not the profiled one less its profile lines"; that run stayed green, since a line counted for a row
+    # with no profile draws nothing, so the test now checks the height as master counts it.)
     Control("p96_row_fix_bare_row_three", SIDEBAR, ROW_LINES,
             "    2 + usize::from(sub.profile.is_some()) + usize::from(sub.profile.is_none())\n", T_BARE, "rust"),
     # The name from disk drawn raw: the ESC and the zero-width space reach the buffer; "@a<U+200B>b" is not there.

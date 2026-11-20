@@ -1783,10 +1783,16 @@ mod tests {
     fn p96_row_fix_without_a_profile_the_panel_is_the_profiled_one_less_its_profile_lines() {
         let with = [("w-a", Some("builder")), ("w-b", None), ("w-c", Some("scholar"))];
         let bare = [("w-a", None), ("w-b", None), ("w-c", None)];
+        let config = ClientShellConfig::from_config(&crate::config::Config::default());
         let [widest, default, narrowest] = p96_row_widths();
         for width in [widest, default, narrowest, 8] {
             let (lines, buf) = p96_row_draw(&p96_row_shape(&with), width, 16);
-            let (bare_lines, bare_buf) = p96_row_draw(&p96_row_shape(&bare), width, 16);
+            let bare_snap = p96_row_shape(&bare);
+            let (bare_lines, bare_buf) = p96_row_draw(&bare_snap, width, 16);
+            // The height as master counts it: two agent lines, the run header, two per live worker. A blank third
+            // line counted for a row with no profile draws nothing, so only the count shows it.
+            let bare_row = agent_row(&bare_snap, "p1", &config, None).unwrap();
+            assert_eq!(agent_row_lines(&bare_row, width), 2 + 1 + 3 * 2, "{width}");
             let text = lines.join("\n");
             let third = |name: &str| {
                 lines
