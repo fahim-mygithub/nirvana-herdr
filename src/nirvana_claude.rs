@@ -1459,9 +1459,12 @@ pub fn stop_output(
         .iter()
         .map(|(run, why, _)| format!("{run}: {}", short(why, STEP_CHARS)))
         .collect();
+    // Plan 47 P47c, at the merge: a dead end may name its own command (a scholar run no driver holds names
+    // `herdr scholar resume <run>`), and the list that follows closed with ending the run, which abandons a finished
+    // report. So the command a dead end names comes before the list.
     let text = format!(
-        "herdr: an open run is at a dead end, with no live worker and no next step ({}). Seat its next order, gate \
-         what waits, ask the owner, or end it with `herdr run end <run>`.",
+        "herdr: an open run is at a dead end, with no live worker and no next step ({}). Do what it names; else \
+         seat its next order, gate what waits, ask the owner, or end it with `herdr run end <run>`.",
         named.join("; ")
     );
     Some(if stop_hook_active {

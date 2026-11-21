@@ -1,6 +1,6 @@
 # Plan 47: the profile on the agents panel, and a scholar in every project
 
-Status: RULED 2026-11-20 (§6). P47a LANDED as alpha 0.92.0, P47b as alpha 0.93.0, P47d's gate part as alpha 0.94.0. P47c follows and carries the scholar log.
+Status: BUILT. P47a LANDED as alpha 0.92.0, P47b as alpha 0.93.0, P47d's gate part as alpha 0.94.0, P47c with the scholar log as alpha 0.95.0. The live checks of §8 are owed; no real scholar run has been made.
 This plan takes over the number 44 held for "scholar on agy": the owner's fetch rulings of 2026-11-18 are in §3.
 
 ## 1. The ask
@@ -151,6 +151,22 @@ P47a builds now. P47b lands before P47c. P47d's gate part is measured before any
   owner and theirs to reverse.
 - The scholar log moved to P47c, with the run that writes it.
 - An honest "found nothing" still fails "no sources". It was counted, once since 2026-11-01, and left.
+
+### What P47c changed from this plan
+
+- The route is one headless turn, not an order: it has no row, no gate and no stream. A route that fails twice
+  falls back to one broad order with the owner's words.
+- "The orchestrator is woken with the path" became the only wake. Every line of a researcher or the writer that the
+  driver handles is kept off the orchestrator's queue, and the driver's end line says what did not deliver. That
+  rule is the orchestrator's, reported to the owner and theirs to reverse.
+- The run is driven by a detached process that keeps its place in a state file. `herdr scholar resume <run>` goes on
+  after a stop, and `herdr run check` names that command when no driver holds the run.
+- Limits the plan did not name: a question of at most 8,000 characters, 90 minutes of research, 45 of writing.
+- The writer reads each passed researcher's findings file from the run's folder, and its Method notes name what did
+  not deliver.
+- `herdr scholar tag` and the log in `docs/research/log.jsonl` came with this package, from P47d.
+- Not measured by any test: a real run. The first one settles whether the route turn runs without tools, and how
+  five agy researchers behave side by side.
 
 ## 8. Live checks owed after building
 

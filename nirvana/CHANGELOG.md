@@ -3,6 +3,72 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.95.0: `herdr scholar` routes one question to parallel researchers and a writer
+
+- **Changed:** plan 47's run package (P47c). This is the last package of plan 47.
+  - `herdr scholar "<question>"` starts a run and returns. A detached driver does the rest. One short route turn
+    names the research styles the question needs, at most five, with one sub-question each. One `research.web` order
+    per style runs side by side on agy with the built-in `scholar` profile and that style's card. One `write.docs`
+    order then writes `docs/research/<date>-<slug>/report.md` and a single-file `report.html`. Every order is an
+    ordinary gated order with its own row.
+  - The other verbs: `status [<run>]`, `resume <run>`, `stop <run>`, `tag <run> hit|partial|miss [--note]`. The verb
+    refuses inside a seated worker, an empty question, a question over 8,000 characters, a folder that is not a git
+    repository, and while another scholar run is live there (`--force` starts another).
+  - One wake per run. What the driver handles of a researcher or the writer stays off the orchestrator's queue: the
+    delivery, every verdict, the question after an `asked`, an interrupt, a stop. The driver's end line is the wake:
+    `scholar report: <path>: <answer>`; `scholar report (2 of 5 lost): <path>` when researchers did not deliver; or
+    `scholar <end>: <why>` for a run with no report. A stall, a deferral, a rate-limit reseat and a doubt still
+    queue, as any order's do.
+  - The driver reseats an interrupted order once; stops what runs past a cap, 90 minutes of research and 45 of
+    writing; checks that both report files are there and that the page loads nothing from outside; appends one line
+    to `docs/research/log.jsonl`; and ends the run. Its place is kept in `.nirvana/runs/<run>/scholar/state.json`, so
+    `resume` goes on from any stop.
+  - `herdr run check`, which feeds the session digest and the Stop hook, answers for a scholar run. With a driver:
+    nothing for the orchestrator to do. With none: a dead end that names `herdr scholar resume <run>`. Every other
+    run reads as before. The Stop hook's text now says first to do what a dead end names.
+  - `ROLE.md` and the seat skill send a research question that needs more than one page to `herdr scholar`.
+  - `Cargo.toml`'s include list names `nirvana/scholar/`, the two texts the binary embeds.
+- **Because:** the owner, 2026-11-20: "I want every project to have the a default Researcher agent,called the
+  scholar agent where it breaks down our prompt to different research styles and runs parallel research agents and
+  finally builds an artifact." On who runs the researchers, the same day: "herdr can run".
+- **Measured:** no real scholar run has been made: a run starts paid turns on the owner's accounts, so every figure
+  here is from tests with stand-in seats and from the real binary's refusals. The whole test binary, one process per
+  test, ran 5566 tests with 2 failed, the same two `app::api` tests that fail on 0.94.0, where 5516 ran; 50 of them
+  are this package's `p47c_` tests. One of those kills the driver at 31 points of its scripted runs, in the route,
+  before and after a seat, in a sleep, around the run's end, before the wake, and between the end line and its record,
+  then resumes: no order is seated twice, the run ends, one end line is written and at most one wake is typed. The
+  real binary, with `claude`, `agy` and `gemini` taken off the path and a scratch home, gave the six expected answers
+  and wrote nothing: three refusals of a question, a status with no runs, and two refusals of a tag. Built on Opus
+  high, reviewed twice on Sonnet high, two fix rounds. The first review had 12 findings; the largest was that a
+  researcher's question and an interrupt woke the orchestrator mid-run and told it to reseat by hand, racing the
+  driver. The second review had 7 and no blocker; it replayed 26 kinds of journal line over 21 kinds of order with the
+  quiet rule on and off, and nothing differed for an order that is not a scholar stage. It also found what the quiet
+  left behind, fixed here: a dead driver read in the session digest as "was interrupted: the orchestrator continues",
+  or as a finished run to end, which abandons a report nobody was told about. The controls file holds 180 `p47c_`
+  controls; each was run red in its branch and 26 were run red again at the merge, four older ones beside `check` and
+  the wake queue among them, the tree unchanged after each. The dry run finds 5248 of 5256 controls' text, the same 8
+  old misses. `ROLE.md` is 13016 bytes, under the 13,100 its test allows. The crate's package list holds 2 scholar
+  texts and 10 profile files. What one run costs, by the default seat table: one route turn on Sonnet at low effort,
+  up to five researchers and one writer on agy, and a lesson review after every researcher that passes, since a
+  research order must name a gotcha. Four runs of five use the day's cap of 20 lesson reviews. What only a real run
+  can settle: whether `claude --tools ""` turns tools off, since a route that fails twice falls back to one broad
+  order and `herdr scholar status` then says the routing failed; whether the route's answer arrives as
+  `structured_output`; five agy researchers at once, where the record's peak is two; whether agy writes its findings
+  file into the run's dot folder; whether the detached driver outlives the orchestrator's Bash call. Choices that are
+  the orchestrator's, reported to the owner and theirs to reverse: one wake per run instead of a wake per order; the
+  8,000-character limit on a question; lesson reviews left on for scholar researchers; the caps of 90 and 45 minutes;
+  `herdr run end` retried for 30 minutes; a run no driver has held reads as starting for 60 seconds. Known gaps: the
+  Stop hook cuts a dead end's reason to 44 characters, so the run's id is read from the name before it; for a moment
+  after `herdr scholar resume` the check still says no driver holds the run; `herdr run resume` on a scholar run still
+  marks its orders "interrupted now"; the page check fails an honest report whose inline script holds `import(` in a
+  string, or the word `import` in a module script's comment, and passes an escaped `@\69mport`; a route is one
+  headless turn, so it has no row on the agents panel; the profile on the phone page is not built.
+- **If you remove this:** a research question goes back to one worker, or to the orchestrator seating and gating
+  each researcher by hand, a turn of the top seat for every delivery, verdict and question. Remove only the quiet
+  rule in `replay` and each of a run's orders puts its delivery and its verdict on the orchestrator's queue, and an
+  interrupt line tells it to reseat an order the driver is already reseating. Remove only the scholar answer in `check` and a run
+  whose driver died reads as a finished run to end, with its report never told.
+
 ## alpha 0.94.0: the gate counts the ways an agy worker really opens a URL
 
 - **Changed:** plan 47's gate package (P47d), in the sources check of a research order.

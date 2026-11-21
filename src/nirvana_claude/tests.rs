@@ -922,6 +922,31 @@ fn a_dead_end_blocks_once_then_tells_the_owner_and_then_says_nothing() {
     assert_eq!(stop_output(&[], &none, false), None);
 }
 
+/// Plan 47 P47c, at the merge. A scholar run no driver holds is a dead end whose reason is a command, `herdr
+/// scholar resume <run>` (`nirvana_scholar::check_answer`). The Stop text closed with "end it with `herdr run end
+/// <run>`", and ending such a run abandons a finished report nobody was told about, so the text says first to do
+/// what the dead end names. The reason is cut to `STEP_CHARS`, so the run's id is read from the name before it.
+#[test]
+fn p47c_merge_the_stop_text_says_first_to_do_what_the_dead_end_names() {
+    let dead = vec![(
+        "scholar-20261120-why".to_owned(),
+        "`herdr scholar resume scholar-20261120-why`, and nothing else: no scholar driver holds the run"
+            .to_owned(),
+        4,
+    )];
+    for active in [false, true] {
+        let out = stop_output(&dead, &BTreeMap::new(), active).expect("raised");
+        let text = out[if active { "systemMessage" } else { "reason" }]
+            .as_str()
+            .unwrap();
+        let names = text
+            .find("Do what it names")
+            .expect("the text says to do what the dead end names");
+        assert!(names < text.find("herdr run end").expect("the end is still named"), "{text}");
+        assert!(text.contains("scholar-20261120-why: `herdr scholar resume"), "{text}");
+    }
+}
+
 #[test]
 fn the_statusline_draws_the_foots_pools_and_narrows_resets_then_orders() {
     let orders = vec![

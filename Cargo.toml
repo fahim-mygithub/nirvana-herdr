@@ -15,6 +15,7 @@ include = [
     "docs/next/api/herdr-api.schema.json",
     "skills/herdr/SKILL.md",
     "nirvana/profiles/**/*",
+    "nirvana/scholar/**/*",
     "distribution/install.ps1",
     "README.md",
     "LICENSE",
