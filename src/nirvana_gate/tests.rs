@@ -1821,7 +1821,7 @@ fn p35a_gh_repo_view_counts_the_repository() {
     }
     // The stable id would count these URLs anyway (the repository named in a gh read), so the mapping itself is
     // checked where the per-segment rule uses it.
-    let urls = shell_fetch_urls(cmd);
+    let urls = shell_fetch_urls(cmd, Shell::PowerShell);
     for url in [
         "https://github.com/MindDock/motion-tracker",
         "https://api.github.com/repos/MindDock/motion-tracker",
@@ -6831,6 +6831,9 @@ fn p47d_cut(command: &str) -> String {
 /// A fetch that prints one status line per URL and names none of them: curl reads its URLs from a file.
 const P47D_CHECK: &str = "curl -s -o NUL -w \"%{http_code} %{url_effective}\\n\" -K urls.txt";
 
+/// The lines agy often writes before a `run_command`'s exit line (the P47d review's S1, by shape).
+const P47D_RAN: &str = "Created At: 2026-11-12T19:10:18-05:00\nCompleted At: 2026-11-12T19:10:20-05:00\n";
+
 /// A Claude tool call and its answer, with the answer's text.
 fn p47d_claude(tool: &str, input: Value, result: &str) -> String {
     [
@@ -6923,6 +6926,10 @@ fn p47d_a_status_line_counts_only_from_a_step_that_ended_well() {
     }
     let exited = format!("Command exited with code 6.\n\n{line}");
     assert_eq!(p47d_mark(url, &p47d_step(3, "DONE", P47D_CHECK, &exited)), Mark::Fail);
+    // Fix round, item 1: below agy's `Created At:`/`Completed At:` lines the exit is read too. The replay moved no
+    // URL of the record when it was, so a failed command's status lines stay uncounted on this path as well.
+    let headed = format!("{P47D_RAN}Command exited with code 6.\n\nCommand output:\n{line}");
+    assert_eq!(p47d_mark(url, &p47d_step(3, "DONE", P47D_CHECK, &headed)), Mark::Fail);
     for state in ["ERROR", "CANCELED", "CANCELLED"] {
         assert_eq!(p47d_mark(url, &p47d_step(3, state, P47D_CHECK, &line)), Mark::Fail, "{state}");
     }
@@ -7125,8 +7132,29 @@ fn p47d_a_cut_command_that_prints_in_sight_or_ended_badly_counts_nothing() {
     ] {
         assert_eq!(mark(&p47d_padded(&head), "DONE", &line), Mark::Fail, "{head}");
     }
+    // Fix round, items 4 and 5: each printer, and each reader of a local file (`LOCAL_READERS`), refuses the step on
+    // its own: a notes file holds status lines as well as `echo` does.
+    for head in [
+        "cat status.txt".to_owned(),
+        "gc status.txt".to_owned(),
+        "more status.txt".to_owned(),
+        "$lines | Out-Host".to_owned(),
+        format!("Write-Information \"200 {url}\""),
+        "Select-String -Path notes.txt -Pattern 200".to_owned(),
+        "sls 200 notes.txt".to_owned(),
+        "grep 200 notes.txt".to_owned(),
+        "tail -n 5 notes.txt".to_owned(),
+        "awk 1 notes.txt".to_owned(),
+        "Import-Csv status.csv".to_owned(),
+    ] {
+        assert_eq!(mark(&p47d_padded(&head), "DONE", &line), Mark::Fail, "{head}");
+    }
     let padded = p47d_padded("Set-Location C:\\w");
     assert_eq!(mark(&padded, "DONE", &format!("Command exited with code 1.\n\n{line}")), Mark::Fail);
+    // Fix round, item 1: agy often writes when the step ran before the exit line (384 of 780 non-zero exits in the
+    // record); the exit is read there too.
+    let headed = format!("{P47D_RAN}Command exited with code 1.\n\nCommand output:\n{line}");
+    assert_eq!(mark(&padded, "DONE", &headed), Mark::Fail);
     for state in ["ERROR", "CANCELED"] {
         assert_eq!(mark(&padded, state, &line), Mark::Fail, "{state}");
     }
@@ -7180,12 +7208,16 @@ document.querySelector('#core')?.innerText\" --url \"https://example.com/dp/X\""
     assert_eq!(p47d_mark("https://example.com/dp/X", &agy_run(eval)), Mark::Pass);
     for (url, command) in [
         ("https://example.com/b", "curl -H \"Accept: text/html; q=0.9\" https://example.com/b"),
-        ("https://example.com/c", "curl -H \"X-Note: \\\"a; b\\\"\" https://example.com/c"),
         ("https://example.com/d", "curl -H \"X-Note: `\"a; b`\"\" https://example.com/d"),
         ("https://example.com/e", "curl -H 'X-Note: a && b | c' https://example.com/e"),
     ] {
         assert_eq!(p47d_mark(url, &agy_run(command)), Mark::Pass, "{command}");
     }
+    // Fix round, item 3: a backslash escapes a quote in a POSIX shell, so this case is a Claude `Bash` call; agy runs
+    // PowerShell, where it does not (`p47d_fix_a_backslash_escapes_a_quote_only_in_bash`).
+    let escaped = "curl -H \"X-Note: \\\"a; b\\\"\" https://example.com/c";
+    let bash = p47d_claude("Bash", serde_json::json!({ "command": escaped }), "");
+    assert_eq!(p47d_mark("https://example.com/c", &bash), Mark::Pass, "{escaped}");
     let outside = "curl -s https://example.com/f; echo \"https://example.com/g\" || echo https://example.com/h";
     assert_eq!(p47d_mark("https://example.com/f", &agy_run(outside)), Mark::Pass);
     for url in ["https://example.com/g", "https://example.com/h"] {
@@ -7240,6 +7272,16 @@ fn p47d_the_check_the_workers_are_told_to_run_counts() {
         assert!(flat.contains("`<status> <url>` line per URL"), "{name}: {text}");
         assert!(flat.contains("a loop") && flat.contains("each pass prints that line"), "{name}: {text}");
     }
+    // Fix round, item 7: `-o NUL` writes a file named `NUL` off Windows, and the two texts that reach a Claude seat on
+    // another system say what to write there, as the scholar card does. SOURCES_LINE goes only to agy on this machine.
+    for (name, text) in [("WEB_RESEARCHER", WEB_RESEARCHER), ("card", &card)] {
+        assert!(text.replace('\n', " ").contains("(off Windows, `-o /dev/null`)"), "{name}: {text}");
+    }
+    assert!(!SOURCES_LINE.contains("/dev/null"), "{SOURCES_LINE}");
+    // No `-L`: with it `url_effective` is the final URL, which no longer matches the cited one.
+    for (name, text) in [("SOURCES_LINE", SOURCES_LINE), ("WEB_RESEARCHER", WEB_RESEARCHER), ("card", &card)] {
+        assert!(!text.contains(" -L"), "{name}: {text}");
+    }
     assert!(SOURCES_LINE.starts_with("Never cite a URL you did not open in this session."));
     assert!(!SOURCES_LINE.contains('\n'), "one line in the brief");
     let named = SOURCES_LINE
@@ -7263,4 +7305,338 @@ fn p47d_webfetch_counts_only_its_url() {
     );
     assert_eq!(p47d_mark("https://example.com/a", &stream), Mark::Pass);
     assert_eq!(p47d_mark("https://example.com/b", &stream), Mark::Fail);
+}
+
+// ---- Plan 47 P47d fix round: the review's S1 to S5 ----
+
+/// Item 1 (S1): agy's exit line is read wherever it starts a line in the part before `Command output:`: after the
+/// `Created At:`/`Completed At:` lines, and after the note that the output was cut. A command that prints the same
+/// words in its own output did not fail by it.
+#[test]
+fn p47d_fix_the_exit_line_is_read_below_agy_s_header() {
+    // The other readers of the exit line: a failed shell read takes its local reads back (fix round F4).
+    let read = p47d_step(7, "DONE", "Get-Content Docs\\notes.md", &format!("{P47D_RAN}Command exited with code 1.\n"));
+    assert!(stream_reads(&read).local.is_empty(), "{read}");
+    let ok = p47d_step(7, "DONE", "Get-Content Docs\\notes.md", &format!("{P47D_RAN}Command exited with code 0.\n"));
+    assert!(!stream_reads(&ok).local.is_empty(), "{ok}");
+    let truncated = "The tool's output was truncated due to being too long. You can find the full output in a file at \
+file:///C:/w/out.txt\nHere is a preview with the middle of the output truncated:\n";
+    for (output, ok) in [
+        (format!("{P47D_RAN}Command exited with code 1.\n\nCommand output:\n200 https://example.com/a\n"), false),
+        (format!("{P47D_RAN}Command exited with code 0.\n\nCommand output:\n200 https://example.com/a\n"), true),
+        (format!("{truncated}{P47D_RAN}Command exited with code 2.\n\nCommand output:\nx\n"), false),
+        (format!("{truncated}Command exited with code 2.\n\nCommand output:\nx\n"), false),
+        ("Command exited with code 1.\n\nCommand output:\nNo such file".to_owned(), false),
+        ("Command exited with code 0.\nNo output from the command.".to_owned(), true),
+        (format!("{P47D_RAN}Command exited with code 0.\nNo output from the command."), true),
+        // The command's own text, after the marker, is not agy's header.
+        ("Command exited with code 0.\n\nCommand output:\nCommand exited with code 1.\n".to_owned(), true),
+        (format!("{P47D_RAN}Command exited with code 0.\n\nCommand output:\nCommand exited with code 9.\n"), true),
+        (format!("{P47D_RAN}\nCommand output:\nCommand exited with code 1.\n"), true),
+        ("200 https://example.com/a\n".to_owned(), true),
+        (String::new(), true),
+    ] {
+        assert_eq!(agy_command_ok(&output), ok, "{output:?}");
+    }
+}
+
+/// Item 2 (S2): a shell's code quote closes at its next unescaped same quote, and starts no new quote there, so the
+/// `;` after it cuts; and `-e` opens code only for an interpreter (`node`, `perl`, ...), in lower case: `grep -E` and
+/// `sed -e` take a pattern. The three commands of the review's S2 table count again, and its control still counts.
+#[test]
+fn p47d_fix_a_shell_s_code_quote_closes_and_e_is_code_only_for_an_interpreter() {
+    let id = "ENMuqbNSLTs";
+    let video = format!("https://www.youtube.com/watch?v={id}");
+    for command in [
+        format!("ls subs | grep -E \"ENMuq|Kahn8\"; python -m yt_dlp --skip-download -o \"subs/%(id)s\" {id}"),
+        format!("python -c \"print(1)\"; yt-dlp --print \"%(id)s\" {id}"),
+        format!("sed -e \"s/a/b/\" f.txt; python -m yt_dlp --print \"%(id)s\" {id}"),
+        format!("ls subs; python -m yt_dlp --skip-download -o \"subs/%(id)s\" {id}"),
+        format!("pwsh -NoProfile -Command \"Set-Location C:\\w; echo hi\"; yt-dlp --print \"%(id)s\" {id}"),
+        // An escaped quote inside the code does not close it.
+        format!("pwsh -NoProfile -Command \"echo `\"a`\"; yt-dlp --print id {id}\""),
+    ] {
+        assert_eq!(p47d_mark(&video, &agy_run(&command)), Mark::Pass, "{command}");
+    }
+    // A pattern is no code: the fetch word inside it runs nothing, so the command's status lines are its notes'.
+    // (A plain URL beside the word still counts by master's substring rule, `command_is_shell_fetch`: a known gap.)
+    let status = "200 https://example.com/z\n";
+    for command in [
+        "grep -E \"curl|wget\" notes.md",
+        "grep -e \"curl\" notes.md",
+        "sed -e \"curl\" notes.md",
+        "node -E \"curl\"",
+    ] {
+        let step = p47d_step(1, "DONE", command, status);
+        assert_eq!(p47d_mark("https://example.com/z", &step), Mark::Fail, "{command}");
+    }
+    let step = p47d_step(1, "DONE", "node -e \"x; curl -s -K urls.txt\"", status);
+    assert_eq!(p47d_mark("https://example.com/z", &step), Mark::Pass, "node's -e is code");
+    for (head, code) in [
+        ("node -e ", true),
+        ("perl -e ", true),
+        ("ruby -w -e ", true),
+        ("& \"C:\\Program Files\\nodejs\\node.exe\" -e ", true),
+        ("bash -c ", true),
+        ("pwsh -NoProfile -Command ", true),
+        ("cmd /C ", true),
+        ("grep -E ", false),
+        ("grep -e ", false),
+        ("sed -e ", false),
+        ("node -E ", false),
+        ("pwsh -e ", false),
+        ("-e ", false),
+    ] {
+        assert_eq!(opens_code(head), code, "{head:?}");
+    }
+    // An apostrophe in a word of prose opens no quote: the curl between two of them is a command of its own. A
+    // string's prefix letter is no prose (`r'...'`).
+    let url = "https://example.com/a";
+    let prose = "echo don't; curl -s -K urls.txt -w \"%{http_code} %{url_effective}\\n\"; echo it's";
+    assert_eq!(p47d_mark(url, &p47d_step(1, "DONE", prose, &format!("200 {url}\n"))), Mark::Pass);
+    let raw = format!("python -c \"print(r'x; yt-dlp {id}')\"");
+    assert_eq!(p47d_mark(&video, &agy_run(&raw)), Mark::Fail, "{raw}");
+}
+
+/// Item 3 (S3): agy runs PowerShell and so does Claude's `PowerShell` tool: there `\` escapes nothing and `"C:\dir\"`
+/// closes at its last quote, so the `;` after it cuts. In a Claude `Bash` call `\"` is an escaped quote, the string
+/// goes on, and the `;` inside it cuts nothing.
+#[test]
+fn p47d_fix_a_backslash_escapes_a_quote_only_in_bash() {
+    let url = "https://example.com/a";
+    let line = format!("200 {url}\n");
+    let cd = "cd \"C:\\dir\\\"; curl -s -K \"urls.txt\" -w \"%{http_code} %{url_effective}\\n\"";
+    assert_eq!(p47d_mark(url, &p47d_step(1, "DONE", cd, &line)), Mark::Pass, "{cd}");
+    let quoted = "Set-Location \"C:\\dir\\\"; curl.exe -s https://example.com/b";
+    assert_eq!(p47d_mark("https://example.com/b", &agy_run(quoted)), Mark::Pass, "{quoted}");
+    let powershell = p47d_claude("PowerShell", serde_json::json!({ "command": quoted }), "");
+    assert_eq!(p47d_mark("https://example.com/b", &powershell), Mark::Pass, "{quoted}");
+    // The other direction: in Bash the string runs on past `\"`, and the yt-dlp inside it is text, so the video id
+    // it names was not fetched; PowerShell runs it. (A plain URL there would count by master's substring rule.)
+    let video = "https://www.youtube.com/watch?v=U24jDyYnU3A";
+    let echoed = "echo \"C:\\dir\\\"; yt-dlp --print id U24jDyYnU3A\"";
+    let bash = p47d_claude("Bash", serde_json::json!({ "command": echoed }), "");
+    assert_eq!(p47d_mark(video, &bash), Mark::Fail, "{echoed}");
+    let powershell = p47d_claude("PowerShell", serde_json::json!({ "command": echoed }), "");
+    assert_eq!(p47d_mark(video, &powershell), Mark::Pass, "{echoed}");
+    // PowerShell's own escape, the backtick, still holds a quote in its string.
+    let ticked = "echo \"a`\"; yt-dlp --print id U24jDyYnU3A\"";
+    assert_eq!(p47d_mark(video, &agy_run(ticked)), Mark::Fail, "{ticked}");
+    // Inside one segment too: the curl after `"C:\d\"` is a command word, not part of a string.
+    let tested =
+        "if (Test-Path \"C:\\d\\\") { curl.exe -s -o NUL -w \"%{http_code} %{url_effective}\\n\" -K urls.txt }";
+    assert_eq!(p47d_mark(url, &p47d_step(2, "DONE", tested, &line)), Mark::Pass, "{tested}");
+}
+
+// ---- Plan 47 P47d fix round, item 6: the record replay, kept ----
+
+/// The DONE `run_command` steps of `stream` whose output names `norm` on a status line: each step's index, whether
+/// agy cut its command, and whether its output reads as exit 0.
+fn p47d_replay_steps(stream: &str, norm: &str) -> Vec<String> {
+    let mut steps = Vec::new();
+    for line in stream.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        let Some(step) = val.get("step_update") else {
+            continue;
+        };
+        if step.get("tool_name").and_then(Value::as_str) != Some("run_command")
+            || step.get("state").and_then(Value::as_str) != Some("DONE")
+        {
+            continue;
+        }
+        let output = step["tool_info"]["output"].as_str().unwrap_or("");
+        if !status_urls(output).iter().any(|url| url == norm) {
+            continue;
+        }
+        let command = step["tool_info"]["parameters"]["CommandLine"]
+            .as_str()
+            .unwrap_or("");
+        let index = step.get("step_index").and_then(Value::as_u64).unwrap_or(0);
+        let shape = format!(
+            "step {index}{}{}",
+            if agy_cut(command) { " cut" } else { "" },
+            if agy_command_ok(output) { "" } else { " exit!=0" }
+        );
+        if !steps.contains(&shape) {
+            steps.push(shape);
+        }
+    }
+    steps
+}
+
+/// The cut commands of `stream` with no fetch in sight that printed status lines, one per step, and how many of them
+/// the printing guard refuses (fix round item 4): each printed.
+fn p47d_replay_cut_steps(order: &str, stream: &str) -> (usize, usize) {
+    let (mut seen, mut refused) = (Vec::new(), 0);
+    for line in stream.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        let Some(step) = val.get("step_update") else {
+            continue;
+        };
+        if step.get("tool_name").and_then(Value::as_str) != Some("run_command")
+            || step.get("state").and_then(Value::as_str) != Some("DONE")
+        {
+            continue;
+        }
+        let index = step.get("step_index").and_then(Value::as_u64).unwrap_or(0);
+        let command = step["tool_info"]["parameters"]["CommandLine"]
+            .as_str()
+            .unwrap_or("");
+        let printed = status_urls(step["tool_info"]["output"].as_str().unwrap_or("")).len();
+        if seen.contains(&index) || !agy_cut(command) || command_fetches(command, Shell::PowerShell) || printed == 0 {
+            continue;
+        }
+        seen.push(index);
+        let refuses = prints_visibly(command);
+        refused += usize::from(refuses);
+        println!("P47D-CUT|{order}|step {index}|status lines={printed}|refused={refuses}");
+    }
+    (seen.len(), refused)
+}
+
+/// The record replay (plan 47 P47d fix round, item 6), run by name: `cargo test --bin herdr
+/// p47d_replay_the_record -- --ignored --nocapture`. It reads the streams and journals where they live, read-only,
+/// and copies none of their text into the repository: the list of orders and their folders is a JSON file named by
+/// `HERDR_P47D_REPLAY` (`[{"root", "run", "order", "class"}]`), kept outside it, since those folders belong to the
+/// owner's other projects. With no variable, or a folder absent, it prints a line and skips.
+///
+/// Per order it prints what was cited, what this head flags, each recorded gate event's sources mark, and by which
+/// rule each cited URL counts. Expected before the run (the P47d review, its table C): over the 9 events that failed
+/// on cited URLs, 75 flagged when recorded, 18 flagged at this head (16 never opened, and r1-tripo-v3's 2 opened by a
+/// script run by name), 57 counted. And 14 cut commands with no fetch in sight print status lines, none refused by
+/// the printing guard (the review's table B; fix round item 4 must keep it so).
+#[test]
+#[ignore]
+fn p47d_replay_the_record() {
+    let Ok(list) = std::env::var("HERDR_P47D_REPLAY") else {
+        println!("P47D|skip|HERDR_P47D_REPLAY is not set");
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(&list) else {
+        println!("P47D|skip|no list at {list}");
+        return;
+    };
+    let rows: Vec<Value> = serde_json::from_str(&text).expect("the list is JSON");
+    let (mut recorded_total, mut flagged_total, mut counted_total) = (0usize, 0usize, 0usize);
+    let (mut cut_total, mut cut_refused) = (0usize, 0usize);
+    for row in &rows {
+        let field = |key: &str| row[key].as_str().unwrap_or("").to_owned();
+        let (root, run, order, class) = (field("root"), field("run"), field("order"), field("class"));
+        let run_dir = Path::new(&root).join(".nirvana").join("runs").join(&run);
+        let Ok(stream) = std::fs::read_to_string(run_dir.join("streams").join(format!("{order}.jsonl"))) else {
+            println!("P47D|{order}|skip|no stream");
+            continue;
+        };
+        let (cut, refused) = p47d_replay_cut_steps(&order, &stream);
+        cut_total += cut;
+        cut_refused += refused;
+        let journal = std::fs::read_to_string(run_dir.join("journal.jsonl")).unwrap_or_default();
+        // Each gate event's sources axis, in the order the journal holds them.
+        let events: Vec<Value> = journal
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|event| {
+                event["event"].as_str() == Some("gated") && event["order"].as_str() == Some(order.as_str())
+            })
+            .filter_map(|event| {
+                event["axes"]
+                    .as_array()?
+                    .iter()
+                    .find(|axis| axis["axis"].as_str() == Some("sources"))
+                    .cloned()
+            })
+            .collect();
+        let mut feed = crate::nirvana_worker::Stream::new("agy");
+        for line in stream.lines() {
+            feed.feed(line);
+        }
+        let Ok(report) = feed.report() else {
+            println!("P47D|{order}|skip|no report");
+            continue;
+        };
+        let web = (!events
+            .iter()
+            .any(|axis| axis["why"].as_str().unwrap_or("").contains("no web asked")))
+        .then_some("the replay reads the web as asked");
+        let worktree = Path::new(&root).join(".nirvana").join("worktrees").join(&order);
+        let roots = [worktree.as_path(), Path::new(&root)];
+        let axis = sources_axis_at(&class, web, Some(&report), &stream, &roots);
+        let reads = stream_reads(&stream);
+        let cited: Vec<String> = report["sources"]
+            .as_array()
+            .map(|items| items.iter().filter_map(|item| item["url"].as_str().map(str::to_owned)).collect())
+            .unwrap_or_default();
+        // By which rule each cited URL counts, in `sources_axis_at`'s order.
+        let mut paths: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut how: BTreeMap<String, String> = BTreeMap::new();
+        for url in &cited {
+            let norm = normalize_url(url);
+            let path = if stable_read(url, &reads) {
+                "stable"
+            } else if status_read(url, &reads) {
+                "status"
+            } else if local_entry(url, &roots) {
+                if class == READ_CLASS || local_read(url, &reads, &roots) {
+                    "local"
+                } else {
+                    "flagged"
+                }
+            } else if class.starts_with("media.") && media_read(url, &reads) {
+                "media"
+            } else if cut_status_step(url, &reads).is_some() && !url_in_stream(&norm, &stream) {
+                "cut-note"
+            } else if url_in_stream(&norm, &stream) {
+                "stream"
+            } else {
+                "flagged"
+            };
+            *paths.entry(path).or_default() += 1;
+            how.insert(url.clone(), format!("{path} {:?}", p47d_replay_steps(&stream, &norm)));
+        }
+        let (mark, lines) = axis
+            .as_ref()
+            .map_or(("none".to_owned(), Vec::new()), |axis| (format!("{:?}", axis.mark), axis.lines.clone()));
+        let recorded: Vec<String> = events
+            .iter()
+            .map(|axis| {
+                let lines = axis["lines"].as_array().map_or(0, Vec::len);
+                format!("{}({lines})", axis["mark"].as_str().unwrap_or("-"))
+            })
+            .collect();
+        println!(
+            "P47D|{order}|{class}|cited={}|recorded={}|head={mark}({} flagged)|paths={paths:?}",
+            cited.len(),
+            recorded.join(","),
+            lines.len()
+        );
+        for line in &lines {
+            println!("P47D-FLAG|{order}|{line}|{}", how.get(line).map_or("not cited as is", String::as_str));
+        }
+        // The first event that failed on cited URLs: the measurement's and the review's 75.
+        if let Some(first) = events.iter().find(|axis| {
+            axis["mark"].as_str() == Some("fail") && axis["lines"].as_array().is_some_and(|l| !l.is_empty())
+        }) {
+            let flagged: Vec<&str> = first["lines"]
+                .as_array()
+                .map(|lines| lines.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            recorded_total += flagged.len();
+            flagged_total += lines.len();
+            for url in flagged {
+                if lines.iter().any(|line| line == url) {
+                    continue;
+                }
+                counted_total += 1;
+                println!("P47D-COUNT|{order}|{url}|{}", how.get(url).map_or("not cited now", String::as_str));
+            }
+        }
+    }
+    println!("P47D|total|recorded flagged={recorded_total}|head flagged={flagged_total}|counted={counted_total}");
+    println!("P47D|total|cut commands with no fetch in sight and status lines={cut_total}|refused={cut_refused}");
+    assert_eq!((recorded_total, flagged_total, counted_total), (75, 18, 57));
+    assert_eq!((cut_total, cut_refused), (14, 0));
 }

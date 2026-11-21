@@ -25,11 +25,30 @@ T_PS = "p47d_the_powershell_tool_counts_as_bash_does"
 T_WF = "p47d_webfetch_counts_only_its_url"
 T_TEXT = "p47d_the_check_the_workers_are_told_to_run_counts"
 
+T_EXIT = "p47d_fix_the_exit_line_is_read_below_agy_s_header"
+T_CODE = "p47d_fix_a_shell_s_code_quote_closes_and_e_is_code_only_for_an_interpreter"
+T_SHELL = "p47d_fix_a_backslash_escapes_a_quote_only_in_bash"
+
 STATUS_CALL = "        if status_read(url, &reads) {\n            continue;\n        }\n"
-FETCHES = "                let fetches = command_fetches(command);\n"
+# The fix round (S3): agy's command is read for PowerShell.
+FETCHES = "                let fetches = command_fetches(command, Shell::PowerShell);\n"
 RECORD = "                    reads.status.extend(status_urls(output));\n"
-QUOTE_ARM = "            b'\"' | b'\\'' if !opens_code(&cmd[start..at]) => {\n"
-ESCAPE_ARM = "            b'\\\\' | b'`' if quote == b'\"' => {\n"
+# The fix round (S2): the quote arm skips a prose apostrophe; the code quote has arms of its own before it.
+QUOTE_ARM = "            b'\"' | b'\\'' if !prose_apostrophe(bytes, at) => {\n"
+CODE_OPEN = ("            byte @ (b'\"' | b'\\'') if code.is_none() && opens_code(&cmd[start..at]) => "
+             "code = Some(byte),\n")
+CODE_CLOSE = "            byte @ (b'\"' | b'\\'') if code == Some(byte) => code = None,\n"
+CODE_ESCAPE = "            byte if code == Some(b'\"') && shell.escapes(byte) => at += 1,\n"
+# The fix round (S3): which byte escapes is the shell's.
+POSIX_ESCAPE = "            Shell::Posix => byte == b'\\\\',\n"
+PS_ESCAPE = "            Shell::PowerShell => byte == b'`',\n"
+EXIT_LINE = '        .find_map(|line| line.strip_prefix("Command exited with code "))\n'
+FIRST_LINE_ONLY = '        .next()\n        .and_then(|line| line.strip_prefix("Command exited with code "))\n'
+EXIT_HEADER = '    let header = output.split_once("Command output:").map_or(output, |(header, _)| header);\n'
+READERS = "const LOCAL_READERS: &[&str] = &[\n"
+# The fix round (item 7): what WEB_RESEARCHER and the card say after their curl example.
+DEV_NULL = "<url>` (off Windows, \\\n`-o /dev/null`)"
+LOOP_FINE = "; a loop over many URLs is fine when each pass prints that line."
 CLAUDE_RESULT = "                        if !id.is_empty() && fetch_ids.iter().any(|f| f == id) {\n"
 FETCH_ARM = "                if fetches && ended_well {\n"
 CUT_ARM = "                } else if ended_well && agy_cut(command) && !prints_visibly(command) {\n"
@@ -48,7 +67,8 @@ CONTROLS = (
     Control("p47d_status_no_fetch_needed", GATE, FETCH_ARM, "                if ended_well {\n", T_ECHO, "rust"),
     # The fetch word from any earlier step: step 2's echo counts after step 1's curl, so the axis passes.
     Control("p47d_status_fetch_any_step", GATE, FETCHES,
-            "                let fetches = command_fetches(command) || !reads.texts.is_empty();\n", T_EARLIER, "rust"),
+            "                let fetches = command_fetches(command, Shell::PowerShell) || !reads.texts.is_empty();\n",
+            T_EARLIER, "rust"),
     # A non-zero exit counts: `Command exited with code 6.` then the line passes.
     Control("p47d_status_failed_counts", GATE,
             "                let ended_well = answered\n                    && agy_command_ok(output)\n",
@@ -78,11 +98,13 @@ CONTROLS = (
             "            .then(|| normalize_url(url))\n", "            .then(|| url.to_owned())\n", T_MATCH, "rust"),
     # A cut command read as a fetch: the URL list whose curl lies past the cut passes plainly, not as a note.
     Control("p47d_status_cut_any", GATE, FETCHES,
-            "                let fetches = command_fetches(command) || command.trim_end().ends_with(CUT_MARK);\n",
+            "                let fetches = command_fetches(command, Shell::PowerShell)\n"
+            "                    || command.trim_end().ends_with(CUT_MARK);\n",
             T_CUT, "rust"),
     # A script run by name counts: `python.exe run_check.py`'s line passes.
     Control("p47d_status_script_by_name", GATE, FETCHES,
-            "                let fetches = command_fetches(command) || command.contains(\"python\");\n", T_SCRIPT, "rust"),
+            "                let fetches = command_fetches(command, Shell::PowerShell)"
+            " || command.contains(\"python\");\n", T_SCRIPT, "rust"),
     # Claude gains the rule: the Bash result's status line passes.
     Control("p47d_status_claude", GATE, CLAUDE_RESULT,
             "                        reads.status.extend(status_urls(&json_text(block.get(\"content\").unwrap_or(&Value::Null))));\n"
@@ -128,18 +150,20 @@ CONTROLS = (
     # ---- item 3: the segment cut respects quotes ----
     # Quote-blind again: the bladebro eval's `||` cuts its `--url` away from `bladebro`, the first case.
     Control("p47d_quote_blind", GATE, QUOTE_ARM, "            b'\"' | b'\\'' if false => {\n", T_QUOTE, "rust"),
-    # A shell's quoted code read as a string: the `-Command "...; echo <m>; curl <n>"` joins m to the curl.
-    Control("p47d_quote_code_not_cut", GATE, QUOTE_ARM, "            b'\"' | b'\\'' => {\n", T_QUOTE, "rust"),
+    # A shell's quoted code read as a string: the `-Command "...; echo <m>; curl <n>"` joins m to the curl. (The fix
+    # round moved the code quote to an arm of its own; this drops that arm.)
+    Control("p47d_quote_code_not_cut", GATE, CODE_OPEN, "", T_QUOTE, "rust"),
     # An unclosed quote runs to the end: `echo it's here; echo <i>; ... curl <j>` is one segment, i passes.
     Control("p47d_quote_unclosed_swallows", GATE,
             "            _ => end += 1,\n        }\n    }\n    None\n}\n",
             "            _ => end += 1,\n        }\n    }\n    Some(bytes.len() - 1)\n}\n", T_QUOTE, "rust"),
     # A quote spans lines: `echo "notes\n<k>; curl <l>"` is one segment, k passes.
     Control("p47d_quote_spans_lines", GATE, "            b'\\n' => return None,\n", "", T_QUOTE, "rust"),
-    # No backslash escape: `"X-Note: \"a; b\""` closes at `\"`, its `;` cuts, the c case fails.
-    Control("p47d_quote_no_backslash", GATE, ESCAPE_ARM, "            b'`' if quote == b'\"' => {\n", T_QUOTE, "rust"),
-    # No backtick escape: the PowerShell d case fails the same way.
-    Control("p47d_quote_no_backtick", GATE, ESCAPE_ARM, "            b'\\\\' if quote == b'\"' => {\n", T_QUOTE, "rust"),
+    # No backslash escape in Bash: `"X-Note: \"a; b\""` closes at `\"`, its `;` cuts, the c case (a Claude `Bash`
+    # call since the fix round) fails.
+    Control("p47d_quote_no_backslash", GATE, POSIX_ESCAPE, "            Shell::Posix => false,\n", T_QUOTE, "rust"),
+    # No backtick escape on agy: the PowerShell d case fails the same way.
+    Control("p47d_quote_no_backtick", GATE, PS_ESCAPE, "            Shell::PowerShell => false,\n", T_QUOTE, "rust"),
     # ---- items 4 and 5: Claude's PowerShell tool, WebFetch's url ----
     # Bash only: PowerShell's `curl.exe -s <a>` fails.
     Control("p47d_powershell_unread", GATE,
@@ -165,4 +189,78 @@ CONTROLS = (
     # The card no longer says it.
     Control("p47d_text_card_loop", PROFILES,
             "URLs is fine when each pass prints that line.\\n\",\n", "URLs is fine.\\n\",\n", T_TEXT, "rust"),
+    # ---- the fix round (the review's S1 to S5) ----
+    # S1, the exit line read on the first line only: the uncut fetch whose header holds `Command exited with code 6.`
+    # below `Created At:`/`Completed At:` counts, so the `headed` case passes (the prefix-form case before it fails).
+    Control("p47d_fix_exit_first_line", GATE, EXIT_LINE, FIRST_LINE_ONLY, T_ENDED, "rust"),
+    # The same, on the cut path: the padded `Set-Location` step whose header says exit 1 counts with a note.
+    Control("p47d_fix_exit_first_line_cut", GATE, EXIT_LINE, FIRST_LINE_ONLY, T_GUARD, "rust"),
+    # S1, the command's own text read as agy's: a header with no exit line, then `Command exited with code 1.` printed
+    # by the command, reads as a failure (the last but two rows of T_EXIT).
+    Control("p47d_fix_exit_below_marker", GATE, EXIT_HEADER, "    let header = output;\n", T_EXIT, "rust"),
+    # S2, a code quote that never closes: `python -c "print(1)"; yt-dlp ...`'s closing quote swallows the `;` again.
+    Control("p47d_fix_code_quote_unclosed", GATE, CODE_CLOSE, "", T_CODE, "rust"),
+    # S2, no escape inside a code quote: `-Command "echo `"a`"; yt-dlp ..."` closes at the first escaped quote, and
+    # the second opens a string that hides the yt-dlp (the sixth command fails).
+    Control("p47d_fix_code_quote_no_escape", GATE, CODE_ESCAPE, "", T_CODE, "rust"),
+    # S2, `-e` code for any command word: `grep -e "curl"`'s status line counts (the second pattern case).
+    Control("p47d_fix_e_any_command", GATE,
+            '            CODE_E_COMMANDS.contains(&program.strip_suffix(".exe").unwrap_or(&program))\n',
+            "            !program.is_empty()\n", T_CODE, "rust"),
+    # S2, `-e` in any case: `node -E "curl"` reads as code, its status line counts (the last pattern case).
+    Control("p47d_fix_e_any_case", GATE, '    if flag == "-e" {\n', '    if flag.eq_ignore_ascii_case("-e") {\n',
+            T_CODE, "rust"),
+    # S2, a prose apostrophe opens a quote: `echo don't; curl ...; echo it's` joins the curl to the echoes again.
+    Control("p47d_fix_prose_quote", GATE, QUOTE_ARM, "            b'\"' | b'\\'' => {\n", T_CODE, "rust"),
+    # S2, a string prefix read as prose: `print(r'x; yt-dlp <id>')` cuts at its `;`, and the id counts.
+    Control("p47d_fix_prose_prefix", GATE,
+            '    !word.is_empty() && !["r", "f", "b", "u", "br", "rb", "rf", "fr"].contains(&word.as_str())\n',
+            "    !word.is_empty()\n", T_CODE, "rust"),
+    # S3, a backslash escapes on agy: `cd "C:\dir\"; curl ...` is one segment again and its status line fails.
+    Control("p47d_fix_agy_backslash", GATE, PS_ESCAPE,
+            "            Shell::PowerShell => matches!(byte, b'\\\\' | b'`'),\n", T_SHELL, "rust"),
+    # S3, Claude's PowerShell tool read as Bash: its `echo "C:\dir\"; yt-dlp ..."` hides the yt-dlp, the id fails.
+    Control("p47d_fix_claude_powershell_as_bash", GATE, '        if name == "PowerShell" {\n', "        if false {\n",
+            T_SHELL, "rust"),
+    # S3, a segment's code read for either shell: `if (Test-Path "C:\d\") { curl.exe ... }` hides its curl in a
+    # string, the last case fails.
+    Control("p47d_fix_code_either_shell", GATE,
+            "        match quote_end(&bytes, at, shell).map(|end| end - at - 1) {\n",
+            "        match quote_end(&bytes, at, Shell::Either).map(|end| end - at - 1) {\n", T_SHELL, "rust"),
+    # S4, the local readers not refused on the cut path: `Get-Content status.txt` in sight counts with a note (the
+    # first reader among T_GUARD's cases, a reader since the fix round; every reader shares this line).
+    Control("p47d_fix_cut_reader_allowed", GATE, "            || segment_reads_local(segment)\n", "", T_GUARD, "rust"),
+    # S5, one per word. Each case of T_GUARD named below counts with a note when its word is gone.
+    # `Write-Host 200 <url>`.
+    Control("p47d_fix_guard_no_write_host", GATE, '    "write-host",\n    "write-information",\n',
+            '    "write-information",\n', T_GUARD, "rust"),
+    # `Write-Information "200 <url>"`.
+    Control("p47d_fix_guard_no_write_information", GATE, '    "write-information",\n    "out-host",\n',
+            '    "out-host",\n', T_GUARD, "rust"),
+    # `$lines | Out-Host`.
+    Control("p47d_fix_guard_no_out_host", GATE, '    "out-host",\n];\n\n/// Script calls that print.\n',
+            "];\n\n/// Script calls that print.\n", T_GUARD, "rust"),
+    # `cat status.txt` (a local reader since the fix round).
+    Control("p47d_fix_guard_no_cat", GATE, READERS + '    "cat",\n', READERS, T_GUARD, "rust"),
+    # `type status.txt`.
+    Control("p47d_fix_guard_no_type", GATE, '    "type",\n    "get-content",\n    "gc",\n    "head",\n',
+            '    "get-content",\n    "gc",\n    "head",\n', T_GUARD, "rust"),
+    # `Get-Content status.txt`.
+    Control("p47d_fix_guard_no_get_content", GATE, '    "get-content",\n    "gc",\n    "head",\n',
+            '    "gc",\n    "head",\n', T_GUARD, "rust"),
+    # `gc status.txt`.
+    Control("p47d_fix_guard_no_gc", GATE, '    "gc",\n    "head",\n', '    "head",\n', T_GUARD, "rust"),
+    # `more status.txt`.
+    Control("p47d_fix_guard_no_more", GATE, '    "tail",\n    "more",\n', '    "tail",\n', T_GUARD, "rust"),
+    # Item 7: WEB_RESEARCHER rule 3 names no `-o /dev/null` for other systems.
+    Control("p47d_fix_text_researcher_dev_null", PROFILES, DEV_NULL + LOOP_FINE + " On", "<url>`" + LOOP_FINE + " On",
+            T_TEXT, "rust"),
+    # The card names none either.
+    Control("p47d_fix_text_card_dev_null", PROFILES, DEV_NULL + LOOP_FINE + "\\n", "<url>`" + LOOP_FINE + "\\n",
+            T_TEXT, "rust"),
+    # SOURCES_LINE, which goes only to agy here, names it anyway.
+    Control("p47d_fix_text_sources_dev_null", AGY, "$_ }` does; a loop is fine",
+            "$_ }` (off Windows, `-o /dev/null`) does; a loop is fine", T_TEXT, "rust"),
+    # SOURCES_LINE's loop follows redirects: its `url_effective` would be the final URL.
+    Control("p47d_fix_text_sources_redirects", AGY, "curl.exe -s -o NUL", "curl.exe -s -L -o NUL", T_TEXT, "rust"),
 )
