@@ -122,9 +122,10 @@ CONTROLS = (
             "    if booked.profile.as_deref() != named {", "    if false && booked.profile.as_deref() != named {",
             T_NAMED, "rust"),
     # §2.5: the digest's lines, at most ten, with model and needs.
+    # Plan 47 P47b: the loop walks `listed`, the built-in scholar too.
     Control("p33a_digest_unbounded", PROFILES,
-            "    for (name, _, parsed) in profiles.iter().take(DIGEST_PROFILES) {",
-            "    for (name, _, parsed) in profiles.iter() {", T_DIGEST, "rust"),
+            "    for found in profiles.iter().take(DIGEST_PROFILES) {",
+            "    for found in profiles.iter() {", T_DIGEST, "rust"),
     Control("p33a_digest_no_model", PROFILES,
             '        (Some(model), _) => parts.push(format!("model {model}")),', "        (Some(_), _) => {}",
             T_DIGEST, "rust"),
@@ -135,8 +136,10 @@ CONTROLS = (
             "        if table.class(class).is_none() {", "        if false && table.class(class).is_none() {",
             T_NEW, "rust"),
     # §2.4: the Profiles group, the panel's keys.
+    # Plan 47 P47b: the group reads `listed`, the built-in scholar too.
     Control("p33a_group_from_the_panels_folder", SHELL,
-            "    crate::nirvana_profiles::list(&root(cwd))", "    crate::nirvana_profiles::list(cwd)", T_GROUP, "rust"),
+            "    crate::nirvana_profiles::listed(&root(cwd))", "    crate::nirvana_profiles::listed(cwd)", T_GROUP,
+            "rust"),
     Control("p33a_name_takes_any_key", SHELL,
             "            if (c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')\n",
             "            if (c != ' ')\n", T_NAMING, "rust"),

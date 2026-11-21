@@ -1501,8 +1501,15 @@ impl ClientShellState {
         let Some(item) = self.preload_item(index) else {
             return;
         };
+        // Plan 47 P47b fix round (the builder's hunk, granted): a built-in's row names the copy, which has a file.
+        let builtin = super::nirvana_profiles::is_profile(&item)
+            && crate::nirvana_profiles::builtin(&item.name).is_some();
         let Some(file) = item.file else {
-            self.preload_say(format!("{} has no file to open", item.name));
+            self.preload_say(if builtin {
+                crate::nirvana_profiles::builtin_refusal(&item.name, "there is no file to open")
+            } else {
+                format!("{} has no file to open", item.name)
+            });
             return;
         };
         self.open_in_editor(&file, outcome);

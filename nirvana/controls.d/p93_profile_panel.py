@@ -140,13 +140,14 @@ CONTROLS = (
             "                        }\n",
             "                        Some(_) => panel.shaping = Some((name.clone(), 0)),\n", T_NEW, "rust"),
     # P45a fix round: New runs on a thread of its own, and lands in `profile_made`.
+    # Plan 47 P47b: the New's job is a closure `profile_make_with` runs; the same two arms.
     Control("p93_new_no_shape_is_a_shape", PANEL,
-            "                    None => crate::nirvana_profiles::new_profile(&root, &owned),",
-            '                    None => crate::nirvana_profiles::new_profile_shape(&root, &owned, "reviewer"),', T_NEW,
+            "            None => crate::nirvana_profiles::new_profile(root, owned),",
+            '            None => crate::nirvana_profiles::new_profile_shape(root, owned, "reviewer"),', T_NEW,
             "rust"),
     Control("p93_new_shape_ignored", PANEL,
-            "                            crate::nirvana_profiles::new_profile_shape(&root, &owned, shape)\n",
-            "                            crate::nirvana_profiles::new_profile(&root, &owned)\n", T_NEW, "rust"),
+            "                Some(shape) => crate::nirvana_profiles::new_profile_shape(root, owned, shape),\n",
+            "                Some(_) => crate::nirvana_profiles::new_profile(root, owned),\n", T_NEW, "rust"),
     Control("p93_new_not_opened", PANEL,
             "                self.profile_open_tab(crate::nirvana::EDIT_FILE_COMMAND, &file, outcome);\n",
             "", T_NEW, "rust"),

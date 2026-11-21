@@ -1030,3 +1030,68 @@ fn p94_fix_the_try_forms_never_wait() {
     accept_seen(&root, &seen).unwrap();
     assert!(list(&root).is_empty());
 }
+
+/// Plan 47 P47b, item 9: a patch of the built-in scholar has no file to patch and a new profile named scholar takes a
+/// name that is taken: each is refused at `write`, and a patch written while the project had its own copy is refused
+/// at `accept` once that copy is gone. Each refusal names the copy command.
+#[test]
+fn p47b_a_proposal_against_the_built_in_is_refused_at_write_and_at_accept() {
+    let (_home, root) = project("p47b-pp");
+    let copy = nirvana_profiles::copy_command("scholar");
+    let body = "You research one question. Open every source before you cite it.";
+    let sha = nirvana_lessons::sha256(nirvana_profiles::builtin("scholar").unwrap().profile);
+    let patch = refused(&root, &draft(Kind::Patch, "scholar", body, Some(sha)));
+    assert!(
+        patch.iter().any(|why| why.contains("there is no file to patch") && why.contains(&copy)),
+        "{patch:?}"
+    );
+    let new = refused(&root, &draft(Kind::New, "scholar", NEW, None));
+    assert!(
+        new.iter().any(|why| why.contains("the name is taken") && why.contains(&copy)),
+        "{new:?}"
+    );
+    assert!(list(&root).is_empty());
+    // With the project's own copy a patch is written; once the copy is gone, accept refuses it and writes nothing.
+    nirvana_profiles::new_profile_from(&root, "scholar", "scholar").unwrap();
+    let sha = profile_sha(&root, "scholar");
+    let id = write(&root, &draft(Kind::Patch, "scholar", body, sha)).expect("a patch of the copy");
+    std::fs::remove_dir_all(nirvana_profiles::folder_of(&root, "scholar")).unwrap();
+    let why = accept(&root, &id).unwrap_err();
+    assert!(
+        why.contains("there is no file to patch") && why.contains(&copy),
+        "{why}"
+    );
+    let proposal = get(&root, &id).unwrap();
+    let target = target(&root, &prepared(proposal)).unwrap_err();
+    assert!(target.contains(&copy), "{target}");
+    assert!(!nirvana_profiles::folder_of(&root, "scholar").exists());
+    assert_eq!(list(&root).len(), 1, "the proposal still waits, for a dismiss");
+}
+
+/// P47b fix round (review F10): with the project's own `scholar/` gone, rolling back a patch accepted into it named
+/// `.nirvana/profiles/scholar.md`, a file that never was. It names the profile now, and still writes nothing.
+#[test]
+fn p47b_a_rollback_for_a_profile_that_is_gone_names_the_profile() {
+    let (_home, root) = project("p47b-pp-rollback");
+    nirvana_profiles::new_profile_from(&root, "scholar", "scholar").unwrap();
+    let body = "You research one question. Open every source before you cite it.";
+    let sha = profile_sha(&root, "scholar");
+    let id = write(&root, &draft(Kind::Patch, "scholar", body, sha)).expect("a patch of the copy");
+    accept(&root, &id).expect("accepted into the copy");
+    let op = ledger(&root)
+        .into_iter()
+        .rev()
+        .find(|row| row.action == "accept")
+        .expect("the accept's row")
+        .op;
+    std::fs::remove_dir_all(nirvana_profiles::folder_of(&root, "scholar")).unwrap();
+    let why = rollback(&root, &op).unwrap_err();
+    assert!(
+        why.contains("profile scholar is not in this project any more") && why.contains(&op),
+        "{why}"
+    );
+    assert!(!why.contains("scholar.md"), "{why}");
+    assert!(!nirvana_profiles::folder_of(&root, "scholar").exists());
+    assert!(!nirvana_profiles::path(&root, "scholar").exists());
+    assert!(list(&root).is_empty(), "nothing is waiting again");
+}

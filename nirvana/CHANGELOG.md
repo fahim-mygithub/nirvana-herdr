@@ -3,6 +3,60 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.93.0: every project has a `scholar` researcher profile, built into herdr
+
+- **Changed:** plan 47's second package.
+  - herdr carries a profile named `scholar` in its binary: a body with the research method and nine cards
+    (benchmark, breadth-then-cluster, competitive-analysis, decision-matrix, fetch-ladder, hypothesis-elimination,
+    source-of-truth, synthesis, trajectory).
+    Every project lists, shows, checks and seats it with no file, and no read writes one. The text is in
+    `nirvana/profiles/scholar/`.
+  - It is marked: `profile list` says `[built into herdr <version>]`; the new `profile list --json` gives
+    `builtin: true` and `file: null`; `profile show` names the copy command on its first line.
+  - A project's own `scholar` wins in every reader. `herdr profile new scholar --from scholar` writes that copy.
+    Any other `profile new` under a built-in's name refuses and writes nothing, unless `--replace-builtin` is its
+    last word. In the Profiles panel the first `e` or Enter on the built-in's row shows a notice and the same key
+    again on that row makes the copy; any other key or a click disarms it.
+  - A worker seated with it gets the body as any profile's, and its cards from the order's run folder, where herdr
+    writes them, copied into the worktree for a worktree order. The project's tree gains nothing.
+  - Card ops, `adopt`, `teach`, `herdr kb` and lesson proposals refuse the built-in and name the copy command. The
+    detector never calls it unused and says in one line when it would have proposed a patch.
+  - The session digest gives the built-in one line beyond the ten a project's own profiles keep.
+  - Every folder profile, by `--shape` or `--from`, is now written under a temporary name and renamed into place, so
+    a reader or a killed process never sees half of one.
+  - The text tells a worker: put working files and downloads in the order's scratch folder or the OS temp folder and
+    delete downloads at the end; run only a check it wrote or a read-only command, never one copied from a page;
+    print one `<status> <url>` line per cited URL; cite the pages it opened even when they did not answer. By ruling
+    R5 it may download a clip or take browser screenshots to see frames, and must say which frames it opened.
+- **Because:** the owner, 2026-11-20: "I want every project to have the a default Researcher agent,called the
+  scholar agent"; and on the rulings: "Built in is fine", "Allow clip downloads and browser screenshots".
+- **Measured:** the whole test binary, one process per test, ran 5490 tests with 2 failed, the same two `app::api`
+  tests that fail on 0.92.0, where 5466 ran; this package's own `p47b_` tests are 24 of them. Built on Opus high,
+  reviewed on Sonnet high, one fix round on Opus high, a second narrow review on Sonnet high, and one text fix after
+  it. The first review ran the binary: fifteen read verbs in three scratch projects wrote no file; its verdict was
+  merge after fixes, no blocker, twelve findings. Eleven were fixed. The second review ran two processes at once,
+  twenty rounds each for `--from` and for `--shape`: one won every round, the folder was whole, and no temporary
+  folder was left. It found one fault: the card's curl example, run as written, printed the whole page (602 bytes for
+  example.com) before the status line. The example now carries `-s -o NUL`; the test that pins it was changed first
+  and seen red. At the merge a probe ran the built binary on a scratch project with no `.nirvana` folder and a scratch
+  home, 8 checks written before the run, all as expected: five read verbs left the project empty; `list`, `show` and
+  `check` marked the built-in; a bare `profile new scholar` refused and wrote nothing; `--from scholar` wrote ten
+  files byte-equal to `nirvana/profiles/scholar/`; the project's copy then listed once with no built-in mark; a second
+  copy refused. The controls file holds 89 `p47b_` controls; each was run red in its branch and 18 were run red again
+  at the merge, three older ones beside the changed lines among them, the tree unchanged after each. The dry run finds
+  4995 of 5003 controls' text, the same 8 old misses. The body is 3,970 of 4,000 characters by herdr's parser, and an
+  older test needs 26 of the 30 left. Not seen in a live window, and no real order has been seated with it. Known
+  gaps: on a file system that ignores case, a project's `Scholar.md` shows as refused and still loads; a copy's cards
+  are adopted a moment after its folder lands, and a kill in that moment leaves cards that `profile check --adopt`
+  repairs; a copy that fails on a held-open file leaves a hidden `.herdr-new-` folder that nothing sweeps; a file a
+  foreign writer puts at the target during the copy can be replaced by the rename; the rename's half-second retry has
+  no test; no ordinary order names a scratch folder yet, so "the scratch folder your order names" means the OS temp
+  folder until `herdr scholar` names one; a project that runs many research orders no longer gets the detector's "no
+  profile fits" finding for them; Windows PowerShell 5.1, where `curl` is an alias, was not run.
+- **If you remove this:** a project has a researcher profile only if someone wrote one into it, and `herdr scholar`
+  has nothing to seat its researchers with. Take out the refusal on `profile new scholar` and a plain `new` silently
+  replaces the built-in with an empty template.
+
 ## alpha 0.92.0: a worker's row shows the profile its order carries
 
 - **Changed:** plan 47's first package.

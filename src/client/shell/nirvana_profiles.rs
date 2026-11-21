@@ -25,26 +25,49 @@ pub(super) fn is_profile(item: &Item) -> bool {
     item.provider == Provider::Other(TITLE.to_owned())
 }
 
-/// One row per profile file: its description, or that it is refused and how to see why.
+/// One row per profile file: its description, or that it is refused and how to see why. Plan 47 P47b: a built-in the
+/// project does not override is a row too, marked, with no file (`e` then says it has none to open) and the command
+/// that makes the project's copy.
 pub(super) fn items(cwd: &Path) -> Vec<Item> {
-    crate::nirvana_profiles::list(&root(cwd))
+    crate::nirvana_profiles::listed(&root(cwd))
         .into_iter()
-        .map(|(name, file, parsed)| Item {
-            provider: Provider::Other(TITLE.to_owned()),
-            group: Group::Agents,
-            detail: match &parsed {
-                Ok(profile) => format!("{}{}", profile.description, cards_note(cwd, &name)),
-                Err(_) => format!("refused: herdr profile check {name}"),
-            },
-            name,
-            tokens: None,
-            on: parsed.is_ok(),
-            preset_off: false,
-            preset_pinned: false,
-            switch: None,
-            file: Some(file),
+        .map(|found| {
+            let name = found.name;
+            Item {
+                provider: Provider::Other(TITLE.to_owned()),
+                group: Group::Agents,
+                detail: match (&found.parsed, found.builtin) {
+                    (Ok(profile), true) => format!(
+                        "built in: {}{} \u{b7} {} makes the project's copy",
+                        profile.description,
+                        builtin_cards_note(&name),
+                        crate::nirvana_profiles::copy_command(&name)
+                    ),
+                    (Ok(profile), false) => {
+                        format!("{}{}", profile.description, cards_note(cwd, &name))
+                    }
+                    (Err(_), _) => format!("refused: herdr profile check {name}"),
+                },
+                tokens: None,
+                on: found.parsed.is_ok(),
+                preset_off: false,
+                preset_pinned: false,
+                switch: None,
+                file: (!found.builtin).then_some(found.file),
+                name,
+            }
         })
         .collect()
+}
+
+/// A built-in's card count, ` · 9 cards`.
+fn builtin_cards_note(name: &str) -> String {
+    crate::nirvana_profiles::builtin(name)
+        .map(|found| {
+            let count = found.cards.len();
+            format!(" \u{b7} {count} card{}", if count == 1 { "" } else { "s" })
+        })
+        .unwrap_or_default()
 }
 
 /// A folder profile's card count, ` · 40 cards`; nothing for a profile that is one file.
@@ -60,6 +83,12 @@ fn cards_note(cwd: &Path, name: &str) -> String {
 /// `K` on a profile row: the folder profile's `knowledge/`, made when it is not there yet so the editor's tab has a
 /// folder to start in. Why not, for a profile that is one file.
 pub(super) fn knowledge_folder(cwd: &Path, item: &Item) -> Result<PathBuf, String> {
+    if crate::nirvana_profiles::builtin_here(&root(cwd), &item.name).is_some() {
+        return Err(crate::nirvana_profiles::builtin_refusal(
+            &item.name,
+            "its cards ship with herdr and have no folder here to open",
+        ));
+    }
     match crate::nirvana_profiles::knowledge_dir(&root(cwd), &item.name) {
         Some(dir) => std::fs::create_dir_all(&dir)
             .map(|()| dir.clone())
@@ -132,7 +161,12 @@ mod tests {
     #[test]
     fn p33_the_profiles_group_lists_each_profile_with_its_file_and_a_refused_one_says_so() {
         let dir = folder("group");
-        assert!(items(&dir).is_empty(), "no folder, no rows");
+        // Plan 47 P47b: with no folder, the built-in scholar is the only row, and it has no file.
+        let builtin: Vec<(String, Option<PathBuf>)> = items(&dir)
+            .into_iter()
+            .map(|row| (row.name, row.file))
+            .collect();
+        assert_eq!(builtin, [("scholar".to_owned(), None)], "no folder, the built-in only");
         let profiles = dir.join(".nirvana").join("profiles");
         std::fs::create_dir_all(&profiles).unwrap();
         std::fs::write(
@@ -146,14 +180,14 @@ mod tests {
         std::fs::create_dir_all(&inside).unwrap();
         let rows = items(&inside);
         let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
-        assert_eq!(names, ["broken", "slicer"]);
+        assert_eq!(names, ["broken", "scholar", "slicer"]);
         assert!(rows.iter().all(is_profile));
-        assert_eq!(rows[1].detail, "Slices prints in Bambu Studio.");
+        assert_eq!(rows[2].detail, "Slices prints in Bambu Studio.");
         assert_eq!(
-            rows[1].file.as_deref(),
+            rows[2].file.as_deref(),
             Some(profiles.join("slicer.md").as_path())
         );
-        assert!(rows[1].on && rows[1].switch.is_none());
+        assert!(rows[2].on && rows[2].switch.is_none());
         assert_eq!(rows[0].detail, "refused: herdr profile check broken");
         assert!(!rows[0].on);
         let _ = std::fs::remove_dir_all(&dir);
@@ -315,8 +349,12 @@ mod tests {
             file,
             dir.join(".nirvana").join("profiles").join("slicer.md")
         );
-        assert_eq!(items(&dir).len(), 1);
-        assert!(items(&dir)[0].on, "the template parses");
+        // Plan 47 P47b: beside the built-in scholar.
+        assert_eq!(items(&dir).len(), 2);
+        assert!(
+            items(&dir).iter().any(|row| row.name == "slicer" && row.on),
+            "the template parses"
+        );
         assert!(make(&dir, "slicer").unwrap_err().contains("already there"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -346,11 +384,12 @@ mod tests {
             "---\ndescription: Slices prints.\n---\nYou slice.\n",
         )
         .unwrap();
+        // Plan 47 P47b: the built-in scholar sits between them, by name.
         let rows = items(&dir);
         let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
-        assert_eq!(names, ["reel", "slicer"]);
+        assert_eq!(names, ["reel", "scholar", "slicer"]);
         assert_eq!(rows[0].detail, "Edits reels. \u{b7} 2 cards");
-        assert_eq!(rows[1].detail, "Slices prints.");
+        assert_eq!(rows[2].detail, "Slices prints.");
         assert_eq!(
             rows[0].file.as_deref(),
             Some(profiles.join("reel").join("profile.md").as_path())
@@ -379,10 +418,25 @@ mod tests {
                 .is_some_and(|m| m.contains("slicer keeps no knowledge cards")),
             "{message:?}"
         );
-        // reel: K opens its knowledge folder; k is still the panel's up.
+        // Plan 47 P47b: the built-in scholar, one up: K says its cards ship with herdr and opens nothing.
         let outcome = press(&mut state, KeyCode::Char('k'));
         assert!(opened(&outcome).is_empty());
         assert_eq!(state.nirvana_preload.as_ref().unwrap().selected, count - 2);
+        let outcome = press(&mut state, KeyCode::Char('K'));
+        assert!(opened(&outcome).is_empty());
+        let message = state
+            .nirvana_preload
+            .as_ref()
+            .and_then(|panel| panel.message.clone());
+        assert!(
+            message.as_deref().is_some_and(|m| m.contains("built into herdr")
+                && m.contains("herdr profile new scholar --from scholar")),
+            "{message:?}"
+        );
+        // reel: K opens its knowledge folder; k is still the panel's up.
+        let outcome = press(&mut state, KeyCode::Char('k'));
+        assert!(opened(&outcome).is_empty());
+        assert_eq!(state.nirvana_preload.as_ref().unwrap().selected, count - 3);
         let outcome = press(&mut state, KeyCode::Char('K'));
         assert_eq!(
             opened(&outcome),
@@ -396,6 +450,77 @@ mod tests {
             state.nirvana_preload.is_none(),
             "the panel closes, as e does"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Plan 47 P47b, item 3: the Preload group shows the built-in in a project with no profiles folder, marked, with no
+    /// file to open and the command that makes the copy; a project's own scholar is the only row of the name.
+    #[test]
+    fn p47b_the_preload_group_shows_the_built_in_with_no_file_and_the_copy_command() {
+        let dir = folder("p47b");
+        let rows = items(&dir);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.name, "scholar");
+        assert!(row.on && row.file.is_none() && is_profile(row));
+        assert!(
+            row.detail.starts_with("built in: Researches a question")
+                && row.detail.contains(" \u{b7} 9 cards \u{b7} ")
+                && row
+                    .detail
+                    .ends_with("herdr profile new scholar --from scholar makes the project's copy"),
+            "{}",
+            row.detail
+        );
+        assert!(!dir.join(".nirvana").exists(), "nothing written");
+        let profiles = dir.join(".nirvana").join("profiles");
+        std::fs::create_dir_all(&profiles).unwrap();
+        std::fs::write(
+            profiles.join("scholar.md"),
+            "---\ndescription: Our own scholar.\n---\nYou research.\n",
+        )
+        .unwrap();
+        let rows = items(&dir);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].detail, "Our own scholar.");
+        assert_eq!(
+            rows[0].file.as_deref(),
+            Some(profiles.join("scholar.md").as_path())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P47b fix round (the builder's hunk, granted): Preload's `e` on the built-in's row said "scholar has no file to
+    /// open"; it names the command that makes the project's copy now, and opens nothing.
+    #[test]
+    fn p47b_preload_e_on_the_built_in_names_the_copy_command() {
+        let dir = folder("p47b-e");
+        let mut state = state_in(&dir);
+        state.toggle_preload_panel();
+        let count = {
+            let panel = state.nirvana_preload.as_ref().expect("open");
+            super::super::nirvana_mods::panel_items(
+                panel,
+                &crate::nirvana_preload::view(&panel.cwd),
+            )
+            .len()
+        };
+        // The scholar is the group's one row, the panel's last.
+        state.nirvana_preload.as_mut().unwrap().selected = count - 1;
+        let outcome = press(&mut state, KeyCode::Char('e'));
+        assert!(opened(&outcome).is_empty());
+        let message = state
+            .nirvana_preload
+            .as_ref()
+            .and_then(|panel| panel.message.clone())
+            .unwrap_or_default();
+        assert!(
+            message.contains("scholar is built into herdr")
+                && message.contains("`herdr profile new scholar --from scholar`")
+                && !message.contains("has no file to open"),
+            "{message}"
+        );
+        assert!(!dir.join(".nirvana").exists(), "nothing written");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -417,6 +417,13 @@ pub fn check_problems(root: &Path, name: &str) -> Vec<String> {
 /// every card that parses is recorded in `index.json`, so `known` holds for it until its text changes. A refused card
 /// is not adopted. The slugs adopted, or why none was.
 pub fn adopt(root: &Path, name: &str) -> Result<Vec<String>, String> {
+    // Plan 47 P47b: a built-in's cards are known as shipped and live in no knowledge folder of the project.
+    if nirvana_profiles::builtin_here(root, name).is_some() {
+        return Err(nirvana_profiles::builtin_refusal(
+            name,
+            "its cards are known as shipped and there is nothing to adopt",
+        ));
+    }
     let dir = nirvana_profiles::knowledge_dir(root, name)
         .ok_or_else(|| format!("profile {name} keeps no cards: only a folder profile does"))?;
     let _lock = lock(root, name).map_err(|err| err.to_string())?;
@@ -597,12 +604,17 @@ fn brief_path(profile: &str, slug: &str) -> String {
 
 /// One brief line: `name — when (path)`, a warning starting `do not:`.
 pub fn line(profile: &str, card: &Card) -> String {
+    line_at(card, &brief_path(profile, &card.slug))
+}
+
+/// `line` for a card at `shown`, the path the brief names (plan 47 P47b: a built-in's cards are in the run).
+fn line_at(card: &Card, shown: &str) -> String {
     format!(
         "- {}{} \u{2014} {} ({})",
         if card.verdict.warns() { "do not: " } else { "" },
         card.name,
         card.when,
-        brief_path(profile, &card.slug)
+        shown
     )
 }
 
@@ -692,6 +704,57 @@ profile's lock ({err}). `herdr kb search --profile {profile} <words>` finds them
         ));
     }
     nirvana_lessons::Offer { section, slugs }
+}
+
+/// Plan 47 P47b: the cards section `seat run` gives an order seated with `profile`. A project profile's is
+/// `offer_uncounted`'s. A built-in the project does not override offers every card it ships, known by construction,
+/// from the run folder where `nirvana_profiles::copy_into_run` wrote them (`builtin_cards_dir`), written again here
+/// when one went, and copied into the worker's folder when it is a worktree, as a project card is. The path is the
+/// same from the worker's folder either way. Nothing goes into the project's knowledge store: no slug is returned, so
+/// `count_offered` counts nothing.
+pub fn offer_seated(root: &Path, cwd: &Path, run_dir: &Path, profile: &str) -> nirvana_lessons::Offer {
+    let Some(found) = nirvana_profiles::builtin_here(root, profile) else {
+        return offer_uncounted(root, cwd, profile);
+    };
+    let sha = nirvana_profiles::sha256_hex(found.profile.as_bytes());
+    let dir = nirvana_profiles::builtin_cards_dir(run_dir, profile, &sha);
+    let head = format!("\n\n## Knowledge cards of the profile {profile}\n\n");
+    let files = match nirvana_profiles::builtin_cards_into(&dir, found) {
+        Ok(files) => files,
+        Err(why) => {
+            return nirvana_lessons::Offer {
+                section: format!("{head}Not listed: herdr could not write the built-in's cards ({why}).\n"),
+                slugs: Vec::new(),
+            }
+        }
+    };
+    let rel = dir.strip_prefix(root).ok().map(Path::to_path_buf);
+    let mut section = format!("{head}{CARDS_OFFER_LINE}\n\n");
+    for (file, (slug, text)) in files.iter().zip(found.cards) {
+        let Ok(card) = parse(file, slug, text) else {
+            continue;
+        };
+        let shown = match &rel {
+            Some(rel) => {
+                let rel = rel.join(format!("{slug}.md"));
+                if cwd != root {
+                    let to = cwd.join(&rel);
+                    if let Some(parent) = to.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::copy(file, to);
+                }
+                rel.display().to_string().replace('\\', "/")
+            }
+            None => file.display().to_string(),
+        };
+        section.push_str(&line_at(&card, &shown));
+        section.push('\n');
+    }
+    nirvana_lessons::Offer {
+        section,
+        slugs: Vec::new(),
+    }
 }
 
 /// Counts one `offered` for each card an offer named, once the order it went into is seated (plan 40 T5).
@@ -1076,6 +1139,13 @@ fn ledgered(
     at: u64,
     evidence: Option<String>,
 ) -> Result<String, String> {
+    // Plan 47 P47b: every card write passes here, so no op of any caller rewrites a built-in's card.
+    if nirvana_profiles::builtin_here(root, profile).is_some() {
+        return Err(nirvana_profiles::builtin_refusal(
+            profile,
+            "a card op cannot change its cards",
+        ));
+    }
     let dir = nirvana_profiles::knowledge_dir(root, profile)
         .ok_or_else(|| format!("profile {profile} keeps no cards: it is one file, not a folder"))?;
     let _lock = lock(root, profile).map_err(|err| err.to_string())?;
@@ -1293,6 +1363,13 @@ pub fn apply_ops(
             let Some(profile) = profile else {
                 return Err("the order was seated with no profile, so it keeps no card".into());
             };
+            // Plan 47 P47b: a lesson review's or a teacher's op on a built-in's card, refused with the copy step.
+            if nirvana_profiles::builtin_here(root, profile).is_some() {
+                return Err(nirvana_profiles::builtin_refusal(
+                    profile,
+                    "a card op cannot change its cards",
+                ));
+            }
             if nirvana_profiles::knowledge_dir(root, profile).is_none() {
                 return Err(format!(
                     "profile {profile} keeps no cards: it is one file, not a folder"
@@ -1681,6 +1758,13 @@ pub fn teach(
     run: &str,
     teach: &Teach,
 ) -> Result<serde_json::Value, (i32, String)> {
+    // Plan 47 P47b: a teacher writes cards, and a built-in's are herdr's.
+    if nirvana_profiles::builtin_here(&project.root, teach.profile).is_some() {
+        return Err((
+            2,
+            nirvana_profiles::builtin_refusal(teach.profile, "it cannot be taught"),
+        ));
+    }
     let loaded = nirvana_profiles::load(&project.root, teach.profile).map_err(|why| (2, why))?;
     if nirvana_profiles::knowledge_dir(&project.root, teach.profile).is_none() {
         return Err((
@@ -2157,6 +2241,17 @@ pub fn kb_run(
     let Some(profile) = profile.filter(|name| nirvana_profiles::valid_name(name)) else {
         return usage(err);
     };
+    if nirvana_profiles::builtin_here(root, &profile).is_some() {
+        let _ = writeln!(
+            err,
+            "herdr kb: {}",
+            nirvana_profiles::builtin_refusal(
+                &profile,
+                "its cards are not in a knowledge folder here (`herdr profile show` names them)"
+            )
+        );
+        return 1;
+    }
     let Some(dir) = nirvana_profiles::knowledge_dir(root, &profile) else {
         let _ = writeln!(
             err,

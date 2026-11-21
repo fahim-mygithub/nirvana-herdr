@@ -1,6 +1,6 @@
 # Plan 47: the profile on the agents panel, and a scholar in every project
 
-Status: PROPOSED 2026-11-20. P47a LANDED as alpha 0.92.0. P47b to P47d wait for the rulings of §6.
+Status: RULED 2026-11-20 (§6). P47a LANDED as alpha 0.92.0, P47b as alpha 0.93.0. P47d and P47c follow, in that order.
 This plan takes over the number 44 held for "scholar on agy": the owner's fetch rulings of 2026-11-18 are in §3.
 
 ## 1. The ask
@@ -102,6 +102,16 @@ improvement loop the skills promised has data.
 | R4 | Where does the report live? | `docs/research/` in the project, tracked, so the next session can find it. The run's raw deliveries stay in `.nirvana/runs/`. |
 | R5 | Video frames: allow the clip download, or a browser screenshot? | Carried from 2026-11-18, still open. Until ruled, a scholar order reads transcripts and says it saw no frames. |
 
+The owner, 2026-11-20, answering R1 to R5 in order: "Built in is fine, herdr can run, go with recomnded, go with
+recomneded, Allow clip downloads and browser screenshots".
+
+- R1: the scholar is built into herdr. A project's own `scholar` file wins.
+- R2: herdr runs the parallel researchers, as separate gated orders.
+- R3: researchers on agy; the route step and the writer by the seat table for the project's mode.
+- R4: the report lives in `docs/research/` in the project.
+- R5: a scholar order may download a clip and may take browser screenshots to see frames. Until this ruling the
+  draft text said "say you saw no frames"; it now says how to see them.
+
 ## 7. Packages
 
 | Package | What | Files it owns |
@@ -120,6 +130,17 @@ P47a builds now. P47b lands before P47c. P47d's gate part is measured before any
 - The spaces view shows the profile only when its one-line row has room, which the default width rarely gives.
 - "In use now" counts what the window's poller holds: a project whose orchestrator no panel drew in the last minute
   shows no count.
+
+### What P47b changed from this plan
+
+- The panel's edit key on the built-in does not write the copy at once. The first press shows a notice and the same
+  key again makes the copy, so a stray key writes nothing into a project.
+- `profile new scholar` refuses unless it copies the built-in (`--from scholar`) or says `--replace-builtin`.
+- The built-in's cards cannot be rewritten, adopted or patched by a lesson review; a project refines its own copy.
+- The detector counts the built-in as fitting `research.web`, so it no longer reports those orders as unprofiled.
+- Every folder profile is now written under a temporary name and renamed into place.
+- The order of the remaining packages changed: P47d's gate part lands before P47c, because a scholar run on agy
+  would be sent back for sources it opened.
 
 ## 8. Live checks owed after building
 

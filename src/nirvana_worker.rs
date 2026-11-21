@@ -4595,7 +4595,13 @@ pub fn seat_order_with(
             crate::nirvana_knowledge::copy_for_teacher(&project.root, &cwd, name);
             crate::nirvana_lessons::Offer::default()
         }
-        Some(name) => crate::nirvana_knowledge::offer_uncounted(&project.root, &cwd, name),
+        // Plan 47 P47b: a built-in's cards are offered from the run folder `copy_into_run` wrote them to.
+        Some(name) => crate::nirvana_knowledge::offer_seated(
+            &project.root,
+            &cwd,
+            &project.run_dir(&request.run),
+            name,
+        ),
         None => crate::nirvana_lessons::Offer::default(),
     };
     let mut text = if lessons.section.is_empty() && cards.section.is_empty() {

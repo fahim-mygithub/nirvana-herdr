@@ -86,9 +86,11 @@ CONTROLS = (
             "            .offered += 1;", "            .offered += 0;", T_OFFER, "rust"),
     Control("p34a_more_line_missing", KNOW,
             "    if rest > 0 {", "    if rest > 99 {", T_OFFER, "rust"),
+    # Plan 47 P47b: seating calls `offer_seated`, which is `offer_uncounted` for a project profile.
     Control("p34a_worker_offers_no_cards", WORKER,
-            "        Some(name) => crate::nirvana_knowledge::offer_uncounted(&project.root, &cwd, name),",
-            "        Some(_) => crate::nirvana_lessons::Offer::default(),", T_OFFER, "rust"),
+            "        Some(name) => crate::nirvana_knowledge::offer_seated(\n            &project.root,\n"
+            "            &cwd,\n            &project.run_dir(&request.run),\n            name,\n        ),\n",
+            "        Some(_) => crate::nirvana_lessons::Offer::default(),\n", T_OFFER, "rust"),
     Control("p34a_opened_uncounted", KNOW,
             "        entry.counters.opened += 1;\n", "", T_COUNT, "rust"),
     Control("p34a_counted_twice", KNOW,
@@ -191,9 +193,10 @@ CONTROLS = (
             "                lines: if card_ops.is_empty() && profile_ops.is_empty() {", "                lines: if true {",
             T_REVIEW, "rust"),
     # §2.7: the panel. The count, K routed, the folder the edit tab starts in, the editor with no file.
+    # Plan 47 P47b: the project profile's arm, beside the built-in's.
     Control("p34a_panel_no_count", SHELL,
-            '                Ok(profile) => format!("{}{}", profile.description, cards_note(cwd, &name)),',
-            "                Ok(profile) => profile.description.clone(),", T_PANEL, "rust"),
+            '                        format!("{}{}", profile.description, cards_note(cwd, &name))\n',
+            "                        profile.description.clone()\n", T_PANEL, "rust"),
     Control("p34a_k_not_routed", MODS,
             "            KeyCode::Char('K') => self.preload_knowledge(selected, outcome),\n", "", T_PANEL, "rust"),
     Control("p34a_edit_dir_any", NIRVANA,

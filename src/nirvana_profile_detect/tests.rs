@@ -467,7 +467,9 @@ fn p94_usage_counts_a_carried_an_unused_and_a_never_fitting_profile() {
             .find(|row| row.profile == name)
             .map(|row| (row.carried, row.fit))
     };
-    assert_eq!(rows.len(), 4, "every profile, zero rows included: {rows:?}");
+    // Plan 47 P47b: the built-in scholar is a profile here too; no order of this run fits it.
+    assert_eq!(rows.len(), 5, "every profile, zero rows included: {rows:?}");
+    assert_eq!(row("scholar"), Some((0, 0)));
     assert_eq!(row("carried"), Some((6, 6)));
     assert_eq!(row("unused"), Some((0, 5)));
     assert_eq!(row("never"), Some((0, 0)));
@@ -1804,4 +1806,78 @@ frame it renders, even when the gate is green.";
             "at_end {at_end}: {line}"
         );
     }
+}
+
+/// Plan 47 P47b, item 10: the built-in scholar is counted as any profile is ("used 6 of 11") and fits research orders,
+/// but it is never an `Unused` finding and never the target of a proposal, since the project cannot act on it.
+#[test]
+fn p47b_the_detector_counts_the_built_in_and_proposes_nothing_about_it() {
+    let (_home, root) = project("p47b-detect");
+    // Six research orders carry scholar and repeat two paragraphs; five more fit it and carry none.
+    let mut orders: Vec<Fixture> = builders("s", 6, "research.web", &[JUDGE, ENGINE])
+        .into_iter()
+        .map(|mut fixture| {
+            fixture.profile = Some("scholar".into());
+            fixture
+        })
+        .collect();
+    orders.extend(builders("u", 5, "research.web", &[]));
+    seat_all(&root, "run-1", &orders);
+    let rows = usage(&root);
+    let row = rows
+        .iter()
+        .find(|row| row.profile == "scholar")
+        .map(|row| (row.carried, row.fit));
+    assert_eq!(row, Some((6, 11)), "{rows:?}");
+    let found = detect(&root);
+    assert!(
+        !found.findings.iter().any(|finding| matches!(
+            finding,
+            Finding::Unused { profile, .. } if profile == "scholar"
+        )),
+        "{:?}",
+        found.findings
+    );
+    // The research orders are not unprofiled: the built-in fits them.
+    assert!(!found.findings.iter().any(
+        |finding| matches!(finding, Finding::Unprofiled { class, .. } if class == "research.web")
+    ));
+    // The paragraphs scholar's orders repeat are evidence, never a patch of scholar.
+    assert!(
+        !repeated(&found).is_empty(),
+        "the repeated paragraphs are found"
+    );
+    // P47b fix round (review F9): the patch the detector would have planned is said in one line, known, so nothing is
+    // written: the scholar is built in, and the copy is how the project refines it.
+    let planned = plan(&root, &found, "run-1");
+    let about: Vec<&Planned> = planned
+        .iter()
+        .filter(|planned| planned.draft.profile == "scholar")
+        .collect();
+    assert_eq!(about.len(), 1, "{planned:?}");
+    let copy = crate::nirvana_profiles::copy_command("scholar");
+    let why = about[0].known.clone().unwrap_or_default();
+    assert!(
+        why.contains("profile scholar is built into herdr")
+            && why.contains(&format!("`{copy}` makes a copy the project can refine")),
+        "{why}"
+    );
+    assert!(
+        about[0].refused.is_none() && about[0].draft.body.is_empty(),
+        "{:?}",
+        about[0]
+    );
+    let mut out = Vec::new();
+    assert_eq!(cli_to(&root, &[], &mut out, &mut Vec::new()), 0);
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains(&copy))
+        .collect();
+    assert_eq!(lines.len(), 1, "{text}");
+    assert!(lines[0].starts_with("known patch scholar: "), "{text}");
+    refresh_with(&root, "run-1", &Limits::default());
+    assert!(proposals::list(&root)
+        .iter()
+        .all(|proposal| proposal.profile != "scholar"));
 }

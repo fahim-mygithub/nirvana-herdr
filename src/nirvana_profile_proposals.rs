@@ -885,6 +885,18 @@ fn content_problems(
             return vec![why];
         }
     }
+    // Plan 47 P47b: a built-in the project does not override has no file to patch, and its name is taken. Read at
+    // `write` and again at `accept` (both reach here), so a proposal written before the project's copy went is refused
+    // too.
+    if nirvana_profiles::builtin_here(root, name).is_some() {
+        return vec![nirvana_profiles::builtin_refusal(
+            name,
+            match kind {
+                Kind::New => "the name is taken and a new profile cannot take it",
+                Kind::Patch => "there is no file to patch",
+            },
+        )];
+    }
     match kind {
         Kind::New => new_problems(root, name, body),
         Kind::Patch => patch_problems(root, name, body, base_sha),
@@ -1348,6 +1360,10 @@ pub fn target(root: &Path, proposal: &Proposal) -> Result<Target, String> {
             before: None,
             after: format!("{}\n", proposal.body.trim()),
         }),
+        // Plan 47 P47b: the panel's detail says why, not "cannot read" a file that never was.
+        Kind::Patch if nirvana_profiles::builtin_here(root, name).is_some() => Err(
+            nirvana_profiles::builtin_refusal(name, "there is no file to patch"),
+        ),
         Kind::Patch => {
             let file = nirvana_profiles::resolve(root, name)?;
             let before = std::fs::read_to_string(&file)
@@ -1596,6 +1612,13 @@ pub fn rollback(root: &Path, op: &str) -> Result<String, String> {
             Kind::Patch => nirvana_profiles::resolve(root, name)?,
         };
         let now = std::fs::read_to_string(&file).ok();
+        // P47b fix round (review F10): with the project's own `scholar/` deleted, `resolve` names `scholar.md`, a file
+        // that never was, and the refusal named it. A profile gone from the project is named as the profile.
+        if now.is_none() && !nirvana_profiles::in_project(root, name) {
+            return Err(format!(
+                "profile {name} is not in this project any more, so {op} has nothing to roll back; nothing was changed"
+            ));
+        }
         if now.as_deref().map(|text| text.replace("\r\n", "\n"))
             != row.after.as_deref().map(|text| text.replace("\r\n", "\n"))
         {
