@@ -1316,13 +1316,13 @@ fn trim_url_tail(token: &str) -> &str {
     t
 }
 
-/// The URLs a shell command fetches. A command is cut at `;`, `|`, `&&` and newlines, and a segment's URLs count only
-/// when the segment itself runs a fetch tool, looked for outside its URLs: `curl a; echo <url>` and
-/// `echo https://curl.se/` fetch nothing. A segment that runs `gh api` or `gh repo view` also reads the repository it
-/// names (`gh_read_urls`).
+/// The URLs a shell command fetches. A command is cut at `;`, `|`, `&&` and newlines outside quotes (`segments`), and
+/// a segment's URLs count only when the segment itself runs a fetch tool, looked for outside its URLs: `curl a; echo
+/// <url>` and `echo https://curl.se/` fetch nothing. A segment that runs `gh api` or `gh repo view` also reads the
+/// repository it names (`gh_read_urls`).
 pub fn shell_fetch_urls(cmd: &str) -> Vec<String> {
     let mut urls = Vec::new();
-    for segment in cmd.split(['\n', ';', '|']).flat_map(|s| s.split("&&")) {
+    for segment in segments(cmd) {
         let tokens = extract_url_tokens(segment);
         let mut rest = segment.to_owned();
         for token in &tokens {
@@ -1408,14 +1408,13 @@ fn segment_code(segment: &str) -> String {
             at += 1;
             continue;
         }
-        let head = String::from_utf8_lossy(&bytes[..at]).to_ascii_lowercase();
-        let flag = head.split_whitespace().next_back().unwrap_or("");
-        if head.ends_with(char::is_whitespace) && matches!(flag, "-c" | "-command" | "/c" | "-e") {
+        if opens_code(&String::from_utf8_lossy(&bytes[..at])) {
             bytes[at] = b'(';
             at += 1;
             continue;
         }
-        match bytes[at + 1..].iter().position(|&b| b == byte) {
+        // Plan 47 P47d: where the quote closes is `quote_end`'s, as `segments` reads it.
+        match quote_end(&bytes, at).map(|end| end - at - 1) {
             Some(len) => {
                 bytes[at..at + len + 2].fill(b' ');
                 at += len + 2;
@@ -1428,6 +1427,37 @@ fn segment_code(segment: &str) -> String {
     }
     // Only whole characters between ASCII quotes, or from a `#` on, were blanked.
     String::from_utf8(bytes).unwrap_or_default()
+}
+
+/// The quote that follows `head` opens a shell's code: `head` ends in whitespace after `-c`, `-Command`, `/c` or `-e`.
+/// That quote holds commands, not a string, so `segment_code` reads it as `(` and `segments` cuts inside it.
+fn opens_code(head: &str) -> bool {
+    let head = head.to_ascii_lowercase();
+    let flag = head.split_whitespace().next_back().unwrap_or("");
+    head.ends_with(char::is_whitespace) && matches!(flag, "-c" | "-command" | "/c" | "-e")
+}
+
+/// Plan 47 P47d: where the quote at `at` (`'` or `"`) closes, on its own line, or `None` when it does not. In `"..."`
+/// a backslash or a PowerShell backtick escapes the next character; `'...'` has no escape (PowerShell's `''` reads as
+/// two strings side by side, which hold the same characters). A quote that does not close on its line is no quote:
+/// an apostrophe in `echo it's` must not join the rest of a long command into one segment.
+fn quote_end(bytes: &[u8], at: usize) -> Option<usize> {
+    let quote = bytes[at];
+    let mut end = at + 1;
+    while end < bytes.len() {
+        match bytes[end] {
+            b'\n' => return None,
+            b'\\' | b'`' if quote == b'"' => {
+                if bytes.get(end + 1) == Some(&b'\n') {
+                    return None;
+                }
+                end += 2;
+            }
+            byte if byte == quote => return Some(end),
+            _ => end += 1,
+        }
+    }
+    None
 }
 
 /// The word at `at` of a segment's code is a command it runs: it comes first, or after `(`, `{`, `[`, `&`, `!`, `=`,
@@ -1711,7 +1741,13 @@ fn url_in_stream(norm_url: &str, stream: &str) -> bool {
                     if is_fetch {
                         if let Some(input) = block.get("input") {
                             let mut strings = Vec::new();
-                            collect_json_strings(input, &mut strings);
+                            // Plan 47 P47d (measurement §5 item 3): WebFetch fetched its `url`; its `prompt` is the
+                            // worker's own text, as `stream_reads` already read it. A browser call keeps its input.
+                            if name == "WebFetch" {
+                                strings.extend(input.get("url").and_then(Value::as_str).map(str::to_owned));
+                            } else {
+                                collect_json_strings(input, &mut strings);
+                            }
                             for s in strings {
                                 for tok in extract_url_tokens(&s) {
                                     if normalize_url(&tok) == norm_url {
@@ -1720,8 +1756,10 @@ fn url_in_stream(norm_url: &str, stream: &str) -> bool {
                                 }
                             }
                         }
-                    } else if name == "Bash" {
-                        // The command only: a `description` naming curl and a URL fetches nothing.
+                    } else if matches!(name, "Bash" | "PowerShell") {
+                        // The command only: a `description` naming curl and a URL fetches nothing. Plan 47 P47d
+                        // (measurement §5 item 4): Claude's PowerShell tool runs a command as Bash does, and the
+                        // stable-id rule (`stream_reads`) already read both.
                         let command = block
                             .pointer("/input/command")
                             .and_then(Value::as_str)
@@ -1942,12 +1980,24 @@ fn id_in(text: &str, id: &StableId) -> bool {
 /// What a stream shows the worker read, beyond the per-segment rule: the text of each command that runs a fetch
 /// (`segment_runs_fetch` in any of its segments) and each fetch tool's call, the output of each that vouches
 /// (`output_vouches`), and every path a file-reading tool opened. Only a stable id counts here; a plain URL keeps the
-/// per-segment rule (the owner, 2026-10-31: "plain URLs keep the per-segment rule").
+/// per-segment rule (the owner, 2026-10-31: "plain URLs keep the per-segment rule"), with one exception since plan
+/// 47 P47d: an agy status line (`status`).
 #[derive(Debug, Default)]
 pub struct Reads {
     texts: Vec<String>,
     outputs: Vec<String>,
     paths: Vec<String>,
+    /// Plan 47 P47d: each URL (normalized) on a status line of its own (`status_urls`) in the output of an agy
+    /// `run_command` that fetches (`command_fetches`, on the part of a cut command agy shows), that agy answered
+    /// `DONE` and that exited 0. This relaxes review round B1's "a plain URL never counts from an output" for this
+    /// one shape, the owner told the trade (fewer wrong send-backs; a status line faked beside a real fetch would
+    /// pass): agy cuts a command at 512 characters (all 786 cut lines in Megajam were 513), and in the 9 failed
+    /// sources checks of 2026-11-01 to 11-20, 56 of the 75 URLs sent back as unopened had a `200 <url>` line in a
+    /// `run_command` output. 21 of them count by this rule; the rest came from a command whose fetch lay past the cut
+    /// (33) or from a script run by name (2), which show no fetch word. Claude's stream does not get it: its command
+    /// is whole (454 Bash commands in 32 Claude research orders, 131 over 512 characters, none cut), so the
+    /// per-segment rule already sees its URLs.
+    status: Vec<String>,
     /// Addendum B (plan 40), for `media_read` only: each URL (normalized) a call that fetches or opens media named
     /// (`command_media`). The report's own calls (`finish`, `StructuredOutput`) and writes are not here: a cite names
     /// itself there.
@@ -2064,8 +2114,37 @@ fn agy_command_ok(output: &str) -> bool {
         .is_none_or(|code| code == 0)
 }
 
+/// A command's segments: cut at every newline, and at `;`, `|` (so `||`) and `&&` outside a quote that closes on its
+/// line (`quote_end`). A shell's quoted code (`opens_code`) is cut inside, as its shell would run it. Plan 47 P47d: the
+/// cut was blind to quotes, so option3-amazon-bom's `bladebro act eval "a?.innerText || b?.innerText" --url "<url>"`
+/// put its `--url` in a segment with no fetch word (3 URLs it had opened, sent back). A single `&` still cuts nothing:
+/// PowerShell's `& "C:\x\curl.exe"` is a call.
 fn segments(cmd: &str) -> impl Iterator<Item = &str> {
-    cmd.split(['\n', ';', '|']).flat_map(|s| s.split("&&"))
+    let bytes = cmd.as_bytes();
+    let mut out = Vec::new();
+    let (mut start, mut at) = (0, 0);
+    while at < bytes.len() {
+        match bytes[at] {
+            b'"' | b'\'' if !opens_code(&cmd[start..at]) => {
+                if let Some(end) = quote_end(bytes, at) {
+                    at = end;
+                }
+            }
+            b'\n' | b';' | b'|' => {
+                out.push(&cmd[start..at]);
+                start = at + 1;
+            }
+            b'&' if bytes.get(at + 1) == Some(&b'&') => {
+                out.push(&cmd[start..at]);
+                start = at + 2;
+                at += 1;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    out.push(&cmd[start..]);
+    out.into_iter()
 }
 
 /// agy's stream cuts a long `CommandLine` to its first 512 characters and this mark (66 of reel-motion-gemini-r2's 112
@@ -3165,6 +3244,15 @@ pub fn stream_reads(stream: &str) -> Reads {
                 if answered && agy_command_ok(output) {
                     reads.media_files.extend(files);
                 }
+                // Plan 47 P47d: a `file://` fetch prints a file, not a page (the B1 review's notes fetched as a file).
+                let fetches = command_fetches(command);
+                if fetches
+                    && answered
+                    && agy_command_ok(output)
+                    && !command.to_ascii_lowercase().contains("file://")
+                {
+                    reads.status.extend(status_urls(output));
+                }
                 command_fetches(command).then(|| command.to_owned())
             }
             "read_file" | "view_file" => {
@@ -3210,6 +3298,33 @@ pub fn stable_read(url: &str, reads: &Reads) -> bool {
             .any(|text| id_in(text, &id)),
         None => false,
     }
+}
+
+/// Plan 47 P47d: the URLs (normalized) an output names on status lines: a line that is a 2xx or 3xx code and one
+/// http(s) URL and nothing else but whitespace, as `curl -w "%{http_code} %{url_effective}\n"` prints it. A 4xx, a 5xx
+/// or curl's `000` (no answer) opened nothing, and a line with other text on it is no status line.
+fn status_urls(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let (code, url) = (words.next()?, words.next()?);
+            let status = code.len() == 3
+                && code.bytes().all(|b| b.is_ascii_digit())
+                && matches!(code.as_bytes()[0], b'2' | b'3');
+            (status
+                && words.next().is_none()
+                && (url.starts_with("https://") || url.starts_with("http://")))
+            .then(|| normalize_url(url))
+        })
+        .collect()
+}
+
+/// Plan 47 P47d: a cited URL an agy fetch printed on a status line of its own (`Reads::status`), compared as the axis
+/// compares any URL (`normalize_url`).
+pub fn status_read(url: &str, reads: &Reads) -> bool {
+    let norm = normalize_url(url);
+    !norm.is_empty() && reads.status.contains(&norm)
 }
 
 // ---- live checks 2026-11-01 F2: sources only when the order asks for the web ----
@@ -3513,6 +3628,9 @@ check ({asked})"
         };
         let norm = normalize_url(url);
         if stable_read(url, &reads) {
+            continue;
+        }
+        if status_read(url, &reads) {
             continue;
         }
         if local_entry(url, roots) {

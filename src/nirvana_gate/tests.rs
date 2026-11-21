@@ -2164,7 +2164,9 @@ fn p35a_a_stable_id_counts_in_a_fetching_command_or_its_output() {
 
 /// Review round (B1): a plain URL never counts from a fetch's output, which is the owner's "plain URLs keep the
 /// per-segment rule". Each case is the review's: an echo after a fetch, the notes printed beside a fetch, the notes
-/// fetched as `file://`, and a real resolved redirect (the URL resolved is not the URL fetched).
+/// fetched as `file://`, and a real resolved redirect (the URL resolved is not the URL fetched). Plan 47 P47d relaxes
+/// the rule for one shape, a `<2xx|3xx> <url>` line alone in an agy fetch's output (the `p47d_` tests); no output here
+/// holds one, so each case still fails.
 #[test]
 fn p35a_a_plain_url_never_counts_from_an_output() {
     let (a, b) = ("https://a.org/x", "https://b.org/y");
@@ -6793,4 +6795,348 @@ fn p45d_fix_looks_in_counts_herdr_only_as_the_command_word() {
     let note = look_axis(true, &call("t1", "Bash", "grep -rn \"herdr look\" docs")).expect("a note");
     assert!(note.why.contains("shows no `herdr look` call"), "{note:?}");
     assert!(note.why.contains("a shell variable"), "{note:?}");
+}
+
+// ---- Plan 47 P47d: the sources check counts the ways an agy worker really reads a URL ----
+
+/// One agy `run_command` step as agy streams it: its `ACTIVE` line, then its answer in `state` with `output`.
+fn p47d_step(index: u64, state: &str, command: &str, output: &str) -> String {
+    let params = serde_json::json!({ "CommandLine": command });
+    format!(
+        "{}\n{}",
+        agy_step(index, "ACTIVE", "run_command", params.clone(), ""),
+        agy_step(index, state, "run_command", params, output)
+    )
+}
+
+/// The sources axis of a research.web order that cites `urls`, on `stream`.
+fn p47d_axis(urls: &[&str], stream: &str) -> Axis {
+    let report = serde_json::json!({"sources": urls
+        .iter()
+        .map(|url| serde_json::json!({"url": url, "used_for": "spec"}))
+        .collect::<Vec<_>>()});
+    web_sources_axis("research.web", Some(&report), stream).expect("axis")
+}
+
+fn p47d_mark(url: &str, stream: &str) -> Mark {
+    p47d_axis(&[url], stream).mark
+}
+
+/// agy's cut: a long command's first 512 characters and `…` (the measurement: all 786 cut lines in Megajam were 513).
+fn p47d_cut(command: &str) -> String {
+    let head: String = command.chars().take(512).collect();
+    format!("{head}\u{2026}")
+}
+
+/// A fetch that prints one status line per URL and names none of them: curl reads its URLs from a file.
+const P47D_CHECK: &str = "curl -s -o NUL -w \"%{http_code} %{url_effective}\\n\" -K urls.txt";
+
+/// A Claude tool call and its answer, with the answer's text.
+fn p47d_claude(tool: &str, input: Value, result: &str) -> String {
+    [
+        serde_json::json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "p47d", "name": tool, "input": input}]}}),
+        serde_json::json!({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "p47d", "content": result}]}}),
+    ]
+    .map(|line| line.to_string())
+    .join("\n")
+}
+
+/// Item 1, h0-hands-validate-s1's step 8 by shape: one curl over five pages, cut by agy before the last ones, its
+/// output one `200 <url>` per page. Every page counts; a page that answered 404 fails, and only that one.
+#[test]
+fn p47d_a_cut_loop_of_five_status_lines_passes_and_a_404_fails_alone() {
+    let urls: Vec<String> = (1..=5)
+        .map(|n| {
+            format!("https://example.com/documentation/en-us/unreal-engine/python-api/class/AnimationLibraryPage{n}")
+        })
+        .collect();
+    let mut command = String::from("curl -s -o NUL -w \"%{http_code} %{url_effective}`n\"");
+    for url in &urls {
+        command.push_str(&format!(" -o NUL \"{url}\""));
+    }
+    let cut = p47d_cut(&command);
+    assert!(!cut.contains(urls[4].as_str()), "the fifth page lies past the cut");
+    let cited: Vec<&str> = urls.iter().map(String::as_str).collect();
+    let printed = |codes: [&str; 5]| {
+        urls.iter()
+            .zip(codes)
+            .map(|(url, code)| format!("{code} {url}\n"))
+            .collect::<String>()
+    };
+    let all = p47d_axis(&cited, &p47d_step(8, "DONE", &cut, &printed(["200"; 5])));
+    assert_eq!(all.mark, Mark::Pass, "{all:?}");
+    let one = p47d_axis(
+        &cited,
+        &p47d_step(8, "DONE", &cut, &printed(["200", "200", "200", "200", "404"])),
+    );
+    assert_eq!(one.mark, Mark::Fail, "{one:?}");
+    assert_eq!(one.lines, vec![urls[4].clone()]);
+}
+
+/// Item 1: a status line counts only from a step whose command fetches. Printing one, or a file that holds one,
+/// fetches nothing; nor does curl reading a `file://` (the B1 review's notes fetched as a file).
+#[test]
+fn p47d_an_echoed_or_printed_status_line_counts_nothing() {
+    let url = "https://example.com/a";
+    let line = format!("200 {url}\n");
+    assert_eq!(p47d_mark(url, &p47d_step(1, "DONE", P47D_CHECK, &line)), Mark::Pass);
+    for command in [
+        format!("echo \"200 {url}\""),
+        format!("printf '200 {url}\\n'"),
+        format!("Write-Output \"200 {url}\""),
+        format!("Write-Host 200 {url}"),
+        "cat status.txt".to_owned(),
+        "type status.txt".to_owned(),
+        "Get-Content status.txt".to_owned(),
+        "echo \"curl -s -K urls.txt\"".to_owned(),
+        "curl -s -w \"%{http_code} %{url_effective}\\n\" file:///C:/proj/status.txt".to_owned(),
+    ] {
+        assert_eq!(p47d_mark(url, &p47d_step(1, "DONE", &command, &line)), Mark::Fail, "{command}");
+    }
+}
+
+/// Item 1: the fetch word must be in the step that printed the line; an earlier step's curl does not make a later
+/// `echo` a read.
+#[test]
+fn p47d_a_fetch_in_an_earlier_step_does_not_count_a_later_echo() {
+    let (fetched, echoed) = ("https://example.com/x", "https://example.com/a");
+    let stream = format!(
+        "{}\n{}",
+        p47d_step(1, "DONE", P47D_CHECK, &format!("200 {fetched}\n")),
+        p47d_step(2, "DONE", &format!("echo \"200 {echoed}\""), &format!("200 {echoed}\n"))
+    );
+    let axis = p47d_axis(&[fetched, echoed], &stream);
+    assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+    assert_eq!(axis.lines, vec![echoed.to_owned()]);
+}
+
+/// Item 1: only a step agy answered `DONE` with exit 0 counts. A non-zero exit, an `ERROR`, a cancelled step, an error
+/// beside `DONE` and a call with no answer record nothing. agy writes `Command exited with code 0.` too (f1's step 132).
+#[test]
+fn p47d_a_status_line_counts_only_from_a_step_that_ended_well() {
+    let url = "https://example.com/a";
+    let line = format!("200 {url}\n");
+    for output in [line.clone(), format!("Command exited with code 0.\n\n{line}")] {
+        assert_eq!(p47d_mark(url, &p47d_step(3, "DONE", P47D_CHECK, &output)), Mark::Pass, "{output}");
+    }
+    let exited = format!("Command exited with code 6.\n\n{line}");
+    assert_eq!(p47d_mark(url, &p47d_step(3, "DONE", P47D_CHECK, &exited)), Mark::Fail);
+    for state in ["ERROR", "CANCELED", "CANCELLED"] {
+        assert_eq!(p47d_mark(url, &p47d_step(3, state, P47D_CHECK, &line)), Mark::Fail, "{state}");
+    }
+    let params = serde_json::json!({ "CommandLine": P47D_CHECK });
+    let unanswered = agy_step(3, "ACTIVE", "run_command", params.clone(), &line);
+    assert_eq!(p47d_mark(url, &unanswered), Mark::Fail);
+    let errored = serde_json::json!({"step_update": {"step_index": 3, "state": "DONE", "step_type": "tool",
+        "tool_name": "run_command",
+        "tool_info": {"parameters": params, "output": line, "error": "the command was killed"}}})
+    .to_string();
+    assert_eq!(p47d_mark(url, &errored), Mark::Fail);
+}
+
+/// Item 1: the line is a 2xx or 3xx code and the URL, and nothing else but whitespace.
+#[test]
+fn p47d_only_a_2xx_or_3xx_alone_with_its_url_counts() {
+    let url = "https://example.com/a";
+    for output in [
+        format!("200 {url}"),
+        format!("  301   {url}  "),
+        format!("HTTP/1.1 200 OK\r\n204 {url}\r\n"),
+        "302 http://example.com/a".to_owned(),
+    ] {
+        assert_eq!(p47d_mark(url, &p47d_step(4, "DONE", P47D_CHECK, &output)), Mark::Pass, "{output:?}");
+    }
+    for output in [
+        format!("404 {url}"),
+        format!("500 {url}"),
+        format!("000 {url}"),
+        format!("101 {url}"),
+        format!("2000 {url}"),
+        format!("200 {url} OK"),
+        format!("HTTP 200 {url}"),
+        format!("200: {url}"),
+        format!("200 {url} https://example.com/b"),
+        "200 example.com/a".to_owned(),
+    ] {
+        assert_eq!(p47d_mark(url, &p47d_step(4, "DONE", P47D_CHECK, &output)), Mark::Fail, "{output:?}");
+    }
+    // A word with no http(s) scheme is no URL, even when the cite has none either.
+    let bare = p47d_step(4, "DONE", P47D_CHECK, "200 example.com/a\n");
+    assert_eq!(p47d_mark("example.com/a", &bare), Mark::Fail);
+}
+
+/// Item 1: a status line's URL is compared as the axis compares any URL (`normalize_url`): a trailing slash, `www.`,
+/// a fragment and the scheme drop; the query and the path's case stay.
+#[test]
+fn p47d_a_status_url_matches_as_any_cited_url_matches() {
+    let stream = p47d_step(
+        5,
+        "DONE",
+        P47D_CHECK,
+        "200 https://www.example.com/a/\n200 https://example.com/s?q=1\n",
+    );
+    for cited in [
+        "https://example.com/a",
+        "https://example.com/a/#intro",
+        "http://www.example.com/a",
+        "https://example.com/s?q=1",
+    ] {
+        assert_eq!(p47d_mark(cited, &stream), Mark::Pass, "{cited}");
+    }
+    for cited in [
+        "https://example.com/s?q=2",
+        "https://example.com/s",
+        "https://example.com/A",
+    ] {
+        assert_eq!(p47d_mark(cited, &stream), Mark::Fail, "{cited}");
+    }
+}
+
+/// Item 1: a cut command counts by the words in the part agy shows. calib-research-s1's step 14 by shape: a URL list
+/// that fills the 512 characters, the curl after it unseen, counts nothing. a4-asset-decisions's by shape: a cut
+/// python script that imports `urllib.request` counts its status lines. A whole command that only imports one still
+/// fetches nothing.
+#[test]
+fn p47d_a_cut_command_counts_by_the_words_it_shows() {
+    let url = "https://example.com/list/page-12";
+    let line = format!("200 {url}\n");
+    let mut listed = String::from("$urls = @(\n");
+    for n in 1..=14 {
+        listed.push_str(&format!("  \"https://example.com/list/page-{n}\",\n"));
+    }
+    listed.push_str(")\nforeach ($u in $urls) { curl -s -o NUL -w \"%{http_code} %{url_effective}`n\" $u }");
+    let listed = p47d_cut(&listed);
+    assert!(!listed.contains("curl"), "the curl lies past the cut");
+    assert_eq!(p47d_mark(url, &p47d_step(14, "DONE", &listed, &line)), Mark::Fail);
+    let script = format!(
+        "Set-Location C:\\w\\a4; @'\nimport re, pathlib, urllib.request, urllib.error\nurls = []\n{}",
+        "for p in ['notes.md']:\n    urls += re.findall(r'https://[^ ]+', pathlib.Path(p).read_text())\n".repeat(6)
+    );
+    let script = p47d_cut(&script);
+    assert_eq!(p47d_mark(url, &p47d_step(388, "DONE", &script, &line)), Mark::Pass);
+    let whole = "python -c \"import urllib.request\nprint(open('status.txt').read())\"";
+    assert_eq!(p47d_mark(url, &p47d_step(388, "DONE", whole, &line)), Mark::Fail);
+}
+
+/// Item 2: a script file run by name holds no fetch word, so its status lines stay uncounted (r1-tripo-v3's step 353
+/// by shape); the same check written into the command counts (a3-megascans-fit's by shape).
+#[test]
+fn p47d_a_script_run_by_name_counts_nothing() {
+    let url = "https://example.com/a";
+    let line = format!("200 {url}\n");
+    let by_name = "pwsh -NoProfile -Command \"Set-Location 'C:\\w\\r1'; python.exe run_check.py\"";
+    assert_eq!(p47d_mark(url, &p47d_step(353, "DONE", by_name, &line)), Mark::Fail);
+    let inline = "python -c \"import urllib.request; [print(urllib.request.urlopen(u).status, u) for u in \
+open('urls.txt').read().split()]\"";
+    assert_eq!(p47d_mark(url, &p47d_step(430, "DONE", inline, &line)), Mark::Pass);
+}
+
+/// Item 1: a Claude stream's Bash or PowerShell result does not gain the rule (its command is whole in the stream), so
+/// the same status line counts from agy and not from Claude.
+#[test]
+fn p47d_a_claude_status_line_counts_nothing() {
+    let url = "https://example.com/a";
+    let line = format!("200 {url}\n");
+    assert_eq!(p47d_mark(url, &p47d_step(1, "DONE", P47D_CHECK, &line)), Mark::Pass);
+    for tool in ["Bash", "PowerShell"] {
+        let stream = p47d_claude(tool, serde_json::json!({ "command": P47D_CHECK }), &line);
+        assert_eq!(p47d_mark(url, &stream), Mark::Fail, "{tool}");
+    }
+}
+
+/// Item 3: the segment cut keeps `;`, `|`, `||` and `&&` inside a quote. option3-amazon-bom's step 172 by shape counts
+/// its `--url`; a `;` inside a header, an escaped quote and a PowerShell backtick keep their segment. Outside a quote
+/// the cut is as before, and a quote that does not close on its line is no quote, so it joins nothing.
+#[test]
+fn p47d_a_quote_holds_its_separators() {
+    let eval = "bladebro act eval \"document.querySelector('.price')?.innerText || \
+document.querySelector('#core')?.innerText\" --url \"https://example.com/dp/X\"";
+    assert_eq!(p47d_mark("https://example.com/dp/X", &agy_run(eval)), Mark::Pass);
+    for (url, command) in [
+        ("https://example.com/b", "curl -H \"Accept: text/html; q=0.9\" https://example.com/b"),
+        ("https://example.com/c", "curl -H \"X-Note: \\\"a; b\\\"\" https://example.com/c"),
+        ("https://example.com/d", "curl -H \"X-Note: `\"a; b`\"\" https://example.com/d"),
+        ("https://example.com/e", "curl -H 'X-Note: a && b | c' https://example.com/e"),
+    ] {
+        assert_eq!(p47d_mark(url, &agy_run(command)), Mark::Pass, "{command}");
+    }
+    let outside = "curl -s https://example.com/f; echo \"https://example.com/g\" || echo https://example.com/h";
+    assert_eq!(p47d_mark("https://example.com/f", &agy_run(outside)), Mark::Pass);
+    for url in ["https://example.com/g", "https://example.com/h"] {
+        assert_eq!(p47d_mark(url, &agy_run(outside)), Mark::Fail, "{url}");
+    }
+    // An unclosed quote, early in a long line: the echo's URL stays in its own segment, away from the curl.
+    let unclosed = format!(
+        "echo it's here; echo https://example.com/i; {}curl -s https://example.com/j",
+        "Write-Output padding; ".repeat(30)
+    );
+    assert_eq!(p47d_mark("https://example.com/i", &agy_run(&unclosed)), Mark::Fail);
+    assert_eq!(p47d_mark("https://example.com/j", &agy_run(&unclosed)), Mark::Pass);
+    // A quote never spans lines: a line still ends a segment, as plan 35a's rule for a URL on a line of its own reads.
+    let lines = "echo \"notes\nhttps://example.com/k; curl -s https://example.com/l\"";
+    assert_eq!(p47d_mark("https://example.com/k", &agy_run(lines)), Mark::Fail);
+    assert_eq!(p47d_mark("https://example.com/l", &agy_run(lines)), Mark::Pass);
+    // A shell's quoted code (`-c`, `-Command`) is code: its `;` still cuts (r1-tripo-v3's step 353 by shape).
+    let code = "pwsh -NoProfile -Command \"Set-Location C:\\w; echo https://example.com/m; curl -s https://example.com/n\"";
+    assert_eq!(p47d_mark("https://example.com/m", &agy_run(code)), Mark::Fail);
+    assert_eq!(p47d_mark("https://example.com/n", &agy_run(code)), Mark::Pass);
+    // The whole-command rule (`segments`) reads quotes the same way: a fetch word inside a quoted string runs nothing.
+    let video = "https://www.youtube.com/watch?v=U24jDyYnU3A";
+    assert_eq!(p47d_mark(video, &agy_run("echo \"notes; yt-dlp U24jDyYnU3A\"")), Mark::Fail);
+    assert_eq!(p47d_mark(video, &agy_run("echo notes; yt-dlp U24jDyYnU3A")), Mark::Pass);
+}
+
+/// Item 4: Claude's `PowerShell` tool counts a plain URL as `Bash` does (measurement §5 item 4).
+#[test]
+fn p47d_the_powershell_tool_counts_as_bash_does() {
+    for (url, command, mark) in [
+        ("https://example.com/a", "curl.exe -s https://example.com/a", Mark::Pass),
+        ("https://example.com/b", "Invoke-WebRequest -Uri https://example.com/b", Mark::Pass),
+        ("https://example.com/c", "Write-Output https://example.com/c", Mark::Fail),
+    ] {
+        let stream = p47d_claude("PowerShell", serde_json::json!({ "command": command }), "");
+        assert_eq!(p47d_mark(url, &stream), mark, "{command}");
+    }
+}
+
+/// Item 6: the three texts a worker is given ask for the status line the gate reads, say a loop is fine, and keep the
+/// sentence the 12-of-12 incident stands behind. The loop `SOURCES_LINE` names, run by agy, counts every URL its
+/// lines print.
+#[test]
+fn p47d_the_check_the_workers_are_told_to_run_counts() {
+    use crate::nirvana_agy_tools::SOURCES_LINE;
+    use crate::nirvana_profiles::{shape, WEB_RESEARCHER};
+    let card = shape("researcher").expect("the researcher shape").cards[0].1.clone();
+    let check = "-o NUL -w \"%{http_code} %{url_effective}\\n\"";
+    for (name, text) in [("SOURCES_LINE", SOURCES_LINE), ("WEB_RESEARCHER", WEB_RESEARCHER), ("card", &card)] {
+        let flat = text.replace('\n', " ");
+        assert!(flat.contains(check), "{name}: {text}");
+        assert!(flat.contains("`<status> <url>` line per URL"), "{name}: {text}");
+        assert!(flat.contains("a loop") && flat.contains("each pass prints that line"), "{name}: {text}");
+    }
+    assert!(SOURCES_LINE.starts_with("Never cite a URL you did not open in this session."));
+    assert!(!SOURCES_LINE.contains('\n'), "one line in the brief");
+    let named = SOURCES_LINE
+        .split_once("`Get-Content")
+        .and_then(|(_, rest)| rest.split_once('`'))
+        .map(|(body, _)| format!("Get-Content{body}"))
+        .expect("SOURCES_LINE names its loop in backticks");
+    let urls = ["https://example.com/a", "https://example.com/b"];
+    let printed: String = urls.iter().map(|url| format!("200 {url}\n")).collect();
+    let axis = p47d_axis(&urls, &p47d_step(9, "DONE", &named, &printed));
+    assert_eq!(axis.mark, Mark::Pass, "{named}: {axis:?}");
+}
+
+/// Item 5: `WebFetch` counts its `url` only; a URL in its `prompt` is the worker's own text (measurement §5 item 3).
+#[test]
+fn p47d_webfetch_counts_only_its_url() {
+    let stream = p47d_claude(
+        "WebFetch",
+        serde_json::json!({"url": "https://example.com/a", "prompt": "compare it with https://example.com/b"}),
+        "a page",
+    );
+    assert_eq!(p47d_mark("https://example.com/a", &stream), Mark::Pass);
+    assert_eq!(p47d_mark("https://example.com/b", &stream), Mark::Fail);
 }

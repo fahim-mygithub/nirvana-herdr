@@ -11,7 +11,9 @@ T_SEG = "p35a_a_url_counts_only_from_a_segment_that_fetches"
 T_P2 = "p35a_the_probe_2_bladebro_stream_passes_example_com"
 T_REAL = "p35a_real_sources_send_backs_count_what_the_twin_counts"
 
-PER_SEGMENT = "    for segment in cmd.split(['\\n', ';', '|']).flat_map(|s| s.split(\"&&\")) {\n"
+# Plan 47 P47d: the split became `segments` (quote-aware), whose loop line command_media shares, so the find holds
+# the line before it too.
+PER_SEGMENT = "    let mut urls = Vec::new();\n    for segment in segments(cmd) {\n"
 GH_CALL = "        urls.extend(gh_read_urls(segment));\n"
 
 
@@ -48,7 +50,8 @@ CONTROLS = (
             "        !before.is_some_and(joins) && !after.is_some_and(joins)\n", T_SEG, "rust"),
     Control("p35a_python_is_a_fetch", GATE, SCRIPT_HEAD + _drop("urlopen("),
             SCRIPT_HEAD + _drop("python") + _drop("urlopen("), T_SEG, "rust"),
-    Control("p35a_per_script", GATE, PER_SEGMENT, "    for segment in [cmd] {\n", T_SEG, "rust"),
+    Control("p35a_per_script", GATE, PER_SEGMENT, "    let mut urls = Vec::new();\n    for segment in [cmd] {\n",
+            T_SEG, "rust"),
     # Item 2, gh: the mapping, the endpoint URL, a flag's value, repo view, its URL form, `.git`, the API URL, and a
     # widened subcommand.
     Control("p35a_no_gh_mapping", GATE, GH_CALL, "", T_GH_API, "rust"),
