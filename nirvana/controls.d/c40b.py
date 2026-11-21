@@ -97,7 +97,7 @@ CONTROLS = (
     # Review round S1: each refusal. echo and the heredoc are refused by the same line (a command that fetches
     # nothing gives no URL), so one control covers both.
     Control("c40b_media_any_command_names_urls", GATE,
-            "    if command_fetches(cmd) {\n        urls.extend(",
+            "    if command_fetches(cmd, shell) {\n        urls.extend(",
             "    if true {\n        urls.extend(", T_REFUSE, "rust"),
     Control("c40b_media_ls_reads_as_ffprobe", GATE,
             '        let probe = command_words(&code, "ffprobe").next().is_some();\n',
