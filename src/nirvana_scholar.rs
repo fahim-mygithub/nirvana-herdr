@@ -2040,6 +2040,10 @@ pub fn drive(project: &Project, run: &str, world: &World, caps: Caps) -> Result<
 fn drive_held(project: &Project, run: &str, world: &World, caps: Caps) -> Result<State, String> {
     // A step that changes nothing would repeat for ever without a sleep; five in a row is a bug, said, not a spin.
     let mut last: Option<(Step, u32)> = None;
+    // Whether the orchestrator's pane can be woken costs two herdr calls, and the end can wait hours: it is asked
+    // once, then again every `WAKEABLE_EVERY` polls (five minutes), not at every poll.
+    const WAKEABLE_EVERY: u32 = 60;
+    let mut wakeable: Option<(bool, u32)> = None;
     loop {
         let mut state = load_state(project, run)?;
         let journal = project.journal(run);
@@ -2047,12 +2051,18 @@ fn drive_held(project: &Project, run: &str, world: &World, caps: Caps) -> Result
         let stop = stop_marker(project, run).exists();
         let mut caps = caps;
         if state.end.is_some() && state.logged && caps.wakeable.is_none() {
-            caps.wakeable = Some(
-                replayed
-                    .orchestrator_pane
-                    .as_deref()
-                    .is_some_and(|pane| (world.wakeable)(pane)),
-            );
+            let (known, polls) = match wakeable {
+                Some((known, polls)) if polls < WAKEABLE_EVERY => (known, polls + 1),
+                _ => (
+                    replayed
+                        .orchestrator_pane
+                        .as_deref()
+                        .is_some_and(|pane| (world.wakeable)(pane)),
+                    0,
+                ),
+            };
+            wakeable = Some((known, polls));
+            caps.wakeable = Some(known);
         }
         let step = next(&state, &replayed, (world.now)(), &caps, stop);
         if step == Step::Done {

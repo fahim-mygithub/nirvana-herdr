@@ -642,6 +642,13 @@ fn p47c_a_chain_sent_back_twice_then_passing_waits_on_its_leaf() {
     // The writer reads the leaf's report, not the root's.
     let text = write_text(&st, &j.state());
     assert!(text.contains("> q-r1-s2 answered"), "{text}");
+    // A sent-back verdict whose child the journal does not show yet: the chain still runs.
+    let mut lone = J::new("send-back-alone");
+    let mut st = state(Stage::Research, &["benchmark"]);
+    lone.seat("q-r1", RESEARCH_CLASS);
+    lone.deliver("q-r1", "first try");
+    lone.gate("q-r1", "sent_back", "sources: a cited URL was never opened");
+    assert_eq!(settle(&mut st, &lone.state(), NOW), Step::Wait);
 }
 
 #[test]
@@ -1789,13 +1796,6 @@ fn p47c_a_whole_scripted_run_seats_researchers_then_the_writer_logs_and_ends() {
         0,
         "a report wakes through the writer's own delivery"
     );
-    let seen = stages.borrow().clone();
-    assert!(
-        seen.contains(&Stage::Research)
-            && seen.contains(&Stage::Write)
-            && seen.contains(&Stage::Ending),
-        "{seen:?}"
-    );
     // The seated lines.
     let replayed = nirvana_run::replay(&journal.read().0);
     assert_eq!(
@@ -1824,6 +1824,14 @@ fn p47c_a_whole_scripted_run_seats_researchers_then_the_writer_logs_and_ends() {
         assert_eq!(known.seated.why.as_deref(), Some(STAGE_WHY), "{id}");
         assert!(known.seated.worktree.is_none(), "{id}");
     }
+    // The state file at each stage the polls saw.
+    let seen = stages.borrow().clone();
+    assert!(
+        seen.contains(&Stage::Research)
+            && seen.contains(&Stage::Write)
+            && seen.contains(&Stage::Ending),
+        "{seen:?}"
+    );
     // The order texts.
     let text_of =
         |id: &str| std::fs::read_to_string(&replayed.order(id).unwrap().seated.order_file).unwrap();
