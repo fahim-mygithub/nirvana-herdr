@@ -120,19 +120,22 @@ by hand: `herdr scholar "<question>"` routes it, seats the researchers and the w
   the answer is for. The route turn sees only the question and the titles of the reports already in `docs/research/`.
 - Then end your turn. herdr runs one short route turn, at most five `research.web` orders side by side on agy with the
   built-in `scholar` profile (each reads its style's card), then one `write.docs` order that writes
-  `docs/research/<date>-<slug>/report.md` and `report.html`. Researchers' deliveries do not wake you.
-- The one wake is the writer's delivery; its summary starts with the page's path. Tell the owner the path. Publish the
-  page only when this session has the publish tool and the owner wants it.
-- A wake that says `scholar <end>: herdr scholar status <run>` is a run that ended without a report
-  (`nothing_to_research`, `no_delivery`, `no_report`, `report_incomplete`, `stopped`, `gave_up`): read the status and
-  tell the owner what it says.
-- A wake that says a scholar order was interrupted is answered with `herdr scholar resume <run>`; the driver reseats
-  it once. `herdr scholar stop <run>` stops a run.
+  `docs/research/<date>-<slug>/report.md` and `report.html`. No researcher's or writer's line wakes you.
+- The one wake is the driver's end line. `scholar report: <path> (herdr scholar status <run>): <answer>` opens with the
+  page's path: tell the owner the path, and what did not deliver when the line says so. Publish the page only when
+  this session has the publish tool and the owner wants it.
+- `scholar <end>: herdr scholar status <run>` is a run that ended without a report (`nothing_to_research`,
+  `no_delivery`, `no_report`, `report_incomplete`, `stopped`, `gave_up`): read the status and tell the owner what it
+  says.
+- An interrupted researcher or writer is the driver's: it reseats it once, and its lines do not wake you.
+  `scholar gave_up` means the driver itself stopped: answer it with `herdr scholar resume <run>`. `herdr scholar stop
+  <run>` stops a run.
 - After the owner reads the report, `herdr scholar tag <run> hit|partial|miss --note "<their words>"` records it in
   `docs/research/log.jsonl`.
 - `herdr scholar` refuses in a folder that is not a git repository, inside a seated worker, and while another scholar
   run of the project has a live driver (`--force` starts one anyway).
-- A single lookup (one fact, one page) stays an ordinary `research.web` order, seated with `--profile scholar`.
+- A single lookup (one fact, one page) stays an ordinary `research.web` order, briefed by the checklist above and
+  seated with `--profile web-researcher` when the project has one.
 
 ## 4. Read it
 

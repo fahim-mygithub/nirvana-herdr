@@ -1354,29 +1354,41 @@ pub fn replay(events: &[Event]) -> RunState {
             }
             _ => true,
         };
-        // Plan 47 P47c: a scholar researcher's delivery, and a verdict that passes it or sends it back, are the scholar
-        // driver's to read (`nirvana_scholar`), so five researchers cost the orchestrator no turn. A question, an amend,
-        // a stall, an interrupt, a failure and every line of the writer still queue. A send-back child is seated with
-        // `why: "send_back"`, so the chain's root carries the mark.
-        let scholar_quiet = match &event.kind {
-            Kind::Delivered { .. } => true,
-            Kind::Gated { verdict, .. } => {
-                verdict == crate::nirvana_gate::Outcome::Pass.word()
-                    || verdict == crate::nirvana_gate::Outcome::SentBack.word()
-            }
-            _ => false,
-        } && event
+        // Plan 47 P47c: what the scholar driver handles (`nirvana_scholar`) costs the orchestrator no turn while the run
+        // goes on, so its own end line is the run's one wake and names what did not deliver, and why. Of a researcher
+        // or the writer: the delivery; a verdict that passes it, sends it back or asks; the question that follows an
+        // `asked`; an interrupt (the driver reseats it once); a stop or a failure. Fix round F1 and F7: the interrupted
+        // line told the orchestrator to reseat it by hand, racing the driver's reseat, and a gated `asked` woke it
+        // mid-run. A stall, an amend, a doubt and every line of an ordinary order still queue. A send-back child is
+        // seated with `why: "send_back"` and a reseat with its own `scholar_stage`, so the chain's root carries the mark.
+        let scholar_quiet = event
             .kind
             .order()
             .and_then(|order| state.order(order))
-            .is_some_and(|known| {
-                known.seated.class == crate::nirvana_scholar::RESEARCH_CLASS
+            .filter(|known| {
+                [
+                    crate::nirvana_scholar::RESEARCH_CLASS,
+                    crate::nirvana_scholar::WRITE_CLASS,
+                ]
+                .contains(&known.seated.class.as_str())
                     && state
                         .order(&crate::nirvana_gate::chain(&state, known.id()).0)
                         .is_some_and(|root| {
                             root.seated.why.as_deref() == Some(crate::nirvana_scholar::STAGE_WHY)
                         })
-            });
+            })
+            .is_some()
+            && match &event.kind {
+                Kind::Interrupted { .. } | Kind::Delivered { .. } | Kind::Asked { .. } => true,
+                Kind::Gated { verdict, .. } => [
+                    crate::nirvana_gate::Outcome::Pass.word(),
+                    crate::nirvana_gate::Outcome::SentBack.word(),
+                    crate::nirvana_gate::Outcome::Asked.word(),
+                ]
+                .contains(&verdict.as_str()),
+                Kind::Ended { outcome, .. } => outcome != "delivered",
+                _ => false,
+            };
         let owed = owed && !scholar_quiet;
         if let Some(line) = queue_line(&event.kind).filter(|_| !herdrs && owed) {
             state.queue.push(QueueItem {

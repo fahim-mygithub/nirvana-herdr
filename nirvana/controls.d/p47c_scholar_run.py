@@ -33,7 +33,7 @@ T_WRITER = _T + "p47c_the_writer_passing_is_checked_and_failing_ends_no_report"
 T_STOP = _T + "p47c_a_stop_in_each_stage_stops_what_runs_then_ends_stopped"
 T_RESUME = _T + "p47c_a_resume_in_each_stage_goes_on_from_the_state_file"
 T_ENDWAIT = _T + "p47c_the_run_ends_only_after_its_wake_is_typed_within_a_bound"
-T_REPLAY = _T + "p47c_replay_queues_nothing_for_a_scholar_researcher_and_every_line_of_the_writer"
+T_REPLAY = _T + "p47c_replay_quiets_what_the_driver_handles_and_every_line_of_an_ordinary_order_queues"
 T_ROWS = _T + "p47c_a_quiet_researcher_keeps_its_row_on_the_agents_panel"
 T_WAKEPATH = _T + "p47c_the_writers_summary_path_fits_the_wake_with_a_40_character_slug"
 T_REFUSALS = _T + "p47c_each_refusal_of_the_verb_says_one_line_and_writes_nothing"
@@ -48,9 +48,25 @@ T_LOG = _T + "p47c_the_log_line_the_tag_and_the_list"
 T_E2E = _T + "p47c_a_whole_scripted_run_seats_researchers_then_the_writer_logs_and_ends"
 T_NOTHING = _T + "p47c_nothing_to_research_ends_told_logged_and_with_no_order"
 T_ROLE = _T + "p47c_the_role_and_the_seat_skill_send_research_to_herdr_scholar"
+# The fix round's tests (the P47c review of 2026-11-20, F1 to F12; the fix brief's items 1 to 9).
+T_TWO = _T + "p47c_two_runs_of_one_question_on_one_day_get_two_folders_and_two_ids"
+T_LOGNL = _T + "p47c_the_log_keeps_each_line_whole_and_writes_a_run_once"
+T_LOGTWICE = _T + "p47c_a_resume_after_the_log_append_writes_no_second_line"
+T_VERBS = _T + "p47c_the_verbs_refuse_in_a_worker_and_an_unknown_run_writes_nothing"
+T_PANIC = _T + "p47c_a_driver_that_panics_leaves_the_gave_up_line_and_status_names_resume"
+T_ENDREFUSED = _T + "p47c_a_run_end_that_keeps_refusing_is_tried_for_thirty_minutes_then_named"
+T_STATUS = _T + "p47c_status_names_a_report_only_when_there_is_one"
+T_RACE = _T + "p47c_a_starting_driver_wins_against_a_status_that_reads_the_lock"
+T_QCAP = _T + "p47c_a_question_over_8000_characters_is_refused_before_anything_is_written"
+T_HTML2 = _T + "p47c_the_html_check_reads_tags_styles_and_scripts_not_prose"
+T_LOST = _T + "p47c_the_end_line_and_the_method_notes_say_what_did_not_deliver"
+T_MATRIX = _T + "p47c_the_kill_matrix_resumes_clean_at_every_stop_point"
 
-LINK_ARM = '            "link" | "img" | "iframe"'
+QUIET_KINDS = "                Kind::Interrupted { .. } | Kind::Delivered { .. } | Kind::Asked { .. } => true,\n"
+TELL_THEN_WAKE = ("            state.told = true;\n            save_state(project, state)?;\n"
+                  "            (world.wake)(project, &state.run);\n")
 NO_DELIVERY = '    Step::Finish(ends::NO_DELIVERY, format!("no researcher passed: {why}"))'
+LINK_FILTER = "            if let Some(href) = get(\"href\").filter(|href| outside(href) && !followed) {"
 
 CONTROLS = (
     # ---- the menu and the shipped texts ----
@@ -120,8 +136,8 @@ CONTROLS = (
             '        ROUTE_TEXT.trim_end(),\n        ""\n', T_PROMPT, "rust"),
     # ---- the planner ----
     # The writer never seated: T_ALLPASS's settle is Finish(no_delivery), not SeatWriter.
-    Control("p47c_writer_never_seated", S, "    {\n        return Step::SeatWriter;\n    }\n    let why = state",
-            "    {\n        return Step::Finish(ends::NO_DELIVERY, String::new());\n    }\n    let why = state",
+    Control("p47c_writer_never_seated", S, "    {\n        return Step::SeatWriter;\n    }\n    let why = lost_lines",
+            "    {\n        return Step::Finish(ends::NO_DELIVERY, String::new());\n    }\n    let why = lost_lines",
             T_ALLPASS, "rust"),
     # A non-passing verdict's reason lost: T_ONEASKS's r2 why is "asked", not "gated asked: the worker ...".
     Control("p47c_not_delivered_why_plain", S,
@@ -188,8 +204,8 @@ CONTROLS = (
     Control("p47c_resume_skips_unseated", S, "            None => ChainStep::Seat,\n",
             "            None => ChainStep::Running(None),\n", T_RESUME, "rust"),
     # Never told: T_RESUME's ending step is Log, not Tell.
-    Control("p47c_never_tells", S, "        if tells(end) && !state.told {", "        if false && tells(end) && !state.told {",
-            T_RESUME, "rust"),
+    Control("p47c_never_tells", S, "        if !state.told {\n            return Step::Tell;",
+            "        if false && !state.told {\n            return Step::Tell;", T_RESUME, "rust"),
     # ---- ending ----
     # A typed wake not seen: T_ENDWAIT's typed step is Wait, not EndRun.
     Control("p47c_end_ignores_typed", S, "            || run.queue.is_empty()\n            || waited",
@@ -203,26 +219,49 @@ CONTROLS = (
     Control("p47c_end_wait_constant", S, "pub const END_WAIT_S: u64 = 6 * 3600;", "pub const END_WAIT_S: u64 = 3600;",
             T_ENDWAIT, "rust"),
     # A run ended elsewhere not seen: T_ENDWAIT's last step is EndRun, not Done.
-    Control("p47c_ended_run_not_done", S, "        if run.ended.is_some() || state.end_tries >= END_TRIES {",
-            "        if state.end_tries >= END_TRIES {", T_ENDWAIT, "rust"),
+    Control("p47c_ended_run_not_done", S, "        if run.ended.is_some() {\n            return Step::Done;",
+            "        if false {\n            return Step::Done;", T_ENDWAIT, "rust"),
     # ---- the replay hunk ----
-    # The hunk off: T_REPLAY's first queue assert holds the researchers' lines.
+    # The hunk off: T_REPLAY's scholar queue holds every s- line, not only the stall.
     Control("p47c_replay_hunk_off", RUN, "        let owed = owed && !scholar_quiet;\n",
             "        let owed = owed && !(scholar_quiet && false);\n", T_REPLAY, "rust"),
-    # The child's own why read, not the root's: T_REPLAY's first queue holds q-r2-s1's lines.
+    # The child's own why read, not the root's: T_REPLAY's scholar queue holds s-r2-s1's lines.
     Control("p47c_replay_child_not_followed", RUN,
             "                        .order(&crate::nirvana_gate::chain(&state, known.id()).0)\n",
             "                        .order(known.id())\n", T_REPLAY, "rust"),
-    # A send-back verdict queued: T_REPLAY's first queue holds "q-r2 gated sent_back".
+    # A send-back verdict queued: T_REPLAY's scholar queue holds "s-r2 gated sent_back".
     Control("p47c_replay_send_back_verdict_queued", RUN,
-            "                    || verdict == crate::nirvana_gate::Outcome::SentBack.word()\n", "", T_REPLAY, "rust"),
-    # The writer made quiet: T_REPLAY's starts lack the two q-write lines.
-    Control("p47c_replay_writer_quiet", RUN,
-            "                known.seated.class == crate::nirvana_scholar::RESEARCH_CLASS\n",
-            "                known.seated.class != \"never\"\n", T_REPLAY, "rust"),
-    # A question made quiet: T_REPLAY's starts lack the q-r3 and q-r4 lines.
-    Control("p47c_replay_asks_quiet", RUN, "            _ => false,\n        } && event",
-            "            _ => true,\n        } && event", T_REPLAY, "rust"),
+            "                    crate::nirvana_gate::Outcome::SentBack.word(),\n", "", T_REPLAY, "rust"),
+    # Fix round F1: the writer's lines loud again: T_REPLAY's scholar queue holds the s-w and s-w-r1 lines.
+    Control("p47c_replay_writer_loud", RUN, "                    crate::nirvana_scholar::WRITE_CLASS,\n                ]",
+            "                    \"never\",\n                ]", T_REPLAY, "rust"),
+    # A stall made quiet: T_REPLAY's scholar queue is empty, not the s-r7 stall line.
+    Control("p47c_replay_stall_quiet", RUN,
+            "                Kind::Ended { outcome, .. } => outcome != \"delivered\",\n                _ => false,",
+            "                Kind::Ended { outcome, .. } => outcome != \"delivered\",\n                _ => true,",
+            T_REPLAY, "rust"),
+    # Fix round F1 and F7, the hunk's kinds as built (only a delivery): T_REPLAY's scholar queue holds the
+    # interrupted lines of s-r4, s-r5 and s-w and the asks line of s-r3.
+    Control("p47c_fix_interrupt_and_ask_loud", RUN, QUIET_KINDS,
+            "                Kind::Delivered { .. } => true,\n", T_REPLAY, "rust"),
+    # Fix round F7: a gated asked loud: T_REPLAY's scholar queue holds "s-r3 gated asked: blocked".
+    Control("p47c_fix_gated_asked_loud", RUN, "                    crate::nirvana_gate::Outcome::Asked.word(),\n", "",
+            T_REPLAY, "rust"),
+    # A stop and a failure loud: T_REPLAY's scholar queue holds "s-r5 ended stopped" and "s-r6 ended failed".
+    Control("p47c_fix_ended_loud", RUN, "                Kind::Ended { outcome, .. } => outcome != \"delivered\",\n",
+            "                Kind::Ended { .. } => false,\n", T_REPLAY, "rust"),
+    # An ordinary order made quiet: T_REPLAY's ordinary queue holds the o-r7 stall only, not all 17 lines.
+    Control("p47c_fix_ordinary_quiet", RUN,
+            "                            root.seated.why.as_deref() == Some(crate::nirvana_scholar::STAGE_WHY)\n",
+            "                            root.seated.why.as_deref() != Some(\"never\")\n", T_REPLAY, "rust"),
+    # Through the driver: a dead worker's line wakes the orchestrator mid-run: T_MATRIX's Dies rows read mid_run 1.
+    Control("p47c_fix_matrix_interrupt_loud", RUN, QUIET_KINDS,
+            "                Kind::Delivered { .. } | Kind::Asked { .. } => true,\n", T_MATRIX, "rust"),
+    # F5's order turned round, the wake before `told` is saved: T_MATRIX's WakeBefore(1) rows read wake_calls 1, not 0
+    # (the resume tells and wakes again).
+    Control("p47c_fix_wake_before_told", S, TELL_THEN_WAKE,
+            "            (world.wake)(project, &state.run);\n            state.told = true;\n"
+            "            save_state(project, state)?;\n", T_MATRIX, "rust"),
     # A delivered order's row dropped: T_ROWS's rows lack rows-r1.
     Control("p47c_rows_hide_delivered", SUB,
             "                crate::nirvana_run::Phase::Merged\n                    | crate::nirvana_run::Phase::Gated\n",
@@ -234,9 +273,14 @@ CONTROLS = (
             "`summary` ends with `{}`, then the answer line.", T_WAKEPATH, "rust"),
     # No owns line: T_WAKEPATH's "\nowns: <dir>/\n" assert.
     Control("p47c_writer_owns_unsaid", S, "owns: {dir}/", "owned: {dir}/", T_WAKEPATH, "rust"),
-    # The wake's summary cut shorter: T_WAKEPATH's queue line lacks the 77-character path.
-    Control("p47c_queue_line_too_short", RUN, '            format!("{order} delivered {status}: {}", short(summary, 90))',
-            '            format!("{order} delivered {status}: {}", short(summary, 60))', T_WAKEPATH, "rust"),
+    # The run's question cut shorter: T_WAKEPATH's queue line lacks the 77-character path and its " (".
+    Control("p47c_queue_line_too_short", RUN, '            None => format!("the run asks: {}", short(question, 120)),',
+            '            None => format!("the run asks: {}", short(question, 60)),', T_WAKEPATH, "rust"),
+    # Fix round item 1: the report's end line with the status command first: T_WAKEPATH's queue line does not start
+    # "the run asks: scholar report: <path> (".
+    Control("p47c_fix_report_path_late", S,
+            '        "scholar report: {why} (`herdr scholar status {}`){answer}{lost}",',
+            '        "scholar report: (`herdr scholar status {}`) {why}{answer}{lost}",', T_WAKEPATH, "rust"),
     # ---- the verb ----
     # A seated worker not refused: T_REFUSALS's first line is the git refusal, not "refused inside order x-r1".
     Control("p47c_seated_not_refused", S,
@@ -273,20 +317,71 @@ CONTROLS = (
     Control("p47c_slug_word_at_cap_cut", S, "    if out.as_bytes()[SLUG_MAX] == b'-' {",
             "    if false && out.as_bytes()[SLUG_MAX] == b'-' {", T_SLUG, "rust"),
     # ---- the html check ----
-    # A script src passes: T_HTML's first bad page finds nothing.
-    Control("p47c_html_script_src_ok", S,
-            '            "script" if !attr("src").is_empty() => found.push("a <script> with a src".to_owned()),',
-            '            "script" if false => found.push("a <script> with a src".to_owned()),', T_HTML, "rust"),
-    # A stylesheet from a host passes: T_HTML's <link> page finds nothing.
-    Control("p47c_html_link_ok", S, LINK_ARM, '            "img" | "iframe"', T_HTML, "rust"),
-    # An @import passes: T_HTML's @import page finds nothing.
-    Control("p47c_html_import_ok", S, '    if lower.contains("@import") {', '    if false && lower.contains("@import") {',
+    # A script src passes: T_HTML's first bad page finds [], not ["<script> src: app.js"].
+    Control("p47c_html_script_src_ok", S, '            if let Some(src) = get("src") {\n                push("src", &src);',
+            '            if let Some(src) = get("src").filter(|_| false) {\n                push("src", &src);', T_HTML,
+            "rust"),
+    # A stylesheet from a host passes: T_HTML's <link> page finds [].
+    Control("p47c_html_link_ok", S, LINK_FILTER, LINK_FILTER.replace(".filter(|href|", ".filter(|_| false).filter(|href|"),
             T_HTML, "rust"),
-    # A url() from a host passes: T_HTML's url() pages find nothing.
-    Control("p47c_html_url_ok", S, "        if outside(&lower[after..]) {", "        if false && outside(&lower[after..]) {",
+    # An @import passes: T_HTML's @import page finds [].
+    Control("p47c_html_import_ok", S, '    if let Some(at) = css.find("@import") {',
+            '    if let Some(at) = css.find("@import").filter(|_| false) {', T_HTML, "rust"),
+    # A url() from a host passes: T_HTML's url() pages find [].
+    Control("p47c_html_url_ok", S, "        if outside(&css[at + 4..]) {", "        if false && outside(&css[at + 4..]) {",
             T_HTML, "rust"),
-    # A link the reader clicks fails: T_HTML's good page finds "a <a> href on another host".
-    Control("p47c_html_anchor_fails", S, LINK_ARM, '            "a" | "link" | "img" | "iframe"', T_HTML, "rust"),
+    # Fix round F4: a canonical link fails: T_HTML2's good row `<link rel="canonical" ...>` finds a <link> line.
+    Control("p47c_html_canonical_fails", S,
+            "            let followed =\n                !words.is_empty() && words.iter().all(|word| LINK_FOLLOWED.contains(word));",
+            "            let followed = false;", T_HTML2, "rust"),
+    # F4: the whole page read as CSS again: T_HTML2's first url() row finds a second, "<page> url(: ...", line (and the
+    # prose rows would find lines).
+    Control("p47c_fix_html_reads_prose", S, "    found.dedup();\n    found\n}",
+            '    css_loads("<page>", &lower, &mut found);\n    found.dedup();\n    found\n}', T_HTML2, "rust"),
+    # Quotes not read as quotes: T_HTML2's first row's value keeps its quotes ("<script> src: \"app.js\"").
+    Control("p47c_fix_html_quotes_ignored", S, "                Some(&quote) if quote == b'\"' || quote == b'\\'' => {",
+            "                Some(&quote) if false && (quote == b'\"' || quote == b'\\'') => {", T_HTML2, "rust"),
+    # An entity left raw: T_HTML2's `&#104;ttps:` row finds [].
+    Control("p47c_fix_html_entities_raw", S, "    decode_entities(raw)\n        .chars()",
+            "    raw.to_owned()\n        .chars()", T_HTML2, "rust"),
+    # A backslash host taken for a path: T_HTML2's `\\evil.example\share` row finds [].
+    Control("p47c_fix_html_backslash_ok", S, '    ["//", "\\\\\\\\", "/\\\\", "\\\\/"]', '    ["//"]', T_HTML2, "rust"),
+    # svg loads pass: T_HTML2's <image> and <use> rows find [].
+    Control("p47c_fix_html_svg_ok", S, '        "image" | "use" | "feimage" => {', '        "never-a-tag" => {', T_HTML2,
+            "rust"),
+    # A <base> passes: T_HTML2's <base> row finds [].
+    Control("p47c_fix_html_base_ok", S, '        "base" => {', '        "base-never" => {', T_HTML2, "rust"),
+    # A meta refresh to a host passes: T_HTML2's <meta http-equiv=refresh> row finds [].
+    Control("p47c_fix_html_meta_ok", S,
+            '            if get("http-equiv").as_deref() == Some("refresh") && target.is_some_and(outside) {',
+            '            if false && target.is_some_and(outside) {', T_HTML2, "rust"),
+    # A form to a host passes: T_HTML2's <form action> row finds [].
+    Control("p47c_fix_html_form_ok", S, '        "form" => {', '        "form-never" => {', T_HTML2, "rust"),
+    # A background from a host passes: T_HTML2's <body background> row finds [].
+    Control("p47c_fix_html_background_ok", S,
+            '    if let Some(value) = get("background").filter(|value| outside(value)) {',
+            '    if let Some(value) = get("background").filter(|_| false) {', T_HTML2, "rust"),
+    # A script that talks passes: T_HTML2's fetch( row finds [].
+    Control("p47c_fix_html_script_talks_ok", S, '                    script_talks("<script>", body, &mut found)',
+            '                    script_talks("<script>", "", &mut found)', T_HTML2, "rust"),
+    # The claims data block read as a script: T_HTML2's application/json good row finds "<script> fetch(: ...".
+    Control("p47c_fix_html_json_runs", S, '                .any(|(key, value)| key == "type" && value.contains("json"));',
+            "                .any(|_| false);", T_HTML2, "rust"),
+    # An event handler passes: T_HTML2's onerror row finds [].
+    Control("p47c_fix_html_handlers_ok", S,
+            '    for (key, value) in tag.attrs.iter().filter(|(key, _)| key.starts_with("on")) {',
+            "    for (key, value) in tag.attrs.iter().filter(|_| false) {", T_HTML2, "rust"),
+    # The value not cut: T_HTML2's long row is 221 characters of value, not 80.
+    Control("p47c_fix_html_value_uncut", S, "    value.chars().take(80).collect()", "    value.chars().take(800).collect()",
+            T_HTML2, "rust"),
+    # A comment read as markup: T_HTML2's comment row finds "<img> src: https://evil.example/x.png".
+    Control("p47c_fix_html_comment_read", S,
+            '            at = comment\n                .find("-->")\n                .map_or(lower.len(), |close| start + 3 + close + 3);',
+            "            at = start + 3;", T_HTML2, "rust"),
+    # A srcset read by its first candidate: T_HTML2's "a.png 1x, https://..." row finds [].
+    Control("p47c_fix_html_srcset_first_only", S,
+            "                .filter(|set| set.split(',').any(|candidate| outside(candidate.trim())))\n",
+            "                .filter(|set| outside(set))\n", T_HTML2, "rust"),
     # An empty page passes: T_HTML's check_files of "  \n" is [] not ["report.html is empty"].
     Control("p47c_html_empty_ok", S, "            Ok(text) if !text.trim().is_empty() => {",
             "            Ok(text) if true || !text.trim().is_empty() => {", T_HTML, "rust"),
@@ -316,8 +411,9 @@ CONTROLS = (
     Control("p47c_log_outcome_set", S, '        "outcome": Value::Null,', '        "outcome": "hit",', T_LOG, "rust"),
     # Send-backs uncounted: T_LOG's send_backs is 0, not 1.
     Control("p47c_log_send_backs_uncounted", S,
-            '        .filter(|order| order.seated.why.as_deref() == Some("send_back"))',
-            '        .filter(|order| order.seated.why.as_deref() == Some("reseat"))', T_LOG, "rust"),
+            '    let send_backs = members\n        .iter()\n        .filter(|order| order.seated.why.as_deref() == Some("send_back"))',
+            '    let send_backs = members\n        .iter()\n        .filter(|order| order.seated.why.as_deref() == Some("reseat"))',
+            T_LOG, "rust"),
     # A run the log lacks tagged: T_LOG's `unwrap_err()` on scholar-nope panics on Ok.
     Control("p47c_tag_unknown_run_taken", S, "    if !lines\n        .iter()\n        .any(|line| line.get(\"end\")",
             "    if false && !lines\n        .iter()\n        .any(|line| line.get(\"end\")", T_LOG, "rust"),
@@ -346,7 +442,7 @@ CONTROLS = (
             '    format!("scratch/{run}/{DIR}/r{n}/")', T_E2E, "rust"),
     # No log line: T_E2E's `read_log(..).len()` is 0, not 1.
     Control("p47c_log_not_written", S,
-            "            append_line(&log_path(&project.root), &log_line(state, run, now))?;\n", "", T_E2E, "rust"),
+            "            append_run_line(&project.root, &log_line(state, run, now))?;\n", "", T_E2E, "rust"),
     # The run never ended: T_E2E's `ended.get()` is false.
     Control("p47c_run_not_ended", S, "            match (world.end_run)(project, &state.run) {",
             "            match Ok::<(), String>(()) {", T_E2E, "rust"),
@@ -355,10 +451,12 @@ CONTROLS = (
     Control("p47c_nothing_researched_anyway", S, "            let nothing = state.orders.is_empty();",
             "            let nothing = false;", T_NOTHING, "rust"),
     # The tell line without the status command: T_NOTHING's asked line does not start "scholar nothing_to_research:".
-    Control("p47c_tell_line_plain", S, '        "scholar {}: `herdr scholar status {}`; {}",',
-            '        "scholar {} {}; {}",', T_NOTHING, "rust"),
+    Control("p47c_tell_line_plain", S,
+            '        return format!("scholar {end}: `herdr scholar status {}`; {why}{lost}", state.run);',
+            '        return format!("scholar {end} {}; {why}{lost}", state.run);', T_NOTHING, "rust"),
     # Told but not woken: T_NOTHING's wakes is 0, not 1.
-    Control("p47c_tell_no_wake", S, "            (world.wake)(project, &state.run);\n", "", T_NOTHING, "rust"),
+    Control("p47c_tell_no_wake", S, TELL_THEN_WAKE,
+            "            state.told = true;\n            save_state(project, state)?;\n", T_NOTHING, "rust"),
     # ---- stop_order and the cap in the driver ----
     # stop_order writes no stop: T_STOPORDER's status is Running, not NotDelivered("stopped").
     Control("p47c_stop_order_writes_nothing", WORKER,
@@ -378,4 +476,104 @@ CONTROLS = (
             "rust"),
     # The seat skill without its section: T_ROLE's heading assert.
     Control("p47c_skill_unsaid", SKILL, "### A research question: `herdr scholar`", "### Research", T_ROLE, "rust"),
+    # Fix round F12: two profiles for a lookup again: T_ROLE's "seated as the line above says" assert.
+    Control("p47c_fix_role_two_profiles", ROLE, "order, seated as the line above says.",
+            "order, seated with `--profile scholar`.", T_ROLE, "rust"),
+    # F12: the role silent on doing the research twice: T_ROLE's "do not also run the research yourself" assert.
+    Control("p47c_fix_role_research_twice", ROLE, "wait for its wake: do\n  not also run the research yourself",
+            "wait for its wake, or\n  run the research yourself", T_ROLE, "rust"),
+    # ---- the fix round: what the end line says (item 1) ----
+    # The lost list dropped from the end line: T_LOST's line does not start "...linker.; did not deliver: ".
+    Control("p47c_fix_lost_unsaid", S, '        format!("; did not deliver: {}", lost.join("; "))\n',
+            "        String::new()\n", T_LOST, "rust"),
+    # The Method notes silent on what did not deliver: T_LOST's "- did not deliver: r2 ..." assert.
+    Control("p47c_fix_method_lost_unsaid", S, "            .filter(|line| line.starts_with('r'))\n",
+            "            .filter(|_| false)\n", T_LOST, "rust"),
+    # A question quoted whole: T_LOST's r3 line is not the 200-character quote.
+    Control("p47c_fix_question_uncut", S,
+            "                question.chars().take(LOST_WHY_MAX).collect::<String>()\n",
+            "                question.to_owned()\n", T_LOST, "rust"),
+    # A reseat unsaid: T_LOST's r2 line lacks "(interrupted and reseated once)".
+    Control("p47c_fix_reseat_unsaid", S, '            extra.push("interrupted and reseated once".to_owned());\n', "",
+            T_LOST, "rust"),
+    # A send-back unsaid: T_LOST's r3 line lacks "(sent back 1 time(s))".
+    Control("p47c_fix_send_backs_unsaid", S, '            extra.push(format!("sent back {send_backs} time(s)"));\n', "",
+            T_LOST, "rust"),
+    # The writer's reseat unsaid: T_LOST's line lacks "the writer was interrupted and reseated once as q-write-r1".
+    Control("p47c_fix_writer_reseat_unsaid", S,
+            '        lines.push(format!("the writer was interrupted and reseated once as {reseat}"));\n', "", T_LOST, "rust"),
+    # The writer's answer dropped from the report's line: T_E2E's told line does not end "): The build is slow ...".
+    Control("p47c_fix_report_answer_dropped", S, "        .filter(|answer| !answer.is_empty())\n",
+            "        .filter(|_| false)\n", T_E2E, "rust"),
+    # ---- the report folder (item 2, F2) ----
+    # Another run's claim not read: T_TWO's forced folder equals the first's.
+    Control("p47c_fix_claims_ignored", S, "        root.join(rel).exists() || claimed.iter().any(|dir| dir == rel)\n",
+            "        root.join(rel).exists()\n", T_TWO, "rust"),
+    # The verb passes no claims: T_TWO's forced folder equals the first's.
+    Control("p47c_fix_claims_unread", S,
+            "    let report_dir = report_dir(&project.root, &date, &slug, &claimed_dirs(project));",
+            "    let report_dir = report_dir(&project.root, &date, &slug, &[]);", T_TWO, "rust"),
+    # ---- the log (item 3, F3 and F11) ----
+    # No newline put back: T_LOGNL's (lines, bad) is (0, 1), not (2, 0).
+    Control("p47c_fix_log_no_newline", S, "        if last[0] != b'\\n' {\n            text.insert(0, '\\n');",
+            "        if false {\n            text.insert(0, '\\n');", T_LOGNL, "rust"),
+    # A bad line not counted: T_LOGNL's (lines, bad) is (3, 0), not (3, 1).
+    Control("p47c_fix_log_bad_uncounted", S, "            _ => bad += 1,\n", "            _ => {}\n", T_LOGNL, "rust"),
+    # The count unsaid: T_LOGNL's list lacks "1 line(s) of docs/research/log.jsonl could not be read".
+    Control("p47c_fix_log_bad_unsaid", S, "    out.extend(unread);\n", "    let _ = unread;\n", T_LOGNL, "rust"),
+    # A run line written twice: T_LOGTWICE's count is 2, not 1.
+    Control("p47c_fix_log_twice", S, "    {\n        return Ok(false);\n    }\n    append_line(",
+            "    {\n        let _ = false;\n    }\n    append_line(", T_LOGTWICE, "rust"),
+    # ---- the verbs a worker must not run (item 4, F6) ----
+    # No guard: T_VERBS's drive in a worker drives (its route stand-in panics, caught as "the driver panicked").
+    Control("p47c_fix_worker_guard_off", S,
+            "    match env(crate::nirvana_profiles::SEATED_ORDER_ENV).filter(|order| !order.trim().is_empty()) {",
+            '    match env("NIRVANA_ORDER_X").filter(|order| !order.trim().is_empty()) {', T_VERBS, "rust"),
+    # `stop` unguarded: T_VERBS's stop in a worker ends the run (Ok), "stop ran in a worker".
+    Control("p47c_fix_stop_in_worker", S, '    refused_in_worker(env, "stop")?;\n', "", T_VERBS, "rust"),
+    # `tag` unguarded: T_VERBS's tag in a worker reads "no scholar run ... in log", not the refusal.
+    Control("p47c_fix_tag_in_worker", S, '    refused_in_worker(env, "tag")?;\n', "", T_VERBS, "rust"),
+    # `drive` reads no state first: T_VERBS's unknown run gets the gave-up asked line (a journal in the listing).
+    Control("p47c_fix_drive_verb_no_read", S, '    refused_in_worker(env, "drive")?;\n    load_state(project, run)?;\n',
+            '    refused_in_worker(env, "drive")?;\n', T_VERBS, "rust"),
+    # `drive()` takes the lock before it reads: T_VERBS's direct drive of an unknown run leaves driver.json.
+    Control("p47c_fix_drive_lock_first", S, "    load_state(project, run)?;\n    let _lock = take_driver(project, run)?;",
+            "    let _lock = take_driver(project, run)?;", T_VERBS, "rust"),
+    # `stop` writes before it reads: T_VERBS's listing gains the unknown run's stop file.
+    Control("p47c_fix_stop_writes_first", S, '    refused_in_worker(env, "stop")?;\n    let state = load_state',
+            '    refused_in_worker(env, "stop")?;\n    let _ = std::fs::create_dir_all(scholar_dir(project, run))'
+            '.and_then(|()| std::fs::write(stop_marker(project, run), "0"));\n    let state = load_state', T_VERBS, "rust"),
+    # ---- ends that leave a trace (item 6, F10 and F11) ----
+    # A panic not caught: T_PANIC's drive_verb panics out.
+    Control("p47c_fix_panic_uncaught", S, '        Err(format!("the driver panicked: {what}"))',
+            "        std::panic::resume_unwind(Box::new(what))", T_PANIC, "rust"),
+    # The refusal counted in polls: T_ENDREFUSED's tries is 60, not 361.
+    Control("p47c_fix_end_tries_60", S, "                    if now.saturating_sub(first) < END_REFUSED_S {",
+            "                    if state.end_tries < 60 {", T_ENDREFUSED, "rust"),
+    # The bound changed: T_ENDREFUSED's `END_REFUSED_S == 30 * 60` assert.
+    Control("p47c_fix_end_refused_constant", S, "pub const END_REFUSED_S: u64 = 30 * 60;",
+            "pub const END_REFUSED_S: u64 = 5 * 60;", T_ENDREFUSED, "rust"),
+    # The command unnamed: T_ENDREFUSED's note lacks "`herdr run end <run>`".
+    Control("p47c_fix_end_command_unnamed", S, '                    let command = format!("`herdr run end {}`", state.run);',
+            '                    let command = "`herdr run end`".to_owned();', T_ENDREFUSED, "rust"),
+    # Given up in silence: T_ENDREFUSED's wakes is 0, not 1.
+    Control("p47c_fix_end_untold", S,
+            "                    state.stage = Stage::Done;\n                    save_state(project, state)?;\n"
+            "                    (world.wake)(project, &state.run);\n",
+            "                    state.stage = Stage::Done;\n                    save_state(project, state)?;\n",
+            T_ENDREFUSED, "rust"),
+    # ---- small (item 7, F12) ----
+    # A report named for every run: T_STATUS's running run prints "report:".
+    Control("p47c_fix_report_always", S, "    let report = (state.end.as_deref() == Some(ends::REPORT))\n",
+            "    let report = (true || state.end.as_deref() == Some(ends::REPORT))\n", T_STATUS, "rust"),
+    # One try for the driver's lock: T_RACE's take loses to the held look ("a driver holds ...").
+    Control("p47c_fix_driver_one_try", S, "pub const DRIVER_TAKE_ATTEMPTS: u32 = 40;",
+            "pub const DRIVER_TAKE_ATTEMPTS: u32 = 1;", T_RACE, "rust"),
+    # ---- the question's cap (item 8) ----
+    # No cap: T_QCAP's 8,001 `unwrap_err` panics on Ok.
+    Control("p47c_fix_question_uncapped", S, "    if length > QUESTION_MAX {", "    if length > QUESTION_MAX * 9 {", T_QCAP,
+            "rust"),
+    # Bytes, not characters: T_QCAP's 8,000 two-byte characters are refused.
+    Control("p47c_fix_question_bytes", S, "    let length = question.chars().count();", "    let length = question.len();",
+            T_QCAP, "rust"),
 )

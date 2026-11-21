@@ -9,9 +9,10 @@
 //! The shape: the verb checks, writes `<run>/scholar/state.json` and the run's `opened` line, starts the driver
 //! detached and returns. The driver (`herdr scholar drive <run>`) carries the run from the question to the report with
 //! no model deciding a step: one headless route turn, the researchers seated back to back as gated orders, the writer,
-//! a check of the files, the log line, then the run's end. The orchestrator spends no turn until the report is there:
-//! `replay` keeps a researcher's delivery and its passing verdict off the wake queue (`STAGE_WHY`), so the writer's
-//! delivery, its summary opening with the page's path, is the one wake.
+//! a check of the files, the log line, then the run's end. The orchestrator spends no turn until the run has its
+//! outcome: `replay` keeps every line of a researcher or the writer that the driver handles off the wake queue
+//! (`STAGE_WHY`), so the driver's own end line (`tell_line`: the page's path, or why there is none, and what did not
+//! deliver) is the one wake.
 //!
 //! Everything a resume needs is in the state file and the run's journal; the driver keeps nothing only in memory.
 //! A driver holds an OS lock (`take_driver`) so one runs per run, and the lock goes when its process ends.
@@ -98,8 +99,18 @@ pub const ROUTE_TIMEOUT: Duration = Duration::from_secs(180);
 pub const ROUTE_TRIES: u32 = 2;
 /// A route turn's booking: it ends within `ROUTE_TIMEOUT`.
 pub const ROUTE_LEASE_MINUTES: u64 = 5;
-/// `herdr run end` refused (a delivered lesson review not gated yet): tried at each poll this many times.
-pub const END_TRIES: u32 = 60;
+/// `herdr run end` refused (a delivered lesson review not gated yet): tried at each poll for this long from the first
+/// refusal, then the run is left open and the orchestrator told the command. Review F10: 60 polls was five minutes; a
+/// lesson review's gate can take longer than that.
+pub const END_REFUSED_S: u64 = 30 * 60;
+/// The route prompt reaches `claude` as one argument, and Windows cuts a command line near 32,767 characters; the
+/// prompt is the route text, the question, 20 report titles and the schema, so the question keeps well under it.
+pub const QUESTION_MAX: usize = 8_000;
+/// A driver's take of its lock: 40 tries 50 ms apart, two seconds. Review F12: one try lost to a concurrent `status`,
+/// whose `driver_live` takes the same lock for an instant. No OS call reads a file lock's holder without trying to
+/// take it, and `driver.json`'s pid is not liveness (a pid is reused), so `status` keeps its instant take and the
+/// driver waits it out.
+pub const DRIVER_TAKE_ATTEMPTS: u32 = 40;
 
 pub const STATE_VERSION: u32 = 1;
 pub const LOG_VERSION: u32 = 1;
@@ -180,11 +191,24 @@ pub fn run_id(project: &Project, ymd: &str, slug: &str) -> String {
     })
 }
 
-/// `docs/research/<YYYY-MM-DD>-<slug>`, relative to the root, with `-2`, `-3` when it exists.
-pub fn report_dir(root: &Path, date: &str, slug: &str) -> String {
+/// `docs/research/<YYYY-MM-DD>-<slug>`, relative to the root, with `-2`, `-3` when it exists or another run's state
+/// file claims it. Review F2: the writer makes the folder, so two runs of one question on one day both saw it free and
+/// the second writer overwrote the first report. The claim is read from the state files rather than made by creating
+/// the folder at `start`: a run whose driver dies before its route leaves no empty folder in the tracked
+/// `docs/research/`, and a refused start writes no state file, so it claims nothing.
+pub fn report_dir(root: &Path, date: &str, slug: &str, claimed: &[String]) -> String {
     first_free(&format!("{REPORTS}/{date}-{slug}"), |rel| {
-        root.join(rel).exists()
+        root.join(rel).exists() || claimed.iter().any(|dir| dir == rel)
     })
+}
+
+/// Every report folder a scholar state file of the project names, done runs included.
+pub fn claimed_dirs(project: &Project) -> Vec<String> {
+    scholar_runs(project)
+        .iter()
+        .filter_map(|run| load_state(project, run).ok())
+        .map(|state| state.report_dir)
+        .collect()
 }
 
 /// The longest suffix an order id of a run gets: the writer, reseated once, sent back three times.
@@ -351,6 +375,9 @@ pub struct State {
     pub logged: bool,
     #[serde(default)]
     pub end_tries: u32,
+    /// When `herdr run end` first refused: the driver keeps trying for `END_REFUSED_S` from here.
+    #[serde(default)]
+    pub end_refused_at: Option<u64>,
 }
 
 pub fn scholar_dir(project: &Project, run: &str) -> PathBuf {
@@ -418,7 +445,7 @@ fn holder(project: &Project, run: &str) -> String {
 
 /// The run's driver lock, or who holds it.
 pub fn take_driver(project: &Project, run: &str) -> Result<DriverLock, String> {
-    match nirvana_seat::Lock::try_take(&driver_dir(project, run), 1) {
+    match nirvana_seat::Lock::try_take(&driver_dir(project, run), DRIVER_TAKE_ATTEMPTS) {
         Ok(lock) => {
             let note = serde_json::json!({"pid": std::process::id(), "at": nirvana_run::now()});
             let _ = nirvana_seat::write_atomic(
@@ -1011,7 +1038,7 @@ pub fn write_text(state: &State, run: &RunState) -> String {
         ));
     }
     text.push_str("\n## For the Method section\n\n");
-    for line in method_notes(state) {
+    for line in method_notes(state, run) {
         text.push_str(&format!("- {}\n", one_line(&line)));
     }
     text.push_str(&format!(
@@ -1021,8 +1048,67 @@ pub fn write_text(state: &State, run: &RunState) -> String {
     text
 }
 
-/// The routing note and every seat note: the writer's Method section, and the log.
-pub fn method_notes(state: &State) -> Vec<String> {
+/// The longest reason a lost line carries: a question asked is quoted up to this many characters (brief item 1).
+pub const LOST_WHY_MAX: usize = 200;
+
+/// Each researcher that did not deliver, with its reason, and the writer's reseat: `r2 (benchmark) over the time cap`,
+/// `r3 (trajectory) asked: "<the question>"`, `r1 (synthesis) interrupted twice: ... (interrupted and reseated once)`,
+/// `... (sent back 2 times)`. Fix round item 1: `replay` keeps these lines off the orchestrator's queue while the
+/// driver handles them, so the driver's end line and the writer's Method notes are where they are said.
+pub fn lost_lines(state: &State, run: &RunState) -> Vec<String> {
+    let mut lines = Vec::new();
+    for chain in &state.orders {
+        let Some(end) = chain.end.as_ref().filter(|end| !end.passed) else {
+            continue;
+        };
+        let why = one_line(end.why.as_deref().unwrap_or("not delivered"));
+        // A question is quoted: it is the worker's or the gate's words, not the driver's.
+        let why = match why
+            .strip_prefix("asked: ")
+            .or_else(|| why.strip_prefix("gated asked: "))
+        {
+            Some(question) => format!(
+                "asked: \"{}\"",
+                question.chars().take(LOST_WHY_MAX).collect::<String>()
+            ),
+            None => why.chars().take(LOST_WHY_MAX).collect(),
+        };
+        let mut extra = Vec::new();
+        if chain.reseat.is_some() {
+            extra.push("interrupted and reseated once".to_owned());
+        }
+        let roots: Vec<&str> = std::iter::once(chain.id.as_str())
+            .chain(chain.reseat.as_deref())
+            .collect();
+        let send_backs = run
+            .orders
+            .iter()
+            .filter(|order| order.seated.why.as_deref() == Some("send_back"))
+            .filter(|order| roots.contains(&crate::nirvana_gate::chain(run, order.id()).0.as_str()))
+            .count();
+        if send_backs > 0 {
+            extra.push(format!("sent back {send_backs} time(s)"));
+        }
+        let extra = if extra.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", extra.join("; "))
+        };
+        lines.push(format!(
+            "r{} ({}) {why}{extra}",
+            chain.n,
+            chain.style.as_deref().unwrap_or("")
+        ));
+    }
+    if let Some(reseat) = state.writer.as_ref().and_then(|writer| writer.reseat.as_deref()) {
+        lines.push(format!("the writer was interrupted and reseated once as {reseat}"));
+    }
+    lines
+}
+
+/// The routing note, every seat note, every reseat and what did not deliver (`lost_lines`): the writer's Method
+/// section.
+pub fn method_notes(state: &State, run: &RunState) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(route) = &state.route {
         lines.push(format!(
@@ -1044,8 +1130,16 @@ pub fn method_notes(state: &State) -> Vec<String> {
         state
             .notes
             .iter()
-            .filter(|note| note.starts_with("seat:"))
+            .filter(|note| {
+                note.starts_with("seat:") || note.contains("was interrupted and reseated once")
+            })
             .cloned(),
+    );
+    lines.extend(
+        lost_lines(state, run)
+            .into_iter()
+            .filter(|line| line.starts_with('r'))
+            .map(|line| format!("did not deliver: {line}")),
     );
     lines
 }
@@ -1126,7 +1220,7 @@ pub enum Step {
     Check,
     /// The run's outcome and why.
     Finish(&'static str, String),
-    /// Append the `asked` line that carries a failed outcome to the orchestrator, and wake it.
+    /// Append the `asked` line that carries the outcome to the orchestrator, and wake it.
     Tell,
     Log,
     EndRun,
@@ -1171,12 +1265,6 @@ impl Caps {
             wakeable: None,
         }
     }
-}
-
-/// Whether a run ended this way tells the orchestrator with its own `asked` line: every end but a report, whose
-/// writer's `delivered` line is the wake.
-pub fn tells(end: &str) -> bool {
-    end != ends::REPORT
 }
 
 /// The step for one chain that has not ended: seat it, reseat it once, or record its end.
@@ -1226,13 +1314,17 @@ pub fn next(state: &State, run: &RunState, now: u64, caps: &Caps, stop: bool) ->
         return Step::Done;
     }
     if let Some(end) = state.end.as_deref() {
-        if tells(end) && !state.told {
+        // Every end tells, a report too: `replay` keeps the writer's lines off the queue as it keeps the
+        // researchers', so the driver's end line is the run's one wake and says what did not deliver (fix round
+        // item 1). It was the writer's `delivered` line, which could not say it.
+        if !state.told {
             return Step::Tell;
         }
         if !state.logged {
             return Step::Log;
         }
-        if run.ended.is_some() || state.end_tries >= END_TRIES {
+        // A run `herdr run end` kept refusing is left `Done` by `apply`, read at the top.
+        if run.ended.is_some() {
             return Step::Done;
         }
         // `herdr run end` drops a wake that is queued and not typed, so the run ends once the queue is empty, at
@@ -1311,22 +1403,7 @@ fn research_step(state: &State, run: &RunState, now: u64, caps: &Caps) -> Step {
     {
         return Step::SeatWriter;
     }
-    let why = state
-        .orders
-        .iter()
-        .map(|chain| {
-            format!(
-                "r{} {}",
-                chain.n,
-                chain
-                    .end
-                    .as_ref()
-                    .and_then(|end| end.why.as_deref())
-                    .unwrap_or("not delivered")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("; ");
+    let why = lost_lines(state, run).join("; ");
     Step::Finish(ends::NO_DELIVERY, format!("no researcher passed: {why}"))
 }
 
@@ -1366,68 +1443,339 @@ fn write_step(state: &State, run: &RunState, now: u64, caps: &Caps) -> Step {
 
 // ---- the files check ----
 
-/// Every load `html` makes from another host: a script with any `src`, a `<link>`, `<img>`, `<iframe>`, `<source>`,
-/// `<video>`, `<audio>`, `<embed>` or `<object>` that points at `http` or `//`, an `@import`, a `url(` of `http` or
-/// `//`. A link the reader clicks (`<a href>`) is fine.
+/// The first 80 characters of a value, for a failure line (brief item 5).
+fn cut80(value: &str) -> String {
+    value.chars().take(80).collect()
+}
+
+/// `&#NN;`, `&#xHH;` (the `;` optional, as a browser reads it) and the named entities a URL can be spelled with, in
+/// text already lower-cased. Anything else is left as it is.
+fn decode_entities(text: &str) -> String {
+    const NAMED: [(&str, char); 11] = [
+        ("&colon;", ':'),
+        ("&sol;", '/'),
+        ("&bsol;", '\\'),
+        ("&period;", '.'),
+        ("&amp;", '&'),
+        ("&quot;", '"'),
+        ("&apos;", '\''),
+        ("&lt;", '<'),
+        ("&gt;", '>'),
+        ("&tab;", '\t'),
+        ("&newline;", '\n'),
+    ];
+    let mut out = String::new();
+    let mut rest = text;
+    'outer: while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        if let Some(number) = rest.strip_prefix("&#") {
+            let hex = number.starts_with('x');
+            let digits = &number[usize::from(hex)..];
+            let len = digits
+                .chars()
+                .take_while(|c| if hex { c.is_ascii_hexdigit() } else { c.is_ascii_digit() })
+                .count();
+            let code = u32::from_str_radix(&digits[..len], if hex { 16 } else { 10 })
+                .ok()
+                .and_then(char::from_u32);
+            if let (true, Some(code)) = (len > 0, code) {
+                out.push(code);
+                let used = 2 + usize::from(hex) + len;
+                rest = &rest[used..];
+                rest = rest.strip_prefix(';').unwrap_or(rest);
+                continue;
+            }
+        }
+        for (name, code) in NAMED {
+            if let Some(after) = rest.strip_prefix(name) {
+                out.push(code);
+                rest = after;
+                continue 'outer;
+            }
+        }
+        out.push('&');
+        rest = &rest[1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// An attribute's value as the browser reads it: entities decoded, then tabs and line breaks dropped (a URL parser
+/// drops them anywhere, so `ht&#9;tps:` is `https:`) and leading spaces and control characters trimmed.
+fn attr_value(raw: &str) -> String {
+    decode_entities(raw)
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect::<String>()
+        .trim_start_matches(|c: char| c <= ' ')
+        .to_owned()
+}
+
+/// Whether a URL (lower-cased) is on another host: a network scheme, or scheme-relative. A browser reads `\` as `/` in
+/// such a URL, so `\\host` is `//host`, and from a page opened as a file it is a network share.
+fn outside(url: &str) -> bool {
+    let url = url.trim_start_matches(|c: char| c <= ' ' || c == '"' || c == '\'');
+    ["//", "\\\\", "/\\", "\\/"]
+        .iter()
+        .any(|prefix| url.starts_with(prefix))
+        || ["http:", "https:", "ws:", "wss:", "ftp:"]
+            .iter()
+            .any(|scheme| url.starts_with(scheme))
+}
+
+/// A start tag read from just after its `<`: its name, its attributes (quoted values may hold `>`), and where it ends.
+struct StartTag {
+    name: String,
+    attrs: Vec<(String, String)>,
+    end: usize,
+}
+
+fn read_tag(lower: &str, start: usize) -> StartTag {
+    let bytes = lower.as_bytes();
+    let mut at = start;
+    while at < bytes.len() && (bytes[at].is_ascii_alphanumeric() || bytes[at] == b'-') {
+        at += 1;
+    }
+    let name = lower[start..at].to_owned();
+    let mut attrs = Vec::new();
+    loop {
+        while at < bytes.len() && (bytes[at].is_ascii_whitespace() || bytes[at] == b'/') {
+            at += 1;
+        }
+        if at >= bytes.len() {
+            return StartTag { name, attrs, end: at };
+        }
+        if bytes[at] == b'>' {
+            return StartTag { name, attrs, end: at + 1 };
+        }
+        let key_from = at;
+        while at < bytes.len() && !bytes[at].is_ascii_whitespace() && !b"=>/".contains(&bytes[at]) {
+            at += 1;
+        }
+        let key = lower[key_from..at].to_owned();
+        while at < bytes.len() && bytes[at].is_ascii_whitespace() {
+            at += 1;
+        }
+        if at < bytes.len() && bytes[at] == b'=' {
+            at += 1;
+            while at < bytes.len() && bytes[at].is_ascii_whitespace() {
+                at += 1;
+            }
+            let value = match bytes.get(at) {
+                Some(&quote) if quote == b'"' || quote == b'\'' => {
+                    let from = at + 1;
+                    let to = lower[from..]
+                        .find(quote as char)
+                        .map_or(lower.len(), |close| from + close);
+                    at = (to + 1).min(lower.len());
+                    &lower[from..to]
+                }
+                _ => {
+                    let from = at;
+                    while at < bytes.len()
+                        && !bytes[at].is_ascii_whitespace()
+                        && bytes[at] != b'>'
+                    {
+                        at += 1;
+                    }
+                    &lower[from..at]
+                }
+            };
+            attrs.push((key, value.to_owned()));
+        } else if !key.is_empty() {
+            attrs.push((key, String::new()));
+        } else {
+            at += 1;
+        }
+    }
+}
+
+/// CSS that loads: an `@import` (the page is one file, so any import is a second load), or a `url(` on another host.
+fn css_loads(label: &str, css: &str, found: &mut Vec<String>) {
+    if let Some(at) = css.find("@import") {
+        found.push(format!("{label} @import: {}", cut80(&css[at..])));
+    }
+    let mut from = 0;
+    while let Some(hit) = css[from..].find("url(") {
+        let at = from + hit;
+        if outside(&css[at + 4..]) {
+            found.push(format!("{label} url(: {}", cut80(&css[at..])));
+            break;
+        }
+        from = at + 4;
+    }
+}
+
+/// Script that talks to a host: `fetch(`, `XMLHttpRequest`, `import(` or `new WebSocket`. The report needs no script
+/// that talks; its claims data is a `<script type="application/json">` block, which never runs.
+fn script_talks(label: &str, js: &str, found: &mut Vec<String>) {
+    for marker in ["fetch(", "xmlhttprequest", "import("] {
+        if let Some(at) = js.find(marker) {
+            found.push(format!("{label} {marker}: {}", cut80(&js[at..])));
+        }
+    }
+    let mut from = 0;
+    while let Some(hit) = js[from..].find("websocket") {
+        let at = from + hit;
+        let before = js[..at].trim_end();
+        if before.len() < at && before.ends_with("new") {
+            let new = before.len() - 3;
+            found.push(format!("{label} new websocket: {}", cut80(&js[new..])));
+            break;
+        }
+        from = at + "websocket".len();
+    }
+}
+
+/// `rel` words of a `<link>` a reader follows, never a load (review F4: `<link rel=canonical>` failed a report).
+const LINK_FOLLOWED: [&str; 10] = [
+    "canonical",
+    "alternate",
+    "author",
+    "license",
+    "help",
+    "next",
+    "prev",
+    "bookmark",
+    "external",
+    "me",
+];
+
+/// What one start tag loads from another host, or runs that talks to one.
+fn tag_loads(tag: &StartTag, found: &mut Vec<String>) {
+    let name = tag.name.as_str();
+    let get = |key: &str| {
+        tag.attrs
+            .iter()
+            .find(|(known, _)| known == key)
+            .map(|(_, value)| attr_value(value))
+    };
+    let mut push = |key: &str, value: &str| found.push(format!("<{name}> {key}: {}", cut80(value)));
+    match name {
+        // Any `src`: the page is one file.
+        "script" => {
+            if let Some(src) = get("src") {
+                push("src", &src);
+            }
+        }
+        "link" => {
+            let rel = get("rel").unwrap_or_default();
+            let words: Vec<&str> = rel.split_whitespace().collect();
+            let followed =
+                !words.is_empty() && words.iter().all(|word| LINK_FOLLOWED.contains(word));
+            if let Some(href) = get("href").filter(|href| outside(href) && !followed) {
+                found.push(format!("<link rel={}> href: {}", words.join(" "), cut80(&href)));
+            }
+        }
+        "img" | "iframe" | "frame" | "source" | "video" | "audio" | "embed" | "object"
+        | "input" | "track" => {
+            for key in ["src", "data", "poster"] {
+                if let Some(value) = get(key).filter(|value| outside(value)) {
+                    push(key, &value);
+                }
+            }
+            if let Some(set) = get("srcset")
+                .filter(|set| set.split(',').any(|candidate| outside(candidate.trim())))
+            {
+                push("srcset", &set);
+            }
+        }
+        // svg: `<image>`, `<use>` and `<feImage>` load what their href names.
+        "image" | "use" | "feimage" => {
+            for key in ["href", "xlink:href"] {
+                if let Some(value) = get(key).filter(|value| outside(value)) {
+                    push(key, &value);
+                }
+            }
+        }
+        // Any `<base href>`: it moves every relative link and load of the page, and a one-file page needs none.
+        "base" => {
+            if let Some(href) = get("href") {
+                push("href", &href);
+            }
+        }
+        "meta" => {
+            let content = get("content").unwrap_or_default();
+            let target = content.find("url").map(|at| {
+                content[at + 3..]
+                    .trim_start_matches(|c: char| c <= ' ' || c == '=' || c == '"' || c == '\'')
+            });
+            if get("http-equiv").as_deref() == Some("refresh") && target.is_some_and(outside) {
+                found.push(format!("<meta http-equiv=refresh> content: {}", cut80(&content)));
+            }
+        }
+        "form" => {
+            if let Some(action) = get("action").filter(|action| outside(action)) {
+                push("action", &action);
+            }
+        }
+        _ => {}
+    }
+    let mut push = |key: &str, value: &str| found.push(format!("<{name}> {key}: {}", cut80(value)));
+    if let Some(value) = get("formaction").filter(|value| outside(value)) {
+        push("formaction", &value);
+    }
+    // `<body background>`, and the table cells that take one too.
+    if let Some(value) = get("background").filter(|value| outside(value)) {
+        push("background", &value);
+    }
+    if let Some(style) = get("style") {
+        css_loads(&format!("<{name}> style"), &style, found);
+    }
+    for (key, value) in tag.attrs.iter().filter(|(key, _)| key.starts_with("on")) {
+        script_talks(&format!("<{name}> {key}"), &attr_value(value), found);
+    }
+}
+
+/// Every load `html` makes from another host, and every script that talks to one, each named by its tag and the
+/// first 80 characters of its value. Review F4: the check read the whole page as one string, so the word `@import` in
+/// prose failed a report about CSS, and an svg `<image>`, a `<base>`, a `<meta refresh>` or an inline `fetch` passed.
+/// It reads tags now: a style counts inside a `<style>` element or a `style=` attribute, a script inside a running
+/// `<script>` or an `on…=` attribute, and text, `<pre>`, `<code>` and comments count for nothing. A link the reader
+/// clicks (`<a href>`, `<link rel=canonical>`) is fine.
 pub fn outside_loads(html: &str) -> Vec<String> {
     let lower = html.to_ascii_lowercase();
     let mut found = Vec::new();
-    let outside = |value: &str| {
-        let value = value.trim_start_matches(['"', '\'', ' ']);
-        value.starts_with("http:") || value.starts_with("https:") || value.starts_with("//")
-    };
     let mut at = 0;
     while let Some(open) = lower[at..].find('<') {
         let start = at + open + 1;
-        let end = lower[start..]
-            .find('>')
-            .map_or(lower.len(), |close| start + close);
-        let tag = &lower[start..end];
-        let name: String = tag
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric())
-            .collect();
-        let attr = |key: &str| -> Vec<&str> {
-            let mut values = Vec::new();
-            let mut from = 0;
-            while let Some(found) = tag[from..].find(key) {
-                let after = from + found + key.len();
-                let before = tag[..from + found].chars().last();
-                if before.is_some_and(|c| c.is_ascii_whitespace() || c == '"' || c == '\'') {
-                    let rest = tag[after..].trim_start();
-                    if let Some(value) = rest.strip_prefix('=') {
-                        values.push(value.trim_start());
-                    }
-                }
-                from = after;
-            }
-            values
-        };
-        match name.as_str() {
-            "script" if !attr("src").is_empty() => found.push("a <script> with a src".to_owned()),
-            "link" | "img" | "iframe" | "source" | "video" | "audio" | "embed" | "object"
-            | "input" => {
-                for key in ["src", "href", "srcset", "data", "poster"] {
-                    if attr(key).into_iter().any(outside) {
-                        found.push(format!("a <{name}> {key} on another host"));
-                    }
-                }
-            }
-            _ => {}
+        let rest = &lower[start..];
+        if let Some(comment) = rest.strip_prefix("!--") {
+            at = comment
+                .find("-->")
+                .map_or(lower.len(), |close| start + 3 + close + 3);
+            continue;
         }
-        at = end.min(lower.len());
-    }
-    if lower.contains("@import") {
-        found.push("an @import".to_owned());
-    }
-    let mut from = 0;
-    while let Some(hit) = lower[from..].find("url(") {
-        let after = from + hit + 4;
-        if outside(&lower[after..]) {
-            found.push("a url() on another host".to_owned());
-            break;
+        if rest.starts_with(['!', '?', '/']) {
+            at = rest.find('>').map_or(lower.len(), |close| start + close + 1);
+            continue;
         }
-        from = after;
+        if !rest.starts_with(|c: char| c.is_ascii_alphabetic()) {
+            at = start;
+            continue;
+        }
+        let tag = read_tag(&lower, start);
+        at = tag.end;
+        tag_loads(&tag, &mut found);
+        // Raw text: what is inside is not markup. A style's is CSS, a running script's is code, a title's is text.
+        if matches!(tag.name.as_str(), "script" | "style" | "title" | "textarea") {
+            let close = format!("</{}", tag.name);
+            let body_end = lower[at..].find(&close).map_or(lower.len(), |close| at + close);
+            let body = &lower[at..body_end];
+            let data = tag
+                .attrs
+                .iter()
+                .any(|(key, value)| key == "type" && value.contains("json"));
+            match tag.name.as_str() {
+                "style" => css_loads("<style>", body, &mut found),
+                "script" if !data && !tag.attrs.iter().any(|(key, _)| key == "src") => {
+                    script_talks("<script>", body, &mut found)
+                }
+                _ => {}
+            }
+            at = body_end;
+        }
     }
     found.dedup();
     found
@@ -1648,13 +1996,37 @@ fn stop_marker(project: &Project, run: &str) -> PathBuf {
     scholar_dir(project, run).join(STOP_FILE)
 }
 
-/// The line the run's `asked` event carries: the outcome, the status command, then why.
-pub fn tell_line(state: &State) -> String {
+/// The line the run's `asked` event carries: the outcome, the status command, why, then what did not deliver
+/// (`lost_lines`). The queue keeps 120 characters of it (`queue_line`), so what the orchestrator acts on comes first;
+/// `status` and the journal keep it whole. A `no_delivery` why is the lost list already.
+pub fn tell_line(state: &State, run: &RunState) -> String {
+    let end = state.end.as_deref().unwrap_or("?");
+    let why = one_line(state.end_why.as_deref().unwrap_or(""));
+    let lost = lost_lines(state, run);
+    let lost = if lost.is_empty() || end == ends::NO_DELIVERY {
+        String::new()
+    } else {
+        format!("; did not deliver: {}", lost.join("; "))
+    };
+    if end != ends::REPORT {
+        return format!("scholar {end}: `herdr scholar status {}`; {why}{lost}", state.run);
+    }
+    // A report: the page's path first (its why), so it is inside the 120 characters, then the writer's answer line,
+    // its summary after the path it opens with.
+    let answer = state
+        .writer
+        .as_ref()
+        .and_then(|writer| writer.end.as_ref())
+        .and_then(|end| run.order(&end.leaf))
+        .and_then(|leaf| leaf.report.as_ref())
+        .and_then(|report| report["summary"].as_str())
+        .map(|summary| one_line(summary.trim().trim_start_matches(why.as_str())))
+        .filter(|answer| !answer.is_empty())
+        .map(|answer| format!(": {}", answer.chars().take(LOST_WHY_MAX).collect::<String>()))
+        .unwrap_or_default();
     format!(
-        "scholar {}: `herdr scholar status {}`; {}",
-        state.end.as_deref().unwrap_or("?"),
-        state.run,
-        one_line(state.end_why.as_deref().unwrap_or(""))
+        "scholar report: {why} (`herdr scholar status {}`){answer}{lost}",
+        state.run
     )
 }
 
@@ -1736,18 +2108,32 @@ pub fn log_path(root: &Path) -> PathBuf {
     root.join(REPORTS).join(LOG_FILE)
 }
 
+/// One line at the end of `path`. Review F3: a log whose last line lost its newline (a hand edit, an editor that strips
+/// it) joined the next line to it, and both were lost to `read_log`; a newline is written first when the file does
+/// not end in one.
 fn append_line(path: &Path, value: &Value) -> Result<(), String> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
     }
     let mut text = value.to_string();
     text.push('\n');
-    std::fs::OpenOptions::new()
+    let said = |err: std::io::Error| format!("{}: {err}", path.display());
+    let mut file = std::fs::OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .open(path)
-        .and_then(|mut file| file.write_all(text.as_bytes()))
-        .map_err(|err| format!("{}: {err}", path.display()))
+        .map_err(said)?;
+    if file.metadata().map_err(said)?.len() > 0 {
+        let mut last = [0u8; 1];
+        file.seek(SeekFrom::End(-1)).map_err(said)?;
+        file.read_exact(&mut last).map_err(said)?;
+        if last[0] != b'\n' {
+            text.insert(0, '\n');
+        }
+    }
+    file.write_all(text.as_bytes()).map_err(said)
 }
 
 /// The writer's order id is seated once its chain list holds it.
@@ -1973,16 +2359,21 @@ fn apply(
                     now,
                     Kind::Asked {
                         order: None,
-                        question: tell_line(state),
+                        question: tell_line(state, run),
                     },
                 )
                 .map_err(|err| err.to_string())?;
+            // `told` is saved before the wake, on purpose (review F5). A kill between the two loses only the typing:
+            // the line is on the queue, and the orchestrator's next prompt notice reads it. Waking first, a kill
+            // before the save would append and type the line a second time on resume.
             state.told = true;
             save_state(project, state)?;
             (world.wake)(project, &state.run);
         }
         Step::Log => {
-            append_line(&log_path(&project.root), &log_line(state, run, now))?;
+            // Two steps, the append and the save of `logged`: a kill between them asks for the line again, and
+            // `append_run_line` skips a run the log already holds (review F11).
+            append_run_line(&project.root, &log_line(state, run, now))?;
             state.logged = true;
         }
         Step::EndRun => {
@@ -2001,13 +2392,36 @@ fn apply(
                 }
                 Err(why) => {
                     state.end_tries += 1;
-                    if state.end_tries >= END_TRIES {
-                        state.notes.push(format!("the run was left open: `herdr run end` refused {END_TRIES} times: {why}"));
-                        state.stage = Stage::Done;
-                    } else {
+                    let first = *state.end_refused_at.get_or_insert(now);
+                    if now.saturating_sub(first) < END_REFUSED_S {
                         save_state(project, state)?;
                         return Ok(true);
                     }
+                    // Review F10: the note and the queued line name the exact command and herdr's own words, and the
+                    // line leads with the command: the queue keeps a run's question to 120 characters.
+                    let command = format!("`herdr run end {}`", state.run);
+                    state.notes.push(format!(
+                        "the run was left open: {command} refused for {} minutes ({} tries); herdr said: {why}",
+                        END_REFUSED_S / 60,
+                        state.end_tries
+                    ));
+                    project
+                        .journal(&state.run)
+                        .append(
+                            now,
+                            Kind::Asked {
+                                order: None,
+                                question: format!(
+                                    "scholar {}: {command} refused for {} minutes; run it once it can end: {why}",
+                                    state.end.as_deref().unwrap_or("?"),
+                                    END_REFUSED_S / 60
+                                ),
+                            },
+                        )
+                        .map_err(|err| err.to_string())?;
+                    state.stage = Stage::Done;
+                    save_state(project, state)?;
+                    (world.wake)(project, &state.run);
                 }
             }
         }
@@ -2032,6 +2446,9 @@ fn finish(project: &Project, state: &mut State, end: &'static str, why: String, 
 
 /// The driver's loop, holding the run's lock: replay, plan, apply, until the run is done.
 pub fn drive(project: &Project, run: &str, world: &World, caps: Caps) -> Result<State, String> {
+    // Read first: taking the lock makes `driver/` and `driver.json`, which a run id that is not there must not get
+    // (review F6).
+    load_state(project, run)?;
     let _lock = take_driver(project, run)?;
     drive_held(project, run, world, caps)
 }
@@ -2159,6 +2576,13 @@ pub fn start(
             "the question is empty: herdr scholar \"<question>\"",
         ));
     }
+    let length = question.chars().count();
+    if length > QUESTION_MAX {
+        return Err(refuse(format!(
+            "the question is {length} characters; the limit is 8,000. Put the background in a file in the project and \
+             name the file in the question."
+        )));
+    }
     if !is_git_repo(&project.root) {
         return Err(refuse(format!(
             "{} is not a git repository: the gate checks each order's files with git status, so every order would be \
@@ -2179,8 +2603,9 @@ pub fn start(
     }
     let slug = slug(question);
     let (ymd, date) = dates(now);
+    // The run id needs no claim of its own: `save_state` below makes its folder, which `run_id` reads.
     let run = run_id(project, &ymd, &slug);
-    let report_dir = report_dir(&project.root, &date, &slug);
+    let report_dir = report_dir(&project.root, &date, &slug, &claimed_dirs(project));
     let mode = nirvana_seat::table_for(&project.root).map_err(refuse)?.mode;
     let state = State {
         version: STATE_VERSION,
@@ -2205,6 +2630,7 @@ pub fn start(
         told: false,
         logged: false,
         end_tries: 0,
+        end_refused_at: None,
     };
     project.ensure().map_err(|err| refuse(err.to_string()))?;
     save_state(project, &state).map_err(refuse)?;
@@ -2283,12 +2709,34 @@ pub fn spawn_driver(project: &Project, run: &str) -> Result<u32, String> {
 
 /// The log's lines: the run lines (with `end`) and the tag lines (`{run, outcome, note, at}`), in file order.
 pub fn read_log(root: &Path) -> Vec<Value> {
-    std::fs::read_to_string(log_path(root))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
-        .filter(Value::is_object)
-        .collect()
+    read_log_counted(root).0
+}
+
+/// The log's lines, and how many lines it skipped because they do not read as a JSON object (review F3: one bad line
+/// costs only itself, and `status` says how many there were).
+pub fn read_log_counted(root: &Path) -> (Vec<Value>, usize) {
+    let text = std::fs::read_to_string(log_path(root)).unwrap_or_default();
+    let mut lines = Vec::new();
+    let mut bad = 0;
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        match serde_json::from_str::<Value>(line) {
+            Ok(value) if value.is_object() => lines.push(value),
+            _ => bad += 1,
+        }
+    }
+    (lines, bad)
+}
+
+/// The run's line, unless the log already holds a run line with its id: `false` then (review F11).
+pub fn append_run_line(root: &Path, line: &Value) -> Result<bool, String> {
+    let run = line["run"].as_str().unwrap_or("");
+    if read_log(root)
+        .iter()
+        .any(|known| known.get("end").is_some() && known["run"].as_str() == Some(run))
+    {
+        return Ok(false);
+    }
+    append_line(&log_path(root), line).map(|()| true)
 }
 
 /// The owner's last tag for `run`, the last line winning.
@@ -2331,7 +2779,10 @@ pub fn tag_line(
 /// `herdr scholar status` with no run: this project's runs from the log and the unfinished state files, newest
 /// first, each with its outcome.
 pub fn list_text(project: &Project) -> String {
-    let lines = read_log(&project.root);
+    let (lines, bad) = read_log_counted(&project.root);
+    let unread = (bad > 0).then(|| {
+        format!("{bad} line(s) of {REPORTS}/{LOG_FILE} could not be read\n")
+    });
     let mut rows: Vec<(u64, String)> = Vec::new();
     let mut logged = std::collections::BTreeSet::new();
     for line in lines.iter().filter(|line| line.get("end").is_some()) {
@@ -2371,16 +2822,23 @@ pub fn list_text(project: &Project) -> String {
         }
     }
     rows.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
-    if rows.is_empty() {
-        return "no scholar run in this project\n".to_owned();
-    }
-    rows.into_iter().map(|(_, row)| row + "\n").collect()
+    let mut out: String = if rows.is_empty() {
+        "no scholar run in this project\n".to_owned()
+    } else {
+        rows.into_iter().map(|(_, row)| row + "\n").collect()
+    };
+    out.extend(unread);
+    out
 }
 
 /// `herdr scholar status <run>`: the state file and the journal, no writes.
 pub fn status_text(project: &Project, state: &State, run: &RunState) -> String {
+    // Review F12: the page's path only for a run that wrote one.
+    let report = (state.end.as_deref() == Some(ends::REPORT))
+        .then(|| format!("report: {}\n", report_html_rel(state)))
+        .unwrap_or_default();
     let mut out = format!(
-        "{} · {}{}\nquestion: {}\nreport: {}\n",
+        "{} · {}{}\nquestion: {}\n{report}",
         state.run,
         state.stage.word(),
         state
@@ -2389,7 +2847,6 @@ pub fn status_text(project: &Project, state: &State, run: &RunState) -> String {
             .map(|end| format!(" · {end}: {}", state.end_why.as_deref().unwrap_or("")))
             .unwrap_or_default(),
         one_line(&state.question),
-        report_html_rel(state),
     );
     if let Some(route) = &state.route {
         out.push_str(&format!(
@@ -2446,6 +2903,111 @@ pub fn status_text(project: &Project, state: &State, run: &RunState) -> String {
     out
 }
 
+// ---- the verbs a worker must not run ----
+
+/// Review F6: every verb that starts paid turns, ends a run or writes the log refuses in a worker herdr seated, as the
+/// question verb does: a worker told by a web page to run `herdr scholar drive <run>` would start a driver's turns.
+/// `status` only reads, and stays open to a worker.
+pub fn refused_in_worker(env: &dyn Fn(&str) -> Option<String>, verb: &str) -> Result<(), String> {
+    match env(crate::nirvana_profiles::SEATED_ORDER_ENV).filter(|order| !order.trim().is_empty()) {
+        Some(order) => Err(format!(
+            "refused inside order {}, a worker seated by herdr: `herdr scholar {verb}` is the orchestrator's",
+            order.trim()
+        )),
+        None => Ok(()),
+    }
+}
+
+/// `herdr scholar drive <run>`: the guard, the state read before the lock (an unknown run id writes nothing), then
+/// the driver. A driver that stops, by an error or a panic, says so on the run with the `asked` line the standard wake
+/// carries (review F11: a panic left no trace). A kill cannot be caught; `status` names a run no driver holds.
+pub fn drive_verb(
+    project: &Project,
+    run: &str,
+    world: &World,
+    caps: Caps,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<State, String> {
+    refused_in_worker(env, "drive")?;
+    load_state(project, run)?;
+    let driven = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        drive(project, run, world, caps)
+    }))
+    .unwrap_or_else(|panic| {
+        let what = panic
+            .downcast_ref::<&str>()
+            .map(|text| (*text).to_owned())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "no message".to_owned());
+        Err(format!("the driver panicked: {what}"))
+    });
+    match driven {
+        Ok(state) => Ok(state),
+        Err(why) => {
+            if !why.starts_with("a driver holds") {
+                let _ = project.journal(run).append(
+                    (world.now)(),
+                    Kind::Asked {
+                        order: None,
+                        question: format!(
+                            "scholar {}: `herdr scholar status {run}`; the driver stopped: {why}; `herdr scholar resume {run}` goes on",
+                            ends::GAVE_UP
+                        ),
+                    },
+                );
+                (world.wake)(project, run);
+            }
+            Err(why)
+        }
+    }
+}
+
+/// `herdr scholar stop <run>`: the guard and the state read before anything is written; then the stop marker, and
+/// the run carried to its end here when no driver holds it.
+pub fn stop_verb(
+    project: &Project,
+    run: &str,
+    world: &World,
+    caps: Caps,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, String> {
+    refused_in_worker(env, "stop")?;
+    let state = load_state(project, run)?;
+    if state.stage == Stage::Done {
+        return Ok(format!(
+            "{run} is done: {}",
+            state.end.as_deref().unwrap_or("")
+        ));
+    }
+    std::fs::write(stop_marker(project, run), nirvana_run::now().to_string())
+        .map_err(|err| err.to_string())?;
+    match take_driver(project, run) {
+        Err(_) => Ok(format!(
+            "{run}: asked its driver to stop; it stops the run's orders and ends the run"
+        )),
+        Ok(lock) => {
+            let state = drive_held(project, run, world, caps)?;
+            drop(lock);
+            Ok(format!("{run}: {}", state.end.as_deref().unwrap_or("stopped")))
+        }
+    }
+}
+
+pub fn tag_verb(
+    root: &Path,
+    run: &str,
+    outcome: &str,
+    note: Option<&str>,
+    env: &dyn Fn(&str) -> Option<String>,
+    now: u64,
+) -> Result<Value, String> {
+    refused_in_worker(env, "tag")?;
+    let line = tag_line(root, run, outcome, note, now)?;
+    // `append_line` writes a newline first when the log lost its last one (review F3).
+    append_line(&log_path(root), &line)?;
+    Ok(line)
+}
+
 // ---- the CLI ----
 
 pub const USAGE: &str = "usage: herdr scholar \"<question>\" [--json] [--force]
@@ -2481,7 +3043,8 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         None => usage_exit(),
         Some("drive") => {
             let run = run_arg(rest.first());
-            match drive(&project, &run, &real_world(), Caps::from_env()) {
+            refused_in_worker(&env, "drive").unwrap_or_else(|why| fail(why, 2));
+            match drive_verb(&project, &run, &real_world(), Caps::from_env(), &env) {
                 Ok(state) => {
                     println!(
                         "{run}: {}",
@@ -2489,23 +3052,7 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
                     );
                     Ok(())
                 }
-                Err(why) => {
-                    // A driver that gives up says so on the run, so the standard wake carries it.
-                    if !why.starts_with("a driver holds") {
-                        let _ = project.journal(&run).append(
-                            nirvana_run::now(),
-                            Kind::Asked {
-                                order: None,
-                                question: format!(
-                                    "scholar {}: `herdr scholar status {run}`; the driver stopped: {why}; `herdr scholar resume {run}` goes on",
-                                    ends::GAVE_UP
-                                ),
-                            },
-                        );
-                        real_wake(&project, &run);
-                    }
-                    fail(why, 1)
-                }
+                Err(why) => fail(why, 1),
             }
         }
         Some("status") => {
@@ -2536,14 +3083,7 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         }
         Some("resume") => {
             let run = run_arg(rest.first());
-            if let Some(order) =
-                env(crate::nirvana_profiles::SEATED_ORDER_ENV).filter(|o| !o.trim().is_empty())
-            {
-                fail(
-                    format!("refused inside order {order}, a worker seated by herdr"),
-                    2,
-                );
-            }
+            refused_in_worker(&env, "resume").unwrap_or_else(|why| fail(why, 2));
             let state = load_state(&project, &run).unwrap_or_else(|why| fail(why, 1));
             if state.stage == Stage::Done {
                 fail(
@@ -2566,43 +3106,30 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         }
         Some("stop") => {
             let run = run_arg(rest.first());
-            let state = load_state(&project, &run).unwrap_or_else(|why| fail(why, 1));
-            if state.stage == Stage::Done {
-                println!("{run} is done: {}", state.end.as_deref().unwrap_or(""));
-                return Ok(());
-            }
-            std::fs::write(stop_marker(&project, &run), nirvana_run::now().to_string())?;
-            match take_driver(&project, &run) {
-                Err(_) => println!(
-                    "{run}: asked its driver to stop; it stops the run's orders and ends the run"
-                ),
-                Ok(lock) => {
-                    let world = real_world();
-                    let state = drive_held(&project, &run, &world, Caps::from_env())
-                        .unwrap_or_else(|why| fail(why, 1));
-                    drop(lock);
-                    println!("{run}: {}", state.end.as_deref().unwrap_or("stopped"));
-                }
-            }
+            refused_in_worker(&env, "stop").unwrap_or_else(|why| fail(why, 2));
+            let said = stop_verb(&project, &run, &real_world(), Caps::from_env(), &env)
+                .unwrap_or_else(|why| fail(why, 1));
+            println!("{said}");
             Ok(())
         }
         Some("tag") => {
             let run = run_arg(rest.first());
+            refused_in_worker(&env, "tag").unwrap_or_else(|why| fail(why, 2));
             let outcome = rest.get(1).cloned().unwrap_or_else(|| usage_exit());
             let note = match rest.get(2..).unwrap_or(&[]) {
                 [] => None,
                 [flag, text] if flag == "--note" => Some(text.clone()),
                 _ => usage_exit(),
             };
-            let line = tag_line(
+            let line = tag_verb(
                 &project.root,
                 &run,
                 &outcome,
                 note.as_deref(),
+                &env,
                 nirvana_run::now(),
             )
             .unwrap_or_else(|why| fail(why, 2));
-            append_line(&log_path(&project.root), &line).unwrap_or_else(|why| fail(why, 1));
             println!("{line}");
             Ok(())
         }
