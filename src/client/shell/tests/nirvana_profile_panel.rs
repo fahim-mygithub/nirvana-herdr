@@ -676,19 +676,45 @@ fn p93_the_use_reads_carried_of_fit_and_in_words_when_nothing_fits() {
 
 #[test]
 fn p93_the_empty_states_say_so_in_plain_words() {
+    // P47b fix round (review F12): the built-in scholar makes the Profiles list never empty, so the empty state is
+    // drawn through the seam that hides the built-ins for this one project, and the test is f66e1fc9's again there.
     let (_home, root) = project("p93-empty");
+    crate::nirvana_profiles::hide_builtins_for_test(&root);
     let mut state = state_in(&root);
     let rows = opened(&mut state, 140);
     let text = rows.join("\n");
-    // Plan 47 P47b: a project with no profile of its own still has the built-in scholar, so Profiles is never empty
-    // and `NO_PROFILES` is not drawn.
-    assert!(!text.contains(NO_PROFILES), "{text}");
+    assert!(text.contains(NO_PROFILES), "{text}");
     assert!(text.contains(NOTHING_SUGGESTED), "{text}");
     assert!(
-        text.contains("[Profiles \u{b7} 1]") && text.contains(" Suggested \u{b7} 0 "),
+        text.contains("[Profiles \u{b7} 0]") && text.contains(" Suggested \u{b7} 0 "),
         "{text}"
     );
-    // Keys on the built-in's row and the empty list never panic; `e` or Enter then any other key makes nothing.
+    // Keys on empty lists never panic and say why.
+    for code in [
+        KeyCode::Down,
+        KeyCode::End,
+        KeyCode::Enter,
+        KeyCode::Char('e'),
+        KeyCode::Char('K'),
+    ] {
+        key(&mut state, code);
+    }
+    assert!(state.nirvana_profile_panel.is_some());
+    key(&mut state, KeyCode::Tab);
+    for code in [KeyCode::PageDown, KeyCode::Enter, KeyCode::Char('d')] {
+        key(&mut state, code);
+    }
+    assert_eq!(panel(&state).message.as_deref(), Some(NOTHING_SUGGESTED));
+    let _ = rows_of(&mut state, 140);
+    // Without the seam the same project lists the built-in, so `NO_PROFILES` is not drawn.
+    crate::nirvana_profiles::show_builtins_for_test(&root);
+    key(&mut state, KeyCode::Esc);
+    let mut state = state_in(&root);
+    let rows = opened(&mut state, 140);
+    let text = rows.join("\n");
+    assert!(!text.contains(NO_PROFILES), "{text}");
+    assert!(text.contains("[Profiles \u{b7} 1]"), "{text}");
+    // Keys on the built-in's row never panic; `e` or Enter then any other key makes nothing.
     for code in [
         KeyCode::Down,
         KeyCode::End,
@@ -700,12 +726,6 @@ fn p93_the_empty_states_say_so_in_plain_words() {
     }
     assert!(state.nirvana_profile_panel.is_some());
     assert!(!crate::nirvana_profiles::folder(&root).exists());
-    key(&mut state, KeyCode::Tab);
-    for code in [KeyCode::PageDown, KeyCode::Enter, KeyCode::Char('d')] {
-        key(&mut state, code);
-    }
-    assert_eq!(panel(&state).message.as_deref(), Some(NOTHING_SUGGESTED));
-    let _ = rows_of(&mut state, 140);
 }
 
 #[test]
@@ -3104,4 +3124,114 @@ fn p47b_the_panel_marks_the_built_in_and_e_writes_nothing_until_the_second_press
         "{}",
         rows.join("\n")
     );
+}
+
+/// The panel's notice after a key, its lines.
+fn notice_of(state: &ClientShellState) -> Vec<String> {
+    panel(state)
+        .notice
+        .iter()
+        .map(|(said, _)| said.clone())
+        .collect()
+}
+
+/// A point inside the Profiles row `name` as last drawn.
+fn row_hit(state: &ClientShellState, name: &str) -> (u16, u16) {
+    let view = panel_mod::read_view(&panel(state).root, false);
+    let index = view
+        .profiles
+        .iter()
+        .position(|row| row.name == name)
+        .unwrap_or_else(|| panic!("{name} is a row"));
+    let (rect, _) = state
+        .hits
+        .nirvana_profile_panel
+        .profiles
+        .iter()
+        .find(|(_, found)| *found == index)
+        .copied()
+        .unwrap_or_else(|| panic!("{name}'s row has a hit"));
+    (rect.x + 3, rect.y)
+}
+
+/// P47b fix round (review F6): a mouse click disarmed nothing, so `e`, a click on the same row, `e` made the copy, and
+/// so did `e`, a click on another row, a click back, `e`. A click anywhere in the panel disarms now, as any key but the
+/// same one on the same row does; `e` then Enter on the same row still copies (both are the edit key).
+#[test]
+fn p47b_a_click_disarms_the_copy_and_e_then_enter_still_makes_it() {
+    let (_home, root) = project("p47b-click");
+    profile_file(
+        &root,
+        "alpha",
+        "---\ndescription: The alpha worker.\n---\nYou work.\n",
+    );
+    let before = p47b_files(&root);
+    let mut state = state_in(&root);
+    let _ = opened(&mut state, 200);
+    // alpha first, the scholar second.
+    key(&mut state, KeyCode::Down);
+    let _ = shown(&mut state, 200);
+    // Each click lands where the row was last drawn.
+    let click_on = |state: &mut ClientShellState, name: &str| {
+        let _ = shown(state, 200);
+        let (column, row) = row_hit(state, name);
+        click(state, column, row);
+        let _ = shown(state, 200);
+    };
+    // `e`, a click on the same row, `e`: the notice again, no copy.
+    key(&mut state, KeyCode::Char('e'));
+    assert!(notice_of(&state)[0].contains("scholar is built into herdr"));
+    click_on(&mut state, "scholar");
+    key(&mut state, KeyCode::Char('e'));
+    assert!(panel(&state).making.is_none(), "a click disarmed it");
+    assert!(
+        notice_of(&state)[0].contains("scholar is built into herdr"),
+        "{:?}",
+        notice_of(&state)
+    );
+    assert_eq!(p47b_files(&root), before);
+    // `e` (the one above armed it again), a click on alpha, a click back on the scholar, `e`: no copy.
+    click_on(&mut state, "alpha");
+    click_on(&mut state, "scholar");
+    key(&mut state, KeyCode::Char('e'));
+    assert!(panel(&state).making.is_none(), "the clicks disarmed it");
+    assert_eq!(p47b_files(&root), before);
+    // `e` then Enter on the same row: both are the edit key, so the second makes the copy.
+    key(&mut state, KeyCode::Enter);
+    let landed = settle(&mut state);
+    let file = crate::nirvana_profiles::folder_of(&root, "scholar").join("profile.md");
+    assert_eq!(
+        invoked(&landed),
+        [format!(
+            "{}{}",
+            crate::nirvana::EDIT_FILE_COMMAND,
+            file.display()
+        )]
+    );
+}
+
+/// P47b fix round (review F4): `n` with the name `scholar` showed nothing and made a profile that silently replaced
+/// the built-in. It shows the library's reason as its notice now, and writes nothing.
+#[test]
+fn p47b_n_named_after_the_built_in_says_why_and_writes_nothing() {
+    let (_home, root) = project("p47b-n");
+    let before = p47b_files(&root);
+    let mut state = state_in(&root);
+    let _ = opened(&mut state, 200);
+    key(&mut state, KeyCode::Char('n'));
+    typed(&mut state, "scholar");
+    key(&mut state, KeyCode::Enter);
+    let reason = crate::nirvana_profiles::builtin_name_problem(&root, "scholar")
+        .expect("the built-in holds the name");
+    assert_eq!(notice_of(&state), [format!("not made: {reason}")]);
+    assert!(
+        panel(&state).shaping.is_none() && panel(&state).making.is_none(),
+        "no shape is asked and nothing is made"
+    );
+    assert!(
+        reason.contains("herdr profile new scholar --from scholar")
+            && reason.contains("--replace-builtin"),
+        "{reason}"
+    );
+    assert_eq!(p47b_files(&root), before);
 }

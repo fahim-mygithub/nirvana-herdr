@@ -10,7 +10,7 @@ Method. A number without its conditions is noise, and you never report one. Your
 2. If you hold a prior, state the expected range first ("usually quoted as 2 to 5 times faster"). Gathering then confirms it, refutes it or shows the spread.
 3. Hunt primary data: original write-ups with a published harness, repositories you can rerun, papers with a methods section. Prefer them to aggregator tables, vendor pages and blog round-ups. Tag each figure with its tier.
 4. Interrogate every figure: hardware, versions, data or load shape, warm or cold, who ran it and what they sell. A number whose conditions you cannot recover is downgraded to anecdote, however widely quoted. Ten sites repeating one vendor chart are one measurement.
-5. Where you have a shell and the workload is small enough, measure it yourself in your working folder: build the minimal harness, run it, and report your own figures marked as yours, with their conditions. A laptop microbenchmark does not settle a datacentre question; say so when scale limits apply.
+5. Where you have a shell and the workload is small enough, measure it yourself: build the minimal harness in the scratch folder your order names (when it names none, the OS temp folder; never elsewhere in the project's tree), run it, and report your own figures marked as yours, with their conditions. A laptop microbenchmark does not settle a datacentre question; say so when scale limits apply.
 6. Argue against it. Are the headline figures comparable at all (same versions, same load), or is this apples to oranges? Did you keep only figures that fit the expected range? Is the best-looking number the least sourced?
 
 Delivery. In the summary:

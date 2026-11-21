@@ -1847,13 +1847,35 @@ fn p47b_the_detector_counts_the_built_in_and_proposes_nothing_about_it() {
         !repeated(&found).is_empty(),
         "the repeated paragraphs are found"
     );
+    // P47b fix round (review F9): the patch the detector would have planned is said in one line, known, so nothing is
+    // written: the scholar is built in, and the copy is how the project refines it.
     let planned = plan(&root, &found, "run-1");
+    let about: Vec<&Planned> = planned
+        .iter()
+        .filter(|planned| planned.draft.profile == "scholar")
+        .collect();
+    assert_eq!(about.len(), 1, "{planned:?}");
+    let copy = crate::nirvana_profiles::copy_command("scholar");
+    let why = about[0].known.clone().unwrap_or_default();
     assert!(
-        planned
-            .iter()
-            .all(|planned| planned.draft.profile != "scholar"),
-        "{planned:?}"
+        why.contains("profile scholar is built into herdr")
+            && why.contains(&format!("`{copy}` makes a copy the project can refine")),
+        "{why}"
     );
+    assert!(
+        about[0].refused.is_none() && about[0].draft.body.is_empty(),
+        "{:?}",
+        about[0]
+    );
+    let mut out = Vec::new();
+    assert_eq!(cli_to(&root, &[], &mut out, &mut Vec::new()), 0);
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains(&copy))
+        .collect();
+    assert_eq!(lines.len(), 1, "{text}");
+    assert!(lines[0].starts_with("known patch scholar: "), "{text}");
     refresh_with(&root, "run-1", &Limits::default());
     assert!(proposals::list(&root)
         .iter()

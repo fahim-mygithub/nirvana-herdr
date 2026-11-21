@@ -801,8 +801,8 @@ pub(crate) struct ProfilePanel {
     /// The proposal highlighted when Suggested was last drawn with the focus; `d` in the list dismisses that one, and a
     /// move or a dismiss clears it (review finding 7).
     pub(super) drawn_proposal: Option<String>,
-    /// Plan 47 P47b: `e` or Enter on a built-in's row said it has no file here; the same key on the same row next
-    /// makes the project's copy. Any other key clears it.
+    /// Plan 47 P47b: `e` or Enter on a built-in's row said it has no file here; the edit key again on the same row next
+    /// makes the project's copy. Any other key, and any mouse input but a bare move, clears it.
     pub(super) copy_armed: Option<String>,
 }
 
@@ -1886,7 +1886,9 @@ impl ClientShellState {
 
     /// `e` and Enter. Plan 47 P47b: a built-in's row has no file to open. The first press says so and names the copy
     /// (`armed` is what the last key left, `copy_armed`); the same key on the same row next writes the project's copy
-    /// off the key path, which `profile_made` then opens. Nothing is written before that second press.
+    /// off the key path, which `profile_made` then opens. Nothing is written before that second press. `e` and Enter
+    /// are both the edit key, so `e` then Enter (or Enter then `e`) on the same row makes the copy too. Any other key,
+    /// and any mouse input but a bare move (`handle_profile_panel_mouse`), disarms it.
     fn profile_edit(
         &mut self,
         view: &View,
@@ -2161,7 +2163,12 @@ impl ClientShellState {
                 super::nirvana_profiles::Naming::Cancel => panel.naming = None,
                 super::nirvana_profiles::Naming::Make(name) => {
                     panel.naming = None;
-                    match crate::nirvana_profiles::new_name_problem(&name) {
+                    // P47b fix round (review F4): a built-in's name is refused here, before a shape is asked, with
+                    // the library's own reason; `new_profile` and `new_profile_shape` refuse it too.
+                    let problem = crate::nirvana_profiles::new_name_problem(&name).or_else(|| {
+                        crate::nirvana_profiles::builtin_name_problem(&panel.root, &name)
+                    });
+                    match problem {
                         Some(why) => {
                             panel.notice = vec![(format!("not made: {why}"), Tone::Attention)]
                         }
@@ -2308,6 +2315,14 @@ impl ClientShellState {
     ) -> bool {
         if self.nirvana_profile_panel.is_none() {
             return false;
+        }
+        // P47b fix round (review F6): `e`, a click on the same row, `e` made the copy; so did `e`, a click on another
+        // row, a click back, `e`. Mouse input disarms the copy as a key does: a click, a release or the wheel, anywhere.
+        // A bare move does not, since a pointer resting on the panel sends those between two presses of `e`.
+        if !matches!(mouse.kind, MouseEventKind::Moved) {
+            if let Some(panel) = self.nirvana_profile_panel.as_mut() {
+                panel.copy_armed = None;
+            }
         }
         let point = (mouse.column, mouse.row);
         let hits = self.hits.nirvana_profile_panel.clone();

@@ -1067,3 +1067,31 @@ fn p47b_a_proposal_against_the_built_in_is_refused_at_write_and_at_accept() {
     assert!(!nirvana_profiles::folder_of(&root, "scholar").exists());
     assert_eq!(list(&root).len(), 1, "the proposal still waits, for a dismiss");
 }
+
+/// P47b fix round (review F10): with the project's own `scholar/` gone, rolling back a patch accepted into it named
+/// `.nirvana/profiles/scholar.md`, a file that never was. It names the profile now, and still writes nothing.
+#[test]
+fn p47b_a_rollback_for_a_profile_that_is_gone_names_the_profile() {
+    let (_home, root) = project("p47b-pp-rollback");
+    nirvana_profiles::new_profile_from(&root, "scholar", "scholar").unwrap();
+    let body = "You research one question. Open every source before you cite it.";
+    let sha = profile_sha(&root, "scholar");
+    let id = write(&root, &draft(Kind::Patch, "scholar", body, sha)).expect("a patch of the copy");
+    accept(&root, &id).expect("accepted into the copy");
+    let op = ledger(&root)
+        .into_iter()
+        .rev()
+        .find(|row| row.action == "accept")
+        .expect("the accept's row")
+        .op;
+    std::fs::remove_dir_all(nirvana_profiles::folder_of(&root, "scholar")).unwrap();
+    let why = rollback(&root, &op).unwrap_err();
+    assert!(
+        why.contains("profile scholar is not in this project any more") && why.contains(&op),
+        "{why}"
+    );
+    assert!(!why.contains("scholar.md"), "{why}");
+    assert!(!nirvana_profiles::folder_of(&root, "scholar").exists());
+    assert!(!nirvana_profiles::path(&root, "scholar").exists());
+    assert!(list(&root).is_empty(), "nothing is waiting again");
+}

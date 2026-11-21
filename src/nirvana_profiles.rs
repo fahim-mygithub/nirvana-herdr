@@ -1440,7 +1440,11 @@ pub fn listed(root: &Path) -> Vec<Listed> {
             builtin: false,
         })
         .collect();
-    for found in &BUILTINS {
+    #[cfg(test)]
+    let builtins: &[Builtin] = if builtins_hidden(root) { &[] } else { &BUILTINS };
+    #[cfg(not(test))]
+    let builtins: &[Builtin] = &BUILTINS;
+    for found in builtins {
         if !in_project(root, found.name) {
             all.push(Listed {
                 name: found.name.to_owned(),
@@ -1452,6 +1456,44 @@ pub fn listed(root: &Path) -> Vec<Listed> {
     }
     all.sort_by(|a, b| a.name.cmp(&b.name));
     all
+}
+
+/// P47b fix round (review F12): the projects whose `listed` leaves the built-ins out, so a test can draw the Profiles
+/// panel's empty state, which the built-in makes unreachable otherwise. Keyed by the project's folder, so tests that
+/// run in parallel never see each other's, whichever thread reads the view.
+#[cfg(test)]
+static BUILTINS_HIDDEN: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn test_key(root: &Path) -> PathBuf {
+    std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+}
+
+#[cfg(test)]
+fn builtins_hidden(root: &Path) -> bool {
+    let key = test_key(root);
+    BUILTINS_HIDDEN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&key)
+}
+
+#[cfg(test)]
+pub(crate) fn hide_builtins_for_test(root: &Path) {
+    let key = test_key(root);
+    BUILTINS_HIDDEN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(key);
+}
+
+#[cfg(test)]
+pub(crate) fn show_builtins_for_test(root: &Path) {
+    let key = test_key(root);
+    BUILTINS_HIDDEN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|hidden| *hidden != key);
 }
 
 /// The word a built-in's line carries in `profile list` and the digest.
@@ -1471,6 +1513,11 @@ pub fn list(root: &Path) -> Vec<(String, PathBuf, Result<Profile, Vec<String>>)>
         .map(|entry| entry.path())
         .filter_map(|entry| {
             let file_name = entry.file_name()?.to_string_lossy().into_owned();
+            // P47b fix round (review F7): a profile staged under a temporary name is not one yet, and a killed run's
+            // leftover never becomes one.
+            if file_name.starts_with(STAGE_PREFIX) {
+                return None;
+            }
             if entry.is_dir() {
                 Some(file_name)
             } else if entry.is_file() && entry.extension().is_some_and(|ext| ext == "md") {
@@ -1523,24 +1570,35 @@ pub fn summary(profile: &Profile) -> String {
     }
 }
 
-/// §2.5: the session digest's profile lines. At most `DIGEST_PROFILES` profile lines; more ends with a count.
+/// §2.5: the session digest's profile lines. At most `DIGEST_PROFILES` lines of the project's own profiles, then each
+/// built-in it does not override; more of its own ends with a count.
 pub fn digest_lines(root: &Path) -> Vec<String> {
     // Plan 47 P47b: the built-ins too, so every project's session hears of the scholar.
     let profiles = listed(root);
     if profiles.is_empty() {
         return Vec::new();
     }
+    // P47b fix round (review F1): `listed` is in name order, so the built-in took a line from the project's own: ten
+    // own profiles and the scholar showed nine own lines and "and 1 more". The project's own keep the ten lines they
+    // had; a built-in the project does not override is one more line after them, outside the cap, never the line it
+    // drops. The count after them is of the project's own.
+    let (builtins, profiles): (Vec<Listed>, Vec<Listed>) =
+        profiles.into_iter().partition(|found| found.builtin);
+    let line = |found: &Listed| {
+        let name = &found.name;
+        let built = if found.builtin { " (built into herdr)" } else { "" };
+        match &found.parsed {
+            Ok(profile) => format!("- {name}{built}: {}", summary(profile)),
+            Err(_) => format!("- {name}{built}: refused; `herdr profile check {name}`"),
+        }
+    };
     let mut lines = vec![
         "Profiles here (an order that fits one is seated with `--profile <name>`):".to_owned(),
     ];
     for found in profiles.iter().take(DIGEST_PROFILES) {
-        let name = &found.name;
-        let built = if found.builtin { " (built into herdr)" } else { "" };
-        lines.push(match &found.parsed {
-            Ok(profile) => format!("- {name}{built}: {}", summary(profile)),
-            Err(_) => format!("- {name}{built}: refused; `herdr profile check {name}`"),
-        });
+        lines.push(line(found));
     }
+    lines.extend(builtins.iter().map(line));
     if profiles.len() > DIGEST_PROFILES {
         lines.push(format!(
             "- and {} more: `herdr profile list`",
@@ -1623,17 +1681,100 @@ pub fn template_text(name: &str) -> Option<&'static str> {
 /// `herdr profile new <name> --from <template>`: a template herdr ships, never over a file already there. Plan 47
 /// P47b: `--from <a built-in>` writes that built-in's text and cards as a folder profile (`new_profile_builtin`).
 pub fn new_profile_from(root: &Path, name: &str, from: &str) -> Result<PathBuf, String> {
-    if let Some(found) = builtin(from) {
-        return new_profile_builtin(root, name, found);
-    }
-    let text = template_text(from).ok_or_else(|| {
+    new_profile_as(root, name, NewFrom::From(from), false)
+}
+
+/// What `herdr profile new <name>` writes a profile from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewFrom<'a> {
+    /// No flag: the template.
+    Template,
+    /// `--shape <shape>`.
+    Shape(&'a str),
+    /// `--from <template or built-in>`.
+    From(&'a str),
+}
+
+/// The flag that lets `herdr profile new` make a different profile under a built-in's name.
+pub const REPLACE_BUILTIN: &str = "--replace-builtin";
+
+/// P47b fix round (review F4): why `name` may not be made new here, when a built-in holds it and the project has none
+/// of its own. `profile new scholar`, `--shape` and `--from web-researcher` each exited 0 and wrote a profile that
+/// silently replaced the nine-card built-in; `profile check` then said ok. A rule for every built-in name: the two ways
+/// on are named, the copy and the flag. The Profiles panel's `n` shows this as its notice.
+pub fn builtin_name_problem(root: &Path, name: &str) -> Option<String> {
+    builtin(name).filter(|_| !in_project(root, name)).map(|_| {
         format!(
-            "no template {from:?}; the templates: {}; the built-ins: {}",
-            TEMPLATES.join(", "),
-            BUILTINS.map(|found| found.name).join(", ")
+            "profile {name} is built into herdr, and a new profile of that name here would replace it in this \
+             project; `{}` copies the built-in's text and cards to refine, and `herdr profile new {name} [--shape \
+             <shape> | --from <template>] {REPLACE_BUILTIN}` makes a different profile under that name",
+            copy_command(name)
         )
-    })?;
-    write_new(root, name, text)
+    })
+}
+
+/// `herdr profile new`'s words after the verb: the name, what it is made from, and whether `--replace-builtin` ends
+/// them. `None` for any other shape, which the CLI answers with its usage.
+pub fn new_args(rest: &[String]) -> Option<(&str, NewFrom<'_>, bool)> {
+    let (rest, replace) = match rest.split_last() {
+        Some((last, before)) if last == REPLACE_BUILTIN => (before, true),
+        _ => (rest, false),
+    };
+    match rest {
+        [name] => Some((name.as_str(), NewFrom::Template, replace)),
+        [name, flag, shape] if flag == "--shape" => {
+            Some((name.as_str(), NewFrom::Shape(shape.as_str()), replace))
+        }
+        [name, flag, from] if flag == "--from" => {
+            Some((name.as_str(), NewFrom::From(from.as_str()), replace))
+        }
+        _ => None,
+    }
+}
+
+/// `herdr profile new <name> [--shape <shape> | --from <template or built-in>] [--replace-builtin]`, never over a
+/// profile already there. A built-in's name is refused (`builtin_name_problem`) unless this is its copy (`--from` the
+/// built-in itself) or `replace_builtin` says to make a different one.
+pub fn new_profile_as(
+    root: &Path,
+    name: &str,
+    from: NewFrom<'_>,
+    replace_builtin: bool,
+) -> Result<PathBuf, String> {
+    let copy = matches!(from, NewFrom::From(source) if source == name && builtin(source).is_some());
+    if !copy && !replace_builtin {
+        if let Some(why) = builtin_name_problem(root, name) {
+            return Err(why);
+        }
+    }
+    match from {
+        NewFrom::Template => {
+            let servers = crate::nirvana_gui_tools::project_servers(root).unwrap_or_default();
+            write_new(root, name, &template(&servers))
+        }
+        NewFrom::Shape(shape_name) => {
+            let found = shape(shape_name).ok_or_else(|| {
+                format!(
+                    "no shape {shape_name:?}; the shapes: {}",
+                    SHAPES.join(", ")
+                )
+            })?;
+            write_folder(root, name, &found)
+        }
+        NewFrom::From(from) => {
+            if let Some(found) = builtin(from) {
+                return new_profile_builtin(root, name, found);
+            }
+            let text = template_text(from).ok_or_else(|| {
+                format!(
+                    "no template {from:?}; the templates: {}; the built-ins: {}",
+                    TEMPLATES.join(", "),
+                    BUILTINS.map(|found| found.name).join(", ")
+                )
+            })?;
+            write_new(root, name, text)
+        }
+    }
 }
 
 /// Plan 47 P47b, the project's own copy of a built-in: `<name>/profile.md` and `knowledge/<slug>.md`, byte for byte
@@ -1820,13 +1961,73 @@ order without that line invented 12 of 12. Open each source in a command of its 
 /// starter cards, adopted so they are offered. Never over a profile already there; every file is parsed before any is
 /// written.
 pub fn new_profile_shape(root: &Path, name: &str, shape_name: &str) -> Result<PathBuf, String> {
-    let found = shape(shape_name).ok_or_else(|| {
-        format!(
-            "no shape {shape_name:?}; the shapes: {}",
-            SHAPES.join(", ")
-        )
-    })?;
-    write_folder(root, name, &found)
+    new_profile_as(root, name, NewFrom::Shape(shape_name), false)
+}
+
+/// The start of the temporary folder name `write_folder` stages a profile under, beside its folder. A name with a `.`
+/// is never a profile's (`valid_name`), and `list` skips these, so a killed run's leftover is no profile and blocks
+/// nothing: each write stages under a name of its own.
+pub const STAGE_PREFIX: &str = ".herdr-new-";
+
+/// A staging folder's name for `name`, unique in this process and, by the pid and the clock, across processes.
+fn stage_dir(root: &Path, name: &str) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    folder(root).join(format!(
+        "{STAGE_PREFIX}{name}-{}-{}-{nanos}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
+}
+
+/// A test's step after the first file of a staged profile is written: it may look at the tree and fail the write.
+#[cfg(test)]
+type StageHook = Box<dyn FnMut() -> Result<(), String>>;
+
+#[cfg(test)]
+thread_local! {
+    /// P47b fix round (review F7): the failure the test injects after the first file, taken once.
+    pub(crate) static AFTER_FIRST_FILE: std::cell::RefCell<Option<StageHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Renames the staged folder into place. On Windows a folder whose files were just closed can refuse a rename for a
+/// moment while another process (a virus scanner, the indexer) still holds one of them open, so a refusal is tried
+/// again for up to half a second; the target never exists in between (the caller holds the proposals' lock).
+fn rename_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut tries = 0;
+    loop {
+        match std::fs::rename(from, to) {
+            Err(_) if tries < 10 && !to.exists() => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            done => return done,
+        }
+    }
+}
+
+/// Writes `found`'s files into `stage`; every error names the file's place in `dir`, where it was going.
+fn write_stage(stage: &Path, dir: &Path, found: &Shape) -> Result<(), String> {
+    let shown = |rel: &Path| dir.join(rel).display().to_string();
+    let knowledge = Path::new(KNOWLEDGE);
+    std::fs::create_dir_all(stage.join(knowledge))
+        .map_err(|err| format!("cannot create {}: {err}", shown(knowledge)))?;
+    let profile = Path::new(PROFILE_FILE);
+    std::fs::write(stage.join(profile), &found.profile)
+        .map_err(|err| format!("cannot write {}: {err}", shown(profile)))?;
+    #[cfg(test)]
+    if let Some(mut hook) = AFTER_FIRST_FILE.with(|slot| slot.borrow_mut().take()) {
+        hook()?;
+    }
+    for (slug, text) in &found.cards {
+        let card = knowledge.join(format!("{slug}.md"));
+        std::fs::write(stage.join(&card), text)
+            .map_err(|err| format!("cannot write {}: {err}", shown(&card)))?;
+    }
+    Ok(())
 }
 
 /// `new_profile_shape`'s writes, which plan 47 P47b's `new_profile_builtin` shares: `<name>/profile.md` and the cards,
@@ -1852,13 +2053,19 @@ fn write_folder(root: &Path, name: &str, found: &Shape) -> Result<PathBuf, Strin
         crate::nirvana_knowledge::parse(&knowledge.join(format!("{slug}.md")), slug, text)
             .map_err(|problems| problems.join("\n"))?;
     }
-    std::fs::create_dir_all(&knowledge)
-        .map_err(|err| format!("cannot create {}: {err}", knowledge.display()))?;
-    std::fs::write(&profile_file, &found.profile)
-        .map_err(|err| format!("cannot write {}: {err}", profile_file.display()))?;
-    for (slug, text) in &found.cards {
-        let card = knowledge.join(format!("{slug}.md"));
-        std::fs::write(&card, text).map_err(|err| format!("cannot write {}: {err}", card.display()))?;
+    // P47b fix round (review F7): the files were written in place, so a reader, or a process killed between two writes,
+    // saw a partial `<name>/` that shadowed the built-in. They go into a folder of a temporary name beside it, which is
+    // renamed into place whole; on any failure the temporary folder is taken out and no `<name>/` was ever there.
+    let stage = stage_dir(root, name);
+    // A name this write chose: only a dead process could have left a folder of it, and that is removed, never merged.
+    let _ = std::fs::remove_dir_all(&stage);
+    let staged = write_stage(&stage, &dir, found).and_then(|()| {
+        rename_dir(&stage, &dir)
+            .map_err(|err| format!("cannot move the new profile into {}: {err}", dir.display()))
+    });
+    if let Err(why) = staged {
+        let _ = std::fs::remove_dir_all(&stage);
+        return Err(why);
     }
     // Plan 34 review B1: only a card herdr knows is offered; these are herdr's own, so they are adopted as written.
     crate::nirvana_knowledge::adopt(root, name)?;
@@ -1867,8 +2074,7 @@ fn write_folder(root: &Path, name: &str, found: &Shape) -> Result<PathBuf, Strin
 
 /// `herdr profile new <name>`: the template, never over a file already there.
 pub fn new_profile(root: &Path, name: &str) -> Result<PathBuf, String> {
-    let servers = crate::nirvana_gui_tools::project_servers(root).unwrap_or_default();
-    write_new(root, name, &template(&servers))
+    new_profile_as(root, name, NewFrom::Template, false)
 }
 
 fn write_new(root: &Path, name: &str, text: &str) -> Result<PathBuf, String> {
@@ -2122,6 +2328,9 @@ const USAGE: &str = "usage: herdr profile list [--json]
                                          cards; the project's copy then wins over the built-in
        herdr profile new <name> --shape <reviewer|operator|builder|researcher>
                                          writes the folder form, profile.md and starter cards, adopted
+       herdr profile new <built-in> [--shape <shape> | --from <template>] --replace-builtin
+                                         makes a different profile under a built-in's name, which then wins;
+                                         without the flag `new` refuses that name, except for the copy above
        herdr profile check [<name>]      prints every refusal, a folder profile's cards too; exit 1 when there is one
        herdr profile check <name> --adopt
                                          records the cards you wrote by hand as they stand, so they are offered
@@ -2265,18 +2474,10 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         (Some("list"), []) => list_to(&root, false, &mut std::io::stdout()),
         (Some("list"), [flag]) if flag == "--json" => list_to(&root, true, &mut std::io::stdout()),
         (Some("show"), [name]) => show_to(&root, name, &mut std::io::stdout(), &mut std::io::stderr()),
-        (Some("new"), [name]) => match new_profile(&root, name) {
-            Ok(file) => {
-                println!("{}", file.display());
-                0
-            }
-            Err(why) => {
-                eprintln!("herdr profile new: {why}");
-                1
-            }
-        },
-        (Some("new"), [name, flag, shape]) if flag == "--shape" => {
-            match new_profile_shape(&root, name, shape) {
+        // P47b fix round (review F4): one arm for every form of `new`, `--replace-builtin` last.
+        (Some("new"), rest) if new_args(rest).is_some() => {
+            let (name, from, replace) = new_args(rest).expect("matched above");
+            match new_profile_as(&root, name, from, replace) {
                 Ok(file) => {
                     println!("{}", file.display());
                     0
@@ -2295,18 +2496,6 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
                 &mut std::io::stdout(),
                 &mut std::io::stderr(),
             )
-        }
-        (Some("new"), [name, flag, from]) if flag == "--from" => {
-            match new_profile_from(&root, name, from) {
-                Ok(file) => {
-                    println!("{}", file.display());
-                    0
-                }
-                Err(why) => {
-                    eprintln!("herdr profile new: {why}");
-                    1
-                }
-            }
         }
         (Some("check"), [name, flag]) if flag == "--adopt" => {
             // Plan 47 P47b: a built-in's cards are herdr's own and known as shipped; there is nothing to adopt.

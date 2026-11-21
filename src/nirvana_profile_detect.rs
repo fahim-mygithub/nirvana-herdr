@@ -1256,11 +1256,36 @@ pub fn plan(root: &Path, detection: &Detection, run: &str) -> Vec<Planned> {
             continue;
         }
         // Plan 47 P47b: a built-in has no file a patch could change; the store would refuse one, so none is planned.
+        // P47b fix round (review F9): it was skipped in silence, so the finding gave no hint. It is one line now, known
+        // and so never written: the profile is built in, and its copy is what the project can refine.
         if kind == Kind::Patch
             && profiles
                 .iter()
                 .any(|(seen, _, builtin)| *builtin && *seen == name)
         {
+            out.push(Planned {
+                about: format!(
+                    "{} {name}: {} paragraph(s) repeated by {class} orders",
+                    kind.word(),
+                    found.len()
+                ),
+                known: Some(format!(
+                    "profile {name} is built into herdr, so no patch is proposed; `{}` makes a copy the project can \
+                     refine",
+                    nirvana_profiles::copy_command(&name)
+                )),
+                draft: Draft {
+                    kind,
+                    profile: name,
+                    by: proposals::DETECTOR.into(),
+                    run: run.to_owned(),
+                    evidence: String::new(),
+                    key: String::new(),
+                    body: String::new(),
+                    base_sha: None,
+                },
+                refused: None,
+            });
             continue;
         }
         let dismissed = dismissed_paragraphs(root, kind, &name);

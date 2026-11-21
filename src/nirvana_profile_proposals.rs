@@ -1612,6 +1612,13 @@ pub fn rollback(root: &Path, op: &str) -> Result<String, String> {
             Kind::Patch => nirvana_profiles::resolve(root, name)?,
         };
         let now = std::fs::read_to_string(&file).ok();
+        // P47b fix round (review F10): with the project's own `scholar/` deleted, `resolve` names `scholar.md`, a file
+        // that never was, and the refusal named it. A profile gone from the project is named as the profile.
+        if now.is_none() && !nirvana_profiles::in_project(root, name) {
+            return Err(format!(
+                "profile {name} is not in this project any more, so {op} has nothing to roll back; nothing was changed"
+            ));
+        }
         if now.as_deref().map(|text| text.replace("\r\n", "\n"))
             != row.after.as_deref().map(|text| text.replace("\r\n", "\n"))
         {

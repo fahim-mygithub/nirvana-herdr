@@ -489,4 +489,38 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// P47b fix round (the builder's hunk, granted): Preload's `e` on the built-in's row said "scholar has no file to
+    /// open"; it names the command that makes the project's copy now, and opens nothing.
+    #[test]
+    fn p47b_preload_e_on_the_built_in_names_the_copy_command() {
+        let dir = folder("p47b-e");
+        let mut state = state_in(&dir);
+        state.toggle_preload_panel();
+        let count = {
+            let panel = state.nirvana_preload.as_ref().expect("open");
+            super::super::nirvana_mods::panel_items(
+                panel,
+                &crate::nirvana_preload::view(&panel.cwd),
+            )
+            .len()
+        };
+        // The scholar is the group's one row, the panel's last.
+        state.nirvana_preload.as_mut().unwrap().selected = count - 1;
+        let outcome = press(&mut state, KeyCode::Char('e'));
+        assert!(opened(&outcome).is_empty());
+        let message = state
+            .nirvana_preload
+            .as_ref()
+            .and_then(|panel| panel.message.clone())
+            .unwrap_or_default();
+        assert!(
+            message.contains("scholar is built into herdr")
+                && message.contains("`herdr profile new scholar --from scholar`")
+                && !message.contains("has no file to open"),
+            "{message}"
+        );
+        assert!(!dir.join(".nirvana").exists(), "nothing written");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
