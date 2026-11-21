@@ -1664,9 +1664,12 @@ could not open.\n\
    - Reddit: `curl -s -A \"<a browser user agent>\" <thread>/.rss`; on a 429, wait for the reset;\n\
    - any other page: one `curl` per page, or the browser tool when your order gives you one.\n\
    There is no YouTube connector: say so and use yt_dlp.\n\
-3. Done means a command, and its output goes into `tests`: last, re-open every cited id or URL in one command \
-(`python -m yt_dlp --skip-download --print id <url> <url>...`, `curl -sI` for pages) and paste what it printed. A \
-check written as prose is not a check.\n\
+3. Done means a command, and its output goes into `tests`: last, re-open every cited id or URL and paste what it \
+printed. Videos: `python -m yt_dlp --skip-download --print id <url> <url>...`. Pages: a command that prints one \
+`<status> <url>` line per URL, `curl -s -o NUL -w \"%{http_code} %{url_effective}\\n\" <url>` (off Windows, \
+`-o /dev/null`); a loop over many URLs is fine when each pass prints that line. On agy, name the fetch in the \
+command's first 512 characters (agy shows no more; put a long list in a file and loop over it), and never run the \
+check as a script file by name. A check written as prose is not a check.\n\
 4. Put downloads and working files where the order's project rules say, never in your own scratch folder, and run \
 every long step in the foreground; never wait on a background task.\n";
 
@@ -1949,7 +1952,9 @@ as unchecked, and the gate treats it so.\n",
                     "herdr profile shape researcher, from the MotoProject brief analysis of 2026-10-31 (plan 35)",
                     "sources, research",
                     "Four agy research orders whose brief said to open every page cited 47 URLs, all real; the one \
-order without that line invented 12 of 12. Open each source in a command of its own before citing it.\n",
+order without that line invented 12 of 12. Open each source before citing it, with a command that prints one \
+`<status> <url>` line per URL, `curl -s -o NUL -w \"%{http_code} %{url_effective}\\n\" <url>` (off Windows, \
+`-o /dev/null`); a loop over many URLs is fine when each pass prints that line.\n",
                 ),
             )],
         }),

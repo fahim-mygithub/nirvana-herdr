@@ -75,7 +75,17 @@ pub const SKILLS_MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// 2026-10-31 (F1): four agy research orders whose brief said to open every page cited 47 URLs, all real (26 of 26
 /// YouTube ids exist); the one order without that line invented 12 of 12. Four against one is too few to size the
 /// effect, so this is an instruction with one measurement behind it, not enforcement.
-pub const SOURCES_LINE: &str = "Never cite a URL you did not open in this session. Open each one in a command of its own (curl, yt_dlp, or bladebro when you have it) before citing it; a URL built inside a script is not seen as read.";
+///
+/// Plan 47 P47d: workers looped over many URLs anyway, and agy cut those commands at 512 characters, so the gate now
+/// reads a fetch's `<status> <url>` lines (`nirvana_gate::status_read`). The line asks for that shape, and for the
+/// fetch inside the part agy shows: in f1-land-foley-cc0-o and calib-research-s1 the curl lay past the cut, so their
+/// 33 opened URLs count only through the guarded cut-command path, named on the axis as a note.
+///
+/// Its fix round: the example writes `-o NUL` and a PowerShell loop because this line goes only to agy on this
+/// machine, which runs PowerShell on Windows; `WEB_RESEARCHER` and the researcher card also reach a Claude seat on
+/// another system, so they name `-o /dev/null` too. No `-L`: with it `url_effective` is the final URL after a
+/// redirect, which no longer matches the cited one; without it a 3xx line still counts.
+pub const SOURCES_LINE: &str = "Never cite a URL you did not open in this session. Check pages with a command that prints one `<status> <url>` line per URL and names its fetch in its first 512 characters (all herdr sees of it), as `Get-Content urls.txt | % { curl.exe -s -o NUL -w \"%{http_code} %{url_effective}\\n\" $_ }` does; a loop is fine when each pass prints that line. A script file run by name is not seen as a fetch. Videos: yt_dlp, or bladebro when you have it.";
 
 /// `<run>/agy/<order>/`.
 pub fn tools_dir(run_dir: &Path, order: &str) -> PathBuf {

@@ -362,8 +362,10 @@ CONTROLS = (
     Control(
         'p24_shell_fetch_per_segment',
         'src/nirvana_gate.rs',
-        '    for segment in cmd.split([\'\\n\', \';\', \'|\']).flat_map(|s| s.split("&&")) {\n',
-        '    for segment in [cmd] {\n',
+        # Plan 47 P47d: the split became `segments` (quote-aware), whose loop line command_media shares; its fix round
+        # (S3) passes the command's shell.
+        '    let mut urls = Vec::new();\n    for segment in segments(cmd, shell) {\n',
+        '    let mut urls = Vec::new();\n    for segment in [cmd] {\n',
         'shell_fetch_counts_only_the_segment_that_fetches_and_only_the_command',
         'rust',
     ),

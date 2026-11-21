@@ -11,8 +11,10 @@ T_SEG = "p35a_a_url_counts_only_from_a_segment_that_fetches"
 T_P2 = "p35a_the_probe_2_bladebro_stream_passes_example_com"
 T_REAL = "p35a_real_sources_send_backs_count_what_the_twin_counts"
 
-PER_SEGMENT = "    for segment in cmd.split(['\\n', ';', '|']).flat_map(|s| s.split(\"&&\")) {\n"
-GH_CALL = "        urls.extend(gh_read_urls(segment));\n"
+# Plan 47 P47d: the split became `segments` (quote-aware), whose loop line command_media shares, so the find holds
+# the line before it too. Its fix round (S3): each call names the shell that reads the command's quotes.
+PER_SEGMENT = "    let mut urls = Vec::new();\n    for segment in segments(cmd, shell) {\n"
+GH_CALL = "        urls.extend(gh_read_urls(segment, shell));\n"
 
 
 SCRIPT_HEAD = "pub const SCRIPT_FETCH_WORDS: &[&str] = &[\n"
@@ -48,7 +50,8 @@ CONTROLS = (
             "        !before.is_some_and(joins) && !after.is_some_and(joins)\n", T_SEG, "rust"),
     Control("p35a_python_is_a_fetch", GATE, SCRIPT_HEAD + _drop("urlopen("),
             SCRIPT_HEAD + _drop("python") + _drop("urlopen("), T_SEG, "rust"),
-    Control("p35a_per_script", GATE, PER_SEGMENT, "    for segment in [cmd] {\n", T_SEG, "rust"),
+    Control("p35a_per_script", GATE, PER_SEGMENT, "    let mut urls = Vec::new();\n    for segment in [cmd] {\n",
+            T_SEG, "rust"),
     # Item 2, gh: the mapping, the endpoint URL, a flag's value, repo view, its URL form, `.git`, the API URL, and a
     # widened subcommand.
     Control("p35a_no_gh_mapping", GATE, GH_CALL, "", T_GH_API, "rust"),
@@ -90,7 +93,8 @@ T_MOTO = "p35a_motoproject_streams_count_what_the_twin_counts"
 
 STABLE_CALL = "        if stable_read(url, &reads) {\n            continue;\n        }\n"
 NO_STABLE = ""
-AGY_FETCH_ONLY = "                command_fetches(command).then(|| command.to_owned())\n"
+# Plan 47 P47d fix round (S3): agy's command is read for PowerShell.
+AGY_FETCH_ONLY = "                command_fetches(command, Shell::PowerShell).then(|| command.to_owned())\n"
 AGY_ANY = "                Some(command.to_owned())\n"
 VIDEO = 'pub const VIDEO_FETCH_WORDS: &[&str] = &["yt_dlp", "yt-dlp", "YoutubeDL"];'
 WHOLE_TREE = "        _ => uncommitted(subject.cwd).map(|changed| (changed, None::<&str>)),\n"
@@ -218,7 +222,8 @@ T_BOUNDS = "p35a_repo_and_post_ids_keep_their_bounds"
 
 PLAIN_NONE = "        None => false,\n"
 CHILD = "        && (FETCH_CALLS.iter().any(|call| calls(&code, call)) || runs_fetch_child(segment, &code))\n"
-CUT = "        || (cmd.trim_end().ends_with(CUT_MARK) && segments(cmd).any(imports_fetch))\n"
+# Plan 47 P47d fix round (S3): `imports` is `imports_fetch` for the command's shell.
+CUT = "        || (cmd.trim_end().ends_with(CUT_MARK) && segments(cmd, shell).any(imports))\n"
 YT_HOST = '        || (["youtube.com/", "youtu.be/"]\n'
 
 CONTROLS = CONTROLS + (
@@ -259,7 +264,7 @@ CONTROLS = CONTROLS + (
     Control("p35a_cut_ignored", GATE, CUT, "", T_CUT, "rust"),
     Control("p35a_moto_cut_ignored", GATE, CUT, "", T_MOTO, "rust"),
     Control("p35a_import_counts_uncut", GATE,
-            CUT, "        || segments(cmd).any(imports_fetch)\n", T_CUT, "rust"),
+            CUT, "        || segments(cmd, shell).any(imports)\n", T_CUT, "rust"),
     Control("p35a_import_any_module", GATE,
             '        .any(|name| FETCH_IMPORTS.contains(&name.split(" as ").next().unwrap_or("").trim()))\n',
             "        .any(|name| !name.trim().is_empty())\n", T_CUT, "rust"),

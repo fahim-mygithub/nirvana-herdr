@@ -1,6 +1,6 @@
 # Plan 47: the profile on the agents panel, and a scholar in every project
 
-Status: RULED 2026-11-20 (§6). P47a LANDED as alpha 0.92.0, P47b as alpha 0.93.0. P47d and P47c follow, in that order.
+Status: RULED 2026-11-20 (§6). P47a LANDED as alpha 0.92.0, P47b as alpha 0.93.0, P47d's gate part as alpha 0.94.0. P47c follows and carries the scholar log.
 This plan takes over the number 44 held for "scholar on agy": the owner's fetch rulings of 2026-11-18 are in §3.
 
 ## 1. The ask
@@ -141,6 +141,16 @@ P47a builds now. P47b lands before P47c. P47d's gate part is measured before any
 - Every folder profile is now written under a temporary name and renamed into place.
 - The order of the remaining packages changed: P47d's gate part lands before P47c, because a scholar run on agy
   would be sent back for sources it opened.
+
+### What P47d changed from this plan
+
+- The figure in §4, "8 of 12 send-backs", was the 2026-10-31 record. Measured again: nine gate events failed for a
+  cited URL not opened, five of them wrongly, 59 of 75 flagged URLs opened.
+- The main cause was not in the plan: agy records only the first 512 characters of a command. The gate now counts
+  the status lines of a cut command, guarded and named in a note. That rule is the orchestrator's, reported to the
+  owner and theirs to reverse.
+- The scholar log moved to P47c, with the run that writes it.
+- An honest "found nothing" still fails "no sources". It was counted, once since 2026-11-01, and left.
 
 ## 8. Live checks owed after building
 

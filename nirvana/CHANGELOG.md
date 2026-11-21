@@ -3,6 +3,58 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.94.0: the gate counts the ways an agy worker really opens a URL
+
+- **Changed:** plan 47's gate package (P47d), in the sources check of a research order.
+  - A line `<status> <url>` alone on its line, with a 2xx or 3xx status, in the output of an agy `run_command` that
+    ended well, counts as that URL opened, when the command holds a fetch word such as `curl`.
+  - agy records a command's first 512 characters. A cut command with no fetch word in sight counts its status lines
+    too, unless what is in sight prints text (`echo`, `printf`, `Write-Output`, `Write-Host`, `print(` and the like)
+    or reads a local file (`cat`, `type`, `Get-Content`, `grep`, `Select-String` and the like, with `.exe` or `.com`
+    or without). Each URL counted this way is named in a note on the verdict with its step. This rule is the
+    orchestrator's, reported to the owner on 2026-11-20 and theirs to reverse.
+  - The command reader cuts at `;`, `|`, `&&` and a newline only outside quotes. A shell's code quote
+    (`-c "..."`, `-Command "..."`) is read as code and closes where the shell closes it. An escape is read by the
+    shell that runs the command: the backtick for agy and Claude's PowerShell tool, the backslash for Claude's Bash.
+  - Whether an agy command ended well is read from its exit line below agy's `Created At:` header, not only from
+    the output's first line, and `Command failed to run` is a failure. Every rule that asks this reads it so.
+  - Claude's `PowerShell` tool is read as `Bash` is. `WebFetch` counts only its `url`.
+  - Workers are told how to be counted: the agy order text, the web researcher profile and its card ask for one
+    `<status> <url>` line per cited URL, with the fetch inside the first 512 characters.
+- **Because:** the owner, 2026-11-20: "I want every project to have the a default Researcher agent"; on 2026-11-18:
+  "We wouldnt need api or should uses api wqe should use agy ffor fetch like tools". A scholar run puts up to five
+  researchers on agy, and the gate was sending agy research back for sources it had opened.
+- **Measured:** first, what was wrong. Nine recorded gate events failed "cited URL not opened", and five of them
+  wrongly: 75 URLs were flagged and 59 had been opened. The causes: agy records only the first 512 characters of a
+  command, so a long loop loses its URLs or its `curl`; a split that was blind to quotes; a script run by name. A test
+  that replays those nine events from where the streams live, run at the merge, now flags 18: the 16 never opened, and
+  2 that a script run by name opened, which stay uncounted. The 57 counted: 21 by status lines with the fetch in
+  sight, 33 by status lines of a cut command, 3 by the quote fix. Four of the five wrongly failed orders now pass or
+  carry a note. The record holds 14 cut commands with status lines and no fetch in sight; the guard refuses 0 of them.
+  The first review replayed 39 other recorded events: none turned into a fail. The second review compared the old and
+  the new command reader over 32,475 distinct recorded commands in 895 streams: no URL lost, 292 gained in 188
+  commands, and 10 commands no longer read as fetching, each an old false positive such as a fetch word inside a
+  `grep` pattern. On the replay's orders the gate now reads 161 commands as failed where it read 41, and no verdict
+  moved. The whole test binary, one process per test, ran 5516 tests with 2 failed, the same two `app::api` tests that
+  fail on 0.93.0, where 5490 ran; this package's own `p47d_` tests are 26 of them. Built on Opus high, reviewed twice
+  on Sonnet high, two fix rounds. The second review overturned a rule the first had asked for, that an apostrophe in
+  prose opens no quote: Bash and PowerShell read `echo don't; curl <url>; echo it's` as one string, so the `curl`
+  never runs; the rule is gone. The controls file holds 73 `p47d_` controls; each was run red in its branch and 20
+  were run red again at the merge, three older ones beside the changed lines among them, the tree unchanged after
+  each. The dry run finds 5068 of 5076 controls' text, the same 8 old misses. What a worker can fake, stated plainly:
+  `curl -V; echo 200 <url>` now counts, and so does a command padded past 512 characters with an `echo` after the cut,
+  the second with the note that names its step. Both take deliberate forgery; the reviews found no command an honest
+  worker would write that counts a URL it did not open. `echo curl <url>` counted before this package and still does.
+  Known gaps: a URL opened by a script run by name is not counted; the per-segment rule is a substring test; `-c` is
+  read as code after any command; "cut" means exactly 512 characters and the `…` mark, so another agy version may not
+  match; a bare PowerShell string prints itself with no printing command in sight; a command a worker starts through
+  `wsl bash -lc` is not read. Not built, only counted: a research order that honestly found nothing still fails "no
+  sources"; one order since 2026-11-01 failed that way and it had fetched 37 times. No real order has run under this
+  gate yet.
+- **If you remove this:** an agy researcher that checks its URLs in one loop is sent back for every one of them, a
+  paid turn each time, and a scholar run of five is likely to hit its time cap in send-backs. Remove only the
+  cut-command rule and 33 opened URLs in two of the record's orders are flagged again.
+
 ## alpha 0.93.0: every project has a `scholar` researcher profile, built into herdr
 
 - **Changed:** plan 47's second package.
