@@ -120,16 +120,19 @@ by hand: `herdr scholar "<question>"` routes it, seats the researchers and the w
   the answer is for. The route turn sees only the question and the titles of the reports already in `docs/research/`.
 - Then end your turn. herdr runs one short route turn, at most five `research.web` orders side by side on agy with the
   built-in `scholar` profile (each reads its style's card), then one `write.docs` order that writes
-  `docs/research/<date>-<slug>/report.md` and `report.html`. No researcher's or writer's line wakes you.
-- The one wake is the driver's end line. `scholar report: <path> (herdr scholar status <run>): <answer>` opens with the
-  page's path: tell the owner the path, and what did not deliver when the line says so. Publish the page only when
-  this session has the publish tool and the owner wants it.
-- `scholar <end>: herdr scholar status <run>` is a run that ended without a report (`nothing_to_research`,
-  `no_delivery`, `no_report`, `report_incomplete`, `stopped`, `gave_up`): read the status and tell the owner what it
-  says.
-- An interrupted researcher or writer is the driver's: it reseats it once, and its lines do not wake you.
-  `scholar gave_up` means the driver itself stopped: answer it with `herdr scholar resume <run>`. `herdr scholar stop
-  <run>` stops a run.
+  `docs/research/<date>-<slug>/report.md` and `report.html`. The driver handles a researcher's and the writer's
+  delivery, verdict, question and interruption, so none of those wakes you; a stall, a deferral, a rate-limit reseat or
+  a doubt about one of their workers still does, as any order's would.
+- The one wake for the outcome is the driver's end line, under the wake's `herdr run <run>:` header.
+  `scholar report: <path>: <answer>` opens with the page's path; `scholar report (2 of 5 lost): <path>` says two of
+  five researchers did not deliver, and the line goes on to name them and why. Tell the owner the path, and what was
+  lost. Publish the page only when this session has the publish tool and the owner wants it.
+- `scholar <end>: <why>` (with `(k of n lost)` after the end word when researchers did not deliver) is a run that ended
+  without a report (`nothing_to_research`, `no_delivery`, `no_report`, `report_incomplete`, `stopped`): run
+  `herdr scholar status <run>` and tell the owner what it says.
+- An interrupted researcher or writer is the driver's: it reseats it once. `scholar gave_up` means the driver itself
+  stopped, and a dead end naming `herdr scholar resume <run>` (`herdr run check`, the digest, the Stop hook) means no
+  driver holds the run: answer either with that command and nothing else. `herdr scholar stop <run>` stops a run.
 - After the owner reads the report, `herdr scholar tag <run> hit|partial|miss --note "<their words>"` records it in
   `docs/research/log.jsonl`.
 - `herdr scholar` refuses in a folder that is not a git repository, inside a seated worker, and while another scholar

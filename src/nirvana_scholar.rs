@@ -111,6 +111,12 @@ pub const QUESTION_MAX: usize = 8_000;
 /// take it, and `driver.json`'s pid is not liveness (a pid is reused), so `status` keeps its instant take and the
 /// driver waits it out.
 pub const DRIVER_TAKE_ATTEMPTS: u32 = 40;
+/// Review 2 F1: how long after `start` a run no driver has held yet reads as starting, not dead, in `check`. The verb
+/// spawns the driver and returns, and ROLE.md tells the orchestrator to end its turn then, so the Stop hook reads
+/// `check` while the driver's process may still be starting. A choice, not a measurement: a process start and a state
+/// read take well under a second here; a minute covers a slow disk or a scan of the exe. Only before the first take:
+/// the first driver to hold the lock writes `driver.json`, so a driver that died after its take is dead at once.
+pub const START_GRACE_S: u64 = 60;
 
 pub const STATE_VERSION: u32 = 1;
 pub const LOG_VERSION: u32 = 1;
@@ -468,6 +474,58 @@ pub fn driver_live(project: &Project, run: &str) -> bool {
             nirvana_seat::Lock::try_take(&driver_dir(project, run), 1),
             Err(err) if err.kind() == std::io::ErrorKind::TimedOut
         )
+}
+
+/// Review 2 F1: `nirvana_run::check`'s answer for a scholar run whose stage is not done, and `None` for every other
+/// run, which then reads exactly as before. `check` feeds the session digest and the Stop hook, and every line of a
+/// scholar stage is quiet, so a dead driver read there as "was interrupted: the orchestrator continues, redoes or asks"
+/// or "every order is finished and the run is not ended: `herdr run end`", which abandons a finished report nobody was
+/// told about. A dead driver is a dead end that names `herdr scholar resume <run>` and nothing else; a live or starting
+/// one leaves the orchestrator nothing to do but read what still queues.
+///
+/// `RunState` carries no run id: the run is the scholar run of `opened`'s project whose state began at `opened`'s
+/// second and whose journal, read up to `run`'s last line, replays to `run` (a line appended since does not hide it).
+/// A driver is read with `driver_live`, one try at its lock let go at once: a starting driver tries its take for two
+/// seconds (`DRIVER_TAKE_ATTEMPTS`), and no `check` holds the lock for more than an instant.
+pub fn check_answer(run: &RunState, now: u64) -> Option<Result<String, String>> {
+    let opened = run.opened.as_ref()?;
+    let project = Project::at(&opened.project);
+    let prefix = format!("scholar-{}-", dates(opened.at).0);
+    let state = std::fs::read_dir(project.dir().join("runs"))
+        .ok()?
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|id| id.starts_with(&prefix))
+        .filter_map(|id| load_state(&project, &id).ok())
+        .filter(|state| state.started_at == opened.at && state.stage != Stage::Done)
+        .find(|state| {
+            let events: Vec<nirvana_run::Event> = project.journal(&state.run).read().0;
+            let upto: Vec<nirvana_run::Event> = events
+                .into_iter()
+                .filter(|event| event.seq <= run.last_seq)
+                .collect();
+            nirvana_run::replay(&upto) == *run
+        })?;
+    let held = driver_live(&project, &state.run);
+    let starting = !held
+        && !scholar_dir(&project, &state.run).join("driver.json").exists()
+        && now.saturating_sub(state.started_at) < START_GRACE_S;
+    if !held && !starting {
+        return Some(Err(format!(
+            "`herdr scholar resume {}`, and nothing else: no scholar driver holds the run",
+            state.run
+        )));
+    }
+    Some(Ok(if !run.queue.is_empty() {
+        format!(
+            "{} event(s) wait for the orchestrator: `herdr run notice`; the scholar driver holds the rest",
+            run.queue.len()
+        )
+    } else if held {
+        "the scholar driver holds the run; nothing for the orchestrator to do".to_owned()
+    } else {
+        "the scholar driver is starting; nothing for the orchestrator to do".to_owned()
+    }))
 }
 
 // ---- route ----
@@ -1591,8 +1649,45 @@ fn read_tag(lower: &str, start: usize) -> StartTag {
     }
 }
 
+/// CSS with its comments taken out; a `/*` inside a quoted string is the string's. Review 2 F6: a comment holding
+/// `url(https://x)` or `@import` failed an honest report.
+fn css_without_comments(css: &str) -> String {
+    let mut out = String::new();
+    let mut chars = css.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '\'' => {
+                out.push(c);
+                while let Some(inner) = chars.next() {
+                    out.push(inner);
+                    if inner == '\\' {
+                        out.extend(chars.next());
+                    } else if inner == c {
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut last = ' ';
+                for inner in chars.by_ref() {
+                    if last == '*' && inner == '/' {
+                        break;
+                    }
+                    last = inner;
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// CSS that loads: an `@import` (the page is one file, so any import is a second load), or a `url(` on another host.
+/// Comments count for nothing.
 fn css_loads(label: &str, css: &str, found: &mut Vec<String>) {
+    let css = css_without_comments(css);
+    let css = css.as_str();
     if let Some(at) = css.find("@import") {
         found.push(format!("{label} @import: {}", cut80(&css[at..])));
     }
@@ -1625,6 +1720,26 @@ fn script_talks(label: &str, js: &str, found: &mut Vec<String>) {
             break;
         }
         from = at + "websocket".len();
+    }
+}
+
+/// A module script's static import: `import` as a word, followed by a space, `{`, `*` or a quote (not `(`, a dynamic
+/// import `script_talks` names, nor `.`, `import.meta`). The page is one file, so any import is a second load, as any
+/// `<script src>` is. Review 2 F6: `import x from 'https://...'` passed. Only in `type=module`: a classic script's
+/// static import is a syntax error that loads nothing. A string that holds such words fails too, a known gap, as
+/// `import(` in a string does.
+fn module_imports(js: &str, found: &mut Vec<String>) {
+    let mut from = 0;
+    while let Some(hit) = js[from..].find("import") {
+        let at = from + hit;
+        let before = js[..at].chars().next_back();
+        let after = js[at + "import".len()..].chars().next();
+        let word = !before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$' || c == '.');
+        if word && after.is_some_and(|c| c.is_whitespace() || matches!(c, '{' | '*' | '"' | '\'')) {
+            found.push(format!("<script> import: {}", cut80(&js[at..])));
+            return;
+        }
+        from = at + "import".len();
     }
 }
 
@@ -1670,6 +1785,12 @@ fn tag_loads(tag: &StartTag, found: &mut Vec<String>) {
         }
         "img" | "iframe" | "frame" | "source" | "video" | "audio" | "embed" | "object"
         | "input" | "track" => {
+            // Review 2 F6: an iframe's `srcdoc` is a page of its own, read by the same rules.
+            if let Some(doc) = get("srcdoc").filter(|_| name == "iframe") {
+                for why in outside_loads(&doc) {
+                    push("srcdoc", &why);
+                }
+            }
             for key in ["src", "data", "poster"] {
                 if let Some(value) = get(key).filter(|value| outside(value)) {
                     push(key, &value);
@@ -1770,7 +1891,10 @@ pub fn outside_loads(html: &str) -> Vec<String> {
             match tag.name.as_str() {
                 "style" => css_loads("<style>", body, &mut found),
                 "script" if !data && !tag.attrs.iter().any(|(key, _)| key == "src") => {
-                    script_talks("<script>", body, &mut found)
+                    script_talks("<script>", body, &mut found);
+                    if tag.attrs.iter().any(|(key, value)| key == "type" && value.contains("module")) {
+                        module_imports(body, &mut found);
+                    }
                 }
                 _ => {}
             }
@@ -1796,7 +1920,14 @@ pub fn check_files(dir: &Path) -> Vec<String> {
                 }
             }
             Ok(_) => problems.push(format!("{name} is empty")),
-            Err(_) => problems.push(format!("{name} is not there")),
+            // Review 2 F6: a report saved in another encoding read as "is not there".
+            Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {
+                problems.push(format!("{name} is not UTF-8"))
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                problems.push(format!("{name} is not there"))
+            }
+            Err(err) => problems.push(format!("{name} could not be read: {err}")),
         }
     }
     problems
@@ -1816,6 +1947,9 @@ pub struct World<'a> {
     pub end_run: &'a dyn Fn(&Project, &str) -> Result<(), String>,
     /// Whether a wake can be typed into this pane: it runs Nirvana Claude.
     pub wakeable: &'a dyn Fn(&str) -> bool,
+    /// Called once the end line is in the journal and before `told` is saved; it does nothing in the product. The
+    /// kill matrix kills there (review 2 F2: a kill at that point wrote the end line twice on resume).
+    pub told: &'a dyn Fn(),
 }
 
 /// One order to seat: its id, class, profile, text and the run's mode.
@@ -1987,8 +2121,11 @@ pub fn real_world() -> World<'static> {
         wake: &real_wake,
         end_run: &real_end_run,
         wakeable: &real_wakeable,
+        told: &real_told,
     }
 }
+
+fn real_told() {}
 
 // ---- the driver ----
 
@@ -1996,12 +2133,30 @@ fn stop_marker(project: &Project, run: &str) -> PathBuf {
     scholar_dir(project, run).join(STOP_FILE)
 }
 
-/// The line the run's `asked` event carries: the outcome, the status command, why, then what did not deliver
-/// (`lost_lines`). The queue keeps 120 characters of it (`queue_line`), so what the orchestrator acts on comes first;
-/// `status` and the journal keep it whole. A `no_delivery` why is the lost list already.
+/// The line the run's `asked` event carries: the outcome and how many researchers were lost, why (the page's path for
+/// a report), what did not deliver (`lost_lines`), then the status command. The queue keeps 120 characters of it
+/// (`queue_line`), so what the orchestrator acts on comes first; `status` and the journal keep it whole. A
+/// `no_delivery` why is the lost list already.
+///
+/// Review 2 F3: the count was past the cut, so the received line never said anything was lost, and the status command
+/// at the head took the room. The wake's digest and the prompt notice both open with `herdr run <run>:`, so the run id
+/// is in what the orchestrator receives and the command goes last. "lost", not "did not deliver": with the longest
+/// path the slug rule makes (79 characters) `scholar report (5 of 5 did not deliver): ` leaves the path one character
+/// short of the 119 the cut keeps; `scholar report (5 of 5 lost): ` leaves ten to spare.
 pub fn tell_line(state: &State, run: &RunState) -> String {
     let end = state.end.as_deref().unwrap_or("?");
     let why = one_line(state.end_why.as_deref().unwrap_or(""));
+    let status = format!("; `herdr scholar status {}`", state.run);
+    let lost_count = state
+        .orders
+        .iter()
+        .filter(|chain| !chain.end.as_ref().is_some_and(|end| end.passed))
+        .count();
+    let count = if lost_count == 0 {
+        String::new()
+    } else {
+        format!(" ({lost_count} of {} lost)", state.orders.len())
+    };
     let lost = lost_lines(state, run);
     let lost = if lost.is_empty() || end == ends::NO_DELIVERY {
         String::new()
@@ -2009,7 +2164,7 @@ pub fn tell_line(state: &State, run: &RunState) -> String {
         format!("; did not deliver: {}", lost.join("; "))
     };
     if end != ends::REPORT {
-        return format!("scholar {end}: `herdr scholar status {}`; {why}{lost}", state.run);
+        return format!("scholar {end}{count}: {why}{lost}{status}");
     }
     // A report: the page's path first (its why), so it is inside the 120 characters, then the writer's answer line,
     // its summary after the path it opens with.
@@ -2024,10 +2179,7 @@ pub fn tell_line(state: &State, run: &RunState) -> String {
         .filter(|answer| !answer.is_empty())
         .map(|answer| format!(": {}", answer.chars().take(LOST_WHY_MAX).collect::<String>()))
         .unwrap_or_default();
-    format!(
-        "scholar report: {why} (`herdr scholar status {}`){answer}{lost}",
-        state.run
-    )
+    format!("scholar report{count}: {why}{answer}{lost}{status}")
 }
 
 /// One researcher's chain as the log and the status read it: every order whose chain root is the chain's root or its
@@ -2353,16 +2505,26 @@ fn apply(
         }
         Step::Finish(end, why) => finish(project, state, end, why, now),
         Step::Tell => {
-            project
-                .journal(&state.run)
-                .append(
-                    now,
-                    Kind::Asked {
-                        order: None,
-                        question: tell_line(state, run),
-                    },
-                )
-                .map_err(|err| err.to_string())?;
+            // Review 2 F2: a kill between this append and the save of `told` below asked for the line again on
+            // resume, and it was written twice. The journal holding the driver's end line word for word is the append
+            // done; the save and the wake follow as before.
+            let line = tell_line(state, run);
+            let journal = project.journal(&state.run);
+            let said = journal.read().0.iter().any(|event| {
+                matches!(&event.kind, Kind::Asked { order: None, question } if *question == line)
+            });
+            if !said {
+                journal
+                    .append(
+                        now,
+                        Kind::Asked {
+                            order: None,
+                            question: line,
+                        },
+                    )
+                    .map_err(|err| err.to_string())?;
+            }
+            (world.told)();
             // `told` is saved before the wake, on purpose (review F5). A kill between the two loses only the typing:
             // the line is on the queue, and the orchestrator's next prompt notice reads it. Waking first, a kill
             // before the save would append and type the line a second time on resume.
@@ -2714,11 +2876,22 @@ pub fn read_log(root: &Path) -> Vec<Value> {
 
 /// The log's lines, and how many lines it skipped because they do not read as a JSON object (review F3: one bad line
 /// costs only itself, and `status` says how many there were).
+///
+/// Review 2 F5: a leading byte-order mark (an editor's UTF-8 save) is dropped, so the first line reads. A file that is
+/// not UTF-8 (an editor's UTF-16 save) is read lossily, so its lines are counted unreadable and said, never read as an
+/// empty log: an empty read let `append_run_line` write a run's line twice and `tag` answer "no scholar run" alone.
+/// NULs at a line's ends are trimmed with its spaces, so UTF-16's two bytes a character make no extra line.
 pub fn read_log_counted(root: &Path) -> (Vec<Value>, usize) {
-    let text = std::fs::read_to_string(log_path(root)).unwrap_or_default();
+    let bytes = std::fs::read(log_path(root)).unwrap_or_default();
+    let text = String::from_utf8_lossy(&bytes);
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text.as_ref());
     let mut lines = Vec::new();
     let mut bad = 0;
-    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    for line in text
+        .lines()
+        .map(|line| line.trim_matches(|c: char| c.is_whitespace() || c == '\0'))
+        .filter(|line| !line.is_empty())
+    {
         match serde_json::from_str::<Value>(line) {
             Ok(value) if value.is_object() => lines.push(value),
             _ => bad += 1,
@@ -2763,13 +2936,19 @@ pub fn tag_line(
             "the outcome is hit, partial or miss, not {outcome:?}"
         ));
     }
-    let lines = read_log(root);
+    let (lines, bad) = read_log_counted(root);
     if !lines
         .iter()
         .any(|line| line.get("end").is_some() && line["run"].as_str() == Some(run))
     {
+        // Review 2 F5: the run's line may be one the log could not read.
+        let unread = if bad > 0 {
+            format!("; {bad} line(s) of {REPORTS}/{LOG_FILE} could not be read")
+        } else {
+            String::new()
+        };
         return Err(format!(
-            "no scholar run {run} in {}: a run is tagged after it ended",
+            "no scholar run {run} in {}: a run is tagged after it ended{unread}",
             log_path(root).display()
         ));
     }

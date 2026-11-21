@@ -1356,11 +1356,13 @@ pub fn replay(events: &[Event]) -> RunState {
         };
         // Plan 47 P47c: what the scholar driver handles (`nirvana_scholar`) costs the orchestrator no turn while the run
         // goes on, so its own end line is the run's one wake and names what did not deliver, and why. Of a researcher
-        // or the writer: the delivery; a verdict that passes it, sends it back or asks; the question that follows an
-        // `asked`; an interrupt (the driver reseats it once); a stop or a failure. Fix round F1 and F7: the interrupted
-        // line told the orchestrator to reseat it by hand, racing the driver's reseat, and a gated `asked` woke it
-        // mid-run. A stall, an amend, a doubt and every line of an ordinary order still queue. A send-back child is
-        // seated with `why: "send_back"` and a reseat with its own `scholar_stage`, so the chain's root carries the mark.
+        // or the writer: the delivery; a verdict that passes it, sends it back, asks, amends or fails it; the question
+        // that follows an `asked`; an interrupt (the driver reseats it once); a stop or a failure. Fix round F1 and F7:
+        // the interrupted line told the orchestrator to reseat it by hand, racing the driver's reseat, and a gated
+        // `asked` woke it mid-run. Review 2 F4: the driver counts an amend and a failed verdict not delivered, so a
+        // re-gate the wake invited was never read. A stall, a deferral, a rate-limit reseat, a doubt, a Jev line and
+        // every line of an ordinary order still queue. A send-back child is seated with `why: "send_back"` and a
+        // reseat with its own `scholar_stage`, so the chain's root carries the mark.
         let scholar_quiet = event
             .kind
             .order()
@@ -1384,6 +1386,8 @@ pub fn replay(events: &[Event]) -> RunState {
                     crate::nirvana_gate::Outcome::Pass.word(),
                     crate::nirvana_gate::Outcome::SentBack.word(),
                     crate::nirvana_gate::Outcome::Asked.word(),
+                    crate::nirvana_gate::Outcome::Amend.word(),
+                    crate::nirvana_gate::Outcome::Failed.word(),
                 ]
                 .contains(&verdict.as_str()),
                 Kind::Ended { outcome, .. } => outcome != "delivered",
@@ -1532,6 +1536,11 @@ pub fn restart_delay(stalls_before: u32) -> Option<u64> {
 pub fn check(state: &RunState, live: &dyn Fn(&str) -> bool, now: u64) -> Result<String, String> {
     if state.ended.is_some() {
         return Ok("the run ended".into());
+    }
+    // Plan 47 P47c review 2 F1: a scholar run its driver has not finished is the driver's, and every line of its stages
+    // is quiet, so the answers below misread it ("was interrupted: the orchestrator continues"). `None` for any other.
+    if let Some(answer) = crate::nirvana_scholar::check_answer(state, now) {
+        return answer;
     }
     if state.orders.is_empty() {
         return Err("the run has no order seated".into());

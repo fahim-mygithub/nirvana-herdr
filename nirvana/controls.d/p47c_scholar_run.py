@@ -61,6 +61,13 @@ T_QCAP = _T + "p47c_a_question_over_8000_characters_is_refused_before_anything_i
 T_HTML2 = _T + "p47c_the_html_check_reads_tags_styles_and_scripts_not_prose"
 T_LOST = _T + "p47c_the_end_line_and_the_method_notes_say_what_did_not_deliver"
 T_MATRIX = _T + "p47c_the_kill_matrix_resumes_clean_at_every_stop_point"
+# The second review's tests (review 2 F1 to F7).
+T_CHECK_DEAD = _T + "p47c_fix2_check_names_resume_for_a_dead_driver_and_nothing_for_a_live_one"
+T_CHECK_PLAIN = _T + "p47c_fix2_check_reads_an_ordinary_run_as_before_beside_a_scholar_run"
+T_CHECK_LOCK = _T + "p47c_fix2_check_reads_the_driver_without_taking_its_lock"
+T_ENDCUT = _T + "p47c_fix2_the_end_line_says_what_was_lost_within_the_cut"
+T_LOGENC = _T + "p47c_fix2_a_log_with_a_bom_or_in_utf16_is_read_and_said"
+T_HTML3 = _T + "p47c_fix2_the_html_check_strips_css_comments_reads_srcdoc_and_module_imports"
 
 QUIET_KINDS = "                Kind::Interrupted { .. } | Kind::Delivered { .. } | Kind::Asked { .. } => true,\n"
 TELL_THEN_WAKE = ("            state.told = true;\n            save_state(project, state)?;\n"
@@ -277,10 +284,11 @@ CONTROLS = (
     Control("p47c_queue_line_too_short", RUN, '            None => format!("the run asks: {}", short(question, 120)),',
             '            None => format!("the run asks: {}", short(question, 60)),', T_WAKEPATH, "rust"),
     # Fix round item 1: the report's end line with the status command first: T_WAKEPATH's queue line does not start
-    # "the run asks: scholar report: <path> (".
+    # "the run asks: scholar report: <path>: ". Retargeted in the second fix round (review 2 F3 moved the command last).
     Control("p47c_fix_report_path_late", S,
-            '        "scholar report: {why} (`herdr scholar status {}`){answer}{lost}",',
-            '        "scholar report: (`herdr scholar status {}`) {why}{answer}{lost}",', T_WAKEPATH, "rust"),
+            '    format!("scholar report{count}: {why}{answer}{lost}{status}")',
+            '    format!("scholar report{count}: (`herdr scholar status {}`) {why}{answer}{lost}", state.run)', T_WAKEPATH,
+            "rust"),
     # ---- the verb ----
     # A seated worker not refused: T_REFUSALS's first line is the git refusal, not "refused inside order x-r1".
     Control("p47c_seated_not_refused", S,
@@ -450,10 +458,11 @@ CONTROLS = (
     # The empty answer researched anyway: T_NOTHING's end is no_delivery, not nothing_to_research.
     Control("p47c_nothing_researched_anyway", S, "            let nothing = state.orders.is_empty();",
             "            let nothing = false;", T_NOTHING, "rust"),
-    # The tell line without the status command: T_NOTHING's asked line does not start "scholar nothing_to_research:".
+    # The tell line without the status command, the run id where the why was: T_NOTHING's asked line does not start
+    # "scholar nothing_to_research: the route found nothing" (retargeted in the second fix round, review 2 F3).
     Control("p47c_tell_line_plain", S,
-            '        return format!("scholar {end}: `herdr scholar status {}`; {why}{lost}", state.run);',
-            '        return format!("scholar {end} {}; {why}{lost}", state.run);', T_NOTHING, "rust"),
+            '        return format!("scholar {end}{count}: {why}{lost}{status}");',
+            '        return format!("scholar {end} {}{count}; {why}{lost}", state.run);', T_NOTHING, "rust"),
     # Told but not woken: T_NOTHING's wakes is 0, not 1.
     Control("p47c_tell_no_wake", S, TELL_THEN_WAKE,
             "            state.told = true;\n            save_state(project, state)?;\n", T_NOTHING, "rust"),
@@ -576,4 +585,118 @@ CONTROLS = (
     # Bytes, not characters: T_QCAP's 8,000 two-byte characters are refused.
     Control("p47c_fix_question_bytes", S, "    let length = question.chars().count();", "    let length = question.len();",
             T_QCAP, "rust"),
+    # ---- the second review (review 2 F1 to F7; the brief p47c-fix2 items 1 to 7) ----
+    # Each comment says the assertion that goes red and why, written before the run.
+    # F1. `check` never asks the scholar answer: T_CHECK_DEAD's first Dies assert reads the old
+    # Ok("...-r2 was interrupted: the orchestrator continues, redoes or asks"), not Err(resume).
+    Control("p47c_fix2_check_unasked", RUN,
+            "    if let Some(answer) = crate::nirvana_scholar::check_answer(state, now) {\n        return answer;\n    }\n",
+            "", T_CHECK_DEAD, "rust"),
+    # F1. Any scholar run of the second matches: T_CHECK_PLAIN's case "live" reads the scholar run's Err(resume), not
+    # Ok("worker live: o-1").
+    Control("p47c_fix2_check_any_scholar_run", S, "            nirvana_run::replay(&upto) == *run\n",
+            "            !upto.is_empty()\n", T_CHECK_PLAIN, "rust"),
+    # F1. The lock never read: T_CHECK_DEAD's Dies assert after `take_driver` reads Err(resume), not CHECK_HELD.
+    Control("p47c_fix2_check_no_lock_read", S, "    let held = driver_live(&project, &state.run);\n",
+            "    let held = false;\n", T_CHECK_DEAD, "rust"),
+    # F1. The look takes the lock as a driver does: T_CHECK_LOCK's driver.json is rewritten with this pid, not
+    # {"pid":1,"at":5}.
+    Control("p47c_fix2_check_takes_lock", S, "    let held = driver_live(&project, &state.run);\n",
+            "    let held = take_driver(&project, &state.run).is_err();\n", T_CHECK_LOCK, "rust"),
+    # F1. No grace: T_CHECK_DEAD's "before the route" assert reads Err(resume), not CHECK_STARTING.
+    Control("p47c_fix2_check_no_grace", S, "pub const START_GRACE_S: u64 = 60;", "pub const START_GRACE_S: u64 = 0;",
+            T_CHECK_DEAD, "rust"),
+    # F1. The grace ignores `driver.json`: T_CHECK_DEAD's first Dies assert (35 s after the start) reads
+    # CHECK_STARTING, not Err(resume).
+    Control("p47c_fix2_check_grace_after_take", S,
+            "        && !scholar_dir(&project, &state.run).join(\"driver.json\").exists()\n", "", T_CHECK_DEAD, "rust"),
+    # F1. A queued line unsaid: T_CHECK_DEAD's stall assert reads CHECK_HELD, not "1 event(s) wait ...".
+    Control("p47c_fix2_check_queue_unsaid", S, "    Some(Ok(if !run.queue.is_empty() {", "    Some(Ok(if false {",
+            T_CHECK_DEAD, "rust"),
+    # F1. A done stage still the driver's: T_CHECK_DEAD's last assert reads Err(resume), not "no order seated".
+    Control("p47c_fix2_check_done_kept", S,
+            ".filter(|state| state.started_at == opened.at && state.stage != Stage::Done)",
+            ".filter(|state| state.started_at == opened.at)", T_CHECK_DEAD, "rust"),
+    # F2. The end line appended again on resume: T_MATRIX's "Mixed Told(1)" row has end_lines 2, not 1.
+    Control("p47c_fix2_tell_twice", S, "            if !said {\n", "            if !said || true {\n", T_MATRIX, "rust"),
+    # F3. No count: T_ENDCUT's received line starts "scholar report: <path>", not "scholar report (5 of 5 lost)".
+    Control("p47c_fix2_count_unsaid", S, "        format!(\" ({lost_count} of {} lost)\", state.orders.len())\n",
+            "        String::new()\n", T_ENDCUT, "rust"),
+    # F3. The status command back at the head: T_ENDCUT's received line does not hold the whole path.
+    Control("p47c_fix2_status_first", S, "    format!(\"scholar report{count}: {why}{answer}{lost}{status}\")",
+            "    format!(\"scholar report{count} ({}): {why}{answer}{lost}\", &status[2..])", T_ENDCUT, "rust"),
+    # F3. The brief's wording: 41 + 79 characters, one past the cut: T_ENDCUT's "the path is cut" assert
+    # ("...report.htm…").
+    Control("p47c_fix2_count_words_long", S, "        format!(\" ({lost_count} of {} lost)\", state.orders.len())\n",
+            "        format!(\" ({lost_count} of {} did not deliver)\", state.orders.len())\n", T_ENDCUT, "rust"),
+    # F4. An amend on a scholar chain loud: T_REPLAY's scholar queue gains "s-r8 gated amend: ...".
+    Control("p47c_fix2_amend_loud", RUN, "                    crate::nirvana_gate::Outcome::Amend.word(),\n", "",
+            T_REPLAY, "rust"),
+    # F4. A failed verdict on a scholar chain loud: T_REPLAY's scholar queue gains "s-r9 gated failed: ...".
+    Control("p47c_fix2_failed_loud", RUN, "                    crate::nirvana_gate::Outcome::Failed.word(),\n", "",
+            T_REPLAY, "rust"),
+    # F4. The untrue sentence back in the seat skill: T_ROLE's "is said" assert.
+    Control("p47c_fix2_skill_untrue", SKILL, "a doubt about one of their workers still does, as any order's would.",
+            "a doubt about one of their workers still does, as any order's would. No researcher's or writer's line "
+            "wakes you.", T_ROLE, "rust"),
+    # F4. ROLE.md without what the driver handles: T_ROLE's "The driver handles its researchers' ..." not in ROLE.md.
+    Control("p47c_fix2_role_handles_unsaid", ROLE,
+            "(plan 47, the owner's scholar). The driver handles its researchers' and\n  writer's deliveries, verdicts, "
+            "questions and interruptions; a stall or a deferral of one still wakes you. One wake\n",
+            "(plan 47, the owner's scholar). One wake\n", T_ROLE, "rust"),
+    # F1 in the role: ROLE.md without the dead end: T_ROLE's "or a dead end naming ..." not in ROLE.md.
+    Control("p47c_fix2_role_resume_unsaid", ROLE,
+            "  wants it. A wake that says `scholar gave_up`, or a dead end naming `herdr scholar resume <run>`, is "
+            "answered with\n  that command.",
+            "  wants it. A wake that says `scholar gave_up` is answered with `herdr scholar resume <run>`.", T_ROLE,
+            "rust"),
+    # F5. The BOM kept: T_LOGENC's BOM log reads (0, 1), not (1, 0).
+    Control("p47c_fix2_log_bom_kept", S, "    let text = text.strip_prefix('\\u{feff}').unwrap_or(text.as_ref());\n",
+            "    let text: &str = text.as_ref();\n", T_LOGENC, "rust"),
+    # F5. A UTF-16 log read as empty: T_LOGENC's UTF-16 log reads (0, 0), not (0, 1).
+    Control("p47c_fix2_log_utf16_empty", S,
+            "    let bytes = std::fs::read(log_path(root)).unwrap_or_default();\n"
+            "    let text = String::from_utf8_lossy(&bytes);\n",
+            "    let text: std::borrow::Cow<str> = std::fs::read_to_string(log_path(root)).unwrap_or_default().into();\n",
+            T_LOGENC, "rust"),
+    # F5. NULs not trimmed: T_LOGENC's UTF-16 log reads (0, 2), its trailing NUL a second unreadable line.
+    Control("p47c_fix2_log_nul_line", S,
+            "        .map(|line| line.trim_matches(|c: char| c.is_whitespace() || c == '\\0'))\n",
+            "        .map(str::trim)\n", T_LOGENC, "rust"),
+    # F5. `tag` silent on the unread lines: T_LOGENC's tag refusal lacks "1 line(s) of ... could not be read".
+    Control("p47c_fix2_tag_unread_unsaid", S,
+            "            format!(\"; {bad} line(s) of {REPORTS}/{LOG_FILE} could not be read\")\n",
+            "            String::new()\n", T_LOGENC, "rust"),
+    # F6. CSS comments read: T_HTML3's first passing page finds "<style> url(: url(https://x.org/a.png) */ ...".
+    Control("p47c_fix2_css_comments_read", S, "    let css = css_without_comments(css);\n",
+            "    let css = css.to_owned();\n", T_HTML3, "rust"),
+    # F6. A `/*` inside a CSS string read as a comment: T_HTML3's string page finds [] (the url swallowed).
+    Control("p47c_fix2_css_string_comment", S, "            '\"' | '\\'' => {\n                out.push(c);",
+            "            '\\u{0}' => {\n                out.push(c);", T_HTML3, "rust"),
+    # F6. `srcdoc` unread: T_HTML3's first srcdoc page finds [], not "<iframe> srcdoc: <img> src: ...".
+    Control("p47c_fix2_srcdoc_unread", S, "            if let Some(doc) = get(\"srcdoc\").filter(|_| name == \"iframe\") {",
+            "            if let Some(doc) = get(\"srcdoc\").filter(|_| false) {", T_HTML3, "rust"),
+    # F6. Static imports unread: T_HTML3's first module page finds [], not "<script> import: ...".
+    Control("p47c_fix2_module_import_unread", S, "                        module_imports(body, &mut found);\n", "",
+            T_HTML3, "rust"),
+    # F6. Static imports read in a classic script: T_HTML3's classic page finds "<script> import: import x from ...".
+    Control("p47c_fix2_module_in_classic", S,
+            "                    if tag.attrs.iter().any(|(key, value)| key == \"type\" && value.contains(\"module\")) {",
+            "                    if true {", T_HTML3, "rust"),
+    # F6. Not UTF-8 unsaid: T_HTML3's Latin-1 report reads "report.html could not be read: stream did not contain
+    # valid UTF-8".
+    Control("p47c_fix2_html_not_utf8_unsaid", S,
+            "            Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {\n"
+            "                problems.push(format!(\"{name} is not UTF-8\"))\n            }\n", "", T_HTML3, "rust"),
+    # F6. Missing unsaid: T_HTML3's missing report.md reads "report.md could not be read: ...".
+    Control("p47c_fix2_html_not_there_unsaid", S,
+            "            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {\n"
+            "                problems.push(format!(\"{name} is not there\"))\n            }\n", "", T_HTML3, "rust"),
+    # F7. A bug that panics elsewhere: T_MATRIX's first row's payload is Some("a bug in the files check"), not None.
+    Control("p47c_fix2_matrix_bug_panic", S,
+            "            let problems = check_files(&project.root.join(&state.report_dir));\n",
+            "            let problems: Vec<String> = panic!(\"a bug in the files check\");\n", T_MATRIX, "rust"),
+    # F7. The stop point moved (no reseat): T_MATRIX's "Dies Sleep(3)" kills at write/sleep, not research/sleep.
+    Control("p47c_fix2_matrix_no_reseat", S, "        ChainStatus::Interrupted(..) if chain.reseat.is_none() => {",
+            "        ChainStatus::Interrupted(..) if false => {", T_MATRIX, "rust"),
 )
