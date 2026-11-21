@@ -366,7 +366,11 @@ CONTROLS = (
     Control("p47b_rule11_gh_signed_in", TEXT, "gh when it is signed in)", "gh)", T_TEXT, "rust"),
     # ---- item 5: the gate's two rules ----
     # No status line per URL: T_TEXT's ladder lacks the curl example.
-    Control("p47b_ladder_no_status_line", LADDER, ' %{url_effective}\\n"`', '\\n"`', T_TEXT, "rust"),
+    Control("p47b_ladder_no_status_line", LADDER, ' %{url_effective}\\n" <url>`', '\\n" <url>`', T_TEXT,
+            "rust"),
+    # The example without -s -o prints the whole page (second review, finding 1): T_TEXT's ladder lacks the
+    # example as written.
+    Control("p47b_ladder_curl_prints_the_page", LADDER, "`curl -s -o NUL -w ", "`curl -w ", T_TEXT, "rust"),
     # No sources when nothing was found: T_TEXT's ladder lacks "When you found nothing, still cite ...".
     Control("p47b_ladder_nothing_found_unsourced", LADDER,
             "When you found nothing, still cite the pages you opened that did not answer, each with a used_for that "

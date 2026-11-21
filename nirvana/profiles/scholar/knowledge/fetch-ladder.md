@@ -31,5 +31,5 @@ Images and video frames: open the file and say what you saw. A file you did not 
 
 Files you make. Working files, downloads, clips, screenshots and test harnesses go in the scratch folder your order names; when it names none, in the OS temp folder. Never put one elsewhere in the project's tree. Delete a download when the order is done, unless the order says to keep it.
 
-Before you cite, check each URL with a fetch command that prints one line per URL: the HTTP status, a space, the URL. For example curl with `-w "%{http_code} %{url_effective}\n"`. A loop over many URLs is fine when each prints that line.
+Before you cite, check each URL with a fetch command that prints one line per URL: the HTTP status, a space, the URL. For example `curl -s -o NUL -w "%{http_code} %{url_effective}\n" <url>` (off Windows, `-o /dev/null`). Without `-s -o` curl prints the whole page as well. A loop over many URLs is fine when each prints that line.
 When you found nothing, still cite the pages you opened that did not answer, each with a used_for that says so. A Work Report with no sources is sent back.

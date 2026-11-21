@@ -2929,7 +2929,8 @@ fn p47b_the_text_keeps_files_out_of_the_project_and_runs_only_its_own_checks() {
     for said in [
         "Before you cite, check each URL with a fetch command that prints one line per URL: the HTTP status, a \
          space, the URL.",
-        "For example curl with `-w \"%{http_code} %{url_effective}\\n\"`.",
+        "For example `curl -s -o NUL -w \"%{http_code} %{url_effective}\\n\" <url>` (off Windows, `-o /dev/null`).",
+        "Without `-s -o` curl prints the whole page as well.",
         "A loop over many URLs is fine when each prints that line.",
         "When you found nothing, still cite the pages you opened that did not answer, each with a used_for that \
          says so. A Work Report with no sources is sent back.",
