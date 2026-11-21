@@ -6994,14 +6994,8 @@ fn p47d_a_status_url_matches_as_any_cited_url_matches() {
     }
 }
 
-/// Item 1: a cut command counts by the words in the part agy shows. calib-research-s1's step 14 by shape: a URL list
-/// that fills the 512 characters, the curl after it unseen, counts nothing. a4-asset-decisions's by shape: a cut
-/// python script that imports `urllib.request` counts its status lines. A whole command that only imports one still
-/// fetches nothing.
-#[test]
-fn p47d_a_cut_command_counts_by_the_words_it_shows() {
-    let url = "https://example.com/list/page-12";
-    let line = format!("200 {url}\n");
+/// calib-research-s1's step 14 by shape: a URL list that fills agy's 512 characters, its curl past the cut.
+fn p47d_listed() -> String {
     let mut listed = String::from("$urls = @(\n");
     for n in 1..=14 {
         listed.push_str(&format!("  \"https://example.com/list/page-{n}\",\n"));
@@ -7009,7 +7003,23 @@ fn p47d_a_cut_command_counts_by_the_words_it_shows() {
     listed.push_str(")\nforeach ($u in $urls) { curl -s -o NUL -w \"%{http_code} %{url_effective}`n\" $u }");
     let listed = p47d_cut(&listed);
     assert!(!listed.contains("curl"), "the curl lies past the cut");
-    assert_eq!(p47d_mark(url, &p47d_step(14, "DONE", &listed, &line)), Mark::Fail);
+    listed
+}
+
+/// A cut command whose part in sight is `head` and then padding with no fetch word and nothing that prints.
+fn p47d_padded(head: &str) -> String {
+    p47d_cut(&format!("{head}\n$pad = '{}'", "x".repeat(600)))
+}
+
+/// Item 1 and the owner's ruling: a cut command with a fetch in sight passes as any fetch does (a4-asset-decisions's
+/// cut python script imports `urllib.request`); the same list with its curl past the cut counts too, but as a note.
+/// A whole command that only imports a fetch module still fetches nothing.
+#[test]
+fn p47d_a_cut_command_with_a_fetch_in_sight_passes_and_one_without_is_a_note() {
+    let url = "https://example.com/list/page-12";
+    let line = format!("200 {url}\n");
+    let axis = p47d_axis(&[url], &p47d_step(14, "DONE", &p47d_listed(), &line));
+    assert_eq!(axis.mark, Mark::Note, "{axis:?}");
     let script = format!(
         "Set-Location C:\\w\\a4; @'\nimport re, pathlib, urllib.request, urllib.error\nurls = []\n{}",
         "for p in ['notes.md']:\n    urls += re.findall(r'https://[^ ]+', pathlib.Path(p).read_text())\n".repeat(6)
@@ -7018,6 +7028,120 @@ fn p47d_a_cut_command_counts_by_the_words_it_shows() {
     assert_eq!(p47d_mark(url, &p47d_step(388, "DONE", &script, &line)), Mark::Pass);
     let whole = "python -c \"import urllib.request\nprint(open('status.txt').read())\"";
     assert_eq!(p47d_mark(url, &p47d_step(388, "DONE", whole, &line)), Mark::Fail);
+}
+
+/// The owner's ruling, item 4: every URL counted from a cut command with no fetch in sight is named on the axis, a
+/// note when nothing else fails, and on the fail's line when something does. No lines on the note: a send-back reads
+/// a sources axis's lines as URLs to open again.
+#[test]
+fn p47d_a_cut_command_with_no_fetch_in_sight_counts_with_a_note() {
+    let (a, b, c) = (
+        "https://example.com/list/page-12",
+        "https://example.com/list/page-13",
+        "https://example.com/other",
+    );
+    let stream = format!(
+        "{}\n{}",
+        p47d_step(14, "DONE", &p47d_listed(), &format!("200 {a}\n301 {b}\n")),
+        p47d_step(132, "DONE", &p47d_padded("Set-Location C:\\w\\f1"), &format!("200 {c}\n"))
+    );
+    let one = p47d_axis(&[a], &stream);
+    assert_eq!(one.mark, Mark::Note, "{one:?}");
+    assert_eq!(
+        one.why,
+        "1 source(s) cited, each verified in stream; 1 cited URL(s) counted from the status lines of a cut command \
+(step 14)"
+    );
+    assert!(one.lines.is_empty(), "{one:?}");
+    let all = p47d_axis(&[c, a, b], &stream);
+    assert_eq!(all.mark, Mark::Note, "{all:?}");
+    assert_eq!(
+        all.why,
+        "3 source(s) cited, each verified in stream; 3 cited URL(s) counted from the status lines of a cut command \
+(steps 14, 132)"
+    );
+    // A URL another rule counts is not this path's: a curl in sight counts `fetched` as before.
+    let fetched = "https://example.com/fetched";
+    let mixed = format!(
+        "{stream}\n{}",
+        p47d_step(15, "DONE", P47D_CHECK, &format!("200 {fetched}\n"))
+    );
+    let both = p47d_axis(&[fetched, a], &mixed);
+    assert_eq!(
+        both.why,
+        "2 source(s) cited, each verified in stream; 1 cited URL(s) counted from the status lines of a cut command \
+(step 14)"
+    );
+    // A URL a fetch in sight also names (a per-segment read) is that rule's: no note.
+    let refetched = format!("{stream}\n{}", agy_run(&format!("curl -s {a}")));
+    let plain = p47d_axis(&[a], &refetched);
+    assert_eq!(plain.mark, Mark::Pass, "{plain:?}");
+    assert_eq!(plain.why, "1 source(s) cited, each verified in stream");
+    // Something unopened still fails, naming only it, and the fail's line says what the cut path counted.
+    let never = "https://example.com/never";
+    let failed = p47d_axis(&[a, never], &stream);
+    assert_eq!(failed.mark, Mark::Fail, "{failed:?}");
+    assert_eq!(failed.lines, vec![never.to_owned()]);
+    assert_eq!(
+        failed.why,
+        "1 source(s) cited that were not fetched, read or browsed; 1 cited URL(s) counted from the status lines of a \
+cut command (step 14)"
+    );
+}
+
+/// The owner's ruling, item 4: a cited video the oEmbed check finds missing fails the axis, and the note of what the
+/// cut path counted stays on its line.
+#[test]
+fn p47d_a_missing_video_keeps_the_cut_note() {
+    let note = "1 source(s) cited, each verified in stream; 1 cited URL(s) counted from the status lines of a cut \
+command (step 14)";
+    let axis = Axis::new("sources", Mark::Note, note.to_owned());
+    let report = serde_json::json!({"sources": [{"url": "https://www.youtube.com/watch?v=U24jDyYnU3A"}]});
+    let mut ask = |_: &str, _: std::time::Duration| Video::Missing;
+    let (axis, _) = check_videos(axis, Some(&report), &mut ask, 5, std::time::Duration::from_secs(5));
+    assert_eq!(axis.mark, Mark::Fail, "{axis:?}");
+    assert_eq!(axis.why, format!("{note}; 1 cited video(s) do not exist on YouTube"));
+}
+
+/// The owner's ruling, guards on a cut command with no fetch in sight. (a) A part in sight that prints anything
+/// refuses the whole step. (b) The step must be `DONE` and exit 0. (c) Only a 2xx or 3xx line alone counts. And the
+/// cut itself is exactly 512 characters and `…`: a command that only ends in `…`, or is 513 characters with no mark,
+/// is whole and keeps the fetch-word rule.
+#[test]
+fn p47d_a_cut_command_that_prints_in_sight_or_ended_badly_counts_nothing() {
+    let url = "https://example.com/a";
+    let line = format!("200 {url}\n");
+    let mark = |command: &str, state: &str, output: &str| p47d_mark(url, &p47d_step(132, state, command, output));
+    assert_eq!(mark(&p47d_padded("Set-Location C:\\w"), "DONE", &line), Mark::Note);
+    for head in [
+        format!("echo \"200 {url}\""),
+        format!("printf '200 {url}\\n'"),
+        format!("Write-Output \"200 {url}\""),
+        format!("Write-Host 200 {url}"),
+        "Get-Content status.txt".to_owned(),
+        "type status.txt".to_owned(),
+        "foreach ($u in $urls) { Write-Output \"200 $u\" }".to_owned(),
+        format!("python -c \"print('200 {url}')\""),
+    ] {
+        assert_eq!(mark(&p47d_padded(&head), "DONE", &line), Mark::Fail, "{head}");
+    }
+    let padded = p47d_padded("Set-Location C:\\w");
+    assert_eq!(mark(&padded, "DONE", &format!("Command exited with code 1.\n\n{line}")), Mark::Fail);
+    for state in ["ERROR", "CANCELED"] {
+        assert_eq!(mark(&padded, state, &line), Mark::Fail, "{state}");
+    }
+    for output in [format!("404 {url}\n"), format!("000 {url}\n"), format!("200 {url} OK\n")] {
+        assert_eq!(mark(&padded, "DONE", &output), Mark::Fail, "{output:?}");
+    }
+    let marked_long = format!("{}\u{2026}", "Set-Location C:\\w; ".repeat(40));
+    assert!(marked_long.chars().count() > 513);
+    assert_eq!(mark(&marked_long, "DONE", &line), Mark::Fail);
+    let unmarked: String = padded.chars().take(512).chain(['x']).collect();
+    assert_eq!(unmarked.chars().count(), 513);
+    assert_eq!(mark(&unmarked, "DONE", &line), Mark::Fail);
+    // A Claude command is never cut: the same text and result counts nothing there.
+    let claude = p47d_claude("Bash", serde_json::json!({ "command": padded }), &line);
+    assert_eq!(p47d_mark(url, &claude), Mark::Fail);
 }
 
 /// Item 2: a script file run by name holds no fetch word, so its status lines stay uncounted (r1-tripo-v3's step 353

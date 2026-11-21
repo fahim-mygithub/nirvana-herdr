@@ -1994,10 +1994,18 @@ pub struct Reads {
     /// pass): agy cuts a command at 512 characters (all 786 cut lines in Megajam were 513), and in the 9 failed
     /// sources checks of 2026-11-01 to 11-20, 56 of the 75 URLs sent back as unopened had a `200 <url>` line in a
     /// `run_command` output. 21 of them count by this rule; the rest came from a command whose fetch lay past the cut
-    /// (33) or from a script run by name (2), which show no fetch word. Claude's stream does not get it: its command
-    /// is whole (454 Bash commands in 32 Claude research orders, 131 over 512 characters, none cut), so the
-    /// per-segment rule already sees its URLs.
+    /// (33, `cut_status`) or from a script run by name (2), which show no fetch word. Claude's stream does not get
+    /// it: its command is whole (454 Bash commands in 32 Claude research orders, 131 over 512 characters, none cut),
+    /// so the per-segment rule already sees its URLs.
     status: Vec<String>,
+    /// The owner's ruling (plan 47 P47d): each URL (normalized) on a status line of an agy `run_command` that agy cut
+    /// (`agy_cut`), whose part in sight holds no fetch word and no printing command (`prints_visibly`), answered
+    /// `DONE`, exit 0, no `file://`; with the step's index. f1-land-foley-cc0-o's step 132 and calib-research-s1's
+    /// step 14 showed only `Test-Path` lines and a URL list, their curl past the cut, and 33 URLs they opened were
+    /// sent back. The full command is nowhere herdr keeps: agy streams the same cut text on the step's `ACTIVE` and
+    /// `DONE` lines, and the run folder holds no other copy (checked 2026-11-20). A fake past the cut cannot be
+    /// seen, so every URL counted here is named on the axis as a note.
+    cut_status: Vec<(String, String)>,
     /// Addendum B (plan 40), for `media_read` only: each URL (normalized) a call that fetches or opens media named
     /// (`command_media`). The report's own calls (`finish`, `StructuredOutput`) and writes are not here: a cite names
     /// itself there.
@@ -3246,12 +3254,21 @@ pub fn stream_reads(stream: &str) -> Reads {
                 }
                 // Plan 47 P47d: a `file://` fetch prints a file, not a page (the B1 review's notes fetched as a file).
                 let fetches = command_fetches(command);
-                if fetches
-                    && answered
+                let ended_well = answered
                     && agy_command_ok(output)
-                    && !command.to_ascii_lowercase().contains("file://")
-                {
+                    && !command.to_ascii_lowercase().contains("file://");
+                if fetches && ended_well {
                     reads.status.extend(status_urls(output));
+                } else if ended_well && agy_cut(command) && !prints_visibly(command) {
+                    // The owner's ruling (plan 47 P47d): a cut command whose part in sight holds no fetch word counts
+                    // its status lines too, each one named on the axis (`Reads::cut_status`).
+                    let index = step
+                        .get("step_index")
+                        .and_then(Value::as_u64)
+                        .map_or_else(|| "?".to_owned(), |index| index.to_string());
+                    reads
+                        .cut_status
+                        .extend(status_urls(output).into_iter().map(|url| (url, index.clone())));
                 }
                 command_fetches(command).then(|| command.to_owned())
             }
@@ -3325,6 +3342,70 @@ fn status_urls(output: &str) -> Vec<String> {
 pub fn status_read(url: &str, reads: &Reads) -> bool {
     let norm = normalize_url(url);
     !norm.is_empty() && reads.status.contains(&norm)
+}
+
+/// How many characters of a long command agy streams before its cut mark.
+const AGY_CUT_CHARS: usize = 512;
+
+/// Plan 47 P47d: agy cut this command: exactly `AGY_CUT_CHARS` characters and the cut mark. All 786 cut lines in
+/// Megajam were 513 characters ending in `…`; a command that only ends in `…`, or is cut at another length, is whole.
+fn agy_cut(command: &str) -> bool {
+    command.ends_with(CUT_MARK) && command.chars().count() == AGY_CUT_CHARS + 1
+}
+
+/// Commands that print their arguments or a file: a segment that runs one, anywhere it stands as a command word, may
+/// print a status line it never fetched.
+const PRINTING_COMMANDS: &[&str] = &[
+    "echo",
+    "printf",
+    "write-output",
+    "write-host",
+    "write-information",
+    "out-host",
+    "cat",
+    "type",
+    "get-content",
+    "gc",
+    "more",
+];
+
+/// Script calls that print.
+const PRINTING_CALLS: &[&str] = &["print(", "console.log(", "[console]::write"];
+
+/// The owner's ruling (plan 47 P47d), guard (a): a cut command whose part in sight prints anything is refused, since
+/// its status lines may be its own text.
+fn prints_visibly(command: &str) -> bool {
+    segments(command).any(|segment| {
+        let code = segment_code(segment).to_ascii_lowercase();
+        PRINTING_COMMANDS
+            .iter()
+            .any(|word| command_words(&code, word).next().is_some())
+            || PRINTING_CALLS.iter().any(|call| code.contains(call))
+    })
+}
+
+/// The step a cited URL was counted from by a cut command's status line (`Reads::cut_status`), if it was.
+fn cut_status_step<'a>(url: &str, reads: &'a Reads) -> Option<&'a str> {
+    let norm = normalize_url(url);
+    reads
+        .cut_status
+        .iter()
+        .find(|(counted, _)| !norm.is_empty() && *counted == norm)
+        .map(|(_, step)| step.as_str())
+}
+
+/// The note the sources axis carries for URLs counted from a cut command (the owner's ruling, plan 47 P47d), so the
+/// owner and a later audit see how often this path is used.
+fn cut_status_note(steps: &[&str]) -> String {
+    let mut named: Vec<&str> = steps.to_vec();
+    named.sort_by_key(|step| (step.parse::<u64>().unwrap_or(u64::MAX), step.to_string()));
+    named.dedup();
+    format!(
+        "{} cited URL(s) counted from the status lines of a cut command ({} {})",
+        steps.len(),
+        if named.len() == 1 { "step" } else { "steps" },
+        named.join(", ")
+    )
 }
 
 // ---- live checks 2026-11-01 F2: sources only when the order asks for the web ----
@@ -3621,6 +3702,7 @@ check ({asked})"
     };
     let mut missing = Vec::new();
     let mut skipped = 0usize;
+    let mut cut_steps: Vec<&str> = Vec::new();
     for item in sources {
         let Some(url) = item.get("url").and_then(Value::as_str) else {
             missing.push("item without url".to_owned());
@@ -3644,15 +3726,36 @@ check ({asked})"
         if class.starts_with("media.") && media_read(url, &reads) {
             continue;
         }
+        // The owner's ruling (plan 47 P47d): last, and only for a URL no other rule counts, so the note names
+        // exactly the URLs this path alone let through.
+        if let Some(step) = cut_status_step(url, &reads).filter(|_| !url_in_stream(&norm, stream)) {
+            cut_steps.push(step);
+            continue;
+        }
         if !url_in_stream(&norm, stream) {
             missing.push(url.to_owned());
         }
     }
-    let unchecked = if skipped > 0 {
+    let mut unchecked = if skipped > 0 {
         format!("; {skipped} local entr(y/ies) not checked ({READ_CLASS} reads the project)")
     } else {
         String::new()
     };
+    if !cut_steps.is_empty() {
+        let note = cut_status_note(&cut_steps);
+        // No lines: a send-back reads a sources axis's lines as URLs to open again (`send_back_brief`).
+        if missing.is_empty() {
+            return Some(Axis::new(
+                "sources",
+                Mark::Note,
+                format!(
+                    "{} source(s) cited, each verified in stream{unchecked}; {note}",
+                    sources.len() - skipped
+                ),
+            ));
+        }
+        unchecked.push_str(&format!("; {note}"));
+    }
     // Fix round F5: with every entry skipped, nothing was verified, and the axis must not say so.
     if missing.is_empty() && skipped == sources.len() {
         Some(Axis::new(
@@ -3794,7 +3897,8 @@ pub fn check_videos(
     }
     if !missing.is_empty() {
         let said = format!("{} cited video(s) do not exist on YouTube", missing.len());
-        axis.why = if axis.mark == Mark::Fail {
+        // Plan 47 P47d: a note (URLs counted from a cut command) keeps its text too.
+        axis.why = if matches!(axis.mark, Mark::Fail | Mark::Note) {
             format!("{}; {said}", axis.why)
         } else {
             said

@@ -78,8 +78,8 @@ pub const SKILLS_MAX_BYTES: u64 = 16 * 1024 * 1024;
 ///
 /// Plan 47 P47d: workers looped over many URLs anyway, and agy cut those commands at 512 characters, so the gate now
 /// reads a fetch's `<status> <url>` lines (`nirvana_gate::status_read`). The line asks for that shape, and for the
-/// fetch inside the part agy shows: in f1-land-foley-cc0-o and calib-research-s1 the curl lay past the cut, so 33
-/// URLs they opened stay unseen by that rule too.
+/// fetch inside the part agy shows: in f1-land-foley-cc0-o and calib-research-s1 the curl lay past the cut, so their
+/// 33 opened URLs count only through the guarded cut-command path, named on the axis as a note.
 pub const SOURCES_LINE: &str = "Never cite a URL you did not open in this session. Check pages with a command that prints one `<status> <url>` line per URL and names its fetch in its first 512 characters (all herdr sees of it), as `Get-Content urls.txt | % { curl.exe -s -o NUL -w \"%{http_code} %{url_effective}\\n\" $_ }` does; a loop is fine when each pass prints that line. A script file run by name is not seen as a fetch. Videos: yt_dlp, or bladebro when you have it.";
 
 /// `<run>/agy/<order>/`.
