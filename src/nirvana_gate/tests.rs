@@ -7218,6 +7218,10 @@ document.querySelector('#core')?.innerText\" --url \"https://example.com/dp/X\""
     let escaped = "curl -H \"X-Note: \\\"a; b\\\"\" https://example.com/c";
     let bash = p47d_claude("Bash", serde_json::json!({ "command": escaped }), "");
     assert_eq!(p47d_mark("https://example.com/c", &bash), Mark::Pass, "{escaped}");
+    // Second fix round, item 5 (F7): the same command as an agy step counts nothing, and that is right. agy runs
+    // PowerShell, where `\` escapes nothing: the string closes at `\"`, the `;` after `a` ends the curl, and the URL
+    // stands in a command of its own (`b\"" <url>`) that fetches nothing. PowerShell cuts at that `;` as the gate does.
+    assert_eq!(p47d_mark("https://example.com/c", &agy_run(escaped)), Mark::Fail, "{escaped}");
     let outside = "curl -s https://example.com/f; echo \"https://example.com/g\" || echo https://example.com/h";
     assert_eq!(p47d_mark("https://example.com/f", &agy_run(outside)), Mark::Pass);
     for url in ["https://example.com/g", "https://example.com/h"] {
@@ -7389,11 +7393,8 @@ fn p47d_fix_a_shell_s_code_quote_closes_and_e_is_code_only_for_an_interpreter() 
     ] {
         assert_eq!(opens_code(head), code, "{head:?}");
     }
-    // An apostrophe in a word of prose opens no quote: the curl between two of them is a command of its own. A
-    // string's prefix letter is no prose (`r'...'`).
-    let url = "https://example.com/a";
-    let prose = "echo don't; curl -s -K urls.txt -w \"%{http_code} %{url_effective}\\n\"; echo it's";
-    assert_eq!(p47d_mark(url, &p47d_step(1, "DONE", prose, &format!("200 {url}\n"))), Mark::Pass);
+    // Inside python's code an apostrophe opens python's string: the yt-dlp in it is text, so its id was not fetched.
+    // (An apostrophe in prose opens a quote too, as the shell reads it: `p47d_fix2_an_apostrophe_opens_a_quote_...`.)
     let raw = format!("python -c \"print(r'x; yt-dlp {id}')\"");
     assert_eq!(p47d_mark(&video, &agy_run(&raw)), Mark::Fail, "{raw}");
 }
@@ -7502,7 +7503,8 @@ fn p47d_replay_cut_steps(order: &str, stream: &str) -> (usize, usize) {
 /// p47d_replay_the_record -- --ignored --nocapture`. It reads the streams and journals where they live, read-only,
 /// and copies none of their text into the repository: the list of orders and their folders is a JSON file named by
 /// `HERDR_P47D_REPLAY` (`[{"root", "run", "order", "class"}]`), kept outside it, since those folders belong to the
-/// owner's other projects. With no variable, or a folder absent, it prints a line and skips.
+/// owner's other projects. With no variable it prints a line and skips; with one that names no list of orders it
+/// panics (`p47d_replay_list`); an order whose folder is absent prints a line, and the totals below then fail.
 ///
 /// Per order it prints what was cited, what this head flags, each recorded gate event's sources mark, and by which
 /// rule each cited URL counts. Expected before the run (the P47d review, its table C): over the 9 events that failed
@@ -7512,15 +7514,10 @@ fn p47d_replay_cut_steps(order: &str, stream: &str) -> (usize, usize) {
 #[test]
 #[ignore]
 fn p47d_replay_the_record() {
-    let Ok(list) = std::env::var("HERDR_P47D_REPLAY") else {
+    let Some(rows) = p47d_replay_list(std::env::var("HERDR_P47D_REPLAY").ok().as_deref()) else {
         println!("P47D|skip|HERDR_P47D_REPLAY is not set");
         return;
     };
-    let Ok(text) = std::fs::read_to_string(&list) else {
-        println!("P47D|skip|no list at {list}");
-        return;
-    };
-    let rows: Vec<Value> = serde_json::from_str(&text).expect("the list is JSON");
     let (mut recorded_total, mut flagged_total, mut counted_total) = (0usize, 0usize, 0usize);
     let (mut cut_total, mut cut_refused) = (0usize, 0usize);
     for row in &rows {
@@ -7639,4 +7636,164 @@ fn p47d_replay_the_record() {
     println!("P47D|total|cut commands with no fetch in sight and status lines={cut_total}|refused={cut_refused}");
     assert_eq!((recorded_total, flagged_total, counted_total), (75, 18, 57));
     assert_eq!((cut_total, cut_refused), (14, 0));
+}
+
+/// Plan 47 P47d second fix round, item 3 (F5): the replay's list of orders, from `HERDR_P47D_REPLAY`. Unset, `None`:
+/// the replay skips with its line (it is `#[ignore]` and runs only by name). Set, a file that cannot be read, is not
+/// JSON, or holds no orders panics with a line that names the file: the round before printed `skip` there and passed,
+/// measuring nothing by accident.
+fn p47d_replay_list(var: Option<&str>) -> Option<Vec<Value>> {
+    let list = var?;
+    let text = std::fs::read_to_string(list)
+        .unwrap_or_else(|why| panic!("P47D: HERDR_P47D_REPLAY names {list}, which cannot be read: {why}"));
+    let rows: Value = serde_json::from_str(&text)
+        .unwrap_or_else(|why| panic!("P47D: HERDR_P47D_REPLAY names {list}, which is not JSON: {why}"));
+    let rows = rows
+        .as_array()
+        .filter(|rows| !rows.is_empty())
+        .unwrap_or_else(|| panic!("P47D: HERDR_P47D_REPLAY names {list}, which holds no orders"));
+    Some(rows.clone())
+}
+
+// ---- Plan 47 P47d second fix round: the second review's F1 to F7 ----
+
+/// Item 1 (F1): an apostrophe opens a single-quoted string wherever it stands, as Bash and PowerShell read it and as
+/// `46ce421f` did. The round before let one between two letters open nothing (`prose_apostrophe`); that read two
+/// shapes against the shell and moved 0 URLs in the record's 1,775 commands with a prose apostrophe, so it is gone.
+/// Both shells read `'t; curl ...; echo it'` as one string: the curl never runs, so its status line counts nothing.
+/// (With the URL written in the command, `echo don't; curl -s <url>; echo it's`, the URL still counts by master's
+/// substring rule, `command_is_shell_fetch` over the one segment, as `echo curl <url>` does: a known gap.)
+#[test]
+fn p47d_fix2_prose_apostrophes_hide_the_curl_between_them() {
+    let url = "https://example.com/a";
+    let prose = "echo don't; curl -s -K urls.txt -w \"%{http_code} %{url_effective}\\n\"; echo it's";
+    let step = p47d_step(1, "DONE", prose, &format!("200 {url}\n"));
+    assert_eq!(p47d_mark(url, &step), Mark::Fail, "{prose}");
+}
+
+/// Item 1: in double quotes the apostrophes are text, and the curl between the two echoes runs and counts.
+#[test]
+fn p47d_fix2_double_quotes_keep_an_apostrophe_text() {
+    let url = "https://example.com/a";
+    let quoted = "echo \"don't\"; curl -s -K urls.txt -w \"%{http_code} %{url_effective}\\n\"; echo \"it's\"";
+    let step = p47d_step(1, "DONE", quoted, &format!("200 {url}\n"));
+    assert_eq!(p47d_mark(url, &step), Mark::Pass, "{quoted}");
+}
+
+/// Item 1 (F2): a quote glued to its flag holds its `;`, as the shell reads it: the header is one argument of the curl,
+/// and the URL after it counts. The prose rule cut at that `;` and lost the URL.
+#[test]
+fn p47d_fix2_a_quote_glued_to_its_flag_holds_its_separator() {
+    let header = "curl -H'Accept: text/html; q=1' https://example.com/b";
+    assert_eq!(p47d_mark("https://example.com/b", &agy_run(header)), Mark::Pass, "{header}");
+}
+
+/// Item 1: python takes its code glued to `-c` (`-c'...'` reaches it as `-c<code>`), so `opens_code` reads the glued
+/// quote as code, as it reads `-c '...'`, and the fetch inside it runs: its status lines count. Without the prose rule,
+/// and before this round's two-line change, the glued quote read as a string and the command fetched nothing.
+#[test]
+fn p47d_fix2_python_takes_its_code_glued_to_c() {
+    let url = "https://example.com/c";
+    let checked = "python -c'import urllib.request; [print(urllib.request.urlopen(u).status, u) for u in \
+open(\"urls.txt\").read().split()]'";
+    assert_eq!(p47d_mark(url, &p47d_step(1, "DONE", checked, &format!("200 {url}\n"))), Mark::Pass, "{checked}");
+    // The review's form, its URL written in the code, counts either way: master's substring rule reads `urlopen(`
+    // beside the URL in the one segment, glued read or not.
+    let glued = "python -c'import urllib.request; urllib.request.urlopen(\"https://example.com/c\")'";
+    assert_eq!(p47d_mark(url, &agy_run(glued)), Mark::Pass, "{glued}");
+    for (head, code) in [
+        ("python -c", true),
+        ("node -e", true),
+        ("python -c ", true),
+        ("curl -H", false),
+        ("grep -E", false),
+        ("grep -e", false),
+        ("echo x-c", false),
+    ] {
+        assert_eq!(opens_code(head), code, "{head:?}");
+    }
+}
+
+/// Item 2 (F4): a reader or a printer named with Windows' `.exe` or `.com` (`cat.exe` ships with Git, `more.com` with
+/// Windows) refuses a cut step as its bare word does. The suffix is read where a command word is matched
+/// (`command_words`), in any case, so every word of `LOCAL_READERS` and `PRINTING_COMMANDS` takes it.
+#[test]
+fn p47d_fix2_a_reader_named_with_exe_or_com_refuses_a_cut_step() {
+    let url = "https://example.com/a";
+    let line = format!("200 {url}\n");
+    let mark = |head: &str| p47d_mark(url, &p47d_step(132, "DONE", &p47d_padded(head), &line));
+    for head in [
+        "cat.exe status.txt",
+        "type.exe status.txt",
+        "gc.exe status.txt",
+        "more.com status.txt",
+        "Cat.EXE status.txt",
+        "echo.exe 200",
+    ] {
+        assert_eq!(mark(head), Mark::Fail, "{head}");
+    }
+    // A word the suffix stands after only when it is the whole word: `catalog.exe` is no `cat`.
+    assert_eq!(mark("catalog.exe status.txt"), Mark::Note);
+}
+
+/// Item 3 (F5): the replay measures or says why not. Unset, it skips; set to a file it cannot use, it panics naming it.
+#[test]
+fn p47d_fix2_the_replay_measures_or_says_why_not() {
+    assert!(p47d_replay_list(None).is_none(), "unset: the replay skips");
+    let dir = temp("p47d-replay-list");
+    let mut seen = Vec::new();
+    for (name, body, why) in [
+        ("missing.json", None, "cannot be read"),
+        ("text.json", Some("not json"), "is not JSON"),
+        ("empty.json", Some("[]"), "holds no orders"),
+        ("object.json", Some("{\"order\": \"o\"}"), "holds no orders"),
+    ] {
+        let path = dir.join(name);
+        if let Some(body) = body {
+            std::fs::write(&path, body).expect("list");
+        }
+        let list = path.to_string_lossy().into_owned();
+        let message = match std::panic::catch_unwind(|| p47d_replay_list(Some(&list))) {
+            Ok(rows) => format!("no panic: {rows:?}"),
+            Err(panic) => panic.downcast_ref::<String>().cloned().unwrap_or_default(),
+        };
+        seen.push((name, message.contains(&list) && message.contains(why), message));
+    }
+    let one = dir.join("one.json");
+    let row = r#"[{"root": "C:\\p", "run": "r", "order": "o", "class": "research.web"}]"#;
+    std::fs::write(&one, row).expect("list");
+    let rows = p47d_replay_list(Some(&one.to_string_lossy()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (name, named, message) in seen {
+        assert!(named, "{name}: {message}");
+    }
+    assert_eq!(rows.map(|rows| rows.len()), Some(1));
+}
+
+/// Item 4 (F6): agy writes `Command failed to run: ...` in a step's header when the command never started (one step in
+/// the record: "The filename or extension is too long."). That is a failed command, as a non-zero exit is, for every
+/// reader of `agy_command_ok`. The same words below `Command output:` are the command's own text and fail nothing. An
+/// output with no exit line and no such header still reads as ended well, as before this round: this round reads one
+/// more header line, it does not make a missing exit line a failure.
+#[test]
+fn p47d_fix2_a_command_that_failed_to_run_is_a_failed_command() {
+    let failed = "Command failed to run: The filename or extension is too long..\n";
+    for (output, ok) in [
+        (failed.to_owned(), false),
+        (format!("{P47D_RAN}{failed}"), false),
+        (format!("{P47D_RAN}{failed}\nCommand output:\nx\n"), false),
+        // Below the marker: the command's own words.
+        (format!("{P47D_RAN}Command exited with code 0.\n\nCommand output:\n{failed}"), true),
+        (format!("{P47D_RAN}\nCommand output:\n{failed}"), true),
+        // No exit line and no such header: ended well, as before.
+        (format!("{P47D_RAN}\nCommand output:\n200 https://example.com/a\n"), true),
+        ("200 https://example.com/a\n".to_owned(), true),
+    ] {
+        assert_eq!(agy_command_ok(&output), ok, "{output:?}");
+    }
+    // Its readers follow: a local read whose command never ran is taken back, one that ran is kept.
+    let read = p47d_step(7, "DONE", "Get-Content Docs\\notes.md", &format!("{P47D_RAN}{failed}"));
+    assert!(stream_reads(&read).local.is_empty(), "{read}");
+    let ran = p47d_step(7, "DONE", "Get-Content Docs\\notes.md", &format!("{P47D_RAN}\nCommand output:\n{failed}"));
+    assert!(!stream_reads(&ran).local.is_empty(), "{ran}");
 }

@@ -29,12 +29,22 @@ T_EXIT = "p47d_fix_the_exit_line_is_read_below_agy_s_header"
 T_CODE = "p47d_fix_a_shell_s_code_quote_closes_and_e_is_code_only_for_an_interpreter"
 T_SHELL = "p47d_fix_a_backslash_escapes_a_quote_only_in_bash"
 
+T_PROSE = "p47d_fix2_prose_apostrophes_hide_the_curl_between_them"
+T_DQ = "p47d_fix2_double_quotes_keep_an_apostrophe_text"
+T_GLUED_FLAG = "p47d_fix2_a_quote_glued_to_its_flag_holds_its_separator"
+T_GLUED_CODE = "p47d_fix2_python_takes_its_code_glued_to_c"
+T_SUFFIX = "p47d_fix2_a_reader_named_with_exe_or_com_refuses_a_cut_step"
+T_REPLAY = "p47d_fix2_the_replay_measures_or_says_why_not"
+T_FAILED_RUN = "p47d_fix2_a_command_that_failed_to_run_is_a_failed_command"
+TESTS = "src/nirvana_gate/tests.rs"
+
 STATUS_CALL = "        if status_read(url, &reads) {\n            continue;\n        }\n"
 # The fix round (S3): agy's command is read for PowerShell.
 FETCHES = "                let fetches = command_fetches(command, Shell::PowerShell);\n"
 RECORD = "                    reads.status.extend(status_urls(output));\n"
-# The fix round (S2): the quote arm skips a prose apostrophe; the code quote has arms of its own before it.
-QUOTE_ARM = "            b'\"' | b'\\'' if !prose_apostrophe(bytes, at) => {\n"
+# The fix round (S2): the code quote has arms of its own before the quote arm. The second fix round (F1): the quote
+# arm reads every apostrophe as a quote again (the prose rule is gone).
+QUOTE_ARM = "            b'\"' | b'\\'' => {\n"
 CODE_OPEN = ("            byte @ (b'\"' | b'\\'') if code.is_none() && opens_code(&cmd[start..at]) => "
              "code = Some(byte),\n")
 CODE_CLOSE = "            byte @ (b'\"' | b'\\'') if code == Some(byte) => code = None,\n"
@@ -210,12 +220,7 @@ CONTROLS = (
     # S2, `-e` in any case: `node -E "curl"` reads as code, its status line counts (the last pattern case).
     Control("p47d_fix_e_any_case", GATE, '    if flag == "-e" {\n', '    if flag.eq_ignore_ascii_case("-e") {\n',
             T_CODE, "rust"),
-    # S2, a prose apostrophe opens a quote: `echo don't; curl ...; echo it's` joins the curl to the echoes again.
-    Control("p47d_fix_prose_quote", GATE, QUOTE_ARM, "            b'\"' | b'\\'' => {\n", T_CODE, "rust"),
-    # S2, a string prefix read as prose: `print(r'x; yt-dlp <id>')` cuts at its `;`, and the id counts.
-    Control("p47d_fix_prose_prefix", GATE,
-            '    !word.is_empty() && !["r", "f", "b", "u", "br", "rb", "rf", "fr"].contains(&word.as_str())\n',
-            "    !word.is_empty()\n", T_CODE, "rust"),
+    # (The second fix round removed p47d_fix_prose_quote and p47d_fix_prose_prefix with the prose rule they pinned.)
     # S3, a backslash escapes on agy: `cd "C:\dir\"; curl ...` is one segment again and its status line fails.
     Control("p47d_fix_agy_backslash", GATE, PS_ESCAPE,
             "            Shell::PowerShell => matches!(byte, b'\\\\' | b'`'),\n", T_SHELL, "rust"),
@@ -263,4 +268,37 @@ CONTROLS = (
             "$_ }` (off Windows, `-o /dev/null`) does; a loop is fine", T_TEXT, "rust"),
     # SOURCES_LINE's loop follows redirects: its `url_effective` would be the final URL.
     Control("p47d_fix_text_sources_redirects", AGY, "curl.exe -s -o NUL", "curl.exe -s -L -o NUL", T_TEXT, "rust"),
+    # ---- the second fix round (the second review's F1 to F7) ----
+    # F1, an apostrophe opens nothing: `echo don't; curl -s -K urls.txt ...; echo it's` cuts at its `;`, the curl is a
+    # segment of its own, and its status line counts (Pass where the test wants Fail).
+    Control("p47d_fix2_prose_apostrophe_opens_nothing", GATE, QUOTE_ARM, "            b'\"' => {\n", T_PROSE, "rust"),
+    # A double quote opens nothing: `"don't"`'s apostrophe opens a string that runs to `"it'`, which hides the curl
+    # (Fail where the test wants Pass).
+    Control("p47d_fix2_double_quote_opens_nothing", GATE, QUOTE_ARM, "            b'\\'' => {\n", T_DQ, "rust"),
+    # F2, an apostrophe opens nothing: `-H'Accept: text/html; q=1'` cuts at its `;` and the URL lands in a segment with
+    # no fetch word (Fail where the test wants Pass).
+    Control("p47d_fix2_glued_header_cut", GATE, QUOTE_ARM, "            b'\"' => {\n", T_GLUED_FLAG, "rust"),
+    # The glued code flag read as before this round: `python -c'...'`'s quote is a string, the urlopen in it is text,
+    # the command fetches nothing, and its status line fails (the first assertion).
+    Control("p47d_fix2_glued_code_unread", GATE, "fn opens_code(head: &str) -> bool {\n",
+            "fn opens_code(head: &str) -> bool {\n    if !head.ends_with(char::is_whitespace) {\n"
+            "        return false;\n    }\n", T_GLUED_CODE, "rust"),
+    # F4, the local readers' follow check without the suffix: `cat.exe status.txt`, the first case, counts with a note.
+    Control("p47d_fix2_reader_suffix_unread", GATE, "            past_suffix(&code[at + word.len()..])\n",
+            "            code[at + word.len()..]\n", T_SUFFIX, "rust"),
+    # F4, `.exe` only: `more.com status.txt`, the fourth case, counts with a note (the three `.exe` cases still fail).
+    Control("p47d_fix2_com_unread", GATE,
+            '    after.strip_prefix(".exe").or_else(|| after.strip_prefix(".com")).unwrap_or(after)\n',
+            '    after.strip_prefix(".exe").unwrap_or(after)\n', T_SUFFIX, "rust"),
+    # F5, a list with no orders measures nothing and passes: `empty.json` (`[]`) does not panic.
+    Control("p47d_fix2_replay_empty_passes", TESTS, "        .filter(|rows| !rows.is_empty())\n", "", T_REPLAY,
+            "rust"),
+    # F6, `Command failed to run` read as before: that output alone, the first case, reads as ended well.
+    Control("p47d_fix2_failed_to_run_ok", GATE,
+            '    if header.lines().any(|line| line.starts_with("Command failed to run")) {\n', "    if false {\n",
+            T_FAILED_RUN, "rust"),
+    # F7, a backslash escapes on agy: the agy form of `curl -H "X-Note: \"a; b\"" <url>` counts its URL (Pass where
+    # the test wants Fail; the Bash case before it still passes).
+    Control("p47d_fix2_agy_backslash_counts", GATE, PS_ESCAPE,
+            "            Shell::PowerShell => matches!(byte, b'\\\\' | b'`'),\n", T_QUOTE, "rust"),
 )

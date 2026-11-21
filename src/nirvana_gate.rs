@@ -1446,14 +1446,12 @@ const CODE_E_COMMANDS: &[&str] = &[
     "osascript",
 ];
 
-/// The quote that follows `head` opens a shell's code: `head` ends in whitespace after `-c`, `-Command` or `/c` (any
-/// case), or after a lower-case `-e` whose command word (the nearest word before it that is no flag) is one of
-/// `CODE_E_COMMANDS`. That quote holds commands, not a string, so `segment_code` reads it as `(` and `segments` cuts
-/// inside it.
+/// The quote that follows `head` opens a shell's code: `head` ends in `-c`, `-Command` or `/c` (any case), or in a
+/// lower-case `-e` whose command word (the nearest word before it that is no flag) is one of `CODE_E_COMMANDS`, with
+/// whitespace after the flag or none. That quote holds commands, not a string, so `segment_code` reads it as `(` and
+/// `segments` cuts inside it. Plan 47 P47d second fix round (F1): glued to its flag too, since python takes
+/// `-c'import urllib.request; ...'` as its code (`-c<code>`); without the prose rule that fetch read as a string.
 fn opens_code(head: &str) -> bool {
-    if !head.ends_with(char::is_whitespace) {
-        return false;
-    }
     let mut words = head.split_whitespace().rev();
     let flag = words.next().unwrap_or("");
     if flag == "-e" {
@@ -1501,22 +1499,6 @@ impl Shell {
             Shell::Posix
         }
     }
-}
-
-/// Plan 47 P47d fix round (S2): the apostrophe at `at` stands inside a word of prose (`don't`, `it's`): a letter or
-/// digit before it and a letter after. It opens no quote: `echo don't; curl -s -K urls.txt; echo it's` joined its curl
-/// to two echoes. A python string's prefix (`r'`, `f'`, `rb'`) opens one.
-fn prose_apostrophe(bytes: &[u8], at: usize) -> bool {
-    if bytes[at] != b'\'' || !bytes.get(at + 1).is_some_and(u8::is_ascii_alphabetic) {
-        return false;
-    }
-    let word: String = bytes[..at]
-        .iter()
-        .rev()
-        .take_while(|byte| byte.is_ascii_alphanumeric())
-        .map(|&byte| char::from(byte.to_ascii_lowercase()))
-        .collect();
-    !word.is_empty() && !["r", "f", "b", "u", "br", "rb", "rf", "fr"].contains(&word.as_str())
 }
 
 /// Plan 47 P47d: where the quote at `at` (`'` or `"`) closes, on its own line, or `None` when it does not. In `"..."`
@@ -1604,11 +1586,17 @@ const ARG_COMMANDS: &[&str] = &[
     "gc",
 ];
 
-/// Each place `word` stands in `code` as a command word, `.exe` allowed after it.
+/// What follows a command word past Windows' `.exe` or `.com` (`curl.exe`; Git's `cat.exe`, Windows' `more.com`), in
+/// lower case code. Plan 47 P47d second fix round (F4): `.com` and the local readers' follow check had none, so
+/// `cat.exe status.txt` and `more.com status.txt` were not refused on the cut path as `cat` and `more` are.
+fn past_suffix(after: &str) -> &str {
+    after.strip_prefix(".exe").or_else(|| after.strip_prefix(".com")).unwrap_or(after)
+}
+
+/// Each place `word` stands in `code` as a command word, `.exe` or `.com` allowed after it (`past_suffix`).
 fn command_words<'a>(code: &'a str, word: &'a str) -> impl Iterator<Item = usize> + 'a {
     code.match_indices(word).filter_map(move |(at, _)| {
-        let after = &code[at + word.len()..];
-        let after = after.strip_prefix(".exe").unwrap_or(after);
+        let after = past_suffix(&code[at + word.len()..]);
         let joined = after
             .chars()
             .next()
@@ -2201,9 +2189,14 @@ fn command_media(cmd: &str, shell: Shell) -> (Vec<String>, Vec<String>) {
 /// `Command output:` (all of it when the marker is absent: then agy writes `No output from the command.`). agy often
 /// writes `Created At:`/`Completed At:` lines, or a note that the output was cut, above it: 384 of the record's 780
 /// non-zero exits carried that header and read as exit 0 when only the output's first line was looked at. Below the
-/// marker it is the command's own text.
+/// marker it is the command's own text. Its second round (F6): a header line `Command failed to run: ...` is a command
+/// that never started (one step in the record, "The filename or extension is too long."), a failure as a non-zero exit
+/// is. With neither line the output reads as ended well, as before.
 fn agy_command_ok(output: &str) -> bool {
     let header = output.split_once("Command output:").map_or(output, |(header, _)| header);
+    if header.lines().any(|line| line.starts_with("Command failed to run")) {
+        return false;
+    }
     header
         .lines()
         .find_map(|line| line.strip_prefix("Command exited with code "))
@@ -2217,8 +2210,10 @@ fn agy_command_ok(output: &str) -> bool {
 /// to its next unescaped same quote, which closes it and opens nothing. Plan 47 P47d: the cut was blind to quotes, so
 /// option3-amazon-bom's `bladebro act eval "a?.innerText || b?.innerText" --url "<url>"` put its `--url` in a segment
 /// with no fetch word (3 URLs it had opened, sent back). Its fix round (S2): the code quote's close was read as a new
-/// quote, which swallowed the next `;` (`python -c "print(1)"; yt-dlp ...` lost its fetch). An apostrophe in prose
-/// (`prose_apostrophe`) opens nothing. A single `&` still cuts nothing: PowerShell's `& "C:\x\curl.exe"` is a call.
+/// quote, which swallowed the next `;` (`python -c "print(1)"; yt-dlp ...` lost its fetch). Its second round (F1, F2):
+/// an apostrophe opens a quote wherever it stands, prose or not, as Bash and PowerShell read it: in `echo don't; curl
+/// <url>; echo it's` the curl is inside a string and never runs. A single `&` still cuts nothing: PowerShell's `&
+/// "C:\x\curl.exe"` is a call.
 fn segments(cmd: &str, shell: Shell) -> impl Iterator<Item = &str> {
     let bytes = cmd.as_bytes();
     let mut out = Vec::new();
@@ -2230,7 +2225,7 @@ fn segments(cmd: &str, shell: Shell) -> impl Iterator<Item = &str> {
             byte if code == Some(b'"') && shell.escapes(byte) => at += 1,
             byte @ (b'"' | b'\'') if code == Some(byte) => code = None,
             byte @ (b'"' | b'\'') if code.is_none() && opens_code(&cmd[start..at]) => code = Some(byte),
-            b'"' | b'\'' if !prose_apostrophe(bytes, at) => {
+            b'"' | b'\'' => {
                 if let Some(end) = quote_end(bytes, at, shell) {
                     at = end;
                 }
@@ -2358,7 +2353,7 @@ fn segment_reads_local(segment: &str) -> bool {
     let code = segment_code(segment, Shell::Either).to_ascii_lowercase();
     LOCAL_READERS.iter().any(|word| {
         command_words(&code, word).any(|at| {
-            code[at + word.len()..]
+            past_suffix(&code[at + word.len()..])
                 .chars()
                 .next()
                 .is_none_or(char::is_whitespace)
