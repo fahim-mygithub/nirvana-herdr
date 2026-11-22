@@ -353,9 +353,13 @@
           nodes.clear();
           byId.clear();
           local = [];
-          if (!data.transcript && !(data.messages || []).length) {
+          // P39t: with no transcript and no bubbles the screen box is all there is, so it opens; a chat with bubbles
+          // has it closed, the PC's last lines showing.
+          const only = !data.transcript && !(data.messages || []).length;
+          if (only) {
             list.append(h('span', { class: 'note', text: 'No transcript for this agent: the PC’s screen is below.' }));
           }
+          liveBox.classList.toggle('open', only);
           upsert(data.messages || []);
           drawLive(data.live);
           prompts.picker(data.picker);

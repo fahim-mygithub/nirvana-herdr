@@ -96,6 +96,11 @@ fn keyed(messages: &[Value]) -> HashMap<String, String> {
         .collect()
 }
 
+/// Whether herdr's row carries the agent's own transcript token (`chat::transcript_for` takes it first).
+fn by_token(agent: &Value) -> bool {
+    agent["tokens"][crate::nirvana_spaces::TRANSCRIPT_TOKEN].is_string()
+}
+
 fn error(status: u16, why: impl Into<String>) -> Response {
     Response::json(status, &json!({ "error": why.into() }))
 }
@@ -264,6 +269,8 @@ impl Site {
         }
         let id = found.id().to_string();
         let mut path = self.transcript(&found);
+        // Whether `path` is the agent's own token's (P39t), not the folder's record.
+        let mut own = path.is_some() && by_token(&found.agent);
         let mut stamp = chat::stamp(path.as_deref());
         let messages = chat::read(path.as_deref());
         let mut sent = keyed(&messages);
@@ -315,9 +322,20 @@ impl Site {
                                     let found = self.found(&id).ok();
                                     let fresh =
                                         found.as_ref().and_then(|found| self.transcript(found));
+                                    // P39t: a row with no kind is a probe that has not answered
+                                    // (`spaces::unread_row`: the server's first ask, or its first after a quiet
+                                    // minute), not a transcript that went. The file the agent's own token gave
+                                    // stays; the folder's record does not, as above.
+                                    let fresh = match &found {
+                                        Some(found) if own && spaces::unread_row(&found.agent) => {
+                                            path.clone()
+                                        }
+                                        _ => fresh,
+                                    };
                                     match found {
                                         Some(found) if fresh != path => {
                                             path = fresh;
+                                            own = path.is_some() && by_token(&found.agent);
                                             stamp = chat::stamp(path.as_deref());
                                             let messages = chat::read(path.as_deref());
                                             sent = keyed(&messages);

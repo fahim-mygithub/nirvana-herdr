@@ -6,7 +6,10 @@
 //!    own session file and its folder (`src/nirvana_spaces.rs` `probe`, the `crate::detect::Agent::Claude` arm:
 //!    `<claude config>/projects/<claude_project_slug(cwd)>/<session_id>.jsonl`), and the Running square reads the
 //!    same token (`src/client/shell/nirvana_mods.rs:82`). It is the live conversation, so it is the same file
-//!    "Open Nirvana here" resumes from once that Claude stops.
+//!    "Open Nirvana here" resumes from once that Claude stops. P39t: `agent.list`, which this server reads, carries it
+//!    from `App::agent_info` (`src/app/agents.rs` `nirvana_tokens`); until then only the window's snapshot did, so
+//!    the phone always fell to rule 2. The probe answers a moment after the server's first ask
+//!    (`nirvana_spaces::cached_model`); the feed builds again until it has (`spaces::Unread`).
 //! 2. With no token (the probe has not run yet, or a Claude that never prompted): the folder's session record,
 //!    which is what "Open Nirvana here" resumes from (`src/nirvana_launch.rs` `resume_session_at`, called by
 //!    `resume_session` from `src/app/nirvana_new.rs:213`), with the same checks: a plain session id, the file's stem
@@ -71,14 +74,16 @@ pub fn is_transcript(path: &Path, claude: &Path) -> bool {
     stem_ok && path.is_absolute() && path.is_file() && same_dir(projects, &claude.join("projects"))
 }
 
-/// Whether herdr's row is a Claude: its kind token, else herdr's agent label.
+/// Whether herdr's row is a Claude: its kind token, else herdr's agent label. A Claude Code on a local model
+/// (`Kind::Local`) is one: P39t, once `agent.list` carried the kind token, such a pane read `local` where herdr's label
+/// had said `claude`, and lost its pickers on the phone.
 pub fn is_claude(agent: &Value) -> bool {
     use crate::nirvana_spaces::{Kind, KIND_TOKEN};
     let kind = match agent["tokens"][KIND_TOKEN].as_str() {
         Some(token) => Kind::parse(token),
         None => agent["agent"].as_str().and_then(Kind::from_agent_label),
     };
-    kind == Some(Kind::Claude)
+    matches!(kind, Some(Kind::Claude | Kind::Local))
 }
 
 fn folder_of(agent: &Value) -> Option<&Path> {

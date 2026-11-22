@@ -1115,3 +1115,20 @@ pub fn cached(
         None
     }
 }
+
+/// P39t: a reading for a test's made-up shell pid, made under `status`. Marked pending, so `cached` never queues a
+/// real read for it.
+#[cfg(test)]
+pub fn seed_for_test(shell_pid: u32, token: Option<String>, status: AgentStatus) {
+    let now = Instant::now();
+    cache().lock().unwrap_or_else(|e| e.into_inner()).insert(
+        shell_pid,
+        Entry {
+            token,
+            read_for: Some(status),
+            checked: Some(now),
+            pending: true,
+            asked: now,
+        },
+    );
+}

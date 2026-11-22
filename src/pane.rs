@@ -4100,6 +4100,12 @@ impl PaneRuntime {
         (release_tx, writer)
     }
 
+    /// P39t: a test runtime's shell pid, which the Nirvana caches key on. A test fixture keeps its processes on drop
+    /// (`preserve_processes_on_drop`), so no pid set here is ever signalled.
+    pub(crate) fn test_set_child_pid(&self, pid: u32) {
+        self.child_pid.store(pid, Ordering::Release);
+    }
+
     pub(crate) fn test_process_pty_bytes(&self, bytes: &[u8]) -> Vec<Bytes> {
         let _content_write_guard = match self.content_write_lock.lock() {
             Ok(guard) => guard,

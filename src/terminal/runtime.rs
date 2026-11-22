@@ -662,6 +662,10 @@ impl TerminalRuntime {
         ))
     }
 
+    pub(crate) fn test_set_child_pid(&self, pid: u32) {
+        self.0.test_set_child_pid(pid);
+    }
+
     pub(crate) fn test_process_pty_bytes(&self, bytes: &[u8]) -> Vec<Bytes> {
         self.0.test_process_pty_bytes(bytes)
     }

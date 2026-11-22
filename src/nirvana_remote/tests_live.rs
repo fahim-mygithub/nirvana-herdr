@@ -456,6 +456,11 @@ impl View {
 
     /// The next `name` event's data, within `within`; events of other names are passed over.
     fn next(&mut self, name: &str, within: Duration) -> Option<Value> {
+        self.next_of(&[name], within).map(|(_, data)| data)
+    }
+
+    /// The next event named one of `names`, with its name, within `within`; events of other names are passed over.
+    fn next_of(&mut self, names: &[&str], within: Duration) -> Option<(String, Value)> {
         let started = Instant::now();
         loop {
             while let Some(end) = self.buffer.find("\n\n") {
@@ -470,8 +475,8 @@ impl View {
                         data = rest;
                     }
                 }
-                if kind == name {
-                    return serde_json::from_str(data).ok();
+                if names.contains(&kind) {
+                    return Some((kind.to_string(), serde_json::from_str(data).ok()?));
                 }
             }
             if started.elapsed() >= within || !self.pump(Duration::from_millis(300)) {
@@ -2177,7 +2182,9 @@ fn the_page_ends_a_gone_view_and_waits_out_composition() {
 /// the caret at the end. The layout itself was measured in headless Chromium and WebKit only (record p39g).
 #[test]
 fn the_message_box_grows_with_its_text_and_comes_back_at_the_end() {
-    let w = world("grow");
+    // P39t: its own folder. Sharing "grow" with `the_chat_view_pushes_new_bubbles_as_the_transcript_grows`, this
+    // test's drop removed that one's transcript under a parallel run, and it waited for a bubble that never came.
+    let w = world("grow-box");
     let running = serve(w.site());
     let (_, _, chat) = get(running.addr, "/chat.js", OWNER);
     let (_, _, css) = get(running.addr, "/app.css", OWNER);
@@ -2278,4 +2285,326 @@ fn asset_reads_in_parallel_arrive_whole() {
     for thread in threads {
         thread.join().expect("every read whole");
     }
+}
+
+// --- P39t, 2026-11-22: the transcript token in agent.list, and the "On the PC now" box ------------------------------
+
+/// Wait until herdr has answered `agent.list` `calls` times, then a little more. A chat view's first four are
+/// `found`, `listen`, and the feed's two around its first subscription.
+fn listed(herdr: &FakeHerdr, calls: usize) {
+    let started = Instant::now();
+    while herdr.calls("agent.list").len() < calls && started.elapsed() < Duration::from_secs(3) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+}
+
+fn feed_settled(herdr: &FakeHerdr) {
+    listed(herdr, 4);
+}
+
+/// P39t item 1. With no window attached the phone is the probe's only reader: the first `agent.list` has no tokens
+/// (`nirvana_spaces::cached_model` answers `None` until its probe has run), and the probe's answer comes with no
+/// herdr event. The feed builds again while a row has no kind (`spaces::Unread`), so an open chat moves to the
+/// agent's transcript within a second or two, not at the agent's next change of state.
+#[test]
+fn a_tokens_arrival_alone_wakes_the_open_chat() {
+    let w = world("token-alone");
+    // p1 before its probe: no tokens. herdr's label says Claude, and the Claudes p3 and p4 share its folder.
+    w.herdr.agents.lock().unwrap()[0]["tokens"] = json!({});
+    let running = serve(w.site());
+    let mut view = View::open(running.addr, "/api/chat/events?agent=p1");
+    let first = view.next("chat", Duration::from_secs(5)).expect("the chat");
+    assert_eq!(first["transcript"], false, "no token yet: the note");
+    // Past the feed's first build for the unread agent (the fifth call, `UNREAD_EVERY` after its subscription), so
+    // the next one comes from the builds that follow it, not the one after subscribing.
+    listed(&w.herdr, 5);
+    // The probe answers, and herdr sends no event for it.
+    w.herdr.agents.lock().unwrap()[0]["tokens"] = json!({
+        "nirvana_model": "Claude Opus 5.5",
+        "nirvana_kind": "claude",
+        "nirvana_transcript": w.path.display().to_string(),
+    });
+    let started = Instant::now();
+    let whole = view
+        .next("chat", Duration::from_secs(5))
+        .expect("the token alone wakes the view: the whole chat from its file");
+    assert_eq!(whole["transcript"], true);
+    assert_eq!(whole["messages"].as_array().unwrap().len(), 4);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "within the feed's wait: {:?}",
+        started.elapsed()
+    );
+    // The file came from its own token, so a later row without tokens (the cache forgot it) keeps it.
+    w.herdr.agents.lock().unwrap()[0]["tokens"] = json!({});
+    w.herdr.set_status("p1", "done");
+    w.herdr
+        .emit(json!({"event": "pane.agent_status_changed", "data": {"pane_id": "p1"}}));
+    let (kind, data) = view
+        .next_of(&["chat", "agent"], Duration::from_secs(5))
+        .expect("the row's change");
+    assert_eq!(kind, "agent", "the token's file is kept: {data}");
+}
+
+/// P39t item 1. The feed's builds for an agent with no kind are bounded: `UNREAD_TRIES` for the same agents, again
+/// when they change, none once every row has its kind.
+#[test]
+fn the_feed_builds_again_for_an_unread_agent_a_bounded_number_of_times() {
+    let list = |kinds: &[(&str, &str)]| {
+        let agents: Vec<Value> = kinds
+            .iter()
+            .map(|(id, kind)| json!({"id": id, "kind": kind}))
+            .collect();
+        json!({"spaces": [{"agents": agents}]})
+    };
+    let mut unread = spaces::Unread::default();
+    let both = list(&[("p1", ""), ("p2", "claude")]);
+    for _ in 0..spaces::UNREAD_TRIES {
+        assert_eq!(unread.after(&both), Some(spaces::UNREAD_EVERY));
+    }
+    assert_eq!(
+        unread.after(&both),
+        None,
+        "an agent never read stops costing"
+    );
+    assert_eq!(
+        unread.after(&list(&[("p1", ""), ("p3", "")])),
+        Some(spaces::UNREAD_EVERY),
+        "a new unread agent"
+    );
+    assert_eq!(unread.after(&list(&[("p1", "claude")])), None, "all read");
+    assert!(spaces::UNREAD_EVERY < spaces::FOLLOW_UP);
+}
+
+/// P39t item 1. `cached_model` drops an entry nobody asked for in `FORGET` (60 s), so with no window the first
+/// `agent.list` after a quiet minute has no tokens for any agent until the probe runs again. That is the cache, not
+/// the agent: an open chat keeps the file its own token gave and is not swapped for the note.
+#[test]
+fn a_row_that_lost_its_tokens_keeps_its_own_transcript() {
+    let w = world("token-forgotten");
+    let running = serve(w.site());
+    let mut view = View::open(running.addr, "/api/chat/events?agent=p1");
+    let first = view.next("chat", Duration::from_secs(5)).expect("the chat");
+    assert_eq!(first["transcript"], true);
+    feed_settled(&w.herdr);
+    w.herdr.agents.lock().unwrap()[0]["tokens"] = json!({});
+    w.herdr.set_status("p1", "done");
+    w.herdr
+        .emit(json!({"event": "pane.agent_status_changed", "data": {"pane_id": "p1"}}));
+    let (kind, data) = view
+        .next_of(&["chat", "agent"], Duration::from_secs(5))
+        .expect("the row's change");
+    assert_eq!(
+        kind, "agent",
+        "the row changed and the transcript did not: {data}"
+    );
+    assert_eq!(data["status"], "done");
+}
+
+/// P39t item 1. The keep is for the agent's own token only. A chat showing the folder's record (a lone Claude with no
+/// transcript token) whose row loses its tokens as a second Claude comes into the folder gets the note, as before
+/// (chat.rs, "Whose record"): the record may be the other's.
+#[test]
+fn a_folders_record_is_not_kept_when_another_claude_comes() {
+    let w = world("record-not-kept");
+    let home = with_record(&w);
+    let elsewhere = w.root.join("other");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    {
+        let mut agents = w.herdr.agents.lock().unwrap();
+        agents[0]["tokens"] = json!({"nirvana_model": "Claude Opus 5.5", "nirvana_kind": "claude"});
+        for agent in agents.iter_mut().skip(1) {
+            agent["cwd"] = json!(elsewhere.display().to_string());
+        }
+    }
+    let running = serve(site_with(
+        w.herdr.clone(),
+        Some(w.claude.clone()),
+        Some(home.clone()),
+    ));
+    let mut view = View::open(running.addr, "/api/chat/events?agent=p1");
+    let first = view.next("chat", Duration::from_secs(5)).expect("the chat");
+    assert_eq!(
+        first["transcript"], true,
+        "a lone Claude: the folder's record"
+    );
+    feed_settled(&w.herdr);
+    {
+        let mut agents = w.herdr.agents.lock().unwrap();
+        agents[0]["tokens"] = json!({});
+        // p3, a Claude, comes into the folder.
+        agents[2]["cwd"] = json!(w.folder.display().to_string());
+    }
+    w.herdr.set_status("p1", "done");
+    w.herdr
+        .emit(json!({"event": "pane.agent_status_changed", "data": {"pane_id": "p1"}}));
+    let (kind, data) = view
+        .next_of(&["chat", "agent"], Duration::from_secs(5))
+        .expect("the row's change");
+    assert_eq!(kind, "chat", "the record is not kept: {data}");
+    assert_eq!(data["transcript"], false);
+}
+
+/// P39t item 1. The builds for an unread agent do not cancel alpha 0.70.0's `FOLLOW_UP` build after an event, which
+/// shows a background-wait reading the event asked for a moment later, with no event of its own.
+#[test]
+fn an_events_follow_up_build_still_comes_after_the_unread_builds_stop() {
+    let w = world("follow-up");
+    // p2 before its probe.
+    w.herdr.agents.lock().unwrap()[1]["tokens"] = json!({});
+    let running = serve(w.site());
+    let mut view = View::open(running.addr, "/api/events");
+    view.next("spaces", Duration::from_secs(5))
+        .expect("the list");
+    let started = Instant::now();
+    while w.herdr.subscribed().is_empty() && started.elapsed() < Duration::from_secs(3) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    w.herdr.set_status("p1", "done");
+    let event_at = Instant::now();
+    w.herdr
+        .emit(json!({"event": "pane.agent_status_changed", "data": {"pane_id": "p1"}}));
+    std::thread::sleep(Duration::from_millis(500));
+    // p2's probe answers before the next build for it, so the builds for an unread agent stop there.
+    w.herdr.agents.lock().unwrap()[1]["tokens"] =
+        json!({"nirvana_model": "Claude Opus 5.5", "nirvana_kind": "claude"});
+    let until = |at: Duration| std::thread::sleep(at.saturating_sub(event_at.elapsed()));
+    until(spaces::FOLLOW_UP - Duration::from_secs(1));
+    let before = w.herdr.calls("agent.list").len();
+    until(spaces::FOLLOW_UP + Duration::from_secs(1));
+    let after = w.herdr.calls("agent.list").len();
+    assert!(
+        after > before,
+        "the build FOLLOW_UP after the event: {before} calls, then {after}"
+    );
+}
+
+/// A second transcript in the same Claude project folder: a seated worker's, in its order's folder.
+fn worker_transcript(w: &World) -> PathBuf {
+    let path = w
+        .path
+        .with_file_name("0a0b0c0d-0000-4000-8000-00000000000f.jsonl");
+    std::fs::write(
+        &path,
+        concat!(
+            r#"{"type":"user","uuid":"wu1","message":{"role":"user","content":"Build the made-up order"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"wa1","message":{"content":[{"type":"text","text":"Built it."}]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    path
+}
+
+/// P39t item 3. An orchestrator Claude and a seated worker in one folder, each row with its own token: each reads
+/// its own file, never the other's. The orchestrator's row with no token yet and the worker beside it still gets the
+/// note: the folder's record is a lone Claude's only (chat.rs, "Whose record").
+#[test]
+fn an_orchestrator_and_a_worker_in_one_folder_each_read_their_own() {
+    let w = world("one-folder");
+    let home = with_record(&w);
+    let worker_path = worker_transcript(&w);
+    let token = crate::nirvana_spaces::TRANSCRIPT_TOKEN;
+    let mut orchestrator = agent("p1", "w1", "nirvana", "idle", &w.folder);
+    orchestrator["tokens"][token] = json!(w.path.display().to_string());
+    let mut worker = agent("p5", "w1", "worker", "working", &w.folder);
+    worker["tokens"][token] = json!(worker_path.display().to_string());
+    let read = |agent: &Value, others: &[Value]| {
+        chat::transcript_for(agent, others, Some(&w.claude), Some(&home))
+    };
+    assert_eq!(
+        read(&orchestrator, std::slice::from_ref(&worker)),
+        Some(w.path.clone()),
+        "the orchestrator's own"
+    );
+    assert_eq!(
+        read(&worker, std::slice::from_ref(&orchestrator)),
+        Some(worker_path.clone()),
+        "the worker's own, never the orchestrator's"
+    );
+    let mut early = orchestrator.clone();
+    early["tokens"] = json!({});
+    assert_eq!(
+        read(&early, std::slice::from_ref(&worker)),
+        None,
+        "no token yet and a worker in the folder: the note"
+    );
+    // Over HTTP, from herdr's rows.
+    {
+        let mut agents = w.herdr.agents.lock().unwrap();
+        agents[0] = orchestrator;
+        agents.push(worker);
+    }
+    let running = serve(site_with(
+        w.herdr.clone(),
+        Some(w.claude.clone()),
+        Some(home.clone()),
+    ));
+    let text = |id: &str| {
+        let (_, _, body) = get(running.addr, &format!("/api/chat?agent={id}"), OWNER);
+        let chat: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(chat["transcript"], true, "{id}: {body}");
+        chat["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|bubble| bubble["text"].as_str().unwrap_or("").to_string())
+            .collect::<Vec<_>>()
+    };
+    let mine = text("p1");
+    assert!(
+        mine.contains(&"Gate G and L together".to_string()),
+        "{mine:?}"
+    );
+    assert!(!mine.contains(&"Build the made-up order".to_string()));
+    let theirs = text("p5");
+    assert_eq!(theirs, ["Build the made-up order", "Built it."]);
+}
+
+/// P39t item 2. With the kind token in `agent.list`, a Claude Code pane on a local model reads `local`, not `claude`;
+/// before, the phone saw only herdr's label, `claude`. It is still Claude Code to the phone: its pickers are Claude
+/// Code's (`prompt::shown`), and it counts as a second Claude in a folder whose record it may own.
+#[test]
+fn a_local_model_claude_is_still_claude_code_to_the_phone() {
+    let w = world("local-kind");
+    let home = with_record(&w);
+    let local = kind(
+        agent("p8", "w1", "chores", "idle", &w.folder),
+        "claude",
+        Some("local"),
+    );
+    assert!(chat::is_claude(&local), "a local model's Claude Code");
+    let mut early = agent("p1", "w1", "nirvana", "idle", &w.folder);
+    early["tokens"] = json!({});
+    assert_eq!(
+        chat::transcript_for(&early, &[local], Some(&w.claude), Some(&home)),
+        None,
+        "a local Claude in the folder hides the record, as herdr's label did"
+    );
+}
+
+/// P39t item 4. When the chat has no transcript and no bubbles, the "On the PC now" box is the only content, so it
+/// is open from the start; closed, it shows the last lines sent (the newest is at the bottom of a terminal), not the
+/// first. No browser runs in this crate's tests: this reads the served page, and the look is the owner's live check.
+#[test]
+fn the_pc_now_box_opens_when_it_is_all_there_is_and_shows_the_newest_lines() {
+    let w = world("pc-now");
+    let running = serve(w.site());
+    let (_, _, chat) = get(running.addr, "/chat.js", OWNER);
+    let (_, _, css) = get(running.addr, "/app.css", OWNER);
+    assert!(
+        chat.contains("const only = !data.transcript && !(data.messages || []).length;"),
+        "the chat knows when the box is all there is"
+    );
+    assert!(
+        chat.contains("liveBox.classList.toggle('open', only);"),
+        "open from the start then, closed when there are bubbles"
+    );
+    assert!(
+        css.contains(".live-box:not(.open) .live { display: flex; flex-direction: column; justify-content: flex-end; }"),
+        "closed, the box keeps its last lines"
+    );
 }

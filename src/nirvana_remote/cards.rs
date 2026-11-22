@@ -168,7 +168,10 @@ pub fn running_card(
                 .iter()
                 .find(|space| space["workspace_id"] == agent["workspace_id"])?;
             let status = agent["agent_status"].as_str().unwrap_or("");
-            let words = running_words(status, activity(agent).as_ref())?;
+            // P39t: only a working agent's open tool call is on the card, so only its transcript is read; since
+            // `agent.list` carries the token, asking for every agent read each idle Claude's on each poll.
+            let at_work = (status == "working").then(|| activity(agent)).flatten();
+            let words = running_words(status, at_work.as_ref())?;
             if status == "blocked" {
                 needs += 1;
             } else {

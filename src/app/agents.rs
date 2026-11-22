@@ -380,26 +380,11 @@ impl App {
         }
         let pane = self.pane_metadata(ws_idx, pane_id)?;
         let mut tokens = pane.tokens;
-        // Nirvana fork, alpha 0.70.0: the background-wait reading (src/nirvana_bgwait.rs), so the phone, which reads
-        // `agent.list`, words it as the sidebar does. Display-only: `agent_status` is still herdr's own.
-        if let Some(bg) = self
-            .terminal_runtimes
-            .get(&pane_state.attached_terminal_id)
-            .and_then(|runtime| runtime.child_pid())
-            .and_then(|shell_pid| {
-                crate::nirvana_bgwait::cached(
-                    shell_pid,
-                    pane.foreground_cwd.as_deref().or(pane.cwd.as_deref()),
-                    pane.agent_status,
-                    &crate::nirvana_spaces::Waker {
-                        dirty: self.render_dirty.clone(),
-                        notify: self.render_notify.clone(),
-                    },
-                )
-            })
-        {
-            tokens.insert(crate::nirvana_bgwait::TOKEN.to_owned(), bg);
-        }
+        tokens.extend(self.nirvana_tokens(
+            &pane_state.attached_terminal_id,
+            pane.foreground_cwd.as_deref().or(pane.cwd.as_deref()),
+            pane.agent_status,
+        ));
         Some(crate::api::schema::AgentInfo {
             terminal_id: pane.terminal_id,
             name: terminal.agent_name.clone(),
@@ -425,6 +410,41 @@ impl App {
             foreground_cwd: pane.foreground_cwd,
             revision: pane.revision,
         })
+    }
+
+    /// Nirvana fork: the tokens Nirvana adds to an agent's row, read off the server's loop: the kind, model,
+    /// transcript and role (`nirvana_spaces::cached_model`, feature 3 and 6, plan 26 §4) and the background-wait
+    /// reading (`nirvana_bgwait::cached`, alpha 0.70.0). Display-only: `agent_status` is still herdr's own.
+    ///
+    /// `agent_info` is the one place they are added. It answers `agent.list` and `agent.get`, which the phone reads,
+    /// and it builds the window's snapshot too (`session_metadata_snapshot`, which `server/client_shell.rs` reads),
+    /// so the two cannot differ. P39t, 2026-11-22: the model tokens were added only in client_shell.rs, so
+    /// `agent.list` never carried `nirvana_transcript`. The phone's chat fell back to the folder's session record,
+    /// and refused it because a seated worker sat in the same folder: "No transcript for this agent".
+    fn nirvana_tokens(
+        &self,
+        terminal_id: &crate::terminal::TerminalId,
+        cwd: Option<&str>,
+        status: crate::api::schema::AgentStatus,
+    ) -> Vec<(String, String)> {
+        let Some(shell_pid) = self
+            .terminal_runtimes
+            .get(terminal_id)
+            .and_then(|runtime| runtime.child_pid())
+        else {
+            return Vec::new();
+        };
+        let waker = crate::nirvana_spaces::Waker {
+            dirty: self.render_dirty.clone(),
+            notify: self.render_notify.clone(),
+        };
+        let mut tokens = crate::nirvana_spaces::cached_model(shell_pid, cwd, &waker)
+            .map(|model| model.tokens())
+            .unwrap_or_default();
+        if let Some(bg) = crate::nirvana_bgwait::cached(shell_pid, cwd, status, &waker) {
+            tokens.push((crate::nirvana_bgwait::TOKEN.to_owned(), bg));
+        }
+        tokens
     }
 
     fn agent_name_conflicts(
