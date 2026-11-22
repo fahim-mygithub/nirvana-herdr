@@ -14,57 +14,6 @@ pub(super) fn snapshot(
     snapshot_with_completions(app, boot_id, revision, config_diagnostic, location).0
 }
 
-/// Nirvana fork: the cached model of the agent in this pane, read off the server's loop.
-fn nirvana_agent_model(
-    app: &app::App,
-    pane_id: &str,
-    cwd: Option<&str>,
-) -> Option<crate::nirvana_spaces::AgentModel> {
-    let (workspace_index, pane) = app.parse_pane_id(pane_id)?;
-    let terminal_id = &app
-        .state
-        .workspaces
-        .get(workspace_index)?
-        .pane_state(pane)?
-        .attached_terminal_id;
-    let shell_pid = app.terminal_runtimes.get(terminal_id)?.child_pid()?;
-    crate::nirvana_spaces::cached_model(
-        shell_pid,
-        cwd,
-        &crate::nirvana_spaces::Waker {
-            dirty: app.render_dirty.clone(),
-            notify: app.render_notify.clone(),
-        },
-    )
-}
-
-/// Nirvana fork, alpha 0.70.0: the background-wait reading of the Claude in this pane, read off the server's loop
-/// (`nirvana_bgwait::cached`), as the token value the sidebar draws.
-fn nirvana_bgwait_token(
-    app: &app::App,
-    pane_id: &str,
-    cwd: Option<&str>,
-    status: crate::api::schema::AgentStatus,
-) -> Option<String> {
-    let (workspace_index, pane) = app.parse_pane_id(pane_id)?;
-    let terminal_id = &app
-        .state
-        .workspaces
-        .get(workspace_index)?
-        .pane_state(pane)?
-        .attached_terminal_id;
-    let shell_pid = app.terminal_runtimes.get(terminal_id)?.child_pid()?;
-    crate::nirvana_bgwait::cached(
-        shell_pid,
-        cwd,
-        status,
-        &crate::nirvana_spaces::Waker {
-            dirty: app.render_dirty.clone(),
-            notify: app.render_notify.clone(),
-        },
-    )
-}
-
 /// Nirvana fork: the ports servers listen on inside this space's panes, read off the server's loop.
 fn nirvana_space_ports(app: &app::App, workspace_index: usize, workspace_id: &str) -> Vec<u16> {
     let shell_pids = app
@@ -240,24 +189,10 @@ pub(super) fn snapshot_with_completions(
             let focused = focused_pane_id.as_deref() == Some(pane_id.as_str());
             let mut state_labels = agent.state_labels.into_iter().collect::<Vec<_>>();
             state_labels.sort_by(|left, right| left.0.cmp(&right.0));
+            // Nirvana fork: the agent's kind, model, transcript, role and background-wait reading are already in
+            // `agent.tokens`, added by `App::agent_info` (src/app/agents.rs `nirvana_tokens`), which answers
+            // `agent.list` too. P39t: they were added here as well, and only the window had the model tokens.
             let mut tokens = agent.tokens.into_iter().collect::<Vec<_>>();
-            // Nirvana fork: the agent's kind and model for the spaces list (src/nirvana_spaces.rs).
-            if let Some(model) = nirvana_agent_model(
-                app,
-                &pane_id,
-                agent.foreground_cwd.as_deref().or(agent.cwd.as_deref()),
-            ) {
-                tokens.extend(model.tokens());
-            }
-            // Nirvana fork, alpha 0.70.0: waiting on background work (src/nirvana_bgwait.rs).
-            if let Some(bg) = nirvana_bgwait_token(
-                app,
-                &pane_id,
-                agent.foreground_cwd.as_deref().or(agent.cwd.as_deref()),
-                agent.agent_status,
-            ) {
-                tokens.push((crate::nirvana_bgwait::TOKEN.to_owned(), bg));
-            }
             tokens.sort_by(|left, right| left.0.cmp(&right.0));
             protocol::ClientShellAgent {
                 pane_id,
@@ -817,6 +752,88 @@ mod tests {
             .terminal_runtimes
             .values()
             .all(|runtime| runtime.test_scroll_metrics_reads() == 1));
+    }
+
+    /// P39t, 2026-11-22: the phone's chat of an orchestrator Claude showed "No transcript for this agent" because
+    /// `agent.list`, which the phone reads, never carried the model tokens the window's snapshot got. Every token the
+    /// window gets is in the API row (`agent.list` and `agent.get` are `agent_info`, as `session_metadata_snapshot`
+    /// is), and the four Nirvana ones are there. The shell pid is made up and odd, which no Windows pid is; the
+    /// caches are seeded as pending, so no probe reads a process or a file.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_api_row_carries_every_token_the_window_gets() {
+        const SHELL: u32 = 0xFFFF_FFF1;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("space")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let terminal = app.state.terminals.values_mut().next().unwrap();
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+        );
+        let terminal_id = terminal.id.clone();
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(20, 5, b"");
+        runtime.test_set_child_pid(SHELL);
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        let transcript =
+            std::path::PathBuf::from("/made/up/claude/projects/-made-up-space/a1b2.jsonl");
+        crate::nirvana_spaces::seed_model_for_test(
+            SHELL,
+            Some(crate::nirvana_spaces::AgentModel {
+                kind: crate::nirvana_spaces::Kind::Claude,
+                label: "Claude Opus 5.5".into(),
+                transcript: Some(transcript.clone()),
+                role: Some("nirvana".into()),
+            }),
+        );
+        crate::nirvana_bgwait::seed_for_test(
+            SHELL,
+            Some("made-up-reading".into()),
+            crate::api::schema::AgentStatus::Idle,
+        );
+
+        let api = app.session_metadata_snapshot().agents.pop().unwrap().tokens;
+        let window = snapshot(&app, "boot", 1, None, None)
+            .agents
+            .pop()
+            .unwrap()
+            .tokens;
+        app.terminal_runtimes
+            .get(&terminal_id)
+            .unwrap()
+            .test_set_child_pid(0);
+
+        let transcript = transcript.display().to_string();
+        for (name, value) in [
+            (crate::nirvana_spaces::KIND_TOKEN, "claude"),
+            (crate::nirvana_spaces::MODEL_TOKEN, "Claude Opus 5.5"),
+            (crate::nirvana_spaces::TRANSCRIPT_TOKEN, transcript.as_str()),
+            (crate::nirvana_spaces::ROLE_TOKEN, "nirvana"),
+            (crate::nirvana_bgwait::TOKEN, "made-up-reading"),
+        ] {
+            assert_eq!(
+                api.get(name).map(String::as_str),
+                Some(value),
+                "agent.list's row has {name}: {api:?}"
+            );
+        }
+        for (name, value) in &window {
+            assert_eq!(
+                api.get(name),
+                Some(value),
+                "a token the window has that agent.list lacks: {name}"
+            );
+        }
+        let mut names: Vec<&String> = window.iter().map(|(name, _)| name).collect();
+        names.dedup();
+        assert_eq!(names.len(), window.len(), "each token once: {window:?}");
     }
 
     #[test]

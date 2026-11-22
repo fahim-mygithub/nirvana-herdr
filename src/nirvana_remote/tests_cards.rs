@@ -963,6 +963,25 @@ fn the_running_card_counts_agents_at_work_in_the_squares_words() {
     assert_eq!(cards::running_words("done", None), None);
 }
 
+/// P39t item 2. With the transcript token in `agent.list`, the card's `activity` reads a transcript
+/// (`nirvana_running::cached`: a 256 KiB tail on its own thread, at most every `REREAD` per file). Only an agent at
+/// work has its open tool call on the card, so only a working agent's is asked for: an idle, done or blocked Claude's
+/// transcript is not read on each poll.
+#[test]
+fn the_running_card_asks_for_a_working_agents_activity_only() {
+    let asked: Mutex<Vec<String>> = Mutex::default();
+    let activity = |agent: &Value| {
+        asked
+            .lock()
+            .unwrap()
+            .push(agent["pane_id"].as_str().unwrap_or("").to_string());
+        None
+    };
+    let card = cards::running_card(&workspaces(), &agents(), &activity);
+    assert_eq!(card["working"], 2, "{card}");
+    assert_eq!(*asked.lock().unwrap(), ["p1", "p5"]);
+}
+
 #[test]
 fn the_running_card_reads_only_a_transcript_under_claudes_folder() {
     let base = scratch("running-token");

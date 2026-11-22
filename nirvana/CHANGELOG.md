@@ -3,6 +3,51 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.95.1: the phone's chat reads each agent's own transcript
+
+- **Changed:** plan 39's phone page (P39t).
+  - `agent.list` and `agent.get` carry an agent's kind, model, transcript and role tokens. One function writes
+    them, `App::nirvana_tokens`, and the window's snapshot passes through it too, so the two cannot differ. The
+    window's own copy in `server/client_shell.rs` is gone; it sent the background-wait token twice.
+  - The phone's feed builds again every second while a row has no kind, at most six times for the same agents. A
+    phone with no window attached gets its chat about a second after opening, not at the agent's next change.
+  - An open chat keeps the file its own token gave when a row comes back without tokens, which the server's cache
+    does after a quiet minute. A file that came from the folder's record is not kept.
+  - The running card reads the transcript of a working agent only. A Claude Code on a local model counts as a
+    Claude on the phone, as it does in the window.
+  - "On the PC now" opens by itself when the chat has no transcript and no bubbles. Closed, it shows the last
+    lines sent, not the first.
+- **Because:** the owner, 2026-11-22, with a screenshot of the phone: "I've noticed a bug or a situation with the
+  app". The chat of an orchestrator Claude with a long conversation showed "No transcript for this agent" and
+  three clipped lines of the screen. The transcript token was added only to the window's snapshot, so the phone,
+  which reads `agent.list`, never got it for any agent. It fell back to the folder's session record, and that is
+  refused when a second Claude sits in the same folder, as a seated worker did.
+- **Measured:** nothing here ran on a phone. On the owner's running session, read-only, before the fix: the
+  orchestrator's row in `herdr agent list` had no `tokens` field at all, and a seated worker's row had the same `cwd`.
+  The whole test binary, one process per test, ran 5577 tests with 2 failed, the same two `app::api` tests that fail
+  on 0.95.0, where 5566 ran; 192 of them are the phone server's. The test that guards the cause,
+  `the_api_row_carries_every_token_the_window_gets`, was red first with a row that held only the background-wait
+  token. Built on Opus high and reviewed on Sonnet high. The review ran all 22 of the builder's controls red, found
+  that the window loses no token, and found one fault, fixed here test first: an open chat showing the folder's record
+  did not become the agent's own when its token named that same file, so a quiet minute and a worker in the folder
+  brought the note back. The controls file holds 23 `p39t_` controls; 26 controls were run red again at the merge, 17
+  of them new and the rest older ones beside the changed code, the tree unchanged after each. The dry run finds 5271
+  of 5279 controls' text, the same 8 old misses. The box's style was measured in Chromium on a made-up page of 14
+  lines: closed, it showed lines 1 to 3 before, and the end of line 12 with lines 13 and 14 after; open, it showed
+  all. iPhone Safari is not measured. Known gaps: a chat opened while the feed is waiting and the server has forgotten
+  the agent shows the note until some agent's next event, which is narrow because the home page's running card asks
+  every 30 seconds; an event's build uses one of the six tries; after a quiet minute the chat's model label is empty
+  for about a second; the folder's record is still refused while a second Claude sits in the folder and no token has
+  come; a Codex or Antigravity agent still has no transcript on the phone; `herdr agent list` now prints a local
+  transcript path; a plugin that polls `agent.list` now costs the server one probe per agent every 3 seconds, as the
+  window already did. One test, `a_failed_upload_logs_one_line_with_its_size_bytes_time_and_why`, fails under a
+  parallel `cargo test` on 0.95.0 too and passes alone and under nextest; it is not from this change.
+- **If you remove this:** remove the tokens from `agent_info` and the phone shows the folder's record for a lone
+  Claude and the note for every Claude that shares its folder with a worker; the running card never names a tool.
+  Remove only the feed's extra builds and a phone with no window attached waits for the agent's next change of
+  state, which for an idle orchestrator may not come. Remove only the box's rules and a chat with no transcript
+  shows the three oldest lines of the screen and an empty page.
+
 ## alpha 0.95.0: `herdr scholar` routes one question to parallel researchers and a writer
 
 - **Changed:** plan 47's run package (P47c). This is the last package of plan 47.

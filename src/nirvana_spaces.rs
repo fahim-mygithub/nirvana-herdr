@@ -727,6 +727,22 @@ pub fn cached_model(shell_pid: u32, cwd: Option<&str>, waker: &Waker) -> Option<
     entry.model.clone()
 }
 
+/// P39t: what the probe read for a test's made-up shell pid. Marked pending, so `cached_model` never queues a real
+/// probe for it.
+#[cfg(test)]
+pub fn seed_model_for_test(shell_pid: u32, model: Option<AgentModel>) {
+    let now = Instant::now();
+    cache().lock().unwrap_or_else(|e| e.into_inner()).insert(
+        shell_pid,
+        Entry {
+            model,
+            checked: Some(now),
+            pending: true,
+            asked: now,
+        },
+    );
+}
+
 /// The task row's text. Claude Code titles its terminal with a short summary of the conversation; a
 /// title that only names the program or the shell means nothing was asked yet, in the old Nirvana's
 /// words "No task yet".

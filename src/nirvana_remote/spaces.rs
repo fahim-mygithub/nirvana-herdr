@@ -190,6 +190,66 @@ pub fn next_build(after_event: bool, background: bool) -> Option<Duration> {
     }
 }
 
+/// P39t: while an agent's row has no kind, the feed builds again this often, at most `UNREAD_TRIES` times for the
+/// same agents. herdr's server reads each agent's kind, model and transcript off its loop
+/// (`crate::nirvana_spaces::cached_model`), which answers `None` until its probe has run: on the first ask, and on
+/// the first after an entry nobody asked for in a minute was dropped. With no window attached the phone is the only
+/// reader, and the probe's answer comes with no herdr event, so without this the list (and an open chat's
+/// transcript) waited for the agent's next change of state. One second is the probe's own pace: it is queued on the
+/// ask and runs at once on one worker thread. Six tries cover a worker with several panes to read; an agent the probe
+/// never reads (not Claude, Codex or Antigravity) costs six builds, two herdr calls each, and then none until the
+/// panes without a kind change.
+pub const UNREAD_EVERY: Duration = Duration::from_secs(1);
+pub const UNREAD_TRIES: usize = 6;
+
+/// Whether herdr's row has no kind token: its probe has not answered (`UNREAD_EVERY`).
+pub fn unread_row(agent: &Value) -> bool {
+    token(agent, crate::nirvana_spaces::KIND_TOKEN).is_none()
+}
+
+/// The agents in a list from `build` whose row has no kind yet.
+pub fn unread(snapshot: &Value) -> BTreeSet<String> {
+    snapshot["spaces"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|space| space["agents"].as_array().cloned().unwrap_or_default())
+        .filter(|agent| agent["kind"] == "")
+        .filter_map(|agent| agent["id"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// The builds that found the same agents without a kind (`UNREAD_TRIES`).
+#[derive(Debug, Default)]
+pub struct Unread {
+    panes: BTreeSet<String>,
+    tries: usize,
+}
+
+impl Unread {
+    /// After a build: `UNREAD_EVERY` while some agent has no kind and its tries last, else `None`.
+    pub fn after(&mut self, snapshot: &Value) -> Option<Duration> {
+        let now = unread(snapshot);
+        if now != self.panes {
+            self.panes = now;
+            self.tries = 0;
+        }
+        if self.panes.is_empty() {
+            return None;
+        }
+        self.tries += 1;
+        (self.tries <= UNREAD_TRIES).then_some(UNREAD_EVERY)
+    }
+}
+
+/// The sooner of two waits; `None` only when both are.
+fn sooner(left: Option<Duration>, right: Option<Duration>) -> Option<Duration> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (left, right) => left.or(right),
+    }
+}
+
 /// Sets its flag when dropped: the subscription it guards is told to end.
 struct Stop(Arc<AtomicBool>);
 
@@ -283,6 +343,8 @@ impl Feed {
     fn watch(self: Arc<Self>) {
         let mut retry = RETRY_FIRST;
         let mut first = true;
+        // P39t: the builds again while an agent has no kind yet (`Unread`).
+        let mut unread = Unread::default();
         loop {
             if !std::mem::replace(&mut first, false) {
                 if !self.send(None) {
@@ -318,6 +380,7 @@ impl Feed {
                 Ok(again) => {
                     let moved = panes(&again) != watched;
                     timed = next_build(false, any_background(&again));
+                    timed = sooner(timed, unread.after(&again));
                     if !self.send(Some(again.to_string())) {
                         return;
                     }
@@ -342,6 +405,8 @@ impl Feed {
                 continue;
             }
             let mut heard = false;
+            // P39t: when an event's `FOLLOW_UP` build is due, kept while sooner builds for an unread agent come.
+            let mut follow_up: Option<Instant> = None;
             loop {
                 let event = match timed {
                     Some(wait) => match rx.recv_timeout(wait) {
@@ -374,6 +439,17 @@ impl Feed {
                 };
                 let changed_agents = panes(&list) != watched;
                 timed = next_build(event, any_background(&list));
+                let now = Instant::now();
+                if event {
+                    follow_up = timed.map(|wait| now + wait);
+                }
+                let due = follow_up
+                    .and_then(|at| at.checked_duration_since(now))
+                    .filter(|left| !left.is_zero());
+                if due.is_none() {
+                    follow_up = None;
+                }
+                timed = sooner(sooner(timed, due), unread.after(&list));
                 if !self.send(Some(list.to_string())) {
                     return;
                 }
