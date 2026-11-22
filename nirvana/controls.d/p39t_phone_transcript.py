@@ -18,6 +18,7 @@ T_BOUNDED = _T + "the_feed_builds_again_for_an_unread_agent_a_bounded_number_of_
 T_FORGOTTEN = _T + "a_row_that_lost_its_tokens_keeps_its_own_transcript"
 T_RECORD = _T + "a_folders_record_is_not_kept_when_another_claude_comes"
 T_FOLLOW = _T + "an_events_follow_up_build_still_comes_after_the_unread_builds_stop"
+T_SAME_FILE = _T + "a_token_naming_the_records_file_makes_it_the_agents_own"
 T_ONE_FOLDER = _T + "an_orchestrator_and_a_worker_in_one_folder_each_read_their_own"
 T_PAGE = _T + "the_pc_now_box_opens_when_it_is_all_there_is_and_shows_the_newest_lines"
 T_LOCAL = _T + "a_local_model_claude_is_still_claude_code_to_the_phone"
@@ -100,6 +101,12 @@ CONTROLS = (
             "                                            own = path.is_some() && by_token(&found.agent);\n",
             "                                            own = false;\n",
             T_ALONE, "rust"),
+    # Review F1, a token naming the record's own file makes it the agent's own (the path stays, its source changes)
+    # Red: "the file is the agent's own since its token named it: {...}" (left "chat", right "agent")
+    Control("p39t_chat_own_same_file", LIVE,
+            "                                                own = by_token(&found.agent) && path.is_some();\n",
+            "                                                own = own && path.is_some();\n",
+            T_SAME_FILE, "rust"),
     # Item 2, the running card reads a working agent's transcript only
     # Red: left ["p1", "p2", "p3", "p4", "p5"], right ["p1", "p5"]
     Control("p39t_cards_working_only", CARDS,

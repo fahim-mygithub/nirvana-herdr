@@ -348,6 +348,16 @@ impl Site {
                                             parts.push(stream::event("chat", &whole.to_string()));
                                         }
                                         _ => {
+                                            // P39t review F1: the path can stay while its source changes. A token
+                                            // that names the file the folder's record already gave makes it the
+                                            // agent's own; a row with its kind and no transcript token makes it the
+                                            // record's again. A row with no kind says nothing, as above.
+                                            if let Some(found) = found
+                                                .as_ref()
+                                                .filter(|found| !spaces::unread_row(&found.agent))
+                                            {
+                                                own = by_token(&found.agent) && path.is_some();
+                                            }
                                             parts.push(stream::event("agent", &row.to_string()));
                                             let live = self.live(&id);
                                             let status = found

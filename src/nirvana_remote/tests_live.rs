@@ -2446,6 +2446,62 @@ fn a_folders_record_is_not_kept_when_another_claude_comes() {
     assert_eq!(data["transcript"], false);
 }
 
+/// P39t review F1. A token can come naming the file the folder's record already gave: a lone Claude whose chat was
+/// opened before its probe answered. The path does not change, but it is the agent's own from then on, so a later row
+/// without tokens (the cache forgot it), with a worker now in the folder, keeps it.
+#[test]
+fn a_token_naming_the_records_file_makes_it_the_agents_own() {
+    let w = world("record-then-token");
+    let home = with_record(&w);
+    let elsewhere = w.root.join("other");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    {
+        let mut agents = w.herdr.agents.lock().unwrap();
+        // p1 before its probe: no tokens. herdr's label says Claude, and it is alone in its folder.
+        agents[0]["tokens"] = json!({});
+        for agent in agents.iter_mut().skip(1) {
+            agent["cwd"] = json!(elsewhere.display().to_string());
+        }
+    }
+    let running = serve(site_with(
+        w.herdr.clone(),
+        Some(w.claude.clone()),
+        Some(home.clone()),
+    ));
+    let mut view = View::open(running.addr, "/api/chat/events?agent=p1");
+    let first = view.next("chat", Duration::from_secs(5)).expect("the chat");
+    assert_eq!(
+        first["transcript"], true,
+        "a lone Claude: the folder's record"
+    );
+    // The probe answers, naming the record's file. herdr sends no event; the feed's build for an unread row sees it.
+    w.herdr.agents.lock().unwrap()[0]["tokens"] = json!({
+        "nirvana_model": "Claude Opus 5.5",
+        "nirvana_kind": "claude",
+        "nirvana_transcript": w.path.display().to_string(),
+    });
+    let (kind, data) = view
+        .next_of(&["chat", "agent"], Duration::from_secs(5))
+        .expect("the row's kind");
+    assert_eq!(kind, "agent", "the same file, so no new chat: {data}");
+    // A quiet minute later the row has no tokens again, and p3, a Claude, has come into the folder.
+    {
+        let mut agents = w.herdr.agents.lock().unwrap();
+        agents[0]["tokens"] = json!({});
+        agents[2]["cwd"] = json!(w.folder.display().to_string());
+    }
+    w.herdr.set_status("p1", "done");
+    w.herdr
+        .emit(json!({"event": "pane.agent_status_changed", "data": {"pane_id": "p1"}}));
+    let (kind, data) = view
+        .next_of(&["chat", "agent"], Duration::from_secs(5))
+        .expect("the row's change");
+    assert_eq!(
+        kind, "agent",
+        "the file is the agent's own since its token named it: {data}"
+    );
+}
+
 /// P39t item 1. The builds for an unread agent do not cancel alpha 0.70.0's `FOLLOW_UP` build after an event, which
 /// shows a background-wait reading the event asked for a moment later, with no event of its own.
 #[test]
