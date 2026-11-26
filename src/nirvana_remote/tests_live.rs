@@ -2664,3 +2664,113 @@ fn the_pc_now_box_opens_when_it_is_all_there_is_and_shows_the_newest_lines() {
         "closed, the box keeps its last lines"
     );
 }
+
+// --- P39v, 2026-11-25: a chat opened on a row the server has forgotten asks again by itself ---------------------------
+
+/// A live spaces view open, and the feed past its first builds with every row read: it waits on herdr's next event
+/// (`Feed::watch`, `rx.recv()`), so nothing it builds can wake a chat after this. A spaces view's first three
+/// `agent.list` calls are `listen` and the feed's two around its first subscription.
+fn feed_waiting_on_events(addr: SocketAddr, herdr: &FakeHerdr) -> View {
+    let mut spaces = View::open(addr, "/api/events");
+    spaces
+        .next("spaces", Duration::from_secs(5))
+        .expect("the spaces");
+    listed(herdr, 3);
+    assert_eq!(herdr.subscribed().len(), 1, "the feed subscribed once");
+    spaces
+}
+
+/// P39v (review note 2 of alpha 0.95.1, seen once live on 2026-11-25). The server's cache forgot the agent: the row a
+/// chat opens on has no tokens, and the probe's answer comes with no herdr event. The feed is settled, so its own
+/// builds (`spaces::Unread`) cannot be what wakes the chat. The view asks again by itself and sends the whole chat
+/// from the agent's own file once the token is there, then stops asking.
+#[test]
+fn a_chat_opened_on_a_forgotten_row_asks_again_and_takes_the_token() {
+    let w = world("forgotten-at-open");
+    let running = serve(w.site());
+    let _spaces = feed_waiting_on_events(running.addr, &w.herdr);
+    // The cache forgets every row (no event: a quiet minute, `cached_model`'s FORGET).
+    w.herdr.agents.lock().unwrap()[0]["tokens"] = json!({});
+    let mut view = View::open(running.addr, "/api/chat/events?agent=p1");
+    let first = view.next("chat", Duration::from_secs(5)).expect("the chat");
+    assert_eq!(first["transcript"], false, "no token yet: the note");
+    // The probe answers, and herdr sends no event for it.
+    w.herdr.agents.lock().unwrap()[0]["tokens"] = json!({
+        "nirvana_model": "Claude Opus 5.5",
+        "nirvana_kind": "claude",
+        "nirvana_transcript": w.path.display().to_string(),
+    });
+    let started = Instant::now();
+    let whole = view.next("chat", Duration::from_secs(5)).expect(
+        "a token that came with no event and no feed build wakes the chat: the whole chat from its file",
+    );
+    assert_eq!(whole["transcript"], true);
+    assert_eq!(whole["messages"].as_array().unwrap().len(), 4);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "about once a second: {:?}",
+        started.elapsed()
+    );
+    // Read: it asks no more (and the feed built nothing either: every `agent.list` here would count).
+    let asked = w.herdr.calls("agent.list").len();
+    std::thread::sleep(spaces::UNREAD_EVERY * 3);
+    assert_eq!(
+        w.herdr.calls("agent.list").len(),
+        asked,
+        "a read row is not asked about again"
+    );
+}
+
+/// P39t item 1, seen on the spaces list alone. Since P39v an open chat also asks about its agent by itself, so a chat
+/// waking no longer shows that the feed built again (`spaces::Unread`); the list does, with no chat open.
+#[test]
+fn a_tokens_arrival_alone_reaches_the_spaces_list() {
+    let w = world("token-alone-list");
+    w.herdr.agents.lock().unwrap()[0]["tokens"] = json!({});
+    let kind = |list: &Value| {
+        list["spaces"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|space| space["agents"].as_array().cloned().unwrap_or_default())
+            .find(|agent| agent["id"] == "p1")
+            .map(|agent| agent["kind"].clone())
+    };
+    let running = serve(w.site());
+    let mut view = View::open(running.addr, "/api/events");
+    let first = view
+        .next("spaces", Duration::from_secs(5))
+        .expect("the spaces");
+    assert_eq!(kind(&first), Some(json!("")), "no kind yet");
+    // Past the feed's first build for the unread agent (the fourth call: `listen`, the two around the subscription,
+    // then one `UNREAD_EVERY` later), so the next one comes from the builds that follow it.
+    listed(&w.herdr, 4);
+    w.herdr.agents.lock().unwrap()[0]["tokens"] = json!({
+        "nirvana_model": "Claude Opus 5.5",
+        "nirvana_kind": "claude",
+        "nirvana_transcript": w.path.display().to_string(),
+    });
+    let list = view
+        .next("spaces", Duration::from_secs(5))
+        .expect("the token alone reaches the list: the feed built again with no event");
+    assert_eq!(kind(&list), Some(json!("claude")));
+}
+
+/// P39v. A row that is never read (an agent the probe does not read) is asked about `UNREAD_TRIES` times, then the
+/// chat waits on the feed as before.
+#[test]
+fn a_chat_on_a_row_never_read_asks_a_bounded_number_of_times() {
+    let w = world("never-read-at-open");
+    let running = serve(w.site());
+    let _spaces = feed_waiting_on_events(running.addr, &w.herdr);
+    w.herdr.agents.lock().unwrap()[0]["tokens"] = json!({});
+    let mut view = View::open(running.addr, "/api/chat/events?agent=p1");
+    view.next("chat", Duration::from_secs(5)).expect("the chat");
+    let asked = w.herdr.calls("agent.list").len();
+    std::thread::sleep(spaces::UNREAD_EVERY * (spaces::UNREAD_TRIES as u32 + 3));
+    assert_eq!(
+        w.herdr.calls("agent.list").len() - asked,
+        spaces::UNREAD_TRIES,
+        "UNREAD_TRIES asks, then none"
+    );
+}

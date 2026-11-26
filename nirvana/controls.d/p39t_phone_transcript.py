@@ -14,6 +14,8 @@ APP_CSS = "src/nirvana_remote/page/app.css"
 T_API = "server::client_shell::tests::the_api_row_carries_every_token_the_window_gets"
 _T = "nirvana_remote::tests_live::"
 T_ALONE = _T + "a_tokens_arrival_alone_wakes_the_open_chat"
+# P39v (plan 48): an open chat now asks about its own agent too, so the feed's own builds are seen on the list alone.
+T_ALONE_LIST = _T + "a_tokens_arrival_alone_reaches_the_spaces_list"
 T_BOUNDED = _T + "the_feed_builds_again_for_an_unread_agent_a_bounded_number_of_times"
 T_FORGOTTEN = _T + "a_row_that_lost_its_tokens_keeps_its_own_transcript"
 T_RECORD = _T + "a_folders_record_is_not_kept_when_another_claude_comes"
@@ -50,16 +52,16 @@ CONTROLS = (
             "            tokens.extend(first);\n",
             T_API, "rust"),
     # Item 1, the feed builds again while a row has no kind
-    # Red: "the token alone wakes the view: the whole chat from its file" (no build after subscribing)
+    # Red: "the token alone reaches the list: the feed built again with no event" (no build after subscribing)
     Control("p39t_unread_builds_after_subscribe", SPACES,
             "                    timed = sooner(timed, unread.after(&again));\n",
             "                    timed = sooner(timed, None);\n",
-            T_ALONE, "rust"),
-    # Red: "the token alone wakes the view: the whole chat from its file" (one build, then none)
+            T_ALONE_LIST, "rust"),
+    # Red: "the token alone reaches the list: the feed built again with no event" (one build, then none)
     Control("p39t_unread_builds_go_on", SPACES,
             "                timed = sooner(sooner(timed, due), unread.after(&list));\n",
             "                timed = sooner(timed, due);\n",
-            T_ALONE, "rust"),
+            T_ALONE_LIST, "rust"),
     # Red: "the build FOLLOW_UP after the event: N calls, then N"
     Control("p39t_follow_up_kept", SPACES,
             "                timed = sooner(sooner(timed, due), unread.after(&list));\n",

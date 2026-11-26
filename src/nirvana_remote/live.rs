@@ -283,6 +283,17 @@ impl Site {
             return Response::sent();
         }
         let mut gone = false;
+        // P39v (review note 2 of alpha 0.95.1): a row the server's cache forgot has no tokens until its probe runs,
+        // and the probe's answer comes with no herdr event. A settled feed waits on herdr's next event and builds
+        // again (`spaces::Unread`) only at its own builds, so a chat opened then said "No transcript" until some
+        // agent changed state. The view asks about its agent by itself, once each `UNREAD_EVERY`, at most
+        // `UNREAD_TRIES` times, and stops once the row is read.
+        let mut asks = if spaces::unread_row(&found.agent) {
+            spaces::UNREAD_TRIES
+        } else {
+            0
+        };
+        let mut next_ask = Instant::now() + spaces::UNREAD_EVERY;
         let caller = self.caller();
         stream::run(
             conn,
@@ -293,7 +304,26 @@ impl Site {
                     return None;
                 }
                 let mut parts = Vec::new();
-                match lists.recv_timeout(wait) {
+                // P39v: a row read since the view opened is taken as the feed's list would be, so one path below
+                // re-reads the agent and its transcript, whichever brought the change.
+                let mut asked = None;
+                if asks > 0 && Instant::now() >= next_ask {
+                    asks -= 1;
+                    next_ask = Instant::now() + spaces::UNREAD_EVERY;
+                    if let Some(found) = self
+                        .found(&id)
+                        .ok()
+                        .filter(|found| !spaces::unread_row(&found.agent))
+                    {
+                        asks = 0;
+                        asked = Some(json!({"spaces": [{"agents": [found.row()]}]}).to_string());
+                    }
+                }
+                let next = match asked {
+                    Some(list) => Ok(list),
+                    None => lists.recv_timeout(wait),
+                };
+                match next {
                     Ok(list) => {
                         let list: Value = serde_json::from_str(&list).unwrap_or_default();
                         let now = list["spaces"]
