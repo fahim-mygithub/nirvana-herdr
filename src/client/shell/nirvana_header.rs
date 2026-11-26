@@ -4,7 +4,8 @@
 //! The badge is the running build (`crate::nirvana::VERSION`). When the server reports a newer
 //! installed build (herdr's `update_available`, fed by `crate::nirvana::check_installed`), the badge
 //! becomes a reload button: `↻ <version>`, then `restart?` after one press, and a second press
-//! reloads. Drawn in the client only: it is TUI presentation (AGENTS.md runtime/client boundary).
+//! reloads. Plan 48: with no newer build, the version label is the same button, a restart onto the
+//! same build. Drawn in the client only: it is TUI presentation (AGENTS.md runtime/client boundary).
 
 use super::*;
 use ratatui::style::Color;
@@ -53,8 +54,10 @@ pub(super) fn render_brand_row(
             .fg(palette.text)
             .add_modifier(Modifier::BOLD),
     );
+    // Plan 48: armed, the badge asks " restart? " whether or not a newer build is installed; with none, the version
+    // label is the press (the owner, 2026-11-25: "restart all of nirvana and add an option to do so").
     let (badge, style) = match update_available {
-        Some(_) if reload_armed => (
+        _ if reload_armed => (
             " restart? ".to_string(),
             Style::default()
                 .fg(Color::White)
@@ -75,7 +78,7 @@ pub(super) fn render_brand_row(
     };
     let start = x;
     let end = super::render::put_segment(buffer, x, row.y, right, &badge, style);
-    if update_available.is_some() && end > start {
+    if end > start {
         hits.nirvana_reload = Rect::new(start, row.y, end - start, 1);
     }
     hits.sidebar_toggle = Rect::new(toggle_x, row.y, 1, 1);
@@ -130,7 +133,38 @@ mod tests {
         assert_eq!(buffer[(23, 0)].bg, Palette::catppuccin().surface0);
         assert_eq!(hits.sidebar_toggle, Rect::new(24, 0, 1, 1));
         assert_eq!(buffer[(24, 0)].symbol(), "«");
-        assert_eq!(hits.nirvana_reload, Rect::default());
+    }
+
+    /// Plan 48: with no newer build installed, the version label is the badge's restart: one press shows
+    /// " restart? ", the second restarts (`mouse.rs`, `crate::nirvana::press_reload`). It looks as before until
+    /// pressed.
+    #[test]
+    fn the_version_label_restarts_on_a_second_press_when_no_build_is_newer() {
+        let (buffer, hits) = draw(25, None, false);
+        let label = format!(" {} ", crate::nirvana::label(crate::nirvana::VERSION));
+        let text = row_text(&buffer, 0);
+        let start = text[..text.find(&label).expect("the label")]
+            .chars()
+            .count();
+        assert_eq!(
+            hits.nirvana_reload,
+            Rect::new(start as u16, 0, label.chars().count() as u16, 1),
+            "the label is the press"
+        );
+        assert_eq!(
+            buffer[(hits.nirvana_reload.x, 0)].bg,
+            Palette::catppuccin().surface0
+        );
+
+        let (buffer, hits) = draw(25, None, true);
+        let text = row_text(&buffer, 0);
+        assert!(text.contains(" restart? "), "armed: {text:?}");
+        assert!(!text.contains("alpha"), "{text:?}");
+        assert_eq!(
+            buffer[(hits.nirvana_reload.x, 0)].bg,
+            Palette::catppuccin().red
+        );
+        assert!(hits.nirvana_reload.width > 0);
     }
 
     #[test]

@@ -21,6 +21,44 @@
       h('span', { class: word === 'working' ? 'shim' : '', text }));
   }
 
+  // Plan 48 (the owner, 2026-11-25: "restart all of nirvana and add an option to do so"). A restart stops every
+  // program in the PC's panes, so it is never one tap: the confirm says how many agents are in a turn now, read from
+  // /api/hello as it opens, since those turns stop. After the POST the shell waits for the new server
+  // (app.js restarting) and the screen comes back by itself.
+  function atWork(working) {
+    if (typeof working !== 'number') return 'The agents could not be counted. Any turn in progress stops.';
+    if (working === 0) return 'No agent is working now.';
+    return (working === 1 ? '1 agent is' : working + ' agents are') + ' working now: their turns stop.';
+  }
+
+  function confirmRestart() {
+    nv.getJson('/api/hello', { quiet: true }).then((hello) => hello.working, () => null).then((working) => {
+      nv.sheet((close) => {
+        const note = h('span', { class: 'note', role: 'status' });
+        const go = h('button', { class: 'press restart-go', type: 'button', text: 'Restart' });
+        go.addEventListener('click', async () => {
+          go.disabled = true;
+          note.textContent = 'Asking the PC…';
+          let answer;
+          try { answer = await nv.postJson('/api/restart', {}); } catch (_) { answer = { ok: false, status: 0, data: {} }; }
+          if (!answer.ok) {
+            go.disabled = false;
+            note.textContent = answer.data.error || (answer.status ? 'The PC answered ' + answer.status + '.' : 'No answer from the PC.');
+            return;
+          }
+          close(() => nv.restarting(answer.data.server));
+        });
+        return h('div', { class: 'sheet-body' },
+          h('span', { class: 'sheet-title', text: 'Restart Nirvana on this PC?' }),
+          h('span', { class: 'restart-text', text: atWork(working) }),
+          h('span', { class: 'restart-text', text: 'Every program in its panes stops. Nirvana Claude comes back in the panes that ran it, and this page comes back by itself.' }),
+          go,
+          h('button', { class: 'press restart-cancel', type: 'button', text: 'Cancel', onclick: () => close() }),
+          note);
+      });
+    });
+  }
+
   nv.screen('spaces', {
     render(el, params) {
       el.classList.add('home');
@@ -48,9 +86,13 @@
       const cards = window.NirvanaCards ? window.NirvanaCards.mount(nv) : null;
       // P39e: the alerts switch below the spaces (alerts.js).
       const alerts = window.NirvanaAlerts ? window.NirvanaAlerts.mount() : null;
+      // Plan 48: Restart Nirvana, at the bottom of the screen, behind a confirm (confirmRestart).
+      const restart = h('div', { class: 'section pad' },
+        h('button', { class: 'press restart-button', type: 'button', text: 'Restart Nirvana',
+          onclick: () => confirmRestart() }));
       el.append(h('div', { class: 'scroll body stack' }, cards && cards.el,
         h('div', { class: 'section pad' }, h('span', { class: 'label', text: 'Spaces' }), list, note),
-        alerts && alerts.el));
+        alerts && alerts.el, restart));
 
       const seen = new Set();
       let first = true;

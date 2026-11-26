@@ -87,7 +87,8 @@ CONTROLS: tuple[Control, ...] = (
             'format!(" {} ", crate::nirvana::label(crate::nirvana::VERSION)),', '" Nirvana ".to_string(),',
             "brand_row_names_nirvana_and_its_running_version", "rust"),
     Control("header_reload_unclickable", "src/client/shell/nirvana_header.rs",
-            "if update_available.is_some() && end > start {", "if false && end > start {",
+            # Plan 48: the badge is clickable with or without a newer build, so the condition lost its first half.
+            "    if end > start {", "    if false && end > start {",
             "a_newer_build_turns_the_badge_into_a_reload_button", "rust"),
     Control("header_badge_clipped", "src/client/shell/nirvana_header.rs",
             "let right = toggle_x;", "let right = toggle_x.saturating_sub(1);",

@@ -11,6 +11,7 @@
 //!   (its length and time read once each `stream::WAKE`; a file, not herdr), and the screen again on a state change.
 //! - `POST /api/send`: `{"agent", "text", "files", "mode"}` (`send.rs`).
 //! - `POST /api/upload?agent=<id>`: the body is the file; its type names the extension.
+//! - `POST /api/restart`: plan 48, Restart Nirvana, the whole session (`nirvana_restart_all`).
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -551,6 +552,45 @@ impl Site {
         }
     }
 
+    /// Plan 48: `POST /api/restart`, Restart Nirvana from the phone. Only after `Site::route`'s checks, as every write
+    /// route, and only as JSON, which a cross-site form cannot send. The worker is started out of this server's
+    /// process tree (`nirvana_restart_all`) and not waited on: this server is what stops. The answer says how many
+    /// agents were in a turn, and names this server, which the page waits to see replaced.
+    pub(super) fn restart(&self, request: &Request, conn: &mut Conn) -> Response {
+        let is_json = request.header("Content-Type").first().is_some_and(|kind| {
+            kind.trim()
+                .to_ascii_lowercase()
+                .starts_with("application/json")
+        });
+        if !is_json {
+            return error(415, "a restart is JSON");
+        }
+        if conn.framing() == Framing::None {
+            return error(411, "a restart has a length");
+        }
+        let mut body = Vec::new();
+        if let Err(why) = conn.read_body(RESTART_BODY_MOST, &mut body) {
+            return error(why.status(), "the restart could not be read");
+        }
+        let working = match super::herdr::summary(self.herdr.as_ref()) {
+            Ok(summary) => summary.working,
+            Err(why) => return error(502, why),
+        };
+        match (self.restart)() {
+            Ok(()) => {
+                info!(working, "nirvana remote: restart asked from the phone");
+                Response::json(
+                    202,
+                    &json!({"restarting": true, "working": working, "server": std::process::id()}),
+                )
+            }
+            Err(why) => {
+                warn!(why = %why, "nirvana remote: the restart did not start");
+                error(503, why)
+            }
+        }
+    }
+
     /// `POST /api/upload`. Every answer but a saved file logs one line (P39u: on 2026-11-06 two phone uploads failed
     /// and herdr-server.log said nothing): the route, the size the head declared, the bytes read, the time since the
     /// head, the status and why; never a byte of the file. The lines go through the refusals' throttle, one per kind
@@ -652,6 +692,8 @@ impl Site {
 /// live views (`stream::MOST`) are 10 of the 32 connections, so a stuck or retrying phone cannot starve the page.
 /// The page keeps to the same number by itself (chat.js `UPLOADS_AT_ONCE`); past it the answer is a 503.
 pub const UPLOADS_AT_ONCE: usize = 4;
+/// Plan 48: a restart's body is `{}`; anything past this is not the page's.
+const RESTART_BODY_MOST: u64 = 1024;
 const BUSY: &str = "the PC is busy with other uploads";
 
 /// The uploads being read now (`UPLOADS_AT_ONCE`).

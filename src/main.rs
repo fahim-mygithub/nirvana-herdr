@@ -68,6 +68,7 @@ mod nirvana_profile_proposals;
 mod nirvana_profiles;
 mod nirvana_questions;
 mod nirvana_remote;
+mod nirvana_restart_all;
 mod nirvana_retro;
 mod nirvana_review;
 mod nirvana_run;
@@ -945,6 +946,10 @@ fn main() -> io::Result<()> {
     }
     if nirvana::reload_requested() {
         nirvana::finish_reload();
+    }
+    // Nirvana fork, plan 48: the server stopped as a restart asked from the command or the phone.
+    if nirvana_restart_all::client_restart_requested() {
+        nirvana_restart_all::finish_client_restart();
     }
     Ok(())
 }

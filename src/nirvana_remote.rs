@@ -48,6 +48,9 @@ pub mod webpush;
 pub mod shell;
 #[cfg(test)]
 mod tests_offline;
+// Plan 48: the phone's Restart Nirvana.
+#[cfg(test)]
+mod tests_restart;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -530,6 +533,8 @@ pub fn start(api_tx: crate::api::ApiRequestSender) -> Option<Remote> {
     site.nirvana_home = crate::nirvana::home();
     // P39d: the picker's root under the profile, the verb's preset, the servers block's ports.
     site.local = pick::Local::live();
+    // Plan 48: the phone's Restart Nirvana starts the same worker as `herdr nirvana restart`.
+    site.restart = Arc::new(crate::nirvana_restart_all::restart_from_phone);
     // P39e: the push key and the phones, in this session's data dir beside the state file. Alerts that cannot be set
     // up leave the rest of Nirvana Remote serving; the routes then say so.
     site.alerts = match alerts::Alerts::live() {

@@ -86,6 +86,16 @@ impl App {
         if params.command_id == crate::nirvana::RESTART_CLAUDE_COMMAND {
             return self.nirvana_restart_claude(id, &params);
         }
+        // Nirvana fork, plan 48: `herdr nirvana restart` and the phone's Restart stop the server as a restart, as
+        // `server.stop` does in the app, with the reason every client's `ServerShutdown` then carries.
+        if params.command_id == crate::nirvana_restart_all::RESTART_COMMAND {
+            self.nirvana_restarting = true;
+            self.state.should_quit = true;
+            return crate::app::api::responses::encode_success(
+                id,
+                crate::api::schema::ResponseResult::Ok {},
+            );
+        }
         // Nirvana fork, feature 5: the Preload panel's "edit" names the file after its id.
         if let Some(file) = params
             .command_id

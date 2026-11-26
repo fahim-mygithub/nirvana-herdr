@@ -870,7 +870,11 @@ const USAGE: &str = "usage: herdr --session nirvana nirvana window [<folder>]
        herdr nirvana fresh [<pane>]
   A fresh session for Nirvana Claude in <pane>, this pane when none is named (plan 25 §2): herdr types /clear once
   it is idle and its input line empty, and the next session starts from a handoff note.
-  Before Claude starts, the window applies the folder's preset (plan 13; `herdr preload why <folder>`).";
+  Before Claude starts, the window applies the folder's preset (plan 13; `herdr preload why <folder>`).
+       herdr --session nirvana nirvana restart
+  Restarts the whole session: every program in its panes stops, a new server restores it and Nirvana Claude comes
+  back (plan 48). The window stays. Run from a pane of the session, it ends with that pane and the restart goes on
+  by itself; `herdr nirvana restart help` says more.";
 
 /// `herdr nirvana <subcommand>`.
 pub fn cli(args: &[String]) -> std::io::Result<()> {
@@ -893,6 +897,8 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
         }
         // Plan 25 §2: the owner's fresh start.
         Some("fresh") if args.len() <= 2 => crate::nirvana_fresh::cli(&args[1..]),
+        // Plan 48: a restart of the whole session, and the worker it starts.
+        Some("restart") => crate::nirvana_restart_all::cli(&args[1..]),
         // Plan 12 O4b: the plugin's hooks and statusline. Plan 41 §5.1: agy's hooks.json calls the same verbs with a
         // trailing `--host agy`, which `nirvana_hookhost::host` reads from the process's own command line; the verb
         // still takes no other argument.

@@ -152,6 +152,9 @@ pub struct App {
     /// Nirvana fork: the next try at starting Nirvana Claude again in restored panes, and the last one.
     pub(crate) nirvana_relaunch_at: Option<Instant>,
     nirvana_relaunch_until: Option<Instant>,
+    /// Nirvana fork, plan 48: this stop was asked as a restart (`nirvana_restart_all`), so each client's
+    /// `ServerShutdown` says so and the window's client comes back on the new server.
+    pub(crate) nirvana_restarting: bool,
     /// Nirvana fork, plan 27: `[ui.idle_compact]`, kept current by a config reload (`apply_live_config`).
     pub(crate) idle_compact: crate::config::IdleCompactConfig,
     pub(crate) pending_host_appearance_deadline: Option<Instant>,
@@ -670,6 +673,7 @@ impl App {
             pending_agent_resume_deadline: None,
             nirvana_relaunch_at: None,
             nirvana_relaunch_until: None,
+            nirvana_restarting: false,
             idle_compact: config.ui.idle_compact,
             pending_host_appearance_deadline: None,
             pane_host_appearance: None,
