@@ -72,7 +72,7 @@ fn the_phones_restart_starts_the_worker_and_says_how_many_were_working() {
     assert_eq!(body["working"], 2, "the working and the blocked turns stop");
     assert_eq!(
         body["server"],
-        std::process::id(),
+        json!(crate::nirvana_restart_all::server_mark()),
         "the page tells the new server from this one by it"
     );
     assert_eq!(asked.load(Ordering::SeqCst), 1, "one worker");
@@ -85,8 +85,25 @@ fn hello_names_the_server_that_answers() {
     let (status, _, body) = get(running.addr, "/api/hello", OWNER);
     assert_eq!(status, 200);
     let body: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(body["server"], std::process::id());
+    assert_eq!(
+        body["server"],
+        json!(crate::nirvana_restart_all::server_mark())
+    );
     assert_eq!(body["working"], 2, "the count the confirm shows");
+}
+
+/// Fix round A (review finding 1): the mark the 202 names is the one `/api/hello` names, a string of the pid and the
+/// start, so the page's `!==` tells a new server from this one even when Windows gives it this one's pid.
+#[test]
+fn hello_and_the_restart_name_one_server() {
+    let running = serve(site(Arc::new(AtomicUsize::new(0)), Ok(())));
+    let (_, _, hello) = get(running.addr, "/api/hello", OWNER);
+    let (status, _, restart) = restart_post(running.addr);
+    assert_eq!(status, 202, "{restart}");
+    let hello: Value = serde_json::from_str(&hello).unwrap();
+    let restart: Value = serde_json::from_str(&restart).unwrap();
+    assert!(hello["server"].is_string(), "a string mark: {hello}");
+    assert_eq!(hello["server"], restart["server"], "one server, one mark");
 }
 
 #[test]

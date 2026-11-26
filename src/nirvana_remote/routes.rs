@@ -346,10 +346,11 @@ impl Site {
 
 const REFUSED: &str = "Only the Tailscale account this PC is signed in with can connect.";
 
-/// Plan 48: `/api/hello` also names the server answering, which the page waits to see change after a restart.
+/// Plan 48: `/api/hello` also names the server answering, which the page waits to see change after a restart: the
+/// same mark the restart's 202 names (`nirvana_restart_all::server_mark`, pid and start, since Windows reuses pids).
 /// Another PC's Nirvana Remote reads `Hello` and passes over it.
 fn with_server(mut hello: serde_json::Value) -> serde_json::Value {
-    hello["server"] = json!(std::process::id());
+    hello["server"] = json!(crate::nirvana_restart_all::server_mark());
     hello
 }
 

@@ -237,6 +237,7 @@ pub(crate) fn render_sidebar(
         Rect::new(workspace_area.x, workspace_area.y, workspace_area.width, 1),
         snapshot.update_available.as_deref(),
         crate::nirvana::reload_armed(),
+        crate::nirvana::supervised(),
         palette,
         hits,
     );

@@ -59,6 +59,19 @@ class PhoneRestartTest(unittest.TestCase):
         self.assertFalse(gone["waiting"])
         self.assertTrue(gone["error"], "past the wait's limit the reach check says the PC is not answering")
 
+    def test_the_confirm_counts_the_working_agents_and_the_wait_is_for_the_202s_server(self) -> None:
+        # Fix round H (review finding 5): spaces.js runs here, not only grepped. The confirm reads hello as it opens.
+        seen = steps("confirm")
+        self.assertIn("2 agents are working now: their turns stop.", seen["confirm"]["sheet"],
+                      "the confirm names the two working agents")
+        asked = seen["restarted"]
+        self.assertEqual(asked["posts"], [{"url": "/api/restart", "method": "POST", "body": "{}"}],
+                         "one POST to /api/restart")
+        self.assertTrue(asked["waiting"], "the wait's screen is drawn after Restart")
+        self.assertEqual(asked["marks"], ["41-1700000000000"], "the wait is for the server the 202 named")
+        self.assertTrue(seen["first ask"]["waiting"], "that server answering again: not back yet")
+        self.assertFalse(seen["back"]["waiting"], "the same pid with another start is a new server")
+
     def test_the_old_server_answering_never_ends_the_wait(self) -> None:
         seen = steps("old")
         self.assertTrue(seen["end"]["waiting"], "the same server: not back yet")

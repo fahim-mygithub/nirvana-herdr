@@ -381,6 +381,164 @@ fn the_hop_starts_the_same_worker() {
     );
 }
 
+/// Fix round A (review finding 1): Windows reuses pids, so the server's mark is its pid and its start. A new server
+/// with the old one's pid has another mark, and one process names one mark every time it is asked.
+#[test]
+fn a_servers_mark_is_its_pid_and_its_start() {
+    assert_ne!(
+        mark_of(41, 1_700_000_000_000),
+        mark_of(41, 1_700_000_009_000),
+        "the same pid, another start: another mark"
+    );
+    assert_ne!(mark_of(41, 1_700_000_000_000), mark_of(42, 1_700_000_000_000));
+    let first = server_mark().to_owned();
+    // A mark taken again would carry a later millisecond.
+    std::thread::sleep(Duration::from_millis(5));
+    assert_eq!(server_mark(), first, "one process, one mark");
+    assert!(
+        first.starts_with(&format!("{}-", std::process::id())),
+        "{first}"
+    );
+}
+
+/// Fix round E (review section 3 item 11, finding 6): a server from a build before plan 48 does not know the restart's
+/// id and answers upstream's `command_not_found`, "custom command manifest is stale; reload configuration", which
+/// sends the owner the wrong way. The worker says what it is instead; any other refusal keeps the server's words.
+#[test]
+fn an_older_server_that_has_no_restart_is_named_in_plain_words() {
+    let old = refusal(
+        Some("command_not_found"),
+        "custom command manifest is stale; reload configuration",
+    );
+    assert_eq!(old, OLD_SERVER, "an older server in plain words");
+    assert!(!old.contains("manifest"), "{old}");
+    assert_eq!(
+        refusal(Some("made_up_code"), "made-up reason"),
+        "made-up reason",
+        "another refusal keeps its words"
+    );
+    assert!(
+        USAGE.contains("an older build has no restart"),
+        "the usage says it too: {USAGE}"
+    );
+}
+
+/// Fix round E: the usage names `help`; it, `--help` and `-h` print the usage and exit 0 (it exited 2).
+#[test]
+fn help_is_help() {
+    let args = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+    for word in ["help", "--help", "-h"] {
+        assert_eq!(verb(&args(&[word])), Verb::Help, "{word}");
+    }
+    assert_eq!(verb(&args(&[])), Verb::Command);
+    assert_eq!(verb(&args(&["made-up"])), Verb::Bad);
+    assert_eq!(
+        verb(&args(&["--hop", "41-7", "alone"])),
+        Verb::Hop {
+            run: "41-7".into(),
+            how: "alone".into()
+        }
+    );
+}
+
+/// A writer whose bytes a test reads while it is lent out.
+struct Said<'a>(&'a RefCell<Vec<u8>>);
+
+impl std::io::Write for Said<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Fix round F (review finding 9): the window says it is a restart before its client waits for the old server.
+#[test]
+fn the_window_says_it_is_restarting_before_it_waits() {
+    let said = RefCell::new(Vec::new());
+    let mut at_first_look = None;
+    let code = client_restart_wait(
+        &mut Said(&said),
+        || {
+            if at_first_look.is_none() {
+                at_first_look = Some(String::from_utf8_lossy(&said.borrow()).into_owned());
+            }
+            true
+        },
+        |_| {},
+    );
+    assert_eq!(code, crate::nirvana::RELOAD_EXIT_CODE);
+    let text = String::from_utf8_lossy(&said.borrow()).into_owned();
+    assert!(
+        text.contains("Nirvana is restarting; this window comes back by itself"),
+        "the window says so: {text:?}"
+    );
+    let before = at_first_look.unwrap_or_default();
+    assert!(
+        before.contains("Nirvana is restarting"),
+        "said before the wait: {before:?}"
+    );
+    let said = RefCell::new(Vec::new());
+    assert_eq!(client_restart_wait(&mut Said(&said), || false, |_| {}), 1);
+    assert!(String::from_utf8_lossy(&said.borrow()).contains(NOT_STOPPED));
+}
+
+/// Fix round G (review section 6): a pane carries `HERDR_SOCKET_PATH` (`integration/env.rs` apply_pane_base_env) and
+/// the server's own `HERDR_SESSION` (portable-pty's CommandBuilder starts from the server's environment). The plain
+/// command restarts the session the pane's socket names, as `session::active_api_socket_path` lets the socket win;
+/// `--session` wins over both. A socket that is no session's own names no session it cannot know.
+#[test]
+fn the_plain_command_restarts_the_session_its_socket_names() {
+    let config = Path::new("/made-up/config/herdr");
+    let nirvana = config.join("sessions").join("nirvana").join("herdr.sock");
+    assert_eq!(
+        target_session(false, None, Some(&nirvana), config),
+        Ok(Some("nirvana".to_owned())),
+        "a pane's socket names its session, HERDR_SESSION or not"
+    );
+    assert_eq!(
+        target_session(false, None, Some(&config.join("herdr.sock")), config),
+        Ok(None),
+        "the default session's socket"
+    );
+    assert_eq!(
+        target_session(false, Some("nirvana"), Some(&nirvana), config),
+        Ok(Some("nirvana".to_owned()))
+    );
+    assert_eq!(
+        target_session(true, Some("work"), Some(&nirvana), config),
+        Ok(Some("work".to_owned())),
+        "--session names it"
+    );
+    assert_eq!(
+        target_session(false, Some("work"), None, config),
+        Ok(Some("work".to_owned())),
+        "a terminal outside herdr"
+    );
+    let odd = target_session(
+        false,
+        None,
+        Some(Path::new("/made-up/elsewhere/herdr.sock")),
+        config,
+    )
+    .unwrap_err();
+    assert!(odd.contains("--session <name>"), "{odd}");
+    assert!(!odd.contains("--session default"), "{odd}");
+    assert!(
+        target_session(
+            false,
+            None,
+            Some(&config.join("sessions").join("default").join("herdr.sock")),
+            config
+        )
+        .is_err(),
+        "`--session default` is the config folder's own socket, never sessions/default"
+    );
+}
+
 /// The worker's `command.invoke` stops the server as a restart, as `server.stop` does in the app.
 #[tokio::test]
 async fn the_restart_command_stops_the_server_as_a_restart() {

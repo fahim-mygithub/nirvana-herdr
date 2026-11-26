@@ -61,6 +61,9 @@ pub const ANSWER_WAIT: Duration = Duration::from_secs(15 + 20 + 30 + 10);
 pub const NOT_STOPPED: &str = "the old server did not stop within 15 s; nothing was started";
 pub const NOT_LISTENING: &str =
     "a new server was started but did not listen within 30 s (see herdr-server.log)";
+/// Fix round E (review finding 6): what upstream's `command_not_found` means for the restart's id.
+pub const OLD_SERVER: &str = "the running Nirvana is an older build that has no restart; reload it once with the \
+     header's badge, or close the window and open Nirvana again";
 
 pub const USAGE: &str = "usage: herdr --session <name> nirvana restart
   Restarts the session: the server saves it and stops, every program in its panes stops (a working agent's turn
@@ -68,7 +71,36 @@ pub const USAGE: &str = "usage: herdr --session <name> nirvana restart
   the panes that ran it. With the Nirvana window open the window stays; with none the server comes back with no
   window. It answers once the new server listens, or says what did not come back, with exit 1.
   Run from a pane of the session it restarts, it ends with that pane; the restart goes on by itself and writes its
-  outcome to nirvana-restart.json in the session's folder.";
+  outcome to nirvana-restart.json in the session's folder. With no --session it restarts the session this
+  terminal's herdr socket names.
+  A running Nirvana from an older build has no restart: reload it once with the header's badge, or close the
+  window and open Nirvana again.";
+
+// ---- The server's mark: which server answers ----
+
+/// A process's mark: its pid and its start in unix milliseconds. Fix round A (review finding 1): the mark was the pid
+/// alone, and Windows reuses pids, so a new server with the old one's pid left the phone on "Restarting Nirvana" for
+/// the page's whole wait (app.js RESTART_MOST_MS, 180 s). With the start beside it, a new process has a new mark.
+pub fn mark_of(pid: u32, started_unix_ms: u128) -> String {
+    format!("{pid}-{started_unix_ms}")
+}
+
+static SERVER_MARK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// This process's mark, taken once. `/api/hello` and the 202 of `POST /api/restart` both name it (`nirvana_remote`
+/// routes.rs `with_server`, live.rs `restart`), and the page waits to see it change. The phone server takes it as it
+/// starts (`nirvana_remote::start`), so its time is the server's start to within the server's own startup; a later
+/// process with the same pid takes a later time.
+pub fn server_mark() -> &'static str {
+    SERVER_MARK.get_or_init(|| mark_of(std::process::id(), unix_ms_now()))
+}
+
+fn unix_ms_now() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis())
+        .unwrap_or(0)
+}
 
 // ---- The server: the stop is a restart ----
 
@@ -129,14 +161,35 @@ pub fn wait_until(
     }
 }
 
+/// What the window shows while its client waits for the old server (fix round, review finding 9): before it, only
+/// upstream's `herdr: server shut down: nirvana restart`, and then up to `STOP_WAIT` of nothing.
+pub const RESTARTING_LINE: &str =
+    "nirvana: Nirvana is restarting; this window comes back by itself in a few seconds.";
+
+/// The client's wait after a restart's shutdown, told on `out` first: wait for the old server's sockets to go, and
+/// the exit code (`client_exit`).
+pub fn client_restart_wait(
+    out: &mut dyn std::io::Write,
+    gone: impl FnMut() -> bool,
+    sleep: impl FnMut(Duration),
+) -> i32 {
+    let _ = writeln!(out, "{RESTARTING_LINE}");
+    let _ = out.flush();
+    let gone = wait_until(STOP_WAIT, POLL, gone, sleep);
+    if !gone {
+        let _ = writeln!(out, "nirvana: {NOT_STOPPED}");
+    }
+    client_exit(gone)
+}
+
 /// After the client left on a restart's shutdown: wait for the old server's sockets to go, then leave with the code
 /// `supervise_code` starts the client again on.
 pub fn finish_client_restart() -> ! {
-    let gone = wait_until(STOP_WAIT, POLL, old_sockets_gone, std::thread::sleep);
-    if !gone {
-        eprintln!("nirvana: {NOT_STOPPED}");
-    }
-    std::process::exit(client_exit(gone));
+    std::process::exit(client_restart_wait(
+        &mut std::io::stderr(),
+        old_sockets_gone,
+        std::thread::sleep,
+    ));
 }
 
 fn reachable(path: &Path) -> bool {
@@ -318,6 +371,18 @@ pub fn run(world: &dyn World, comeback: Comeback) -> Result<Duration, String> {
     }
 }
 
+/// What the worker says when the server refused `RESTART_COMMAND`. Upstream's `command_not_found` (`app/
+/// custom_commands.rs`, "custom command manifest is stale; reload configuration") is what a server from a build before
+/// plan 48 answers, which has no restart: `OLD_SERVER` says that, and how to get past it. Any other refusal keeps the
+/// server's own words.
+pub fn refusal(code: Option<&str>, message: &str) -> String {
+    if code == Some("command_not_found") {
+        OLD_SERVER.to_owned()
+    } else {
+        message.to_owned()
+    }
+}
+
 /// The worker on this PC: herdr's own socket, server start and clock; its progress in `<data dir>/RESULT_FILE`.
 struct Live {
     run: String,
@@ -342,7 +407,10 @@ impl World for Live {
             .request_value(&request)
             .map_err(|err| err.to_string())?;
         match response.get("error") {
-            Some(error) => Err(error["message"].as_str().unwrap_or("error").to_owned()),
+            Some(error) => Err(refusal(
+                error["code"].as_str(),
+                error["message"].as_str().unwrap_or("error"),
+            )),
             None => Ok(()),
         }
     }
@@ -551,30 +619,106 @@ fn working_now() -> Option<usize> {
     Some(crate::nirvana_remote::herdr::working(&response["result"]))
 }
 
+/// What `herdr nirvana restart <args>` asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verb {
+    Command,
+    Help,
+    Hop { run: String, how: String },
+    Worker { run: String, how: String },
+    Bad,
+}
+
+/// Fix round E: the usage the window's usage text points at (`herdr nirvana restart help`) is an answer, exit 0.
+pub fn verb(args: &[String]) -> Verb {
+    match args {
+        [] => Verb::Command,
+        [word] if matches!(word.as_str(), "help" | "--help" | "-h") => Verb::Help,
+        [flag, run, how] if flag == "--hop" => Verb::Hop {
+            run: run.clone(),
+            how: how.clone(),
+        },
+        [flag, run, how] if flag == "--worker" => Verb::Worker {
+            run: run.clone(),
+            how: how.clone(),
+        },
+        _ => Verb::Bad,
+    }
+}
+
+/// The session whose own API socket `socket` is (`session::api_socket_path_for`'s layout): `Some(None)` for the
+/// default session's `<config>/herdr.sock`, `Some(Some(name))` for `<config>/sessions/<name>/herdr.sock`, `None` for
+/// any other path. `sessions/default` is no session's: `--session default` is the config folder's own socket.
+pub fn session_of_socket(socket: &Path, config_dir: &Path) -> Option<Option<String>> {
+    if socket.file_name()? != "herdr.sock" {
+        return None;
+    }
+    let folder = socket.parent()?;
+    if folder == config_dir {
+        return Some(None);
+    }
+    if folder.parent()? != config_dir.join("sessions") {
+        return None;
+    }
+    let name = folder.file_name()?.to_str()?;
+    if name == crate::session::DEFAULT_SESSION_NAME {
+        return None;
+    }
+    crate::session::validate_name(name).ok()?;
+    Some(Some(name.to_owned()))
+}
+
+/// Which session the plain `herdr nirvana restart` restarts, in `session::active_api_socket_path`'s order: `--session`
+/// (`explicit`), else the terminal's `HERDR_SOCKET_PATH` (`socket`: every pane has its session's), else
+/// `HERDR_SESSION` (`name`). Fix round G (review section 6): a socket that was not `name`'s told the owner to run
+/// `herdr --session default ...`, which is wrong advice when the socket is another session's. The socket's own folder
+/// names its session now; a socket that is no session's own names none.
+pub fn target_session(
+    explicit: bool,
+    name: Option<&str>,
+    socket: Option<&Path>,
+    config_dir: &Path,
+) -> Result<Option<String>, String> {
+    match socket {
+        Some(socket) if !explicit => session_of_socket(socket, config_dir).ok_or_else(|| {
+            format!(
+                "nirvana: this terminal's herdr socket ({}) is not a session's own; name the session: `herdr \
+                 --session <name> nirvana restart`",
+                socket.display()
+            )
+        }),
+        _ => Ok(name.map(str::to_owned)),
+    }
+}
+
 /// `herdr nirvana restart`; `--hop` and `--worker` (`<run> window|alone`) are its own steps.
 pub fn cli(args: &[String]) -> std::io::Result<()> {
-    match args {
-        [] => std::process::exit(command()),
-        [flag, id, how] if flag == "--hop" => {
+    match verb(args) {
+        Verb::Command => std::process::exit(command()),
+        Verb::Help => {
+            println!("{USAGE}");
+            std::process::exit(0);
+        }
+        Verb::Hop { run: id, how } => {
             let session = session_arg(crate::session::active_name().as_deref());
-            let started = start_worker(&session, id, comeback_arg(how));
+            let started = start_worker(&session, &id, comeback_arg(&how));
             if let Err(why) = &started {
-                write_result(&result_path(), id, "failed", why);
+                write_result(&result_path(), &id, "failed", why);
             }
             std::process::exit(if started.is_ok() { 0 } else { 1 });
         }
-        [flag, id, how] if flag == "--worker" => {
+        Verb::Worker { run: id, how } => {
             let world = Live {
-                run: id.clone(),
+                run: id,
                 result: result_path(),
             };
-            std::process::exit(if run(&world, comeback_arg(how)).is_ok() {
+            std::process::exit(if run(&world, comeback_arg(&how)).is_ok() {
                 0
             } else {
                 1
             });
         }
-        _ => {
+        Verb::Bad => {
             eprintln!("{USAGE}");
             std::process::exit(2);
         }
@@ -583,28 +727,34 @@ pub fn cli(args: &[String]) -> std::io::Result<()> {
 
 /// The command: say what stops and what comes back, start the worker, wait on its outcome.
 fn command() -> i32 {
-    let name = crate::session::active_name();
+    let pane_socket = std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR).map(PathBuf::from);
+    let name = match target_session(
+        crate::session::explicit_session_requested(),
+        crate::session::active_name().as_deref(),
+        pane_socket.as_deref(),
+        &crate::config::config_dir(),
+    ) {
+        Ok(name) => name,
+        Err(why) => {
+            eprintln!("{why}");
+            return 2;
+        }
+    };
     let session = session_arg(name.as_deref());
     let session_socket = crate::session::api_socket_path_for(name.as_deref());
-    if crate::session::active_api_socket_path() != session_socket {
-        eprintln!(
-            "nirvana: this terminal's herdr socket is not session {session}'s; run `herdr --session {session} \
-             nirvana restart`"
-        );
-        return 2;
-    }
     if !reachable(&session_socket) {
         eprintln!("nirvana: session {session} is not running: there is nothing to restart");
         return 1;
     }
     let comeback = comeback(window_live_now(), name.as_deref());
-    let pane_socket = std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR).map(PathBuf::from);
     let own_pane = in_own_pane(pane_socket.as_deref(), &session_socket);
+    // `ApiClient::local` asks `session::active_api_socket_path`, which `target_session` follows: the session's socket.
     for line in notice(&session, working_now(), comeback, own_pane) {
         println!("{line}");
     }
     let run = new_run();
-    let result = result_path();
+    // The worker, started with `--session <session>`, writes here: that session's folder.
+    let result = crate::session::data_dir_for(name.as_deref()).join(RESULT_FILE);
     if let Err(why) = spawn_worker(&session, &run, comeback) {
         eprintln!("nirvana: the restart did not start: {why}");
         return 1;

@@ -5,14 +5,19 @@
 //
 // app.js loads in a fake window with a small DOM, a fake clock and timers, a fake EventSource and a fake fetch whose
 // /api/hello answers come from the scenario. A test screen is open with one live view. The page is told a restart
-// was asked of server 41 (what the POST answered), and the clock runs. stdout is JSON, one entry per step: whether
+// was asked of server OLD (what the POST answered), and the clock runs. stdout is JSON, one entry per step: whether
 // the wait's screen is up, whether the error screen is, how often the test screen was drawn, and how many live views
-// were opened.
+// were opened. A server's mark is its pid and its start (fix round A, src/nirvana_restart_all.rs server_mark).
 //
-//   back    hello answers: 41 (the old server, still up), no answer, tailscaled's 502, then 42 (the new server).
+//   back    hello answers: OLD (the old server, still up), no answer, tailscaled's 502, then NEW: the new server,
+//           which Windows gave the old one's pid (fix round A: only its start differs).
 //   kept    as back, on a screen the shell keeps (the chat's draft): the wait ends and the screen is not redrawn.
 //   never   hello never answers: past the wait's limit the reach check takes over and draws the error screen.
-//   old     hello answers 41 every time: the old server is never taken for the new one.
+//   old     hello answers OLD every time: the old server is never taken for the new one.
+//   confirm fix round H: spaces.js loads after app.js and the spaces screen opens. Restart Nirvana is pressed, the
+//           confirm reads hello (working: 2), Restart is pressed, the POST answers 202 naming OLD, and hello then
+//           answers OLD, then NEW. Each step also says the confirm's text, the POSTs, and the marks the wait was
+//           started with.
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -62,6 +67,8 @@ class Node {
     if (this.parent) this.parent.children = this.parent.children.filter((c) => c !== this);
     this.parent = null;
   }
+  // spaces.js's sparkle asks for its marks every 250 ms; the confirm scenario draws no space.
+  querySelectorAll() { return []; }
 }
 function textNode(value) { const n = new Node('#text'); n.text = String(value); return n; }
 
@@ -123,15 +130,29 @@ FakeEventSource.OPEN = 1;
 FakeEventSource.CLOSED = 2;
 
 // --- a fake fetch: /api/hello answers in order, the last one again ---
+const OLD = '41-1700000000000';
+const NEW = '41-1700000009000';
 const ANSWERS = {
-  back: [{ server: 41 }, 'none', 'gateway', { server: 42 }],
-  kept: [{ server: 41 }, 'none', 'gateway', { server: 42 }],
+  back: [{ server: OLD }, 'none', 'gateway', { server: NEW }],
+  kept: [{ server: OLD }, 'none', 'gateway', { server: NEW }],
   never: ['none'],
-  old: [{ server: 41 }],
+  old: [{ server: OLD }],
+  confirm: [{ server: OLD, working: 2 }, { server: OLD }, { server: NEW }],
 };
 const answers = ANSWERS[scenario];
 let asked = 0;
-function fetchFake(url) {
+const posts = [];
+function fetchFake(url, options) {
+  if (options && options.method === 'POST') {
+    posts.push({ url, method: options.method, body: options.body });
+    const ok = url === '/api/restart';
+    const json = ok ? { restarting: true, working: 2, server: OLD } : { error: 'not found' };
+    return Promise.resolve({
+      ok, status: ok ? 202 : 404,
+      headers: { get(name) { return name === 'Content-Type' ? 'application/json' : ''; } },
+      json() { return Promise.resolve(json); },
+    });
+  }
   // A screen's load while the PC restarts: tailscaled answers its gateway error, which is the error screen at once
   // when no restart is under way (app.js trouble, fallen).
   if (url === '/api/spaces') {
@@ -141,7 +162,8 @@ function fetchFake(url) {
   const answer = answers[Math.min(asked, answers.length - 1)];
   asked += 1;
   if (answer === 'none') return Promise.reject(new Error('no answer'));
-  const json = answer === 'gateway' ? null : { app: 'nirvana-remote', version: '9.9.9', spaces: 1, working: 0, server: answer.server };
+  const json = answer === 'gateway' ? null
+    : { app: 'nirvana-remote', version: '9.9.9', spaces: 1, working: answer.working || 0, server: answer.server };
   return Promise.resolve({
     ok: json !== null,
     status: json ? 200 : 502,
@@ -175,6 +197,31 @@ vm.createContext(context);
 const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'nirvana_remote', 'page', 'app.js'), 'utf8');
 vm.runInContext(source, context, { filename: 'app.js' });
 const Nirvana = win.Nirvana;
+if (scenario === 'confirm') {
+  const spaces = fs.readFileSync(path.join(__dirname, '..', 'src', 'nirvana_remote', 'page', 'spaces.js'), 'utf8');
+  vm.runInContext(spaces, context, { filename: 'spaces.js' });
+}
+// The marks the wait is started with: spaces.js calls nv.restarting on this same object.
+const marks = [];
+const restartingReal = Nirvana.restarting;
+Nirvana.restarting = (mark) => { marks.push(mark); restartingReal(mark); };
+
+// The first node under `node` whose own text is `text`.
+function find(node, text) {
+  if (node.text === text) return node;
+  for (const child of node.children) {
+    const hit = find(child, text);
+    if (hit) return hit;
+  }
+  return null;
+}
+function press(node) {
+  if (!node) throw new Error('nothing to press');
+  for (const fn of (node.on.click || []).slice()) fn({});
+}
+function sheetText() {
+  return nv.children.filter((c) => c.className === 'layer').map((c) => c.textContent).join(' ');
+}
 
 let renders = 0;
 // `kept`: the screen is one the shell never draws again (the chat, which keeps the owner's draft): only its live view
@@ -187,14 +234,35 @@ function layerText(kind) {
 }
 const out = [];
 function note(step) {
-  out.push({ step, waiting: layerText('Restarting Nirvana'), error: layerText("Can't reach your PC") || layerText('not answering'), renders, opened });
+  out.push({ step, waiting: layerText('Restarting Nirvana'), error: layerText("Can't reach your PC") || layerText('not answering'), renders, opened,
+    sheet: sheetText(), posts: posts.slice(), marks: marks.slice() });
+}
+
+async function confirm() {
+  Nirvana.go('spaces', 'f', {});
+  await settle();
+  note('open');
+  press(find(nv, 'Restart Nirvana'));
+  await settle();
+  note('confirm');
+  press(find(nv, 'Restart'));
+  await settle();
+  // The sheet closes in 240 ms, then the wait starts.
+  await advance(300);
+  note('restarted');
+  await advance(2000);
+  note('first ask');
+  await advance(2000);
+  note('back');
+  process.stdout.write(JSON.stringify(out));
 }
 
 (async () => {
+  if (scenario === 'confirm') return confirm();
   Nirvana.go('pcs', 'f', {});
   Nirvana.stream('/api/events', { state() {} });
   note('open');
-  Nirvana.restarting(41);
+  Nirvana.restarting(OLD);
   note('asked');
   // The live view drops with the old server: EventSource reports an error and closes.
   sources[sources.length - 1].readyState = FakeEventSource.CLOSED;

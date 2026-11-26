@@ -58,6 +58,172 @@ _BYPASS = ("        if let Err((status, why)) = checked {\n",
            '        if let Err((status, why)) = checked.or_else(|e| if request.path == "/api/restart" '
            "{ Ok(()) } else { Err(e) }) {\n")
 
+# ---- Plan 48 fix round (review of 7d493691), A to H ----
+NIRVANA = "src/nirvana.rs"
+T_MARK = _A + "a_servers_mark_is_its_pid_and_its_start"
+T_ONE_MARK = _R + "hello_and_the_restart_name_one_server"
+T_TWO_PRESSES = "nirvana::tests::reload_takes_two_presses"
+T_LAPSE = "nirvana::tests::an_armed_press_lapses"
+T_SUPERVISOR = "nirvana::tests::the_supervisor_marks_the_client_it_starts"
+_H = "client::shell::nirvana_header::tests::"
+T_SUPERVISED = _H + "only_a_supervised_client_offers_the_restart"
+T_NARROW = _H + "a_label_the_header_cannot_draw_whole_is_no_press"
+T_OLD_SERVER = _A + "an_older_server_that_has_no_restart_is_named_in_plain_words"
+T_HELP = _A + "help_is_help"
+T_SAYS = _A + "the_window_says_it_is_restarting_before_it_waits"
+T_TARGET = _A + "the_plain_command_restarts_the_session_its_socket_names"
+N_CONFIRM = _N + "test_the_confirm_counts_the_working_agents_and_the_wait_is_for_the_202s_server"
+_PAGE_WAITS = "          close(() => nv.restarting(answer.data.server));\n"
+_LABEL_PRESS = "        None => supervised && end > start && whole,\n"
+_SOCKET_WINS = "        Some(socket) if !explicit => session_of_socket(socket, config_dir).ok_or_else(|| {\n"
+_SAYS_THEN_WAITS = ('    let _ = writeln!(out, "{RESTARTING_LINE}");\n    let _ = out.flush();\n'
+                    "    let gone = wait_until(STOP_WAIT, POLL, gone, sleep);\n")
+
+FIX_CONTROLS = (
+    # A. Red: "the same pid, another start: another mark" (left "41", right "41")
+    Control("p48_mark_has_start", ALL,
+            '    format!("{pid}-{started_unix_ms}")\n', '    format!("{pid}")\n',
+            T_MARK, "rust"),
+    # A. Red: "one process, one mark" (left "<pid>-<later ms>", right "<pid>-<first ms>")
+    Control("p48_mark_once", ALL,
+            "    SERVER_MARK.get_or_init(|| mark_of(std::process::id(), unix_ms_now()))\n",
+            "    Box::leak(mark_of(std::process::id(), unix_ms_now()).into_boxed_str())\n",
+            T_MARK, "rust"),
+    # A. Red: "one server, one mark" (the 202 names another string than hello)
+    Control("p48_hello_and_202_one_mark", LIVE,
+            '                        "server": crate::nirvana_restart_all::server_mark(),\n',
+            '                        "server": format!("{}-0", std::process::id()),\n',
+            T_ONE_MARK, "rust"),
+    # A. Red: "a string mark: {..."server":<pid>...}"
+    Control("p48_hello_mark_is_a_string", ROUTES,
+            '    hello["server"] = json!(crate::nirvana_restart_all::server_mark());\n',
+            '    hello["server"] = json!(std::process::id());\n',
+            T_ONE_MARK, "rust"),
+
+    # B. Red: "lapsed at the window"
+    Control("p48_arm_lapses", NIRVANA,
+            "    since.is_some_and(|since| since < RELOAD_ARM_WINDOW)\n", "    since.is_some()\n",
+            T_LAPSE, "rust"),
+    # B. Red: "a lapsed arm reads unarmed"
+    Control("p48_reload_armed_lapses", NIRVANA,
+            "    arm_holds(armed_at().map(|at| at.elapsed()))\n", "    armed_at().is_some()\n",
+            T_TWO_PRESSES, "rust"),
+    # B. Red: "after the lapse a press is a first press again" (left (true, None): a press that ignores the lapse).
+    # First tried as "(false, Some(now))" -> "(false, None)", which went red at "the first press arms" instead.
+    Control("p48_lapsed_press_arms_again", NIRVANA,
+            "    if arm_holds(armed_at.map(|at| now.saturating_duration_since(at))) {",
+            "    if armed_at.is_some() {",
+            T_LAPSE, "rust"),
+
+    # C. Red: "the client knows a supervisor starts it again"
+    Control("p48_supervisor_marks", NIRVANA,
+            '    command.args(args).env(SUPERVISED_ENV, "1");\n', "    command.args(args);\n",
+            T_SUPERVISOR, "rust"),
+    # C. Red: "nothing starts this client again: no press" (left the label's Rect, right a zero Rect)
+    Control("p48_label_needs_supervisor", HEADER,
+            _LABEL_PRESS, "        None => end > start && whole,\n",
+            T_SUPERVISED, "rust"),
+    # C. Red: "the look is unchanged" (the label's background differs when not supervised)
+    Control("p48_unsupervised_look_unchanged", HEADER,
+            "            Style::default().fg(palette.overlay1).bg(palette.surface0),\n",
+            "            Style::default().fg(palette.overlay1).bg(if supervised { palette.surface0 } else { palette.red }),\n",
+            T_SUPERVISED, "rust"),
+    # C. Red: "a newer build: the reload button in every client" (left 0)
+    Control("p48_update_badge_any_client", HEADER,
+            "        Some(_) => end > start,\n", "        Some(_) => supervised && end > start,\n",
+            T_SUPERVISED, "rust"),
+
+    # D. Red: "too narrow to draw: no press" (left Rect { x: 9, width: 0 }, right a zero Rect)
+    Control("p48_narrow_no_hit", HEADER,
+            "        Some(_) => end > start,\n", "        Some(_) => true,\n",
+            T_NARROW, "rust"),
+    # D. Red: "a clipped label is no press" (left Rect { x: 10, width: 1 })
+    Control("p48_clipped_label_no_press", HEADER,
+            _LABEL_PRESS, "        None => supervised && end > start,\n",
+            T_NARROW, "rust"),
+
+    # E. Red: "an older server in plain words" (left the manifest text)
+    Control("p48_old_server_plain", ALL,
+            '    if code == Some("command_not_found") {\n', "    if false {\n",
+            T_OLD_SERVER, "rust"),
+    # E. Red: "another refusal keeps its words" (left OLD_SERVER)
+    Control("p48_other_refusal_kept", ALL,
+            '    if code == Some("command_not_found") {\n', "    if true {\n",
+            T_OLD_SERVER, "rust"),
+    # E. Red: "the usage says it too"
+    Control("p48_usage_old_server", ALL,
+            "  A running Nirvana from an older build has no restart: reload it once with the header's badge, or close the\n",
+            "  A running Nirvana from an older build: reload it once with the header's badge, or close the\n",
+            T_OLD_SERVER, "rust"),
+    # E. Red: left Bad, right Help ("help")
+    Control("p48_help_is_help", ALL,
+            '        [word] if matches!(word.as_str(), "help" | "--help" | "-h") => Verb::Help,\n', "",
+            T_HELP, "rust"),
+
+    # F. Red: "the window says so: \"\""
+    Control("p48_window_says_restarting", ALL,
+            '    let _ = writeln!(out, "{RESTARTING_LINE}");\n', "",
+            T_SAYS, "rust"),
+    # F. Red: "said before the wait: \"\"" (the line comes, but after the wait)
+    Control("p48_said_before_the_wait", ALL,
+            _SAYS_THEN_WAITS,
+            "    let gone = wait_until(STOP_WAIT, POLL, gone, sleep);\n"
+            '    let _ = writeln!(out, "{RESTARTING_LINE}");\n    let _ = out.flush();\n',
+            T_SAYS, "rust"),
+
+    # G. Red: "a pane's socket names its session, HERDR_SESSION or not" (left Ok(None))
+    Control("p48_pane_socket_names_session", ALL,
+            _SOCKET_WINS,
+            "        Some(socket) if !explicit && false => session_of_socket(socket, config_dir).ok_or_else(|| {\n",
+            T_TARGET, "rust"),
+    # G. Red: "--session names it" (left Ok(Some("nirvana")))
+    Control("p48_explicit_session_wins", ALL,
+            _SOCKET_WINS,
+            "        Some(socket) => session_of_socket(socket, config_dir).ok_or_else(|| {\n",
+            T_TARGET, "rust"),
+    # G. Red: "the default session's socket" (left Err(...))
+    Control("p48_default_socket_is_default", ALL,
+            "    if folder == config_dir {\n        return Some(None);\n", "    if false {\n        return Some(None);\n",
+            T_TARGET, "rust"),
+    # G. Red: "`--session default` is the config folder's own socket, never sessions/default"
+    Control("p48_sessions_default_is_none", ALL,
+            "    if name == crate::session::DEFAULT_SESSION_NAME {\n", "    if false {\n",
+            T_TARGET, "rust"),
+    # G. Red: the odd socket's words name `--session default` again (assertion on "--session <name>")
+    Control("p48_odd_socket_names_no_session", ALL,
+            "                 --session <name> nirvana restart`\",",
+            "                 --session default nirvana restart`\",",
+            T_TARGET, "rust"),
+
+    # H (node). Red: "the confirm names the two working agents" (it says they could not be counted)
+    Control("p48_node_confirm_counts", SPACES_JS,
+            ".then((hello) => hello.working, () => null)", ".then(() => null, () => null)",
+            N_CONFIRM, "python"),
+    # H. Red: "one POST to /api/restart" (the POST went to /api/restart-not)
+    Control("p48_node_one_post", SPACES_JS,
+            "nv.postJson('/api/restart', {})", "nv.postJson('/api/restart-not', {})",
+            N_CONFIRM, "python"),
+    # H. Red: "the wait's screen is drawn after Restart" (True is not... False is not true)
+    Control("p48_node_wait_after_confirm", SPACES_JS,
+            _PAGE_WAITS, "          close();\n",
+            N_CONFIRM, "python"),
+    # H. Red: "the wait is for the server the 202 named" (marks [2])
+    Control("p48_node_wait_on_202_mark", SPACES_JS,
+            _PAGE_WAITS, "          close(() => nv.restarting(answer.data.working));\n",
+            N_CONFIRM, "python"),
+    # H. Red: "that server answering again: not back yet"
+    Control("p48_node_confirm_same_mark_waits", APP_JS,
+            "      const back = response.ok && data.server && data.server !== wait.old;\n",
+            "      const back = response.ok;\n",
+            N_CONFIRM, "python"),
+    # A, page side. Red: "the same pid with another start is a new server" (a pid-only compare waits for ever)
+    Control("p48_node_same_pid_new_start", APP_JS,
+            "      const back = response.ok && data.server && data.server !== wait.old;\n",
+            "      const back = response.ok && data.server && String(data.server).split('-')[0] !== "
+            "String(wait.old).split('-')[0];\n",
+            N_CONFIRM, "python"),
+)
+
 CONTROLS = (
     # P39v, a chat opened on an unread row asks again by itself
     # Red: "a token that came with no event and no feed build wakes the chat: the whole chat from its file"
@@ -257,7 +423,7 @@ CONTROLS = (
     # ---- The window's control: the version label ----
     # Red: "the label is the press" (left Rect 0x0, right the label's 14 columns)
     Control("p48_label_is_the_press", HEADER,
-            "    if end > start {\n", "    if update_available.is_some() && end > start {\n",
+            "        None => supervised && end > start && whole,\n", "        None => false,\n",
             T_HEADER, "rust"),
     # Red: "armed: ..." (the label stays " alpha ... " after one press)
     Control("p48_label_arms", HEADER,
@@ -278,14 +444,15 @@ CONTROLS = (
     Control("p48_route_working", LIVE,
             "            Ok(summary) => summary.working,\n", "            Ok(_summary) => 0,\n",
             T_PHONE, "rust"),
-    # Red: "the page tells the new server from this one by it" (left 0)
+    # Red: "the page tells the new server from this one by it" (fix round A: left Number(<pid>), right String("<pid>-<ms>"))
     Control("p48_route_names_server", LIVE,
-            '&json!({"restarting": true, "working": working, "server": std::process::id()}),',
-            '&json!({"restarting": true, "working": working, "server": 0}),',
+            '                        "server": crate::nirvana_restart_all::server_mark(),\n',
+            '                        "server": std::process::id(),\n',
             T_PHONE, "rust"),
-    # Red: left 0, right <this process id>
+    # Red: fix round A: left Number(<pid>), right String("<pid>-<ms>")
     Control("p48_hello_names_server", ROUTES,
-            '    hello["server"] = json!(std::process::id());\n', '    hello["server"] = json!(0);\n',
+            '    hello["server"] = json!(crate::nirvana_restart_all::server_mark());\n',
+            '    hello["server"] = json!(std::process::id());\n',
             T_HELLO, "rust"),
     # Red: "a GET: HTTP/1.1 404 Not Found"
     Control("p48_route_get_refused", ROUTES,
@@ -387,4 +554,4 @@ CONTROLS = (
     Control("p48_node_gives_up_to_check", APP_JS,
             "      wait.layer.remove();\n      check();\n", "      wait.layer.remove();\n",
             N_NEVER, "python"),
-)
+) + FIX_CONTROLS

@@ -581,7 +581,12 @@ impl Site {
                 info!(working, "nirvana remote: restart asked from the phone");
                 Response::json(
                     202,
-                    &json!({"restarting": true, "working": working, "server": std::process::id()}),
+                    &json!({
+                        "restarting": true,
+                        "working": working,
+                        // Fix round A: the mark `/api/hello` names, pid and start.
+                        "server": crate::nirvana_restart_all::server_mark(),
+                    }),
                 )
             }
             Err(why) => {

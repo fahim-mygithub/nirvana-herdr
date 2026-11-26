@@ -535,6 +535,8 @@ pub fn start(api_tx: crate::api::ApiRequestSender) -> Option<Remote> {
     site.local = pick::Local::live();
     // Plan 48: the phone's Restart Nirvana starts the same worker as `herdr nirvana restart`.
     site.restart = Arc::new(crate::nirvana_restart_all::restart_from_phone);
+    // Plan 48 fix round A: the server's mark (pid and start) is taken now, as the phone server starts.
+    let _ = crate::nirvana_restart_all::server_mark();
     // P39e: the push key and the phones, in this session's data dir beside the state file. Alerts that cannot be set
     // up leave the rest of Nirvana Remote serving; the routes then say so.
     site.alerts = match alerts::Alerts::live() {

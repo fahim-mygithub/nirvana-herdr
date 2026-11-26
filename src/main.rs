@@ -572,6 +572,9 @@ fn main() -> io::Result<()> {
             std::process::exit(2);
         }
     };
+    // Nirvana fork, plan 48 fix round C: whether `nirvana::supervise_code` started this process, read before any
+    // thread and taken out of the environment so nothing this process starts inherits it.
+    nirvana::take_supervised_mark();
     #[cfg(windows)]
     if let Some(result) = platform::maybe_activate_desktop_notification(&raw_args) {
         return result;
