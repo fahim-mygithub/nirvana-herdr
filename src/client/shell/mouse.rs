@@ -1977,7 +1977,8 @@ impl ClientShellState {
                 self.tab_press = None;
                 self.chrome_drag = None;
                 // Nirvana fork: the version badge reloads onto a newer installed build on its
-                // second press; any other press puts an armed badge back.
+                // second press, and restarts onto the same build when none is newer (plan 48);
+                // any other press puts an armed badge back.
                 if super::contains(self.hits.nirvana_reload, point) {
                     if crate::nirvana::press_reload() {
                         outcome.detach = true;

@@ -390,7 +390,17 @@ fn run_client_with_mode(
         );
         let connection_lost_during_terminal_hangup =
             terminal_restore_failed && matches!(&err, ClientError::ConnectionLost(_));
-        if detached || connection_lost_during_terminal_hangup {
+        // Nirvana fork, plan 48: a restart asked from outside the window ends the client as the reload badge does;
+        // `main` waits for the old server's sockets to go, then leaves with the code the window starts it again on.
+        let restarting = matches!(
+            &err,
+            ClientError::ServerShutdown { reason }
+                if crate::nirvana_restart_all::is_restart(reason.as_deref())
+        );
+        if restarting {
+            crate::nirvana_restart_all::client_saw_restart();
+        }
+        if detached || connection_lost_during_terminal_hangup || restarting {
             return Ok(());
         }
 

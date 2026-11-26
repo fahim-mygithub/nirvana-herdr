@@ -257,6 +257,7 @@
   }
 
   function fallen(why) {
+    if (reach.restarting) return; // plan 48: the wait's own screen is up
     clearTimeout(reach.grace);
     reach.grace = null;
     if (!reach.down) reach.tries = 0;
@@ -295,6 +296,79 @@
   function tryNow() {
     clearInterval(reach.tick);
     check();
+  }
+
+  // Plan 48: Restart Nirvana (spaces.js). The PC's server stops and a new one starts, so for some seconds every
+  // request fails and the live views drop. That is the restart the owner asked for, not the PC out of reach: while it
+  // lasts the error screen is not drawn (fallen returns at once, whatever reached it) and this screen says what is
+  // happening. /api/hello is asked every RESTART_POLL_MS; the restart is over when it answers with a `server` other
+  // than the one that took the POST, which may answer for a moment yet. Then the live views open again, the screen
+  // is drawn again from the new server, and the build is checked (a restart can come back on a newer install). Past
+  // RESTART_MOST_MS the reach check takes over and shows the error screen if the PC is still down.
+  const RESTART_POLL_MS = 2000;
+  const RESTART_MOST_MS = 180000;
+
+  function restarting(old) {
+    clearTimeout(reach.grace);
+    reach.grace = null;
+    clearInterval(reach.tick);
+    if (reach.layer) reach.layer.remove();
+    reach.layer = null;
+    reach.when = null;
+    reach.down = '';
+    const wait = { old, until: Date.now() + RESTART_MOST_MS, layer: null };
+    wait.layer = h('section', { class: 'reach scr-f', role: 'status' },
+      h('div', { class: 'brand' },
+        h('div', { class: 'brand-mark' }, icon('lotus', 26, '#E9F7F8', 1.7)),
+        h('div', { class: 'brand-text' },
+          h('span', { class: 'brand-name', text: 'Nirvana' }),
+          h('span', { class: 'brand-sub', text: 'Restarting on the PC' }))),
+      h('div', { class: 'section' },
+        h('h1', { class: 'reach-title', text: 'Restarting Nirvana' }),
+        h('p', { class: 'reach-lead', text: 'The PC is stopping Nirvana and starting it again. Nirvana Claude comes back in its panes, and this page comes back by itself when the PC answers.' })),
+      h('span', { class: 'note', text: 'Waiting for the PC…' }));
+    reach.restarting = wait;
+    document.getElementById('nv').append(wait.layer);
+    setTimeout(() => restartPoll(wait), RESTART_POLL_MS);
+  }
+
+  // Whether the PC's Nirvana answers from another server than `wait.old`.
+  async function newServer(wait) {
+    const stop = new AbortController();
+    const timer = setTimeout(() => stop.abort(), PROBE_MS);
+    try {
+      const response = await fetch('/api/hello', { credentials: 'same-origin', cache: 'no-store', signal: stop.signal });
+      let data = {};
+      try { data = await response.json(); } catch (_) { /* not JSON: tailscaled's gateway error */ }
+      const back = response.ok && data.server && data.server !== wait.old;
+      return Boolean(back);
+    } catch (_) {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function restartPoll(wait) {
+    if (reach.restarting !== wait) return;
+    const back = await newServer(wait);
+    if (reach.restarting !== wait) return;
+    if (back) {
+      reach.restarting = null;
+      wait.layer.remove();
+      reach.revive.forEach((revive) => revive());
+      const def = current && screens[current.name];
+      if (def && !def.keep) show(current.name, 'f', current.params);
+      fresh();
+      return;
+    }
+    if (Date.now() >= wait.until) {
+      reach.restarting = null;
+      wait.layer.remove();
+      check();
+      return;
+    }
+    setTimeout(() => restartPoll(wait), RESTART_POLL_MS);
   }
 
   // Drawn again only when what it says changes (the case, or the phone going on or offline): each retry only writes
@@ -519,6 +593,8 @@
     current = { name: has(name) ? name : 'pcs', params: params || {} };
     reach.dirty = false;
     if (reach.layer) document.getElementById('nv').append(reach.layer);
+    // Plan 48: a screen opened while the PC restarts stays under the wait's screen.
+    if (reach.restarting) document.getElementById('nv').append(reach.restarting.layer);
     const cleanup = def.render(el, params || {}, api);
     if (typeof cleanup === 'function') leave = cleanup;
   }
@@ -567,6 +643,6 @@
   // Whether the phone asked for less motion: the sparkle then stands still.
   function still() { return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches; }
 
-  const api = { screen, go, has, h, icon, getJson, postJson, upload, stream, sheet, still };
+  const api = { screen, go, has, h, icon, getJson, postJson, upload, stream, sheet, still, restarting };
   window.Nirvana = api;
 })();

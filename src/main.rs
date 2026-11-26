@@ -68,6 +68,7 @@ mod nirvana_profile_proposals;
 mod nirvana_profiles;
 mod nirvana_questions;
 mod nirvana_remote;
+mod nirvana_restart_all;
 mod nirvana_retro;
 mod nirvana_review;
 mod nirvana_run;
@@ -571,6 +572,9 @@ fn main() -> io::Result<()> {
             std::process::exit(2);
         }
     };
+    // Nirvana fork, plan 48 fix round C: whether `nirvana::supervise_code` started this process, read before any
+    // thread and taken out of the environment so nothing this process starts inherits it.
+    nirvana::take_supervised_mark();
     #[cfg(windows)]
     if let Some(result) = platform::maybe_activate_desktop_notification(&raw_args) {
         return result;
@@ -945,6 +949,10 @@ fn main() -> io::Result<()> {
     }
     if nirvana::reload_requested() {
         nirvana::finish_reload();
+    }
+    // Nirvana fork, plan 48: the server stopped as a restart asked from the command or the phone.
+    if nirvana_restart_all::client_restart_requested() {
+        nirvana_restart_all::finish_client_restart();
     }
     Ok(())
 }

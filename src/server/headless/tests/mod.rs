@@ -8428,3 +8428,30 @@ fn no_handle_internal_event_bypass_in_module() {
         bypass_lines.join("\n  ")
     );
 }
+
+/// Nirvana fork, plan 48: a stop asked as a restart (`nirvana_restart_all`) says so in the `ServerShutdown` every
+/// client gets, so the window's client comes back on the new server; any other stop keeps upstream's text.
+#[test]
+fn a_restarts_shutdown_tells_each_client_it_is_a_restart() {
+    for (restarting, want) in [
+        (true, crate::nirvana_restart_all::SHUTDOWN_REASON),
+        (false, "server is shutting down"),
+    ] {
+        let (mut server, control_rx) = window_title_test_server();
+        server.app.nirvana_restarting = restarting;
+        server.initiate_shutdown();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut reason = None;
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            let Ok(bytes) = control_rx.recv_timeout(left) else {
+                break;
+            };
+            if let ServerMessage::ServerShutdown { reason: said } = read_server_message(bytes) {
+                reason = said;
+                break;
+            }
+        }
+        assert_eq!(reason.as_deref(), Some(want), "restarting: {restarting}");
+        shutdown_test_runtimes(&mut server);
+    }
+}

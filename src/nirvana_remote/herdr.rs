@@ -90,7 +90,16 @@ pub fn summary(herdr: &dyn Herdr) -> Result<Summary, String> {
     let workspaces = herdr.call("workspace.list", json!({}))?;
     let agents = herdr.call("agent.list", json!({}))?;
     let spaces = workspaces["workspaces"].as_array().map_or(0, Vec::len);
-    let working = agents["agents"].as_array().map_or(0, |agents| {
+    Ok(Summary {
+        spaces,
+        working: working(&agents),
+    })
+}
+
+/// The agents in `agent.list`'s answer that are in a turn now: working, or blocked on the owner. Plan 48: the
+/// restart's confirm and `herdr nirvana restart` count with it too, since a restart stops those turns.
+pub fn working(agents: &Value) -> usize {
+    agents["agents"].as_array().map_or(0, |agents| {
         agents
             .iter()
             .filter(|agent| match agent["agent_status"].as_str() {
@@ -100,8 +109,7 @@ pub fn summary(herdr: &dyn Herdr) -> Result<Summary, String> {
                 _ => false,
             })
             .count()
-    });
-    Ok(Summary { spaces, working })
+    })
 }
 
 /// The app behind the socket server.

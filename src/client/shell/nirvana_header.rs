@@ -4,7 +4,10 @@
 //! The badge is the running build (`crate::nirvana::VERSION`). When the server reports a newer
 //! installed build (herdr's `update_available`, fed by `crate::nirvana::check_installed`), the badge
 //! becomes a reload button: `↻ <version>`, then `restart?` after one press, and a second press
-//! reloads. Drawn in the client only: it is TUI presentation (AGENTS.md runtime/client boundary).
+//! reloads. Plan 48: with no newer build, the version label is the same button, a restart onto the
+//! same build, in a client `supervise_code` started and only when the label is drawn whole. An armed
+//! press lapses after `crate::nirvana::RELOAD_ARM_WINDOW`. Drawn in the client only: it is TUI
+//! presentation (AGENTS.md runtime/client boundary).
 
 use super::*;
 use ratatui::style::Color;
@@ -13,12 +16,14 @@ use ratatui::style::Color;
 pub(super) const NIRVANA_TEAL: Color = Color::Rgb(0x2A, 0x8C, 0x96);
 pub(super) const MARK: &str = "◆";
 
-/// Draws the brand row on `row` and records the toggle and reload hits.
+/// Draws the brand row on `row` and records the toggle and reload hits. `supervised`: something starts this client
+/// again when it exits 75 (`crate::nirvana::supervised`), so the version label may restart it.
 pub(super) fn render_brand_row(
     buffer: &mut Buffer,
     row: Rect,
     update_available: Option<&str>,
     reload_armed: bool,
+    supervised: bool,
     palette: &Palette,
     hits: &mut ShellHitMap,
 ) {
@@ -53,8 +58,10 @@ pub(super) fn render_brand_row(
             .fg(palette.text)
             .add_modifier(Modifier::BOLD),
     );
+    // Plan 48: armed, the badge asks " restart? " whether or not a newer build is installed; with none, the version
+    // label is the press (the owner, 2026-11-25: "restart all of nirvana and add an option to do so").
     let (badge, style) = match update_available {
-        Some(_) if reload_armed => (
+        _ if reload_armed => (
             " restart? ".to_string(),
             Style::default()
                 .fg(Color::White)
@@ -75,7 +82,15 @@ pub(super) fn render_brand_row(
     };
     let start = x;
     let end = super::render::put_segment(buffer, x, row.y, right, &badge, style);
-    if update_available.is_some() && end > start {
+    // Plan 48 fix round: a newer build's badge is the reload button wherever any of it is drawn, as before plan 48.
+    // With none, the label restarts only a client something starts again on exit 75 (C, review finding 3), and only
+    // when it is drawn whole (D, finding 7): a clipped sliver does not say what it is.
+    let whole = end - start == super::render::display_width(&badge);
+    let press = match update_available {
+        Some(_) => end > start,
+        None => supervised && end > start && whole,
+    };
+    if press {
         hits.nirvana_reload = Rect::new(start, row.y, end - start, 1);
     }
     hits.sidebar_toggle = Rect::new(toggle_x, row.y, 1, 1);
@@ -99,7 +114,17 @@ mod tests {
             .collect()
     }
 
+    /// A supervised client's row (`supervise_code` started it): the window's.
     fn draw(width: u16, update: Option<&str>, armed: bool) -> (Buffer, ShellHitMap) {
+        draw_in(width, update, armed, true)
+    }
+
+    fn draw_in(
+        width: u16,
+        update: Option<&str>,
+        armed: bool,
+        supervised: bool,
+    ) -> (Buffer, ShellHitMap) {
         let area = Rect::new(0, 0, width, 1);
         let mut buffer = Buffer::empty(area);
         let mut hits = ShellHitMap::default();
@@ -108,6 +133,7 @@ mod tests {
             area,
             update,
             armed,
+            supervised,
             &Palette::catppuccin(),
             &mut hits,
         );
@@ -130,7 +156,38 @@ mod tests {
         assert_eq!(buffer[(23, 0)].bg, Palette::catppuccin().surface0);
         assert_eq!(hits.sidebar_toggle, Rect::new(24, 0, 1, 1));
         assert_eq!(buffer[(24, 0)].symbol(), "«");
-        assert_eq!(hits.nirvana_reload, Rect::default());
+    }
+
+    /// Plan 48: with no newer build installed, the version label is the badge's restart: one press shows
+    /// " restart? ", the second restarts (`mouse.rs`, `crate::nirvana::press_reload`). It looks as before until
+    /// pressed.
+    #[test]
+    fn the_version_label_restarts_on_a_second_press_when_no_build_is_newer() {
+        let (buffer, hits) = draw(25, None, false);
+        let label = format!(" {} ", crate::nirvana::label(crate::nirvana::VERSION));
+        let text = row_text(&buffer, 0);
+        let start = text[..text.find(&label).expect("the label")]
+            .chars()
+            .count();
+        assert_eq!(
+            hits.nirvana_reload,
+            Rect::new(start as u16, 0, label.chars().count() as u16, 1),
+            "the label is the press"
+        );
+        assert_eq!(
+            buffer[(hits.nirvana_reload.x, 0)].bg,
+            Palette::catppuccin().surface0
+        );
+
+        let (buffer, hits) = draw(25, None, true);
+        let text = row_text(&buffer, 0);
+        assert!(text.contains(" restart? "), "armed: {text:?}");
+        assert!(!text.contains("alpha"), "{text:?}");
+        assert_eq!(
+            buffer[(hits.nirvana_reload.x, 0)].bg,
+            Palette::catppuccin().red
+        );
+        assert!(hits.nirvana_reload.width > 0);
     }
 
     #[test]
@@ -154,5 +211,49 @@ mod tests {
         assert_eq!(hits.sidebar_toggle, Rect::new(11, 0, 1, 1));
         assert_eq!(buffer[(11, 0)].symbol(), "«");
         assert!(row_text(&buffer, 0).starts_with(" ◆ Nirvana"));
+    }
+
+    /// Plan 48 fix round C (review finding 3): the brand row draws in every herdr client, and only a client that
+    /// `supervise_code` started comes back after exit 75. In any other one the label is no press and looks as it
+    /// does in the window; a newer build's badge is the reload button in every client, as before plan 48.
+    #[test]
+    fn only_a_supervised_client_offers_the_restart() {
+        let (window, window_hits) = draw_in(25, None, false, true);
+        let (plain, plain_hits) = draw_in(25, None, false, false);
+        assert_ne!(window_hits.nirvana_reload, Rect::default());
+        assert_eq!(
+            plain_hits.nirvana_reload,
+            Rect::default(),
+            "nothing starts this client again: no press"
+        );
+        assert_eq!(row_text(&plain, 0), row_text(&window, 0), "the look is unchanged");
+        let x = window_hits.nirvana_reload.x;
+        assert_eq!(plain[(x, 0)].bg, window[(x, 0)].bg, "the look is unchanged");
+        assert_eq!(plain[(x, 0)].fg, window[(x, 0)].fg);
+        let (_, update_hits) = draw_in(25, Some("0.1.1"), false, false);
+        assert!(
+            update_hits.nirvana_reload.width >= 7,
+            "a newer build: the reload button in every client"
+        );
+    }
+
+    /// Plan 48 fix round D (review finding 7): a header too narrow to draw the label has no press. At 12 columns the
+    /// label is clipped to one blank column: no press either, since it does not say what it is, and its second press
+    /// stops every pane. A newer build's clipped badge keeps its hit, as before plan 48.
+    #[test]
+    fn a_label_the_header_cannot_draw_whole_is_no_press() {
+        let (_, hits) = draw(10, None, false);
+        assert_eq!(hits.nirvana_reload, Rect::default(), "too narrow to draw: no press");
+        let (_, hits) = draw(10, Some("0.1.1"), false);
+        assert_eq!(hits.nirvana_reload, Rect::default(), "too narrow to draw: no press");
+        let (buffer, hits) = draw(12, None, false);
+        assert_eq!(
+            buffer[(10, 0)].bg,
+            Palette::catppuccin().surface0,
+            "a sliver of the label is drawn"
+        );
+        assert_eq!(hits.nirvana_reload, Rect::default(), "a clipped label is no press");
+        let (_, hits) = draw(12, Some("0.1.1"), false);
+        assert_eq!(hits.nirvana_reload, Rect::new(10, 0, 1, 1), "the badge as before");
     }
 }

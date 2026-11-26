@@ -3,6 +3,59 @@
 Each entry: Changed → Because → Measured → If you remove this. herdr's own changes are in the root CHANGELOG.md,
 which the fork never edits.
 
+## alpha 0.96.0: restart all of Nirvana from a command, the window or the phone
+
+- **Changed:** plan 48, and plan 39's phone chat (P39v).
+  - `herdr --session nirvana nirvana restart` restarts the session: the server saves it and stops, every program in
+    its panes stops, a new server restores it, and Nirvana Claude comes back in the panes that ran it. It first says
+    how many agents are working. It answers when the new server listens, or says what did not come back, with
+    exit 1. In a pane of the session the plain `herdr nirvana restart` does the same: the pane ends with the
+    session and the restart goes on by itself.
+  - In the Nirvana window the header's version label is that restart when no newer build is installed: one press
+    shows " restart? " and a second within 5 seconds restarts. The reload badge takes the same 5 seconds. Only a
+    client the window starts again offers it, and only when the label is drawn whole.
+  - The phone's spaces screen has "Restart Nirvana" behind a confirm that names how many agents are working.
+    `POST /api/restart` passes the checks of every write route. The page shows "Restarting Nirvana" and comes back
+    by itself when another server answers `/api/hello`, which now names its server by pid and start time.
+  - An open window stays: its client reads the stop's reason, waits for the old sockets to go and leaves with the
+    reload's code, and the window starts it again. With no window the server comes back alone.
+  - A phone chat opened on a row the server has forgotten asks about its agent again each second, at most six
+    times, and takes the transcript when the token comes.
+- **Because:** the owner, 2026-11-25: "Is there a wway to restart all of nirvana and add an option to do so. Can
+  you restart it first". The only restart was the reload badge, which shows only when a newer build is installed.
+  Done by hand that day, a restart closed the window and opened another. The chat fix is review note 2 of alpha
+  0.95.1, seen once live the same day: a first `agent list` came back with no tokens on any row, and a chat opened
+  then showed "No transcript" until some agent's next change.
+- **Measured:** no restart ran through this code: no test starts or stops a server, a window or a worker, so the first
+  restart from each of the three places is the owner's check. By hand on 2026-11-25, on the owner's word: `herdr
+  --session nirvana server stop` had the window, its client and the server gone within 4 seconds, and 12 seconds after
+  the launcher all 8 Nirvana Claudes were back with their tokens. The whole test binary, one process per test, ran
+  5617 tests with 2 failed, the same two `app::api` tests that fail on 0.95.1, where 5577 ran; 22 of them are the
+  restart's own and 204 the phone server's. The page's wait and its confirm run in node against a made-up window,
+  clock and fetch: 5 tests. Built on Opus high and reviewed on Sonnet high. The review found no blocker and nine
+  things, seven fixed here in a second Opus high round, each test first: the page told the new server by its pid
+  alone, which Windows reuses; one press on the label armed it with no time limit; a plain `herdr` outside the window
+  got the label and nothing would start its server again; a clipped label was a press; a server from before this build
+  answered with "custom command manifest is stale"; the window said nothing while it waited; nothing ran the phone's
+  confirm. The controls file holds 97 `p48_` and 4 `p39v_` controls; 35 controls were run red again at the merge, 27
+  of them new and the rest older ones beside the changed code, the tree unchanged after each. The dry run finds 5372
+  of 5380 controls' text, the same 8 old misses. Known gaps: after this install the label is a press only once the
+  Nirvana window has been closed and opened again, since the window process that is running is the older build and
+  does not mark its client; " restart? " stays drawn after its 5 seconds until the next frame; a phone whose request
+  is cut off as the restart starts reads "No answer from the PC." and finds the PC again by itself, and a second tap
+  there restarts again; an old server that takes over 15 seconds to stop leaves nothing running, and Open Nirvana
+  starts it; the worker says "did not stop" for a restart that worked if a new server listens within 100 ms of the old
+  one going; a restart of a session with no workspace makes one; with an SSH endpoint on, the window's client may not
+  read the reason and the window then closes. Not measured: the page on iPhone Safari, the worker under Windows
+  Terminal's job, and whether the 202 is always written before the stop.
+- **If you remove this:** remove the reason from the server's stop and a restart from the command or the phone
+  closes the window. Remove the hop that starts the worker and a restart asked from a pane ends with that pane,
+  after the server has stopped, with nothing to bring it back. Remove the 5 seconds and a press now and another an
+  hour later stop every program. Remove the supervised mark and two presses in a plain `herdr` stop its server for
+  good. Remove the start time from the server's mark and a new server that gets the old pid leaves the phone
+  waiting three minutes. Remove the chat's own asks and a chat opened on a forgotten row waits for some agent's
+  next change.
+
 ## alpha 0.95.1: the phone's chat reads each agent's own transcript
 
 - **Changed:** plan 39's phone page (P39t).

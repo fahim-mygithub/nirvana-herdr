@@ -87,13 +87,15 @@ CONTROLS: tuple[Control, ...] = (
             'format!(" {} ", crate::nirvana::label(crate::nirvana::VERSION)),', '" Nirvana ".to_string(),',
             "brand_row_names_nirvana_and_its_running_version", "rust"),
     Control("header_reload_unclickable", "src/client/shell/nirvana_header.rs",
-            "if update_available.is_some() && end > start {", "if false && end > start {",
+            # Plan 48 fix round: a newer build's badge has its own arm of the press decision.
+            "        Some(_) => end > start,\n", "        Some(_) => false,\n",
             "a_newer_build_turns_the_badge_into_a_reload_button", "rust"),
     Control("header_badge_clipped", "src/client/shell/nirvana_header.rs",
             "let right = toggle_x;", "let right = toggle_x.saturating_sub(1);",
             "brand_row_names_nirvana_and_its_running_version", "rust"),
     Control("reload_single_press", "src/nirvana.rs",
-            "if RELOAD_ARMED.swap(false, Ordering::Relaxed) {", "if true {",
+            # Plan 48 fix round B: the press is decided in `press_at`, over the arm's time.
+            "    if arm_holds(armed_at.map(|at| now.saturating_duration_since(at))) {", "    if true {",
             "reload_takes_two_presses", "rust"),
     Control("same_build_counts_as_newer", "src/nirvana.rs",
             "(Some(running), Some(installed)) => installed > running,",

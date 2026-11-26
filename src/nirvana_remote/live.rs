@@ -11,6 +11,7 @@
 //!   (its length and time read once each `stream::WAKE`; a file, not herdr), and the screen again on a state change.
 //! - `POST /api/send`: `{"agent", "text", "files", "mode"}` (`send.rs`).
 //! - `POST /api/upload?agent=<id>`: the body is the file; its type names the extension.
+//! - `POST /api/restart`: plan 48, Restart Nirvana, the whole session (`nirvana_restart_all`).
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -283,6 +284,17 @@ impl Site {
             return Response::sent();
         }
         let mut gone = false;
+        // P39v (review note 2 of alpha 0.95.1): a row the server's cache forgot has no tokens until its probe runs,
+        // and the probe's answer comes with no herdr event. A settled feed waits on herdr's next event and builds
+        // again (`spaces::Unread`) only at its own builds, so a chat opened then said "No transcript" until some
+        // agent changed state. The view asks about its agent by itself, once each `UNREAD_EVERY`, at most
+        // `UNREAD_TRIES` times, and stops once the row is read.
+        let mut asks = if spaces::unread_row(&found.agent) {
+            spaces::UNREAD_TRIES
+        } else {
+            0
+        };
+        let mut next_ask = Instant::now() + spaces::UNREAD_EVERY;
         let caller = self.caller();
         stream::run(
             conn,
@@ -293,7 +305,26 @@ impl Site {
                     return None;
                 }
                 let mut parts = Vec::new();
-                match lists.recv_timeout(wait) {
+                // P39v: a row read since the view opened is taken as the feed's list would be, so one path below
+                // re-reads the agent and its transcript, whichever brought the change.
+                let mut asked = None;
+                if asks > 0 && Instant::now() >= next_ask {
+                    asks -= 1;
+                    next_ask = Instant::now() + spaces::UNREAD_EVERY;
+                    if let Some(found) = self
+                        .found(&id)
+                        .ok()
+                        .filter(|found| !spaces::unread_row(&found.agent))
+                    {
+                        asks = 0;
+                        asked = Some(json!({"spaces": [{"agents": [found.row()]}]}).to_string());
+                    }
+                }
+                let next = match asked {
+                    Some(list) => Ok(list),
+                    None => lists.recv_timeout(wait),
+                };
+                match next {
                     Ok(list) => {
                         let list: Value = serde_json::from_str(&list).unwrap_or_default();
                         let now = list["spaces"]
@@ -521,6 +552,50 @@ impl Site {
         }
     }
 
+    /// Plan 48: `POST /api/restart`, Restart Nirvana from the phone. Only after `Site::route`'s checks, as every write
+    /// route, and only as JSON, which a cross-site form cannot send. The worker is started out of this server's
+    /// process tree (`nirvana_restart_all`) and not waited on: this server is what stops. The answer says how many
+    /// agents were in a turn, and names this server, which the page waits to see replaced.
+    pub(super) fn restart(&self, request: &Request, conn: &mut Conn) -> Response {
+        let is_json = request.header("Content-Type").first().is_some_and(|kind| {
+            kind.trim()
+                .to_ascii_lowercase()
+                .starts_with("application/json")
+        });
+        if !is_json {
+            return error(415, "a restart is JSON");
+        }
+        if conn.framing() == Framing::None {
+            return error(411, "a restart has a length");
+        }
+        let mut body = Vec::new();
+        if let Err(why) = conn.read_body(RESTART_BODY_MOST, &mut body) {
+            return error(why.status(), "the restart could not be read");
+        }
+        let working = match super::herdr::summary(self.herdr.as_ref()) {
+            Ok(summary) => summary.working,
+            Err(why) => return error(502, why),
+        };
+        match (self.restart)() {
+            Ok(()) => {
+                info!(working, "nirvana remote: restart asked from the phone");
+                Response::json(
+                    202,
+                    &json!({
+                        "restarting": true,
+                        "working": working,
+                        // Fix round A: the mark `/api/hello` names, pid and start.
+                        "server": crate::nirvana_restart_all::server_mark(),
+                    }),
+                )
+            }
+            Err(why) => {
+                warn!(why = %why, "nirvana remote: the restart did not start");
+                error(503, why)
+            }
+        }
+    }
+
     /// `POST /api/upload`. Every answer but a saved file logs one line (P39u: on 2026-11-06 two phone uploads failed
     /// and herdr-server.log said nothing): the route, the size the head declared, the bytes read, the time since the
     /// head, the status and why; never a byte of the file. The lines go through the refusals' throttle, one per kind
@@ -622,6 +697,8 @@ impl Site {
 /// live views (`stream::MOST`) are 10 of the 32 connections, so a stuck or retrying phone cannot starve the page.
 /// The page keeps to the same number by itself (chat.js `UPLOADS_AT_ONCE`); past it the answer is a 503.
 pub const UPLOADS_AT_ONCE: usize = 4;
+/// Plan 48: a restart's body is `{}`; anything past this is not the page's.
+const RESTART_BODY_MOST: u64 = 1024;
 const BUSY: &str = "the PC is busy with other uploads";
 
 /// The uploads being read now (`UPLOADS_AT_ONCE`).

@@ -287,7 +287,13 @@ pub struct Site {
     pub alerts: Option<Arc<super::alerts::Alerts>>,
     /// P39u: the uploads being read now, at most `live::UPLOADS_AT_ONCE`.
     pub uploads: super::live::Uploads,
+    /// Plan 48: starts the restart's worker (`nirvana_restart_all::restart_from_phone` on the PC). A `Site::new`'s
+    /// refuses and starts nothing, so no test can restart a server.
+    pub restart: Restarter,
 }
+
+/// Plan 48: what `POST /api/restart` calls once every check has passed.
+pub type Restarter = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 
 impl Site {
     pub fn new(
@@ -316,6 +322,7 @@ impl Site {
             local: super::pick::Local::default(),
             alerts: None,
             uploads: super::live::Uploads::default(),
+            restart: Arc::new(|| Err("a restart is not set up on this server".to_owned())),
             herdr,
         }
     }
@@ -338,6 +345,14 @@ impl Site {
 }
 
 const REFUSED: &str = "Only the Tailscale account this PC is signed in with can connect.";
+
+/// Plan 48: `/api/hello` also names the server answering, which the page waits to see change after a restart: the
+/// same mark the restart's 202 names (`nirvana_restart_all::server_mark`, pid and start, since Windows reuses pids).
+/// Another PC's Nirvana Remote reads `Hello` and passes over it.
+fn with_server(mut hello: serde_json::Value) -> serde_json::Value {
+    hello["server"] = json!(crate::nirvana_restart_all::server_mark());
+    hello
+}
 
 impl Handler for Site {
     fn admit(&self, peer: SocketAddr, local: SocketAddr) -> Result<(), String> {
@@ -409,8 +424,14 @@ impl Site {
                 "/api/key" => return self.key(request, conn),
                 // Alpha 0.68.0: a search typed into the picker the phone saw, with no Enter (prompt.rs).
                 "/api/type" => return self.type_search(request, conn),
+                // Plan 48: Restart Nirvana, the whole session (live.rs).
+                "/api/restart" => return self.restart(request, conn),
                 _ => {}
             }
+        }
+        // Plan 48: a restart is a POST only; a GET (a link, an `<img>`) never restarts anything.
+        if request.path == "/api/restart" {
+            return Response::text(405, "POST only").with("Allow", "POST");
         }
         if request.method != "GET" && request.method != "HEAD" {
             return Response::text(405, "GET only").with("Allow", "GET, HEAD");
@@ -439,12 +460,12 @@ impl Site {
         let summary = super::herdr::summary(self.herdr.as_ref()).unwrap_or_default();
         Response::json(
             200,
-            &json!(super::pcs::Hello {
+            &with_server(json!(super::pcs::Hello {
                 app: super::pcs::APP.into(),
                 version: crate::nirvana::VERSION.into(),
                 spaces: summary.spaces,
                 working: summary.working,
-            }),
+            })),
         )
     }
 

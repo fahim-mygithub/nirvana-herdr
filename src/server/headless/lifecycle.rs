@@ -316,8 +316,11 @@ impl HeadlessServer {
         self.shutting_down = true;
 
         // Clear client-local host graphics, then send ServerShutdown to all connected clients.
+        // Nirvana fork, plan 48: a restart's stop says so, and the window's client comes back on the new server.
         let shutdown_msg = ServerMessage::ServerShutdown {
-            reason: Some("server is shutting down".to_owned()),
+            reason: Some(crate::nirvana_restart_all::shutdown_message(
+                self.app.nirvana_restarting,
+            )),
         };
         self.send_to_all_clients(shutdown_msg);
 
@@ -340,7 +343,9 @@ impl HeadlessServer {
         // Send ServerShutdown to all remaining clients.
         if !self.clients.is_empty() {
             let shutdown_msg = ServerMessage::ServerShutdown {
-                reason: Some("server is shutting down".to_owned()),
+                reason: Some(crate::nirvana_restart_all::shutdown_message(
+                    self.app.nirvana_restarting,
+                )),
             };
             self.send_to_all_clients(shutdown_msg);
 

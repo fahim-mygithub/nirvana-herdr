@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const VERSION: &str = env!("NIRVANA_VERSION");
 /// The exit code that asks `supervise` to start the installed build again (EX_TEMPFAIL).
@@ -33,8 +33,11 @@ pub const CHECK_INTERVAL: Duration = Duration::from_secs(5);
 pub const RELOAD_COMMAND: &str = "nirvana reload";
 
 static RELOAD_REQUESTED: AtomicBool = AtomicBool::new(false);
-static RELOAD_ARMED: AtomicBool = AtomicBool::new(false);
+/// When the badge was armed; it holds for `RELOAD_ARM_WINDOW`.
+static RELOAD_ARMED_AT: Mutex<Option<Instant>> = Mutex::new(None);
 static LAST_ANNOUNCED: Mutex<Option<String>> = Mutex::new(None);
+/// Plan 48 fix round C: this client is one `supervise_code` started (`take_supervised_mark`).
+static SUPERVISED: AtomicBool = AtomicBool::new(false);
 
 pub fn label(version: &str) -> String {
     format!("alpha {version}")
@@ -145,24 +148,49 @@ pub fn check_installed(events: &tokio::sync::mpsc::Sender<crate::events::AppEven
     });
 }
 
-/// A click on the reload badge: the first arms it, the second confirms. Reload stops the server, so
-/// the programs in its panes stop too (Windows has no live handoff); one click must not do that.
-pub fn press_reload() -> bool {
-    if RELOAD_ARMED.swap(false, Ordering::Relaxed) {
-        RELOAD_REQUESTED.store(true, Ordering::Relaxed);
-        true
+/// Plan 48 fix round B (review finding 2): an armed press lapses, as a Restart Claude press does
+/// (`client/shell/nirvana_seats.rs` RESTART_ARM_WINDOW, 5 s, the P87 brief's number, not a measured one). Since plan
+/// 48 the version label is a press target with or without a newer build, so with no lapse a press now and another an
+/// hour later stopped every pane.
+pub const RELOAD_ARM_WINDOW: Duration = Duration::from_secs(5);
+
+/// Whether a press armed `since` ago still holds (`None`: no arm).
+pub fn arm_holds(since: Option<Duration>) -> bool {
+    since.is_some_and(|since| since < RELOAD_ARM_WINDOW)
+}
+
+/// A press at `now` with the badge armed at `armed_at`: whether it confirms, and the arm it leaves.
+pub fn press_at(armed_at: Option<Instant>, now: Instant) -> (bool, Option<Instant>) {
+    if arm_holds(armed_at.map(|at| now.saturating_duration_since(at))) {
+        (true, None)
     } else {
-        RELOAD_ARMED.store(true, Ordering::Relaxed);
-        false
+        (false, Some(now))
     }
 }
 
+fn armed_at() -> std::sync::MutexGuard<'static, Option<Instant>> {
+    RELOAD_ARMED_AT.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A click on the reload badge: the first arms it, the second confirms. Reload stops the server, so
+/// the programs in its panes stop too (Windows has no live handoff); one click must not do that.
+pub fn press_reload() -> bool {
+    let mut armed = armed_at();
+    let (confirmed, next) = press_at(*armed, Instant::now());
+    *armed = next;
+    if confirmed {
+        RELOAD_REQUESTED.store(true, Ordering::Relaxed);
+    }
+    confirmed
+}
+
+/// Puts an armed badge back; whether there was an arm, lapsed or not, so a stale " restart? " is drawn again.
 pub fn disarm_reload() -> bool {
-    RELOAD_ARMED.swap(false, Ordering::Relaxed)
+    armed_at().take().is_some()
 }
 
 pub fn reload_armed() -> bool {
-    RELOAD_ARMED.load(Ordering::Relaxed)
+    arm_holds(armed_at().map(|at| at.elapsed()))
 }
 
 pub fn reload_requested() -> bool {
@@ -185,6 +213,34 @@ pub fn supervise(args: &[String]) -> std::io::Result<()> {
     std::process::exit(supervise_code(args)?);
 }
 
+/// Plan 48 fix round C (review finding 3): the mark on the client `supervise_code` starts. Only such a client is
+/// started again when it exits `RELOAD_EXIT_CODE`, so only it offers the restart on the version label: in any other
+/// client two presses stopped the server and nothing brought it back. Not `nirvana_launch::WINDOW_CLAIMED_ENV`: that
+/// is set only on the `nirvana window` path and only when the taskbar claim worked, never for `herdr nirvana-shell`,
+/// which supervises too, and it is inherited by the server a client starts and by every pane under it.
+pub const SUPERVISED_ENV: &str = "NIRVANA_SUPERVISED";
+
+/// The command `supervise_code` runs: the build, `args`, and the mark that something starts it again on exit 75.
+pub fn supervised_command(exe: &Path, args: &[String]) -> std::process::Command {
+    let mut command = std::process::Command::new(exe);
+    command.args(args).env(SUPERVISED_ENV, "1");
+    command
+}
+
+/// At the top of `main`, before any thread: reads the mark into this process and takes it out of the environment,
+/// so the server a supervised client starts, and every pane that server starts, never inherits it.
+pub fn take_supervised_mark() {
+    if std::env::var_os(SUPERVISED_ENV).is_some() {
+        SUPERVISED.store(true, Ordering::Relaxed);
+        std::env::remove_var(SUPERVISED_ENV);
+    }
+}
+
+/// Whether `supervise_code` started this process: the version label may then restart it.
+pub fn supervised() -> bool {
+    SUPERVISED.load(Ordering::Relaxed)
+}
+
 /// `supervise` without the exit, for a caller with something to undo first (plan 12 O4a: the verb's window
 /// clears its taskbar badge and properties after the client is gone).
 pub fn supervise_code(args: &[String]) -> std::io::Result<i32> {
@@ -193,7 +249,7 @@ pub fn supervise_code(args: &[String]) -> std::io::Result<i32> {
             .map(|home| installed_exe_in(&home))
             .filter(|exe| exe.exists())
             .map_or_else(std::env::current_exe, Ok)?;
-        let status = std::process::Command::new(&exe).args(args).status()?;
+        let status = supervised_command(&exe, args).status()?;
         match status.code() {
             Some(RELOAD_EXIT_CODE) => continue,
             Some(code) => return Ok(code),
@@ -524,7 +580,7 @@ mod tests {
     #[test]
     fn reload_takes_two_presses() {
         RELOAD_REQUESTED.store(false, Ordering::Relaxed);
-        RELOAD_ARMED.store(false, Ordering::Relaxed);
+        *armed_at() = None;
         assert!(!press_reload());
         assert!(reload_armed() && !reload_requested());
         assert!(press_reload());
@@ -533,7 +589,60 @@ mod tests {
         assert!(!press_reload());
         assert!(disarm_reload());
         assert!(!press_reload());
-        RELOAD_ARMED.store(false, Ordering::Relaxed);
+        // Plan 48 fix round B: an arm older than the window reads unarmed, and the next press arms again.
+        *armed_at() = Instant::now().checked_sub(RELOAD_ARM_WINDOW + Duration::from_secs(1));
+        assert!(!reload_armed(), "a lapsed arm reads unarmed");
+        assert!(!press_reload(), "a press after the lapse is a first press");
+        assert!(reload_armed() && !reload_requested());
+        *armed_at() = None;
+    }
+
+    /// Plan 48 fix round B (review finding 2): the arm's lapse, over stated durations.
+    #[test]
+    fn an_armed_press_lapses() {
+        assert!(!arm_holds(None));
+        assert!(arm_holds(Some(Duration::ZERO)));
+        assert!(arm_holds(Some(Duration::from_millis(4_900))));
+        assert!(
+            !arm_holds(Some(RELOAD_ARM_WINDOW)),
+            "lapsed at the window"
+        );
+        assert!(
+            !arm_holds(Some(Duration::from_secs(3600))),
+            "a press an hour later is a first press"
+        );
+        let t0 = Instant::now();
+        assert_eq!(press_at(None, t0), (false, Some(t0)), "the first press arms");
+        let soon = t0 + Duration::from_secs(1);
+        assert_eq!(
+            press_at(Some(t0), soon),
+            (true, None),
+            "a second press within the window confirms"
+        );
+        let late = t0 + Duration::from_secs(6);
+        assert_eq!(
+            press_at(Some(t0), late),
+            (false, Some(late)),
+            "after the lapse a press is a first press again"
+        );
+    }
+
+    /// Plan 48 fix round C (review finding 3): the client the supervisor starts carries the mark that it is started
+    /// again on exit 75.
+    #[test]
+    fn the_supervisor_marks_the_client_it_starts() {
+        let command = supervised_command(Path::new("made-up-herdr.exe"), &strings(&["--made-up"]));
+        let one = Some(std::ffi::OsStr::new("1"));
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == SUPERVISED_ENV && value == one),
+            "the client knows a supervisor starts it again"
+        );
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [std::ffi::OsStr::new("--made-up")]
+        );
     }
 
     fn strings(args: &[&str]) -> Vec<String> {
